@@ -2420,9 +2420,9 @@ static int host_main(int argc, char **argv)
     }
 }
 
-#if defined(__ANDROID__) || defined(ICO_IOS)
+#if defined(__ANDROID__) || defined(ICO_IOS) || defined(ICO_PS5)
 
-/* Mobile entry points run the end-of-run steps before returning to SDL. */
+/* Mobile and console entry points run the end-of-run steps before returning to SDL. */
 int ico_host_main(int argc, char **argv)
 {
     int r = host_main(argc, argv);

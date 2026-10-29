@@ -155,3 +155,8 @@ android-keystores/
 
 # coverage_check.py: the previous run's pictures
 tools/.coverage/
+
+# Local PS5 port inputs and products
+/source/
+/.upstream-clone/
+/dist/

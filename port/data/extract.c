@@ -70,7 +70,11 @@ static double now_s(void)
 #else
     struct timespec ts;
 
+#ifdef ICO_PS5
+    clock_gettime(CLOCK_MONOTONIC, &ts);
+#else
     timespec_get(&ts, TIME_UTC);
+#endif
     return (double)ts.tv_sec + (double)ts.tv_nsec * 1e-9;
 #endif
 }

@@ -70,8 +70,13 @@
 #endif
 
 /* The window's first client size: 4:3, three times 320 x 240. */
+#ifdef ICO_PS5
+#define WINDOW_W 1920
+#define WINDOW_H 1080
+#else
 #define WINDOW_W 960
 #define WINDOW_H 720
+#endif
 /* A host this far behind the vsync deadlines stops trying to catch up. */
 #define RESYNC_NS 100000000ull
 /* Slow-step lines a stats block logs at most (the rest are
@@ -532,7 +537,7 @@ static int window_fullscreen(void)
    finds its own path through /proc and tells that Steam runs from Linux's
    pid files or Windows' registry and process list, none of which a Mac has,
    so the row is not shown there. */
-#if !defined(__ANDROID__) && !defined(__APPLE__)
+#if !defined(__ANDROID__) && !defined(__APPLE__) && !defined(ICO_PS5)
 /* steam_shortcut.c's answers are the menu's */
 _Static_assert(ICO_STEAM_ADDED == UI_STEAM_ADDED && ICO_STEAM_EXISTS == UI_STEAM_EXISTS &&
                    ICO_STEAM_RUNNING == UI_STEAM_RUNNING &&
@@ -2431,7 +2436,7 @@ open_window:
     ui_settings_set_window_mode_query(window_mode_now);
     /* Display > Texture pack says "None installed" without one */
     ui_settings_set_texture_pack_count(texpack_count);
-#if !defined(__ANDROID__) && !defined(__APPLE__)
+#if !defined(__ANDROID__) && !defined(__APPLE__) && !defined(ICO_PS5)
     /* Extras > Add to Steam (Windows and Linux; see steam_add_handler) */
     ui_settings_set_steam_handler(steam_add_handler);
 #endif

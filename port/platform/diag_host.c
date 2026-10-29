@@ -58,6 +58,10 @@
 #define ICO_WANT_LIBC_SCHED 1 /* sched.h says why */
 
 #include <pthread.h>
+#ifdef ICO_PS5
+#include <pthread_np.h>
+#include <ps5platform/context.h>
+#endif
 
 #undef ICO_WANT_LIBC_SCHED
 
@@ -3223,7 +3227,7 @@ void ico_diag_set_relaunch_stub(int (*fn)(const char *value))
     relaunch_stub = fn;
 }
 
-#if !defined(__ANDROID__) && !defined(ICO_IOS)
+#if !defined(__ANDROID__) && !defined(ICO_IOS) && !defined(ICO_PS5)
 static void loss_relaunch_at_exit(void);
 static int loss_at_exit;
 
@@ -3303,7 +3307,7 @@ static int relaunch_now(const char *value)
     return 0;
 }
 
-#elif !defined(__ANDROID__) && !defined(ICO_IOS)
+#elif !defined(__ANDROID__) && !defined(ICO_IOS) && !defined(ICO_PS5)
 
 extern char **environ;
 
@@ -3417,7 +3421,7 @@ static int relaunch_now(const char *value)
 #endif
 const char *ico_diag_relaunch_program(void)
 {
-#if !defined(_WIN32) && !defined(__ANDROID__) && !defined(ICO_IOS)
+#if !defined(_WIN32) && !defined(__ANDROID__) && !defined(ICO_IOS) && !defined(ICO_PS5)
     return relaunch_ready ? relaunch_exe : NULL;
 #else
     return NULL;
@@ -3497,7 +3501,7 @@ static void driver_crash_plan(void)
    Apart from relaunch_value, so a crash or watchdog end during the
    shutdown still reports as one. */
 static char loss_value[48];
-#if defined(__ANDROID__) || defined(ICO_IOS)
+#if defined(__ANDROID__) || defined(ICO_IOS) || defined(ICO_PS5)
 static const int loss_at_exit = 0; /* no relaunch */
 #endif
 
@@ -3542,7 +3546,7 @@ int ico_diag_device_lost_restart(int blend_was_fixed)
     return 1;
 }
 
-#if !defined(__ANDROID__) && !defined(ICO_IOS)
+#if !defined(__ANDROID__) && !defined(ICO_IOS) && !defined(ICO_PS5)
 
 /* The box when the relaunch could not be made: the player is not left with
    a game that just went */
@@ -4272,6 +4276,9 @@ ICO_ENTRY static void sample_handler(int sig, siginfo_t *si, void *ucv)
 #elif defined(__APPLE__) && defined(__x86_64__)
     sample_pc = (uintptr_t)uc->uc_mcontext->__ss.__rip;
     sample_sp = (uintptr_t)uc->uc_mcontext->__ss.__rsp;
+#elif defined(ICO_PS5)
+    sample_pc = (uintptr_t)uc->uc_mcontext.mc_rip;
+    sample_sp = (uintptr_t)uc->uc_mcontext.mc_rsp;
 #elif defined(__x86_64__)
     sample_pc = (uintptr_t)uc->uc_mcontext.gregs[REG_RIP];
     sample_sp = (uintptr_t)uc->uc_mcontext.gregs[REG_RSP];
@@ -5318,6 +5325,9 @@ ICO_ENTRY static void crash_handler(int sig, siginfo_t *si, void *ucv)
 #elif defined(__APPLE__) && defined(__x86_64__)
     crash.pc = (uintptr_t)uc->uc_mcontext->__ss.__rip;
     crash.sp = (uintptr_t)uc->uc_mcontext->__ss.__rsp;
+#elif defined(ICO_PS5)
+    crash.pc = (uintptr_t)uc->uc_mcontext.mc_rip;
+    crash.sp = (uintptr_t)uc->uc_mcontext.mc_rsp;
 #elif defined(__x86_64__)
     crash.pc = (uintptr_t)uc->uc_mcontext.gregs[REG_RIP];
     crash.sp = (uintptr_t)uc->uc_mcontext.gregs[REG_RSP];
@@ -5512,7 +5522,13 @@ static void install_handlers(void)
     main_stack_hi = (uintptr_t)pthread_get_stackaddr_np(main_thread);
     main_stack_lo = main_stack_hi - pthread_get_stacksize_np(main_thread);
 #else
-    if (pthread_getattr_np(main_thread, &attr) == 0) {
+#ifdef ICO_PS5
+    pthread_attr_init(&attr);
+    if (pthread_attr_get_np(main_thread, &attr) == 0)
+#else
+    if (pthread_getattr_np(main_thread, &attr) == 0)
+#endif
+    {
         void *addr;
         size_t size;
         if (pthread_attr_getstack(&attr, &addr, &size) == 0) {

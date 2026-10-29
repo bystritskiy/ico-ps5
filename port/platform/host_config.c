@@ -69,7 +69,11 @@ static void copy(char *out, size_t size, const char *s)
 
 int ico_host_exe_dir(char *out, size_t size)
 {
-#ifdef ICO_IOS
+#ifdef ICO_PS5
+    if (size < sizeof("/app0")) return -1;
+    copy(out, size, "/app0");
+    return 0;
+#elif defined(ICO_IOS)
     const char *documents = SDL_GetUserFolder(SDL_FOLDER_DOCUMENTS);
     if (!documents || strlen(documents) >= size || ico_make_dir(documents) != 0) {
         copy(out, size, ".");
@@ -1341,7 +1345,13 @@ int ico_host_attach_console(void)
 
 void ico_host_message_box(const char *text, int error)
 {
-#if defined(ICO_HOST_ANDROID)
+#if defined(ICO_PS5)
+    extern void ico_ps5_notify(const char *);
+    fprintf(stderr, "%s\n", text);
+    fflush(stderr);
+    ico_ps5_notify(text);
+    (void)error;
+#elif defined(ICO_HOST_ANDROID)
     flush_all();
     ico_android_message_box(text, error);
 #elif defined(ICO_IOS)
@@ -2226,6 +2236,12 @@ int ico_host_pref_is_portable(void)
 
 int ico_host_pref_dir(char *out, size_t size)
 {
+#ifdef ICO_PS5
+    const char *data = "/data/ico/PPSA99030";
+    if (strlen(data) >= size) return -1;
+    copy(out, size, data);
+    return 0;
+#endif
     if (portable_dir(out, size)) {
         return 0;
     }
@@ -2259,7 +2275,7 @@ int ico_host_ini_path(char *out, size_t size)
 
     /* a folder lookup that fails leaves "." (the working folder), which
        main_host.c then uses: only a path that does not fit fails */
-#if defined(__APPLE__) && !defined(ICO_IOS) && defined(ICO_HOST_SDL_PREFPATH)
+#if defined(ICO_PS5) || (defined(__APPLE__) && !defined(ICO_IOS) && defined(ICO_HOST_SDL_PREFPATH))
     ico_host_pref_dir(dir, sizeof(dir));
 #else
     ico_host_exe_dir(dir, sizeof(dir));
@@ -2290,7 +2306,7 @@ int ico_host_logs_dir(char *out, size_t size)
         return 0;
     }
 
-#if defined(__APPLE__) && !defined(ICO_IOS)
+#if (defined(__APPLE__) && !defined(ICO_IOS)) || defined(ICO_PS5)
     if (ico_host_pref_dir(dir, sizeof(dir)) != 0) {
         if (size > 0) {
             out[0] = '\0';

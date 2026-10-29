@@ -1,3 +1,5 @@
+> **PS5:** Native port and build instructions: [port/ps5/README.md](port/ps5/README.md). First build; console validation pending.
+
 # ico-pc
 
 This is **ICO** (Sony Computer Entertainment, 2001) made to run as a normal

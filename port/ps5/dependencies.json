@@ -1,0 +1,25 @@
+{
+  "upstream": "b55a34f65adaee73b68362aab355b076feebf108",
+  "ps5_content_version": "01.000.000",
+  "title_id": "PPSA99030",
+  "sources": {
+    "sdl3": "829a65d769d935c4852f8159e964312c0957260a",
+    "volk": "54fc0d7a72887cbfc5b030d26897b2b40ac53fb8",
+    "vulkan-headers": "6802bb4733b63ed5efd3adb308a6c885ef180ea1",
+    "libmpeg2": "a97c2a1f0a796dc32bed80d3353c69c5fc07c750",
+    "libchdr": "93d8c239ff0d4e8d7722985992649fce12d2463b",
+    "PS5_Vulkan": "f410e67a0241b3e8edcdbcd2a9b285dfc4a412ed"
+  },
+  "PS5_Mesa": "1ba9874f478657ccf6da72ce55f0260164cc0bd0",
+  "PS5_PayloadSDK": "b83202be73e930050e00de0f1b4d9ec46c0391bf",
+  "llvm": "18.1.8",
+  "dxc": {
+    "release": "v1.9.2609",
+    "archive_sha256": "96faadc7f5c282d2ffda49804beb4c3ee38127bc252b723234e3c5cdf7aa39a1"
+  },
+  "runtime": {
+    "radv_sha256": "136acdc2e9f28fd0ce6135d8bc1ee80cb2ed785e797921b9a0db08858f099de0",
+    "libc_sha256": "e6ff45d16adf687855cc3b33b0c8a4132b6504360b221e0a34c7e99fb3ba0036",
+    "builtins_sha256": "52f850cf79b9cda0b00b78aa2fed86bae6947e596cc7cafb52dba4fd88acb07d"
+  }
+}

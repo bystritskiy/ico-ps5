@@ -14,6 +14,11 @@ if(CMAKE_C_COMPILER_LAUNCHER AND NOT EXISTS "${CMAKE_C_COMPILER_LAUNCHER}"
 endif()
 
 project(ico_pc LANGUAGES C)
+if(ICO_PS5)
+    add_compile_definitions(ICO_PS5=1)
+    # FreeBSD tgmath.h uses qualified _Generic associations; Clang 18 diagnoses them.
+    add_compile_options(-ffunction-sections -fdata-sections -Wno-unreachable-code-generic-assoc)
+endif()
 if(CMAKE_SYSTEM_NAME STREQUAL "iOS")
     add_compile_definitions(ICO_IOS=1)
 endif()
@@ -128,6 +133,10 @@ foreach(prog ${ICO_PROGRAMMERS})
     list(APPEND ICO_GAME_OBJECT_LIBS ico_${prog})
 endforeach()
 message(STATUS "ico: ${ICO_COMPILED_COUNT} game sources in the build")
+if(ICO_PS5)
+    # The game decoder and RADV zlib each export inflate with different ABIs.
+    target_compile_definitions(ico_fumi PRIVATE inflate=ico_game_inflate)
+endif()
 
 # The game's main becomes ico_game_main; port/platform/main_host.c is the
 # program's main.
@@ -237,7 +246,11 @@ if(ICO_LINK_EXE)
     endif()
     configure_file(port/platform/ico_version.h.in "${CMAKE_BINARY_DIR}/generated/ico_version.h"
                    @ONLY)
-    if(ANDROID)
+    if(ICO_PS5)
+        # Final ELF is linked with the public RADV recipe, outside CMake.
+        add_library(ico_pc STATIC ${_ico_pc_sources} port/ps5/src/main_ps5.c port/ps5/src/native_start.c)
+        set_source_files_properties(port/platform/main_host.c PROPERTIES COMPILE_DEFINITIONS "main=ico_pc_main")
+    elseif(ANDROID)
         # Android: the program is libmain.so, which SDL's Java side
         # (SDLActivity, android/) loads after libSDL3.so; it calls SDL_main
         # (port/platform/android/main_android.c). The target keeps the name
@@ -516,7 +529,7 @@ if(TARGET ico_pc AND NOT ICO_HEADLESS)
     endif()
     # ico_texpack_export: Options > Extras > Export textures (texpack_export.h)
     target_link_libraries(ico_pc PRIVATE ico_render ico_texpack_export ico_miniz SDL3::SDL3)
-    if(NOT ANDROID AND NOT APPLE)
+    if(NOT ANDROID AND NOT APPLE AND NOT ICO_PS5)
         # Extras > Add to Steam: Windows, Linux and the Steam Deck (window_host.c
         # offers the row on the same platforms)
         target_sources(ico_pc PRIVATE port/platform/steam_shortcut.c)
