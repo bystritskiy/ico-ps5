@@ -10,7 +10,7 @@
 #include <sys/stat.h>
 #include <stdio.h>
 #if !defined(_WIN32)
-#if defined(__APPLE__)
+#if defined(__APPLE__) || defined(__FreeBSD__)
 #include <sys/mount.h>
 #include <sys/param.h>
 #else
@@ -636,7 +636,7 @@ int ico_host_drive_kind(const char *path, char *out, size_t n)
         if (statfs(path, &sf) != 0) {
             return drive_word(out, n, "unknown");
         }
-#ifdef __APPLE__
+#if defined(__APPLE__) || defined(__FreeBSD__)
         if (strcmp(sf.f_fstypename, "nfs") == 0 || strcmp(sf.f_fstypename, "smbfs") == 0 ||
             strcmp(sf.f_fstypename, "afpfs") == 0 || strcmp(sf.f_fstypename, "webdav") == 0) {
             w = "network";
@@ -708,7 +708,7 @@ int ico_host_drive_fs_name(const char *path, char *out, size_t n)
         if (statfs(path, &sf) != 0) {
             return -1;
         }
-#ifdef __APPLE__
+#if defined(__APPLE__) || defined(__FreeBSD__)
         w = sf.f_fstypename;
 #else
         switch ((unsigned long)sf.f_type) {

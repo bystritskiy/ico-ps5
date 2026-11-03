@@ -1,14 +1,14 @@
 # ICO на PS5
 
 Нативный перенос `nathanialf/ico-pc`, upstream
-`b55a34f65adaee73b68362aab355b076feebf108` от 29 октября 2026.
+`v0.10.0` (`e99d01813489d23f2a46264ca037b9ccf6899174`).
 Игровой C-код компилируется для x86-64 PS5; PS2-эмулятор, BIOS и JIT не нужны.
 Проект неофициальный и не связан с Sony Interactive Entertainment и Team Ico;
 игра в пакет не входит, нужен образ своего диска.
 
 ## Состояние
 
-Сборка `01.000.000`, title ID **PPSA99031**, название плитки **ICO**.
+Сборка `01.000.001`, title ID **PPSA99031**, название плитки **ICO**.
 Что проверено на консоли и при каких условиях — [VALIDATION.md](VALIDATION.md).
 
 ## Установка (публичный пакет)
@@ -118,7 +118,7 @@ PS5_PayloadSDK, PS5_Mesa на ревизиях из `dependencies.json`) и `rel
 
 - **ProsperoStore** ([руководство](https://github.com/darkxex/ps5-homebrew-catalog/blob/main/docs/submitting.md)):
   публичный GitHub-репозиторий, опубликованный release с тегом версии
-  (`01.000.000`) и ZIP папки приложения; `.ffpfsc` не принимается. Запись
+  (`01.000.001`) и ZIP папки приложения; `.ffpfsc` не принимается. Запись
   `apps/PPSA99031.json` с URL asset и его SHA-256, `icon_url` на
   `port/ps5/sce_sys/icon0.png` по тегу, лицензия, категория; PR от владельца
   репозитория. В каждом релизе поднимать `contentVersion` и не заменять

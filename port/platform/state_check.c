@@ -166,7 +166,11 @@ static int image_phdr(struct dl_phdr_info *info, size_t size, void *user)
     (void)size;
     memset(&im, 0, sizeof im);
     for (i = 0; i < info->dlpi_phnum; i++) {
+#ifdef __FreeBSD__
+        const Elf_Phdr *ph = &info->dlpi_phdr[i];
+#else
         const ElfW(Phdr) *ph = &info->dlpi_phdr[i];
+#endif
         uint64_t lo, hi;
 
         if (ph->p_type != PT_LOAD || ph->p_memsz == 0) {

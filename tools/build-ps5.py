@@ -17,7 +17,7 @@ def main():
  run('python3',ROOT/'tools/prepare-ps5-sdl.py',ROOT/'build/deps/sdl3')
  run('cmake','-S',ROOT/'build/deps/sdl3','-B',ROOT/'build/ps5/sdl3',*common,*['-D'+o for o in options])
  run('cmake','--build',ROOT/'build/ps5/sdl3','-j',a.jobs)
- options=['ICO_HEADLESS=OFF','ICO_LINK_EXE=ON','ICO_DEPS_DIR='+str(ROOT/'build/deps'),'SDL3_DIR='+str(ROOT/'build/ps5/sdl3'),'ICO_DXC='+str(ROOT/'build/deps/dxc/dxc'),'ICO_RHI_MOLTENVK=OFF','ICO_RHI_OPENGL=OFF','ICO_SHADERS_DXIL=OFF','ICO_SHADERS_GLSL=OFF','ICO_SHADERS_D3D11_CHECK=OFF','ICO_PS5_DEVTOOLS='+('ON' if a.devtools else 'OFF')]
+ options=['ICO_VERSION_LABEL=v0.10.0','ICO_HEADLESS=OFF','ICO_LINK_EXE=ON','ICO_DEPS_DIR='+str(ROOT/'build/deps'),'SDL3_DIR='+str(ROOT/'build/ps5/sdl3'),'ICO_DXC='+str(ROOT/'build/deps/dxc/dxc'),'ICO_RHI_MOLTENVK=OFF','ICO_RHI_OPENGL=OFF','ICO_SHADERS_DXIL=OFF','ICO_SHADERS_GLSL=OFF','ICO_SHADERS_D3D11_CHECK=OFF','ICO_PS5_DEVTOOLS='+('ON' if a.devtools else 'OFF')]
  run('cmake','-S',ROOT,'-B',ROOT/'build/ps5/game',*common,*['-D'+o for o in options])
  run('cmake','--build',ROOT/'build/ps5/game','--target','ico_pc','-j',a.jobs)
  run('docker','run','--rm','-v',str(ROOT)+':'+str(ROOT),'-w',ROOT,'-e','ICO_COMPILER_RT='+str(ROOT/'build/deps/compiler-rt/libclang_rt.builtins-x86_64.a'),a.builder_image,'bash','tools/link-ps5.sh')
