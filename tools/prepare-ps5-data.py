@@ -41,9 +41,11 @@ def normalize(src,dst):
   if patched:
    f.seek(cnf_off);f.write(cnf.replace(b'PBPX_955.06',b'SCES_507.60'))
   # The game uses DATA.DF. The menu's alternate DATA.D2 is not imported.
+  # ISO9660 records never cross a 2048-byte sector: close the gap inside
+  # the record's own sector and zero that sector's tail.
   for _,_,_,pos,n in sorted(extras,key=lambda r:r[3],reverse=True):
-   f.seek(df_off);d=f.read(df_n);f.seek(df_off)
-   f.write(d[:pos]+d[pos+n:]+bytes(n))
+   f.seek(df_off);d=f.read(df_n);end=min((pos//2048+1)*2048,len(d));f.seek(df_off)
+   f.write(d[:pos]+d[pos+n:end]+bytes(n)+d[end:])
  return {'boot_menu_normalized':patched,'alternate_archives_omitted':len(extras),'elf_sha1':ELF_SHA1}
 def main():
  p=argparse.ArgumentParser(description=__doc__)

@@ -5470,6 +5470,15 @@ extern char etext[] __attribute__((weak));
 
 static void exe_range(void)
 {
+#if defined(ICO_PS5)
+    /* The native title forbids the SDK's direct readlink syscall. The
+       program is always /app0/eboot.bin, and its report name is fixed. */
+    if (__executable_start != NULL && etext != NULL) {
+        exe_lo = (uintptr_t)__executable_start;
+        exe_hi = (uintptr_t)etext;
+    }
+    snprintf(exe_name, sizeof exe_name, "eboot.bin");
+#else
     char path[512];
     ssize_t n;
     if (__executable_start != NULL && etext != NULL) {
@@ -5483,6 +5492,7 @@ static void exe_range(void)
         b = strrchr(path, '/');
         snprintf(exe_name, sizeof exe_name, "%.63s", b != NULL ? b + 1 : path);
     }
+#endif
 }
 
 #endif

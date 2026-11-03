@@ -41,14 +41,14 @@
 
 ## Первая проверка на PS5
 
-1. Установить `dist/ICO-PS5-PPSA99030-with-game.ffpfsc` через ShadowMountPlus
-   либо скопировать папку `dist/with-game/PPSA99030/` в
-   `/data/homebrew/PPSA99030/` и смонтировать её. Title ID PPSA99030.
+1. Установить `dist/ICO-PS5-PPSA99031-with-game.ffpfsc` через ShadowMountPlus
+   либо скопировать папку `dist/with-game/PPSA99031/` в
+   `/data/homebrew/PPSA99031/` и смонтировать её. Title ID PPSA99031.
 2. Запустить плитку ICO. Зафиксировать, дошёл ли запуск до титульного меню,
    звук, изображение, работу ✕/○ и Options.
 3. Начать новую игру, проверить движение, камеру, R1 и вибрацию.
 4. Сделать и загрузить сохранение, перезапустить приложение.
-5. Сохранить `/data/ico/PPSA99030/logs/ico-pc.log`, `.previous`, crash/report
+5. Сохранить `/data/ico/PPSA99031/logs/ico-pc.log`, `.previous`, crash/report
    файлы и klog при падении. Не заменять пользовательскую папку при обновлении.
 
 ## Повторение платформенных тестов

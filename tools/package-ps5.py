@@ -4,7 +4,8 @@ import argparse,hashlib,json,os,re,shutil,subprocess,tempfile
 from pathlib import Path
 from ps5_provenance import source_identity
 ROOT=Path(__file__).resolve().parent.parent
-TITLE='PPSA99030'
+LOCK=json.loads((ROOT/'port/ps5/dependencies.json').read_text())
+TITLE=LOCK['title_id']
 def sha(p):
  h=hashlib.sha256()
  with p.open('rb') as f:
@@ -24,12 +25,18 @@ def main():
  p.add_argument('--game',type=Path,help='Verified ico.o2r, for a private package')
  p.add_argument('--pack-python',type=Path,help='Python with MkPFS 1.1.0')
  a=p.parse_args();identity=source_identity()
- if json.loads((ROOT/'build/ps5/build-source.json').read_text())!=identity:raise ValueError('Sources differ from the linked build; run tools/build-ps5.py')
+ built=json.loads((ROOT/'build/ps5/build-source.json').read_text())
+ if {k:built.get(k) for k in identity}!=identity:raise ValueError('Sources differ from the linked build; run tools/build-ps5.py')
+ devtools=bool(built.get('devtools'))
+ if devtools and not a.game:print('note: a --devtools build; tools/release-ps5.py refuses it')
  native=a.native_tool.resolve();llvm=a.llvm_bin.resolve()
  linked=ROOT/'build/ps5/linked';vk=ROOT/'build/deps/PS5_Vulkan';sdk=vk/'.deps/native/ps5-payload-sdk'
- lock=json.loads((ROOT/'port/ps5/dependencies.json').read_text())
- app=ROOT/'dist'/('with-game' if a.game else 'app')/TITLE;app.mkdir(parents=True,exist_ok=True)
- if not a.game and (app/'ico.o2r').exists():raise ValueError('Unexpected game in app-only stage')
+ lock=LOCK
+ # A fresh stage each time: a file left by an earlier run or copied in by
+ # hand must not reach the image or the receipt.
+ app=ROOT/'dist'/('with-game' if a.game else 'app')/TITLE
+ if app.exists():shutil.rmtree(app)
+ app.mkdir(parents=True)
  symbols=run([llvm/'llvm-readelf','--dyn-syms','--wide',linked/'llvm-pie.elf'])
  exports=[x for x in symbols.splitlines() if re.search(r'\b(?:GLOBAL|WEAK)\b',x) and ' UND ' not in x]
  if exports:raise ValueError('Unexpected ELF exports: '+repr(exports[:5]))
@@ -54,7 +61,7 @@ def main():
   if sha(a.game)!=facts['archive_sha256']:raise ValueError('Unverified game archive')
   shutil.copyfile(a.game,app/'ico.o2r')
  expected=inventory(app)
- result={'source':identity,'title_id':TITLE,'version':param['contentVersion'],'console_tested':False,'game_included':bool(a.game),'fself_integrity':'valid','linked_elf_sha256':sha(linked/'llvm-pie.elf'),'imports':re.findall(r'\bUND[ \t]+(\S+)',symbols),'files':expected}
+ result={'source':identity,'title_id':TITLE,'version':param['contentVersion'],'console_tested':False,'devtools':devtools,'game_included':bool(a.game),'fself_integrity':'valid','linked_elf_sha256':sha(linked/'llvm-pie.elf'),'imports':re.findall(r'\bUND[ \t]+(\S+)',symbols),'files':expected}
  if a.pack_python:
   dest=ROOT/'dist'/('ICO-PS5-'+TITLE+('-with-game' if a.game else '-app')+'.ffpfsc')
   with tempfile.TemporaryDirectory(prefix='ico-pack-',dir=ROOT/'build/ps5') as tmp:

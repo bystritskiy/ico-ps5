@@ -1206,6 +1206,34 @@ int ico_host_redirect_output_keep(const char *log_path)
 
 static int redirect_output(const char *log_path, int keep)
 {
+#ifdef ICO_PS5
+    /* The native title forbids the SDK's direct dup syscall. libc stream
+       pointers are writable, so no descriptor duplication is needed.  As
+       below, the probe empties the file (unless keep) and the stream then
+       appends: diag_host.c's log_fd appends to the same file, and a stream
+       with its own offset would write over those lines. */
+    FILE *ps5_probe = ico_fopen(log_path, keep ? "a" : "w");
+    FILE *file;
+
+    if (ps5_probe == NULL) return -1;
+    fclose(ps5_probe);
+    file = ico_fopen(log_path, "a");
+    if (file == NULL) return -1;
+    fflush(stdout);
+    fflush(stderr);
+    if (stdout != file && stdout == stderr && stdout != NULL) {
+        /* main_ps5.c's boot.log, or the previous redirect's stream */
+        FILE *old = stdout;
+        stdout = file;
+        stderr = file;
+        fclose(old);
+    } else {
+        stdout = file;
+        stderr = file;
+    }
+    setvbuf(file, NULL, _IONBF, 0);
+    return 0;
+#endif
     FILE *probe = ico_fopen(log_path, keep ? "a" : "w");
 
     if (probe == NULL) {
@@ -1214,7 +1242,7 @@ static int redirect_output(const char *log_path, int keep)
     fclose(probe);
     fflush(stdout);
     fflush(stderr);
-#ifndef _WIN32
+#if !defined(_WIN32) && !defined(ICO_PS5)
     if (console_fd < 0) {
         console_fd = dup(2);
     }
@@ -2237,7 +2265,7 @@ int ico_host_pref_is_portable(void)
 int ico_host_pref_dir(char *out, size_t size)
 {
 #ifdef ICO_PS5
-    const char *data = "/data/ico/PPSA99030";
+    const char *data = ICO_PS5_DATA_DIR; /* CMakeLists.txt, from the title ID */
     if (strlen(data) >= size) return -1;
     copy(out, size, data);
     return 0;

@@ -43,10 +43,13 @@ def main():
  for line in (ROOT/'.gitattributes').read_text().splitlines():
   if line.endswith(' working-tree-encoding=EUC-JP'):
    name=line.split()[0];expected=subprocess.check_output(['git','show',lock['upstream']+':'+name],cwd=ROOT).decode('utf8').encode('euc_jp');path=ROOT/name
-   if path.read_bytes()!=expected:
-    # Refuse real edits; allow only Git's platform checkout conversion.
-    clean=subprocess.check_output(['git','diff','--',name],cwd=ROOT)
-    if clean and b'\xef\xbc\xbc' not in clean:raise ValueError('Modified game source: '+name)
+   current=path.read_bytes()
+   if current!=expected:
+    # Refuse real edits; allow only the checkout's backslash damage (iconv
+    # writes U+005C as the full-width U+FF3C): the file must equal the blob
+    # once both spell every backslash the same way.
+    same=lambda b:b.decode('euc_jp',errors='surrogateescape').replace('＼','\\')
+    if same(current)!=same(expected):raise ValueError('Modified game source: '+name)
     path.write_bytes(expected)
  run(['python3',ROOT/'tools/prepare-ps5-sdl.py',deps/'sdl3'])
  dxc=deps/'dxc';dxc.mkdir(exist_ok=True);archive=dxc/'dxc.tar.gz'

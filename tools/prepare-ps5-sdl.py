@@ -9,7 +9,11 @@ if subprocess.check_output(['git','-C',str(s),'rev-parse','HEAD'],text=True).str
 shutil.copyfile(root/'port/ps5/sdl/SDL_ps5vulkan.c',s/'src/video/offscreen/SDL_offscreenvulkan.c')
 shutil.copyfile(root/'port/ps5/sdl/SDL_ps5audio.c',s/'src/audio/dummy/SDL_dummyaudio.c')
 p=s/'src/audio/dummy/SDL_dummyaudio.h';t=p.read_text();t=t.replace('    Uint32 io_delay;', '    int handle;\n    Uint32 io_delay;') if 'int handle;' not in t else t;p.write_text(t)
-p=s/'src/video/offscreen/SDL_offscreenvideo.c';t=p.read_text().replace('mode.w = 1024;','mode.w = 1920;').replace('mode.h = 768;','mode.h = 1080;');p.write_text(t)
+# The display mode matches the window main_host.c opens (window_host.c
+# WINDOW_W/H): the VideoOut 2160p mode, so Fullscreen keeps the swapchain's size.
+p=s/'src/video/offscreen/SDL_offscreenvideo.c';t=p.read_text()
+for w,h in (('1024','768'),('1920','1080')):t=t.replace('mode.w = '+w+';','mode.w = 3840;').replace('mode.h = '+h+';','mode.h = 2160;')
+p.write_text(t)
 
 p=s/"CMakeLists.txt";t=p.read_text().replace('dep_option(SDL_VIRTUAL_JOYSTICK    "Enable the virtual-joystick driver" ON SDL_HIDAPI OFF)', 'dep_option(SDL_VIRTUAL_JOYSTICK    "Enable the virtual-joystick driver" ON SDL_JOYSTICK OFF)');p.write_text(t)
 

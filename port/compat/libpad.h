@@ -8,6 +8,13 @@
 #ifndef ICO_COMPAT_LIBPAD_H
 #define ICO_COMPAT_LIBPAD_H
 
+/* The PS5 system's libScePad exports scePadInit and scePadRead with the
+   console's signatures (handle, 120-byte samples), which are not the PS2
+   libpad ones this header declares.  Keep the game's shim under its own
+   names so the PS5 host can still call the console's pair. */
+#define scePadInit ico_ps2_scePadInit
+#define scePadRead ico_ps2_scePadRead
+
 int scePadEnterPressMode(int port, int slot);
 int scePadGetButtonMask(int port, int slot);
 int scePadGetModVersion(void);

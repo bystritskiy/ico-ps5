@@ -16,6 +16,17 @@ endif()
 project(ico_pc LANGUAGES C)
 if(ICO_PS5)
     add_compile_definitions(ICO_PS5=1)
+    # The title ID names the data folder; port/ps5/dependencies.json holds it
+    # for the packager too.
+    file(READ "${CMAKE_CURRENT_SOURCE_DIR}/port/ps5/dependencies.json" _ico_ps5_lock)
+    string(JSON ICO_PS5_TITLE_ID GET "${_ico_ps5_lock}" title_id)
+    add_compile_definitions("ICO_PS5_DATA_DIR=\"/data/ico/${ICO_PS5_TITLE_ID}\"")
+    # DevLoop's renderer capture and the menu-less texture export: development
+    # builds only (tools/build-ps5.py --devtools), never a release.
+    option(ICO_PS5_DEVTOOLS "PS5 development hooks" OFF)
+    if(ICO_PS5_DEVTOOLS)
+        add_compile_definitions(ICO_PS5_DEVTOOLS=1)
+    endif()
     # FreeBSD tgmath.h uses qualified _Generic associations; Clang 18 diagnoses them.
     add_compile_options(-ffunction-sections -fdata-sections -Wno-unreachable-code-generic-assoc)
 endif()
@@ -248,7 +259,8 @@ if(ICO_LINK_EXE)
                    @ONLY)
     if(ICO_PS5)
         # Final ELF is linked with the public RADV recipe, outside CMake.
-        add_library(ico_pc STATIC ${_ico_pc_sources} port/ps5/src/main_ps5.c port/ps5/src/native_start.c)
+        add_library(ico_pc STATIC ${_ico_pc_sources} port/ps5/src/main_ps5.c
+                                  port/ps5/src/native_start.c port/ps5/src/memory_ps5.c)
         set_source_files_properties(port/platform/main_host.c PROPERTIES COMPILE_DEFINITIONS "main=ico_pc_main")
     elseif(ANDROID)
         # Android: the program is libmain.so, which SDL's Java side

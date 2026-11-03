@@ -129,6 +129,9 @@
 #include "trace_host.h"
 #include "options.h"       /* the recording's effective stick_fix */
 #include "video_options.h" /* the recording's frame: ico_video_frame */
+#ifdef ICO_PS5
+#include "../ps5/src/ps5_host.h" /* the image folders, the notifications */
+#endif
 
 extern int ScreenHeight;   /* ico2/seki/include/GsBase.h */
 extern int systemStatus[]; /* common/src/main.c: [0] the video mode word */
@@ -599,7 +602,8 @@ static void record_check(const char *path)
     }
 }
 
-#if !defined(ICO_HEADLESS) && !defined(_WIN32) && !defined(ICO_IOS)
+/* the file picker: no PS5 (find_iso says where to copy the image) */
+#if !defined(ICO_HEADLESS) && !defined(_WIN32) && !defined(ICO_IOS) && !defined(ICO_PS5)
 
 /* Linux window build: SDL3's file dialog (xdg-desktop-portal, else zenity or
    kdialog), since host_config.c's native dialog is Windows only. Returns 0
@@ -882,6 +886,19 @@ static int find_iso(const Args *a, const IcoIni *ini, const char *exe_dir, char 
         fprintf(stderr, "ico_pc: disc image beside the executable: %s\n", iso);
         return 0;
     }
+#ifdef ICO_PS5
+    /* PS5: /app0 is the read-only app; the player copies the image into
+       the data folder over FTP, or plugs in a USB drive */
+    for (i = 0; i < ICO_PS5_IMAGE_DIR_COUNT; i++) {
+        char dir[64];
+
+        ico_ps5_image_dir(i, dir, sizeof(dir));
+        if (find_beside(dir, disc_setting(), iso) == 0) {
+            fprintf(stderr, "ico_pc: disc image in %s: %s\n", dir, iso);
+            return 0;
+        }
+    }
+#endif
     v = ico_ini_get(ini, "iso");
     if (v != NULL && v[0] != '\0') {
         if (ico_path_join(iso, ICO_PATH_MAX, exe_dir, v) != 0) {
@@ -912,6 +929,14 @@ static int find_iso(const Args *a, const IcoIni *ini, const char *exe_dir, char 
                    "reopen ICO. A disc image named %s (.iso, .chd, "
                    ".bin or .cue) can also be placed there.",
                    ico_disc_archive_names_text(), ico_disc_image_names_text(""));
+    return 1;
+#elif defined(ICO_PS5)
+    ico_host_fatal(log_file(),
+                   "No ICO disc image was found. Copy your disc image, named %s "
+                   "(.iso, .chd, .bin or .cue), into " ICO_PS5_DATA_DIR "/ or /data/ico/ "
+                   "over FTP, or into the top folder or an ico folder of a USB drive, "
+                   "then start ICO again (%s).",
+                   ico_disc_image_names_text(""), ico_disc_list_text());
     return 1;
 #else
 #if !defined(ICO_HEADLESS) && !defined(_WIN32)
@@ -1065,6 +1090,47 @@ static int progress_ui_update(const char *phase, int pct, uint64_t total)
 }
 
 static void progress_ui_close(void) {}
+
+#elif defined(ICO_PS5) && !defined(ICO_HEADLESS)
+
+/* PS5: SDL's windows are offscreen until the game's swapchain owns the
+   display, so the first start's progress goes out as system notifications:
+   one as it begins, one each quarter of the copy, one at the end. */
+static int progressQuarter;
+static int progressHashing;
+
+static void progress_ui_open(void)
+{
+    progressQuarter = 0;
+    progressHashing = 0;
+    ico_ps5_notify("Preparing the game data from your disc image (first start only, a few "
+                   "minutes)");
+}
+
+static int progress_ui_update(const char *phase, int pct, uint64_t total)
+{
+    char text[96];
+
+    (void)total;
+    if (strcmp(phase, "hash") == 0 && !progressHashing) {
+        progressHashing = 1;
+        ico_ps5_notify("Checking the disc image");
+    }
+    if (strcmp(phase, "extract") != 0) {
+        return 0;
+    }
+    if (pct >= (progressQuarter + 1) * 25 && pct < 100) {
+        progressQuarter = pct / 25;
+        snprintf(text, sizeof(text), "Preparing the game data: %d%%", progressQuarter * 25);
+        ico_ps5_notify(text);
+    }
+    return 0;
+}
+
+static void progress_ui_close(void)
+{
+    ico_ps5_notify("Game data ready");
+}
 
 #elif !defined(ICO_HEADLESS)
 

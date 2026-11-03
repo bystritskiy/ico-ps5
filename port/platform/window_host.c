@@ -9,6 +9,10 @@
 #include <stdlib.h>
 #include <string.h>
 #include <time.h>
+#if defined(ICO_PS5) && defined(ICO_PS5_DEVTOOLS)
+#include <unistd.h>
+#include <sys/stat.h>
+#endif
 #include "audio_host.h"
 #include "cdvd_host.h"
 #include "config.h"
@@ -69,10 +73,13 @@
 #include "strings.h"
 #endif
 
-/* The window's first client size: 4:3, three times 320 x 240. */
+/* The window's first client size: 4:3, three times 320 x 240.  PS5: the
+   VideoOut mode the WSI asks for (the console's own output resolution); a
+   mode the display does not offer falls back to the largest 60 Hz one, and
+   the swapchain's extent then follows it. */
 #ifdef ICO_PS5
-#define WINDOW_W 1920
-#define WINDOW_H 1080
+#define WINDOW_W 3840
+#define WINDOW_H 2160
 #else
 #define WINDOW_W 960
 #define WINDOW_H 720
@@ -3697,6 +3704,41 @@ static void pump_event_line(const SDL_Event *e, const char *name)
     }
 }
 
+#if defined(ICO_PS5) && defined(ICO_PS5_DEVTOOLS)
+/* Development builds only (tools/build-ps5.py --devtools): DevLoop asks for
+   one native renderer readback, outside the system gallery, by creating
+   devloop-shot in the app folder. */
+static void ps5_devloop_capture(void)
+{
+    static unsigned calls;
+    if (++calls % 4 != 0 || unlink("/app0/devloop-shot") != 0) return;
+    const char *dir = ICO_PS5_DATA_DIR "/devloop";
+    mkdir(dir, 0777);
+    chmod(dir, 0777);
+    char path[256];
+    snprintf(path, sizeof(path), "%s/frame-%llu.png", dir,
+             (unsigned long long)SDL_GetTicksNS());
+    if (!rd_capture_presented(path))
+        fprintf(stderr, "DevLoop: could not arm capture %s\n", path);
+}
+
+/* video.export_textures: one full disc texture export into
+   textures/<serial>/dumps (the Options > Extras > Export textures job,
+   without a menu), retried until the disc is mounted. */
+static void ps5_dev_export_textures(void)
+{
+    static int s_exportStarted;
+    static Uint64 s_exportRetry;
+    if (!s_exportStarted && ico_config_get_bool("video.export_textures", 0) &&
+        SDL_GetTicksNS() >= s_exportRetry) {
+        s_exportRetry = SDL_GetTicksNS() + 2000000000ull;
+        if (texpack_export_begin() == 0) {
+            s_exportStarted = 1;
+        }
+    }
+}
+#endif
+
 int ico_window_pump(void)
 {
     SDL_Event e;
@@ -3704,6 +3746,10 @@ int ico_window_pump(void)
     int quit = 0;
     unsigned events = 0;
     const Uint64 t0 = SDL_GetTicksNS();
+#if defined(ICO_PS5) && defined(ICO_PS5_DEVTOOLS)
+    ps5_devloop_capture();
+    ps5_dev_export_textures();
+#endif
 
     if (device_lost_quit()) {
         return 0;
