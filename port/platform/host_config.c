@@ -1407,7 +1407,9 @@ static int redirect_output(const char *log_path, int keep)
         stdout = file;
         stderr = file;
     }
-    setvbuf(file, NULL, _IONBF, 0);
+    /* Batch the SDK libc writes: v0.10 logs detailed frame timings. */
+    static char ps5_log_buffer[64 * 1024];
+    setvbuf(file, ps5_log_buffer, _IOLBF, sizeof ps5_log_buffer);
     return 0;
 #endif
     FILE *probe = ico_fopen(log_path, keep ? "a" : "w");
