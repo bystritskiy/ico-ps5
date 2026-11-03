@@ -63,7 +63,7 @@ for file in "$sdk"/target/lib/*.so; do
     stubs+=("$file")
 done
 "$sdk/bin/prospero-lld" "${radv_linker_script[@]}" "${flags[@]}" \
-    --version-script "$work/exports.map" --exclude-libs=ALL --no-dynamic-linker --gc-sections \
+    -T "$root/port/ps5/image-bounds.ld" --version-script "$work/exports.map" --exclude-libs=ALL --no-dynamic-linker --gc-sections \
     -e _start -o "$work/llvm-pie.elf" \
     --undefined=_start "$work/obj/cpp-runtime.o" \
     "$work/stubs/libSceAgc.so" "$work/stubs/libSceAgcDriver.so" \

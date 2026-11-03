@@ -148,6 +148,24 @@ int ico_state_image_range(IcoStateImage *out)
     return 0;
 }
 
+#elif defined(ICO_PS5)
+
+/* The native linker supplies these bounds for the main executable. */
+extern const char ico_image_text_start[], ico_image_text_end[];
+extern const char ico_image_ro_start[], ico_image_ro_end[], ico_image_end[];
+
+int ico_state_image_range(IcoStateImage *out)
+{
+    memset(out, 0, sizeof *out);
+    out->lo = out->text_lo = (uintptr_t)ico_image_text_start;
+    out->text_hi = (uintptr_t)ico_image_text_end;
+    out->ro_lo[0] = (uintptr_t)ico_image_ro_start;
+    out->ro_hi[0] = (uintptr_t)ico_image_ro_end;
+    out->n_ro = 1;
+    out->hi = (uintptr_t)ico_image_end;
+    return 0;
+}
+
 #else
 
 typedef struct ImageFind {

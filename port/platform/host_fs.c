@@ -628,6 +628,12 @@ int ico_host_drive_kind(const char *path, char *out, size_t n)
         }
         return drive_word(out, n, w);
     }
+#elif defined(ICO_PS5)
+    /* The payload libc implements statfs via a direct syscall. */
+    if (strncmp(path, "/mnt/usb", 8) == 0) {
+        return drive_word(out, n, "removable");
+    }
+    return drive_word(out, n, "fixed");
 #else
     {
         struct statfs sf;
@@ -700,6 +706,8 @@ int ico_host_drive_fs_name(const char *path, char *out, size_t n)
         }
         return drive_word(out, n, name);
     }
+#elif defined(ICO_PS5)
+    return -1; /* Filesystem type unavailable through the title SDK. */
 #else
     {
         struct statfs sf;
