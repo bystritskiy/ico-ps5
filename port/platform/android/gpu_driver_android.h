@@ -47,8 +47,16 @@
 #include "settings.h"
 
 /* 1 when the player's driver is in use for this start (rd_init next), 0
-   for the phone's own. */
+   for the phone's own (always below Android 9, logged). */
 int ico_gpu_driver_android_start(void);
+/* 1 when driver packages can be loaded on this device: Android 9 (API 28)
+   or later, libadrenotools' need. Below it (Android 8, issue 158) there is
+   no Graphics driver page (ico_gpu_driver_android_host NULL), the start-up
+   box names no package route (box_text; the window shows it without the
+   choice), the hang and loss notes name none, and a start that ended while
+   the driver compiled the pipelines also takes the plain VU entries
+   (window_host.c, rd_set_vu_plain_only). */
+int ico_gpu_driver_android_supported(void);
 /* rd_init failed with the player's driver (start returned 1). */
 void ico_gpu_driver_android_init_failed(void);
 /* The start-up choice: the system's file picker, waited for with SDL's
@@ -73,12 +81,21 @@ void ico_gpu_driver_android_no_device_note(void);
    phone's own Qualcomm driver (customDriver 0), see
    ico_gpu_driver_android_note_loss_on_stock. */
 void ico_gpu_driver_android_device_up(int customDriver);
+/* The sentence the boxes after the graphics driver stopped responding end
+   with (the GPU hang's, diag_host.c, registered by device_up through
+   ico_diag_set_gpu_hang_note; the device loss's, window_host.c
+   device_lost_quit) when this start runs on the phone's own Qualcomm
+   driver: the Options > Graphics driver > Add a driver route to a Turnip
+   package, in English as the boxes are; NULL otherwise. Any thread (a table
+   read). */
+const char *ico_gpu_driver_android_hang_note(void);
 /* After each present that reached the screen. */
 void ico_gpu_driver_android_presented(void);
 /* At a normal end, before the renderer shuts down: a trial still running
    ends as passed (the marker removed). */
 void ico_gpu_driver_android_end(void);
-/* The Settings page's host; valid for the program's life. */
+/* The Settings page's host; valid for the program's life; NULL below
+   Android 9 (ico_gpu_driver_android_supported). */
 const UiGpuDriverHost *ico_gpu_driver_android_host(void);
 
 #endif

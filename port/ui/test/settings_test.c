@@ -28,6 +28,7 @@
  */
 #include "settings_fixture.h"
 #include "popup.h"
+#include "ui_lang.h" /* ui_settings_text_language */
 
 static void testBuild(void)
 {
@@ -36,22 +37,28 @@ static void testBuild(void)
         UI_OPT_LINK,     UI_OPT_LINK,           UI_OPT_LINK, UI_OPT_LINK,
         UI_OPT_LANGUAGE, UI_OPT_MENU_LANGUAGE,  UI_OPT_DISC, UI_OPT_LINK,
         UI_OPT_LINK,     UI_OPT_REPORT_PICTURE, UI_OPT_LINK, UI_OPT_BACK};
-    static const int apiOpts[] = {UI_OPT_GRAPHICS_API, UI_OPT_GRAPHICS_APPLY, UI_OPT_GRAPHICS_KEEP,
+    static const int apiOpts[] = {UI_OPT_GRAPHICS_API,    UI_OPT_GRAPHICS_ADAPTER,
+                                  UI_OPT_GRAPHICS_APPLY,  UI_OPT_GRAPHICS_KEEP,
                                   UI_OPT_GRAPHICS_REVERT, UI_OPT_BACK};
-    static const int apiStrs[] = {UI_STR_OPT_GRAPHICS_API, UI_STR_GRAPHICS_APPLY,
-                                  UI_STR_GRAPHICS_KEEP, UI_STR_GRAPHICS_REVERT, UI_STR_BACK};
+    static const int apiStrs[] = {UI_STR_OPT_GRAPHICS_API, UI_STR_OPT_GRAPHICS_ADAPTER,
+                                  UI_STR_GRAPHICS_APPLY,   UI_STR_GRAPHICS_KEEP,
+                                  UI_STR_GRAPHICS_REVERT,  UI_STR_BACK};
     static const int fxOpts[] = {UI_OPT_EFFECT_GLOW,
+                                 UI_OPT_EFFECT_GLOW_SMOOTH,
                                  UI_OPT_EFFECT_DEPTH_OF_FIELD,
                                  UI_OPT_EFFECT_SOFTENING,
                                  UI_OPT_EFFECT_MOTION_BLUR,
+                                 UI_OPT_EFFECT_MOTION_BLUR_STRENGTH,
                                  UI_OPT_EFFECT_FOG,
                                  UI_OPT_EFFECT_WATER,
                                  UI_OPT_EFFECT_CINEMATIC_BARS,
                                  UI_OPT_BACK};
     static const int fxStrs[] = {UI_STR_OPT_EFFECT_GLOW,
+                                 UI_STR_OPT_EFFECT_GLOW_SMOOTH,
                                  UI_STR_OPT_EFFECT_DEPTH_OF_FIELD,
                                  UI_STR_OPT_EFFECT_SOFTENING,
                                  UI_STR_OPT_EFFECT_MOTION_BLUR,
+                                 UI_STR_OPT_EFFECT_MOTION_BLUR_STRENGTH,
                                  UI_STR_OPT_EFFECT_FOG,
                                  UI_STR_OPT_EFFECT_WATER,
                                  UI_STR_OPT_EFFECT_CINEMATIC_BARS,
@@ -122,13 +129,15 @@ static void testBuild(void)
         UI_STR_OPT_TOUCH_MODE, UI_STR_OPT_TOUCH_SIZE,  UI_STR_OPT_TOUCH_OPACITY,
         UI_STR_OPT_TOUCH_EDIT, UI_STR_OPT_TOUCH_SNAP,  UI_STR_OPT_TOUCH_GRID,
         UI_STR_TOUCH_RESET,    UI_STR_TOUCH_RESET_ALL, UI_STR_BACK};
-    static const int gameOpts[] = {UI_OPT_YORDA,       UI_OPT_PIT_TIME,       UI_OPT_STICK_FIX,
-                                   UI_OPT_DOOR_FIX,    UI_OPT_NATURAL_CHAINS, UI_OPT_SKIP_OPENING,
-                                   UI_OPT_FILM_EFFECT, UI_OPT_PLAYERS,        UI_OPT_BACK};
+    static const int gameOpts[] = {UI_OPT_YORDA,          UI_OPT_PIT_TIME,     UI_OPT_SHADOW_SPEED,
+                                   UI_OPT_STICK_FIX,      UI_OPT_DOOR_FIX,     UI_OPT_YORDA_TRIPS,
+                                   UI_OPT_NATURAL_CHAINS, UI_OPT_SKIP_OPENING, UI_OPT_SECOND_CARD,
+                                   UI_OPT_FILM_EFFECT,    UI_OPT_PLAYERS,      UI_OPT_BACK};
     static const int gameStrs[] = {
-        UI_STR_OPT_YORDA,       UI_STR_OPT_PIT_TIME,       UI_STR_OPT_STICK_FIX,
-        UI_STR_OPT_DOOR_FIX,    UI_STR_OPT_NATURAL_CHAINS, UI_STR_OPT_SKIP_OPENING,
-        UI_STR_OPT_FILM_EFFECT, UI_STR_OPT_PLAYERS,        UI_STR_BACK};
+        UI_STR_OPT_YORDA,          UI_STR_OPT_PIT_TIME,     UI_STR_OPT_SHADOW_SPEED,
+        UI_STR_OPT_STICK_FIX,      UI_STR_OPT_DOOR_FIX,     UI_STR_OPT_YORDA_TRIPS,
+        UI_STR_OPT_NATURAL_CHAINS, UI_STR_OPT_SKIP_OPENING, UI_STR_OPT_SECOND_CARD,
+        UI_STR_OPT_FILM_EFFECT,    UI_STR_OPT_PLAYERS,      UI_STR_BACK};
     static const int listOpts[8] = {UI_OPT_LIST, UI_OPT_LIST, UI_OPT_LIST, UI_OPT_LIST,
                                     UI_OPT_LIST, UI_OPT_LIST, UI_OPT_LIST, UI_OPT_LIST};
     static const int listStrs[8] = {-1, -1, -1, -1, -1, -1, -1, -1};
@@ -140,14 +149,14 @@ static void testBuild(void)
     ui_set_language(UI_LANG_EN);
     ui_settings_install();
     CHECK(labelsAre(UI_PAGE_MAIN, mainOpts, mainStrs, 16), "main page rows");
-    CHECK(labelsAre(UI_PAGE_GRAPHICS, apiOpts, apiStrs, 5), "Graphics page rows");
-    CHECK(labelsAre(UI_PAGE_EFFECTS, fxOpts, fxStrs, 8), "effects rows");
+    CHECK(labelsAre(UI_PAGE_GRAPHICS, apiOpts, apiStrs, 6), "Graphics page rows");
+    CHECK(labelsAre(UI_PAGE_EFFECTS, fxOpts, fxStrs, 10), "effects rows");
     CHECK(labelsAre(UI_PAGE_PICTURE, picOpts, picStrs, 11), "picture rows");
     CHECK(labelsAre(UI_PAGE_DEVELOPER, devOpts, devStrs, 4), "developer rows");
     {
-        /* Characters and Game variants (links), then Add to Steam and
-           Export textures (hidden without a host) before the pop-ups and
-           Back */
+        /* Characters and Game variants (links), then Add to Steam,
+           Export textures, Back up your data and Restore from a backup
+           (hidden without a host) before the pop-ups and Back */
         static const int extrasOpts[] = {UI_OPT_EXTRAS_MUSIC,
                                          UI_OPT_EXTRAS_MODELS,
                                          UI_OPT_EXTRAS_CREDITS,
@@ -155,13 +164,22 @@ static void testBuild(void)
                                          UI_OPT_LINK,
                                          UI_OPT_EXTRAS_STEAM,
                                          UI_OPT_EXTRAS_EXPORT_TEXTURES,
+                                         UI_OPT_EXTRAS_BACKUP,
+                                         UI_OPT_EXTRAS_RESTORE,
                                          UI_OPT_ACH_POPUPS,
                                          UI_OPT_BACK};
-        static const int extrasStrs[] = {
-            UI_STR_EXTRAS_MUSIC,           UI_STR_EXTRAS_MODELS,    UI_STR_EXTRAS_CREDITS,
-            UI_STR_SECTION_CHARACTERS,     UI_STR_SECTION_VARIANTS, UI_STR_EXTRAS_STEAM,
-            UI_STR_EXTRAS_EXPORT_TEXTURES, UI_STR_OPT_ACH_POPUPS,   UI_STR_BACK};
-        CHECK(labelsAre(UI_PAGE_EXTRAS, extrasOpts, extrasStrs, 9), "Extras page rows");
+        static const int extrasStrs[] = {UI_STR_EXTRAS_MUSIC,
+                                         UI_STR_EXTRAS_MODELS,
+                                         UI_STR_EXTRAS_CREDITS,
+                                         UI_STR_SECTION_CHARACTERS,
+                                         UI_STR_SECTION_VARIANTS,
+                                         UI_STR_EXTRAS_STEAM,
+                                         UI_STR_EXTRAS_EXPORT_TEXTURES,
+                                         UI_STR_EXTRAS_BACKUP,
+                                         UI_STR_EXTRAS_RESTORE,
+                                         UI_STR_OPT_ACH_POPUPS,
+                                         UI_STR_BACK};
+        CHECK(labelsAre(UI_PAGE_EXTRAS, extrasOpts, extrasStrs, 11), "Extras page rows");
         /* Game variants: the eight variants, the Debug menu, Back */
         static const int varOpts[] = {UI_OPT_VAR_TOUGHNESS,   UI_OPT_VAR_ONE_HIT,
                                       UI_OPT_VAR_NEVER_DODGE, UI_OPT_VAR_AGGRESSION,
@@ -190,7 +208,7 @@ static void testBuild(void)
                   lt_ext_prop(cl[12])->right == ui_settings_page_layout(UI_PAGE_TOUCH),
               "Touch screen opens its page");
     }
-    CHECK(labelsAre(UI_PAGE_GAMEPLAY, gameOpts, gameStrs, 9), "gameplay rows");
+    CHECK(labelsAre(UI_PAGE_GAMEPLAY, gameOpts, gameStrs, 12), "gameplay rows");
     /* the pop-ups switch is an item of the list (first, before the achievements), not a row of its own */
     CHECK(labelsAre(UI_PAGE_ACHIEVEMENTS, listOpts, listStrs, 8), "achievement slots");
     CHECK(labelsAre(UI_PAGE_REMAP, listOpts, listStrs, 8), "remap slots");
@@ -524,10 +542,12 @@ static void stripBlanks(const char *in, char *out)
 
 static void testNotesFit(void)
 {
-    static const char *const kLang[UI_LANG_COUNT] = {"en", "fr", "de", "it",
-                                                     "es", "ja", "ko", "zh"};
+    /* the eight tables and the community translations (an id one leaves
+       untranslated is the English note) */
+    static const char *const kLang[UI_LANG_TABLES] = {
+        "en", "fr", "de", "it", "es", "ja", "ko", "zh", "ru-bobttz", "ru-cobra838", "pt-br"};
     int checked = 0;
-    for (int lang = 0; lang < UI_LANG_COUNT; lang++) {
+    for (int lang = 0; lang < UI_LANG_TABLES; lang++) {
         ui_set_language((UiLang)lang);
         for (int pg = 0; pg < UI_PAGE_COUNT; pg++) {
             for (int i = 0; i < 40; i++) {
@@ -1895,6 +1915,44 @@ static void testValues(void)
         ui_settings_step(UI_OPT_PIT_TIME, 1);
         CHECK(ico_opt_pit_time() == ICO_PIT_ORIGINAL, "pit time back to Original");
     }
+    /* Shadow speed: right after Time to rescue Yorda; Original, Faster, Fastest, Slower, Original */
+    {
+        static const char *const kWord[4] = {"slower", "original", "faster", "fastest"};
+        static const char *const kText[4] = {"Slower", "Original", "Faster", "Fastest"};
+        static const float kFactor[4] = {0.75f, 1.0f, 1.25f, 1.5f};
+        int k;
+
+        {
+            /* the rows in page order (ui_settings_row_of gives a layout item, and a
+               row's note item sits between two rows' labels) */
+            int rl[16], ro[16], rn, pit = -1, speed = -1;
+
+            rn = ui_settings_page_rows(UI_PAGE_GAMEPLAY, rl, ro, NULL, 16);
+            for (k = 0; k < rn; k++) {
+                if (ro[k] == UI_OPT_PIT_TIME) {
+                    pit = k;
+                } else if (ro[k] == UI_OPT_SHADOW_SPEED) {
+                    speed = k;
+                }
+            }
+            CHECK(pit >= 0 && speed == pit + 1,
+                  "the Shadow speed row sits right after Time to rescue Yorda (%d, %d)", pit,
+                  speed);
+        }
+        CHECK(strcmp(ui_settings_value_text(UI_OPT_SHADOW_SPEED), "Original") == 0,
+              "shadow speed default");
+        for (k = 2; k < 7; k++) {
+            ui_settings_step(UI_OPT_SHADOW_SPEED, 1);
+            CHECK(ico_opt_shadow_speed() == k % 4 &&
+                      ico_opt_shadow_speed_factor() == kFactor[k % 4] &&
+                      strcmp(ui_settings_value_text(UI_OPT_SHADOW_SPEED), kText[k % 4]) == 0 &&
+                      strcmp(ico_config_get_string("gameplay.shadow_speed", ""), kWord[k % 4]) == 0,
+                  "shadow speed step %d", k);
+        }
+        /* five steps from Original end on Faster; back once is Original */
+        ui_settings_step(UI_OPT_SHADOW_SPEED, -1);
+        CHECK(ico_opt_shadow_speed() == ICO_SPEED_ORIGINAL, "shadow speed steps back");
+    }
     ui_settings_step(UI_OPT_DEVELOPER, 1);
     CHECK(ico_opt_developer_mode() == 1, "developer mode on");
     ui_settings_step(UI_OPT_MOUSE_SENS, 1);
@@ -1912,9 +1970,54 @@ static void testValues(void)
           "circle_back: off (Triangle alone)");
     ui_settings_step(UI_OPT_CIRCLE_BACK, -1);
     CHECK(ico_opt_circle_back() == 1 && lt_ext_back_buttons() == 0x30, "circle_back: on again");
+    /* Spanish, then the community translations (the English game under
+       Russian (bob-ttz), Russian (cobra838), then Brazilian Portuguese:
+       [game] text_language), then English again: eight entries */
     NonLinearCameraMove = 6;
     ui_settings_step(UI_OPT_LANGUAGE, 1);
-    CHECK(NonLinearCameraMove == 2, "language wraps ES -> EN");
+    CHECK(NonLinearCameraMove == 2 && ico_opt_text_language() == UI_LANG_RU_BOBTTZ &&
+              ui_settings_text_language() == UI_LANG_RU_BOBTTZ &&
+              strcmp(ico_config_get_string("game.text_language", ""), "ru-bobttz") == 0 &&
+              strcmp(ico_config_get_string("game.language", ""), "en") == 0 &&
+              strcmp(ui_settings_value_text(UI_OPT_LANGUAGE), "Русский (bob-ttz)") == 0,
+          "language ES -> Russian (bob-ttz) over the English game (%d, %s)", NonLinearCameraMove,
+          ui_settings_value_text(UI_OPT_LANGUAGE));
+    ui_settings_step(UI_OPT_LANGUAGE, 1);
+    CHECK(NonLinearCameraMove == 2 && ico_opt_text_language() == UI_LANG_RU_COBRA838 &&
+              ui_settings_text_language() == UI_LANG_RU_COBRA838 &&
+              strcmp(ico_config_get_string("game.text_language", ""), "ru-cobra838") == 0 &&
+              strcmp(ico_config_get_string("game.language", ""), "en") == 0 &&
+              strcmp(ui_settings_value_text(UI_OPT_LANGUAGE), "Русский (cobra838)") == 0 &&
+              ui_settings_resolve_language() == UI_LANG_RU_COBRA838,
+          "language Russian (bob-ttz) -> Russian (cobra838) over the English game (%d, %s)",
+          NonLinearCameraMove, ui_settings_value_text(UI_OPT_LANGUAGE));
+    ui_settings_step(UI_OPT_LANGUAGE, 1);
+    CHECK(NonLinearCameraMove == 2 && ico_opt_text_language() == UI_LANG_PT_BR &&
+              ui_settings_text_language() == UI_LANG_PT_BR &&
+              strcmp(ico_config_get_string("game.text_language", ""), "pt-br") == 0 &&
+              strcmp(ico_config_get_string("game.language", ""), "en") == 0 &&
+              strcmp(ui_settings_value_text(UI_OPT_LANGUAGE), "Português (Brasil) (ichagas7)") ==
+                  0 &&
+              ui_settings_resolve_language() == UI_LANG_PT_BR,
+          "language Russian (cobra838) -> Brazilian Portuguese over the English game (%d, %s)",
+          NonLinearCameraMove, ui_settings_value_text(UI_OPT_LANGUAGE));
+    ui_settings_step(UI_OPT_LANGUAGE, 1);
+    CHECK(NonLinearCameraMove == 2 && ico_opt_text_language() == -1 &&
+              strcmp(ico_config_get_string("game.text_language", "?"), "") == 0,
+          "language wraps Brazilian Portuguese -> EN");
+    ui_settings_step(UI_OPT_LANGUAGE, -1);
+    CHECK(ico_opt_text_language() == UI_LANG_PT_BR, "left: Brazilian Portuguese");
+    ui_settings_step(UI_OPT_LANGUAGE, -1);
+    CHECK(ico_opt_text_language() == UI_LANG_RU_COBRA838, "left: Russian (cobra838)");
+    ui_settings_step(UI_OPT_LANGUAGE, -1);
+    ui_settings_step(UI_OPT_LANGUAGE, -1);
+    CHECK(NonLinearCameraMove == 6 && ico_opt_text_language() == -1,
+          "left four times: back to Spanish (%d)", NonLinearCameraMove);
+    ui_settings_step(UI_OPT_LANGUAGE, 1);
+    ui_settings_step(UI_OPT_LANGUAGE, 1);
+    ui_settings_step(UI_OPT_LANGUAGE, 1);
+    ui_settings_step(UI_OPT_LANGUAGE, 1);
+    CHECK(NonLinearCameraMove == 2 && ico_opt_text_language() == -1, "and on to English");
 
     CHECK(ui_settings_save() == 0, "save");
     path(p, sizeof(p), "settings_test.toml");
@@ -2791,15 +2894,13 @@ static void testGameOptions(void)
               rowShown(UI_PAGE_GAMEPLAY, UI_OPT_PLAYERS),
           "cleared: Film effect and Players");
     checkPageFits(UI_PAGE_GAMEPLAY, "Gameplay (cleared)");
-    press(0x4000);
-    press(0x4000);
-    press(0x4000);
-    press(0x4000);
-    press(0x4000);
-    press(0x4000);
+    for (int k = 0; k < 9; k++) {
+        press(0x4000);
+    }
     CHECK(lt_ext_layout(gameL)->curItem == film,
-          "down six times from Yorda (past Time to rescue Yorda, Natural chains and Skip the "
-          "opening): Film effect");
+          "down nine times from Yorda (past Time to rescue Yorda, Shadow speed, the stick fix, "
+          "the door fix, Yorda trips, Natural chains, Skip the opening and Second memory card): "
+          "Film effect");
     optionScreenMode = 0;
     s_filmCalls = 0;
     CHECK(strcmp(ui_settings_value_text(UI_OPT_FILM_EFFECT), "Off") == 0, "film effect Off (%s)",
@@ -3379,6 +3480,190 @@ static void testModelPack(void)
     useConfig("version = 1\n");
 }
 
+/* Options > Effects > Glow between frames: Original by default, a step makes
+   it Smooth and ui_settings_save writes [video] effect_glow_mode; greyed (no
+   step) with Glow off and at Frame rate Original; the Enhanced preset sets
+   Smooth and Original sets Original, and the rows read back as Enhanced; a
+   file without the key under the Enhanced rows reads Smooth */
+static void testGlowSmooth(void)
+{
+    IcoVideoOptions o;
+    char p[1100];
+    IcoToml *t;
+    const char *got;
+
+    useConfig("version = 1\n[video]\nframerate = \"uncapped\"\n");
+    CHECK(strcmp(ui_settings_value_text(UI_OPT_EFFECT_GLOW_SMOOTH), "Original") == 0,
+          "glow between frames: Original by default");
+    CHECK(ico_video_effect_glow_smooth() == 0, "glow between frames: the getter 0");
+    ui_settings_step(UI_OPT_EFFECT_GLOW_SMOOTH, 1);
+    CHECK(strcmp(ui_settings_value_text(UI_OPT_EFFECT_GLOW_SMOOTH), "Smooth") == 0,
+          "glow between frames: a step makes it Smooth");
+    CHECK(ico_video_effect_glow_smooth() == 1, "glow between frames: the getter 1");
+    CHECK(ui_settings_save() == 0, "glow between frames: save");
+    path(p, sizeof(p), "settings_test.toml");
+    t = ico_toml_load(p);
+    got = t ? ico_toml_get(t, "video.effect_glow_mode") : NULL;
+    CHECK(got != NULL && strcmp(got, "smooth") == 0, "glow between frames: the file says smooth");
+    ico_toml_free(t);
+    ico_video_get(&o);
+    CHECK(ico_video_preset(&o) == ICO_VIDEO_CUSTOM,
+          "glow between frames: Smooth beside the Original rows is Custom");
+    CHECK(ico_video_preset_rows(&o) == ICO_VIDEO_ORIGINAL,
+          "glow between frames: the Display rows alone are still Original");
+    /* Glow off: the row does not step and the getter is 0 */
+    ui_settings_step(UI_OPT_EFFECT_GLOW, 1);
+    ui_settings_step(UI_OPT_EFFECT_GLOW_SMOOTH, 1);
+    ico_video_get(&o);
+    CHECK(o.effectGlowSmooth == 1 && ico_video_effect_glow_smooth() == 0,
+          "glow between frames: locked with Glow off (kept, not in force)");
+    ui_settings_step(UI_OPT_EFFECT_GLOW, 1);
+    /* Frame rate Original: no step */
+    ico_video_get(&o);
+    o.framerate = ICO_FRAMERATE_ORIGINAL;
+    ico_video_set(&o);
+    ui_settings_step(UI_OPT_EFFECT_GLOW_SMOOTH, 1);
+    ico_video_get(&o);
+    CHECK(o.effectGlowSmooth == 1, "glow between frames: locked at Frame rate Original");
+    o.framerate = ICO_FRAMERATE_UNCAPPED;
+    ico_video_set(&o);
+    /* the preset */
+    ui_settings_step(UI_OPT_EFFECT_GLOW_SMOOTH, 1);
+    ico_video_get(&o);
+    CHECK(o.effectGlowSmooth == 0, "glow between frames: Original again");
+    ui_settings_step(UI_OPT_PRESET, 1);
+    ico_video_get(&o);
+    CHECK(o.effectGlowSmooth == 1 && ico_video_preset(&o) == ICO_VIDEO_ENHANCED,
+          "glow between frames: the Enhanced preset sets Smooth and reads back as Enhanced");
+    ui_settings_step(UI_OPT_PRESET, 1);
+    ico_video_get(&o);
+    CHECK(o.effectGlowSmooth == 0 && ico_video_preset(&o) == ICO_VIDEO_ORIGINAL,
+          "glow between frames: the Original preset sets Original");
+    /* a file without the key under the Enhanced rows */
+    useConfig("version = 1\n[video]\npreset = \"enhanced\"\nresolution = \"window\"\n"
+              "aspect = \"auto\"\ntexture_filter = \"anisotropic\"\nfull_height = true\n");
+    ico_video_get(&o);
+    CHECK(o.effectGlowSmooth == 1 && ico_video_preset(&o) == ICO_VIDEO_ENHANCED &&
+              strcmp(ui_settings_value_text(UI_OPT_EFFECT_GLOW_SMOOTH), "Smooth") == 0,
+          "glow between frames: no key under the Enhanced rows reads Smooth");
+    useConfig("version = 1\n[video]\npreset = \"enhanced\"\nresolution = \"window\"\n"
+              "aspect = \"auto\"\ntexture_filter = \"anisotropic\"\nfull_height = true\n"
+              "effect_glow_mode = \"original\"\n");
+    ico_video_get(&o);
+    CHECK(o.effectGlowSmooth == 0 && ico_video_preset(&o) == ICO_VIDEO_CUSTOM,
+          "glow between frames: an explicit key wins");
+    useConfig("version = 1\n");
+}
+
+/* the label of the Effects page's row for opt, -1 */
+static int effectsRow(int opt)
+{
+    int labels[24], opts[24];
+    const int n = ui_settings_page_rows(UI_PAGE_EFFECTS, labels, opts, NULL, 24);
+    for (int i = 0; i < n; i++) {
+        if (opts[i] == opt) {
+            return labels[i];
+        }
+    }
+    return -1;
+}
+
+/* the [video] effect_motion_blur_strength the file holds after a save, -1 without
+   the key */
+static long long savedStrength(void)
+{
+    char p[1100];
+    CHECK(ui_settings_save() == 0, "motion blur strength: save");
+    path(p, sizeof(p), "settings_test.toml");
+    IcoToml *t = ico_toml_load(p);
+    const long long v = t ? ico_toml_get_int(t, "video.effect_motion_blur_strength", -1) : -1;
+    ico_toml_free(t);
+    return v;
+}
+
+/* Effects > Motion blur strength (issue 181): right under Motion blur,
+   100 % by default (the PS2's), 10 % to 100 % in tens held at both ends,
+   each step the getter at once and the file's [video]
+   effect_motion_blur_strength when saved; the row hidden (masked, the
+   cursor's links past it) while Motion blur is Off and shown again with
+   Original or Smooth, its value kept; its note on the page */
+static void testMotionBlurStrength(void)
+{
+    IcoVideoOptions o;
+    useConfig("version = 1\n");
+    const int fxL = openPage(enterMain(0), 1, UI_PAGE_EFFECTS);
+    CHECK(fxL == ui_settings_page_layout(UI_PAGE_EFFECTS), "strength: the Effects page");
+    const int row = effectsRow(UI_OPT_EFFECT_MOTION_BLUR_STRENGTH);
+    const int blurRow = effectsRow(UI_OPT_EFFECT_MOTION_BLUR);
+    CHECK(row >= 0 && blurRow >= 0, "strength: the row (%d) and Motion blur's (%d)", row, blurRow);
+    CHECK(row >= 0 && strcmp(lt_ext_row_text(row), "Motion blur strength") == 0,
+          "strength: the label \"%s\"", row >= 0 ? lt_ext_row_text(row) : "");
+    CHECK(strcmp(ui_settings_value_text(UI_OPT_EFFECT_MOTION_BLUR_STRENGTH), "100 %") == 0 &&
+              ico_video_effect_motion_blur_strength() == 100,
+          "strength: 100 %% by default (%s)",
+          ui_settings_value_text(UI_OPT_EFFECT_MOTION_BLUR_STRENGTH));
+    CHECK(ui_settings_opt_shown(UI_OPT_EFFECT_MOTION_BLUR_STRENGTH) &&
+              (row < 0 || ui_settings_row_shown(row)),
+          "strength: shown with Motion blur Original");
+    CHECK(noteStarting(UI_PAGE_EFFECTS, "Lower values make the trail fade faster") >= 0,
+          "strength: the note");
+    checkPageFits(UI_PAGE_EFFECTS, "Effects with Motion blur strength (pause)");
+    /* nothing changed yet: ui_settings_save writes [video] only once a video
+       row was stepped (s_dirtyVideo), so the file keeps no key, which reads
+       as 100 */
+    CHECK(savedStrength() == -1 && ico_video_effect_motion_blur_strength() == 100,
+          "strength: no change, no key in the file (read as 100)");
+
+    /* Right at 100 % stays; Left down to 10 % in tens, held there */
+    ui_settings_step(UI_OPT_EFFECT_MOTION_BLUR_STRENGTH, 1);
+    CHECK(ico_video_effect_motion_blur_strength() == 100, "strength: held at 100 %%");
+    for (int want = 90; want >= 0; want -= 10) {
+        ui_settings_step(UI_OPT_EFFECT_MOTION_BLUR_STRENGTH, -1);
+        const int w = want < 10 ? 10 : want;
+        char text[16];
+        snprintf(text, sizeof(text), "%d %%", w);
+        CHECK(ico_video_effect_motion_blur_strength() == w &&
+                  strcmp(ui_settings_value_text(UI_OPT_EFFECT_MOTION_BLUR_STRENGTH), text) == 0,
+              "strength: Left to %s (%d, \"%s\")", text, ico_video_effect_motion_blur_strength(),
+              ui_settings_value_text(UI_OPT_EFFECT_MOTION_BLUR_STRENGTH));
+    }
+    CHECK(savedStrength() == 10, "strength: the file has 10");
+    for (int k = 0; k < 4; k++) {
+        ui_settings_step(UI_OPT_EFFECT_MOTION_BLUR_STRENGTH, 1);
+    }
+    CHECK(ico_video_effect_motion_blur_strength() == 50 && savedStrength() == 50,
+          "strength: Right four times to 50 %%, saved as 50");
+    ico_video_get(&o);
+    CHECK(o.effectMotionBlur == 1 && o.effectMotionBlurSmooth == 0 && o.effectFog == 1,
+          "strength: Motion blur and Fog untouched");
+
+    /* Motion blur Off: the row goes (masked, not the cursor's), the value
+       kept; Smooth (Left from Off): the row again at 50 % */
+    lt_ext_layout(fxL)->curItem = blurRow;
+    ui_settings_step(UI_OPT_EFFECT_MOTION_BLUR, -1); /* Original -> Off */
+    frame(0);
+    CHECK(strcmp(ui_settings_value_text(UI_OPT_EFFECT_MOTION_BLUR), "Off") == 0 &&
+              !ui_settings_opt_shown(UI_OPT_EFFECT_MOTION_BLUR_STRENGTH) &&
+              (row < 0 || (!ui_settings_row_shown(row) && lt_ext_prop(row)->defaultMask)),
+          "strength: hidden with Motion blur Off");
+    CHECK(blurRow < 0 || row < 0 || lt_ext_prop(blurRow)->downItem != row,
+          "strength: Down from Motion blur skips the hidden row");
+    checkPageFits(UI_PAGE_EFFECTS, "Effects with Motion blur Off (pause)");
+    CHECK(savedStrength() == 50, "strength: kept in the file with Motion blur Off");
+    ui_settings_step(UI_OPT_EFFECT_MOTION_BLUR, -1); /* Off -> Smooth (around) */
+    frame(0);
+    CHECK(strcmp(ui_settings_value_text(UI_OPT_EFFECT_MOTION_BLUR), "Smooth") == 0 &&
+              ui_settings_opt_shown(UI_OPT_EFFECT_MOTION_BLUR_STRENGTH) &&
+              (row < 0 || ui_settings_row_shown(row)) &&
+              ico_video_effect_motion_blur_strength() == 50,
+          "strength: shown again with Smooth, at 50 %% (%s)",
+          ui_settings_value_text(UI_OPT_EFFECT_MOTION_BLUR_STRENGTH));
+    checkPageFits(UI_PAGE_EFFECTS, "Effects with Motion blur Smooth (pause)");
+    press(0x10);
+    useConfig("version = 1\n");
+    CHECK(ico_video_effect_motion_blur_strength() == 100, "strength: a file without the key: 100");
+}
+
 /* Options > Effects.  The link sits under Display on the main page,
    the six rows read On by default, a step flips one and ui_settings_save
    writes [video] effect_*; the Main page fits in all four entries */
@@ -3465,6 +3750,7 @@ static void testEffects(void)
         }
         ico_toml_free(t);
     }
+    testMotionBlurStrength();
     /* the note under the row, and the page with it from both menus */
     {
         int fl = openPage(enterMain(1), 1, UI_PAGE_EFFECTS);
@@ -3773,6 +4059,7 @@ int main(int argc, char **argv)
     testTexturePackNoteLines();
     testModelPack();
     testEffects();
+    testGlowSmooth();
     testTouch();
     if (failures) {
         printf("settings_test: %d failure(s)\n", failures);

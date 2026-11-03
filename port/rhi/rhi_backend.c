@@ -26,7 +26,18 @@ static const RhiBackendTable *const s_backends[] = {
     NULL};
 
 static const RhiBackendTable *s_sel;
+/* rhi_set_call_guard's (rhi.h): copied, so the caller's struct may go */
+static RhiCallGuard s_guard;
+static bool s_guardOn;
+/* rhi_call_guard_snapshot's counters, rhi_get_stats's answer while busy */
+static RhiStats s_guardStats;
+/* rhi_set_slot_guard's (rhi.h): copied as the call guard is */
+static RhiSlotGuard s_slotGuard;
+static bool s_slotOn;
 static bool s_up; /* rhi_init succeeded and rhi_shutdown has not run */
+/* [video] adapter (rhi_set_adapter_wanted): handed to the backend at each
+   rhi_init, whichever backend is selected then */
+static char s_adapterWanted[256];
 
 static bool nameEq(const char *a, const char *b)
 {
@@ -127,18 +138,95 @@ static const RhiBackendTable *be(void)
     return s_sel;
 }
 
+/* an entry point that changes the device's state waits while the guard's
+ * other thread works (rhi.h rhi_set_call_guard) */
+#define RHI_GUARD()                                                                                \
+    do {                                                                                           \
+        if (s_guardOn && s_guard.busy(s_guard.user)) {                                             \
+            s_guard.wait(s_guard.user);                                                            \
+        }                                                                                          \
+    } while (0)
+
+/* a slot call (rhi.h rhi_set_slot_guard) on frame slot `slot`: the call
+ * guard's wait, but where the slot guard lets the calling thread run beside
+ * the other thread's work of another slot (the backend's slots apart) */
+static bool slotFree(uint32_t slot)
+{
+    return s_slotOn && s_up && be()->limits()->slotOverlap &&
+           s_slotGuard.free(s_slotGuard.user, slot);
+}
+
+#define RHI_GUARD_SLOT(slot)                                                                       \
+    do {                                                                                           \
+        if (s_guardOn && s_guard.busy(s_guard.user) && !slotFree(slot)) {                          \
+            s_guard.wait(s_guard.user);                                                            \
+        }                                                                                          \
+    } while (0)
+
+/* the recording thread's slot, and the one its next rhi_wait_frame
+ * recycles */
+#define RHI_SLOT_NOW() (s_up ? be()->frame_slot() : 0u)
+#define RHI_SLOT_NEXT() ((RHI_SLOT_NOW() + 1u) % RHI_FRAMES_IN_FLIGHT)
+
+void rhi_set_slot_guard(const RhiSlotGuard *guard)
+{
+    if (guard != NULL && guard->free != NULL && guard->pending != NULL && guard->worker != NULL) {
+        s_slotGuard = *guard;
+        s_slotOn = true;
+    } else {
+        s_slotOn = false;
+        memset(&s_slotGuard, 0, sizeof(s_slotGuard));
+    }
+}
+
+bool rhi_slot_guard_pending(uint32_t slot)
+{
+    return s_slotOn && s_slotGuard.pending(s_slotGuard.user, slot);
+}
+
+bool rhi_slot_guard_worker(void)
+{
+    return s_slotOn && s_slotGuard.worker(s_slotGuard.user);
+}
+
+void rhi_set_call_guard(const RhiCallGuard *guard)
+{
+    if (guard != NULL && guard->busy != NULL && guard->wait != NULL) {
+        s_guard = *guard;
+        s_guardOn = true;
+    } else {
+        s_guardOn = false;
+        memset(&s_guard, 0, sizeof(s_guard));
+    }
+}
+
+void rhi_call_guard_settle(void)
+{
+    RHI_GUARD();
+}
+
+void rhi_call_guard_snapshot(void)
+{
+    if (s_up) {
+        be()->get_stats(&s_guardStats);
+    }
+}
+
 /* ------------------------------------------------------------- forwarders */
 bool rhi_init(const RhiDeviceDesc *desc)
 {
+    RHI_GUARD();
     if (s_up) {
         return true;
     }
+    be()->set_adapter_wanted(s_adapterWanted);
     s_up = be()->init(desc);
     return s_up;
 }
 
 void rhi_shutdown(void)
 {
+    RHI_GUARD();
     be()->shutdown();
     s_up = false;
 }
@@ -158,6 +246,21 @@ const char *rhi_adapter_name(void)
     return be()->adapter_name();
 }
 
+uint32_t rhi_adapter_list(RhiAdapterInfo *out, uint32_t max)
+{
+    return be()->adapter_list(out, max);
+}
+
+void rhi_set_adapter_wanted(const char *name)
+{
+    snprintf(s_adapterWanted, sizeof(s_adapterWanted), "%s", name != NULL ? name : "");
+}
+
+const char *rhi_adapter_wanted(void)
+{
+    return s_adapterWanted;
+}
+
 bool rhi_device_lost(void)
 {
     return s_up && be()->device_lost();
@@ -165,6 +268,7 @@ bool rhi_device_lost(void)
 
 bool rhi_resize_swapchain(uint32_t width, uint32_t height, bool vsync)
 {
+    RHI_GUARD();
     return be()->resize_swapchain(width, height, vsync);
 }
 
@@ -180,46 +284,55 @@ bool rhi_swapchain_size(uint32_t *w, uint32_t *h)
 
 void rhi_surface_poll_restart(void)
 {
+    RHI_GUARD();
     be()->surface_poll_restart();
 }
 
 RhiTexture rhi_acquire_backbuffer(void)
 {
+    RHI_GUARD_SLOT(RHI_SLOT_NOW());
     return be()->acquire_backbuffer();
 }
 
 void rhi_present(void)
 {
+    RHI_GUARD();
     be()->present();
 }
 
 void rhi_release_surface(void)
 {
+    RHI_GUARD();
     be()->release_surface();
 }
 
 bool rhi_recreate_surface(void *window)
 {
+    RHI_GUARD();
     return be()->recreate_surface(window);
 }
 
 RhiBuffer rhi_create_buffer(const RhiBufferDesc *desc)
 {
+    RHI_GUARD();
     return be()->create_buffer(desc);
 }
 
 void rhi_destroy_buffer(RhiBuffer b)
 {
+    RHI_GUARD();
     be()->destroy_buffer(b);
 }
 
 void *rhi_map_buffer(RhiBuffer b)
 {
+    RHI_GUARD_SLOT(RHI_SLOT_NOW());
     return be()->map_buffer(b);
 }
 
 void rhi_unmap_buffer(RhiBuffer b)
 {
+    RHI_GUARD_SLOT(RHI_SLOT_NOW());
     be()->unmap_buffer(b);
 }
 
@@ -230,82 +343,112 @@ void rhi_buffer_note_written(RhiBuffer b, uint64_t hi)
 
 RhiTexture rhi_create_texture(const RhiTextureDesc *desc)
 {
+    RHI_GUARD();
     return be()->create_texture(desc);
 }
 
 void rhi_destroy_texture(RhiTexture t)
 {
+    RHI_GUARD();
     be()->destroy_texture(t);
 }
 
 RhiSampler rhi_create_sampler(const RhiSamplerDesc *desc)
 {
+    RHI_GUARD();
     return be()->create_sampler(desc);
 }
 
 void rhi_destroy_sampler(RhiSampler s)
 {
+    RHI_GUARD();
     be()->destroy_sampler(s);
 }
 
 RhiShader rhi_create_shader(const RhiShaderDesc *desc)
 {
+    RHI_GUARD();
     return be()->create_shader(desc);
 }
 
 void rhi_destroy_shader(RhiShader s)
 {
+    RHI_GUARD();
     be()->destroy_shader(s);
 }
 
 RhiBindGroupLayout rhi_create_bind_group_layout(const RhiBindGroupLayoutDesc *desc)
 {
+    RHI_GUARD();
     return be()->create_bind_group_layout(desc);
 }
 
 void rhi_destroy_bind_group_layout(RhiBindGroupLayout l)
 {
+    RHI_GUARD();
     be()->destroy_bind_group_layout(l);
 }
 
 RhiBindGroup rhi_create_bind_group(const RhiBindGroupDesc *desc)
 {
+    RHI_GUARD_SLOT(RHI_SLOT_NOW());
     return be()->create_bind_group(desc);
 }
 
 RhiPipeline rhi_create_pipeline(const RhiPipelineDesc *desc)
 {
+    RHI_GUARD();
     return be()->create_pipeline(desc);
 }
 
 uint32_t rhi_create_pipelines(const RhiPipelineDesc *descs, uint32_t n, RhiPipeline *out,
                               RhiPipelineBatch *batch)
 {
+    RHI_GUARD();
     return be()->create_pipelines(descs, n, out, batch);
+}
+
+RhiPipelineJobs *rhi_create_pipelines_begin(const RhiPipelineDesc *descs, uint32_t n,
+                                            uint32_t maxThreads, bool lowPriority)
+{
+    RHI_GUARD();
+    return be()->create_pipelines_begin(descs, n, maxThreads, lowPriority);
+}
+
+bool rhi_create_pipelines_end(RhiPipelineJobs *jobs, bool wait, RhiPipeline *out, float *ms,
+                              uint32_t *threads)
+{
+    RHI_GUARD();
+    return be()->create_pipelines_end(jobs, wait, out, ms, threads);
 }
 
 void rhi_destroy_pipeline(RhiPipeline p)
 {
+    RHI_GUARD();
     be()->destroy_pipeline(p);
 }
 
 RhiCommandList rhi_begin_commands(void)
 {
+    RHI_GUARD_SLOT(RHI_SLOT_NOW());
     return be()->begin_commands();
 }
 
 void rhi_end_commands(RhiCommandList cl)
 {
+    RHI_GUARD();
     be()->end_commands(cl);
 }
 
 void rhi_submit(RhiCommandList cl)
 {
+    RHI_GUARD();
     be()->submit(cl);
 }
 
 void rhi_wait_frame(void)
 {
+    RHI_GUARD_SLOT(RHI_SLOT_NEXT());
     be()->wait_frame();
 }
 
@@ -316,11 +459,13 @@ uint32_t rhi_frame_slot(void)
 
 void rhi_wait_idle(void)
 {
+    RHI_GUARD();
     be()->wait_idle();
 }
 
 void rhi_collect_garbage_now(void)
 {
+    RHI_GUARD();
     be()->collect_garbage_now();
 }
 
@@ -478,11 +623,17 @@ bool rhi_gpu_progress(RhiGpuProgress *out)
 bool rhi_readback_texture(RhiTexture t, RhiViewAspect aspect, void *dst, size_t dstSize,
                           uint32_t *outRowPitch)
 {
+    RHI_GUARD();
     return be()->readback_texture(t, aspect, dst, dstSize, outRowPitch);
 }
 
 void rhi_get_stats(RhiStats *out)
 {
+    if (s_guardOn &&
+        (s_guard.stale != NULL ? s_guard.stale(s_guard.user) : s_guard.busy(s_guard.user))) {
+        *out = s_guardStats; /* the hand-over's counters (rhi.h rhi_set_call_guard) */
+        return;
+    }
     be()->get_stats(out);
 }
 
@@ -498,16 +649,40 @@ void rhi_cmd_write_timestamp(RhiCommandList cl, uint32_t index)
 
 uint32_t rhi_read_timestamps(uint64_t *ns, uint32_t max)
 {
+    RHI_GUARD_SLOT(RHI_SLOT_NOW());
     return be()->read_timestamps(ns, max);
 }
 
 uint32_t rhi_read_timestamps_busy(uint64_t *ns, uint32_t max)
 {
+    RHI_GUARD_SLOT(RHI_SLOT_NOW());
     return be()->read_timestamps_busy(ns, max);
+}
+
+bool rhi_occlusion_supported(void)
+{
+    return be()->occlusion_supported();
+}
+
+void rhi_cmd_begin_occlusion(RhiCommandList cl, uint32_t index)
+{
+    be()->cmd_begin_occlusion(cl, index);
+}
+
+void rhi_cmd_end_occlusion(RhiCommandList cl, uint32_t index)
+{
+    be()->cmd_end_occlusion(cl, index);
+}
+
+uint32_t rhi_read_occlusion(uint64_t *samples, uint32_t max)
+{
+    RHI_GUARD_SLOT(RHI_SLOT_NOW());
+    return be()->read_occlusion(samples, max);
 }
 
 void rhi_prefer_mailbox(bool on)
 {
+    RHI_GUARD();
     be()->prefer_mailbox(on);
 }
 
@@ -521,8 +696,20 @@ bool rhi_present_mailbox(void)
     return be()->present_mailbox();
 }
 
+void rhi_present_fifo_fallback(bool on)
+{
+    RHI_GUARD();
+    be()->present_fifo_fallback(on);
+}
+
+bool rhi_present_fifo_fallback_on(void)
+{
+    return be()->present_fifo_fallback_on();
+}
+
 void rhi_set_exclusive_fullscreen(bool allowed)
 {
+    RHI_GUARD();
     be()->set_exclusive_fullscreen(allowed);
 }
 
@@ -538,6 +725,7 @@ bool rhi_present_timing(void)
 
 void rhi_present_timing_use(bool on)
 {
+    RHI_GUARD();
     if (s_up) {
         be()->present_timing_use(on);
     }
@@ -561,6 +749,7 @@ bool rhi_present_statistics(uint64_t *presentCount, uint64_t *presentRefresh, ui
 
 void rhi_set_pipeline_cache_path(const char *path)
 {
+    RHI_GUARD();
     be()->set_pipeline_cache_path(path);
 }
 
@@ -571,6 +760,7 @@ bool rhi_pipeline_cache_loaded(void)
 
 bool rhi_pipeline_cache_save(void)
 {
+    RHI_GUARD();
     return s_up && be()->pipeline_cache_save();
 }
 
@@ -581,6 +771,7 @@ uint64_t rhi_pipeline_cache_size(void)
 
 void rhi_set_vulkan_loader(void *getInstanceProcAddr)
 {
+    RHI_GUARD();
     be()->set_vulkan_loader(getInstanceProcAddr);
 }
 

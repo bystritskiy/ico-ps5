@@ -17,7 +17,9 @@
  *   7  untouched (clear colour)
  *
  * Then cells of their own targets: BC textures, the fill rule (edges through
- * pixel centres), multisampling, the destination read, dynamic state.
+ * pixel centres), a list recorded on this thread and ended and submitted on
+ * another (the window's render thread, port/platform/render_thread.c),
+ * multisampling, the destination read, dynamic state.
  *
  * Plus an RGBA8_UINT target (integer clear and integer output), R8 texture
  * copies (a whole copy, then a second copy over part of it: same-state copy
@@ -27,10 +29,12 @@
  * offset alignment (1/4 on Vulkan, 256/512 on D3D12). */
 #include "rhi_test_common.h"
 #include "rhi.h"
+#include "rhi_bind_cache.h"
 #include "rhi_test_dxil.h"
 #include "rhi_test_glsl.h"
 #include "rhi_test_hlsl.h"
 #include "rhi_test_spv.h"
+#include "ico_thread.h"
 #include <stdarg.h>
 #include <stdlib.h>
 #include <string.h>
@@ -473,6 +477,552 @@ static void fillRuleCell(const Ctx *c)
     }
     rhi_destroy_pipeline(pipe);
     rhi_destroy_texture(tgt);
+    rhi_destroy_buffer(ring);
+}
+
+/* A list recorded on this thread, ended and submitted on another (the
+ * window's render thread: port/platform/render_thread.c; Vulkan and D3D12,
+ * not a backend that takes every call on one thread,
+ * RhiLimits.singleThreadCommands).  The fill rule's two squares are drawn
+ * into a reference target whole on this thread, then the same list into a
+ * second target, whose end and submit go to a thread of their own; the
+ * call guard (rhi.h rhi_set_call_guard) says the other thread is busy, so
+ * the readback that follows waits for it (the guard's wait joins it) before
+ * it runs.  The two read back byte for byte equal, and the guard waited. */
+typedef struct ThreadSubmit {
+    RhiCommandList cl;
+    int done;
+} ThreadSubmit;
+
+static _Thread_local int t_submitter; /* set on the submitting thread */
+static IcoThread *s_submitThread;
+static int s_submitBusy, s_guardWaits;
+
+static void submitOnThread(void *arg)
+{
+    ThreadSubmit *s = arg;
+    t_submitter = 1;
+    rhi_end_commands(s->cl);
+    rhi_submit(s->cl);
+    __atomic_store_n(&s->done, 1, __ATOMIC_RELEASE);
+}
+
+static bool submitGuardBusy(void *u)
+{
+    (void)u;
+    return !t_submitter && __atomic_load_n(&s_submitBusy, __ATOMIC_ACQUIRE) != 0;
+}
+
+static void submitGuardWait(void *u)
+{
+    (void)u;
+    if (s_submitThread != NULL) {
+        ico_thread_join(s_submitThread);
+        s_submitThread = NULL;
+    }
+    __atomic_store_n(&s_submitBusy, 0, __ATOMIC_RELEASE);
+    s_guardWaits++;
+}
+
+/* the fill rule cell's two squares into tgt (RENDER_TARGET from UNDEFINED,
+ * then COPY_SRC); the list left open */
+static RhiCommandList threadCellRecord(RhiTexture tgt, RhiPipeline pipe, RhiBuffer ring, int fs)
+{
+    RhiCommandList cl = rhi_begin_commands();
+    RhiTextureBarrier pre = {tgt, RHI_STATE_UNDEFINED, RHI_STATE_RENDER_TARGET};
+    rhi_cmd_barrier(cl, &pre, 1);
+    RhiRenderPassDesc rp;
+    memset(&rp, 0, sizeof(rp));
+    rp.color[0].texture = tgt;
+    rp.color[0].load = RHI_LOAD_CLEAR;
+    rp.colorCount = 1;
+    rp.width = (uint32_t)fs;
+    rp.height = (uint32_t)fs;
+    rhi_cmd_begin_render_pass(cl, &rp);
+    rhi_cmd_set_pipeline(cl, pipe);
+    rhi_cmd_set_vertex_buffer(cl, 0, ring, 0);
+    rhi_cmd_draw(cl, 12, 0, 1);
+    rhi_cmd_end_render_pass(cl);
+    RhiTextureBarrier post = {tgt, RHI_STATE_RENDER_TARGET, RHI_STATE_COPY_SRC};
+    rhi_cmd_barrier(cl, &post, 1);
+    return cl;
+}
+
+/* h rows of w RGBA8 texels, pitch bytes apart, equal */
+static bool rowsEqual(const uint8_t *a, const uint8_t *b, uint32_t pitch, int w, int h)
+{
+    for (int y = 0; y < h; y++) {
+        if (memcmp(a + (size_t)y * pitch, b + (size_t)y * pitch, (size_t)w * 4) != 0) {
+            return false;
+        }
+    }
+    return true;
+}
+
+static void threadSubmitCell(const Ctx *c)
+{
+    enum { FS = 16 };
+
+    if (rhi_limits()->singleThreadCommands) {
+        rhi_test_log("%s: thread submit cell skipped (this backend takes every call on one "
+                     "thread)\n",
+                     s_label);
+        return;
+    }
+    const RhiFormat CF = RHI_FMT_RGBA8_UNORM;
+    RhiTexture ref = rhi_create_texture(&(RhiTextureDesc){
+        FS, FS, 1, CF, RHI_TEX_RENDER_TARGET | RHI_TEX_COPY_SRC, "thread submit reference", 0});
+    RhiTexture tgt = rhi_create_texture(&(RhiTextureDesc){
+        FS, FS, 1, CF, RHI_TEX_RENDER_TARGET | RHI_TEX_COPY_SRC, "thread submit target", 0});
+    RhiBuffer ring = rhi_create_buffer(
+        &(RhiBufferDesc){4096, RHI_BUF_VERTEX, RHI_MEM_UPLOAD, "thread submit verts"});
+    uint8_t *map = ring.id ? rhi_map_buffer(ring) : NULL;
+    RhiBlendState opaque = {.writeMask = 0xF};
+    RhiPipeline pipe =
+        makePipeline(c, c->psColor, CF, RHI_FMT_UNKNOWN, &opaque, NULL, "thread submit");
+    if (!ref.id || !tgt.id || !map || !pipe.id) {
+        rhi_test_log("FAIL %s: thread submit resources\n", s_label);
+        failures++;
+        return;
+    }
+    Vtx v[12];
+    quad(&v[0], 2.5f, 2.5f, 6.5f, 6.5f, FS, FS, 0.0f, 255, 0, 0, 255);
+    quad(&v[6], 2.5f, 6.5f, 6.5f, 10.5f, FS, FS, 0.0f, 0, 255, 0, 255);
+    memcpy(map, v, sizeof(v));
+
+    /* the reference: recorded, ended and submitted here */
+    RhiCommandList cl = threadCellRecord(ref, pipe, ring, FS);
+    rhi_end_commands(cl);
+    rhi_submit(cl);
+    static uint8_t want[FS * FS * 4], got[FS * FS * 4];
+    uint32_t pitchWant = 0, pitchGot = 0;
+    const bool haveRef =
+        rhi_readback_texture(ref, RHI_ASPECT_COLOR, want, sizeof(want), &pitchWant);
+
+    /* the same list into tgt, its end and submit on another thread */
+    ThreadSubmit job = {threadCellRecord(tgt, pipe, ring, FS), 0};
+    const RhiCallGuard guard = {NULL, submitGuardBusy, submitGuardWait, NULL};
+    s_guardWaits = 0;
+    rhi_set_call_guard(&guard);
+    __atomic_store_n(&s_submitBusy, 1, __ATOMIC_RELEASE);
+    s_submitThread = ico_thread_create(submitOnThread, &job);
+    if (s_submitThread == NULL) {
+        rhi_set_call_guard(NULL);
+        __atomic_store_n(&s_submitBusy, 0, __ATOMIC_RELEASE);
+        rhi_test_log("FAIL %s: thread submit: no thread\n", s_label);
+        failures++;
+        rhi_end_commands(job.cl);
+        rhi_submit(job.cl);
+        rhi_wait_idle();
+        rhi_destroy_pipeline(pipe);
+        rhi_destroy_texture(ref);
+        rhi_destroy_texture(tgt);
+        rhi_destroy_buffer(ring);
+        return;
+    }
+    /* the readback waits for the other thread through the guard */
+    const bool haveGot = rhi_readback_texture(tgt, RHI_ASPECT_COLOR, got, sizeof(got), &pitchGot);
+    rhi_set_call_guard(NULL);
+    if (s_submitThread != NULL) {
+        submitGuardWait(NULL); /* the guard did not wait: joined here (a failure below) */
+        s_guardWaits--;
+    }
+    if (!haveRef || !haveGot || pitchWant != pitchGot) {
+        rhi_test_log("FAIL %s: thread submit readback\n", s_label);
+        failures++;
+    } else if (s_guardWaits != 1 || !__atomic_load_n(&job.done, __ATOMIC_ACQUIRE)) {
+        rhi_test_log("FAIL %s: thread submit: the readback did not wait for the submitting "
+                     "thread (guard waits %d)\n",
+                     s_label, s_guardWaits);
+        failures++;
+    } else if (!rowsEqual(want, got, pitchGot, FS, FS)) {
+        rhi_test_log("FAIL %s: thread submit: the list submitted on another thread drew other "
+                     "pixels than the same list submitted here\n",
+                     s_label);
+        failures++;
+    } else {
+        const int before = failures;
+        for (int y = 0; y < FS && failures - before < 4; y++) {
+            for (int x = 0; x < FS && failures - before < 4; x++) {
+                const int in = x >= 2 && x <= 5;
+                const uint8_t r = in && y >= 2 && y <= 5 ? 255 : 0;
+                const uint8_t g = in && y >= 6 && y <= 9 ? 255 : 0;
+                expectRGBA(got, pitchGot, x, y, r, g, 0, (r | g) != 0 ? 255 : 0, 210);
+            }
+        }
+        if (failures == before) {
+            rhi_test_log("%s: thread submit cell passed (recorded here, ended and submitted on "
+                         "another thread, read back equal; the readback waited for it)\n",
+                         s_label);
+        }
+    }
+    rhi_destroy_pipeline(pipe);
+    rhi_destroy_texture(ref);
+    rhi_destroy_texture(tgt);
+    rhi_destroy_buffer(ring);
+}
+
+/* The submit thread's shape (port/render/rd_submit_thread.h): the list
+ * recorded on one thread (A: the render thread), ended and submitted on
+ * another (B: the submit thread), read back here, equal row by row to the
+ * same list recorded, ended and submitted here and to the fill rule's two
+ * squares; the readback waited for B through the call guard.  Skipped where
+ * the backend takes every call on one thread (OpenGL, Direct3D 11). */
+typedef struct ThreadRecord {
+    RhiTexture tgt;
+    RhiPipeline pipe;
+    RhiBuffer ring;
+    int fs;
+    RhiCommandList cl;
+} ThreadRecord;
+
+static void recordOnThread(void *arg)
+{
+    ThreadRecord *r = arg;
+    r->cl = threadCellRecord(r->tgt, r->pipe, r->ring, r->fs);
+}
+
+static void threadRecordCell(const Ctx *c)
+{
+    enum { FS = 16 };
+
+    if (rhi_limits()->singleThreadCommands) {
+        rhi_test_log("%s: thread record cell skipped (this backend takes every call on one "
+                     "thread)\n",
+                     s_label);
+        return;
+    }
+    rhi_wait_frame(); /* a slot of its own for the four lists */
+    const RhiFormat CF = RHI_FMT_RGBA8_UNORM;
+    RhiTexture ref = rhi_create_texture(&(RhiTextureDesc){
+        FS, FS, 1, CF, RHI_TEX_RENDER_TARGET | RHI_TEX_COPY_SRC, "thread record reference", 0});
+    RhiTexture tgt = rhi_create_texture(&(RhiTextureDesc){
+        FS, FS, 1, CF, RHI_TEX_RENDER_TARGET | RHI_TEX_COPY_SRC, "thread record target", 0});
+    RhiBuffer ring = rhi_create_buffer(
+        &(RhiBufferDesc){4096, RHI_BUF_VERTEX, RHI_MEM_UPLOAD, "thread record verts"});
+    uint8_t *map = ring.id ? rhi_map_buffer(ring) : NULL;
+    RhiBlendState opaque = {.writeMask = 0xF};
+    RhiPipeline pipe =
+        makePipeline(c, c->psColor, CF, RHI_FMT_UNKNOWN, &opaque, NULL, "thread record");
+    if (!ref.id || !tgt.id || !map || !pipe.id) {
+        rhi_test_log("FAIL %s: thread record resources\n", s_label);
+        failures++;
+        return;
+    }
+    Vtx v[12];
+    quad(&v[0], 2.5f, 2.5f, 6.5f, 6.5f, FS, FS, 0.0f, 255, 0, 0, 255);
+    quad(&v[6], 2.5f, 6.5f, 6.5f, 10.5f, FS, FS, 0.0f, 0, 255, 0, 255);
+    memcpy(map, v, sizeof(v));
+
+    /* the reference: recorded, ended and submitted here */
+    RhiCommandList cl = threadCellRecord(ref, pipe, ring, FS);
+    rhi_end_commands(cl);
+    rhi_submit(cl);
+    static uint8_t want[FS * FS * 4], got[FS * FS * 4];
+    uint32_t pitchWant = 0, pitchGot = 0;
+    const bool haveRef =
+        rhi_readback_texture(ref, RHI_ASPECT_COLOR, want, sizeof(want), &pitchWant);
+
+    /* A records the list into tgt and ends without ending it */
+    ThreadRecord rec = {tgt, pipe, ring, FS, {0}};
+    IcoThread *a = ico_thread_create(recordOnThread, &rec);
+    if (a != NULL) {
+        ico_thread_join(a);
+    }
+    if (a == NULL || !rec.cl.id) {
+        rhi_test_log("FAIL %s: thread record: no thread or no list recorded on it\n", s_label);
+        failures++;
+        if (rec.cl.id) {
+            rhi_end_commands(rec.cl);
+            rhi_submit(rec.cl);
+        }
+        rhi_wait_idle();
+        rhi_destroy_pipeline(pipe);
+        rhi_destroy_texture(ref);
+        rhi_destroy_texture(tgt);
+        rhi_destroy_buffer(ring);
+        return;
+    }
+    /* B ends and submits it; the readback here waits for B */
+    ThreadSubmit job = {rec.cl, 0};
+    const RhiCallGuard guard = {NULL, submitGuardBusy, submitGuardWait, NULL};
+    s_guardWaits = 0;
+    rhi_set_call_guard(&guard);
+    __atomic_store_n(&s_submitBusy, 1, __ATOMIC_RELEASE);
+    s_submitThread = ico_thread_create(submitOnThread, &job);
+    if (s_submitThread == NULL) {
+        rhi_set_call_guard(NULL);
+        __atomic_store_n(&s_submitBusy, 0, __ATOMIC_RELEASE);
+        rhi_test_log("FAIL %s: thread record: no second thread\n", s_label);
+        failures++;
+        rhi_end_commands(job.cl);
+        rhi_submit(job.cl);
+        rhi_wait_idle();
+        rhi_destroy_pipeline(pipe);
+        rhi_destroy_texture(ref);
+        rhi_destroy_texture(tgt);
+        rhi_destroy_buffer(ring);
+        return;
+    }
+    const bool haveGot = rhi_readback_texture(tgt, RHI_ASPECT_COLOR, got, sizeof(got), &pitchGot);
+    rhi_set_call_guard(NULL);
+    if (s_submitThread != NULL) {
+        submitGuardWait(NULL); /* the guard did not wait: joined here (a failure below) */
+        s_guardWaits--;
+    }
+    if (!haveRef || !haveGot || pitchWant != pitchGot) {
+        rhi_test_log("FAIL %s: thread record readback\n", s_label);
+        failures++;
+    } else if (s_guardWaits != 1 || !__atomic_load_n(&job.done, __ATOMIC_ACQUIRE)) {
+        rhi_test_log("FAIL %s: thread record: the readback did not wait for the submitting "
+                     "thread (guard waits %d)\n",
+                     s_label, s_guardWaits);
+        failures++;
+    } else if (!rowsEqual(want, got, pitchGot, FS, FS)) {
+        rhi_test_log("FAIL %s: thread record: the list recorded on one thread and submitted on "
+                     "another drew other pixels than the same list made here\n",
+                     s_label);
+        failures++;
+    } else {
+        const int before = failures;
+        for (int y = 0; y < FS && failures - before < 4; y++) {
+            for (int x = 0; x < FS && failures - before < 4; x++) {
+                const int in = x >= 2 && x <= 5;
+                const uint8_t r = in && y >= 2 && y <= 5 ? 255 : 0;
+                const uint8_t g = in && y >= 6 && y <= 9 ? 255 : 0;
+                expectRGBA(got, pitchGot, x, y, r, g, 0, (r | g) != 0 ? 255 : 0, 210);
+            }
+        }
+        if (failures == before) {
+            rhi_test_log("%s: thread record cell passed (recorded on thread A, ended and "
+                         "submitted on thread B, read back equal here; the readback waited for "
+                         "B)\n",
+                         s_label);
+        }
+    }
+    rhi_destroy_pipeline(pipe);
+    rhi_destroy_texture(ref);
+    rhi_destroy_texture(tgt);
+    rhi_destroy_buffer(ring);
+}
+
+/* The frame slots apart (RhiLimits.slotOverlap; port/rhi/vk/vk_cmd.c
+ * "Frame slots", port/render/rd_submit_thread.h "the slots"): list A of
+ * one slot is ended and submitted on thread B while this thread recycles
+ * the other slot (rhi_wait_frame), begins list B there and records it, at
+ * the same time (B waits until this thread has begun list B, then ends and
+ * submits A).  The slot guard (rhi.h rhi_set_slot_guard) says the slot
+ * calls of this thread are free while B's job is of the other slot, so
+ * neither rhi_wait_frame nor rhi_begin_commands waits for B; list B's end,
+ * not a slot call, waits for it through the call guard (one wait).  Both
+ * targets read back row by row equal to the same two lists made one after
+ * the other on this thread, and to the squares each drew (A the fill rule
+ * cell's red and green squares, B a blue square of its own).  Skipped where
+ * the slots are not apart (Direct3D 12, OpenGL, Direct3D 11, Vulkan's fence
+ * sync, ICO_VK_SLOT_OVERLAP=0). */
+typedef struct ThreadSlots {
+    RhiCommandList cl;
+    int go, done;
+} ThreadSlots;
+
+static int s_slotsJob; /* the frame slot of thread B's job */
+
+static void slotsOnThread(void *arg)
+{
+    ThreadSlots *s = arg;
+    t_submitter = 1;
+    /* until this thread's next list has begun (a bound: a failure below) */
+    const double t0 = ico_thread_now_ms();
+    while (!__atomic_load_n(&s->go, __ATOMIC_ACQUIRE) && ico_thread_now_ms() - t0 < 5000.0) {}
+    rhi_end_commands(s->cl);
+    rhi_submit(s->cl);
+    __atomic_store_n(&s->done, 1, __ATOMIC_RELEASE);
+}
+
+static bool slotsFree(void *u, uint32_t slot)
+{
+    (void)u;
+    return !t_submitter && (int)slot != s_slotsJob;
+}
+
+static bool slotsPending(void *u, uint32_t slot)
+{
+    (void)u;
+    return __atomic_load_n(&s_submitBusy, __ATOMIC_ACQUIRE) != 0 && (int)slot == s_slotsJob;
+}
+
+static bool slotsWorker(void *u)
+{
+    (void)u;
+    return t_submitter != 0;
+}
+
+/* list B: a blue square (2..5, 10..13) from the ring's second quad, the
+ * list left open; begun by the caller */
+static void slotsRecordB(RhiCommandList cl, RhiTexture tgt, RhiPipeline pipe, RhiBuffer ring,
+                         int fs)
+{
+    RhiTextureBarrier pre = {tgt, RHI_STATE_UNDEFINED, RHI_STATE_RENDER_TARGET};
+    rhi_cmd_barrier(cl, &pre, 1);
+    RhiRenderPassDesc rp;
+    memset(&rp, 0, sizeof(rp));
+    rp.color[0].texture = tgt;
+    rp.color[0].load = RHI_LOAD_CLEAR;
+    rp.colorCount = 1;
+    rp.width = (uint32_t)fs;
+    rp.height = (uint32_t)fs;
+    rhi_cmd_begin_render_pass(cl, &rp);
+    rhi_cmd_set_pipeline(cl, pipe);
+    rhi_cmd_set_vertex_buffer(cl, 0, ring, 12u * sizeof(Vtx));
+    rhi_cmd_draw(cl, 6, 0, 1);
+    rhi_cmd_end_render_pass(cl);
+    RhiTextureBarrier post = {tgt, RHI_STATE_RENDER_TARGET, RHI_STATE_COPY_SRC};
+    rhi_cmd_barrier(cl, &post, 1);
+}
+
+static void threadSlotsCell(const Ctx *c)
+{
+    enum { FS = 16 };
+
+    if (rhi_limits()->singleThreadCommands || !rhi_limits()->slotOverlap) {
+        rhi_test_log("%s: thread slots cell skipped (the frame slots are not apart on this "
+                     "device: one call at a time)\n",
+                     s_label);
+        return;
+    }
+    const RhiFormat CF = RHI_FMT_RGBA8_UNORM;
+    const uint32_t use = RHI_TEX_RENDER_TARGET | RHI_TEX_COPY_SRC;
+    RhiTexture refA = rhi_create_texture(&(RhiTextureDesc){FS, FS, 1, CF, use, "slots ref A", 0});
+    RhiTexture refB = rhi_create_texture(&(RhiTextureDesc){FS, FS, 1, CF, use, "slots ref B", 0});
+    RhiTexture tgtA = rhi_create_texture(&(RhiTextureDesc){FS, FS, 1, CF, use, "slots A", 0});
+    RhiTexture tgtB = rhi_create_texture(&(RhiTextureDesc){FS, FS, 1, CF, use, "slots B", 0});
+    RhiBuffer ring = rhi_create_buffer(
+        &(RhiBufferDesc){4096, RHI_BUF_VERTEX, RHI_MEM_UPLOAD, "thread slots verts"});
+    uint8_t *map = ring.id ? rhi_map_buffer(ring) : NULL;
+    RhiBlendState opaque = {.writeMask = 0xF};
+    RhiPipeline pipe =
+        makePipeline(c, c->psColor, CF, RHI_FMT_UNKNOWN, &opaque, NULL, "thread slots");
+    if (!refA.id || !refB.id || !tgtA.id || !tgtB.id || !map || !pipe.id) {
+        rhi_test_log("FAIL %s: thread slots resources\n", s_label);
+        failures++;
+        return;
+    }
+    Vtx v[18];
+    quad(&v[0], 2.5f, 2.5f, 6.5f, 6.5f, FS, FS, 0.0f, 255, 0, 0, 255);
+    quad(&v[6], 2.5f, 6.5f, 6.5f, 10.5f, FS, FS, 0.0f, 0, 255, 0, 255);
+    quad(&v[12], 2.5f, 10.5f, 6.5f, 14.5f, FS, FS, 0.0f, 0, 0, 255, 255);
+    memcpy(map, v, sizeof(v));
+
+    /* the serial run: A then B, each in a slot of its own, on this thread */
+    static uint8_t wantA[FS * FS * 4], wantB[FS * FS * 4], gotA[FS * FS * 4], gotB[FS * FS * 4];
+    uint32_t pA = 0, pB = 0, qA = 0, qB = 0;
+    rhi_wait_frame();
+    RhiCommandList cl = threadCellRecord(refA, pipe, ring, FS);
+    rhi_end_commands(cl);
+    rhi_submit(cl);
+    rhi_wait_frame();
+    cl = rhi_begin_commands();
+    slotsRecordB(cl, refB, pipe, ring, FS);
+    rhi_end_commands(cl);
+    rhi_submit(cl);
+    const bool haveRef = rhi_readback_texture(refA, RHI_ASPECT_COLOR, wantA, sizeof(wantA), &pA) &&
+                         rhi_readback_texture(refB, RHI_ASPECT_COLOR, wantB, sizeof(wantB), &pB);
+
+    /* the slots apart: A recorded here in this slot, its end and submit on
+       thread B while this thread recycles the other slot and records B */
+    rhi_wait_frame();
+    s_slotsJob = (int)rhi_frame_slot();
+    ThreadSlots job = {threadCellRecord(tgtA, pipe, ring, FS), 0, 0};
+    const RhiCallGuard guard = {NULL, submitGuardBusy, submitGuardWait, NULL};
+    const RhiSlotGuard slots = {NULL, slotsFree, slotsPending, slotsWorker};
+    s_guardWaits = 0;
+    rhi_set_call_guard(&guard);
+    rhi_set_slot_guard(&slots);
+    __atomic_store_n(&s_submitBusy, 1, __ATOMIC_RELEASE);
+    s_submitThread = ico_thread_create(slotsOnThread, &job);
+    if (s_submitThread == NULL) {
+        rhi_set_slot_guard(NULL);
+        rhi_set_call_guard(NULL);
+        __atomic_store_n(&s_submitBusy, 0, __ATOMIC_RELEASE);
+        rhi_test_log("FAIL %s: thread slots: no second thread\n", s_label);
+        failures++;
+        rhi_end_commands(job.cl);
+        rhi_submit(job.cl);
+        rhi_wait_idle();
+        rhi_destroy_pipeline(pipe);
+        rhi_destroy_texture(refA);
+        rhi_destroy_texture(refB);
+        rhi_destroy_texture(tgtA);
+        rhi_destroy_texture(tgtB);
+        rhi_destroy_buffer(ring);
+        return;
+    }
+    rhi_wait_frame(); /* the other slot: a slot call the slot guard lets through */
+    const bool otherSlot = (int)rhi_frame_slot() != s_slotsJob;
+    RhiCommandList clB = rhi_begin_commands();
+    __atomic_store_n(&job.go, 1, __ATOMIC_RELEASE);
+    if (clB.id) {
+        slotsRecordB(clB, tgtB, pipe, ring, FS);
+    }
+    const int waitsRecording = s_guardWaits;
+    /* not a slot call: waits for thread B (the guard's wait joins it) */
+    if (clB.id) {
+        rhi_end_commands(clB);
+    }
+    const int waitsEnd = s_guardWaits;
+    rhi_set_slot_guard(NULL);
+    rhi_set_call_guard(NULL);
+    if (s_submitThread != NULL) {
+        submitGuardWait(NULL); /* the guard did not wait: joined here (a failure below) */
+        s_guardWaits--;
+    }
+    if (clB.id) {
+        rhi_submit(clB);
+    }
+    const bool haveGot = rhi_readback_texture(tgtA, RHI_ASPECT_COLOR, gotA, sizeof(gotA), &qA) &&
+                         rhi_readback_texture(tgtB, RHI_ASPECT_COLOR, gotB, sizeof(gotB), &qB);
+    if (!haveRef || !haveGot || !clB.id || pA != qA || pB != qB) {
+        rhi_test_log("FAIL %s: thread slots readback\n", s_label);
+        failures++;
+    } else if (!otherSlot || waitsRecording != 0 || waitsEnd != 1 ||
+               !__atomic_load_n(&job.done, __ATOMIC_ACQUIRE)) {
+        rhi_test_log("FAIL %s: thread slots: the recycle and the next list's recording waited "
+                     "for the other thread (waits %d while recording, %d at the end, other slot "
+                     "%d)\n",
+                     s_label, waitsRecording, waitsEnd, otherSlot ? 1 : 0);
+        failures++;
+    } else if (!rowsEqual(wantA, gotA, qA, FS, FS) || !rowsEqual(wantB, gotB, qB, FS, FS)) {
+        rhi_test_log("FAIL %s: thread slots: a list ended and submitted on another thread while "
+                     "the next slot's list was recorded here drew other pixels than the two "
+                     "made one after the other (A %s, B %s)\n",
+                     s_label, rowsEqual(wantA, gotA, qA, FS, FS) ? "equal" : "differs",
+                     rowsEqual(wantB, gotB, qB, FS, FS) ? "equal" : "differs");
+        failures++;
+    } else {
+        const int before = failures;
+        for (int y = 0; y < FS && failures - before < 4; y++) {
+            for (int x = 0; x < FS && failures - before < 4; x++) {
+                const int in = x >= 2 && x <= 5;
+                const uint8_t r = in && y >= 2 && y <= 5 ? 255 : 0;
+                const uint8_t g = in && y >= 6 && y <= 9 ? 255 : 0;
+                const uint8_t b = in && y >= 10 && y <= 13 ? 255 : 0;
+                expectRGBA(gotA, qA, x, y, r, g, 0, (r | g) != 0 ? 255 : 0, 210);
+                expectRGBA(gotB, qB, x, y, 0, 0, b, b, 211);
+            }
+        }
+        if (failures == before) {
+            rhi_test_log("%s: thread slots cell passed (slot %d's list ended and submitted on "
+                         "thread B while this thread recycled the other slot and recorded its "
+                         "list without waiting; both read back equal to the serial run; the "
+                         "next list's end waited once)\n",
+                         s_label, s_slotsJob);
+        }
+    }
+    rhi_destroy_pipeline(pipe);
+    rhi_destroy_texture(refA);
+    rhi_destroy_texture(refB);
+    rhi_destroy_texture(tgtA);
+    rhi_destroy_texture(tgtB);
     rhi_destroy_buffer(ring);
 }
 
@@ -940,12 +1490,16 @@ static void dualLeftoverCell(const Ctx *c)
     const uint64_t sets = s1.dynamicSets - s0.dynamicSets;
     const uint64_t off = s1.blendEqOffSets - s0.blendEqOffSets;
     const uint64_t left = s1.dualLeftovers - s0.dualLeftovers;
+    /* the bind cache off (ICO_RHI_BIND_CACHE=0, rhi_vk_nobindcache): every
+     * command of the group sent again (3), the equation no leftover (nothing
+     * is kept to be left over) */
+    const bool cache = rhi_bind_cache_enabled();
     rhi_test_log("%s: dynamic state: an opaque draw after a dual-source one: %llu dynamic "
                  "commands, %llu equations for a draw without blending, %llu replacing a "
-                 "dual-source one (want 2, 1, 1)\n",
+                 "dual-source one (want %d, 1, %d)\n",
                  s_label, (unsigned long long)sets, (unsigned long long)off,
-                 (unsigned long long)left);
-    if (sets != 2 || off != 1 || left != 1) {
+                 (unsigned long long)left, cache ? 2 : 3, cache ? 1 : 0);
+    if (sets != (cache ? 2u : 3u) || off != 1 || left != (cache ? 1u : 0u)) {
         rhi_test_log("FAIL %s: dynamic state: the dual-source equation on a draw without "
                      "blending was not replaced\n",
                      s_label);
@@ -1059,7 +1613,7 @@ static void dynamicCell(const Ctx *c)
         dss[i].depthCompare = cases[i].cmp;
         pipelineDesc(c, c->psColor, CF, DF, &cases[i].b, &dss[i], "dyn static", 0u, &sd[i]);
     }
-    RhiPipelineBatch one = {NULL, NULL, NULL, 0, 1};
+    RhiPipelineBatch one = {NULL, NULL, NULL, 0, 1, NULL, NULL};
     const uint32_t made = rhi_create_pipelines(sd, NCASE, ps, &one);
     rhi_test_log("%s: dynamic state: the static cells' %u of %u pipelines on %u thread%s "
                  "(maxThreads 1)\n",
@@ -1103,7 +1657,7 @@ static void dynamicCell(const Ctx *c)
 
     static uint8_t img[2][DW * DH * 4];
     uint32_t pitch[2] = {0, 0};
-    uint64_t sets[2] = {0, 0}, repeat = 0;
+    uint64_t sets[2] = {0, 0}, repeat = 0, repeatSkips = 0;
     for (int run = 0; run < (dyn ? 2 : 1); run++) {
         RhiStats s0, s1;
         rhi_wait_frame();
@@ -1160,6 +1714,7 @@ static void dynamicCell(const Ctx *c)
             rhi_cmd_draw(cl, 3, NCASE * 18, 1);
             rhi_get_stats(&s1);
             repeat = s1.dynamicSets - s0.dynamicSets;
+            repeatSkips = s1.stateSetsSkipped - s0.stateSetsSkipped;
         }
         rhi_cmd_end_render_pass(cl);
         RhiTextureBarrier b1 = {col, RHI_STATE_RENDER_TARGET, RHI_STATE_COPY_SRC};
@@ -1203,11 +1758,25 @@ static void dynamicCell(const Ctx *c)
                  s_label, diff ? "differ" : "equal texel for texel", diff,
                  (unsigned long long)sets[1], (unsigned)NCASE, (unsigned long long)perDraw,
                  (unsigned long long)repeat);
-    if (diff || sets[0] != 0 || sets[1] != perDraw * NCASE || repeat != 0) {
+    /* the two repeats: nothing sent, every command of their groups counted
+     * in RhiStats.stateSetsSkipped (the bind cache's count); with the bind
+     * cache off (ICO_RHI_BIND_CACHE=0, rhi_vk_nobindcache, rhi_gl_nobindcache)
+     * every command is sent again and none is counted */
+    const bool cache = rhi_bind_cache_enabled();
+    const uint64_t wantRepeat = cache ? 0u : 2u * perDraw;
+    const uint64_t wantSkips = cache ? 2u * perDraw : 0u;
+    if (diff || sets[0] != 0 || sets[1] != perDraw * NCASE || repeat != wantRepeat) {
         rhi_test_log("FAIL %s: dynamic state: %u rows differ, %llu static and %llu dynamic "
-                     "commands (want 0 and %llu), %llu on the repeats (want 0)\n",
+                     "commands (want 0 and %llu), %llu on the repeats (want %llu)\n",
                      s_label, diff, (unsigned long long)sets[0], (unsigned long long)sets[1],
-                     (unsigned long long)(perDraw * NCASE), (unsigned long long)repeat);
+                     (unsigned long long)(perDraw * NCASE), (unsigned long long)repeat,
+                     (unsigned long long)wantRepeat);
+        failures++;
+    }
+    if (repeatSkips != wantSkips) {
+        rhi_test_log("FAIL %s: dynamic state: %llu commands of the repeats counted as skipped "
+                     "(want %llu)\n",
+                     s_label, (unsigned long long)repeatSkips, (unsigned long long)wantSkips);
         failures++;
     }
     dualLeftoverCell(c);
@@ -1219,6 +1788,313 @@ static void dynamicCell(const Ctx *c)
     }
     rhi_destroy_texture(col);
     rhi_destroy_texture(dep);
+    rhi_destroy_buffer(ring);
+}
+
+/* The bind cache (docs/port/RHI.md "The bind cache"): a bind or a state set
+ * equal to what the list holds records nothing, and nothing else is
+ * skipped.  The same list is recorded twice: run 0 gives each bind once,
+ * run 1 gives every one of them REP times in a row (the pipeline, a group
+ * with its offset, the viewport, the scissor, the stencil reference, the
+ * blend constant, the vertex and index buffers).  The two pictures are
+ * equal texel for texel and exact, the recorded binds are the same, and run
+ * 1 counts exactly REP - 1 more skips for each repeated call
+ * (RhiStats.*Skipped).  In both runs: the group bound again with another
+ * dynamic offset draws that offset's value and is not skipped; a second
+ * pass that binds the texture group the first pass bound draws the
+ * texture (Direct3D 11 unbinds the shader resources at a pass's start); a
+ * pipeline destroyed inside the list, a new one made in its pool slot (the
+ * same index, a new id) and bound draws with the new one's write mask, not
+ * the old one's (by id, not by the slot's pointer).  With the bind cache
+ * off (ICO_RHI_BIND_CACHE=0: rhi_vk_nobindcache, rhi_gl_nobindcache) the
+ * same pictures, no skip counted, the repeated pipeline binds recorded
+ * (REP - 1 more at each of the three sites) and the group binds the same
+ * (a repeated set marks the slot dirty once). */
+static void bindCacheCell(const Ctx *c)
+{
+    enum { UW = 8, UH = 2, CW = 4, CH = 1, REP = 3 };
+
+    const RhiLimits *lim = rhi_limits();
+    /* the uniforms' stride: a whole TestCB (32 bytes) in steps of the
+     * device's offset alignment, which may be 16 (llvmpipe: Vulkan and
+     * OpenGL), so the second block does not write over the first one's
+     * uint value */
+    const uint32_t ua = (uint32_t)((sizeof(TestCB) + lim->uniformAlign - 1u) / lim->uniformAlign *
+                                   lim->uniformAlign);
+    const RhiFormat CF = RHI_FMT_RGBA8_UNORM, UF = RHI_FMT_RGBA8_UINT;
+    rhi_wait_frame();
+    RhiTexture ut = rhi_create_texture(&(RhiTextureDesc){
+        UW, UH, 1, UF, RHI_TEX_RENDER_TARGET | RHI_TEX_COPY_SRC, "bind cache uint", 0});
+    RhiTexture ct = rhi_create_texture(&(RhiTextureDesc){
+        CW, CH, 1, CF, RHI_TEX_RENDER_TARGET | RHI_TEX_COPY_SRC, "bind cache colour", 0});
+    RhiTexture src = rhi_create_texture(&(RhiTextureDesc){
+        2, 2, 1, CF, RHI_TEX_RENDER_TARGET | RHI_TEX_SAMPLED, "bind cache texture", 0});
+    const RhiSamplerDesc sd = {RHI_FILTER_NEAREST,
+                               RHI_FILTER_NEAREST,
+                               RHI_FILTER_NEAREST,
+                               RHI_WRAP_CLAMP,
+                               RHI_WRAP_CLAMP,
+                               1.0f,
+                               0.0f,
+                               0.0f,
+                               0.0f};
+    RhiSampler smp = rhi_create_sampler(&sd);
+    /* the ring: the uint target's column quads, the indexed column's four
+     * corners and six indices, the colour target's column quads, the
+     * uniforms at three offsets */
+    const uint64_t offVerts = 0, offIdxVerts = 2048, offIdx = 2304, offCVerts = 2560;
+    const uint64_t offUbo = (4096u + ua - 1u) / ua * ua;
+    RhiBuffer ring = rhi_create_buffer(
+        &(RhiBufferDesc){offUbo + 4u * ua, RHI_BUF_VERTEX | RHI_BUF_INDEX | RHI_BUF_UNIFORM,
+                         RHI_MEM_UPLOAD, "bind cache ring"});
+    uint8_t *map = ring.id ? rhi_map_buffer(ring) : NULL;
+    const RhiBlendState opaque = {.writeMask = 0xF};
+    RhiBlendState maskRG = opaque;
+    maskRG.writeMask = 0x3;
+    RhiPipeline pU = makePipeline(c, c->psUint, UF, RHI_FMT_UNKNOWN, &opaque, NULL, "bc uint");
+    RhiPipeline pT = makePipeline(c, c->psTex, CF, RHI_FMT_UNKNOWN, &opaque, NULL, "bc tex");
+    if (!ut.id || !ct.id || !src.id || !smp.id || !map || !pU.id || !pT.id) {
+        rhi_test_log("FAIL %s: bind cache: resources\n", s_label);
+        failures++;
+        return;
+    }
+    Vtx v[UW * 6];
+    for (int i = 0; i < UW; i++) {
+        quad(&v[i * 6], (float)i, 0.0f, (float)i + 1.0f, (float)UH, (float)UW, (float)UH, 0.0f, 0,
+             0, 0, 0);
+    }
+    memcpy(map + offVerts, v, sizeof(v));
+    const Vtx corners[4] = {v[6 * 6 + 0], v[6 * 6 + 1], v[6 * 6 + 2], v[6 * 6 + 5]};
+    memcpy(map + offIdxVerts, corners, sizeof(corners));
+    static const uint16_t idx[6] = {0, 1, 2, 2, 1, 3};
+    memcpy(map + offIdx, idx, sizeof(idx));
+    Vtx cv[CW * 6];
+    for (int i = 0; i < CW; i++) {
+        quad(&cv[i * 6], (float)i, 0.0f, (float)i + 1.0f, (float)CH, (float)CW, (float)CH, 0.0f, 0,
+             0, 0, 0);
+    }
+    memcpy(map + offCVerts, cv, sizeof(cv));
+    const TestCB cbA = {{0, 0, 0, 0}, {11, 22, 33, 44}}, cbB = {{0, 0, 0, 0}, {55, 66, 77, 88}};
+    memcpy(map + offUbo, &cbA, sizeof(cbA));
+    memcpy(map + offUbo + ua, &cbB, sizeof(cbB));
+    const uint32_t offA = 0, offB = ua;
+
+    /* the texture: a clear to magenta, then read by the shader */
+    {
+        RhiCommandList cl = rhi_begin_commands();
+        RhiTextureBarrier b0 = {src, RHI_STATE_UNDEFINED, RHI_STATE_RENDER_TARGET};
+        rhi_cmd_barrier(cl, &b0, 1);
+        RhiRenderPassDesc rp;
+        memset(&rp, 0, sizeof(rp));
+        rp.color[0].texture = src;
+        rp.color[0].load = RHI_LOAD_CLEAR;
+        rp.color[0].clear[0] = rp.color[0].clear[2] = rp.color[0].clear[3] = 1.0f;
+        rp.colorCount = 1;
+        rp.width = 2;
+        rp.height = 2;
+        rhi_cmd_begin_render_pass(cl, &rp);
+        rhi_cmd_end_render_pass(cl);
+        RhiTextureBarrier b1 = {src, RHI_STATE_RENDER_TARGET, RHI_STATE_SHADER_READ};
+        rhi_cmd_barrier(cl, &b1, 1);
+        rhi_end_commands(cl);
+        rhi_submit(cl);
+    }
+
+    static uint8_t uimg[2][UW * UH * 4], cimg[2][CW * CH * 4];
+    uint32_t upitch[2] = {0, 0}, cpitch[2] = {0, 0};
+    uint64_t skip[2][3], binds[2][2];
+    bool sameSlot = false;
+    for (int run = 0; run < 2; run++) {
+        const int rep = run ? REP : 1;
+        rhi_wait_frame();
+        RhiBinding b0 = {0};
+        b0.slot = 0;
+        b0.type = RHI_BIND_UNIFORM_BUFFER_DYNAMIC;
+        b0.buffer = ring;
+        b0.offset = offUbo;
+        b0.size = sizeof(TestCB);
+        const RhiBindGroup g0 = rhi_create_bind_group(&(RhiBindGroupDesc){c->l0, &b0, 1});
+        RhiBinding tb[2] = {{0}, {0}};
+        tb[0].slot = 1;
+        tb[0].type = RHI_BIND_SAMPLED_TEXTURE;
+        tb[0].texture = src;
+        tb[1].slot = 1;
+        tb[1].type = RHI_BIND_SAMPLER;
+        tb[1].sampler = smp;
+        const RhiBindGroup gT = rhi_create_bind_group(&(RhiBindGroupDesc){c->l2, tb, 2});
+        RhiPipeline pOld = makePipeline(c, c->psUint, UF, RHI_FMT_UNKNOWN, &opaque, NULL, "bc old");
+        if (!g0.id || !gT.id || !pOld.id) {
+            rhi_test_log("FAIL %s: bind cache: run %d groups or pipeline\n", s_label, run);
+            failures++;
+            return;
+        }
+        RhiStats s0, s1;
+        rhi_get_stats(&s0);
+        RhiCommandList cl = rhi_begin_commands();
+        const RhiState was = run ? RHI_STATE_COPY_SRC : RHI_STATE_UNDEFINED;
+        RhiTextureBarrier pre[2] = {{ut, was, RHI_STATE_RENDER_TARGET},
+                                    {ct, was, RHI_STATE_RENDER_TARGET}};
+        rhi_cmd_barrier(cl, pre, 2);
+        RhiRenderPassDesc rp;
+        memset(&rp, 0, sizeof(rp));
+        rp.color[0].texture = ut;
+        rp.color[0].load = RHI_LOAD_CLEAR;
+        rp.color[0].clear[0] = 1.0f;
+        rp.color[0].clear[1] = 2.0f;
+        rp.color[0].clear[2] = 3.0f;
+        rp.color[0].clear[3] = 4.0f;
+        rp.colorCount = 1;
+        rp.width = UW;
+        rp.height = UH;
+        rhi_cmd_begin_render_pass(cl, &rp);
+        const RhiViewport vp = {0.0f, 0.0f, (float)UW, (float)UH, 0.0f, 1.0f};
+        const RhiRect sc = {0, 0, UW, UH};
+        static const float zero[4] = {0.0f, 0.0f, 0.0f, 0.0f};
+        /* column 0: the first binds */
+        for (int k = 0; k < rep; k++) {
+            rhi_cmd_set_vertex_buffer(cl, 0, ring, offVerts);
+            rhi_cmd_set_pipeline(cl, pU);
+            rhi_cmd_set_bind_group_offsets(cl, 0, g0, &offA, 1);
+        }
+        rhi_cmd_draw(cl, 6, 0 * 6, 1);
+        /* column 1: every one of them again, and the state in force */
+        for (int k = 0; k < rep; k++) {
+            rhi_cmd_set_pipeline(cl, pU);
+            rhi_cmd_set_bind_group_offsets(cl, 0, g0, &offA, 1);
+            rhi_cmd_set_viewport(cl, &vp);
+            rhi_cmd_set_scissor(cl, &sc);
+            rhi_cmd_set_stencil_ref(cl, 0);
+            rhi_cmd_set_blend_constant(cl, zero);
+            rhi_cmd_set_vertex_buffer(cl, 0, ring, offVerts);
+        }
+        rhi_cmd_draw(cl, 6, 1 * 6, 1);
+        /* column 2: the same group at another offset (bound), 3: back */
+        rhi_cmd_set_bind_group_offsets(cl, 0, g0, &offB, 1);
+        rhi_cmd_draw(cl, 6, 2 * 6, 1);
+        rhi_cmd_set_bind_group_offsets(cl, 0, g0, &offA, 1);
+        rhi_cmd_draw(cl, 6, 3 * 6, 1);
+        /* column 4: the old pipeline; 5: destroyed, a new one (red and
+           green only) made in its slot and bound */
+        rhi_cmd_set_pipeline(cl, pOld);
+        rhi_cmd_draw(cl, 6, 4 * 6, 1);
+        rhi_destroy_pipeline(pOld);
+        RhiPipeline pNew = makePipeline(c, c->psUint, UF, RHI_FMT_UNKNOWN, &maskRG, NULL, "bc new");
+        sameSlot = pNew.id && (pNew.id & 0xFFFFFu) == (pOld.id & 0xFFFFFu);
+        if (pNew.id == pOld.id) {
+            rhi_test_log("FAIL %s: bind cache: the new pipeline has the destroyed one's id %08x\n",
+                         s_label, pNew.id);
+            failures++;
+        }
+        rhi_cmd_set_pipeline(cl, pNew);
+        rhi_cmd_draw(cl, 6, 5 * 6, 1);
+        /* column 6: indexed, the index buffer given REP times */
+        rhi_cmd_set_pipeline(cl, pU);
+        rhi_cmd_set_vertex_buffer(cl, 0, ring, offIdxVerts);
+        for (int k = 0; k < rep; k++) {
+            rhi_cmd_set_index_buffer(cl, ring, offIdx, false);
+        }
+        rhi_cmd_draw_indexed(cl, 6, 0, 0, 1);
+        rhi_cmd_end_render_pass(cl);
+        /* the texture group in two passes: the second binds it again */
+        memset(&rp, 0, sizeof(rp));
+        rp.color[0].texture = ct;
+        rp.color[0].load = RHI_LOAD_CLEAR;
+        rp.colorCount = 1;
+        rp.width = CW;
+        rp.height = CH;
+        rhi_cmd_begin_render_pass(cl, &rp);
+        rhi_cmd_set_pipeline(cl, pT);
+        rhi_cmd_set_bind_group_offsets(cl, 0, g0, &offA, 1);
+        rhi_cmd_set_bind_group(cl, 2, gT);
+        rhi_cmd_set_vertex_buffer(cl, 0, ring, offCVerts);
+        rhi_cmd_draw(cl, 6, 0 * 6, 1);
+        rhi_cmd_end_render_pass(cl);
+        rp.color[0].load = RHI_LOAD_LOAD;
+        rhi_cmd_begin_render_pass(cl, &rp);
+        for (int k = 0; k < rep; k++) {
+            rhi_cmd_set_pipeline(cl, pT);
+            rhi_cmd_set_bind_group_offsets(cl, 0, g0, &offA, 1);
+            rhi_cmd_set_bind_group(cl, 2, gT);
+            rhi_cmd_set_vertex_buffer(cl, 0, ring, offCVerts);
+        }
+        rhi_cmd_draw(cl, 6, 1 * 6, 1);
+        rhi_cmd_end_render_pass(cl);
+        RhiTextureBarrier post[2] = {{ut, RHI_STATE_RENDER_TARGET, RHI_STATE_COPY_SRC},
+                                     {ct, RHI_STATE_RENDER_TARGET, RHI_STATE_COPY_SRC}};
+        rhi_cmd_barrier(cl, post, 2);
+        rhi_end_commands(cl);
+        rhi_submit(cl);
+        rhi_get_stats(&s1);
+        skip[run][0] = s1.pipelineBindsSkipped - s0.pipelineBindsSkipped;
+        skip[run][1] = s1.bindGroupBindsSkipped - s0.bindGroupBindsSkipped;
+        skip[run][2] = s1.stateSetsSkipped - s0.stateSetsSkipped;
+        binds[run][0] = s1.pipelineBinds - s0.pipelineBinds;
+        binds[run][1] = s1.bindGroupBinds - s0.bindGroupBinds;
+        const bool okU =
+            rhi_readback_texture(ut, RHI_ASPECT_COLOR, uimg[run], sizeof(uimg[run]), &upitch[run]);
+        const bool okC =
+            rhi_readback_texture(ct, RHI_ASPECT_COLOR, cimg[run], sizeof(cimg[run]), &cpitch[run]);
+        rhi_destroy_pipeline(pNew);
+        if (!okU || !okC) {
+            rhi_test_log("FAIL %s: bind cache: readback %d\n", s_label, run);
+            failures++;
+            return;
+        }
+    }
+    const int before = failures;
+    for (int run = 0; run < 2; run++) {
+        for (int y = 0; y < UH; y++) {
+            expectRGBA(uimg[run], upitch[run], 0, y, 11, 22, 33, 44, 400 + run); /* first binds */
+            expectRGBA(uimg[run], upitch[run], 1, y, 11, 22, 33, 44, 400 + run); /* repeats */
+            expectRGBA(uimg[run], upitch[run], 2, y, 55, 66, 77, 88, 400 + run); /* offset B */
+            expectRGBA(uimg[run], upitch[run], 3, y, 11, 22, 33, 44, 400 + run); /* back to A */
+            expectRGBA(uimg[run], upitch[run], 4, y, 11, 22, 33, 44, 400 + run); /* the old */
+            expectRGBA(uimg[run], upitch[run], 5, y, 11, 22, 3, 4, 400 + run);   /* the new: RG */
+            expectRGBA(uimg[run], upitch[run], 6, y, 11, 22, 33, 44, 400 + run); /* indexed */
+            expectRGBA(uimg[run], upitch[run], 7, y, 1, 2, 3, 4, 400 + run);     /* the clear */
+        }
+        expectRGBA(cimg[run], cpitch[run], 0, 0, 255, 0, 255, 255, 410 + run); /* first pass */
+        expectRGBA(cimg[run], cpitch[run], 1, 0, 255, 0, 255, 255, 410 + run); /* second */
+        expectRGBA(cimg[run], cpitch[run], 2, 0, 0, 0, 0, 0, 410 + run);
+    }
+    bool same = upitch[0] == upitch[1] && cpitch[0] == cpitch[1];
+    for (int y = 0; same && y < UH; y++) {
+        same =
+            memcmp(uimg[0] + (size_t)y * upitch[0], uimg[1] + (size_t)y * upitch[1], UW * 4u) == 0;
+    }
+    same = same && memcmp(cimg[0], cimg[1], CW * 4u) == 0;
+    const bool cache = rhi_bind_cache_enabled();
+    const uint64_t want[3] = {cache ? 3u * (REP - 1) : 0u, cache ? 4u * (REP - 1) : 0u,
+                              cache ? 8u * (REP - 1) : 0u};
+    const uint64_t wantPipes = binds[0][0] + (cache ? 0u : 3u * (REP - 1));
+    const uint64_t got[3] = {skip[1][0] - skip[0][0], skip[1][1] - skip[0][1],
+                             skip[1][2] - skip[0][2]};
+    rhi_test_log("%s: bind cache: repeats skipped %llu pipeline, %llu bind group and %llu state "
+                 "binds more with each given %d times (want %llu, %llu, %llu); recorded binds "
+                 "%llu and %llu, then %llu and %llu (want %llu and the same); the pictures %s; "
+                 "the new pipeline %s; the cache %s\n",
+                 s_label, (unsigned long long)got[0], (unsigned long long)got[1],
+                 (unsigned long long)got[2], (int)REP, (unsigned long long)want[0],
+                 (unsigned long long)want[1], (unsigned long long)want[2],
+                 (unsigned long long)binds[0][0], (unsigned long long)binds[0][1],
+                 (unsigned long long)binds[1][0], (unsigned long long)binds[1][1],
+                 (unsigned long long)wantPipes, same ? "equal texel for texel" : "differ",
+                 sameSlot ? "in the destroyed one's pool slot" : "in another pool slot",
+                 cache ? "on" : "off (ICO_RHI_BIND_CACHE=0)");
+    if (!same || got[0] != want[0] || got[1] != want[1] || got[2] != want[2] ||
+        binds[1][0] != wantPipes || binds[0][1] != binds[1][1]) {
+        rhi_test_log("FAIL %s: bind cache: the repeats changed what was recorded or drawn\n",
+                     s_label);
+        failures++;
+    } else if (failures == before) {
+        rhi_test_log("%s: bind cache cell passed\n", s_label);
+    }
+    rhi_destroy_pipeline(pU);
+    rhi_destroy_pipeline(pT);
+    rhi_destroy_sampler(smp);
+    rhi_destroy_texture(ut);
+    rhi_destroy_texture(ct);
+    rhi_destroy_texture(src);
     rhi_destroy_buffer(ring);
 }
 
@@ -1391,7 +2267,7 @@ int rhi_test_run_cells(const RhiTestConfig *cfg)
     RhiPipeline batchPipe[8];
     float batchMs[8];
     BatchWait bw = {0, 0, 0};
-    RhiPipelineBatch batch = {batchWait, &bw, batchMs, 0, 0};
+    RhiPipelineBatch batch = {batchWait, &bw, batchMs, 0, 0, NULL, NULL};
     pipelineDesc(&c, c.psColor, CF, DF, &noColor, &dsDecr, "stencilDecr", 0u, &batchDesc[0]);
     pipelineDesc(&c, c.psColor, CF, DF, &noColor, &dsReplace, "stencilRep", 0u, &batchDesc[1]);
     pipelineDesc(&c, c.psColor, CF, DF, &noColor, &dsIncr, "stencilIncr", 0u, &batchDesc[2]);
@@ -1423,6 +2299,73 @@ int rhi_test_run_cells(const RhiTestConfig *cfg)
             rhi_test_log("FAIL rhi_create_pipelines: pipeline %u took %.3f ms\n", i,
                          (double)batchMs[i]);
             failures++;
+        }
+    }
+    /* the same eight compiled while the caller goes on
+     * (rhi_create_pipelines_begin, the renderer's background set): on
+     * Vulkan the seven made and the failed one failed alone, on at most the
+     * two threads asked for, ids of their own, destroyed again; the other
+     * backends offer none (NULL, and an end of NULL is false) */
+    {
+        RhiPipeline bgPipe[8];
+        float bgMs[8];
+        uint32_t bgThreads = 0, bgMade = 0, polls = 0;
+        RhiGpuProgress gp0, gp1;
+        (void)rhi_gpu_progress(&gp0);
+        RhiPipelineJobs *jobs = rhi_create_pipelines_begin(batchDesc, 8, 2, true);
+        if (rhi_backend() != RHI_BACKEND_VULKAN) {
+            if (jobs != NULL || rhi_create_pipelines_end(NULL, true, bgPipe, bgMs, &bgThreads)) {
+                rhi_test_log("FAIL rhi_create_pipelines_begin: offered on %s\n", s_label);
+                failures++;
+            }
+        } else if (jobs == NULL) {
+            rhi_test_log("FAIL rhi_create_pipelines_begin: not offered on Vulkan\n");
+            failures++;
+        } else {
+            /* not waited: false while a compile goes on, then the end */
+            while (!rhi_create_pipelines_end(jobs, false, bgPipe, bgMs, &bgThreads) &&
+                   polls < 1000000u) {
+                polls++;
+            }
+            if (polls >= 1000000u) {
+                (void)rhi_create_pipelines_end(jobs, true, bgPipe, bgMs, &bgThreads);
+            }
+            for (uint32_t i = 0; i < 8; i++) {
+                bgMade += bgPipe[i].id != 0;
+                for (uint32_t k = 0; k < 8; k++) {
+                    if (bgPipe[i].id && batchPipe[k].id == bgPipe[i].id) {
+                        rhi_test_log("FAIL rhi_create_pipelines_end: pipeline %u has batch "
+                                     "pipeline %u's id %u\n",
+                                     i, k, bgPipe[i].id);
+                        failures++;
+                    }
+                }
+            }
+            rhi_test_log("%s: rhi_create_pipelines_begin/end: %u of 8 on %u threads, %u polls\n",
+                         s_label, bgMade, bgThreads, polls);
+            /* the watchdog's heartbeat of the background compiles (rhi.h
+               RhiGpuProgress): the eight returned (the failed one too),
+               none left once they have */
+            (void)rhi_gpu_progress(&gp1);
+            if (gp1.bgPipesDone != gp0.bgPipesDone + 8u || gp1.bgPipesLeft != 0 ||
+                gp0.bgPipesLeft != 0) {
+                rhi_test_log("FAIL rhi_gpu_progress: the background compiles %u -> %u returned, "
+                             "%u -> %u left (want 8 more returned, none left)\n",
+                             gp0.bgPipesDone, gp1.bgPipesDone, gp0.bgPipesLeft, gp1.bgPipesLeft);
+                failures++;
+            }
+            if (bgMade != 7 || bgPipe[4].id != 0 || bgThreads < 1 || bgThreads > 2 ||
+                bgMs[4] != 0.0f) {
+                rhi_test_log("FAIL rhi_create_pipelines_end: %u made, the failed one %u, %u "
+                             "threads\n",
+                             bgMade, bgPipe[4].id, bgThreads);
+                failures++;
+            }
+            for (uint32_t i = 0; i < 8; i++) {
+                if (bgPipe[i].id) {
+                    rhi_destroy_pipeline(bgPipe[i]);
+                }
+            }
         }
     }
     RhiPipeline pDecr = batchPipe[0];
@@ -1802,6 +2745,15 @@ int rhi_test_run_cells(const RhiTestConfig *cfg)
         fillRuleCell(&c);
     }
     if (!failures) {
+        threadSubmitCell(&c);
+    }
+    if (!failures) {
+        threadRecordCell(&c);
+    }
+    if (!failures) {
+        threadSlotsCell(&c);
+    }
+    if (!failures) {
         msaaCell(&c);
     }
     if (!failures) {
@@ -1810,6 +2762,9 @@ int rhi_test_run_cells(const RhiTestConfig *cfg)
     }
     if (!failures) {
         dynamicCell(&c);
+    }
+    if (!failures) {
+        bindCacheCell(&c);
     }
 
     /* destroys are deferred; the frames in flight retire them */

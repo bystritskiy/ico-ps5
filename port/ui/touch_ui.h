@@ -52,6 +52,7 @@ extern "C" {
 
 struct RdOverlayCtx;
 struct IcoTouchOverlay;
+struct IcoTouchLayout;
 
 /* Where the drawing reads the overlay from: fn fills *out and returns 1
    when there is something to draw.  NULL (the default): nothing drawn. */
@@ -60,12 +61,27 @@ void ui_touch_set_source(int (*fn)(struct IcoTouchOverlay *out));
 /* The overlay on the output (ui_host.c's overlay callback). */
 void ui_touch_draw_overlay(const struct RdOverlayCtx *ctx);
 
-/* The stretch of the screen's top edge the default touch layout leaves
-   empty (right of the D-pad's Up key, left of Select; the Frame rate
-   counter's place while the touch controls are on): its left and right
-   ends and its top, in output pixels.  Returns 0 (the outputs untouched)
+/* Where the Frame rate counter goes while the touch controls show, from the
+   player's actual layout (touch_gap.h ico_touch_fps_place): margin, the
+   corner it has with no touch controls; bandH its text's height; natW its
+   width at full size, minW at the least it is drawn; all in output pixels.  Fills the counter's
+   left end, the right limit it is shrunk to fit before (0: none) and its
+   top, in output pixels.  Returns 0 (the outputs untouched) when there is
+   no touch layout. */
+int ui_touch_top_gap(const struct RdOverlayCtx *ctx, float margin, float bandH, float natW,
+                     float minW, float *x0, float *x1, float *y0);
+
+/* Where the layout's safe area comes from whatever the controls show: fn
+   fills *out with the touch layout and returns 1 (input_sdl.h
+   ico_input_sdl_touch_safe_layout).  NULL (the default): none. */
+void ui_touch_set_layout_source(int (*fn)(struct IcoTouchLayout *out));
+
+/* The Frame rate counter's corner with no touch control in the way, in
+   every touch mode (Hidden and Off, a gamepad's fade to nothing, opacity
+   0 included): margin inside the layout's safe area (touch_gap.h
+   ico_touch_fps_corner), output pixels.  Returns 0 (the outputs untouched)
    when there is no touch layout. */
-int ui_touch_top_gap(const struct RdOverlayCtx *ctx, float *x0, float *x1, float *y0);
+int ui_touch_safe_corner(const struct RdOverlayCtx *ctx, float margin, float *x, float *y);
 
 #ifdef __cplusplus
 }

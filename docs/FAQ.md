@@ -127,8 +127,9 @@ every frame you see instead of once for each of the game's frames.
 
 Open **Options > Display** and turn **Frame rate counter** On. A small
 number such as "60 fps" appears in the top-left corner of the screen,
-updated once a second. With the touch controls showing, it stands on the top
-edge between the D-pad and Select. Turn it Off the same way.
+updated once a second. With the touch controls showing, it moves along the top
+edge to the first place no visible control covers (between the D-pad and
+Select unless you moved them). Turn it Off the same way.
 [What the row does](OPTIONS.md#display).
 
 ## The counter shows 30 at Frame rate 60
@@ -139,7 +140,9 @@ screen refresh in time. When a picture takes longer than one refresh of the
 screen, the game shows only its own pictures (30 a second) until the card
 has the time again, so the game keeps its normal speed. It goes back to 60
 within a couple of seconds once the card keeps up. A card that is always
-too slow stays at 30.
+too slow stays at 30, and tries 60 again from time to time (every few
+seconds at first, then at most every 16 seconds); each try can show as one
+small stutter.
 
 What to lower, in this order (Options):
 
@@ -220,6 +223,27 @@ In a folder the game makes in your user folder, not beside the program.
 If you would rather keep everything beside the program, for example on a
 USB stick, use [portable mode](PORTABLE_MODE.md#keep-everything-in-one-folder).
 
+## The sound cuts out or the game pauses briefly during loads
+
+Look at the start of `ico-pc.log`: if the lines for the game data or the user
+folder say "on a network drive" or "on a removable drive", that is the cause,
+since each load waits for the drive. Run the game from a drive inside the
+computer. In portable mode the saves sit beside the game, so they move with
+it. [More](TROUBLESHOOTING.md#the-sound-cuts-out-or-the-game-pauses-briefly-during-loads).
+
+## Can I save anywhere?
+
+Yes, with a save state. Press Start, choose **Save states** (under Photo
+mode), pick one of the four slots and choose **Save**. On a computer, F5
+saves to slot 1 from the pause menu. The state keeps the game exactly as it
+is, and you can load it from the pause menu or from the title screen
+(choose **Continue**, then press **Square** for **Save states**; F9 loads
+slot 1). It does not replace
+the game's own save points: those still write to the memory card. A state
+only loads in the version of the game that saved it, so keep a save point
+too before you update.
+[The details](OPTIONS.md#save-states).
+
 ## Can I bring my PS2 save over?
 
 Yes, if you have it as a memory card file, the kind PS2 emulators and
@@ -240,8 +264,10 @@ download for each and how well it is tested.
 
 ## Does it work on my phone?
 
-On most 64-bit Android phones and tablets from 2022 or newer, with
-Android 10 or later. [The Android guide](ANDROID.md) has the details.
+On most 64-bit Android phones and tablets from 2017 or newer, with
+Android 8 or later and graphics that support Vulkan 1.0 or later. Older
+phones can be slow, and on one with Vulkan 1.0 graphics the first start can
+take several minutes. [The Android guide](ANDROID.md) has the details.
 
 On an iPhone with iOS 15 or newer, it runs inside LiveContainer.
 [How to install it](../README.md#iphone).
@@ -251,11 +277,69 @@ On an iPhone with iOS 15 or newer, it runs inside LiveContainer.
 Yes, on Windows. On Linux, vkBasalt does a similar job.
 [How to set it up](RESHADE.md).
 
+## Moving to a new version
+
+Your saves, settings and the game's files (copied from your disc image at the
+first start) live in one place, and a new download does not know about the
+old one's place unless it is the same.
+
+- **The plain download** (`-win.zip`, `-linux.tar.gz`, the AppImage) keeps
+  everything in your user folder, not beside the program. A newer version
+  finds it by itself: just extract the new one anywhere and start it.
+  [Where that is](PORTABLE_MODE.md#where-your-saves-are).
+- **The portable download** (`-win-portable.zip` and the like) keeps
+  everything in a folder named `userdata` beside the program (on Windows,
+  inside the `x64` folder). A newer version in a new folder starts empty and
+  asks for your disc image again. To bring everything over, copy the old
+  `userdata` folder into the new program's folder (next to
+  `ico_pc_x64.exe` on Windows), or extract the new version over the old
+  folder.
+- If you switched from one kind of download to the other, copy the `userdata`
+  folder to your user folder, or the user folder's files into a `userdata`
+  folder beside the program, whichever way you are going.
+
+Your saves and your save states are in that folder (`memcard` and
+`states`), so they come with it. If the game asks for your disc image again,
+see [the game asks for the disc image
+again](TROUBLESHOOTING.md#the-game-asks-for-the-disc-image-again).
+
+## Moving to another computer or phone
+
+On the title screen, choose Options > Extras > **Back up your data** and save
+the file somewhere you can reach from the other device (a USB stick, a cloud
+folder, or on a phone the Downloads folder). It holds your memory card, your
+save states, your settings and your achievements. On the other device, set the
+game up with your disc image as usual, then choose Options > Extras >
+**Restore from a backup** and pick that file. The game restarts (on a phone it
+closes: start it again) with your data in place. This also works between a
+computer and a phone, and on Android 13 and later, where the game's own folder
+cannot be opened from a file manager.
+[The details](OPTIONS.md#extras).
+
+Your save states come with the backup, but a state only loads in a version of
+the game that can resume it, the same as on the device that made it.
+
+## Going back to the version you had before
+
+If a new version does not suit you, you can go back to the older one. Before
+you update, make a backup (Options > Extras > **Back up your data**). After
+you go back, restore it (**Restore from a backup**): your memory card,
+settings and achievements are as they were when you made the backup. A
+backup made by a newer version also restores in an older one: the memory card
+and the settings work, but its save states only load in a version that can
+resume them, so a state the newer version made may be greyed in the older one.
+Save at one of the game's own save points before you switch, so your progress
+is on the memory card.
+
 ## Do I need the disc image every time?
 
 No. The first start copies the game's files out of the disc image. After
 that the game never opens the image again, so you can move it or delete
 it.
+
+If it asks for the image again after you moved to a new version, the new
+folder cannot see the old one's game data:
+[moving to a new version](#moving-to-a-new-version).
 
 ## Which disc image works?
 

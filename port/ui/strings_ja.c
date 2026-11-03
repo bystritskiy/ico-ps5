@@ -39,6 +39,12 @@ const char *const ui_strings_ja[UI_STR_COUNT] = {
     [UI_STR_VAL_PIT_LONGER] = "やや長い",
     [UI_STR_VAL_PIT_DOUBLE] = "2倍",
     [UI_STR_VAL_PIT_TRIPLE] = "3倍",
+    [UI_STR_OPT_SHADOW_SPEED] = "影の速さ",
+    [UI_STR_OPT_SHADOW_SPEED_NOTE] =
+        "影が歩く、走る、飛ぶ速さです。攻撃してくる頻度は変わりません。",
+    [UI_STR_VAL_SPEED_SLOWER] = "遅め",
+    [UI_STR_VAL_SPEED_FASTER] = "速め",
+    [UI_STR_VAL_SPEED_FASTEST] = "最速",
     [UI_STR_LANG_EN] = "English",
     [UI_STR_LANG_FR] = "Français",
     [UI_STR_LANG_DE] = "Deutsch",
@@ -433,7 +439,7 @@ const char *const ui_strings_ja[UI_STR_COUNT] = {
     [UI_STR_OPT_EFFECT_MOTION_BLUR] = "モーションブラー",
     [UI_STR_OPT_EFFECT_FOG] = "フォグ",
     [UI_STR_EFFECTS_NOTE] =
-        "ゲーム本来の画面効果です。すべてオンでPS2の画面になります。プリセットではこれらは変わりません。",
+        "ゲーム本来の画面効果です。すべてオンでPS2の画面になります。プリセットでは、フレーム間の光のにじみ以外は変わりません。",
     [UI_STR_STATS_PLAY_TIME] = "プレイ時間",
     [UI_STR_STATS_DEATHS] = "ゲームオーバー回数",
     [UI_STR_STATS_CAPTURES] = "ヨルダがさらわれた回数",
@@ -525,6 +531,11 @@ const char *const ui_strings_ja[UI_STR_COUNT] = {
     [UI_STR_VAL_GRAPHICS_AUTOMATIC] = "自動",
     [UI_STR_GRAPHICS_API_NOTE] =
         "「適用」ですぐに切り替わります。適用しない場合は次回の起動から使われます。",
+    [UI_STR_OPT_GRAPHICS_ADAPTER] = "グラフィックカード",
+    [UI_STR_GRAPHICS_ADAPTER_NOTE] =
+        "ゲームを描画するグラフィックカードです。「適用」ですぐに切り替わります。適用しない場合は次回の起動から使われます。",
+    [UI_STR_GRAPHICS_ADAPTER_FAILED] =
+        "グラフィックカード %s を開始できませんでした。%s を使い続けます",
     [UI_STR_GRAPHICS_APPLY] = "適用",
     [UI_STR_GRAPHICS_APPLY_NOTE] =
         "ゲームを終了せずにすぐ切り替えます。しばらく止まることがあります。",
@@ -569,12 +580,18 @@ const char *const ui_strings_ja[UI_STR_COUNT] = {
     [UI_STR_OPT_DOOR_FIX] = "東の反射板の扉の修正",
     [UI_STR_OPT_DOOR_FIX_NOTE] =
         "手をつないだイコとヨルダが、出入り口からすぐに引き返さなくなります。",
+    [UI_STR_OPT_YORDA_TRIPS] = "ヨルダがつまずく",
+    [UI_STR_OPT_YORDA_TRIPS_NOTE] =
+        "オフ：オリジナルどおり。オン：正門が開いた後のように、手をつないで3秒走り続けると転びます。",
     [UI_STR_OPT_NATURAL_CHAINS] = "自然な鎖",
     [UI_STR_OPT_NATURAL_CHAINS_NOTE] =
         "イコのところへ降りてくる鎖の輪が、最後まで正しい大きさのままになります。",
     [UI_STR_OPT_SKIP_OPENING] = "オープニングをスキップ",
     [UI_STR_OPT_SKIP_OPENING_NOTE] =
         "ソニーのロゴとオープニングの場面を出さずに、タイトル画面から始まります。次回の起動から使われます。",
+    [UI_STR_OPT_SECOND_CARD] = "2つ目のメモリーカード",
+    [UI_STR_OPT_SECOND_CARD_NOTE] =
+        "オフ：オリジナルどおりメモリーカード1つ。オン：2つ目のカードにさらに10個セーブでき、セーブとロードで両方を選べます。",
     [UI_STR_OPT_AA] = "アンチエイリアス",
     [UI_STR_OPT_AA_NOTE] =
         "輪郭をなめらかにします。スーパーサンプリングは画素が4倍(2x)、16倍(4x)。30に下がるときは下げます。",
@@ -614,6 +631,53 @@ const char *const ui_strings_ja[UI_STR_COUNT] = {
     [UI_STR_EXPORT_TEXTURES_STOPPED_BODY] = "%d個の画像を保存して中止しました",
     [UI_STR_EXPORT_TEXTURES_FAILED] = "テクスチャを書き出せませんでした",
     [UI_STR_EXPORT_TEXTURES_FAILED_BODY] = "フォルダー%sに\n書き込めませんでした",
+    [UI_STR_EXTRAS_BACKUP] = "データをバックアップ",
+    [UI_STR_EXTRAS_RESTORE] = "バックアップから復元",
+    [UI_STR_BACKUP_NOTE] =
+        "メモリーカード、セーブステート、設定、実績を一つの.zipファイルに保存します。保管や別の機器への移動に使えます。",
+    [UI_STR_RESTORE_NOTE] =
+        "バックアップの.zipからメモリーカード、セーブステート、設定、実績を戻し、今のものと置き換えます。その後ゲームが再起動します。",
+    [UI_STR_BACKUP_CHOOSING] = "バックアップの保存先を選んでください。",
+    [UI_STR_BACKUP_PROGRESS] = "バックアップ中：%d / %dファイル",
+    [UI_STR_RESTORE_AGAIN] = "もう一度押して選ぶ",
+    [UI_STR_RESTORE_CONFIRM_TITLE] = "バックアップから復元しますか？",
+    [UI_STR_RESTORE_CONFIRM_BODY] =
+        "ここにあるメモリーカード、セーブステート、設定、実績がバックアップのものに置き換わり、ゲームが再起動します。\nもう一度押すとバックアップを選べます。",
+    [UI_STR_RESTORE_CHOOSING] = "復元するバックアップを選んでください。",
+    [UI_STR_RESTORE_READING] = "バックアップを読み込み中…",
+    [UI_STR_RESTORE_PROGRESS] = "復元中：%d / %dファイル",
+    [UI_STR_RESTORE_THIS] = "このバックアップを復元",
+    [UI_STR_RESTORE_ASK_NOTE] = "バージョン%sで作られました。もう一度押すと復元します。",
+    [UI_STR_RESTORE_ASK_TITLE] = "このバックアップを復元しますか？",
+    [UI_STR_RESTORE_VERSION] = "バージョン：%s",
+    [UI_STR_RESTORE_SAVED] = "保存日時：%s",
+    [UI_STR_RESTORE_DISCS] = "ディスク：%s",
+    [UI_STR_RESTORE_OTHER_DISC] = "別のディスクで遊んでいたときに作られました",
+    [UI_STR_RESTORE_PRESS] = "もう一度押すと復元します",
+    [UI_STR_BACKUP_DONE] = "データをバックアップしました",
+    [UI_STR_BACKUP_DONE_BODY] = "%d個のファイルを\n%sに保存しました",
+    [UI_STR_BACKUP_FAILED] = "データをバックアップできませんでした",
+    [UI_STR_RESTORE_DONE] = "データを復元しています",
+    [UI_STR_RESTORE_DONE_RESTART] = "ゲームが再起動し、バックアップを元に戻します。",
+    [UI_STR_RESTORE_DONE_CLOSE] =
+        "ゲームを終了します。もう一度起動すると、起動時にバックアップを元に戻します。",
+    [UI_STR_RESTORE_FAILED] = "バックアップを復元できませんでした",
+    [UI_STR_BACKUP_WHY_BUSY] =
+        "今はできません：ゲームが保存中です。少し待ってからもう一度お試しください。",
+    [UI_STR_BACKUP_WHY_NOTHING] = "まだバックアップするものがありません。",
+    [UI_STR_BACKUP_WHY_WRITE] =
+        "データを書き込めませんでした。空き容量を確認して、もう一度お試しください。",
+    [UI_STR_BACKUP_WHY_READ] = "ファイルを読み込めませんでした。",
+    [UI_STR_BACKUP_WHY_NOT_BACKUP] =
+        "このファイルはこのゲームで作られたバックアップではありません。",
+    [UI_STR_BACKUP_WHY_NEWER] =
+        "このバックアップは新しいバージョンで作られました。ゲームを更新してから復元してください。",
+    [UI_STR_BACKUP_WHY_DAMAGED] = "このバックアップは壊れています。",
+    [UI_STR_BACKUP_WHY_UNSAFE] =
+        "このバックアップにはゲームのフォルダー以外のファイルが含まれているため、使えません。",
+    [UI_STR_BACKUP_WHY_TOO_BIG] = "このバックアップはゲームが受け付ける大きさを超えています。",
+    [UI_STR_BACKUP_WHY_NO_DIALOG] = "ファイルを選ぶ画面を開けませんでした。",
+    [UI_STR_BACKUP_WHY_NO_SPACE] = "機器の空き容量が足りません。",
     [UI_STR_LANG_KO] = "한국어",
     [UI_STR_LANG_ZH] = "繁體中文",
     /* Controls > Touch screen and the touch layout editor */
@@ -694,4 +758,46 @@ const char *const ui_strings_ja[UI_STR_COUNT] = {
         "このバージョンにはヒントがないため、変わりません。実績はそのままです。",
     [UI_STR_OPT_VAR_NO_LOOK_NOTE_2001] =
         "このバージョンではもともとムービー中に見回せないため、変わりません。実績はそのままです。",
+    [UI_STR_GPU_HANG_TURNIP] =
+        "この端末のQualcommドライバーでは、Turnipドライバーを追加してください (オプション > グラフィックドライバー > ドライバーを追加)。次回の起動から使われます。",
+    [UI_STR_STATES] = "セーブステート",
+    [UI_STR_STATES_SLOT] = "スロット%d",
+    [UI_STR_STATES_EMPTY] = "空",
+    [UI_STR_STATES_ACT_SAVE] = "保存",
+    [UI_STR_STATES_ACT_LOAD] = "読み込み",
+    [UI_STR_STATES_ACT_DELETE] = "削除",
+    [UI_STR_STATES_CONFIRM] = "もう一度押すと実行：%s",
+    [UI_STR_STATES_SAVED] = "スロット%dに保存しました",
+    [UI_STR_STATES_LOADED] = "スロット%dから読み込みました",
+    [UI_STR_STATES_DELETED] = "スロット%dを空にしました",
+    [UI_STR_STATES_NOTE] =
+        "ステートはこのディスクのものです。後のバージョンでも読み込める場合があります。左右でアクションを選びます。",
+    [UI_STR_STATES_PAUSE_FIRST] = "ステートを保存するにはゲームを一時停止してください",
+    [UI_STR_STATES_REFUSED_BUILD] = "別のバージョンのゲームで保存されています",
+    [UI_STR_STATES_REFUSED_DISC] = "別のディスクで保存されています",
+    [UI_STR_STATES_REFUSED_SETTINGS] = "ゲームの設定が違います：%s",
+    [UI_STR_STATES_REFUSED_BUSY] = "今はできません：ゲームを読み込み中か保存中です",
+    [UI_STR_STATES_REFUSED_CHECK] = "ステートを復元できませんでした。ゲームは続行します",
+    [UI_STR_STATES_OFF] = "このビルドではセーブステートは無効です",
+    [UI_STR_STATES_TITLE_HINT] = "保存は一時停止メニューから行います",
+    [UI_STR_STATES_SAVE_FAILED] = "ステートを保存できませんでした",
+    [UI_STR_STATES_XB_OLD] =
+        "このセーブステートはバージョン%sで作られました。セーブステートを新しいバージョンに引き継げるようになる前のものです。メモリーカードのセーブデータはそのまま使えます。",
+    [UI_STR_STATES_XB_CODE] =
+        "このセーブステートはバージョン%sで作られました。バージョン%sでは保存した場面のゲームが変更されたため、再開できません。メモリーカードのセーブデータはそのまま使えます。",
+    [UI_STR_STATES_XB_DATA] =
+        "このセーブステートはバージョン%sで作られました。バージョン%sではゲームが進行状況をメモリーに保持する方法が変更されたため、再開できません。メモリーカードのセーブデータはそのまま使えます。",
+    [UI_STR_STATES_XB_PINNED] =
+        "このセーブステートはバージョン%sで作られ、そのバージョンでしか再開できません。メモリーカードのセーブデータはそのまま使えます。",
+    [UI_STR_OPT_EFFECT_GLOW_SMOOTH] = "フレーム間の光のにじみ",
+    [UI_STR_EFFECT_GLOW_SMOOTH_NOTE] =
+        "「オリジナル」はゲーム本来のフレームの光のにじみをその間も使います。「なめらか」は表示するフレームごとに作り直し、負荷が増えます。",
+    [UI_STR_EFFECT_GLOW_SMOOTH_LOCKED] =
+        "フレームレートが「オリジナル」より高く、光のにじみがオンのときだけ働きます。",
+    [UI_STR_OPT_EFFECT_MOTION_BLUR_STRENGTH] = "モーションブラーの強さ",
+    [UI_STR_EFFECT_MOTION_BLUR_STRENGTH_NOTE] =
+        "小さくするとブラーが速く消えます。100はPS2のままです。",
+    [UI_STR_LANG_RU_BOBTTZ] = "Русский (bob-ttz)",
+    [UI_STR_LANG_RU_COBRA838] = "Русский (cobra838)",
+    [UI_STR_LANG_PT_BR] = "Português (Brasil) (ichagas7)",
 };

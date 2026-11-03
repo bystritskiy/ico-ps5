@@ -9,9 +9,39 @@
  * of a slot's last submit before it reuses the slot.  The first submit
  * after a swapchain acquire waits on the acquire semaphore; the present
  * waits on the image's renderDone semaphore, which the presenting list's
- * submit or an empty batch in rhi_present signals (rhi_submit). */
+ * submit or an empty batch in rhi_present signals (rhi_submit).
+ *
+ * Frame slots (docs/port/RHI.md "Frame slots and the submit thread"): a
+ * command list belongs to the slot whose pool it came from
+ * (VkrCmdList.slot, and its handle's tag names the slot), and its end and
+ * submit take that slot's fence value, acquire and query pools, never the
+ * current frame index.  So with RhiLimits.slotOverlap the submit thread
+ * (port/render/rd_submit_thread.h) ends and submits picture N's list of
+ * slot A and presents its image while the render thread recycles slot B
+ * (rhi_wait_frame: B's own fence), acquires B's image and records B's
+ * list.  What each side writes then:
+ *   recording thread  frameIndex, slot B (its pool, lists, descriptor
+ *                     pools, sets, garbage, queries, tag, acquire),
+ *                     hzEpoch, stats, tsResult and occResult (the recycled
+ *                     slot's results), the texture and buffer tracking
+ *                     state of what its list touches;
+ *   submit thread     slot A's lists (their end), A's waitValue and
+ *                     acquire record, the submission counter
+ *                     (timelineValue, stored with __atomic), the submit
+ *                     history, late (atomic adds), and under the
+ *                     swapchain's lock the present's state;
+ *   both, read only   the object pools' live entries, the swapchain's
+ *                     images and semaphores (made again only with the
+ *                     submit thread idle: vk_swapchain.c defers a rebuild
+ *                     its present asks for to the next acquire).
+ * The queue (vkQueueSubmit, vkQueuePresentKHR, vkDeviceWaitIdle) is the
+ * submit thread's while it works: every call of the recording thread that
+ * submits or waits idle is one the call guard holds until the submit
+ * thread is idle (rhi_backend.c), and rhi_cmd_begin_occlusion's first use,
+ * which submits the pools' reset, asks the guard first. */
 #include "vk_internal.h"
 #include "rhi_vk.h"
+#include "../rhi_bind_cache.h"
 #include <assert.h>
 #include <stdlib.h>
 #include <string.h>
@@ -26,6 +56,12 @@ bool vkr_frames_init(void)
     g_vkr.globalBarriers = gb && gb[0] && gb[0] != '0';
     if (g_vkr.globalBarriers) {
         VKR_LOG("ICO_VK_GLOBAL_BARRIERS: a global barrier before every render pass and copy");
+    }
+    const char *da = getenv("ICO_VK_DEPTH_ALWAYS");
+    g_vkr.depthAlways = da && da[0] && da[0] != '0';
+    if (g_vkr.depthAlways) {
+        VKR_LOG("ICO_VK_DEPTH_ALWAYS: every depth test passes (the occlusion measurement's run "
+                "without the depth; not the game's picture)");
     }
     for (uint32_t i = 0; i < RHI_FRAMES_IN_FLIGHT; i++) {
         VkrFrame *f = &g_vkr.frames[i];
@@ -65,6 +101,7 @@ bool vkr_frames_init(void)
                 g_vkr.timestamps = false;
             }
         }
+        f->gen = i & VKR_GEN_MASK; /* the frame index the slot would hold first */
     }
     g_vkr.frameIndex = 0;
     return true;
@@ -90,8 +127,15 @@ void vkr_frames_shutdown(void)
         if (f->queryPool) {
             vkDestroyQueryPool(g_vkr.device, f->queryPool, NULL);
         }
+        if (f->occPool) {
+            vkDestroyQueryPool(g_vkr.device, f->occPool, NULL);
+        }
         memset(f, 0, sizeof(*f));
     }
+    free(g_vkr.occResult);
+    g_vkr.occResult = NULL;
+    g_vkr.occUsed = false;
+    g_vkr.occCount = 0;
 }
 
 /* rhi_gpu_progress (rhi.h): the values a watchdog reads from another
@@ -156,8 +200,9 @@ void vkr_wait_value(uint64_t value)
         VKR_LOG("waited %.1f s for submission %llu (the last submitted is %llu; sync %s); the "
                 "GPU reached %llu%s",
                 (double)waited / 1e9, (unsigned long long)value,
-                (unsigned long long)g_vkr.timelineValue, vkr_sync_name(),
-                (unsigned long long)reached, known ? "" : " (the counter read failed too)");
+                (unsigned long long)__atomic_load_n(&g_vkr.timelineValue, __ATOMIC_ACQUIRE),
+                vkr_sync_name(), (unsigned long long)reached,
+                known ? "" : " (the counter read failed too)");
         if (!g_vkr.lostWaitValue) {
             g_vkr.lostWaitValue = value;
         }
@@ -167,24 +212,27 @@ void vkr_wait_value(uint64_t value)
     g_vkr.stats.fenceWaitNs += waited;
 }
 
-void vkr_note_submit(uint64_t value, uint32_t lists, bool present)
+void vkr_note_submit(const VkrFrame *f, uint64_t value, uint32_t lists, bool present)
 {
     const uint32_t i = g_vkr.submitCount++ % VKR_SUBMIT_HISTORY;
-    __atomic_store_n(&g_vkr.progReplay, g_vkr.tagReplay, __ATOMIC_RELAXED);
-    __atomic_store_n(&g_vkr.progFrame, g_vkr.tagFrame, __ATOMIC_RELAXED);
+    __atomic_store_n(&g_vkr.progReplay, f->tagReplay, __ATOMIC_RELAXED);
+    __atomic_store_n(&g_vkr.progFrame, f->tagFrame, __ATOMIC_RELAXED);
     __atomic_store_n(&g_vkr.progSubmitNs, vkr_now_ns(), __ATOMIC_RELAXED);
     __atomic_store_n(&g_vkr.progSubmitted, value, __ATOMIC_RELEASE);
     g_vkr.submits[i].value = value;
-    g_vkr.submits[i].replay = g_vkr.tagReplay;
-    g_vkr.submits[i].frame = g_vkr.tagFrame;
+    g_vkr.submits[i].replay = f->tagReplay;
+    g_vkr.submits[i].frame = f->tagFrame;
     g_vkr.submits[i].lists = (uint8_t)(lists > 255u ? 255u : lists);
     g_vkr.submits[i].present = present ? 1u : 0u;
 }
 
+/* the recording thread's slot's tag: its submits carry it, wherever they
+ * are made (vkr_note_submit) */
 void rhi_set_submit_tag(uint32_t replay, uint32_t frame)
 {
-    g_vkr.tagReplay = replay;
-    g_vkr.tagFrame = frame;
+    VkrFrame *f = vkr_cur_frame();
+    f->tagReplay = replay;
+    f->tagFrame = frame;
 }
 
 /* the finished slot's timestamps into g_vkr.tsResult (the slot is complete:
@@ -221,12 +269,56 @@ static void vkr_collect_timestamps(VkrFrame *f)
     memset(f->tsWritten, 0, sizeof(f->tsWritten));
 }
 
+/* the finished slot's occlusion counts into g_vkr.occResult, as the
+ * timestamps above (rhi_read_occlusion) */
+static void vkr_collect_occlusion(VkrFrame *f)
+{
+    if (!g_vkr.occResult) {
+        return;
+    }
+    const uint32_t clear = g_vkr.occCount;
+    for (uint32_t i = 0; i < clear; i++) {
+        g_vkr.occResult[i] = RHI_OCCLUSION_NONE;
+    }
+    g_vkr.occCount = 0;
+    uint32_t hi = 0;
+    for (uint32_t w = 0; w < RHI_OCCLUSION_WORDS; w++) {
+        if (f->occWritten[w]) {
+            hi = w * 32u + 32u - (uint32_t)__builtin_clz(f->occWritten[w]);
+        }
+    }
+    if (!f->occPool || hi == 0) {
+        memset(f->occWritten, 0, sizeof(f->occWritten));
+        return;
+    }
+    /* the (count, availability) pairs up to the highest index written */
+    uint64_t *data = malloc(sizeof(uint64_t) * 2u * hi);
+    if (data) {
+        memset(data, 0, sizeof(uint64_t) * 2u * hi);
+        const VkResult r = vkGetQueryPoolResults(
+            g_vkr.device, f->occPool, 0, hi, sizeof(uint64_t) * 2u * hi, data,
+            sizeof(uint64_t) * 2u, VK_QUERY_RESULT_64_BIT | VK_QUERY_RESULT_WITH_AVAILABILITY_BIT);
+        if (r == VK_SUCCESS || r == VK_NOT_READY) {
+            for (uint32_t i = 0; i < hi; i++) {
+                if (((f->occWritten[i >> 5] >> (i & 31u)) & 1u) && data[2u * i + 1u]) {
+                    g_vkr.occResult[i] = data[2u * i];
+                }
+            }
+            g_vkr.occCount = hi;
+        }
+        free(data);
+    }
+    memset(f->occWritten, 0, sizeof(f->occWritten));
+}
+
 /* Recycles a frame slot once the GPU is done with it. */
 static void vkr_recycle_frame(VkrFrame *f)
 {
     vkr_wait_value(f->waitValue);
     vkr_collect_timestamps(f);
+    vkr_collect_occlusion(f);
     f->tsReset = false;
+    f->occReset = false;
     vkr_destroy_garbage(f);
     vkResetCommandPool(g_vkr.device, f->cmdPool, 0);
     for (uint32_t j = 0; j < VKR_MAX_CMD_LISTS; j++) {
@@ -242,10 +334,20 @@ static void vkr_recycle_frame(VkrFrame *f)
     f->setCount = 0;
 }
 
+/* The next slot, recycled: its own last submit waited for.  The call guard
+ * (rhi_backend.c) lets it run beside the submit thread only when none of
+ * that thread's jobs is of this slot (RhiSlotGuard), so the slot's lists
+ * were all submitted and its waitValue is the last. */
 void rhi_wait_frame(void)
 {
+    const VkrFrame *prev = vkr_cur_frame();
     g_vkr.frameIndex++;
-    vkr_recycle_frame(vkr_cur_frame());
+    VkrFrame *f = vkr_cur_frame();
+    vkr_recycle_frame(f);
+    f->gen = (uint32_t)(g_vkr.frameIndex & VKR_GEN_MASK);
+    /* the tag in force goes on until the next rhi_set_submit_tag */
+    f->tagReplay = prev->tagReplay;
+    f->tagFrame = prev->tagFrame;
 }
 
 uint32_t rhi_frame_slot(void)
@@ -289,15 +391,27 @@ void rhi_collect_garbage_now(void)
 
 static void vkr_open_barrier(VkCommandBuffer cb);
 static void vkr_flush_barriers(VkrCmdList *c);
+static void vkr_occ_close(VkrCmdList *c);
+
+/* VkrCmdList.known: the bind cache's state the list holds (vk_internal.h) */
+#define VKR_KNOW_VIEWPORT 1u
+#define VKR_KNOW_SCISSOR 2u
+#define VKR_KNOW_INDEX 4u
+#define VKR_KNOW_STENCIL 8u
+#define VKR_KNOW_BLEND_CONSTANT 16u
 
 /* ---------------------------------------------------------- command lists
- * Handle id: (frame tag << 20) | (list index + 1). */
+ * Handle id: (frame tag << 20) | (list index + 1).  The tag is the frame
+ * index the list's slot was recycled at (masked), so it names the slot
+ * (tag % RHI_FRAMES_IN_FLIGHT) and goes stale when that slot is recycled
+ * again: a list of slot A stays valid for the submit thread while the
+ * recording thread has moved on to slot B. */
 VkrCmdList *vkr_get_cmd(RhiCommandList cl)
 {
-    VkrFrame *f = vkr_cur_frame();
+    const uint32_t tag = cl.id >> VKR_GEN_SHIFT;
+    VkrFrame *f = &g_vkr.frames[tag % RHI_FRAMES_IN_FLIGHT];
     uint32_t idx = cl.id & VKR_INDEX_MASK;
-    if (idx == 0 || idx > f->listCount ||
-        (cl.id >> VKR_GEN_SHIFT) != (uint32_t)(g_vkr.frameIndex & VKR_GEN_MASK)) {
+    if (idx == 0 || idx > f->listCount || tag != f->gen) {
         return NULL;
     }
     return &f->lists[idx - 1];
@@ -320,6 +434,13 @@ RhiCommandList rhi_begin_commands(void)
         return out;
     }
     c->recording = true;
+    c->slot = (uint8_t)(f - g_vkr.frames);
+    /* the bind cache starts empty (the slot's recycle zeroed it too) */
+    c->pipeline = NULL;
+    c->pipelineId = 0;
+    c->known = 0;
+    c->vbKnown = 0;
+    c->dynFresh = 0;
     c->pendCount = 0;
     c->pendSrc = c->pendDst = 0;
     c->pendMemDst = 0;
@@ -345,19 +466,30 @@ RhiCommandList rhi_begin_commands(void)
         vkCmdResetQueryPool(c->cb, f->queryPool, 0, RHI_MAX_TIMESTAMPS);
         f->tsReset = true;
     }
-    out.id = ((uint32_t)(g_vkr.frameIndex & VKR_GEN_MASK) << VKR_GEN_SHIFT) | f->listCount;
+    if (f->occPool && !f->occReset) {
+        /* likewise the occlusion queries, once a run has used them */
+        vkCmdResetQueryPool(c->cb, f->occPool, 0, RHI_MAX_OCCLUSION);
+        f->occReset = true;
+    }
+    out.id = (f->gen << VKR_GEN_SHIFT) | f->listCount;
     return out;
 }
 
+static void vkr_flush_barriers_to(VkrCmdList *c, bool late);
+
+/* On the submit thread with RhiLimits.slotOverlap: its own list only, and
+ * the barriers it sends counted in late (the recording thread writes
+ * stats) */
 void rhi_end_commands(RhiCommandList cl)
 {
     VkrCmdList *c = vkr_get_cmd(cl);
     if (!c || !c->recording) {
         return;
     }
-    vkr_flush_barriers(c);
+    vkr_flush_barriers_to(c, true);
     if (c->inPass) {
         VKR_LOG("rhi_end_commands inside a render pass");
+        vkr_occ_close(c);
         vkr_pass_end(c);
         c->inPass = false;
     }
@@ -381,24 +513,29 @@ void rhi_end_commands(RhiCommandList cl)
  * semaphore (renderDone), either as an empty batch after all frame work
  * (vkr_submit_present_signal) or as the submit of the list that moved the
  * image to PRESENT (rhi_submit). */
-static bool vkr_submit_batch(const VkCommandBuffer *cbs, uint32_t count, bool forPresent)
+static bool vkr_submit_batch(VkrFrame *f, const VkCommandBuffer *cbs, uint32_t count,
+                             bool forPresent)
 {
     VkrSubmitDesc d = {.cbs = cbs, .cbCount = count};
     bool tookAcquire = false;
 
-    if (g_vkr.acquireWaitPending) {
+    if (f->acq.waitPending) {
         /* The first submit after an acquire waits for the image.  With
          * commands, at COLOR_ATTACHMENT_OUTPUT: the image's first use after
          * an acquire is a barrier out of UNDEFINED or PRESENT, and such a
          * barrier on a swapchain image has that stage in its first scope
          * (vkr_image_barrier), which chains it to this wait in this submit
          * or a later one; the work before it, on other images, need not
-         * wait for the presentation engine.  An empty batch keeps
-         * ALL_COMMANDS. */
-        d.wait = g_vkr.acquireSem;
+         * wait for the presentation engine.  The clear passes of new targets
+         * (rd__clear_new_targets, the uploads piece) are the first colour
+         * output when they come first, so on a tile-based GPU the display
+         * wait lands in the uploads piece's time (the 10 s GPU lines say so).
+         * An empty batch keeps ALL_COMMANDS.  The slot's own acquire: a
+         * submit of slot A never takes the image slot B acquired since. */
+        d.wait = f->acquireSem;
         d.waitStage = count ? VK_PIPELINE_STAGE_COLOR_ATTACHMENT_OUTPUT_BIT
                             : VK_PIPELINE_STAGE_ALL_COMMANDS_BIT;
-        g_vkr.acquireWaitPending = false;
+        f->acq.waitPending = false;
         tookAcquire = true;
     }
     if (forPresent) {
@@ -409,36 +546,36 @@ static bool vkr_submit_batch(const VkCommandBuffer *cbs, uint32_t count, bool fo
         d.afterAll = count == 0;
         /* the binary semaphore the present waits on; a semaphore signal
          * covers the batch's commands and every earlier submission */
-        d.signal = g_vkr.renderDone[g_vkr.swapImage];
+        d.signal = g_vkr.renderDone[f->acq.image];
     }
     uint64_t value = 0;
     if (!vkr_sync_submit(&d, &value)) {
         /* a failed submit other than a device loss leaves its semaphores
          * as they were: the acquire semaphore is still signalled, and the
          * next submit must wait on it before the next acquire reuses it */
-        if (tookAcquire && !g_vkr.deviceLost) {
-            g_vkr.acquireWaitPending = true;
+        if (tookAcquire && !__atomic_load_n(&g_vkr.deviceLost, __ATOMIC_ACQUIRE)) {
+            f->acq.waitPending = true;
         }
         return false;
     }
-    g_vkr.stats.submits++;
-    vkr_cur_frame()->waitValue = value;
-    vkr_note_submit(value, count, forPresent);
+    vkr_late_add(&g_vkr.late.submits, 1u);
+    f->waitValue = value;
+    vkr_note_submit(f, value, count, forPresent);
     return true;
 }
 
-/* Submits nothing but the wait on a pending acquire semaphore, then waits
- * for it: a swapchain recreate drops acquireWaitPending, and the semaphore
- * must not stay signalled for the frame's next acquire. */
-bool vkr_submit_empty(void)
+/* Submits nothing but the wait on slot f's pending acquire semaphore, then
+ * waits for it: a swapchain recreate drops the acquire, and the semaphore
+ * must not stay signalled for the slot's next acquire. */
+bool vkr_submit_empty(VkrFrame *f)
 {
-    if (!g_vkr.acquireWaitPending) {
+    if (!f->acq.waitPending) {
         return true;
     }
-    if (!vkr_submit_batch(NULL, 0, false)) {
+    if (!vkr_submit_batch(f, NULL, 0, false)) {
         return false;
     }
-    vkr_wait_value(g_vkr.timelineValue);
+    vkr_wait_value(f->waitValue);
     return true;
 }
 
@@ -460,19 +597,20 @@ void rhi_submit(RhiCommandList cl)
      * backbuffer again and moves it back to PRESENT is not covered by the
      * present's wait.  Today rd_replay.c (rd__present_record) and
      * rd_video.c each present from one list. */
+    VkrFrame *f = &g_vkr.frames[c->slot];
     bool signal = false;
-    if (c->presentImage != VK_NULL_HANDLE && g_vkr.swapAcquired && !g_vkr.presentSignalled) {
-        const VkrTexture *bb = vkr_get_texture((RhiTexture){g_vkr.swapTextures[g_vkr.swapImage]});
+    if (c->presentImage != VK_NULL_HANDLE && f->acq.acquired && !f->acq.signalled) {
+        const VkrTexture *bb = vkr_get_texture((RhiTexture){g_vkr.swapTextures[f->acq.image]});
         signal = bb && bb->image == c->presentImage;
     }
-    if (vkr_submit_batch(&c->cb, 1, signal) && signal) {
-        g_vkr.presentSignalled = true;
+    if (vkr_submit_batch(f, &c->cb, 1, signal) && signal) {
+        f->acq.signalled = true;
     }
 }
 
-bool vkr_submit_present_signal(void)
+bool vkr_submit_present_signal(VkrFrame *f)
 {
-    return vkr_submit_batch(NULL, 0, true);
+    return vkr_submit_batch(f, NULL, 0, true);
 }
 
 /* ---------------------------------------------------------------- barriers
@@ -491,6 +629,13 @@ bool vkr_submit_present_signal(void)
  * at once.  stats.barriers counts vkCmdPipelineBarrier calls. */
 static void vkr_flush_barriers(VkrCmdList *c)
 {
+    vkr_flush_barriers_to(c, false);
+}
+
+/* late: counted in VkrState.late (a list's end, which the submit thread
+ * may make), else in stats */
+static void vkr_flush_barriers_to(VkrCmdList *c, bool late)
+{
     if (c->pendCount == 0 && c->pendMemDst == 0) {
         return;
     }
@@ -501,7 +646,11 @@ static void vkr_flush_barriers(VkrCmdList *c)
     };
     vkCmdPipelineBarrier(c->cb, c->pendSrc, c->pendDst, 0, c->pendMemDst ? 1u : 0u, &mb, 0, NULL,
                          c->pendCount, c->pendImg);
-    g_vkr.stats.barriers++;
+    if (late) {
+        vkr_late_add(&g_vkr.late.barriers, 1u);
+    } else {
+        g_vkr.stats.barriers++;
+    }
     c->pendCount = 0;
     c->pendSrc = c->pendDst = 0;
     c->pendMemDst = 0;
@@ -1043,12 +1192,34 @@ void rhi_cmd_begin_render_pass(RhiCommandList cl, const RhiRenderPassDesc *pass)
     }
     uint32_t areaW = pass->width, areaH = pass->height;
     vkr_pass_area_fits(&areaW, &areaH, colorTex, pass->colorCount, depthTex);
-    d.areaW = areaW;
-    d.areaH = areaH;
     /* the framebuffer (legacy path): the attachments' common size, the
-     * area's without one */
+     * pass's own without one */
     d.fbW = areaW;
     d.fbH = areaH;
+    /* the render area: RhiRenderPassDesc.area cut to the pass's size, the
+     * whole of it when the area is not given or leaves nothing (Vulkan
+     * wants an extent above zero).  The loads and stores apply inside it
+     * only; the pixels outside are not accessed and keep their contents */
+    const uint32_t passW = areaW, passH = areaH;
+    uint32_t areaX = 0, areaY = 0;
+    if (pass->area.w && pass->area.h) {
+        const int64_t x0 = pass->area.x > 0 ? pass->area.x : 0;
+        const int64_t y0 = pass->area.y > 0 ? pass->area.y : 0;
+        int64_t x1 = (int64_t)pass->area.x + pass->area.w;
+        int64_t y1 = (int64_t)pass->area.y + pass->area.h;
+        x1 = x1 < (int64_t)passW ? x1 : (int64_t)passW;
+        y1 = y1 < (int64_t)passH ? y1 : (int64_t)passH;
+        if (x1 > x0 && y1 > y0) {
+            areaX = (uint32_t)x0;
+            areaY = (uint32_t)y0;
+            areaW = (uint32_t)(x1 - x0);
+            areaH = (uint32_t)(y1 - y0);
+        }
+    }
+    d.areaX = areaX;
+    d.areaY = areaY;
+    d.areaW = areaW;
+    d.areaH = areaH;
     if (pass->colorCount || depthTex) {
         d.fbW = d.fbH = UINT32_MAX;
         for (uint32_t i = 0; i < pass->colorCount; i++) {
@@ -1115,14 +1286,20 @@ void rhi_cmd_begin_render_pass(RhiCommandList cl, const RhiRenderPassDesc *pass)
         return;
     }
     c->inPass = true;
+    c->areaX = areaX;
+    c->areaY = areaY;
     c->areaW = areaW;
     c->areaH = areaH;
     c->storageDrawn = c->drawnInPass = false;
     g_vkr.stats.renderPasses++;
 
-    /* defaults: full-target viewport and scissor */
-    RhiViewport vp = {0.0f, 0.0f, (float)areaW, (float)areaH, 0.0f, 1.0f};
-    RhiRect sc = {0, 0, areaW, areaH};
+    /* defaults: the viewport the pass's whole size (an area does not move
+     * the draws' coordinates), the scissor its render area, recorded
+     * whatever the list held before (the bind cache forgets both at a
+     * pass's start) */
+    c->known &= ~(VKR_KNOW_VIEWPORT | VKR_KNOW_SCISSOR);
+    RhiViewport vp = {0.0f, 0.0f, (float)passW, (float)passH, 0.0f, 1.0f};
+    RhiRect sc = {(int32_t)areaX, (int32_t)areaY, areaW, areaH};
     rhi_cmd_set_viewport(cl, &vp);
     rhi_cmd_set_scissor(cl, &sc);
 }
@@ -1133,6 +1310,7 @@ void rhi_cmd_end_render_pass(RhiCommandList cl)
     if (!c || !c->inPass) {
         return;
     }
+    vkr_occ_close(c); /* a query does not outlive its pass */
     vkr_flush_barriers(c);
     vkr_pass_end(c);
     c->inPass = false;
@@ -1148,7 +1326,14 @@ void rhi_cmd_set_viewport(RhiCommandList cl, const RhiViewport *v)
     /* Negative height (core since Vulkan 1.1) gives D3D's y-up NDC, so the
      * same HLSL runs on both backends without -fvk-invert-y. */
     VkViewport vp = {v->x, v->y + v->h, v->w, -v->h, v->minDepth, v->maxDepth};
+    if (rhi_bind_cache_enabled() && (c->known & VKR_KNOW_VIEWPORT) &&
+        memcmp(&vp, &c->vp, sizeof(vp)) == 0) {
+        g_vkr.stats.stateSetsSkipped++;
+        return;
+    }
     vkCmdSetViewport(c->cb, 0, 1, &vp);
+    c->vp = vp;
+    c->known |= VKR_KNOW_VIEWPORT;
 }
 
 void rhi_cmd_set_scissor(RhiCommandList cl, const RhiRect *r)
@@ -1160,12 +1345,53 @@ void rhi_cmd_set_scissor(RhiCommandList cl, const RhiRect *r)
     vkr_flush_barriers(c);
     VkRect2D sc = {{r->x, r->y}, {r->w, r->h}};
     if (c->inPass) {
-        /* within the render area (vkr_pass_area_fits) */
-        const uint32_t x = r->x > 0 ? (uint32_t)r->x : 0u, y = r->y > 0 ? (uint32_t)r->y : 0u;
-        sc.extent.width = x >= c->areaW ? 0u : r->w < c->areaW - x ? r->w : c->areaW - x;
-        sc.extent.height = y >= c->areaH ? 0u : r->h < c->areaH - y ? r->h : c->areaH - y;
+        /* within the render area (vkr_pass_area_fits, RhiRenderPassDesc.area):
+         * Vulkan leaves rendering outside it undefined, so the scissor is
+         * the two rectangles' intersection (an empty one keeps its offset,
+         * extent 0) */
+        const int64_t ax0 = c->areaX, ay0 = c->areaY;
+        const int64_t ax1 = ax0 + c->areaW, ay1 = ay0 + c->areaH;
+        int64_t x0 = r->x > 0 ? r->x : 0, y0 = r->y > 0 ? r->y : 0;
+        int64_t x1 = (int64_t)r->x + r->w, y1 = (int64_t)r->y + r->h;
+        x0 = x0 > ax0 ? x0 : ax0;
+        y0 = y0 > ay0 ? y0 : ay0;
+        x1 = x1 < ax1 ? x1 : ax1;
+        y1 = y1 < ay1 ? y1 : ay1;
+        sc.offset.x = (int32_t)x0;
+        sc.offset.y = (int32_t)y0;
+        sc.extent.width = x1 > x0 ? (uint32_t)(x1 - x0) : 0u;
+        sc.extent.height = y1 > y0 ? (uint32_t)(y1 - y0) : 0u;
+    }
+    /* compared as recorded (cut to the pass's area) */
+    if (rhi_bind_cache_enabled() && (c->known & VKR_KNOW_SCISSOR) &&
+        memcmp(&sc, &c->sc, sizeof(sc)) == 0) {
+        g_vkr.stats.stateSetsSkipped++;
+        return;
     }
     vkCmdSetScissor(c->cb, 0, 1, &sc);
+    c->sc = sc;
+    c->known |= VKR_KNOW_SCISSOR;
+}
+
+/* The groups a change from pipeline `from` (NULL: none known, or a new
+ * pipeline in the bound one's pool slot) to `to` must bind again: every
+ * group from the first whose set layout differs (or that `from` does not
+ * have) on.  Vulkan keeps a bound descriptor set valid for a pipeline whose
+ * layout is compatible for that set (the same set layouts up to it, and the
+ * same push constants: none here), so the groups below stay bound; the
+ * pipelines' VkPipelineLayout handles differ (one each), so comparing them
+ * would bind every group again at every change. */
+static uint32_t vkr_groups_disturbed(const VkrPipeline *from, const VkrPipeline *to)
+{
+    if (!from) {
+        return 0xFFu;
+    }
+    uint32_t g = 0;
+    while (g < to->layoutCount && g < from->layoutCount &&
+           from->setLayoutIds[g] == to->setLayoutIds[g]) {
+        g++;
+    }
+    return (0xFFu << g) & 0xFFu;
 }
 
 void rhi_cmd_set_pipeline(RhiCommandList cl, RhiPipeline p)
@@ -1175,20 +1401,28 @@ void rhi_cmd_set_pipeline(RhiCommandList cl, RhiPipeline p)
     if (!c || !pp) {
         return;
     }
-    if (c->pipeline != pp) {
-        if (!c->pipeline || c->pipeline->layout != pp->layout) {
-            c->groupDirty = 0xFFu; /* rebind against the new layout */
-        }
+    /* by id: a pipeline destroyed and another made in its pool slot has the
+     * same pointer but a new id (the slot's generation) */
+    const bool cache = rhi_bind_cache_enabled();
+    if (!cache || c->pipelineId != p.id) {
+        /* the cache off (rhi_bind_cache.h): every group bound again at
+         * every pipeline bind, whatever the layouts share */
+        c->groupDirty |=
+            cache ? vkr_groups_disturbed(c->pipeline == pp ? NULL : c->pipeline, pp) : 0xFFu;
         c->pipeline = pp;
+        c->pipelineId = p.id;
         vkr_flush_barriers(c);
         vkCmdBindPipeline(c->cb, VK_PIPELINE_BIND_POINT_GRAPHICS, pp->pipeline);
         g_vkr.stats.pipelineBinds++;
         /* a group the new pipeline has static: its own values replaced the
          * ones set before, which a later dynamic pipeline must set again */
         c->dynValid &= pp->dynamic;
+    } else {
+        g_vkr.stats.pipelineBindsSkipped++;
     }
     /* the next draw's dynamic values: the pipeline's own until a set */
     c->dynSet = 0;
+    c->dynFresh = 0;
     c->depthWant = pp->depthDefault;
     c->blendWant = pp->blendDefault;
 }
@@ -1217,12 +1451,14 @@ void rhi_cmd_set_bind_group_offsets(RhiCommandList cl, uint32_t group, RhiBindGr
     }
     /* the set already bound with the same dynamic offsets is not bound
      * again */
-    if (c->groups[group] != s || c->dynCount[group] != dyn ||
+    if (!rhi_bind_cache_enabled() || c->groups[group] != s || c->dynCount[group] != dyn ||
         memcmp(c->offsets[group], off, dyn * sizeof(off[0])) != 0) {
         c->groups[group] = s;
         c->dynCount[group] = dyn;
         memcpy(c->offsets[group], off, sizeof(off));
         c->groupDirty |= 1u << group;
+    } else {
+        g_vkr.stats.bindGroupBindsSkipped++;
     }
 }
 
@@ -1256,7 +1492,18 @@ void rhi_cmd_set_vertex_buffer(RhiCommandList cl, uint32_t binding, RhiBuffer b,
     }
     VkDeviceSize off = offset;
     vkr_flush_barriers(c);
+    const uint32_t bit = binding < RHI_MAX_VERTEX_ATTRS ? 1u << binding : 0u;
+    if (rhi_bind_cache_enabled() && bit && (c->vbKnown & bit) && c->vbId[binding] == b.id &&
+        c->vbOff[binding] == offset) {
+        g_vkr.stats.stateSetsSkipped++;
+        return;
+    }
     vkCmdBindVertexBuffers(c->cb, binding, 1, &buf->buffer, &off);
+    if (bit) {
+        c->vbId[binding] = b.id;
+        c->vbOff[binding] = offset;
+        c->vbKnown |= bit;
+    }
 }
 
 void rhi_cmd_set_index_buffer(RhiCommandList cl, RhiBuffer b, uint64_t offset, bool u32)
@@ -1267,8 +1514,17 @@ void rhi_cmd_set_index_buffer(RhiCommandList cl, RhiBuffer b, uint64_t offset, b
         return;
     }
     vkr_flush_barriers(c);
+    if (rhi_bind_cache_enabled() && (c->known & VKR_KNOW_INDEX) && c->ibId == b.id &&
+        c->ibOff == offset && c->ib32 == u32) {
+        g_vkr.stats.stateSetsSkipped++;
+        return;
+    }
     vkCmdBindIndexBuffer(c->cb, buf->buffer, offset,
                          u32 ? VK_INDEX_TYPE_UINT32 : VK_INDEX_TYPE_UINT16);
+    c->ibId = b.id;
+    c->ibOff = offset;
+    c->ib32 = u32;
+    c->known |= VKR_KNOW_INDEX;
 }
 
 void rhi_cmd_set_stencil_ref(RhiCommandList cl, uint8_t ref)
@@ -1276,16 +1532,29 @@ void rhi_cmd_set_stencil_ref(RhiCommandList cl, uint8_t ref)
     VkrCmdList *c = vkr_get_cmd(cl);
     if (c) {
         vkr_flush_barriers(c);
+        if (rhi_bind_cache_enabled() && (c->known & VKR_KNOW_STENCIL) && c->stencilRef == ref) {
+            g_vkr.stats.stateSetsSkipped++;
+            return;
+        }
         vkCmdSetStencilReference(c->cb, VK_STENCIL_FACE_FRONT_AND_BACK, ref);
+        c->stencilRef = ref;
+        c->known |= VKR_KNOW_STENCIL;
     }
 }
 
 void rhi_cmd_set_blend_constant(RhiCommandList cl, const float rgba[4])
 {
     VkrCmdList *c = vkr_get_cmd(cl);
-    if (c) {
+    if (c && rgba) {
         vkr_flush_barriers(c);
+        if (rhi_bind_cache_enabled() && (c->known & VKR_KNOW_BLEND_CONSTANT) &&
+            memcmp(c->blendConst, rgba, sizeof(c->blendConst)) == 0) {
+            g_vkr.stats.stateSetsSkipped++;
+            return;
+        }
         vkCmdSetBlendConstants(c->cb, rgba);
+        memcpy(c->blendConst, rgba, sizeof(c->blendConst));
+        c->known |= VKR_KNOW_BLEND_CONSTANT;
     }
 }
 
@@ -1307,8 +1576,9 @@ void rhi_cmd_set_depth_state(RhiCommandList cl, bool test, bool write, RhiCompar
     memset(&c->depthWant, 0, sizeof(c->depthWant));
     c->depthWant.test = test ? VK_TRUE : VK_FALSE;
     c->depthWant.write = test && write ? VK_TRUE : VK_FALSE;
-    c->depthWant.compare = vkr_compareMap[cmp].vk;
+    c->depthWant.compare = g_vkr.depthAlways ? VK_COMPARE_OP_ALWAYS : vkr_compareMap[cmp].vk;
     c->dynSet |= RHI_DYN_DEPTH;
+    c->dynFresh |= RHI_DYN_DEPTH;
 }
 
 void rhi_cmd_set_blend_state(RhiCommandList cl, const RhiBlendState *blend)
@@ -1320,6 +1590,7 @@ void rhi_cmd_set_blend_state(RhiCommandList cl, const RhiBlendState *blend)
     const VkPipelineColorBlendAttachmentState a = vkr_blend_state(blend, c->pipeline->intTarget);
     vkr_blend_dyn(&a, &c->blendWant);
     c->dynSet |= RHI_DYN_BLEND;
+    c->dynFresh |= RHI_DYN_BLEND;
 }
 
 /* whether a blend equation reads the shader's second output (a SRC1
@@ -1344,6 +1615,8 @@ static void vkr_flush_dynamic(VkrCmdList *c)
     if (!dyn) {
         return;
     }
+    /* the cache off: every command of a dynamic group at every draw */
+    const bool cache = rhi_bind_cache_enabled();
     if ((dyn & ~c->dynSet) != 0u) {
         /* a bind site that does not set the state (rd binds through
          * rd__set_pipeline, which always does): the pipeline's own values,
@@ -1359,27 +1632,33 @@ static void vkr_flush_dynamic(VkrCmdList *c)
         }
     }
     if (dyn & RHI_DYN_DEPTH) {
-        const bool all = !(c->dynValid & RHI_DYN_DEPTH);
+        const bool all = !cache || !(c->dynValid & RHI_DYN_DEPTH);
         const VkrDepthDyn *w = &c->depthWant, *h = &c->depthHave;
+        uint32_t sent = 0;
         if (all || w->test != h->test) {
             g_vkr.cmdSetDepthTestEnable(c->cb, w->test);
-            g_vkr.stats.dynamicSets++;
+            sent++;
         }
         if (all || w->write != h->write) {
             g_vkr.cmdSetDepthWriteEnable(c->cb, w->write);
-            g_vkr.stats.dynamicSets++;
+            sent++;
         }
         if (all || w->compare != h->compare) {
             g_vkr.cmdSetDepthCompareOp(c->cb, w->compare);
-            g_vkr.stats.dynamicSets++;
+            sent++;
+        }
+        g_vkr.stats.dynamicSets += sent;
+        if (c->dynFresh & RHI_DYN_DEPTH) {
+            g_vkr.stats.stateSetsSkipped += 3u - sent; /* the set's values in force */
         }
         c->depthHave = *w;
         c->dynValid |= RHI_DYN_DEPTH;
     }
     if (dyn & RHI_DYN_BLEND) {
-        const bool all = !(c->dynValid & RHI_DYN_BLEND);
+        const bool all = !cache || !(c->dynValid & RHI_DYN_BLEND);
         const VkrBlendDyn *w = &c->blendWant;
         VkrBlendDyn *h = &c->blendHave;
+        const uint64_t before = g_vkr.stats.dynamicSets;
         if (all || w->enable != h->enable) {
             g_vkr.cmdSetColorBlendEnable(c->cb, 0, 1, &w->enable);
             g_vkr.stats.dynamicSets++;
@@ -1412,8 +1691,12 @@ static void vkr_flush_dynamic(VkrCmdList *c)
             g_vkr.stats.dynamicSets++;
             h->mask = w->mask;
         }
+        if (c->dynFresh & RHI_DYN_BLEND) {
+            g_vkr.stats.stateSetsSkipped += 3u - (g_vkr.stats.dynamicSets - before);
+        }
         c->dynValid |= RHI_DYN_BLEND;
     }
+    c->dynFresh = 0;
 }
 
 /* Inside the open pass (dynamic rendering local read): one by-region
@@ -1824,7 +2107,7 @@ bool rhi_readback_texture(RhiTexture h, RhiViewAspect aspect, void *dst, size_t 
         ok = vkr_sync_submit(&(VkrSubmitDesc){.cbs = &cb, .cbCount = 1}, &value);
         if (ok) {
             vkr_cur_frame()->waitValue = value;
-            vkr_note_submit(value, 1, false);
+            vkr_note_submit(vkr_cur_frame(), value, 1, false);
             vkr_wait_value(value);
             const void *mapped = rhi_map_buffer(rb); /* NULL when vkMapMemory failed */
             ok = mapped != NULL;
@@ -1872,4 +2155,134 @@ uint32_t rhi_read_timestamps_busy(uint64_t *ns, uint32_t max)
     (void)ns;
     (void)max;
     return 0;
+}
+
+/* ------------------------------------------------------- occlusion queries */
+/* The pools at the first begin (rhi.h rhi_cmd_begin_occlusion): one per
+ * slot and the result array; the current slot's pool is reset by a
+ * one-time submit (its first list began before the pool existed), the
+ * others in their first list (rhi_begin_commands).  False when a pool or
+ * the array could not be made (occlusion then stays off for the run). */
+static bool vkr_occ_make(void)
+{
+    if (g_vkr.occUsed || g_vkr.occBroken) {
+        return g_vkr.occUsed;
+    }
+    g_vkr.occBroken = true; /* until every part is made */
+    g_vkr.occResult = malloc(sizeof(uint64_t) * RHI_MAX_OCCLUSION);
+    if (!g_vkr.occResult) {
+        VKR_LOG("occlusion queries: off (no memory for the counts)");
+        return false;
+    }
+    for (uint32_t i = 0; i < RHI_MAX_OCCLUSION; i++) {
+        g_vkr.occResult[i] = RHI_OCCLUSION_NONE;
+    }
+    g_vkr.occCount = 0;
+    for (uint32_t i = 0; i < RHI_FRAMES_IN_FLIGHT; i++) {
+        VkrFrame *f = &g_vkr.frames[i];
+        VkQueryPoolCreateInfo qci = {
+            .sType = VK_STRUCTURE_TYPE_QUERY_POOL_CREATE_INFO,
+            .queryType = VK_QUERY_TYPE_OCCLUSION,
+            .queryCount = RHI_MAX_OCCLUSION,
+        };
+        if (!VKR_CHECK(vkCreateQueryPool(g_vkr.device, &qci, NULL, &f->occPool))) {
+            f->occPool = VK_NULL_HANDLE;
+            for (uint32_t j = 0; j < RHI_FRAMES_IN_FLIGHT; j++) {
+                if (g_vkr.frames[j].occPool) {
+                    vkDestroyQueryPool(g_vkr.device, g_vkr.frames[j].occPool, NULL);
+                    g_vkr.frames[j].occPool = VK_NULL_HANDLE;
+                }
+            }
+            free(g_vkr.occResult);
+            g_vkr.occResult = NULL;
+            VKR_LOG("occlusion queries: off (a query pool could not be made)");
+            return false;
+        }
+        f->occReset = false;
+        memset(f->occWritten, 0, sizeof(f->occWritten));
+    }
+    VkrFrame *f = vkr_cur_frame();
+    VkCommandBufferAllocateInfo ai = {
+        .sType = VK_STRUCTURE_TYPE_COMMAND_BUFFER_ALLOCATE_INFO,
+        .commandPool = g_vkr.oneShotPool,
+        .level = VK_COMMAND_BUFFER_LEVEL_PRIMARY,
+        .commandBufferCount = 1,
+    };
+    VkCommandBuffer cb;
+    if (VKR_CHECK(vkAllocateCommandBuffers(g_vkr.device, &ai, &cb))) {
+        VkCommandBufferBeginInfo bi = {
+            .sType = VK_STRUCTURE_TYPE_COMMAND_BUFFER_BEGIN_INFO,
+            .flags = VK_COMMAND_BUFFER_USAGE_ONE_TIME_SUBMIT_BIT,
+        };
+        vkBeginCommandBuffer(cb, &bi);
+        vkCmdResetQueryPool(cb, f->occPool, 0, RHI_MAX_OCCLUSION);
+        vkEndCommandBuffer(cb);
+        /* submitted before the lists of this frame, so the reset comes
+           first in the queue's order */
+        uint64_t value = 0;
+        if (vkr_sync_submit(&(VkrSubmitDesc){.cbs = &cb, .cbCount = 1}, &value)) {
+            f->waitValue = value;
+            vkr_note_submit(f, value, 1, false);
+            vkr_wait_value(value);
+            f->occReset = true;
+        }
+        vkFreeCommandBuffers(g_vkr.device, g_vkr.oneShotPool, 1, &cb);
+    }
+    g_vkr.occUsed = true;
+    g_vkr.occBroken = false;
+    VKR_LOG("occlusion queries: on (%u a frame slot, %s)", (unsigned)RHI_MAX_OCCLUSION,
+            g_vkr.occPrecise ? "precise sample counts"
+                             : "not precise: a count is exact only as zero or not zero");
+    return true;
+}
+
+void rhi_cmd_begin_occlusion(RhiCommandList cl, uint32_t index)
+{
+    VkrCmdList *c = vkr_get_cmd(cl);
+    if (!c || !c->inPass || c->occOpen || index >= RHI_MAX_OCCLUSION || g_vkr.deviceLost) {
+        return;
+    }
+    if (!g_vkr.occUsed && !g_vkr.occBroken) {
+        /* the first use submits the pools' reset: the queue is the submit
+         * thread's while it works, so the call guard's wait first, as an
+         * entry point that submits makes it ("Frame slots" above) */
+        rhi_call_guard_settle();
+    }
+    if (!vkr_occ_make()) {
+        return;
+    }
+    VkrFrame *f = vkr_cur_frame();
+    if (!f->occPool || !f->occReset || ((f->occWritten[index >> 5] >> (index & 31u)) & 1u)) {
+        return;
+    }
+    vkCmdBeginQuery(c->cb, f->occPool, index, g_vkr.occPrecise ? VK_QUERY_CONTROL_PRECISE_BIT : 0);
+    f->occWritten[index >> 5] |= 1u << (index & 31u);
+    c->occOpen = index + 1u;
+}
+
+/* the open query's end (rhi_cmd_end_occlusion, a pass end) */
+static void vkr_occ_close(VkrCmdList *c)
+{
+    if (c->occOpen) {
+        vkCmdEndQuery(c->cb, g_vkr.frames[c->slot].occPool, c->occOpen - 1u);
+        c->occOpen = 0;
+    }
+}
+
+void rhi_cmd_end_occlusion(RhiCommandList cl, uint32_t index)
+{
+    VkrCmdList *c = vkr_get_cmd(cl);
+    if (c && c->occOpen == index + 1u) {
+        vkr_occ_close(c);
+    }
+}
+
+uint32_t rhi_read_occlusion(uint64_t *samples, uint32_t max)
+{
+    if (!samples || !g_vkr.occResult) {
+        return 0;
+    }
+    const uint32_t n = g_vkr.occCount < max ? g_vkr.occCount : max;
+    memcpy(samples, g_vkr.occResult, (size_t)n * sizeof(uint64_t));
+    return n;
 }

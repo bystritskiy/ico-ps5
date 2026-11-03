@@ -43,6 +43,12 @@ const char *const ui_strings_ko[UI_STR_COUNT] = {
     [UI_STR_VAL_PIT_LONGER] = "더 오래",
     [UI_STR_VAL_PIT_DOUBLE] = "2배",
     [UI_STR_VAL_PIT_TRIPLE] = "3배",
+    [UI_STR_OPT_SHADOW_SPEED] = "그림자 속도",
+    [UI_STR_OPT_SHADOW_SPEED_NOTE] =
+        "그림자가 걷고, 달리고, 나는 속도입니다. 공격하는 빈도는 바뀌지 않습니다.",
+    [UI_STR_VAL_SPEED_SLOWER] = "느리게",
+    [UI_STR_VAL_SPEED_FASTER] = "빠르게",
+    [UI_STR_VAL_SPEED_FASTEST] = "가장 빠르게",
     [UI_STR_LANG_EN] = "English",
     [UI_STR_LANG_FR] = "Français",
     [UI_STR_LANG_DE] = "Deutsch",
@@ -436,7 +442,7 @@ const char *const ui_strings_ko[UI_STR_COUNT] = {
     [UI_STR_OPT_EFFECT_MOTION_BLUR] = "모션 블러",
     [UI_STR_OPT_EFFECT_FOG] = "안개",
     [UI_STR_EFFECTS_NOTE] =
-        "게임 본래의 화면 효과입니다. 모두 켜면 PS2의 화면이 됩니다. 프리셋은 이 설정을 바꾸지 않습니다.",
+        "게임 본래의 화면 효과입니다. 모두 켜면 PS2의 화면이 됩니다. 프리셋은 프레임 사이의 빛 번짐 외에는 이 설정을 바꾸지 않습니다.",
     [UI_STR_STATS_PLAY_TIME] = "플레이 시간",
     [UI_STR_STATS_DEATHS] = "게임 오버 횟수",
     [UI_STR_STATS_CAPTURES] = "요르다가 잡혀간 횟수",
@@ -526,6 +532,11 @@ const char *const ui_strings_ko[UI_STR_COUNT] = {
     [UI_STR_VAL_GRAPHICS_AUTOMATIC] = "자동",
     [UI_STR_GRAPHICS_API_NOTE] =
         "적용하면 바로 바뀝니다. 적용하지 않으면 다음 실행부터 적용됩니다.",
+    [UI_STR_OPT_GRAPHICS_ADAPTER] = "그래픽 카드",
+    [UI_STR_GRAPHICS_ADAPTER_NOTE] =
+        "게임을 그리는 그래픽 카드입니다. 적용하면 바로 바뀝니다. 적용하지 않으면 다음 실행부터 적용됩니다.",
+    [UI_STR_GRAPHICS_ADAPTER_FAILED] =
+        "그래픽 카드 %s을(를) 시작하지 못했습니다. %s을(를) 계속 사용합니다",
     [UI_STR_GRAPHICS_APPLY] = "적용",
     [UI_STR_GRAPHICS_APPLY_NOTE] =
         "게임을 끝내지 않고 바로 바뀝니다. 잠시 기다려야 할 수 있습니다.",
@@ -568,12 +579,18 @@ const char *const ui_strings_ko[UI_STR_COUNT] = {
     [UI_STR_OPT_DOOR_FIX] = "동쪽 반사경 문 수정",
     [UI_STR_OPT_DOOR_FIX_NOTE] =
         "손을 잡은 이코와 요르다가 출입구에서 곧바로 되돌아 나오지 않게 됩니다.",
+    [UI_STR_OPT_YORDA_TRIPS] = "요르다가 넘어짐",
+    [UI_STR_OPT_YORDA_TRIPS_NOTE] =
+        "끔: 원작 그대로. 켬: 정문이 열린 뒤처럼, 손을 잡고 3초 동안 달리면 넘어집니다.",
     [UI_STR_OPT_NATURAL_CHAINS] = "자연스러운 사슬",
     [UI_STR_OPT_NATURAL_CHAINS_NOTE] =
         "이코에게 내려오는 사슬의 고리가 끝까지 올바른 크기를 유지합니다.",
     [UI_STR_OPT_SKIP_OPENING] = "오프닝 건너뛰기",
     [UI_STR_OPT_SKIP_OPENING_NOTE] =
         "소니 로고와 오프닝 장면 없이 타이틀 화면에서 시작합니다. 다음 실행부터 적용됩니다.",
+    [UI_STR_OPT_SECOND_CARD] = "두 번째 메모리 카드",
+    [UI_STR_OPT_SECOND_CARD_NOTE] =
+        "끔: 원작 그대로 메모리 카드 1장. 켬: 두 번째 카드에 10개 더 저장할 수 있고, 저장과 불러오기에서 둘 다 고릅니다.",
     [UI_STR_OPT_AA] = "안티에일리어싱",
     [UI_STR_OPT_AA_NOTE] =
         "윤곽을 매끄럽게 합니다. 슈퍼샘플링은 점이 4배(2x), 16배(4x). 카운터가 30이 되면 줄이세요.",
@@ -613,6 +630,49 @@ const char *const ui_strings_ko[UI_STR_COUNT] = {
     [UI_STR_EXPORT_TEXTURES_STOPPED_BODY] = "이미지 %d개를 저장한 뒤 중지했습니다",
     [UI_STR_EXPORT_TEXTURES_FAILED] = "텍스처를 내보내지 못했습니다",
     [UI_STR_EXPORT_TEXTURES_FAILED_BODY] = "%s 폴더에\n쓰지 못했습니다",
+    [UI_STR_EXTRAS_BACKUP] = "데이터 백업",
+    [UI_STR_EXTRAS_RESTORE] = "백업에서 복원",
+    [UI_STR_BACKUP_NOTE] =
+        "메모리 카드, 저장 상태, 설정, 업적을 하나의 .zip 파일로 저장합니다. 보관하거나 다른 기기로 옮길 수 있습니다.",
+    [UI_STR_RESTORE_NOTE] =
+        "백업 .zip에서 메모리 카드, 저장 상태, 설정, 업적을 되돌려 지금 것을 바꿉니다. 그다음 게임이 다시 시작됩니다.",
+    [UI_STR_BACKUP_CHOOSING] = "백업을 저장할 곳을 고르세요.",
+    [UI_STR_BACKUP_PROGRESS] = "백업 중: %d / %d개 파일",
+    [UI_STR_RESTORE_AGAIN] = "한 번 더 눌러 고르기",
+    [UI_STR_RESTORE_CONFIRM_TITLE] = "백업에서 복원할까요?",
+    [UI_STR_RESTORE_CONFIRM_BODY] =
+        "지금의 메모리 카드, 저장 상태, 설정, 업적이 백업의 것으로 바뀌고 게임이 다시 시작됩니다.\n백업을 고르려면 한 번 더 누르세요.",
+    [UI_STR_RESTORE_CHOOSING] = "복원할 백업을 고르세요.",
+    [UI_STR_RESTORE_READING] = "백업을 읽는 중…",
+    [UI_STR_RESTORE_PROGRESS] = "복원 중: %d / %d개 파일",
+    [UI_STR_RESTORE_THIS] = "이 백업 복원",
+    [UI_STR_RESTORE_ASK_NOTE] = "버전 %s에서 만들었습니다. 복원하려면 한 번 더 누르세요.",
+    [UI_STR_RESTORE_ASK_TITLE] = "이 백업을 복원할까요?",
+    [UI_STR_RESTORE_VERSION] = "버전: %s",
+    [UI_STR_RESTORE_SAVED] = "저장 시각: %s",
+    [UI_STR_RESTORE_DISCS] = "디스크: %s",
+    [UI_STR_RESTORE_OTHER_DISC] = "다른 디스크로 플레이하던 중에 만들었습니다",
+    [UI_STR_RESTORE_PRESS] = "복원하려면 한 번 더 누르세요",
+    [UI_STR_BACKUP_DONE] = "데이터를 백업했습니다",
+    [UI_STR_BACKUP_DONE_BODY] = "파일 %d개를\n%s에 저장했습니다",
+    [UI_STR_BACKUP_FAILED] = "데이터를 백업하지 못했습니다",
+    [UI_STR_RESTORE_DONE] = "데이터를 복원하는 중",
+    [UI_STR_RESTORE_DONE_RESTART] = "게임이 지금 다시 시작되며 백업을 제자리에 둡니다.",
+    [UI_STR_RESTORE_DONE_CLOSE] =
+        "게임이 지금 종료됩니다. 다시 실행하면 시작할 때 백업을 제자리에 둡니다.",
+    [UI_STR_RESTORE_FAILED] = "백업을 복원하지 못했습니다",
+    [UI_STR_BACKUP_WHY_BUSY] = "지금은 안 됩니다: 게임이 저장 중입니다. 잠시 후 다시 해 보세요.",
+    [UI_STR_BACKUP_WHY_NOTHING] = "아직 백업할 것이 없습니다.",
+    [UI_STR_BACKUP_WHY_WRITE] = "데이터를 쓰지 못했습니다. 남은 공간을 확인하고 다시 해 보세요.",
+    [UI_STR_BACKUP_WHY_READ] = "파일을 읽지 못했습니다.",
+    [UI_STR_BACKUP_WHY_NOT_BACKUP] = "이 파일은 이 게임이 만든 백업이 아닙니다.",
+    [UI_STR_BACKUP_WHY_NEWER] =
+        "이 백업은 더 새로운 버전에서 만들었습니다. 게임을 업데이트한 뒤 복원하세요.",
+    [UI_STR_BACKUP_WHY_DAMAGED] = "이 백업은 손상되었습니다.",
+    [UI_STR_BACKUP_WHY_UNSAFE] = "이 백업에는 게임 폴더 밖의 파일이 들어 있어 쓰지 않습니다.",
+    [UI_STR_BACKUP_WHY_TOO_BIG] = "이 백업은 게임이 받아들이는 크기보다 큽니다.",
+    [UI_STR_BACKUP_WHY_NO_DIALOG] = "파일 선택 화면을 열지 못했습니다.",
+    [UI_STR_BACKUP_WHY_NO_SPACE] = "기기의 남은 공간이 부족합니다.",
     [UI_STR_LANG_KO] = "한국어",
     [UI_STR_LANG_ZH] = "繁體中文",
     /* Controls > Touch screen and the touch layout editor */
@@ -693,4 +753,46 @@ const char *const ui_strings_ko[UI_STR_COUNT] = {
         "이 버전에는 힌트가 없어서 효과가 없습니다. 업적은 그대로 유지됩니다.",
     [UI_STR_OPT_VAR_NO_LOOK_NOTE_2001] =
         "이 버전은 컷신 중에 둘러볼 수 없어서 효과가 없습니다. 업적은 그대로 유지됩니다.",
+    [UI_STR_GPU_HANG_TURNIP] =
+        "이 기기의 Qualcomm 드라이버에서는 Turnip 드라이버를 추가하세요 (옵션 > 그래픽 드라이버 > 드라이버 추가). 다음 실행부터 적용됩니다.",
+    [UI_STR_STATES] = "저장 상태",
+    [UI_STR_STATES_SLOT] = "슬롯 %d",
+    [UI_STR_STATES_EMPTY] = "비어 있음",
+    [UI_STR_STATES_ACT_SAVE] = "저장",
+    [UI_STR_STATES_ACT_LOAD] = "불러오기",
+    [UI_STR_STATES_ACT_DELETE] = "삭제",
+    [UI_STR_STATES_CONFIRM] = "한 번 더 누르세요: %s",
+    [UI_STR_STATES_SAVED] = "슬롯 %d에 상태를 저장했습니다",
+    [UI_STR_STATES_LOADED] = "슬롯 %d에서 상태를 불러왔습니다",
+    [UI_STR_STATES_DELETED] = "슬롯 %d을(를) 비웠습니다",
+    [UI_STR_STATES_NOTE] =
+        "상태는 이 디스크에 속합니다. 이후 버전에서도 불러올 수도 있습니다. 왼쪽과 오른쪽으로 동작을 고릅니다.",
+    [UI_STR_STATES_PAUSE_FIRST] = "상태를 저장하려면 게임을 일시정지하세요",
+    [UI_STR_STATES_REFUSED_BUILD] = "다른 버전의 게임에서 저장됨",
+    [UI_STR_STATES_REFUSED_DISC] = "다른 디스크에서 저장됨",
+    [UI_STR_STATES_REFUSED_SETTINGS] = "게임 설정이 다릅니다: %s",
+    [UI_STR_STATES_REFUSED_BUSY] = "지금은 할 수 없습니다: 게임이 불러오거나 저장하는 중입니다",
+    [UI_STR_STATES_REFUSED_CHECK] = "상태를 복원하지 못했습니다. 게임은 계속됩니다",
+    [UI_STR_STATES_OFF] = "이 빌드에서는 저장 상태가 꺼져 있습니다",
+    [UI_STR_STATES_TITLE_HINT] = "저장은 일시정지 메뉴에서 합니다",
+    [UI_STR_STATES_SAVE_FAILED] = "상태를 저장하지 못했습니다",
+    [UI_STR_STATES_XB_OLD] =
+        "이 저장 상태는 버전 %s에서 만들어졌습니다. 저장 상태를 새 버전으로 옮길 수 있게 되기 전의 것입니다. 메모리 카드의 저장 데이터는 그대로 쓸 수 있습니다.",
+    [UI_STR_STATES_XB_CODE] =
+        "이 저장 상태는 버전 %s에서 만들어졌습니다. 버전 %s에서 저장한 부분의 게임이 바뀌어 이어서 할 수 없습니다. 메모리 카드의 저장 데이터는 그대로 쓸 수 있습니다.",
+    [UI_STR_STATES_XB_DATA] =
+        "이 저장 상태는 버전 %s에서 만들어졌습니다. 버전 %s에서 게임이 진행 상황을 메모리에 담는 방식이 바뀌어 이어서 할 수 없습니다. 메모리 카드의 저장 데이터는 그대로 쓸 수 있습니다.",
+    [UI_STR_STATES_XB_PINNED] =
+        "이 저장 상태는 버전 %s에서 만들어졌으며 그 버전에서만 이어서 할 수 있습니다. 메모리 카드의 저장 데이터는 그대로 쓸 수 있습니다.",
+    [UI_STR_OPT_EFFECT_GLOW_SMOOTH] = "프레임 사이의 빛 번짐",
+    [UI_STR_EFFECT_GLOW_SMOOTH_NOTE] =
+        "‘오리지널’은 게임 본래 프레임의 빛 번짐을 그 사이에도 그대로 씁니다. ‘부드럽게’는 표시되는 프레임마다 다시 만들어 부담이 늘어납니다.",
+    [UI_STR_EFFECT_GLOW_SMOOTH_LOCKED] =
+        "프레임 레이트가 ‘오리지널’보다 높고 빛 번짐이 켜져 있을 때만 적용됩니다.",
+    [UI_STR_OPT_EFFECT_MOTION_BLUR_STRENGTH] = "모션 블러 강도",
+    [UI_STR_EFFECT_MOTION_BLUR_STRENGTH_NOTE] =
+        "값을 줄이면 블러가 더 빠르게 사라집니다. 100은 PS2 그대로입니다.",
+    [UI_STR_LANG_RU_BOBTTZ] = "Русский (bob-ttz)",
+    [UI_STR_LANG_RU_COBRA838] = "Русский (cobra838)",
+    [UI_STR_LANG_PT_BR] = "Português (Brasil) (ichagas7)",
 };

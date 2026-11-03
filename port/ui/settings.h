@@ -234,10 +234,23 @@ void ui_settings_set_gpu_driver_host(const UiGpuDriverHost *host);
    The row stores the choice in the config (written on leaving the page) and
    the window reads it at the next start. */
 void ui_settings_set_backend_names(const char *const *names, int count);
+/* Settings > Graphics > Graphics card: the suitable graphics cards of the
+   renderer running (port/rhi/rhi.h rhi_adapter_list), by the names the
+   config key [video] adapter takes, in the order the row steps them after
+   Automatic; current is the card running, automatic the card Automatic
+   picks (NULL when not known: Apply then shows only for a listed name
+   other than current).  At most 8 are kept, copied; the window installs
+   them after the renderer starts and after every switch
+   (window_switch.c).  The row shows only with two or more; the Graphics
+   link shows with two or more renderers or two or more cards. */
+void ui_settings_set_adapter_names(const char *const *names, int count, const char *current,
+                                   const char *automatic);
 /* Settings > Graphics > Apply: the renderer switched now, in the game, by
    the window (port/platform/window_switch.c), which installs this host.
-   running() names the renderer running, as the backend names above;
-   switchBegin(name, why) asks for a switch to name (why: UI_GFX_WHY_*) and
+   running() names the renderer running, as the backend names above, and
+   runningAdapter() (may be NULL) the card it runs on, as the card names;
+   switchBegin(name, adapter, why) asks for a switch to name on the card
+   adapter ("" Automatic; why: UI_GFX_WHY_*) and
    answers with a UI_GFX_SWITCH_*: PENDING when it runs later (switchPoll
    then answers, every frame, until it is no longer PENDING), else what
    came of it at once; kept() is the player's Keep (the window logs it);
@@ -247,7 +260,9 @@ void ui_settings_set_backend_names(const char *const *names, int count);
    FAILED means name did not start and the renderer that ran before is
    back; REFUSED that nothing was tried.  The Apply row shows while the
    Graphics API row's value is not the renderer running (Automatic counts
-   as automatic()'s, else "vulkan"); Apply then turns the page into a 10 s
+   as automatic()'s, else "vulkan") or the Graphics card row's value is a
+   listed card other than the one running (Automatic counts as the card
+   Automatic picks); Apply then turns the page into a 10 s
    countdown with Keep and Revert: Keep writes the choice, Revert, Circle
    or the end of the countdown switch back.  From Apply until Keep the
    config holds the value the page found (every save writes that one, the
@@ -265,10 +280,11 @@ void ui_settings_set_backend_names(const char *const *names, int count);
 
 typedef struct UiGraphicsHost {
     const char *(*running)(void);
-    int (*switchBegin)(const char *name, int why);
+    int (*switchBegin)(const char *name, const char *adapter, int why);
     int (*switchPoll)(void);
     void (*kept)(void);
     const char *(*automatic)(void);
+    const char *(*runningAdapter)(void);
 } UiGraphicsHost;
 
 void ui_settings_set_graphics_host(const UiGraphicsHost *host);
@@ -318,6 +334,144 @@ typedef struct UiTextureExportHost {
 } UiTextureExportHost;
 
 void ui_settings_set_texture_export_host(const UiTextureExportHost *host);
+
+/* Settings > Extras > Back up your data and Restore from a backup (the
+   title only): the player's memory card, save states, settings and
+   achievements in one zip the player picks a place for, and such a zip put
+   back, a job the host runs (port/platform/backup_host.c over backup.h; the
+   UI knows nothing of files).  begin(job) asks for the system's file
+   dialog: 0 asked (every end, the dialog closed too, comes through poll),
+   -1 not (one is under way).  poll() fills *out and returns its state,
+   called by the rows every frame and by ui_settings_vsync, so the end
+   popup comes on any screen.  proceed() restores the backup shown (state
+   ASK); cancel() drops it.  pump() is called once a vsync by
+   ui_settings_vsync, outside the game's threads (the window's per-vsync
+   step): the host opens the dialog there, starts its work and ends the
+   run.  A restore that is DONE has unpacked the backup
+   beside the data: the host ends the run a few seconds later and the next
+   start puts it in place (restarts 1: the program starts itself again;
+   0: the player starts it again).  NULL (or never set) hides both rows (the
+   headless build, iOS, tests); every pointer must be set; the struct is
+   copied. */
+#define UI_BACKUP_JOB_SAVE 0
+#define UI_BACKUP_JOB_RESTORE 1
+
+#define UI_BACKUP_IDLE 0      /* none since the start */
+#define UI_BACKUP_CHOOSING 1  /* the file dialog is open */
+#define UI_BACKUP_WORKING 2   /* writing the zip, reading it, or unpacking it */
+#define UI_BACKUP_ASK 3       /* restore: the backup was read; restore it? (proceed/cancel) */
+#define UI_BACKUP_DONE 4      /* written; or restore: unpacked, the run ends */
+#define UI_BACKUP_FAILED 5    /* why says why */
+#define UI_BACKUP_CANCELLED 6 /* the dialog was closed without a file, or cancel() */
+
+/* why a job FAILED: the popup's reason */
+#define UI_BACKUP_WHY_NONE 0
+#define UI_BACKUP_WHY_BUSY 1       /* the memory card or a save state is being written */
+#define UI_BACKUP_WHY_NOTHING 2    /* nothing to back up yet */
+#define UI_BACKUP_WHY_WRITE 3      /* the file or the unpacked data could not be written */
+#define UI_BACKUP_WHY_READ 4       /* the file could not be read */
+#define UI_BACKUP_WHY_NOT_BACKUP 5 /* not a backup this game made */
+#define UI_BACKUP_WHY_NEWER 6      /* made by a newer version in a form this one cannot read */
+#define UI_BACKUP_WHY_DAMAGED 7    /* the file is damaged */
+#define UI_BACKUP_WHY_UNSAFE 8     /* it holds files outside the game's own folders */
+#define UI_BACKUP_WHY_TOO_BIG 9    /* past the size a backup keeps */
+#define UI_BACKUP_WHY_NO_DIALOG 10 /* no file dialog could open */
+#define UI_BACKUP_WHY_NO_SPACE 11  /* the device has too little free space */
+
+typedef struct UiBackupStatus {
+    int job;          /* UI_BACKUP_JOB_* */
+    int state;        /* UI_BACKUP_* */
+    int done;         /* files handled */
+    int total;        /* files to handle (0 until known) */
+    int why;          /* UI_BACKUP_WHY_* when FAILED */
+    int restarts;     /* a restore DONE: the program starts itself again (else it closes) */
+    int otherDisc;    /* ASK: made while another disc was played */
+    char name[96];    /* the file's name */
+    char version[32]; /* ASK: the version that made it */
+    char date[32];    /* ASK: when, in local time */
+    char discs[96];   /* ASK: its discs' serials, ", " between */
+} UiBackupStatus;
+
+typedef struct UiBackupHost {
+    int (*begin)(int job);
+    int (*poll)(UiBackupStatus *out);
+    void (*proceed)(void);
+    void (*cancel)(void);
+    void (*pump)(void);
+} UiBackupHost;
+
+void ui_settings_set_backup_host(const UiBackupHost *host);
+
+/* The Save states page's host (v0.9.6 contract, ui_states_host.h; the UI
+ * knows nothing of files or memory: port/game/state_host.c behind
+ * main_host.c).  NULL (or never set) hides the pause row and the Extras
+ * link (the headless build, tests).  The struct is copied. */
+
+#define UI_STATES_SLOTS 4
+
+typedef struct UiStateSlotInfo {
+    int present;              /* a state exists */
+    int loadable;             /* it would load now */
+    int refusal_str;          /* UI_STR_* naming why not (when !loadable); 0 none */
+    unsigned int play_frames; /* for playTimeText */
+    int stage_no;             /* for areaName */
+    long long saved_at;       /* time(NULL) */
+    char png_path[260];       /* "" when none */
+} UiStateSlotInfo;
+
+#define UI_STATES_ACT_SAVE 0
+#define UI_STATES_ACT_LOAD 1
+#define UI_STATES_ACT_DELETE 2
+
+typedef struct UiStatesHost {
+    /* fills out[0..UI_STATES_SLOTS-1] */
+    void (*list)(UiStateSlotInfo out[UI_STATES_SLOTS]);
+    /* asks for the action on slot 1..4; 0 accepted (the result comes later
+       as a popup from the host side), -1 refused at once (the menu shows
+       the refusal popup with refusal_str) */
+    int (*request)(int action, int slot, int *refusal_str);
+    /* 1 when saves are allowed from here (the pause menu; 0 on the title) */
+    int (*can_save)(void);
+} UiStatesHost;
+
+void ui_settings_set_states_host(const UiStatesHost *host);
+
+/* The page's slot pictures: load(png path, &w, &h) reads the PNG and makes
+   the texture (an RdTex id, 0 on failure; w and h its real size), destroy(id)
+   releases it.  The default is the renderer's (texpack_load_png and
+   rd_create_texture; none without ICO_RD, so the pictures stay empty);
+   tests set fakes, NULL puts the default back. */
+typedef struct UiStatesTexFuncs {
+    unsigned int (*load)(const char *png_path, int *w, int *h);
+    void (*destroy)(unsigned int tex);
+} UiStatesTexFuncs;
+
+void ui_settings_set_states_tex_funcs(const UiStatesTexFuncs *funcs);
+/* The rows of a slot's card (tests): out = {picture, label, action word,
+   arrow left, arrow right, area and play time, date, status line}; the
+   status line is shared by the four.  Returns 8, or 0 when the page is not
+   built (no host at the build) or slot is outside 0..UI_STATES_SLOTS-1. */
+int ui_settings_states_card(int slot, int out[8]);
+/* The pause menu's Save states row, -1 when not built (tests) */
+int ui_settings_states_row(void);
+/* The Continue screen's Save states prompt: its layout (no cursor; rows
+   first .. last, the Square glyph and the words), chained after the file
+   select by the install, -1 when not built (tests) */
+int ui_settings_states_prompt_layout(void);
+/* After a load: the menu closes its page and puts the cursor on the pause
+   menu's Save states row (the restored game is on the pause layout). */
+void ui_settings_sync_after_state_load(void);
+/* F6 (port/platform/hotkeys.h ICO_HOTKEY_STATES_PAGE, the window's key
+   down): startOpensPause is mouse_look.h ico_start_opens_pause's answer.
+   In play the press is latched and 1 returned: the window then taps Start
+   (the pause menu opens) and the menu opens the page once its fade-in is
+   done; on the pause menu the page opens the same way; on the Save states
+   page (from the pause menu or Extras) the page closes into the game, as
+   the pause menu's Back does.  A latch not taken within 60 frames is
+   dropped.  Ignored (0, a "hotkeys: F6 ignored: <why>" line): without the
+   page's host, in photo mode, on the title, where the game cannot pause,
+   anywhere else, and on Android. */
+int ui_settings_states_key(int startOpensPause);
 /* Main > Save a picture for a bug report (always shown, directly above
    Developer mode: a player's row, no developer mode needed): fn arms the host's frame dump (window_host.c frame_dump: the
    picture, the frame's rd dump and the log in a zip in the dumps folder,
@@ -429,6 +583,12 @@ typedef enum UiSettingsPage {
     /* Developer (main page, before Back): Developer mode, Dump textures,
        Dump models, Back */
     UI_PAGE_DEVELOPER,
+    /* Save states: the pause menu's Save states row and the Continue
+       screen's Square prompt open it (both only built while a UiStatesHost
+       is set before ui_settings_install): four
+       cards, each a picture, "Slot N" with its action, the area and play
+       time, and the date */
+    UI_PAGE_STATES,
     UI_PAGE_COUNT
 } UiSettingsPage;
 
@@ -457,11 +617,17 @@ typedef enum UiSettingsOpt {
     UI_OPT_VIDEO_MODE,
     /* Effects ([video] effect_*; On/Off, outside the preset) */
     UI_OPT_EFFECT_GLOW,
+    /* [video] effect_glow_mode: Original/Smooth, default Original; greyed under Frame
+       rate Original and with Glow off; part of the Preset (Enhanced sets Smooth) */
+    UI_OPT_EFFECT_GLOW_SMOOTH,
     UI_OPT_EFFECT_DEPTH_OF_FIELD,
     UI_OPT_EFFECT_SOFTENING,
     /* [video] effect_motion_blur and effect_motion_blur_mode: Off/Original/Smooth,
        default Original */
     UI_OPT_EFFECT_MOTION_BLUR,
+    /* [video] effect_motion_blur_strength: 10..100 % in tens, default 100 % (the
+       PS2's); shown only while Motion blur is not Off */
+    UI_OPT_EFFECT_MOTION_BLUR_STRENGTH,
     UI_OPT_EFFECT_FOG,
     UI_OPT_EFFECT_WATER, /* [video] effect_water_sharp: Original/Sharp, default Original */
     UI_OPT_EFFECT_CINEMATIC_BARS,
@@ -493,9 +659,12 @@ typedef enum UiSettingsOpt {
     UI_OPT_STICK_FIX,
     UI_OPT_YORDA,
     UI_OPT_PIT_TIME,       /* [gameplay] pit_time: Half, Original, Longer, Double, Triple */
+    UI_OPT_SHADOW_SPEED,   /* [gameplay] shadow_speed: Slower, Original, Faster, Fastest */
     UI_OPT_DOOR_FIX,       /* [gameplay] door_fix, the doorway fix */
+    UI_OPT_YORDA_TRIPS,    /* [gameplay] yorda_trips (port/game/yorda_trip.h) */
     UI_OPT_NATURAL_CHAINS, /* [gameplay] natural_chains (port/render/rd_chain.h) */
     UI_OPT_SKIP_OPENING,   /* [gameplay] skip_opening: the boot starts at the title */
+    UI_OPT_SECOND_CARD,    /* [gameplay] second_memory_card: a card in port 1 */
     UI_OPT_FILM_EFFECT,    /* the game's optionScreenMode 0..4, once cleared */
     UI_OPT_PLAYERS,        /* the game's girlControlMode, 1 or 2, once cleared */
     UI_OPT_ACH_POPUPS,     /* [game] achievements, On/Off: the achievement pop-ups, on the
@@ -559,6 +728,9 @@ typedef enum UiSettingsOpt {
     UI_OPT_GPU_REMOVE,
     /* Graphics page: the stepped Graphics API row (config key video.backend) */
     UI_OPT_GRAPHICS_API,
+    /* Graphics page: the stepped Graphics card row (config key
+       video.adapter; shown with two or more cards) */
+    UI_OPT_GRAPHICS_ADAPTER,
     /* Graphics page: Apply (shown while the row's value is not the renderer
        running and the host is set), then the countdown's Keep and Revert
        (shown only in it) */
@@ -571,6 +743,10 @@ typedef enum UiSettingsOpt {
     /* Extras > Export textures (shown from the title while a host is set,
        ui_settings_set_texture_export_host); Stop exporting while it runs */
     UI_OPT_EXTRAS_EXPORT_TEXTURES,
+    /* Extras > Back up your data and Restore from a backup (shown from the
+       title while a host is set, ui_settings_set_backup_host) */
+    UI_OPT_EXTRAS_BACKUP,
+    UI_OPT_EXTRAS_RESTORE,
     /* Controls > Touch screen's actions: Edit layout (opens
        UI_PAGE_TOUCH_LAYOUT; locked while Touch controls is Off or without
        an editor host), Reset layout (the posture the phone is in now) and
@@ -584,6 +760,9 @@ typedef enum UiSettingsOpt {
     /* Game variants' Debug menu: a press row, shown while Developer mode
        is on (ico_variants_debug_menu_pressed) */
     UI_OPT_VAR_DEBUG_MENU,
+    /* Save states page: a slot's card (its label row; the action word is
+       the value row) */
+    UI_OPT_STATE_SLOT,
 #if ICO_RC_TOOLS
     /* Main's row "Share a bug report" below it, rc builds on Android alone
        (ui_settings_set_share_report_handler) */

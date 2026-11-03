@@ -252,7 +252,7 @@ static bool dx_write_resource(const RhiBindSlot *s, const RhiBinding *b,
         return true;
     }
     case RHI_BIND_STORAGE_BUFFER: {
-        /* StructuredBuffer<float4> (vu_common.hlsli): 16-byte elements */
+        /* StructuredBuffer<uint4> (vu_common.hlsli): 16-byte elements */
         DxBuffer *buf = dx_get_buffer(b->buffer);
         /* the offset is checked first: past the end, buf->size - b->offset
            wraps and a huge offset + size would pass the bound */
@@ -886,4 +886,28 @@ void rhi_destroy_pipeline(RhiPipeline h)
     }
     dx_defer((IUnknown *)p->pso);
     d3dp_pool_release(&g_dx.pipelines, h.id);
+}
+
+/* Compiled while the caller goes on (rhi.h rhi_create_pipelines_begin):
+ * not offered here (the background finisher is for the Vulkan phones whose
+ * start-up set stopped at the free-memory floor) */
+RhiPipelineJobs *rhi_create_pipelines_begin(const RhiPipelineDesc *descs, uint32_t n,
+                                            uint32_t maxThreads, bool lowPriority)
+{
+    (void)descs;
+    (void)n;
+    (void)maxThreads;
+    (void)lowPriority;
+    return NULL;
+}
+
+bool rhi_create_pipelines_end(RhiPipelineJobs *jobs, bool wait, RhiPipeline *out, float *ms,
+                              uint32_t *threads)
+{
+    (void)jobs;
+    (void)wait;
+    (void)out;
+    (void)ms;
+    (void)threads;
+    return false;
 }

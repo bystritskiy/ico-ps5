@@ -87,6 +87,8 @@ void ico_video_defaults_for(IcoVideoOptions *o, int android)
     o->effectSoftening = 1;
     o->effectMotionBlur = 1;
     o->effectMotionBlurSmooth = 0;
+    o->effectMotionBlurStrength = ICO_MOTION_BLUR_STRENGTH_MAX;
+    o->effectGlowSmooth = 0;
     o->effectFog = 1;
     o->effectCinematicBars = 1;
     o->effectWaterSharp = 0;
@@ -298,7 +300,7 @@ const char *ico_video_filter_name(int filter)
     return filter >= 0 && filter < 3 ? kFilter[filter] : kFilter[0];
 }
 
-int ico_video_preset(const IcoVideoOptions *o)
+int ico_video_preset_rows(const IcoVideoOptions *o)
 {
     if (o->resW != 0 || o->resH != 0) {
         return ICO_VIDEO_CUSTOM;
@@ -307,15 +309,28 @@ int ico_video_preset(const IcoVideoOptions *o)
         !o->fullHeight) {
         return ICO_VIDEO_ORIGINAL;
     }
-    /* Enhanced's resolution: the window's, "auto" on Android; on
-       Android a saved Enhanced with "window" (a file written before "auto"
-       existed) is still Enhanced, so the player keeps the preset's name (the shortcut writes
-       "auto") */
+    /* Enhanced's resolution: the window's; on Android a saved Enhanced with
+       "auto" (a file written while the preset chose Auto there, v0.9.x) is
+       still Enhanced, so the player keeps the preset's name */
     if ((o->resScale == 0 || (s_android && o->resScale == ICO_RES_AUTO)) &&
         o->aspect == ICO_ASPECT_AUTO && o->filter == ICO_FILTER_ANISOTROPIC && o->fullHeight) {
         return ICO_VIDEO_ENHANCED;
     }
     return ICO_VIDEO_CUSTOM;
+}
+
+/* the rows and Glow between frames together: Original is Original with
+   the game's own glow, Enhanced is Enhanced with the Smooth glow, any other
+   mix is Custom */
+int ico_video_preset(const IcoVideoOptions *o)
+{
+    const int p = ico_video_preset_rows(o);
+
+    if ((p == ICO_VIDEO_ORIGINAL && o->effectGlowSmooth) ||
+        (p == ICO_VIDEO_ENHANCED && !o->effectGlowSmooth)) {
+        return ICO_VIDEO_CUSTOM;
+    }
+    return p;
 }
 
 static void set_preset(IcoVideoOptions *o, int preset, int android)
@@ -330,17 +345,24 @@ static void set_preset(IcoVideoOptions *o, int preset, int android)
         /* the PS2 picture has no anti-aliasing, and its frame's shape */
         o->antiAlias = ICO_AA_OFF;
         o->fullPixel = 0;
+        o->effectGlowSmooth = 0;
     } else if (preset == ICO_VIDEO_ENHANCED) {
-        /* the window's size (on Android "auto": the window's, lowered
-           while the phone falls behind), its aspect, anisotropic, full
-           height */
+        /* the window's size on every platform (Android included: Auto, the
+           size lowered while the phone falls behind, is a choice the player
+           makes in the Resolution row, never the preset's: a picture that
+           changes size on its own confuses more than it helps), its aspect,
+           anisotropic, full height */
+        (void)android;
         o->resW = o->resH = 0;
-        o->resScale = android ? ICO_RES_AUTO : 0;
+        o->resScale = 0;
         o->aspect = ICO_ASPECT_AUTO;
         o->filter = ICO_FILTER_ANISOTROPIC;
         o->fullHeight = 1;
         /* the window's own pixels (rd_present.c rd__apply_display) */
         o->fullPixel = 1;
+        /* the glow made again for every frame shown (the Effects page's
+           Glow between frames) */
+        o->effectGlowSmooth = 1;
     }
 }
 
@@ -438,6 +460,8 @@ static void sanitize(IcoVideoOptions *o)
     o->effectSoftening = !!o->effectSoftening;
     o->effectMotionBlur = !!o->effectMotionBlur;
     o->effectMotionBlurSmooth = !!o->effectMotionBlurSmooth;
+    o->effectMotionBlurStrength = ico_video_motion_blur_strength_clamp(o->effectMotionBlurStrength);
+    o->effectGlowSmooth = !!o->effectGlowSmooth;
     o->effectFog = !!o->effectFog;
     o->effectCinematicBars = !!o->effectCinematicBars;
     o->effectWaterSharp = !!o->effectWaterSharp;
@@ -449,11 +473,12 @@ static void read_config(void)
     IcoVideoOptions o;
     const char *s;
     int preset;
+    int glowKey; /* effect_glow_mode is in the file */
 
     ico_video_defaults(&o);
-    /* no key: Enhanced's resolution ("auto" on Android) */
+    /* no key: Enhanced's resolution, the window's size on every platform */
     {
-        const char *dres = s_android ? "auto" : "window";
+        const char *dres = "window";
 
         if (ico_video_parse_resolution(ico_config_get_string("video.resolution", dres), &o) != 0) {
             ico_video_parse_resolution(dres, &o);
@@ -555,26 +580,58 @@ static void read_config(void)
         o.effectMotionBlurSmooth = 0;
         fprintf(stderr, "video: effect_motion_blur_mode not understood; \"original\" used\n");
     }
+    {
+        /* no key (a file from before the row): 100, the game's own */
+        const long long v =
+            ico_config_get_int("video.effect_motion_blur_strength", ICO_MOTION_BLUR_STRENGTH_MAX);
+        o.effectMotionBlurStrength = ico_video_motion_blur_strength_clamp(v < -1000  ? -1000
+                                                                          : v > 1000 ? 1000
+                                                                                     : (int)v);
+        if ((long long)o.effectMotionBlurStrength != v) {
+            fprintf(stderr,
+                    "video: effect_motion_blur_strength %lld is not 10..100 in tens; %d used\n", v,
+                    o.effectMotionBlurStrength);
+        }
+    }
     o.effectFog = ico_config_get_bool("video.effect_fog", 1);
     o.effectCinematicBars = ico_config_get_bool("video.effect_cinematic_bars", 1);
     o.effectWaterSharp = ico_config_get_bool("video.effect_water_sharp", 0);
     /* the depth handed to an effects program (ReShade) */
     o.effectsDepth = ico_config_get_bool("video.effects_depth", 1);
+    /* Glow between frames: an explicit key wins; no key (a file from before
+       the row) takes the Enhanced rows' Smooth below, once the preset is
+       settled */
+    {
+        const char *gm = ico_config_get_string("video.effect_glow_mode", "");
+
+        glowKey = gm != NULL && gm[0] != '\0';
+        if (glowKey && ico_video_parse_motion_blur_mode(gm, &o.effectGlowSmooth) != 0) {
+            o.effectGlowSmooth = 0;
+            fprintf(stderr, "video: effect_glow_mode not understood; \"original\" used\n");
+        }
+    }
     /* the preset is a shortcut over the four rows: only "enhanced" and
        "custom" take them as written; "original", no key, or anything else
        (a misspelling) is the PS2 picture whatever they say */
     s = ico_config_get_string("video.preset", "original");
     if (s == NULL || !(lower_eq(s, "enhanced") || lower_eq(s, "custom"))) {
-        const int fullPixel = o.fullPixel; /* a saved Full pixel is kept */
+        const int fullPixel = o.fullPixel;         /* a saved Full pixel is kept */
+        const int glowSmooth = o.effectGlowSmooth; /* so is a saved glow mode */
 
         ico_video_set_preset(&o, ICO_VIDEO_ORIGINAL);
         o.fullPixel = fullPixel;
+        o.effectGlowSmooth = glowSmooth;
+    }
+    if (!glowKey) {
+        o.effectGlowSmooth = ico_video_preset_rows(&o) == ICO_VIDEO_ENHANCED;
+        fprintf(stderr, "video: effect_glow_mode not in the file: %s\n",
+                o.effectGlowSmooth ? "smooth (the Enhanced preset)" : "original");
     }
     /* Full pixel without its key (a new config, or one from before the
        option was saved): on under the Enhanced rows, off otherwise; a saved
        value is kept as it is */
     if (ico_config_get_bool("video.full_pixel", 0) != ico_config_get_bool("video.full_pixel", 1)) {
-        o.fullPixel = ico_video_preset(&o) == ICO_VIDEO_ENHANCED;
+        o.fullPixel = ico_video_preset_rows(&o) == ICO_VIDEO_ENHANCED;
     }
     sanitize(&o);
     s_opt = o;
@@ -586,12 +643,12 @@ static void read_config(void)
 
         fprintf(stderr,
                 "video: %s preset: resolution %s, aspect %s, texture filter %s, %s "
-                "height, framerate %s, motion blur %s\n",
+                "height, framerate %s, motion blur %s, glow %s\n",
                 preset == ICO_VIDEO_ENHANCED ? "Enhanced" : "Custom",
                 ico_video_resolution_name(&o, res, sizeof(res)), ico_video_aspect_name(o.aspect),
                 ico_video_filter_name(o.filter), o.fullHeight ? "full" : "half",
                 ico_video_framerate_name(o.framerate, fr, sizeof(fr)),
-                ico_video_motion_blur_name(&o));
+                ico_video_motion_blur_name(&o), ico_video_glow_name(&o));
     } else if (!o.effectMotionBlur || o.effectMotionBlurSmooth) {
         /* the Original preset's line is the window's; a motion blur that
            is not the game's own is named here too */
@@ -687,6 +744,9 @@ int ico_video_save(void)
     r |= ico_config_set_bool("video.effect_motion_blur", o.effectMotionBlur);
     r |= ico_config_set_string("video.effect_motion_blur_mode",
                                o.effectMotionBlurSmooth ? "smooth" : "original");
+    r |= ico_config_set_int("video.effect_motion_blur_strength", o.effectMotionBlurStrength);
+    r |=
+        ico_config_set_string("video.effect_glow_mode", o.effectGlowSmooth ? "smooth" : "original");
     r |= ico_config_set_bool("video.effect_fog", o.effectFog);
     r |= ico_config_set_bool("video.effect_cinematic_bars", o.effectCinematicBars);
     r |= ico_config_set_bool("video.effect_water_sharp", o.effectWaterSharp);
@@ -795,6 +855,39 @@ int ico_video_effect_motion_blur_smooth(void)
     return s_opt.effectMotionBlur && s_opt.effectMotionBlurSmooth;
 }
 
+int ico_video_effect_motion_blur_strength(void)
+{
+    if (!s_read) {
+        read_config();
+    }
+    return s_opt.effectMotionBlurStrength;
+}
+
+int ico_video_motion_blur_strength_clamp(int v)
+{
+    if (v <= ICO_MOTION_BLUR_STRENGTH_MIN) {
+        return ICO_MOTION_BLUR_STRENGTH_MIN;
+    }
+    if (v >= ICO_MOTION_BLUR_STRENGTH_MAX) {
+        return ICO_MOTION_BLUR_STRENGTH_MAX;
+    }
+    return (v + ICO_MOTION_BLUR_STRENGTH_STEP / 2) / ICO_MOTION_BLUR_STRENGTH_STEP *
+           ICO_MOTION_BLUR_STRENGTH_STEP;
+}
+
+int ico_video_effect_glow_smooth(void)
+{
+    if (!s_read) {
+        read_config();
+    }
+    return s_opt.effectGlow && s_opt.effectGlowSmooth;
+}
+
+const char *ico_video_glow_name(const IcoVideoOptions *o)
+{
+    return !o->effectGlow ? "off" : o->effectGlowSmooth ? "smooth" : "original";
+}
+
 const char *ico_video_motion_blur_name(const IcoVideoOptions *o)
 {
     return !o->effectMotionBlur ? "off" : o->effectMotionBlurSmooth ? "smooth" : "original";
@@ -850,7 +943,7 @@ int ico_video_original(void)
     if (!s_read) {
         read_config();
     }
-    return ico_video_preset(&s_opt) == ICO_VIDEO_ORIGINAL;
+    return ico_video_preset_rows(&s_opt) == ICO_VIDEO_ORIGINAL;
 }
 
 int ico_video_anti_alias(void)
@@ -858,7 +951,7 @@ int ico_video_anti_alias(void)
     if (!s_read) {
         read_config();
     }
-    return ico_video_preset(&s_opt) == ICO_VIDEO_ORIGINAL ? ICO_AA_OFF : s_opt.antiAlias;
+    return ico_video_preset_rows(&s_opt) == ICO_VIDEO_ORIGINAL ? ICO_AA_OFF : s_opt.antiAlias;
 }
 
 void ico_video_set_anti_alias(int aa)
@@ -989,5 +1082,9 @@ int ico_video_changes_text(const IcoVideoOptions *was, const IcoVideoOptions *no
                   o->dumpModels ? "on" : "off");
     changes_field(out, size, "motion blur", ico_video_motion_blur_name(p),
                   ico_video_motion_blur_name(o));
+    snprintf(a, sizeof(a), "%d %%", p->effectMotionBlurStrength);
+    snprintf(b, sizeof(b), "%d %%", o->effectMotionBlurStrength);
+    changes_field(out, size, "motion blur strength", a, b);
+    changes_field(out, size, "glow", ico_video_glow_name(p), ico_video_glow_name(o));
     return (int)strlen(out);
 }

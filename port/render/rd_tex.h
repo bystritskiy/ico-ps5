@@ -29,11 +29,24 @@
  *             which is also what the PS2 shows, since its DMA chain reads the
  *             CLUT at kick time); otherwise the old RdTex is retired and
  *             destroyed two rdtex_frame_tick calls later, after any frame
- *             that may reference it has been replayed.
+ *             that may reference it has been replayed.  An id that gets a
+ *             different picture (Texture.c's slot loaded with the next
+ *             stage's texture) is dropped first by the caller
+ *             (rdtex_drop), so a frame recorded before keeps the old
+ *             texels: the in-place update is for the same picture's new
+ *             content (a CLUT scroll, a recolour) alone.
  *
  * Mips: an entry holds the one level the caller decodes (TexExt.level).
  * The replay builds and uploads the further levels the texture filter
  * samples (rd_upload.c uploadMips, rdtex_build_mip_chain).
+ *
+ * Decoding off the game thread: a store makes the entry and its rd texture
+ * at once and its decode runs on the decode pool's worker threads from a
+ * copy of the image's bytes (rd_tex_decode.h); the pixels go into the
+ * texture at rdtex_settle, which the replay, the frame dump and
+ * rd_shutdown call before they read any.  The result is the synchronous
+ * store's byte for byte, in the same order; [dev] texture_decode_threads =
+ * 0 decodes on the game thread as before (docs/port/TEXTURES.md).
  *
  * All calls from the game fiber, like the rest of rd.
  */
@@ -91,15 +104,17 @@ typedef struct RdTexSampler {
 } RdTexSampler;
 
 typedef struct RdTexCacheStats {
-    uint32_t entries;  /* live entries */
-    uint32_t decodes;  /* images decoded (creates + updates) */
-    uint32_t creates;  /* rd textures created */
-    uint32_t updates;  /* re-expansions into an existing rd texture */
-    uint32_t hits;     /* rdtex_find hits */
-    uint32_t misses;   /* rdtex_find misses */
-    uint32_t retired;  /* rd textures queued for destruction */
-    uint32_t failures; /* images that could not be decoded */
-    uint32_t replaced; /* texture packs: entries given a replacement (rdtex_replace) */
+    uint32_t entries;   /* live entries */
+    uint32_t decodes;   /* images decoded (creates + updates) */
+    uint32_t creates;   /* rd textures created */
+    uint32_t updates;   /* re-expansions into an existing rd texture */
+    uint32_t hits;      /* rdtex_find hits */
+    uint32_t misses;    /* rdtex_find misses */
+    uint32_t retired;   /* rd textures queued for destruction */
+    uint32_t failures;  /* images that could not be decoded */
+    uint32_t replaced;  /* texture packs: entries given a replacement (rdtex_replace) */
+    uint32_t pooled;    /* decodes queued to the decode pool's threads */
+    uint32_t fallbacks; /* decodes the game thread ran with the pool on (its queue full) */
 } RdTexCacheStats;
 
 /* ------------------------------------------------------------ decoding */
@@ -205,7 +220,8 @@ bool rd__tex_alpha_scan(uint32_t id, RdTexAlphaScan *out);
 RdTex rdtex_find(uint32_t id, uint32_t gen, int texa);
 /* Decode im for (id, gen, texa) and return its texture (see "update"
  * above).  smp may be null.  {0} when rd is not initialised or the format
- * is unknown. */
+ * is unknown.  The texels reach the texture at the next rdtex_settle (at
+ * once with the pool off); im's bytes may change after the call. */
 RdTex rdtex_store(uint32_t id, uint32_t gen, int texa, const RdTexImage *im,
                   const RdTexSampler *smp, const char *debugName);
 /* rdtex_store for a texture the GS samples mipmapped (TEX1's MMIN 2..5
@@ -226,6 +242,20 @@ RdTex rdtex_store(uint32_t id, uint32_t gen, int texa, const RdTexImage *im,
  * not at the GS's level: the pack's pictures are not the TIM2's. */
 RdTex rdtex_store_levels(uint32_t id, uint32_t gen, int texa, const RdTexImage *ims, uint32_t n,
                          const RdTexSampler *smp, const char *debugName);
+/* Every decode the stores queued is finished (the queued ones no worker
+ * took are decoded on this thread) and its pixels and levels put into its
+ * texture, in the stores' order.  The replay's uploads, the frame dump,
+ * rd_shutdown and rdtex_reset call it; a caller that reads a texture's CPU
+ * texels (RdTexRec.pixels) right after a store does too.  Logs a wait over
+ * 20 ms: "rd: waited N ms for texture decodes (...)". */
+void rdtex_settle(void);
+/* The decode pool's worker threads: n 0 (every decode on the game thread),
+ * 1..4, or -1 automatic (2, 1 on a machine with 2 hardware threads or
+ * fewer); over [dev] texture_decode_threads and the default for the rest
+ * of the run (the tests).  Settles first when the count changes. */
+void rdtex_set_decode_threads(int n);
+/* The pool's worker threads in force (0: decodes on the game thread). */
+int rdtex_decode_threads(void);
 /* The sampler state stored with the entry for (id, texa), or null. */
 const RdTexSampler *rdtex_sampler(uint32_t id, int texa);
 /* The texture id is gone (tex_FreeTexture): retire its entries. */

@@ -57,7 +57,10 @@
  *               ended while"), deletes it and is lazy; a lazy run keeps its
  *               notes and a line between them, and keeps the file at a
  *               clean exit (the next start is lazy); a normal end of the
- *               set deletes it; a restart after a driver crash logs it but
+ *               set deletes it; the creation limit's stall mark (review
+ *               finding 2) makes every start of its version take the plain
+ *               VU entries, and a start of another version deletes it;
+ *               a restart after a driver crash logs it but
  *               is not lazy; a file another version wrote is not lazy; a
  *               lazy run's clean exit is logged as such at the next start,
  *               not as an ended run; a file cut short after a write (the
@@ -150,7 +153,9 @@
  *               static functions as its object's;
  *   - report:   the segv and watchdog cases write logs/report-<stamp>.zip
  *               (report.h), read back with miniz: report.txt names the end,
- *               the summary line, the report block with its symbol lines,
+ *               the summary line (longer than a log line, whole in the
+ *               summary and in the log's lines), the report block with its
+ *               symbol lines,
  *               and ico-pc.log is the log; the crash's report.txt is
  *               written to diag_test_report.txt (an example); the prune
  *               keeps the newest 5;
@@ -880,6 +885,10 @@ static void activity_child(const char *mode, const char *log)
             _exit(0);
         }
         child_quit(0);
+    } else if (strcmp(mode, "actstall") == 0) {
+        /* review finding 2: the stall mark read at the start */
+        ico_diag_log("test: stall end %d", ico_diag_startup_stall_end());
+        child_quit(0);
     } else if (strcmp(mode, "actclean") == 0) {
         ico_diag_startup_activity_record(ICO_DIAG_ACTIVITY_STARTUP);
         ico_diag_set_activity("creating the start-up pipelines (1 of 9)");
@@ -997,7 +1006,9 @@ static void gpu_dump_stub(void)
 }
 
 /* "hang": the dump noted; "hangnodump": no dump function; "hangnot": no
-   wait for the GPU in progress. The later limit (1 s) ends the run. */
+   wait for the GPU in progress. The later limit (1 s) ends the run.
+   "hanglimit": the GPU hang limit (2 s) ends it before the later limit
+   (60 s), the dump noted. */
 static void hang_child(const char *mode, const char *log)
 {
     char path[300];
@@ -1005,10 +1016,17 @@ static void hang_child(const char *mode, const char *log)
     ico_diag_set_version("test 1");
     (void)ico_diag_startup_activity_begin(path, 0);
     gpu_fake_waiting = strcmp(mode, "hangnot") != 0;
-    ico_diag_set_gpu_hang(gpu_fake, strcmp(mode, "hang") == 0 ? gpu_dump_stub : NULL);
+    ico_diag_set_gpu_hang(gpu_fake, strcmp(mode, "hang") == 0 || strcmp(mode, "hanglimit") == 0
+                                        ? gpu_dump_stub
+                                        : NULL);
     ico_diag_set_fatal_ui(loss_box, NULL);
     fake_ticks = 1;
-    ico_diag_start(0, 1);
+    if (strcmp(mode, "hanglimit") == 0) {
+        ico_diag_set_gpu_hang_limit(2.0);
+        ico_diag_start(0, 60);
+    } else {
+        ico_diag_start(0, 1);
+    }
     ico_diag_present_enter();
     pause_ms(5000);
     ico_diag_log("test: the watchdog did not fire");
@@ -1045,7 +1063,14 @@ static void run_child(const char *mode, const char *log)
 
         ico_report_set_paths(dir, NULL, dir, NULL);
         ico_diag_set_version("test (commit 0)");
-        ico_diag_set_summary("version test; platform the test; GPU none");
+        /* longer than a log line (1024 bytes): the summary is written
+           whole (diag_host.c SUMMARY_MAX_BYTES) */
+        char pad[1201];
+
+        memset(pad, 'x', sizeof pad - 1);
+        pad[sizeof pad - 1] = '\0';
+        ico_diag_set_summary("version test; platform the test; GPU none; %s; the summary's end",
+                             pad);
     }
     if (strcmp(mode, "limited") == 0) {
         for (unsigned int i = 1; i <= 250; i++) {
@@ -1540,6 +1565,8 @@ int main(int argc, char **argv)
     unsetenv("ICO_TEST_REPORT_DIR");
     s = read_file(log);
     CHECK(r == 3);
+    CHECK(strstr(s, "ico_pc: summary: version test; platform the test; GPU none; xxx") != NULL &&
+          strstr(s, "xxx; the summary's end\n") != NULL);
     /* the symbol lines from diag_test.map, after the raw ones */
     CHECK(strstr(s, "ico_pc: symbols from diag_test.map (each offset above in diag_test, in "
                     "order):\n") != NULL);
@@ -1567,11 +1594,17 @@ int main(int argc, char **argv)
             FILE *ex = fopen("diag_test_report.txt", "wb");
 
             CHECK(strstr(txt, "what ended the run: SIGSEGV") != NULL);
-            CHECK(strstr(txt, "summary: version test; platform the test; GPU none\n") != NULL);
+            CHECK(strstr(txt, "summary: version test; platform the test; GPU none; xxx") != NULL);
+            CHECK(strstr(txt, "xxx; the summary's end\n") != NULL);
             /* issue 128: the process's and the device's memory */
             CHECK(strstr(txt, "\nmemory: memory ") != NULL);
             CHECK(strstr(txt, "the last ico_pc:/window:/rd: lines before the report:\n") != NULL);
             CHECK(strstr(txt, "ico_pc: summary: version test") != NULL);
+            /* the log's summary line whole, past 1024 bytes, in the ring too */
+            CHECK(strstr(txt, "ico_pc: summary: version test; platform the test; GPU none; xxx") !=
+                      NULL &&
+                  strstr(strstr(txt, "ico_pc: summary: version test"), "; the summary's end\n") !=
+                      NULL);
             CHECK(strstr(txt, "ico_pc: CRASH: SIGSEGV") != NULL);
             CHECK(strstr(txt, "ico_pc: symbols from diag_test.map") != NULL);
             CHECK(strstr(txt, "achievements.toml: (no stages line)") != NULL);
@@ -2015,6 +2048,32 @@ int main(int argc, char **argv)
         if (fails) {
             printf("--- hangnot log ---\n%s\n", read_file(log));
         }
+        remove(act);
+        remove(ends);
+        /* the GPU hang limit (issue 123: ico_diag_set_gpu_hang_limit, 2 s
+           here): the GPU hang's end comes at the limit, not at the later
+           limit (60 s), its WATCHDOG line naming the submission and the
+           limit, the rest the hang's (the dump, the hang's loss line) */
+        r = run(argv[0], "hanglimit", log);
+        s = read_file(log);
+        CHECK(r == 4);
+        CHECK(strstr(s, "GPU hang limit 2.0 s for one wait for the GPU (0 = off)") != NULL);
+        CHECK(strstr(s, "ico_pc: WATCHDOG: the GPU: submission 263 not finished after 60 s "
+                        "(limit 2 s); the newest is 263, the newest seen finished 262\nico_pc: "
+                        "the graphics driver did not finish the picture (submission 263 has not "
+                        "finished after a 60 s wait)\n") != NULL);
+        CHECK(strstr(s, "test: hang dump\n") != NULL);
+        CHECK(strstr(s, "ico_pc: the run ended: the graphics driver stopped responding "
+                        "(watchdog)\n") != NULL);
+        CHECK(strstr(s, "test: the watchdog did not fire") == NULL);
+        CHECK(strstr(s, "no new Main tick") == NULL);
+        CHECK(strcmp(read_file(act),
+                     "test 1\n\nloss dump (the driver hung): /logs/loss-hang.zip") == 0);
+        if (fails) {
+            printf("--- hanglimit log ---\n%s\n", read_file(log));
+        }
+        remove(act);
+        remove(ends);
         clear_dir(rdir);
         rmdir(rdir);
     }
@@ -2125,6 +2184,46 @@ int main(int argc, char **argv)
                 fclose(f);
             }
         }
+        /* review finding 2: the creation limit's mark (Android writes it;
+           here by hand): every start of the version that wrote it takes
+           the plain VU entries and keeps it; a start of another version
+           deletes it and says so */
+        {
+            char stall[320];
+            FILE *f;
+            snprintf(stall, sizeof stall, "%s-stall.txt", act);
+            f = fopen(stall, "wb");
+            if (f != NULL) {
+                fputs("test 1\ncreating pipeline vu_main_vs merge 7\n", f);
+                fclose(f);
+            }
+            r = run(argv[0], "actstall", log);
+            s = read_file(log);
+            CHECK(r == 0);
+            CHECK(strstr(s, "test: stall end 1\n") != NULL);
+            CHECK(strstr(s, "ico_pc: a run of this version ended when the graphics driver did not "
+                            "return from creating a pipeline (creating pipeline vu_main_vs merge "
+                            "7): every start of this version takes the plain VU vertex shaders") !=
+                  NULL);
+            r = run(argv[0], "actstall", log);
+            CHECK(strstr(read_file(log), "test: stall end 1\n") != NULL);
+            setenv("ICO_TEST_ACT_VERSION", "test 2", 1);
+            r = run(argv[0], "actstall", log);
+            unsetenv("ICO_TEST_ACT_VERSION");
+            s = read_file(log);
+            CHECK(strstr(s, "test: stall end 0\n") != NULL);
+            CHECK(strstr(s, "ico_pc: version test 1 ended a run when the graphics driver did not "
+                            "return from creating a pipeline (creating pipeline vu_main_vs merge "
+                            "7); this version tries the extended VU vertex shaders again") != NULL);
+            f = fopen(stall, "rb");
+            CHECK(f == NULL);
+            if (f != NULL) {
+                fclose(f);
+            }
+            r = run(argv[0], "actstall", log);
+            CHECK(strstr(read_file(log), "test: stall end 0\n") != NULL);
+            remove(act);
+        }
         /* a lazy run's clean exit keeps the file: the next start of the
            same version is lazy too */
         run(argv[0], "actrecord", log);
@@ -2151,8 +2250,8 @@ int main(int argc, char **argv)
         s = read_file(log);
         CHECK(r == 0);
         CHECK(strstr(s, "ico_pc: the previous run ended while: " BATCH_NOTE
-                        " (version test 1); a Vulkan renderer drops the graphics cache of that "
-                        "version\n") != NULL);
+                        " (version test 1); a Vulkan renderer keeps that version's graphics "
+                        "cache when both have the same shaders\n") != NULL);
         CHECK(strstr(s, "trying the start-up set again") == NULL);
         CHECK(strstr(s, "test: lazy 0") != NULL);
         run(argv[0], "actrecord", log);
@@ -2165,8 +2264,8 @@ int main(int argc, char **argv)
             strstr(s,
                    "ico_pc: the previous run (version test 1) created the pipelines as the "
                    "frames needed them; trying the start-up set again on test 2 (a Vulkan renderer "
-                   "drops the graphics cache of that version; this start prepares the graphics "
-                   "from nothing)\n") != NULL);
+                   "keeps that version's graphics cache when both have the same shaders, else "
+                   "this start prepares the graphics from nothing)\n") != NULL);
         CHECK(strstr(s, "test: lazy 0") != NULL);
         {
             FILE *f = fopen(act, "rb");
@@ -2293,8 +2392,8 @@ int main(int argc, char **argv)
         s = read_file(log);
         CHECK(strstr(s, "test: lazy 0\n") != NULL);
         CHECK(strstr(s, "ico_pc: the previous run ended while: " NOTE_2D
-                        " (version test 1); a Vulkan renderer drops the graphics cache of that "
-                        "version\n") != NULL);
+                        " (version test 1); a Vulkan renderer keeps that version's graphics "
+                        "cache when both have the same shaders\n") != NULL);
         CHECK(strstr(s, "trying the start-up set again") == NULL);
         CHECK(strstr(s, "this start only makes the pipelines as the game needs them") != NULL);
         CHECK(strstr(s, "test: config write") == NULL);

@@ -30,11 +30,19 @@
  *          x 64..160: a cell, then two LERP draws, A over 64..128 and B over
  *          96..160: where they overlap B must blend over A's result;
  *          x 160..256: a cell, then one glyph quad through the text sheet's
- *          shader (font_sheet_ps, the largest destination-read shader);
+ *          shader, font_sheet_ps, the largest destination-read shader (a
+ *          1x sheet kept off the bake, RdTexRec.sheetShader: the pixels
+ *          the baked 1x path draws);
  *   row 2  x 0..64: the after cell, opaque (ABE 0), drawn after every
  *          blended draw: it must be its own colour on an even and an odd
  *          texel column (a driver that keeps the LERP's dual-source
- *          equation with blending off leaves the odd one undefined).
+ *          equation with blending off leaves the odd one undefined);
+ *          x 64..128: a cell, then ONE LERP command of two sprites, A over
+ *          64..112 and B over 80..128: where they overlap B must blend over
+ *          A's result inside the one draw (the attachment read's
+ *          rasterization order, which the draw merge and GS state as
+ *          shader data rely on, rd_uber.c; the fixed-function blender
+ *          orders it in hardware).
  * The samples are the centres of the regions (six points in the glyph, two
  * neighbouring texel columns in the after cell), copied out of SCENE and
  * read back.  The modelled samples are
@@ -60,6 +68,12 @@
  *     fixed-function ok 1; kept by [dev] blend) on SCENE ...
  *   blend: fixed-function (self-test: fixed-function fail N -> two-pass
  *     ok 1; ...) on SCENE ...
+ *   blend: exact (attachment read) (self-test: attachment ok 0,
+ *     fixed-function ok 1; GS state as shader data) on SCENE ...
+ * Under GS state as shader data's auto ([dev] uber unset, no [dev] blend:
+ * rd_uber.c) a failing attachment read turns it off (rd__uber_off) and the
+ * fixed-function blend draws ("; GS state as shader data off: the colour
+ * read failed"); [dev] uber = on or [dev] blend = attachment keep it.
  *   blend: self-test: attachment ok 1 at glyph 0 (texel 1105,709):
  *     73,57,41,23 want 74,57,41,23
  * (lavapipe: the glyph one level off the fixed-function reference, the
@@ -128,7 +142,7 @@ static const uint8_t kAfterCell[4] = {170, 30, 110, 0x80};
 #define SHEET_H 12
 
 #define N_GLYPH 6
-#define N_SAMPLES (8 + 2 + 3 + N_GLYPH + 2)
+#define N_SAMPLES (8 + 2 + 3 + N_GLYPH + 1 + 2)
 
 typedef struct Sample {
     int16_t x, y;     /* GS pixels in the block */
@@ -206,6 +220,8 @@ static void buildSamples(void)
                                   {0},
                                   0};
     }
+    s_samples[n++] = (Sample){
+        96, 80, true, "one draw, second over first", 0, false, {ab[0], ab[1], ab[2], ab[3]}, 0};
     for (int k = 0; k < 2; k++) {
         s_samples[n++] = (Sample){32,
                                   80,
@@ -323,18 +339,23 @@ static bool buildFrame(RdFrame *f, uint32_t scene, uint32_t w, uint32_t h, RdTex
     const Rect row1[3] = {{0, 32, 64, 64, kLeafCell, 0, 0, 0, 0},
                           {64, 32, 160, 64, kOverCell, 0, 0, 0, 0},
                           {160, 32, 256, 64, kGlyphCell, 0, 0, 0, 0}};
-    ok = ok && pushSprites(f, bx, by, cells, 8) && pushSprites(f, bx, by, row1, 3);
+    const Rect row2 = {64, 64, 128, 96, kOverCell, 0, 0, 0, 0};
+    ok = ok && pushSprites(f, bx, by, cells, 8) && pushSprites(f, bx, by, row1, 3) &&
+         pushSprites(f, bx, by, &row2, 1);
     /* the blended draws */
     const Rect tintR = {0, 0, 256, 32, kTintSprite, 0, 0, 0, 0};
     const Rect leafR = {0, 32, 64, 64, kOverA /* colour unused: DECAL */, 0, 0, 2, 1};
     const Rect overA = {64, 32, 128, 64, kOverA, 0, 0, 0, 0};
     const Rect overB = {96, 32, 160, 64, kOverB, 0, 0, 0, 0};
     const Rect glyph = {168, 36, 248, 60, kGlyphInk, 0, 0, SHEET_W, SHEET_H};
+    /* the two sprites of one command (one draw) */
+    const Rect intra[2] = {{64, 64, 112, 96, kOverA, 0, 0, 0, 0},
+                           {80, 64, 128, 96, kOverB, 0, 0, 0, 0}};
     ok = ok && pushBlend(f, 1) && pushSprites(f, bx, by, &tintR, 1) &&
          pushTexture(f, leaf, RD_TEXFN_DECAL) && pushSprites(f, bx, by, &leafR, 1) &&
          rd__st_push(f, 0, RDC_TEXTURE_OFF) && pushSprites(f, bx, by, &overA, 1) &&
-         pushSprites(f, bx, by, &overB, 1) && pushTexture(f, sheet, RD_TEXFN_MODULATE) &&
-         pushSprites(f, bx, by, &glyph, 1);
+         pushSprites(f, bx, by, &overB, 1) && pushSprites(f, bx, by, intra, 2) &&
+         pushTexture(f, sheet, RD_TEXFN_MODULATE) && pushSprites(f, bx, by, &glyph, 1);
     /* the after cell: blending off after the dual-source LERPs */
     const Rect after = {0, 64, 64, 96, kAfterCell, 0, 0, 0, 0};
     ok = ok && rd__st_push(f, 0, RDC_TEXTURE_OFF) && pushBlend(f, 0) &&
@@ -540,6 +561,13 @@ static bool runSelftest(void)
     const RdTex leaf = rd_create_texture(2, 1, kLeafTex, RD_TEXA_80_80, "rd blend self-test leaf");
     const RdTex sheet =
         rd_create_texture_sheet(SHEET_W, SHEET_H, cov, NULL, "rd blend self-test glyph");
+    {
+        /* through font_sheet_ps, not the 1x bake (before its first upload) */
+        RdTexRec *gr = rd__tex_rec(sheet.id);
+        if (gr) {
+            gr->sheetShader = 1;
+        }
+    }
     static RdFrame f;
     if (!leaf.id || !sheet.id ||
         !buildFrame(&f, rd_target(RD_TARGET_SCENE).id, t->w, t->h, leaf, sheet)) {
@@ -598,8 +626,17 @@ static bool runSelftest(void)
     /* the next replay starts SCENE from its clear, not from the block */
     t->clearPending = 1;
 
-    const int chosen = askedEntry >= 0 ? asked : RD_BLEND_EXACT_OFF;
+    /* GS state as shader data's auto (rd_uber.c): a failing read is not
+       kept; [dev] uber = on and [dev] blend = attachment keep it */
+    const char *blendAsk = getenv("ICO_RD_BLEND");
+    const bool uberAsked = g_rd.uber && !(blendAsk && blendAsk[0]);
+    const bool uberDrop = uberAsked && askedEntry == E_ATTACH && v[E_ATTACH].result != R_OK &&
+                          rd__uber_asked_env() != 1;
+    const int chosen = askedEntry >= 0 && !uberDrop ? asked : RD_BLEND_EXACT_OFF;
     g_rd.dstMode = (uint8_t)chosen;
+    if (uberDrop) {
+        rd__uber_off("the colour read failed the blend's self-test");
+    }
     s_bt.fellBack = g_rd.noDual && !noDualBefore;
     if (s_bt.fellBack) {
         rd__log("blend: the fixed-function blend through the two-pass fallback (the dual-source "
@@ -622,9 +659,11 @@ static bool runSelftest(void)
         n = n >= sizeof res ? sizeof res - 1 : n;
         entryText(res, sizeof res, &n, E_NODUAL, &v[E_NODUAL]);
     }
-    const char *why = askedEntry >= 0 ? "; kept by [dev] blend"
-                                      : "; exact modes not asked for: [dev] blend = "
-                                        "attachment|storage tries one";
+    const char *why = uberDrop          ? "; GS state as shader data off: the colour read failed"
+                      : uberAsked       ? "; GS state as shader data"
+                      : askedEntry >= 0 ? "; kept by [dev] blend"
+                                        : "; exact modes not asked for: [dev] blend = "
+                                          "attachment|storage tries one";
     snprintf(g_rdSumBlend, sizeof g_rdSumBlend, "%s (self-test: %s%s)",
              rd__blend_exact_name(chosen), res, askedEntry >= 0 ? why : "");
     rd__log("blend: %s (self-test: %s%s) on SCENE %ux%u at %ux%u texels in %.1f ms",

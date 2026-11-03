@@ -44,14 +44,22 @@
  *            moved by whole pixels gives the same pixels (the grain is the
  *            texel's); on the presentation overlay magnified 4x within 2;
  *            the frame dumped and loaded keeps the format and the style and
- *            replays to the same bytes; a strip rasterised at 2 and 4
+ *            replays to the same bytes; a 1x sheet's texels are baked on
+ *            the CPU (font_sheet_baked_ps): the same frame through
+ *            font_sheet_ps (rd__set_sheet_shader) is the same SCENE byte for
+ *            byte at every scene scale, the device texture read back is
+ *            sheetref_texel's on the page and its apron, and after
+ *            rd_update_texture_rect too; a strip rasterised at 2 and 4
  *            texels a sheet texel (style.scale) drawn 1:1 is
  *            sheetref_texel's at that scale within 1, its rim reaches 6.5 S
  *            pixels across and 4.5 S down, its fill's grain is constant
  *            over each S x S cell, magnified it is within 1 of the
  *            reference, outside the letters it is the 1x strip of its sheet
  *            texels magnified S times within 1 (the rim is the sheets'
- *            look magnified), and its dump keeps the scale
+ *            look magnified), its frame drawn again through
+ *            font_sheet_ps is the same SCENE byte for byte (the 2x sheet's
+ *            texels baked on the CPU, rd__sheet_bake_scaled_rect; the 4x
+ *            one the shader both times), and its dump keeps the scale
  *   gs lod   a TIM2 picture with three authored levels (a dark base,
  *            then flat green and blue: rdtex_store_levels keeps them)
  *            drawn in strips of one Q each through the STQ shaders under
@@ -155,7 +163,19 @@
  *            blends (0, 1, 5, 6 without PABE) the same, the storage path
  *            and the attachment read the same bytes but in the storage
  *            path's fixed-function cells, each exact mode off the
- *            fixed-function blend somewhere
+ *            fixed-function blend somewhere; under GS state as shader data
+ *            its premultiplied subtract cells (modes 1, 6 without PABE)
+ *            stay within the blender's rounding of the fixed-function
+ *            draw (each RGB channel the same or a level under, two where
+ *            the quads overlap; the alpha and the depth the same)
+ *   ubersub  the premultiplied subtracts (modes 1 and 6, FIX 0x10, 0x55,
+ *            0x80, 0xC0 or As, FBA off and on; noise over noise, every
+ *            input a texel the CPU holds) against the GS's arithmetic
+ *            clamp(Cd + (((0 - Cs) F) >> 7)) with its arithmetic shift
+ *            (gs_blend_reg_ch): through the colour read (rd_pixel_uber)
+ *            every pixel is the GS's; on the blender every pixel is
+ *            clamp(Cd - ((Cs F) >> 7)), one level above the GS exactly
+ *            where Cs F is not a multiple of 128, never below
  *   pipes    every pipeline created is in the enumerated reachable set,
  *            whose screen and post part has fewer than 250 keys (with the
  *            sprite_texa_ps twins) and holds the colour mask 7 keys of the
@@ -701,7 +721,13 @@ static void testDateFlat(void)
  * though A cleared that alpha.  The frame replayed through the stencil bit and through the
  * snapshot gives SCENE byte for byte the same, the stencil run with no
  * snapshot taken and DATE draws through the bit, the snapshot run with no
- * stencil draws. */
+ * stencil draws.
+ * Under GS state as shader data (rd_uber.c, ctest rd_pixel_uber) the frame
+ * is replayed first with DATE in the shader against the alpha it reads
+ * (g_rd.uberDate): no snapshot, no stencil bit, and the GS's DATE per
+ * primitive: B fails over A where A cleared the alpha (rows 32..63 of
+ * columns 128..255 keep A's red), its other pixels as the snapshot's; the
+ * two replays above follow with it held off. */
 static void testDateStencil(void)
 {
     if (!rhi_limits()->localRead || !g_rd.fs[RD_FS_DATE_STENCIL].id ||
@@ -746,6 +772,41 @@ static void testDateStencil(void)
     static uint8_t viaBit[512 * 512 * 4], viaSnap[512 * 512 * 4];
     uint32_t w = 0, h = 0, bitDraws = 0, bitSnaps = 0, snapDraws = 0, snapSnaps = 0;
     bool okBit = false, okSnap = false;
+    const bool uberDate = g_rd.uberDate;
+    if (f && uberDate && rd__uber_on()) {
+        /* the colour read's DATE, primitive by primitive: (x, y) -> the colour */
+        static const struct {
+            uint32_t x, y;
+            const uint8_t *c;
+        } kWantGs[] = {{60, 10, red}, {200, 10, red},   {200, 50, red}, {300, 50, a0},
+                       {60, 80, a1},  {200, 80, green}, {300, 110, a0}, {450, 50, a0}};
+
+        const bool okU = rd__replay_frame(f, 0, false);
+        rhi_wait_idle();
+        const uint32_t dstDates = g_rdPerf.dateDstDraws, snaps = g_rdPerf.dateSnapshots,
+                       bits = g_rdPerf.dateStencilDraws;
+        uint32_t uw = 0, uh = 0;
+        const uint8_t *img = readTarget(RD_TARGET_SCENE, &uw, &uh);
+        int badU = 0;
+        for (size_t k = 0; k < sizeof(kWantGs) / sizeof(kWantGs[0]) && img && uw; k++) {
+            const uint8_t *p = &img[(kWantGs[k].y * uw + kWantGs[k].x) * 4];
+            if (memcmp(p, kWantGs[k].c, 4) != 0) {
+                printf("  DATE colour read (%u,%u): %u,%u,%u,%u, want %u,%u,%u,%u\n", kWantGs[k].x,
+                       kWantGs[k].y, p[0], p[1], p[2], p[3], kWantGs[k].c[0], kWantGs[k].c[1],
+                       kWantGs[k].c[2], kWantGs[k].c[3]);
+                badU++;
+            }
+        }
+        printf("  DATE colour read: %u DATE draws read the alpha, %u snapshots, %u through the "
+               "bit\n",
+               dstDates, snaps, bits);
+        CHECK(okU && img, "DATE colour read: the replay");
+        CHECK(badU == 0, "DATE colour read: %d samples off the GS's per-primitive DATE", badU);
+        CHECK(dstDates > 0 && snaps == 0 && bits == 0,
+              "DATE colour read: %u draws read the alpha, %u snapshots, %u through the bit",
+              dstDates, snaps, bits);
+    }
+    g_rd.uberDate = false; /* the bit and the snapshot, as without the colour read */
     if (f) {
         okBit = rd__replay_frame(f, 0, false);
         rhi_wait_idle();
@@ -797,6 +858,7 @@ static void testDateStencil(void)
           bitDraws, bitSnaps);
     CHECK(snapDraws == 0 && snapSnaps > 0, "DATE snapshot: %u draws through the bit, %u snapshots",
           snapDraws, snapSnaps);
+    g_rd.uberDate = uberDate;
     g_rd.profile.dateStencil = was;
     rd_reset_scene(512, 512);
     rhi_wait_idle();
@@ -905,7 +967,12 @@ static void testScreenRuns(void)
     runSprite(0, 0, 256, 128, 2, 0x30);
     runSprite(50, 30, 220, 110, 3, 0x58);
     rd_end_frame(0);
-    checkRun("run boundaries", 2 + 2 + 2 + 4, 1 + 2 + 1 + 2);
+    /* under GS state as shader data DATE reads the alpha in the shader
+     * (rd_uber.c rd__uber_date): no snapshot to retake, so the two DATE
+     * sprites are one draw, the same bytes (the read in rasterization
+     * order) */
+    const bool dateRead = rd__uber_on() && g_rd.uberDate;
+    checkRun("run boundaries", 2 + 2 + 2 + 4, dateRead ? 1 + 1 + 1 + 2 : 1 + 2 + 1 + 2);
 }
 
 /* -------------------------------------------------------------------- AA1 */
@@ -2125,6 +2192,120 @@ static void testOverlayReplacement(void)
 }
 
 /* scale: the scene's (1 in Original); dir: the dump's directory (scale 1) */
+/* testSheetText's first frame: the sheet and its RGBA8 reference
+ * magnified MX x MY side by side (TCC RGB on top, TCC RGBA below), the sheet
+ * 1:1 at the texel centres, and magnified 2x twice, the second moved by
+ * whole pixels (96, 45) */
+static void sheetTextFrame(RdTex sheet, RdTex ref, int mx, int my)
+{
+    sheetFrameBegin();
+    sheetDraw(sheet, RD_TCC_RGB, 8, 8, SHEET_W * mx, SHEET_H * my, 0);
+    sheetDraw(ref, RD_TCC_RGB, 136, 8, SHEET_W * mx, SHEET_H * my, 0);
+    sheetDraw(sheet, RD_TCC_RGBA, 8, 96, SHEET_W * mx, SHEET_H * my, 0);
+    sheetDraw(ref, RD_TCC_RGBA, 136, 96, SHEET_W * mx, SHEET_H * my, 0);
+    sheetDraw(sheet, RD_TCC_RGB, 264, 8, SHEET_W, SHEET_H, 1);
+    sheetDraw(sheet, RD_TCC_RGBA, 264, 40, SHEET_W, SHEET_H, 1);
+    sheetDraw(sheet, RD_TCC_RGBA, 264, 184, SHEET_W * 2, SHEET_H * 2, 0);
+    sheetDraw(sheet, RD_TCC_RGBA, 264 + 96, 184 + 45, SHEET_W * 2, SHEET_H * 2, 0);
+    rd_end_frame(0);
+}
+
+/* The baked 1x sheet (issue 173): the device texture read back is
+ * sheetref_texel's at every page texel and every apron texel
+ * (ICO_SHEET_BAKE_AX/AY round the page, (w + 2 AX) x (h + 2 AY) RGBA8,
+ * grey grey grey alpha); a rectangle of new coverage
+ * (rd_update_texture_rect: a solid block with a soft edge over the noisy
+ * patch, which changes the rim round it) is uploaded with the rim's reach
+ * round it, so the texels again are sheetref_texel's everywhere and the 1:1
+ * draw is too, with font_sheet_ps's bytes; the coverage is put back. */
+static int sheetDeviceBad(RdTexRec *sr, const RdSheetStyle *st)
+{
+    const uint32_t dw = SHEET_W + 2 * ICO_SHEET_BAKE_AX, dh = SHEET_H + 2 * ICO_SHEET_BAKE_AY;
+    static uint8_t dev[(SHEET_W + 2 * ICO_SHEET_BAKE_AX) * (SHEET_H + 2 * ICO_SHEET_BAKE_AY) * 4];
+    if (!sr->rhi.id || !rd__read_rhi_texture(sr->rhi, &sr->state, dw, dh, dev, sizeof(dev))) {
+        CHECK(0, "the baked sheet's device texture read back");
+        return -1;
+    }
+    /* draws sample image textures in SHADER_READ only */
+    if (sr->state != RHI_STATE_SHADER_READ) {
+        RhiCommandList cl = rhi_begin_commands();
+        if (cl.id) {
+            rd__transition(cl, sr->rhi, &sr->state, RHI_STATE_SHADER_READ);
+            rhi_end_commands(cl);
+            rhi_submit(cl);
+        }
+    }
+    int bad = 0;
+    for (uint32_t y = 0; y < dh; y++) {
+        for (uint32_t x = 0; x < dw; x++) {
+            uint8_t g, a;
+            const int px = (int)x - ICO_SHEET_BAKE_AX, py = (int)y - ICO_SHEET_BAKE_AY;
+            sheetref_texel(s_sheetCov, SHEET_W, SHEET_H, px, py, st, &g, &a);
+            const uint8_t *d = &dev[((size_t)y * dw + x) * 4];
+            if (d[0] != g || d[1] != g || d[2] != g || d[3] != a) {
+                const int want[4] = {g, g, g, a};
+                bad += pixFail("baked sheet texel against sheetref_texel", px, py, d, want);
+            }
+        }
+    }
+    return bad;
+}
+
+static void testSheetBakedTexels(RdTex sheet, const char *mode)
+{
+    RdTexRec *sr = rd__tex_rec(sheet.id);
+    if (!sr) {
+        return;
+    }
+    sheetFrameBegin();
+    rd_end_frame(0); /* the replay uploads it (baked again after the switch) */
+    CHECK(sr->sheetBaked, "%s: the sheet baked again after the switch", mode);
+    int bad = sheetDeviceBad(sr, &kSheetEn);
+    CHECK(bad == 0, "%s: %d baked texels (page and apron) off sheetref_texel", mode, bad);
+
+    /* new coverage over x 26..33, y 6..13 */
+    enum { UX = 26, UY = 6, UW = 8, UH = 8 };
+
+    static uint8_t keep[SHEET_W * SHEET_H];
+    memcpy(keep, s_sheetCov, sizeof(keep));
+    uint8_t blk[UW * UH];
+    for (int y = 0; y < UH; y++) {
+        for (int x = 0; x < UW; x++) {
+            blk[y * UW + x] = (uint8_t)(x < 5 ? 0xFF : 0xFF - (x - 4) * 60);
+            s_sheetCov[(UY + y) * SHEET_W + UX + x] = blk[y * UW + x];
+        }
+    }
+    rd_update_texture_rect(sheet, UX, UY, UW, UH, blk);
+    sheetFrameBegin();
+    sheetDraw(sheet, RD_TCC_RGB, 264, 8, SHEET_W, SHEET_H, 1);
+    sheetDraw(sheet, RD_TCC_RGBA, 264, 40, SHEET_W, SHEET_H, 1);
+    rd_end_frame(0);
+    uint32_t w = 0, h = 0;
+    float fsx = 1.0f, fsy = 1.0f;
+    uint8_t *img = readScaled(RD_TARGET_SCENE, &w, &h, &fsx, &fsy);
+    bad = sheetDeviceBad(sr, &kSheetEn);
+    CHECK(bad == 0, "%s: after a rectangle, %d baked texels off sheetref_texel", mode, bad);
+    if (img) {
+        int rim = 0;
+        bad = sheetExact(img, w, 264, 8, 40, &kSheetEn, &rim);
+        CHECK(bad == 0 && rim > 0, "%s: after a rectangle, 1:1 %d texels off sheetref_texel", mode,
+              bad);
+    }
+    free(img);
+    /* back as it was */
+    memcpy(s_sheetCov, keep, sizeof(keep));
+    for (int y = 0; y < UH; y++) {
+        memcpy(&blk[y * UW], &keep[(UY + y) * SHEET_W + UX], UW);
+    }
+    rd_update_texture_rect(sheet, UX, UY, UW, UH, blk);
+    sheetFrameBegin();
+    rd_end_frame(0); /* the replay uploads it */
+    bad = sheetDeviceBad(sr, &kSheetEn);
+    CHECK(bad == 0, "%s: the coverage put back, %d baked texels off sheetref_texel", mode, bad);
+    printf("  sheet text (%s): the baked texels and a rectangle's upload match sheetref_texel\n",
+           mode);
+}
+
 static void testSheetText(const char *mode, int scale, const char *dir)
 {
     for (int y = 0; y < SHEET_H; y++) {
@@ -2144,19 +2325,36 @@ static void testSheetText(const char *mode, int scale, const char *dir)
      * magnified 2x twice, the second moved by whole pixels (96, 45) */
     enum { MX = 3, MY = 4 };
 
-    sheetFrameBegin();
-    sheetDraw(sheet, RD_TCC_RGB, 8, 8, SHEET_W * MX, SHEET_H * MY, 0);
-    sheetDraw(ref, RD_TCC_RGB, 136, 8, SHEET_W * MX, SHEET_H * MY, 0);
-    sheetDraw(sheet, RD_TCC_RGBA, 8, 96, SHEET_W * MX, SHEET_H * MY, 0);
-    sheetDraw(ref, RD_TCC_RGBA, 136, 96, SHEET_W * MX, SHEET_H * MY, 0);
-    sheetDraw(sheet, RD_TCC_RGB, 264, 8, SHEET_W, SHEET_H, 1);
-    sheetDraw(sheet, RD_TCC_RGBA, 264, 40, SHEET_W, SHEET_H, 1);
-    sheetDraw(sheet, RD_TCC_RGBA, 264, 184, SHEET_W * 2, SHEET_H * 2, 0);
-    sheetDraw(sheet, RD_TCC_RGBA, 264 + 96, 184 + 45, SHEET_W * 2, SHEET_H * 2, 0);
-    rd_end_frame(0);
+    sheetTextFrame(sheet, ref, MX, MY);
     uint32_t w = 0, h = 0;
     float fsx = 1.0f, fsy = 1.0f;
     uint8_t *img = readScaled(RD_TARGET_SCENE, &w, &h, &fsx, &fsy);
+    /* a 1x sheet's texels are baked on the CPU (issue 173) and drawn by
+     * font_sheet_baked_ps; the same frame through font_sheet_ps
+     * (ICO_RD_SHEET_SHADER's switch) is the same SCENE, byte for byte:
+     * magnified at fractional positions, 1:1, moved */
+    CHECK(sr && rd__sheet_baked(sr) && sr->sheetBaked,
+          "%s: the 1x sheet's device texture holds the baked texels", mode);
+    if (img) {
+        rd__set_sheet_shader(true);
+        sheetTextFrame(sheet, ref, MX, MY);
+        uint32_t w2 = 0, h2 = 0;
+        uint8_t *viaShader = readScaled(RD_TARGET_SCENE, &w2, &h2, &fsx, &fsy);
+        CHECK(sr && !rd__sheet_baked(sr) && !sr->sheetBaked,
+              "%s: under the switch the sheet's device texture holds its coverage", mode);
+        long differ = -1;
+        if (viaShader && w2 == w && h2 == h) {
+            differ = 0;
+            for (size_t i = 0; i < (size_t)w * h * 4; i++) {
+                differ += viaShader[i] != img[i];
+            }
+        }
+        printf("  sheet text (%s): baked against font_sheet_ps, %ld bytes differ\n", mode, differ);
+        CHECK(differ == 0, "%s: the baked 1x sheet differs from font_sheet_ps in %ld bytes", mode,
+              differ);
+        free(viaShader);
+        rd__set_sheet_shader(false);
+    }
     const int s = (int)lroundf(fsx);
     CHECK(s == scale && (int)lroundf(fsy) == scale, "%s: SCENE at %gx%g, %d expected", mode,
           (double)fsx, (double)fsy, scale);
@@ -2201,6 +2399,7 @@ static void testSheetText(const char *mode, int scale, const char *dir)
     free(img);
 
     if (scale == 1) {
+        testSheetBakedTexels(sheet, mode);
         /* the style follows rd_set_texture_sheet_style: the French rim level,
          * a faint rim (fewer rim texels), then no rim (the rim texels go
          * transparent) */
@@ -2412,35 +2611,69 @@ static void testSheetScaled(int S, const char *dir)
        sheet and reference side by side, RGB then RGBA */
     const int yA = 8 + H + 4, yM = yA + H + 8, mw = W * 3 / 2, mh = H * 3 / 2;
     const int yMA = yM + mh + 8;
-    sheetFrameBegin();
-    for (int k = 0; k < 2; k++) {
-        rd_texture(sheet, RD_TEXFN_MODULATE, k ? RD_TCC_RGBA : RD_TCC_RGB);
-        sprite(512, 512, 8 * 16, (k ? yA : 8) * 16, (8 + W) * 16, ((k ? yA : 8) + H) * 16, grey, 8,
-               8, W * 16 + 8, H * 16 + 8);
-    }
-    for (int k = 0; k < 4; k++) {
-        const int x = k & 1 ? 8 + mw + 8 : 8, y = k & 2 ? yMA : yM;
-        rd_texture(k & 1 ? ref : sheet, RD_TEXFN_MODULATE, k & 2 ? RD_TCC_RGBA : RD_TCC_RGB);
-        sprite(512, 512, x * 16, y * 16, (x + mw) * 16, (y + mh) * 16, grey, 0, 0, W * 16, H * 16);
-    }
     /* right of the 1:1 strip the 1x strip magnified S times, RGB
        then RGBA, nudged by half a pixel (8 / S sixteenths of a sheet
        texel: a pixel samples at its corner) so pixel x samples sheet
        texel position (x + 0.5) / S, where the scaled strip's texel x
        reads its rim; and the plain strip 1:1 (RGBA) */
     const int x1x = 8 + W + 8, xPl = x1x + W + 8, n1 = 8 / S;
-    for (int k = 0; k < 2; k++) {
-        rd_texture(sheet1, RD_TEXFN_MODULATE, k ? RD_TCC_RGBA : RD_TCC_RGB);
-        sprite(512, 512, x1x * 16, (k ? yA : 8) * 16, (x1x + W) * 16, ((k ? yA : 8) + H) * 16, grey,
-               n1, n1, SHEET_W * 16 + n1, SHEET_H * 16 + n1);
-    }
-    rd_texture(sheetPlain, RD_TEXFN_MODULATE, RD_TCC_RGBA);
-    sprite(512, 512, xPl * 16, yA * 16, (xPl + W) * 16, (yA + H) * 16, grey, 8, 8, W * 16 + 8,
-           H * 16 + 8);
-    rd_end_frame(0);
-    uint32_t w = 0, h = 0;
+    /* the frame twice: as drawn (a 2x sheet's texels baked on the CPU,
+     * rd__sheet_baked, font_sheet_baked_ps; 4x through font_sheet_ps),
+     * then every scale through font_sheet_ps (ICO_RD_SHEET_SHADER's switch,
+     * rd__set_sheet_shader): the same SCENE byte for byte */
+    uint32_t w = 0, h = 0, w2 = 0, h2 = 0;
     float fsx = 1.0f, fsy = 1.0f;
-    uint8_t *img = readScaled(RD_TARGET_SCENE, &w, &h, &fsx, &fsy);
+    uint8_t *img = NULL, *viaShader = NULL;
+    for (int pass = 0; pass < 2; pass++) {
+        if (pass == 1) {
+            CHECK(sr && sr->sheetBaked == (S == 2),
+                  "scaled sheet %d: the device texture holds %s (sheetBaked %d)", S,
+                  S == 2 ? "the baked texels" : "the coverage", sr ? sr->sheetBaked : -1);
+            rd__set_sheet_shader(true);
+        }
+        sheetFrameBegin();
+        for (int k = 0; k < 2; k++) {
+            rd_texture(sheet, RD_TEXFN_MODULATE, k ? RD_TCC_RGBA : RD_TCC_RGB);
+            sprite(512, 512, 8 * 16, (k ? yA : 8) * 16, (8 + W) * 16, ((k ? yA : 8) + H) * 16, grey,
+                   8, 8, W * 16 + 8, H * 16 + 8);
+        }
+        for (int k = 0; k < 4; k++) {
+            const int x = k & 1 ? 8 + mw + 8 : 8, y = k & 2 ? yMA : yM;
+            rd_texture(k & 1 ? ref : sheet, RD_TEXFN_MODULATE, k & 2 ? RD_TCC_RGBA : RD_TCC_RGB);
+            sprite(512, 512, x * 16, y * 16, (x + mw) * 16, (y + mh) * 16, grey, 0, 0, W * 16,
+                   H * 16);
+        }
+        for (int k = 0; k < 2; k++) {
+            rd_texture(sheet1, RD_TEXFN_MODULATE, k ? RD_TCC_RGBA : RD_TCC_RGB);
+            sprite(512, 512, x1x * 16, (k ? yA : 8) * 16, (x1x + W) * 16, ((k ? yA : 8) + H) * 16,
+                   grey, n1, n1, SHEET_W * 16 + n1, SHEET_H * 16 + n1);
+        }
+        rd_texture(sheetPlain, RD_TEXFN_MODULATE, RD_TCC_RGBA);
+        sprite(512, 512, xPl * 16, yA * 16, (xPl + W) * 16, (yA + H) * 16, grey, 8, 8, W * 16 + 8,
+               H * 16 + 8);
+        rd_end_frame(0);
+        if (pass == 0) {
+            img = readScaled(RD_TARGET_SCENE, &w, &h, &fsx, &fsy);
+        } else {
+            viaShader = readScaled(RD_TARGET_SCENE, &w2, &h2, &fsx, &fsy);
+            CHECK(sr && !sr->sheetBaked, "scaled sheet %d: under the switch the coverage", S);
+        }
+    }
+    rd__set_sheet_shader(false);
+    {
+        long differ = -1;
+        if (img && viaShader && w2 == w && h2 == h) {
+            differ = 0;
+            for (size_t i = 0; i < (size_t)w * h * 4; i++) {
+                differ += viaShader[i] != img[i];
+            }
+        }
+        printf("  scaled sheet %dx (%s): against font_sheet_ps, %ld bytes differ\n", S,
+               S == 2 ? "baked" : "the shader both times", differ);
+        CHECK(differ == 0, "scaled sheet %d: %ld bytes differ from font_sheet_ps's frame", S,
+              differ);
+        free(viaShader);
+    }
     if (!img) {
         CHECK(0, "scaled sheet %d: SCENE", S);
     } else {
@@ -3318,7 +3551,18 @@ static void testForestTint(void)
  *     fixed-function blend (Z write under Z GEQUAL with the alpha test or
  *     DATE, rd_dst_read.c);
  *   - each exact mode differs from the fixed-function blend somewhere (the
- *     rounding, FIX 0xA0 past 1.0, PABE, the Ad and mode 11 forms). */
+ *     rounding, FIX 0xA0 past 1.0, PABE, the Ad and mode 11 forms).
+ * Under GS state as shader data (rd_uber.c, ctest rd_pixel_uber) the
+ * attachment read also draws the premultiplied subtracts (modes 1 and 6:
+ * the GS's floor, one level under the blender where Cs*F is not a
+ * multiple of 128) and DATE per primitive (the two quads of a command
+ * see each other's alpha, where the snapshot holds the alpha before the
+ * command): those cells are left out of the hardware-exact and depth
+ * comparisons and counted (printed); the subtracts are held within the
+ * blender's rounding (each RGB channel the same or a level under, two
+ * where the quads overlap, the alpha and the depth the same), and
+ * testUberSubtractOracle (rd_pixel_uber_test.inc) has them against the
+ * GS's bytes. */
 static void testExactModes(void)
 {
     enum { FRAMES = 3, BLENDS_PER = RD_BLEND_COUNT / FRAMES };
@@ -3359,22 +3603,58 @@ static void testExactModes(void)
     rd_set_blend_exact(was);
     const uint32_t perBlend = 2 * 2 * 2 * ND_AFAILS * 3 * 4; /* SCENE cells a blend */
     int badZ = 0, badSame = 0, badModes = 0, differ[RD_BLEND_EXACT_COUNT] = {0}, shown = 0;
+    int uberDate = 0, uberSub = 0; /* GS state as shader data's own cells, differing */
+    int uberSubBad = 0;            /* its subtract cells outside the blender's rounding */
     for (int m = 1; m < RD_BLEND_EXACT_COUNT; m++) {
         if (!have[m]) {
             continue;
         }
+        const bool uber = m == RD_BLEND_EXACT_ATTACHMENT && g_rd.uber;
         for (int f = 0; f < FRAMES; f++) {
             for (uint32_t i = 0; i < 512 * 512; i++) {
                 const uint32_t cell = (i / 512 / ND_CELL) * 64 + (i % 512) / ND_CELL;
                 const uint32_t b = (uint32_t)(f * BLENDS_PER) + cell / perBlend;
                 const uint32_t k = cell % perBlend;
                 const uint32_t pabe = k / (perBlend / 2);
+                const uint32_t date = (k / (12 * ND_AFAILS)) % 2;
+                const int sub = b == 1 || b == 6;
                 const int exactInHw = (b == 0 || b == 1 || b == 5 || b == 6) && !pabe;
                 if (b >= RD_BLEND_COUNT) {
                     continue; /* the cells past the frame's blends: background */
                 }
                 const int mz = memcmp(&depth[0][f][i], &depth[m][f][i], sizeof(float)) != 0;
                 const int mc = memcmp(&scene[0][f][i * 4], &scene[m][f][i * 4], 4) != 0;
+                if (uber && (date || (sub && exactInHw))) {
+                    uberDate += date && (mz || mc);
+                    if (!date) {
+                        /* the read's floor against the blender's
+                         * truncation (rd_pixel_uber_test.inc has the GS's
+                         * bytes): each RGB channel the same or one level
+                         * under, two where quad B's subtract starts from
+                         * quad A's level-under result; the alpha (As,
+                         * FBA) and the depth the same */
+                        const uint8_t *a = &scene[0][f][i * 4], *c = &scene[m][f][i * 4];
+                        int under = 0;
+                        for (int ch = 0; ch < 3; ch++) {
+                            const int d = (int)c[ch] - (int)a[ch];
+                            under += d < -2 || d > 0;
+                        }
+                        uberSub += mc;
+                        if (under || c[3] != a[3] || mz) {
+                            uberSubBad++;
+                            if (shown++ < 8) {
+                                printf("FAIL exact (%s): SCENE (%u,%u) blend %u: %u %u %u %u (Z "
+                                       "%g) through the read, %u %u %u %u (Z %g) on the blender: "
+                                       "not within the blender's rounding\n",
+                                       rd__blend_exact_name(m), i % 512, i / 512, b, c[0], c[1],
+                                       c[2], c[3], (double)depth[m][f][i], a[0], a[1], a[2], a[3],
+                                       (double)depth[0][f][i]);
+                            }
+                        }
+                    }
+                    differ[m] += mc;
+                    continue;
+                }
                 badZ += mz;
                 differ[m] += mc;
                 if (exactInHw && mc) {
@@ -3422,6 +3702,16 @@ static void testExactModes(void)
            have[RD_BLEND_EXACT_ATTACHMENT] ? ", attachment read" : "",
            differ[RD_BLEND_EXACT_STORAGE], differ[RD_BLEND_EXACT_ATTACHMENT], badZ, badSame,
            badModes);
+    if (g_rd.uber) {
+        printf("  exact modes, GS state as shader data: %d pixels of the DATE cells and %d of the "
+               "premultiplied subtracts off the fixed-function draw (per primitive, the GS's "
+               "floor), %d of the subtracts outside the blender's rounding\n",
+               uberDate, uberSub, uberSubBad);
+        CHECK(uberSubBad == 0,
+              "exact: %d pixels of the premultiplied subtracts through the read are not within "
+              "the blender's rounding of the fixed-function draw",
+              uberSubBad);
+    }
     CHECK(badZ == 0, "exact: the depth differs from the fixed-function draw's (%d pixels)", badZ);
     CHECK(badSame == 0, "exact: %d pixels of blends the hardware does exactly differ", badSame);
     CHECK(badModes == 0, "exact: the storage path and the attachment read differ (%d)", badModes);
@@ -3434,7 +3724,39 @@ static void testExactModes(void)
     rd__pipeline_cache_clear(); /* outside the reachable set, as testNoDual's */
 }
 
+/* testUberSubtractOracle: the premultiplied subtracts against the GS's
+ * arithmetic, through the colour read and on the blender */
+#include "rd_pixel_uber_test.inc"
+
 /* -------------------------------------------------------------- pipelines */
+
+/* a planned pass's key as the cache would hold it, in the set: the screen
+ * set as enumerated (keys[0..ns)), or under GS state as shader data the
+ * read's image, normalised (rd__expand_dst, rd__uber_normalise, as
+ * rd_pipeline.c drawKey makes it), in the set in force */
+static bool passEnumerated(const RdDrawPass *p, const RdPipeKeyInt *keys, uint32_t ns,
+                           const RdPipeKeyInt *mine, uint32_t nMine)
+{
+    if (rd__uber_on()) {
+        RdDrawPass ex[4];
+        const int ne = rd__expand_dst(p, 1, g_rd.dstMode, ex);
+        for (int j = 0; j < ne; j++) {
+            rd__uber_normalise(&ex[j].key);
+            for (uint32_t i = 0; i < nMine && i < RD_PIPELINE_REACHABLE_MAX; i++) {
+                if (rd__pipe_key_equal(&ex[j].key, &mine[i])) {
+                    return true;
+                }
+            }
+        }
+        return false;
+    }
+    for (uint32_t j = 0; j < ns; j++) {
+        if (rd__pipe_key_equal(&p->key, &keys[j])) {
+            return true;
+        }
+    }
+    return false;
+}
 
 static void testPipelines(void)
 {
@@ -3557,36 +3879,35 @@ static void testPipelines(void)
                         CHECK(rd__plane_pass(&kt) && kt.key.fs == RD_FS_SPRITE_TEXA_PLANES,
                               "a TEXA triangle pass with the planes draws sprite_texa_ps_planes");
                         found = 0;
-                        for (uint32_t j = 0; j < ns; j++) {
-                            found |= rd__pipe_key_equal(&kt.key, &keys[j]);
-                        }
+                        found |= passEnumerated(&kt, keys, ns, mine, nMine);
                         CHECK(found,
                               "TEXA UI triangle pass with the planes (depth %d) is not "
                               "enumerated",
                               dz);
                         found = 0;
                     }
-                    for (uint32_t j = 0; j < ns; j++) {
-                        found |= rd__pipe_key_equal(&pl.key, &keys[j]);
-                    }
+                    found |= passEnumerated(&pl, keys, ns, mine, nMine);
                     CHECK(dp[i].key.gs.colorMask == 0x7 && found,
                           "UI draw under colour mask 7 (lines %d, depth %d) is not enumerated",
                           prim, dz);
                     dp[i].key.fs = RD_FS_FONT;
                     found = 0;
-                    for (uint32_t j = 0; j < ns; j++) {
-                        found |= rd__pipe_key_equal(&dp[i].key, &keys[j]);
-                    }
+                    found |= passEnumerated(&dp[i], keys, ns, mine, nMine);
                     CHECK(prim || found,
                           "font draw under colour mask 7 (depth %d) is not enumerated", dz);
                     /* the menus' sheet text in the same state */
                     dp[i].key.fs = RD_FS_FONT_SHEET;
                     found = 0;
-                    for (uint32_t j = 0; j < ns; j++) {
-                        found |= rd__pipe_key_equal(&dp[i].key, &keys[j]);
-                    }
+                    found |= passEnumerated(&dp[i], keys, ns, mine, nMine);
                     CHECK(prim || found,
                           "sheet text draw under colour mask 7 (depth %d) is not enumerated", dz);
+                    /* and a 1x sheet's (font_sheet_baked_ps) */
+                    dp[i].key.fs = RD_FS_FONT_SHEET_BAKED;
+                    found = 0;
+                    found |= passEnumerated(&dp[i], keys, ns, mine, nMine);
+                    CHECK(prim || found,
+                          "baked sheet text draw under colour mask 7 (depth %d) is not enumerated",
+                          dz);
                 }
             }
             s.ds.colorMask = 0xF;
@@ -3611,9 +3932,7 @@ static void testPipelines(void)
                           rd__fs_has_dst(RD_FS_SPRITE_PLANES) &&
                           rd__fs_has_dst(RD_FS_SPRITE_TEXA_PLANES),
                       "the planes build's pixel shaders without their _nodual or _dst twins");
-                for (uint32_t j = 0; j < ns; j++) {
-                    found |= rd__pipe_key_equal(&dp[i].key, &keys[j]);
-                }
+                found |= passEnumerated(&dp[i], keys, ns, mine, nMine);
                 CHECK(found, "STQ world triangle pass (depth %d) is not enumerated", dz);
             }
             s.ds.colorMask = 0x7;
@@ -4243,6 +4562,23 @@ static void testVuPaths(const char *mode, int check34)
  * the game the fog pass paints at full fog (bright dots through the fog).
  * Model space is GS pixels from the 512 target's top-left, as in vpDraw. */
 static const char kSeamKey;
+/* PC port: the folder the dumps go to (main's argv[1]); S3's first cut
+ * strip and S4's 64 draws at Original 1x are written as rd_pixel_vu36 and
+ * rd_pixel_vu.rddump, the frames with VU draws the replay tool's draw merge
+ * and fused pair A/Bs take where no game dump is (CMakeLists.txt
+ * rd_vumerge_ab_pixel, rd_vufuse_ab_pixel; tools/ci_d3d11_warp.sh) */
+static const char *s_dumpDir;
+
+static void seamDump(const char *mode, const char *name)
+{
+    if (!s_dumpDir || strcmp(mode, "Original 1x") != 0) {
+        return;
+    }
+    char path[1024];
+    snprintf(path, sizeof(path), "%s/%s.rddump", s_dumpDir, name);
+    CHECK(rd_dump_frame(path), "rd_dump_frame (%s)", name);
+}
+
 static const uint8_t kSeamRed[4] = {200, 30, 30, 0x80}, kSeamGreen[4] = {30, 200, 30, 0x80};
 
 /* ftoi4 as vu_ftoi4 computes it, of a float the VU holds */
@@ -4470,6 +4806,9 @@ static void testVuSeams(const char *mode)
                                  (kP[1][1] + kP[2][1]) * 0.5 + 8.0 * 0.6};
         int probeBg = 1;
         n = seamEnd(edge, 1, 0.1, 0.9, &near, probe, &probeBg);
+        if (c == 0) {
+            seamDump(mode, "rd_pixel_vu36"); /* a code-36 cut and kick pair */
+        }
         printf("  vu seams (%s): S3 code 36 cut beside kicked, v0 %s: %d cracks in %d pixels, "
                "v0's side %s\n",
                mode, c == 0 ? "GS Z < 0" : "w < 0", n, near, probeBg ? "empty" : "covered");
@@ -4513,6 +4852,7 @@ static void testVuSeams(const char *mode)
             u[3] = by + sn * e + cs * a;
         }
         n = seamEnd((const double (*)[4])lines, 14, 0.02, 0.98, &near, NULL, NULL);
+        seamDump(mode, "rd_pixel_vu"); /* 64 code-32 draws, one state */
         if (strcmp(mode, "Original 1x") == 0) {
             s_s4Ref = n;
         }
@@ -5032,6 +5372,15 @@ static void testVuPathsAt(const char *mode, RdPreset preset, float scale, int ch
 
 int main(int argc, char **argv)
 {
+    /* the frames here hold golden bytes (or read SCENE back) with list
+       11's last sprites drawn into SCENE; the fades fold, how the game
+       draws them, is ctest rd_fades_fold's and rd_fades_fold_ab's
+       (rd_fades_fold.c): drawn here as before */
+#ifdef _WIN32
+    _putenv_s("ICO_RD_FADES_FOLD", "0");
+#else
+    setenv("ICO_RD_FADES_FOLD", "0", 1);
+#endif
     rd__set_not_implemented_fatal(true); /* a stub command replayed stops the test */
     const char *dir = argc > 1 ? argv[1] : ".";
     RdSettings s;
@@ -5049,7 +5398,8 @@ int main(int argc, char **argv)
            rd__blend_exact_name(rd_blend_exact()));
     testNoDual(); /* first: it clears the pipeline cache */
     testForestTint();
-    testExactModes(); /* these two clear it too */
+    testExactModes(); /* these three clear it too */
+    testUberSubtractOracle();
     testOrder();
     testHalfOffset();
     testRailing(0);
@@ -5091,6 +5441,7 @@ int main(int argc, char **argv)
     testAuraMaskAt("Enhanced 4x, full height", 4.0f, 1);
     testSheetTextAt("Enhanced 2x", 2);
     testSheetTextAt("Enhanced 3x", 3);
+    s_dumpDir = dir;
     testVuPathsAt("Original 1x", RD_PRESET_ORIGINAL, 1.0f, 1);
     testVuPathsAt("Original 4x", RD_PRESET_ORIGINAL, 4.0f, 1);
     testVuPathsAt("Enhanced 2.25x", RD_PRESET_ENHANCED, 2.25f, 1);

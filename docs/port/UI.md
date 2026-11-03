@@ -11,9 +11,14 @@ draws, navigates, fades and sounds it; the port supplies the rows, their words a
 | --- | --- |
 | `port/ui/layout_ext.h`, `layout_ext.c` | the layout extension: port layouts and rows past the game's tables, text, glyph and rectangle rows, the text hook, the back buttons, pointer roles |
 | `port/ui/settings.h`, `settings.c` | the Settings menu: the pages, the entry rows, the New Game and Quit screens, the values and their setters, the saves |
+| `port/ui/settings_graphics.h`, `settings_graphics.c` | Settings > Graphics: the Graphics API and Graphics card rows' values and steps, Apply and its countdown |
+| `port/ui/settings_backup.h`, `settings_backup.c` | Settings > Extras > Back up your data and Restore from a backup: the rows' words and notes, Cross, the confirmations, the popups |
+| `port/ui/settings_states.h`, `settings_states.c` | the Save states page's host, cards' texts and pictures, actions on a slot with their second press, and F6's latch (`settings.c` builds, opens, leaves and ticks the page) |
 | `port/ui/ui_list.h`, `ui_list.c` | the scrolling list pages (Achievements, Remap, Music) |
 | `port/ui/ui_hint.h`, `ui_hint.c` | a line of button prompts (glyphs and words) |
 | `port/ui/strings.h`, `strings.c`, `strings_{en,fr,de,it,es,ja,ko,zh}.c` | the UI strings, one table per language; the serial notes; the Japanese, Chinese and Korean line-break rules |
+| `port/ui/strings_ru_bobttz.c`, `strings_ru_cobra838.c`, `strings_pt_br.c` | the community translations' tables: Russian, by bob-ttz, Russian, by cobra838, and Brazilian Portuguese, by Igor Chagas (ichagas7) ([Community translations](#community-translations)) |
+| `port/ui/subtitle_text.h`, `subtitle_text.c` | a community translation's subtitles drawn as text in the subtitle band (`jimakuDisp`'s hook) |
 | `port/ui/ui_lang.h`, `ui_lang.c` | the port text's language from `[ui] language` and the running disc |
 | `port/ui/font.h`, `font.c` | Arimo, then Noto Sans JP, then Noto Sans KR, then Noto Sans TC (first of the three while the language is Chinese), through stb_truetype: atlases, measuring, plain text, the presentation overlay mode, the sheet rasteriser |
 | `port/ui/menu_font.h`, `menu_font.c` | the menus' text in the look of the game's menu sheets: strip pages, inks, rims |
@@ -22,6 +27,7 @@ draws, navigates, fades and sounds it; the port supplies the rows, their words a
 | `port/ui/embed_font.cmake` | a font file as a C array at build time; the subsets' code points |
 | `port/assets/fonts/Arimo-Regular.ttf`, `OFL.txt` | the font and its licence |
 | `port/assets/fonts/NotoSansJP-Regular-subset.ttf`, `NotoSansJP-OFL.txt` | the second font (the characters Arimo lacks) and its licence |
+| `tools/subset_font_arimo.py` | makes and checks Arimo's subset |
 | `tools/subset_font_ja.py` | makes and checks the second font's subset |
 | `port/assets/fonts/NotoSansKR-Regular-subset.ttf`, `NotoSansKR-OFL.txt` | the third font (the Hangul the other two lack) and its licence |
 | `tools/subset_font_ko.py` | makes and checks the third font's subset |
@@ -50,7 +56,7 @@ rectangle, its box on screen, its item links); on the Japanese disc `texLayout[7
 rows 66..79 sit inside every stage's layout range, whose textures the game initialises at each
 stage load, so a port row there would be looked up as a texture file. The port therefore extends
 both tables past their ends: layouts `80 ..` and properties `436 ..`, up to
-`LT_EXT_MAX_LAYOUTS` (32) and `LT_EXT_MAX_PROPERTIES` (768) (`port/ui/layout_ext.h`, header
+`LT_EXT_MAX_LAYOUTS` (32) and `LT_EXT_MAX_PROPERTIES` (1024) (`port/ui/layout_ext.h`, header
 comment). `layout_texture.c` reads both tables through `LT_LAYOUT(i)` and `LT_PROP(i)`, which are
 `lt_ext_layout(i)` and `lt_ext_prop(i)`: the game's row below its count, the port's above it, and
 a zeroed scratch row for an index in neither, never memory outside the tables
@@ -77,7 +83,11 @@ A port row is one of three kinds (`port/ui/layout_ext.c` (`ExtRow`)):
   not the PAL ones it draws nothing (`lt_ext_add_glyph`, `lt_ext_glyph_source`);
 - a rectangle row: a filled box, `fill` of it from the left, in a colour times the row's colour
   (the music gallery's progress bar, the Characters page's swatches) (`lt_ext_add_rect`,
-  `lt_ext_set_fill`, `lt_ext_set_rect_color`).
+  `lt_ext_set_fill`, `lt_ext_set_rect_color`);
+- an image row: a texture the page owns (an `RdTex` from `rd_create_texture`, released by the page
+  with `rd_destroy_texture`, as the font and menu atlases are) drawn over a row's box, its texels
+  from (0, 0) to the given size, times the row's colour; texture 0 draws nothing (an empty slot,
+  the headless build) (`lt_ext_add_image`, `lt_ext_set_image`).
 
 A row with no width gets 400 x units and one with no height 40 y units, the Options screen's row
 height (`lt_ext_add_property`). `lt_ext_set_dim` greys a row: its colour at half whatever the
@@ -147,7 +157,7 @@ Circle (`port/ui/layout_ext.h` (`lt_ext_port_back_buttons`, `lt_ext_confirm_butt
 
 Each port row has a pointer role for the mouse: `LT_POINTER_AUTO` (an item is pointed at and a
 click is the disc's confirm on it, Cross, or Circle on the Japanese disc), `NONE` (never hit: a list heading, an empty slot), `LEFT` and `RIGHT` (a
-value's arrows, padded), `STEP` (a stepped value: a click is Right), `UP` and `DOWN` (a scroll mark: a click or a tap is Up or Down on the page's cursor, which does not move) (`port/ui/layout_ext.h`
+value's arrows, padded), `STEP` (a stepped value: a click is Right), `UP` and `DOWN` (a scroll mark: a click or a tap is Up or Down on the page's cursor, which does not move), `SQUARE` (a button prompt, the Continue screen's Save states line: a click or a tap is Square and moves no cursor; taken in a layout with no cursor of its own whatever the current layout has, [Save states](#save-states)) (`port/ui/layout_ext.h`
 (`lt_ext_set_pointer_role`)).
 
 ## The Settings menu
@@ -182,17 +192,17 @@ tables in step and within the `MAX_ROWS` (17, 18 in an rc build) budget of a pag
 | Main (`UI_PAGE_MAIN`) | Display, Picture (`UI_PAGE_PICTURE`), Effects, Graphics (`UI_PAGE_GRAPHICS`), Graphics driver, Audio, Controls, Gameplay, Language, Menu language, Disc, Achievements, Extras, Save a picture for a bug report, (an rc build on Android: Share a bug report,) Developer (`UI_PAGE_DEVELOPER`), Back |
 | Display | Preset, Resolution, Aspect, Window mode, Vsync, Frame rate, Frame rate counter (`UI_OPT_SHOW_FPS`, `[video] show_fps`, Off or On), Video mode, Back |
 | Picture | Anti-aliasing, Downsampling (`UI_OPT_DOWNSAMPLE`, `[video] downsample`, Off or To original size), Full height, Filtering, Full pixel, Brightness (pause menu only), CRT filter, CRT strength, Texture pack, Model pack (title only), Back |
-| Effects | the six game effects (Motion blur Off, Original or Smooth, `UI_OPT_EFFECT_MOTION_BLUR`, stepped round with `stepIndex` and its note `UI_STR_EFFECT_MOTION_BLUR_NOTE`) with Water reflections (Original or Sharp, `UI_OPT_EFFECT_WATER`) after Fog, Cinematic bars last, Back |
-| Graphics | Graphics API (`UI_OPT_GRAPHICS_API`: Automatic, then each name `ui_settings_set_backend_names` was given as Vulkan, OpenGL, Direct3D 12 or Direct3D 11; the shown value and the step base are the config's `video.backend`, an unlinked value shows as written and steps from Automatic; a step writes `video.backend` ("" for Automatic) and sets `s_dirtyConfig`, so the file is written on leaving; the note `UI_STR_GRAPHICS_API_NOTE` says Apply switches now and the choice is otherwise used from the next start), Apply (`UI_OPT_GRAPHICS_APPLY`, shown while a `UiGraphicsHost` is set, two or more names, no switch under way and the row's value, Automatic counting as the host's `automatic()` (the backend Automatic started this run) or else `vulkan`, a linked name that is not the host's `running()`; note `UI_STR_GRAPHICS_APPLY_NOTE`), Keep and Revert (`UI_OPT_GRAPHICS_KEEP`, `UI_OPT_GRAPHICS_REVERT`, shown only in the countdown, which hides Graphics API and Back), Back (the link and the page only with two or more names) |
+| Effects | the six game effects (Glow between frames, `UI_OPT_EFFECT_GLOW_SMOOTH`, Original or Smooth right after Glow, `[video] effect_glow_mode`, greyed by `glowSmoothLocked` at Frame rate Original or with Glow off, its note `UI_STR_EFFECT_GLOW_SMOOTH_NOTE` swapped for `UI_STR_EFFECT_GLOW_SMOOTH_LOCKED` while greyed; Motion blur Off, Original or Smooth, `UI_OPT_EFFECT_MOTION_BLUR`, stepped round with `stepIndex` and its note `UI_STR_EFFECT_MOTION_BLUR_NOTE`; Motion blur strength right after it, `UI_OPT_EFFECT_MOTION_BLUR_STRENGTH`, 10..100 % in tens held at both ends, `[video] effect_motion_blur_strength`, hidden by `optShown` while Motion blur is Off, its note `UI_STR_EFFECT_MOTION_BLUR_STRENGTH_NOTE`) with Water reflections (Original or Sharp, `UI_OPT_EFFECT_WATER`) after Fog, Cinematic bars last, Back |
+| Graphics | Graphics API (`UI_OPT_GRAPHICS_API`, shown with two or more renderer names: Automatic, then each name `ui_settings_set_backend_names` was given as Vulkan, OpenGL, Direct3D 12 or Direct3D 11; the shown value and the step base are the config's `video.backend`, an unlinked value shows as written and steps from Automatic; a step writes `video.backend` ("" for Automatic) and sets `s_dirtyConfig`, so the file is written on leaving; the note `UI_STR_GRAPHICS_API_NOTE` says Apply switches now and the choice is otherwise used from the next start), Graphics card (`UI_OPT_GRAPHICS_ADAPTER`, shown with two or more card names: Automatic (`UI_STR_VAL_GRAPHICS_AUTOMATIC`), then each name `ui_settings_set_adapter_names` was given, untranslated and cut to the value box by `gpuFit`; the config's `video.adapter`, a name the list lacks shows as written and steps from Automatic; a step writes it ("" for Automatic) with the line `settings: Graphics card set to <name|automatic> (used from the next start)`; note `UI_STR_GRAPHICS_ADAPTER_NOTE`), Apply (`UI_OPT_GRAPHICS_APPLY`, shown while a `UiGraphicsHost` is set, no switch under way and either the Graphics API value, Automatic counting as the host's `automatic()` (the backend Automatic started this run) or else `vulkan`, is a linked name that is not the host's `running()`, or the Graphics card value, Automatic counting as the card the names marked automatic, is a listed card that is not the host's `runningAdapter()`; note `UI_STR_GRAPHICS_APPLY_NOTE`), Keep and Revert (`UI_OPT_GRAPHICS_KEEP`, `UI_OPT_GRAPHICS_REVERT`, shown only in the countdown, which hides Graphics API, Graphics card and Back), Back (the link and the page with two or more renderer names or two or more card names) |
 | Graphics driver | Driver, Add a driver, Add from the drivers folder (`UI_OPT_GPU_ADD_FILE`, stepped over `fileName(i)`, shown while `fileCount()` is above 0, Cross calls `installFileBegin`), Remove this driver, Back (Android) |
 | Developer | Developer mode, Dump textures, Dump models (the two dump rows only with Developer mode on), Back |
 | Audio | Volume, Music, Effects, Output, Device, Back |
 | Controls | Remap (a list), Button configuration, Vibration, Hold type, Stick fix, the mouse camera's six rows, Circle back, Touch screen (a link, with a touch screen only), Back |
 | Touch screen (`UI_PAGE_TOUCH`) | Touch controls, Touch size, Touch opacity, Edit layout (`UI_OPT_TOUCH_EDIT`), Snap to grid, Grid size, Reset layout, Reset all layouts, Back |
 | Edit layout (`UI_PAGE_TOUCH_LAYOUT`) | no shown rows: the editor's own screen ([The touch layout editor](#the-touch-layout-editor)) |
-| Gameplay | Yorda safe, Stick fix, Door fix, Natural chains, Skip the opening (`UI_OPT_SKIP_OPENING`), Film effect, Players, Back |
+| Gameplay | Yorda safe, Time to rescue Yorda, Shadow speed, Stick fix, Door fix, Yorda trips (`UI_OPT_YORDA_TRIPS`, `[gameplay] yorda_trips`, its note `UI_STR_OPT_YORDA_TRIPS_NOTE`), Natural chains, Skip the opening (`UI_OPT_SKIP_OPENING`), Second memory card (`UI_OPT_SECOND_CARD`, `[gameplay] second_memory_card`, its note `UI_STR_OPT_SECOND_CARD_NOTE`; the step calls `ico_opt_set_second_memory_card`, whose listener puts the card in at once), Film effect, Players, Back; twelve rows once the game is cleared, so the page scrolls |
 | Achievements | a list, the popups switch |
-| Extras | Music, Models, Credits, Characters, Game variants (`UI_PAGE_VARIANTS`), Add to Steam, Export textures (`UI_OPT_EXTRAS_EXPORT_TEXTURES`), Achievement popups, Back |
+| Extras | Music, Models, Credits, Characters, Game variants (`UI_PAGE_VARIANTS`), Add to Steam, Export textures (`UI_OPT_EXTRAS_EXPORT_TEXTURES`), Back up your data (`UI_OPT_EXTRAS_BACKUP`), Restore from a backup (`UI_OPT_EXTRAS_RESTORE`), Achievement popups, Back |
 | Game variants (`UI_PAGE_VARIANTS`) | Shadow toughness, One hit per swing, Shadows never dodge, Shadow aggression, No hints, Queen barrier, No cutscene look-around, Ignore cutscene cameras (`UI_OPT_VAR_*`, one per `IcoVariantId`), Debug menu (`UI_OPT_VAR_DEBUG_MENU`, a press row, shown with Developer mode on), Back |
 | Music | the music gallery, a list |
 | Characters | nine colour rows, Switch, Randomize, Reset, Back |
@@ -229,7 +239,8 @@ Which rows show depends on where the menu was entered and what the machine has: 
 settings (Brightness, Vibration, Button configuration, Film effect, Players) only from
 the pause menu (Hold type shows from the title too: `[gameplay] hold_type`), Film effect and Players once the game is cleared; Video mode, Model pack and Extras'
 Music, Models and Credits only from the title (Add to Steam also only where the window host installs
-its handler, Export textures only while a `UiTextureExportHost` is set, the window build's; neither is in
+its handler, Export textures only while a `UiTextureExportHost` is set, the backup rows only while a
+`UiBackupHost` is set, the window build's but iOS's; none of them is in
 `isExtrasOpt`, which is the three rows that leave the stage); the dump rows only in developer mode; the Touch screen link only with a touch screen; the
 window and mouse camera rows not on Android; the Graphics link only with two or more renderer names (`ui_settings_set_backend_names`), the Graphics driver link only with a driver host on an
 Adreno GPU (`port/ui/settings.c` (`optShown`, `isGameOpt`, `isExtrasOpt`)). `layoutPage` masks the
@@ -363,7 +374,7 @@ what is pending and calls the quit handler: the [window build](ARCHITECTURE.md#t
 
 The menu knows nothing of the platform; the window host installs what the pages ask: the window
 mode query, the anti-aliasing list and block, the texture and model pack counts, the touch query,
-the touch editor's host (`UiTouchEditHost`), the Quit word, the Graphics driver host (`UiGpuDriverHost`), the renderer names (`ui_settings_set_backend_names`, filled from `rhi_backend_name` in `ico_window_open`, so port/ui never links the RHI), the Graphics page's Apply host (`UiGraphicsHost`, below), the Steam handler, the texture export host (`UiTextureExportHost`, below), the models
+the touch editor's host (`UiTouchEditHost`), the Quit word, the Graphics driver host (`UiGpuDriverHost`), the renderer names (`ui_settings_set_backend_names`, filled from `rhi_backend_name` in `ico_window_open`, so port/ui never links the RHI), the graphics card names (`ui_settings_set_adapter_names(names, n, current, automatic)`: the suitable entries of `rhi_adapter_list`, the card running and the one Automatic picks, copied; `port/platform/window_switch.c` (`installAdapters`) at the start and after every switch), the Graphics page's Apply host (`UiGraphicsHost`, below), the Steam handler, the texture export host (`UiTextureExportHost`, below), the backup host (`UiBackupHost`, below), the Save states host (`UiStatesHost`, below), the models
 handler, the Characters host (the model viewer's panel) (`port/ui/settings.h`
 (`ui_settings_set_*`)). A page whose host is missing hides its row.
 
@@ -371,34 +382,42 @@ handler, the Characters host (the model viewer's panel) (`port/ui/settings.h`
 
 `UiGraphicsHost` (`port/ui/settings.h`) is set by `port/platform/window_switch.c`
 (`ico_window_switch_install`): `running()` names the backend running as the config names it,
-`switchBegin(name, why)` asks for a switch (`UI_GFX_WHY_APPLY`, `_REVERT`, `_TIMEOUT`) and answers
+`runningAdapter()` (may be NULL) the card it runs on, `switchBegin(name, adapter, why)` asks for a
+switch to name on the card adapter (`""` automatic; `UI_GFX_WHY_APPLY`, `_REVERT`, `_TIMEOUT`) and answers
 `UI_GFX_SWITCH_PENDING` (then `switchPoll()` is asked every frame and every vsync until it is not),
 `_DONE`, `_FAILED` (the name did not start, the backend that ran is back) or `_REFUSED`; `kept()` is
 Keep, which the window logs; `automatic()` (may be NULL) names the backend Automatic started this
-run (its fallback or a restart's), NULL for Vulkan or a start the player chose. The page's state is
-`s_gfx` (`port/ui/settings.c`): idle, applying, countdown, reverting.
+run (its fallback or a restart's), NULL for Vulkan or a start the player chose. The rows' values
+and the switch are `port/ui/settings_graphics.c` (`settings_graphics.h`, the `ui__gfx_*` calls
+`port/ui/settings.c` makes); the page's state is its `s_gfx`: idle, applying, countdown,
+reverting.
 
-- Cross on Apply records the backend running and asks for the row's (`gfxApply`); the row's value
-  moves to `s_gfx.trial` and `video.backend` holds the value the page found until Keep, so every
-  save in between (`ui_settings_save`, the close button's `ui_settings_save_on_quit`, any
-  `ico_config_save`) writes that; the row shows the trial while applying and in the countdown
-  (`backendValue`). While a switch is under way the page takes no input (`gfxProc`).
+- Cross on Apply records the backend and card running and asks for the rows' (`ui__gfx_apply`:
+  the Graphics API value's backend, or the one running when only the card differs, and the
+  Graphics card value as written, `""` for Automatic); the rows' values move to `s_gfx.trial` and
+  `s_gfx.trialAdapter` and `video.backend` and `video.adapter` hold the values the page found
+  until Keep, so every save in between (`ui_settings_save`, the close button's
+  `ui_settings_save_on_quit`, any `ico_config_save`) writes those; the rows show the trials while
+  applying and in the countdown (`backendValue`, `ui__gfx_adapter_value`). While a switch is
+  under way the page takes no input (`gfxProc`).
 - Done: the countdown, `UI_GFX_KEEP_SECONDS` (10) times the popups' vsync rate
   (`ui_popup_vsync_hz`), counted by `ui_settings_vsync` (`ui_host_vsync` calls it after
   `ui_popup_vsync`); the cursor goes to Revert (`gfxRefresh`), so a second Cross meant for Apply
   goes back. Keep and Revert share one note, `UI_STR_GRAPHICS_KEEP_ASK` with one `%d`, the
   seconds left rounded up, written each refresh (`gfxNote`, outside `setNote`'s cache).
-- Keep: the trial into `video.backend` and `s_dirtyConfig` (written on leaving), the host's
-  `kept()`.
-- Revert, Circle (`PAD_BACK`) or 0: `video.backend` back to the value the page found (`gfxEntry`:
-  taken at the first step or Apply after the page is entered), `switchBegin` with the backend that
-  ran.
+- Keep: the trials into `video.backend` and `video.adapter` and `s_dirtyConfig` (written on
+  leaving), the host's `kept()`.
+- Revert, Circle (`PAD_BACK`) or 0: `video.backend` and `video.adapter` back to the values the
+  page found (`gfxEntry`: taken at the first step or Apply after the page is entered),
+  `switchBegin` with the backend and the card that ran (the card by its name).
 - Failed: a popup, `UI_STR_GRAPHICS_FAILED` with two `%s` (the backend that did not start, the
-  one kept, by their proper names); after Apply `video.backend` keeps the value the page found, as
-  Revert puts it back, so the file names a backend that starts. Refused: nothing, the trial back
-  in `video.backend`.
+  one kept, by their proper names), or `UI_STR_GRAPHICS_ADAPTER_FAILED` (the card that did not
+  start, the one kept) when only the card changed; after Apply the two keys keep the values the
+  page found, as Revert puts them back, so the file names a renderer and card that start.
+  Refused: nothing, the trials back in the keys.
 
-ctest `settings_extra` (`testGraphicsApply`).
+ctest `settings_extra` (`testGraphicsApply`); `settings_adapter` (`settings_adapter_test.c`: the
+Graphics card row, its link, Apply, Keep, Revert and a card that did not start).
 
 ### Extras > Export textures
 
@@ -436,6 +455,50 @@ build installs no host, so the row stays hidden there and in the UI tests withou
 ctest `settings_extra` (`testExportTextures`, a fake host), `settings_extras` (the rows hidden
 without a host and on the pause menu).
 
+### Extras > Back up your data and Restore from a backup
+
+`UiBackupHost` (`port/ui/settings.h`) is set by `port/platform/backup_host.c`
+(`ico_backup_host_install`, from `main_host.c` `setup_states` with the Save states host; not on
+iOS) and drives [the backup](PLATFORM.md#backups) behind the two rows. The rows show from the
+title only, after Export textures (`optShown`: `onTitle() && ui__backup_hosted()`). Their words,
+Cross and the popups are `port/ui/settings_backup.c` (`settings_backup.h`, the `ui__backup_*`
+calls `settings.c` makes in `refreshPage`, the Cross case and `ui_settings_vsync`). The host's
+`begin`, `proceed` and `cancel` only set its state; `pump()`, called once a vsync from
+`ui_settings_vsync` (the window's per-vsync step, outside the game's fibers, as SDL's dialogs
+require), opens the dialog, starts the work and ends the run; `poll()` fills a `UiBackupStatus`
+(`job`, `state`: `UI_BACKUP_IDLE`, `_CHOOSING`, `_WORKING`, `_ASK`, `_DONE`, `_FAILED`,
+`_CANCELLED`; `done`, `total`, `why`: `UI_BACKUP_WHY_*`; `restarts`; and for `_ASK` the backup's
+`version`, `date`, `discs` and `otherDisc`).
+
+- Back up your data (`UI_STR_EXTRAS_BACKUP`, note `UI_STR_BACKUP_NOTE`): Cross calls
+  `begin(UI_BACKUP_JOB_SAVE)` (log `extras: back up your data: started`); the note is
+  `UI_STR_BACKUP_CHOOSING` while the dialog is open and `UI_STR_BACKUP_PROGRESS` (two `%d`, done
+  and total) while the zip is written, written outside `setNote`'s cache (`liveNoteText`).
+- Restore from a backup (`UI_STR_EXTRAS_RESTORE`, note `UI_STR_RESTORE_NOTE`): the first Cross
+  asks nothing of the host: the popup `UI_STR_RESTORE_CONFIRM_TITLE` with `_CONFIRM_BODY` (what is
+  replaced, the restart) and the label `UI_STR_RESTORE_AGAIN`; a second Cross within
+  `RESTORE_CONFIRM_SECONDS` (8) calls `begin(UI_BACKUP_JOB_RESTORE)`; the first press ends when
+  the cursor leaves the row (the row's refresh with the cursor elsewhere) or the time runs out.
+  The note is `UI_STR_RESTORE_CHOOSING`, then `UI_STR_RESTORE_READING`. When the host has read
+  the backup (`_ASK`), `ui__backup_vsync` shows `UI_STR_RESTORE_ASK_TITLE` once with the lines
+  `UI_STR_RESTORE_VERSION`, `_SAVED`, `_DISCS` (one `%s` each), `_OTHER_DISC` when another disc
+  made it, `_PRESS`; the label is `UI_STR_RESTORE_THIS` and the note `UI_STR_RESTORE_ASK_NOTE`
+  (the version). Cross calls `proceed()` (the progress `UI_STR_RESTORE_PROGRESS`); the cursor
+  leaving the row, or `RESTORE_ASK_SECONDS` (60), calls `cancel()` (log `extras: restore from a
+  backup: not restored (<why>)`).
+- The end (from `ui_settings_vsync`, on any screen, once): `_DONE` pushes `UI_STR_BACKUP_DONE`
+  with `_DONE_BODY` (`%d` files, `%s` the file's name), or for a restore `UI_STR_RESTORE_DONE`
+  with `_DONE_RESTART` or `_DONE_CLOSE` (the host's `restarts`); `_FAILED` pushes
+  `UI_STR_BACKUP_FAILED` or `UI_STR_RESTORE_FAILED` with the reason `UI_STR_BACKUP_WHY_*`; a
+  closed dialog (`_CANCELLED`) pushes nothing. Log `extras: <row> ended: state S, D of T files,
+  reason R`. While a job is under way (and after a restore is done, until the run ends) Cross on
+  either row asks nothing (`NEGATIVE_SE`).
+- The bodies go through `fmtText` (`ui__settings_fmt`).
+
+ctest `settings_backup` (`settings_backup_test.c`, a fake host; `_jpn`, `_kor`, `_cn`: the rows on
+those discs' numbers and confirm button), `settings_extras` and `settings_extra` (the page's
+eleven rows, the backup rows hidden without a host).
+
 ## Strings and languages
 
 Every word the port draws is a `UiStrId` into one table per language, `strings_en.c`, `fr`, `de`,
@@ -444,9 +507,10 @@ initialisers; the tables also hold the game's own menu words (`UI_STR_MT_*`) as 
 letter them (`port/ui/strings.h`, header comment). `ui_str` answers in the current language and
 falls back to English for a missing entry (`port/ui/strings.c` (`ui_str_in`)); ctest
 `strings_complete` fails on a missing or empty entry, and on an entry whose printf conversions are
-not the English one's, so the fallback never shows (`port/ui/test/strings_complete_test.c`). Every
-table names the languages in their own words (English, Français, Deutsch, Italiano, Español,
-日本語, 한국어, 繁體中文), so a player finds theirs whatever the menus are in.
+not the English one's, so the fallback never shows (`port/ui/test/strings_complete_test.c`); a
+community translation's table is the exception ([Community translations](#community-translations)).
+Every table names the languages in their own words (English, Français, Deutsch, Italiano, Español,
+日本語, 한국어, 繁體中文, Русский (bob-ttz), Русский (cobra838), Português (Brasil) (ichagas7)), so a player finds theirs whatever the menus are in.
 
 The first five languages, `UI_LANG_PAL_COUNT`, are the European disc's, in the order of the game's
 language numbers; Japanese (`UI_LANG_JA`), Korean (`UI_LANG_KO`) and Traditional Chinese (`UI_LANG_ZH`) are the
@@ -465,7 +529,8 @@ menus follow at once while the menu language is Auto, and writes `[game] languag
 the row is not shown there and the port never writes the word (`gameLanguage` is -1); `Main` sets it
 from `ico_boot_language`, which gives 0 on that disc (`port/config/sysconf.c`), so it stays 0.
 
-The menu language, `[ui] language` (`auto`, `en`, `fr`, `de`, `it`, `es`, `ja`, `ko` or `zh`;
+The menu language, `[ui] language` (`auto`, `en`, `fr`, `de`, `it`, `es`, `ja`, `ko`, `zh`,
+`ru-bobttz`, `ru-cobra838` or `pt-br`;
 `port/game/options.h` (`ico_opt_ui_language`)), is resolved by `ui_settings_resolve_language`: a
 chosen language wins on every disc; `auto`, the default, follows the disc: the language its region
 row names (`IcoRegionInfo.ui_lang_default`: `UI_LANG_JA` on the Japanese disc, `UI_LANG_KO` on the
@@ -552,29 +617,71 @@ punctuation (，。？！：) in the port's sentences, which break between any t
 before the closing marks, as the Japanese text does (`ui_break_before`). Ico and Yorda stay in
 Latin letters, as the sheets never spell them. The language is named 繁體中文 in every table.
 
+### Community translations
+
+A community translation ([TRANSLATING.md](../TRANSLATING.md)) is a table past the eight complete ones:
+`UI_LANG_COMMUNITY_FIRST` (= `UI_LANG_COUNT`) to `UI_LANG_TABLES`, today `UI_LANG_RU_BOBTTZ`
+(`port/ui/strings_ru_bobttz.c`, converted once by hand from bob-ttz's CSV) and
+`UI_LANG_RU_COBRA838` (`port/ui/strings_ru_cobra838.c`, converted once from the complete
+`strings_ru.c` of cobra838's pull request 180: his rows left in English, the ids newer than his
+table, the one whose English changed since, the two notes over 255 bytes, a note that says
+something else than the English and his Korean and Chinese names, which every table gives in their
+own script, are NULL; his "Longer" pit-time value, "x1", is the 1.5x step's "x1,5") and
+`UI_LANG_PT_BR` (`port/ui/strings_pt_br.c`, converted once from Igor Chagas's CSV, issue 157: his
+empty rows, the rows the same as the English, the ids newer than his CSV, the one whose English
+changed since, three notes whose second half his spreadsheet lost, three rows without the
+English's `%s`, and six notes over two lines are NULL; where his sheet split a note at the
+English's `;` the two halves are joined; then 62 rows taken from cobra838's copy of the same
+table in PR 180, each marked `/* [cobra838] */`: 7 corrections (the Shadow's "Sombra", the
+leading space `UI_STR_AA_UNAVAILABLE` is appended with, the mouse range's "Total", Full pixel's
+name, the water note's value name, the full stop of the AA note, "nativo" for the device's own
+driver) and 55 fills (colours, CRT values, hold type, the graphics card and API rows, the driver
+messages, two of the three half notes and one of the `%s` rows whole); 569 of 707 translated, 138
+NULL). Its table names every
+`UiStrId` but leaves NULL the ids it has not translated: the CSV's empty rows (the language,
+disc and button names, the units, the test popup, the digit and letter tiles), the ids newer than
+the CSV, a row whose English changed after the translation and the notes longer than a note's two
+lines and 255 bytes ([TRANSLATING.md](../TRANSLATING.md#what-the-maintainer-checks)); those are
+English at run time (`ui_str_in`). `strings_complete` holds such a table to its own rule: every
+entry it has non-empty with the English one's conversions, at least half translated, its name in
+every table. The tests that hold every table to a word of its own (the notes' fit aside, which
+`settings` checks for it too) walk the first `UI_LANG_COUNT`; `font_coverage` and `font_audit`
+walk every table and its subtitles.
+
+The Menu language row offers the community translations after the eight (`[ui] language`
+`ru-bobttz`, `ru-cobra838`, `pt-br`), and its Auto resolves to the one in force (`port/ui/ui_lang.h`
+(`ui_settings_text_language`): the Language row's community entry, `[game] text_language`, on the
+European disc with the game in English). `ui_settings_apply_language` also sets the menu words'
+language to it (`ui_set_menu_words_language`), so the game's menu words over the English sheets
+are its `UI_STR_MT_*` strings with the English sheet's geometry, an item's strip hashed with that
+language so the five sheets' own strips stay byte for byte (`port/ui/menu_font.c` (`itemStrip`,
+`itemWords`); ctests `subtitles_ru`, `subtitles_ru_cobra838`, `subtitles_pt_br`). Its subtitles are drawn by `port/ui/subtitle_text.c`
+([GAME_FEATURES.md](GAME_FEATURES.md#community-translations)).
+
 ## Text: the font and the sheet look
 
 ### The font
 
 The port's text is Arimo Regular (SIL OFL 1.1), embedded in the program: `embed_font.cmake` turns
 `port/assets/fonts/Arimo-Regular.ttf` into `ui_font_ttf[]` at build time, so no file sits beside
-the program (`port/ui/embed_font.cmake`; `port/ui/CMakeLists.txt`). The font is a subset; the
-code points it holds are listed on the `subset:` line of `embed_font.cmake`, which
-`tools/font_audit.py` checks the port's text against.
+the program (`port/ui/embed_font.cmake`; `port/ui/CMakeLists.txt`). The font is a subset (48,336
+bytes, 596 code points: ASCII, Latin-1, Latin Extended-A, Cyrillic U+0400-04FF and the
+typographic punctuation the tables use); the code points it holds are listed on the `subset:` line
+of `embed_font.cmake`, which `tools/font_audit.py` checks the port's text against.
 
 A character Arimo has no glyph for is drawn from a second embedded font, a subset of Noto Sans JP
 Regular (SIL OFL 1.1; `port/assets/fonts/NotoSansJP-Regular-subset.ttf` into `ui_font_ja_ttf[]`,
-142,792 bytes, 752 code points): the Japanese table, the language names and the PlayStation
+150,760 bytes, 782 code points): the Japanese table, the language names and the PlayStation
 button marks □ △ ○ (`port/ui/font.c` (`fontGlyph`)). Its metrics are scaled to Arimo's em (`jaK`),
 a pair across the two fonts has no kerning, and every line keeps Arimo's ascent and line height,
 so Latin text draws as before; the sheet rasteriser (`ui__sheet_raster_line`, the menus' look)
 takes the same glyphs. A character neither has (Hangul) is drawn from a third embedded font, a
 subset of Noto Sans KR Regular (SIL OFL 1.1; `port/assets/fonts/NotoSansKR-Regular-subset.ttf`
-into `ui_font_ko_ttf[]`, 84,372 bytes, 655 code points: the Hangul of every table, 한국어 being
+into `ui_font_ko_ttf[]`, 89,068 bytes, 681 code points: the Hangul of every table, 한국어 being
 in all of them, and the Korean table's other characters outside Arimo), scaled to Arimo's em in
 the same way (`koK`; `port/ui/font.c` (`fontGlyph`)). A fourth, a subset of Noto Sans TC Regular
-(SIL OFL 1.1; `port/assets/fonts/NotoSansTC-Regular-subset.ttf` into `ui_font_zh_ttf[]`, 219,264
-bytes, 893 code points: the Chinese table's and corpus' characters outside Arimo, Hangul left to
+(SIL OFL 1.1; `port/assets/fonts/NotoSansTC-Regular-subset.ttf` into `ui_font_zh_ttf[]`, 222,372
+bytes, 903 code points: the Chinese table's and corpus' characters outside Arimo, Hangul left to
 Noto Sans KR), holds the ideographs of the Chinese table (`zhK`). The order is Arimo, Noto Sans JP,
 Noto Sans KR, Noto Sans TC, so a character two fonts hold (the button marks, the CJK punctuation)
 comes from the same font whatever the language, and the Japanese and Korean text draw exactly as
@@ -584,9 +691,19 @@ Japanese text use (返, 選) is then drawn in its Traditional form, not the Japa
 glyph cache keeps both (its key carries the face order's bit), and the menus' strips are hashed
 with it, so changing the Menu language between Japanese and Chinese draws each anew. The language
 name 繁體中文 every table holds is in the Japanese subset too (`subset_font_ja.py` reads every table
-but the Chinese one), so it is drawn from one font in every language. The fonts
-are for the port's own text only: every word of the game's is the disc's own picture, on every
-disc.
+but the Chinese one), so it is drawn from one font in every language. The fonts draw the port's own
+text and the European disc's menu words ([The game's own menu words](#the-games-own-menu-words)); the
+game's subtitles stay the disc's own pictures, except under a community translation
+([Community translations](#community-translations)), whose subtitles are drawn with Arimo.
+
+Arimo's subset is made the same way as the three below: `tools/fetch_deps.sh` (section 8c,
+`SKIP_ARIMO=1` skips it) fetches the variable `Arimo[wght].ttf` of `google/fonts` at a pinned
+commit into `tools/toolchain/deps/arimo/`, SHA-256 checked; `tools/subset_font_arimo.py` makes the
+wght 400 instance of the ranges it lists (`BASE_RANGES`) and every other character of a community
+translation's tables (`port/ui/strings_<lang>_<translator>.c`, `port/game/subtitles_*.c`), hinting
+dropped, the kerning feature kept (GPOS pair adjustments, which stb_truetype reads; an extension
+lookup is unwrapped), the name table whole and the source's timestamps, and writes the `subset:`
+line; `--check` (ctest `font_subset_arimo`) makes the same three comparisons as the Noto scripts'.
 
 The subset pipeline: `tools/fetch_deps.sh` (section 7, `SKIP_NOTO_JP=1` skips it) fetches the
 variable `NotoSansJP[wght].ttf` of `google/fonts` at a pinned commit into
@@ -641,7 +758,15 @@ that grid, its lettering 0.8 as wide as the typeface (`UI_SHEET_WIDTH`, the shee
 lettered for the GS's 512-wide frame) and a little heavier (`UI_MENU_BOLD_X`, `UI_MENU_BOLD_Y`),
 then drawn with rd's sheet [shader](SHADERS.md): a rim around the letters and the antialiasing
 quantised against a fixed dither, as the sheets read (`port/ui/menu_font.h`;
-`port/ui/ui_internal.h` (`UI_SHEET_WIDTH`, `UI_MENU_BOLD_X`)).
+`port/ui/ui_internal.h` (`UI_SHEET_WIDTH`, `UI_MENU_BOLD_X`)). At 1x rd computes a page's finished
+texels on the CPU when it uploads the strips placed on it, and the shader reads four of them a pixel
+([SHADERS.md](SHADERS.md#sheet_texthlsli), **The 1x bake**): a 1x page is 1038 x 1034 RGBA8 on the
+graphics card (4.3 MB, the page and its apron) where its coverage is 1 MB, and a placed strip costs
+its rectangle and the rim's reach round it once; a language change bakes the light and faint pages
+again whole. At 2x (the strips of a scene twice the PS2's height or a little more: the phone at
+Resolution Auto or 2x) rd bakes the pages the same way ([SHADERS.md](SHADERS.md#sheet_texthlsli),
+**The 2x bake**): a 2x page is 2062 x 1034 RGBA8 (8.5 MB, the 2048 x 1024 texture and its apron)
+where its coverage and rim are 2 MB; at 3x and 4x the shader rebuilds each pixel.
 
 The strips are rasterised at the [scene scale](ARCHITECTURE.md#terms), the scene's texels per GS
 line rounded to whole strip texels per sheet texel, from 1 up to `ICO_SHEET_SCALE_MAX` (on the
@@ -764,8 +889,8 @@ right edge of the 4:3 picture for 0.3 s, held for 4 s, sliding out for 0.3 s, co
 call, `ico_host_vsync_hz()` (15, 200 and 15 at 50 Hz; 18, 240 and 18 at 60 Hz, the Japanese disc's
 and the European disc's 60 Hz mode; `port/ui/popup.h` (`UI_POPUP_QUEUE`, `ui_popup_set_vsync_hz`,
 `ui_popup_slide_vsyncs`, `ui_popup_hold_vsyncs`), 50 Hz by default in the tests). Achievements, photo mode, the model viewer, the Graphics driver page and
-Extras > Add to Steam and Export textures push them (`port/ui/settings.c` (`steamAdd`,
-`texExportEnd`)); `ui_popup_title` and `ui_popup_body` give the one showing (tests). They are drawn on the
+Extras > Add to Steam, Export textures and the backup rows push them (`port/ui/settings.c` (`steamAdd`,
+`texExportEnd`); `port/ui/settings_backup.c` (`ui__backup_press`, `ui__backup_vsync`)); `ui_popup_title` and `ui_popup_body` give the one showing (tests). They are drawn on the
 presentation overlay (`rd_set_present_overlay`) at every [present](ARCHITECTURE.md#terms), after the
 box blit and at the output's resolution: outside the game's frame, so a frame the GS keeps never
 shows one twice, and never mirrored (`port/ui/popup.h`, header comment; `port/ui/ui_host.c`
@@ -819,17 +944,35 @@ screen, not the 4:3 picture: `pxToGrid` maps an output pixel to the font's grid,
 outside 0..640 on a wide screen). The number is made by `port/platform/fps_counter.c` (free of SDL
 and rd, `fps_counter_test`): the presents over the last second or more, the figure the 10 s line
 gives as "presents/s", 0 until the first second (nothing is drawn while it is 0). `window_host.c`
-only calls `ui_fps_tick(now)` at the top of `pace_log` and `ui_fps_present()` after a present
+only calls `ui_fps_tick(now)` at the top of `window_pace_log` and `ui_fps_present()` after a present
 (`window_host.c` is within a few hundred bytes of the 256 KiB per-file gate: the rest lives here and in
 `fps_counter.c`); `ui_fps_tick` passes the renderer's replay count (`rd_replay_time_max(0, ...)`,
 which the 10 s line zeroes: a smaller count than the last is a zeroing) and `rd_interpolation_active()`.
 With interpolation on the counter counts the window's presents, with it off the replays, as the 10 s
 line does. The counting runs whether or not the option is on. While a touch layout exists
-(`ui_touch_top_gap`) the corner is Left 2's, so the text starts 35 q in from the layout's left edge
-(just right of the D-pad's Up key at 33 q) at the keys' row (3 q down) and is shrunk by 8 % steps (to
-12 pixels at least) until it fits before Select's left less 2 q (`touch.c` header: the default
-places). A player's edited layout can put a control there; the counter does not look. The log says
-"window: frame rate counter on" or "off" when the option changes (and "on" at the start when it is
+(`ui_touch_top_gap`, which asks `ico_touch_fps_place` in `port/input/touch_gap.c`) the place comes
+from the player's actual layout, edits applied, the one the overlay snapshot carries. A control
+counts when it is drawn (a button with `alpha` > 0, the left stick's resting ring with
+`stickAlpha` > 0; Hidden and Off controls are not drawn, the look pad's area is drawn only under a
+finger) and its box is padded by 2 q. When none meets the corner's band (the margin in, the text's
+height, the text's width at full size) the counter stays in the corner. Otherwise it goes on the
+keys' row (3 q below the region's top) at the first x from the corner, going right, where no counted
+control meets the row over the text's full width: on the default layout the Left 2 and the D-pad's
+Up key hold the row up to 35 q (the old fixed place), Start moved to the top-left pushes it to
+Start's right edge plus 2 q. The text is shrunk by 8 % steps (to 12 pixels at least) until it fits
+before the next counted control's padded left edge (Select's less 2 q by default). When no gap holds
+the full width a gap that holds the shrunk floor is used, and with none the corner again, drawn
+over. The corner is the margin inside the screen's safe area (the output's edge plus SDL's insets: a
+rounded corner or a notch is outside it; `ico_touch_fps_corner`) in every touch mode: with the
+overlay faded (`ico_input_sdl_touch_overlay` gives no snapshot: a gamepad's fade to nothing, the
+Touch controls row Hidden or Off, opacity 0) `ui_fps.c` takes the corner from the layout alone
+(`ui_touch_safe_corner` over `ico_input_sdl_touch_safe_layout`, the same snapshot's layout whatever
+its opacity), and with no touch layout at all (a desktop without a touch screen) the margin from the
+output's edge. `touch_gap_test` checks the default place, Start top-left drawn, Hidden and Off, every
+control Off, no room, the stick's ring, and the safe corner with the controls drawn and not. The log
+says "window: frame rate counter at the corner", "at the corner inside the screen's safe area" or "at
+the touch controls' row, clear of the drawn controls" (x, y, the output's size) once per change of
+place, besides "window: frame rate counter on" or "off" when the option changes (and "on" at the start when it is
 on).
 
 ## The touch layout editor
@@ -991,7 +1134,8 @@ the Japanese program with Korean text, and every bullet below holds on it as wel
 row numbers (the title's copyright line is rows 12 and 13 there), its own sheets (`UI_SHEET_KO`)
 and Korean in place of Japanese where a bullet names the language; the Korean disc has not been
 run in the port yet, so those numbers are checked by the tests (`ui_kor`, `settings_kor` and the
-other `_kor` rows of [TESTING.md](TESTING.md)) and by reading its tables, not by play. The Asian
+other `_kor` rows of [TESTING_PROGRAMS.md](TESTING_PROGRAMS.md)) and by reading its tables, not
+by play. The Asian
 disc (`region_cn.c`) is the Korean program on the Japanese disc's records: Circle confirms as there,
 and its menu sheets are Traditional Chinese, so its Menu language starts on Chinese
 (`ui_lang_default` `UI_LANG_ZH`) over its own sheets' look (`menu_sheet` `UI_SHEET_ZH`, the Japanese
@@ -1089,6 +1233,142 @@ popup test switch and the quit handler; `ui_host_vsync` runs the popup clock onc
 (`port/ui/ui_host.h`; `port/ui/ui_host.c`; `port/ui/ui_internal.h` (`ui__set_record_hook`,
 `ui__set_sync_hook`)).
 
+### Save states
+
+`UiStatesHost` (`port/ui/settings.h`; the contract is `list`, `request` and `can_save`) is set by
+`port/platform/main_host.c` (`setup_states`, window build only) before the menus are built; it is
+copied by `ui_settings_set_states_host`. Two things depend on it **when `build()` runs**
+(`s_statesAtBuild`): the pause menu's row and the Continue screen's prompt exist only if the host
+was set by then, so a build without one (the headless build, the other Settings tests) has the same
+rows and layouts as before. Extras has no Save states row: the title's way in is the Continue
+screen.
+The page itself (`UI_PAGE_STATES`, `buildStatesPage`) is always built, with no way in; its layout
+costs one layout and 30 rows of the extension's budget (`testBudget`); with the host, the pause row
+and the prompt add three rows and one layout. `port/ui/settings.c` builds the page's rows, the ways
+in and out (`statesOpen`, `statesLeave`, `statesLeaveQuiet`, `statesKeyClose`, `contProc`) and the
+tick's shell (`statesProc`); `port/ui/settings_states.c` holds the host, the cards' texts
+(`ui__states_refresh`), the pictures, the actions (`statesPerform`) and F6's latch, through the
+`ui__states_*` calls of `settings_states.h`.
+
+- **Entry from the pause menu**: under Photo mode a pause menu row `UI_STR_STATES`, in the port
+  layout chained after the pause menu (`s_statesRow`, built in `buildEntries` before the journey's
+  lines), whose `right` is the page's layout.
+- **Entry from the title** (the Continue screen's prompt, `contProc`): the Continue screen's file
+  select is `la_mc_load_file_select` (region `layout_load_files`: 19 on the European disc, 16 on the
+  six others), a layout with no cursor whose `link` is the files' layout (`layout_mc_files`, 14 or
+  11, `la_mc_file_select`, shared with the Save screen; `menu_region_test` checks both on the
+  Japanese, Korean and Asian ELFs). `buildEntries` builds a one-item `UiHint` (the Square glyph
+  and `UI_STR_STATES`, `NOTE_SIZE`) in a port layout of its own with no cursor (`s_contLayout`),
+  and `repoint` chains it between the two: `19 -> prompt -> 14` (logged once, and left out, when
+  19 does not link 14). `exec_layout_texture` runs the chain's procs from the far end, each
+  handing its return to the next as `item`, and the file select's own proc last: the prompt's proc
+  returns the `item` it is given unchanged (the file `la_mc_file_select` picked on a confirm, which
+  `la_mc_load_file_select` indexes as `file[item]`). The line is shown while
+  `la_host_mc_files_shown()` (`layout_action.c`: `fileMask` and `actionStarted` set, the card check
+  done and the tiles up) and sits at field line 183 (`CONT_HINT_Y`), under the frame of the file
+  picture (lines 60 to 180 on the European disc, to 169 on the others), clear of the memory card
+  slot words (112 / 110), the area name (135 / 124) and the play time (160 / 150), above the OK and
+  Back bar (200), centred. Square (0x80: no proc of the screen reads it on any disc; not taken with
+  the confirm or Back in the same press) after the fade opens the page: `la_host_leave()` (as the
+  game's own exits: the item filter off, `actionStarted` 0), `s_origin` the title (the title's hint
+  line; the host allows no Save there), `lt_switch_layout` to the page, and the log line
+  `settings: Save states opened from the Continue screen`. The file select's proc runs after the
+  prompt in the same tick and installs its item filter again; the page's first tick (`statesOpen`
+  from 19) calls `la_host_leave()` once more before any cursor move. The two-card slot screen (17)
+  and the Save screen have no prompt. Its rows' pointer role is `LT_POINTER_SQUARE`: a click (a
+  tap) is Square and moves no cursor, and `ui_mouse.c` takes these rows in a layout with no cursor
+  whatever the current layout has (the file select has none).
+- **Pause rows** (`placePause`): the port rows (Photo mode while a stage runs, Save states) are
+  chained one `PAUSE_PITCH` (20) apart under Options, or `PAUSE_PITCH_STATES` (16) when the states
+  row shows: Options 50, Photo mode 66, Save states 82, Back 98, End Game 120 where the data has it.
+  A row not shown is masked and skipped by the item links. `pauseRowsOk` accepts Back at 1 or 2 pitches
+  of 20, or (with the row) 1 to 3 of 16, and still wants End Game three pitches of 20 below Options.
+  The boxes keep Options' height, so the letters stay where they are in them and overlap
+  4 lines at the narrower pitch.
+- **Entry by F6** (`ui_settings_states_key`, the keyboard only: [PLATFORM.md](PLATFORM.md#hotkeys-and-dump-zips)):
+  the press is latched (`settings_states.c` `s_stKeyAt`, the flip it came at); in play the window taps Start first. The
+  pause menu's `entryProc` takes the latch once the menu's fade-in is done (`lt_fade_status()`
+  2, after its own default restore so nothing it sets is undone) and opens the page as the row does:
+  the confirm sound, `lt_switch_layout`, the page's first tick then `statesOpen` from the pause menu
+  (`s_procLayout`), so Back returns to the row. On the page `statesProc` takes it before Back and
+  closes the page into the game (`statesKeyClose`: the pictures released, what changed saved, the
+  cancel sound, `la_host_resume_play` and the region's play layout, `closeForDebugMenu`'s way). The
+  cursor of the pause menu is not moved to the row when F6 opens the page (`gameCursorOn` would
+  leave the next pause on the row after an F6 close); Back puts it there as for the row. A latch
+  older than 60 frames (`ST_KEY_TICKS`) is dropped with a line. Ignored on the title (stage up to
+  the region's `stage_title`), without the host, in photo mode, where Start cannot pause
+  (`enable_game_pause`), on any other screen and on Android.
+- **Cards** (`buildStatesPage`): the header, then four cards `ST_PITCH` (44) field lines apart from
+  line `ST_Y0` (40): an image row 72 x 54 at x 40 (`lt_ext_add_image`; the picture drawn at its own
+  shape inside it, centred: `lt_ext_image_fit`, a 16:9 picture as wide as the tile with bands above
+  and below, nothing stretched), the label "Slot N" at
+  x 124 (24 em, the only stop: the page's `rows[]` are these four, `UI_OPT_STATE_SLOT`, the action
+  row their value row), the action word centred between the Options pages' arrows (`STEP_X`,
+  `ARROW_*`: the pointer's roles are the value rows'), the area and play time 13 lines under the
+  label (`areaName`, `playTimeText`: the save screen's own, in the note size) and the date 22
+  lines under it (`%Y-%m-%d %H:%M`, local time). The last card's date ends on line 204; the status
+  line (a note row, y 205) is under it. A slot not in use reads `UI_STR_STATES_EMPTY`; one that is in use
+  but cannot load is greyed (`lt_ext_set_dim`) and, with the cursor on it, the status line gives the
+  host's `refusal_str` (a `%s` and the colon before it cut off, `statesPlain`).
+- **Actions**: Save (only where `can_save()`), Load and Delete (only on a slot in use), stepped
+  by Left and Right in that order (`statesStepAct`; the arrows show while two or more apply); the
+  choice is kept per slot while it is still possible. Cross (`statesPerform`) asks the host
+  (`request`): 0 is accepted (the result is the host's popup, and the cards are listed again at
+  the next tick), -1 shows `refusal_str` (`UI_STR_STATES_OFF` if none) as a popup. Save over a
+  slot in use and Delete first show `UI_STR_STATES_CONFIRM` (the action word lowercased on its first
+  letter, English only matters) in the status line and need a second Cross within two seconds
+  (`ST_CONFIRM_SECONDS` times `ui_popup_vsync_hz()` page ticks); moving the cursor, stepping the
+  action or waiting cancels. On the title the status line is `UI_STR_STATES_TITLE_HINT`, elsewhere
+  `UI_STR_STATES_NOTE` ("A state belongs to this disc. Later versions may load it too. ...").
+- **A state of another version** (`main_host.c` `states_done` and `states_other_version`, the
+  host's popup after a refused load): a slot another build made is listed loadable when this build
+  can translate it ([PLATFORM.md](PLATFORM.md#across-versions)); when it cannot, the card is greyed
+  with `UI_STR_STATES_REFUSED_BUILD` in the status line, and Load's popup says why in the player's
+  words, from `ico_state_last_refusal` (`state.h` `IcoStateBlocker`, the two versions from the
+  commit texts without `-dirty`): `UI_STR_STATES_XB_OLD` for a format 1 state ("This save state was
+  made by version X, before save states could carry over to newer versions. Your memory-card saves
+  still work."), `UI_STR_STATES_XB_CODE` for a changed function a thread sits in ("This save state
+  was made by version X. Version Y changed the part of the game it was saved in, so it cannot be
+  resumed. Your memory-card saves still work."), `UI_STR_STATES_XB_DATA` for the game data layout, a
+  variable, a start-up value, a block or a section size ("... Version Y changed how the game keeps
+  its progress in memory, so it cannot be resumed. ..."), and `UI_STR_STATES_XB_PINNED` for a state
+  nothing translates ("This save state was made by version X, and only that version can resume
+  it. ..."). The Latin languages' texts carry their own line breaks (the popup keeps Latin lines as
+  written); the log line names the function, the variable or the block.
+- **Listing and pictures**: `statesOpen` lists when the page opens, then every `ST_RELIST_TICKS`
+  (30) ticks and at the tick after an accepted request (`list` is cheap and cached by the host; the
+  picture appears a few frames after a save). The host's picture is the game before the pause
+  menu, at most 960 x 960 (a stored PNG under 2.8 MB, inside `statesDefaultLoad`'s 8 MB read), or
+  the frame after the save when there is none ([PLATFORM.md](PLATFORM.md#saving-and-loading)). A slot's picture is made from its `png_path` when the
+  path or `saved_at` changes (`statesPictureSync`: `texpack_load_png` and `rd_create_texture`,
+  `ico_fopen` for the file) and released with `rd_destroy_texture` after its row is set to 0 when
+  it changes, the slot empties, the page closes (Back, or any other layout's proc: `ui__states_release`)
+  or `ui_settings_reset` runs. `ui_settings_set_states_tex_funcs` swaps the two calls for fakes (the
+  tests; without `ICO_RD` the default makes none and the pictures stay empty). A picture that cannot
+  be read logs `state: the picture of slot N could not be loaded (path)` once per change.
+- **Back** goes to the layout it was opened from (the layout the last settings proc ran in,
+  `s_procLayout`): the pause menu with the cursor on the row, or the Continue screen's file select
+  (`s_stFromContinue`, logged `settings: Save states closed, back to the Continue screen`), whose
+  first tick reads the card again as on any entry (`fileMask` 0, the files' cursor on its
+  default). The title's logo stays down while the page covers the title and shows again on the
+  Continue screen (`port/game/title_logo.c`).
+- **After a load** (`ui_settings_sync_after_state_load`, called by the host after the restore):
+  the pictures are released, the entry becomes the pause menu, the default cursor of the pause
+  layout is the Save states row (and the current one if the pause menu is up), and a page still
+  showing closes at its next tick without a sound or a save (`statesLeaveQuiet`).
+
+ctest `settings_states` (and `_jpn`, `_kor`, `_cn`, `_ntsc`, `_aug6`, `_jun26`, which run the pause
+rows, Extras and the Continue prompt on those discs' numbers): the pause rows' places and links with
+and without the host or a stage, Extras' nine rows from both entries with and without the host, the
+Continue prompt (no layout and the item handed on without the host; with it the chain, the glyph
+and words, hidden until the files show, its lines, a confirm on a file reaching the file select
+unchanged, Square and a click opening the page with Load and Delete only, Back to the file select
+from its first tick, a load closing to the pause menu), the four cards' texts, geometry and
+pictures, the actions, the confirm rule, the title, Back, the page after a load, the pictures' box at
+their own shape (16:9, 4:3 and a tall one in the tile), and F6 on every disc (in play: Start asked
+for and the page once the pause menu is up, Back to the row; on the pause menu the page; on the
+page back to the game; a late press dropped; each ignore with its line).
+
 ## Tests
 
 Each is a ctest of `port/ui/CMakeLists.txt`; the Settings tests share a fixture:
@@ -1103,11 +1383,18 @@ Each is a ctest of `port/ui/CMakeLists.txt`; the Settings tests share a fixture:
 - `settings` (`test/settings_test.c`): the menu over fake PAL-shaped tables: pages and labels, the
   entry repoint, the title and pause rows' places, navigation through the real `layout_texture.c`,
   the game's settings on the pages, what is written.
+- `settings_states` (`test/settings_states_test.c`): the Save states page, the pause menu's row
+  and the Continue screen's prompt over a fake host ([Save states](#save-states)).
 - `settings_extras` (`test/settings_extras_test.c`): the Extras page from the title and the pause
   menu, Credits, Models, Characters with a faked viewer, the pages that hide the logo.
 - `settings_extra` (`test/settings_extra_test.c`): further Settings tests, one function per
   feature, kept in their own file under the source size cap of `tools/check_no_rom.sh`; new
-  Settings tests go here (`port/ui/CMakeLists.txt`).
+  Settings tests go here (`port/ui/CMakeLists.txt`), or into a program of their own once it is
+  near the cap.
+- `settings_adapter` (`test/settings_adapter_test.c`): the Graphics card row and Apply on another
+  card over a fake host ([Graphics > Apply](#graphics--apply)).
+- `settings_backup` (`test/settings_backup_test.c`): Extras' backup rows over a fake host
+  ([Extras > Back up your data and Restore from a backup](#extras--back-up-your-data-and-restore-from-a-backup)).
 - `settings_render` (`test/settings_photo_test.c` with `SETTINGS_RENDER`): every screen through rd
   on a Vulkan device, written as PNGs, the words as sheet strips in the scene list, photo mode's
   panel in every language.

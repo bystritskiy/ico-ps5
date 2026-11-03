@@ -20,12 +20,15 @@ int ico_mv_active;
 static int s_stick_fix = -1;
 static int s_yorda_safe = -1;
 static int s_door_fix = -1;
+static int s_yorda_trips = -1;
 static int s_natural_chains = -1;
 static int s_skip_opening = -1;
+static int s_second_card = -1;
 static int s_mirror = -1;
 static int s_developer_mode = -1;
 static int s_circle_back = -1;
-static int s_ui_language = -2; /* -2: not read yet */
+static int s_ui_language = -2;   /* -2: not read yet */
+static int s_text_language = -2; /* -2: not read yet */
 
 static int get_or(int *v, const char *path, int def)
 {
@@ -132,6 +135,77 @@ float ico_opt_pit_dive_ratio(int camera)
     return (camera != 0 ? 2.0f : 1.0f) / ico_opt_pit_time_factor();
 }
 
+/* [gameplay] shadow_speed (options.h): -1 not read yet, else ICO_SPEED_* */
+static int s_shadow_speed = -1;
+static const char *const kSpeedNames[ICO_SPEED_COUNT] = {"slower", "original", "faster", "fastest"};
+static const float kSpeedFactors[ICO_SPEED_COUNT] = {0.75f, 1.0f, 1.25f, 1.5f};
+
+static void log_shadow_speed(int v)
+{
+    fprintf(stderr, "gameplay: shadow speed %s (x%.2f)\n", kSpeedNames[v],
+            (double)kSpeedFactors[v]);
+}
+
+int ico_opt_shadow_speed(void)
+{
+    if (s_shadow_speed < 0) {
+        const char *v = ico_config_get_string("gameplay.shadow_speed", "original");
+        int i;
+
+        s_shadow_speed = ICO_SPEED_ORIGINAL;
+        for (i = 0; v != NULL && i < ICO_SPEED_COUNT; i++) {
+            if (strcmp(v, kSpeedNames[i]) == 0) {
+                s_shadow_speed = i;
+                break;
+            }
+        }
+        if (v != NULL && i == ICO_SPEED_COUNT) {
+            fprintf(stderr,
+                    "options: [gameplay] shadow_speed = \"%s\" is not one of slower, original, "
+                    "faster, fastest\n",
+                    v);
+        }
+        log_shadow_speed(s_shadow_speed);
+    }
+    return s_shadow_speed;
+}
+
+void ico_opt_set_shadow_speed(int v)
+{
+    v = v >= 0 && v < ICO_SPEED_COUNT ? v : ICO_SPEED_ORIGINAL;
+    if (v != s_shadow_speed) {
+        log_shadow_speed(v);
+    }
+    s_shadow_speed = v;
+}
+
+float ico_opt_shadow_speed_factor(void)
+{
+    return kSpeedFactors[ico_opt_shadow_speed()];
+}
+
+int ico_opt_shadow_speed_motion(int motion)
+{
+    /* options.h: each disc's locomotion motions, -1 ending the list */
+    static const int kPal[] = {836, 838, 841, 842, 843, 844, 845, 846, 941, 942, -1};
+    static const int kNtsc[] = {790, 792, 795, 796, 797, 798, 799, 800, 888, 889, -1};
+    static const int kAug6[] = {792, 794, 797, 798, 799, 800, 801, 802, 890, 891, -1};
+    static const int kJun26[] = {823, 825, 828, 829, 830, 831, 832,
+                                 833, 923, 924, 942, 944, 955, -1};
+    const char *slug = ico_region_cur()->slug;
+    const int *m = strcmp(slug, "ntsc") == 0    ? kNtsc
+                   : strcmp(slug, "aug6") == 0  ? kAug6
+                   : strcmp(slug, "jun26") == 0 ? kJun26
+                                                : kPal;
+
+    for (; *m >= 0; m++) {
+        if (*m == motion) {
+            return 1;
+        }
+    }
+    return 0;
+}
+
 int ico_opt_door_fix(void)
 {
     return get(&s_door_fix, "gameplay.door_fix");
@@ -140,6 +214,23 @@ int ico_opt_door_fix(void)
 void ico_opt_set_door_fix(int on)
 {
     s_door_fix = on != 0;
+}
+
+int ico_opt_yorda_trips(void)
+{
+    if (s_yorda_trips < 0) {
+        s_yorda_trips = ico_config_get_bool("gameplay.yorda_trips", 0) != 0;
+        fprintf(stderr, "gameplay: yorda trips %s\n", s_yorda_trips ? "on" : "off");
+    }
+    return s_yorda_trips;
+}
+
+void ico_opt_set_yorda_trips(int on)
+{
+    if ((on != 0) != s_yorda_trips) {
+        fprintf(stderr, "gameplay: yorda trips %s\n", on ? "on" : "off");
+    }
+    s_yorda_trips = on != 0;
 }
 
 int ico_opt_natural_chains(void)
@@ -160,6 +251,36 @@ int ico_opt_skip_opening(void)
 void ico_opt_set_skip_opening(int on)
 {
     s_skip_opening = on != 0;
+}
+
+int ico_opt_second_memory_card(void)
+{
+    if (s_second_card < 0) {
+        s_second_card = ico_config_get_bool("gameplay.second_memory_card", 0) != 0;
+        fprintf(stderr, "gameplay: second memory card %s\n", s_second_card ? "on" : "off");
+    }
+    return s_second_card;
+}
+
+static void (*s_second_card_listener)(int on);
+
+void ico_opt_set_second_memory_card(int on)
+{
+    if ((on != 0) != s_second_card) {
+        fprintf(stderr, "gameplay: second memory card %s\n", on ? "on" : "off");
+    }
+    s_second_card = on != 0;
+    if (s_second_card_listener != NULL) {
+        s_second_card_listener(s_second_card);
+    }
+}
+
+void ico_opt_set_second_memory_card_listener(void (*fn)(int on))
+{
+    s_second_card_listener = fn;
+    if (fn != NULL) {
+        fn(ico_opt_second_memory_card());
+    }
 }
 
 int ico_opt_mirror(void)
@@ -329,9 +450,14 @@ void ico_opt_set_circle_back(int on)
     s_circle_back = on != 0;
 }
 
-/* [ui] language's names, UiLang order (port/ui/strings.h) */
-static const char *const kUiLanguages[] = {"en", "fr", "de", "it", "es", "ja", "ko", "zh"};
+/* [ui] language's and [game] text_language's names, UiLang order
+   (port/ui/strings.h) */
+static const char *const kUiLanguages[] = {
+    "en", "fr", "de", "it", "es", "ja", "ko", "zh",
+    /* the community translations, from ICO_OPT_TEXT_LANGUAGE_FIRST */
+    "ru-bobttz", "ru-cobra838", "pt-br"};
 #define UI_LANGUAGES ((int)(sizeof(kUiLanguages) / sizeof(kUiLanguages[0])))
+_Static_assert(UI_LANGUAGES == ICO_OPT_UI_LANGUAGE_COUNT, "a name for each UiLang");
 
 int ico_opt_ui_language(void)
 {
@@ -346,10 +472,10 @@ int ico_opt_ui_language(void)
             }
         }
         if (s_ui_language < 0 && v != NULL && strcmp(v, "auto") != 0) {
-            fprintf(
-                stderr,
-                "options: [ui] language = \"%s\" is not one of auto, en, fr, de, it, es, ja, ko, zh\n",
-                v);
+            fprintf(stderr,
+                    "options: [ui] language = \"%s\" is not one of auto, en, fr, de, it, es, ja, "
+                    "ko, zh, ru-bobttz, ru-cobra838, pt-br\n",
+                    v);
         }
     }
     return s_ui_language;
@@ -363,6 +489,45 @@ void ico_opt_set_ui_language(int lang)
 const char *ico_opt_ui_language_name(int lang)
 {
     return lang >= 0 && lang < UI_LANGUAGES ? kUiLanguages[lang] : "auto";
+}
+
+static int textLanguageOk(int lang)
+{
+    return lang >= ICO_OPT_TEXT_LANGUAGE_FIRST && lang < UI_LANGUAGES;
+}
+
+int ico_opt_text_language(void)
+{
+    if (s_text_language < -1) {
+        const char *v = ico_config_get_string("game.text_language", "");
+
+        s_text_language = -1;
+        for (int i = ICO_OPT_TEXT_LANGUAGE_FIRST; v != NULL && i < UI_LANGUAGES; i++) {
+            if (strcmp(v, kUiLanguages[i]) == 0) {
+                s_text_language = i;
+            }
+        }
+        if (s_text_language < 0 && v != NULL && v[0] != '\0') {
+            fprintf(stderr,
+                    "options: [game] text_language = \"%s\" is not one of \"\", ru-bobttz, "
+                    "ru-cobra838, pt-br; the game's own text\n",
+                    v);
+        } else if (s_text_language >= 0) {
+            fprintf(stderr, "options: [game] text_language = \"%s\": a community translation\n",
+                    kUiLanguages[s_text_language]);
+        }
+    }
+    return s_text_language;
+}
+
+void ico_opt_set_text_language(int lang)
+{
+    s_text_language = textLanguageOk(lang) ? lang : -1;
+}
+
+const char *ico_opt_text_language_name(int lang)
+{
+    return textLanguageOk(lang) ? kUiLanguages[lang] : "";
 }
 
 int ico_opt_debug_option(void)
@@ -540,10 +705,11 @@ void ico_opt_hold_type_toggled(int type)
 void ico_opt_reload(void)
 {
     s_stick_fix = s_yorda_safe = s_door_fix = s_mirror = s_developer_mode = s_circle_back = -1;
-    s_pit_time = -1;
-    s_natural_chains = s_skip_opening = -1;
+    s_pit_time = s_shadow_speed = -1;
+    s_natural_chains = s_skip_opening = s_yorda_trips = s_second_card = -1;
     s_output = -2;
     s_ui_language = -2;
+    s_text_language = -2;
     s_hold_choice = -1;
     /* the characters' colours ([characters], appearance.h) */
     ico_appearance_reload();

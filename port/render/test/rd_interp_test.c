@@ -10,7 +10,10 @@
  *   snaps     a key missing from the previous frame, a vertex count change,
  *             a jump past the screen threshold, a camera cut (rd_camera_cut),
  *             a fully faded frame (the fade edge), a discarded frame between
- *             (gap), a camera turn past the threshold: the current data
+ *             (gap), a camera turn past the threshold, the eye's path
+ *             through the stage (rd_camera_cut_wall: RD_SNAP_WALL and
+ *             RdCamera.cut 2; with rd_camera_cut too, before or after it,
+ *             a plain cut, RdCamera.cut 1): the current data
  *   ordinal   the same key twice matches in order
  *   photo     two paused photo ticks whose cameras differ:
  *             the camera blends half way, and list 11's full-screen prims
@@ -202,6 +205,9 @@
  *             (the load screen's bars at a change of layout) is drawn once,
  *             whole; other geometry or state still cross-fades
  *             (rd_interp_bars_test.inc)
+ *   memo      a stream's same-shape answer and a skinned mesh's pivots
+ *             kept while its serial holds, made again after a rewrite
+ *             (rd_interp_mesh.c; rd_interp_memo_test.inc)
  */
 #include <math.h>
 #include <stdio.h>
@@ -433,6 +439,15 @@ static void framePair(int what)
         if (what == 1 && k) {
             rd_camera_cut();
         }
+        if ((what == 6 || what == 7 || what == 8) && k) {
+            if (what == 8) {
+                rd_camera_cut();
+            }
+            rd_camera_cut_wall();
+            if (what == 7) {
+                rd_camera_cut();
+            }
+        }
         if (what == 2 && !k) {
             RdPostParams pp;
             memset(&pp, 0, sizeof(pp));
@@ -460,7 +475,9 @@ static void testFrameSnaps(void)
         const char *name;
     } cases[] = {{0, RD_SNAP_NONE, "none"},          {1, RD_SNAP_CUT, "cut"},
                  {2, RD_SNAP_FADE, "fade edge"},     {3, RD_SNAP_GAP, "gap"},
-                 {4, RD_SNAP_CAMERA, "camera turn"}, {5, RD_SNAP_KEEP, "keep"}};
+                 {4, RD_SNAP_CAMERA, "camera turn"}, {5, RD_SNAP_KEEP, "keep"},
+                 {6, RD_SNAP_WALL, "wall"},          {7, RD_SNAP_CUT, "wall, then cut"},
+                 {8, RD_SNAP_CUT, "cut, then wall"}};
 
     for (size_t i = 0; i < sizeof(cases) / sizeof(cases[0]); i++) {
         framePair(cases[i].what);
@@ -478,8 +495,14 @@ static void testFrameSnaps(void)
         } else if (cases[i].what != 5) {
             CHECK(x == 8 * 16, "%s: the current sprite (x %d)", cases[i].name, x);
         }
-        if (cases[i].what == 1) {
-            CHECK(rd__last_frame()->camera.cut == 1, "rd_camera_cut sets RdCamera.cut");
+        if (cases[i].what == 1 || cases[i].what == 7 || cases[i].what == 8) {
+            CHECK(rd__last_frame()->camera.cut == 1, "%s: RdCamera.cut 1 (got %u)", cases[i].name,
+                  rd__last_frame()->camera.cut);
+        }
+        if (cases[i].what == 6) {
+            CHECK(rd__last_frame()->camera.cut == RD_CAMERA_CUT_WALL,
+                  "rd_camera_cut_wall sets RdCamera.cut %u (got %u)", RD_CAMERA_CUT_WALL,
+                  rd__last_frame()->camera.cut);
         }
     }
 }
@@ -948,6 +971,55 @@ static void testFade(void)
         }
     }
     CHECK(found, "the fade sprite is keyed");
+}
+
+/* Glow between frames (RdSettings.glowSmooth, rd_glow_hold.c): a frame whose
+ * list 7 holds the glow chain's last sprite (the eye blur into WORK3).  A
+ * tick's first present draws it; a later present pastes the tick's glow, or,
+ * with the row Smooth, draws the chain again and says so with the row's
+ * words (the environment switch's words stay "glow redrawn ([dev]
+ * glow_redraw)").  ICO_RD_GLOW_REDRAW is not set in this test */
+static void testGlowRow(void)
+{
+    const uint8_t keep = g_rd.settings.glowSmooth;
+
+    for (int smooth = 0; smooth <= 1; smooth++) {
+        g_rd.settings.glowSmooth = (uint8_t)smooth;
+        for (int n = 0; n < 2; n++) {
+            rd_begin_frame();
+            frameHead();
+            RdPostParams pp;
+            memset(&pp, 0, sizeof(pp));
+            pp.fix = 0x20;
+            pp.blend = RD_BLEND_LERP_FIX;
+            pp.scalar[2] = 1.0f;
+            rd_select_list(7);
+            rd_set_target(rd_target(RD_TARGET_WORK3_HELD), (RdTarget){0}, 128, 128, 0);
+            rd_set_target(rd_target(RD_TARGET_WORK3), (RdTarget){0}, 128, 128, 0);
+            rd_post(RD_POST_EYE_BLUR, &pp);
+            rd_end_frame(0);
+        }
+        const RdFrame *cur = rd__last_frame();
+        const RdFrame *f = rd__interp_frame(rd__prev_frame(), cur, 0.5f, 1, NULL);
+        CHECK(f != NULL && rd__glow_hold_last() == RD_GLOW_FIRST,
+              "glow row %d: a tick's first present draws the chain (%d)", smooth,
+              rd__glow_hold_last());
+        f = rd__interp_frame(rd__prev_frame(), cur, 0.5f, 0, NULL);
+        CHECK(f != NULL, "glow row %d: the later present built", smooth);
+        if (smooth) {
+            CHECK(rd__glow_hold_last() == RD_GLOW_SMOOTH &&
+                      strcmp(rd__glow_hold_text(rd__glow_hold_last()),
+                             "glow redrawn (Glow between frames: Smooth)") == 0,
+                  "glow row Smooth: a later present redraws the chain (%d)", rd__glow_hold_last());
+        } else {
+            CHECK(rd__glow_hold_last() != RD_GLOW_SMOOTH && rd__glow_hold_last() != RD_GLOW_DEV,
+                  "glow row Original: a later present does not redraw by the row (%d)",
+                  rd__glow_hold_last());
+        }
+    }
+    CHECK(strcmp(rd__glow_hold_text(RD_GLOW_DEV), "glow redrawn ([dev] glow_redraw)") == 0,
+          "the environment switch's words are kept");
+    g_rd.settings.glowSmooth = keep;
 }
 
 /* the frame of testFeedback: with display, a motion blur sprite reading
@@ -5801,6 +5873,7 @@ static void testNativeWidths(void)
 }
 
 #include "rd_interp_seams_test.inc"
+#include "rd_interp_memo_test.inc"
 
 static void runCpu(void)
 {
@@ -5821,6 +5894,7 @@ static void runCpu(void)
     testPrisms();
     testFade();
     testFeedback();
+    testGlowRow();
     testText();
     testDeferredText();
     testMorph();
@@ -5846,6 +5920,7 @@ static void runCpu(void)
     testStillSeams();
     testStillSeamsAlpha0();
     testSeamsSizeTail();
+    testStreamMemos();
 }
 
 /* ------------------------------------------------------ the ticks' eyes
@@ -6040,6 +6115,15 @@ static void testEyeTicks(void)
 
 int main(void)
 {
+    /* the frames here hold golden bytes (or read SCENE back) with list
+       11's last sprites drawn into SCENE; the fades fold, how the game
+       draws them, is ctest rd_fades_fold's and rd_fades_fold_ab's
+       (rd_fades_fold.c): drawn here as before */
+#ifdef _WIN32
+    _putenv_s("ICO_RD_FADES_FOLD", "0");
+#else
+    setenv("ICO_RD_FADES_FOLD", "0", 1);
+#endif
     rd__set_not_implemented_fatal(true); /* a stub command replayed stops the test */
     if (!rd__init_record_only(512, 512)) {
         printf("rd_interp_test: no context\n");

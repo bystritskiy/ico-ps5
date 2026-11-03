@@ -283,6 +283,72 @@ static void test_saves_dir_layered(void)
     remove(toml);
 }
 
+/* Options > Gameplay > Second memory card: with no saves2 the port-1 card is
+   memcard2 in the user folder (beside memcard) while the option is on, from
+   config.toml's [gameplay] second_memory_card until the options module sets
+   it (ico_host_set_second_card) and from that after; an explicit saves2
+   still wins; the read makes no folder (the game's first Mkdir does) */
+static void test_saves2_second_card(void)
+{
+    char ini_path[ICO_PATH_MAX], exe[ICO_PATH_MAX], pref[ICO_PATH_MAX], toml[ICO_PATH_MAX];
+    char out[ICO_PATH_MAX], want[ICO_PATH_MAX], card[ICO_PATH_MAX];
+    FILE *f;
+
+    ico_host_ini_path(ini_path, sizeof(ini_path));
+    CHECK(ico_host_exe_dir(exe, sizeof(exe)) == 0);
+    CHECK(ico_host_pref_dir(pref, sizeof(pref)) == 0);
+    ico_path_join(toml, sizeof(toml), pref, "config.toml");
+    ico_path_join(want, sizeof(want), pref, "memcard2");
+    if (ico_file_exists(ini_path) || ico_file_exists(toml) ||
+        ico_path_kind(want, NULL, NULL) >= 0) {
+        fprintf(stderr, "host_config_test: %s, %s or %s exists; the second card not tested\n",
+                ini_path, toml, want);
+        return;
+    }
+    ico_host_set_second_card(-1);
+    /* no config: off, no card */
+    CHECK(ico_host_second_card() == 0);
+    CHECK(ico_host_saves2_dir(out, sizeof(out)) == 0 && out[0] == '\0');
+    f = fopen(toml, "wb");
+    CHECK(f != NULL);
+    if (f == NULL) {
+        return;
+    }
+    fputs("[gameplay]\nsecond_memory_card = true\n", f);
+    fclose(f);
+    /* on in config.toml: memcard2 beside memcard, not made */
+    CHECK(ico_host_second_card() == 1);
+    CHECK(ico_host_saves2_dir(out, sizeof(out)) == 1 && strcmp(out, want) == 0);
+    CHECK(ico_host_saves_dir(card, sizeof(card)) == 0);
+    {
+        char beside[ICO_PATH_MAX];
+
+        ico_path_join(beside, sizeof(beside), pref, "memcard");
+        CHECK(strcmp(card, beside) == 0);
+    }
+    CHECK(ico_path_kind(want, NULL, NULL) < 0);
+    /* the options module's value wins over the file: off, then on again */
+    ico_host_set_second_card(0);
+    CHECK(ico_host_second_card() == 0);
+    CHECK(ico_host_saves2_dir(out, sizeof(out)) == 0 && out[0] == '\0');
+    ico_host_set_second_card(5);
+    CHECK(ico_host_second_card() == 1);
+    CHECK(ico_host_saves2_dir(out, sizeof(out)) == 1 && strcmp(out, want) == 0);
+    /* too small a buffer: -1 and "" */
+    CHECK(ico_host_saves2_dir(out, 4) == -1 && out[0] == '\0');
+    /* an explicit saves2 still wins */
+    f = fopen(toml, "wb");
+    CHECK(f != NULL);
+    if (f != NULL) {
+        fputs("[paths]\nsaves2 = \"own-cards-2\"\n[gameplay]\nsecond_memory_card = true\n", f);
+        fclose(f);
+        ico_path_join(want, sizeof(want), exe, "own-cards-2");
+        CHECK(ico_host_saves2_dir(out, sizeof(out)) == 1 && strcmp(out, want) == 0);
+    }
+    ico_host_set_second_card(-1);
+    remove(toml);
+}
+
 /* portable mode: portable=1 in the ini, or a userdata folder beside the
    program, makes the user folder <exe dir>/userdata; portable=0 turns it off */
 static void test_portable_value(void)
@@ -451,7 +517,8 @@ static void test_dev_env(void)
         "ICO_GPU_ROBUST",         "ICO_VK_ATTACHMENT_READ", "ICO_RD_DATE_PATH",
         "ICO_RD_STORE_PLAN",      "ICO_RD_BLUR_FOLD",       "ICO_RD_UINT_VIEW",
         "ICO_VK_FAKE_NO_DYNAMIC", "ICO_RD_ALPHA_PLAN",      "ICO_RD_FX_PLAN",
-        "ICO_RD_FX_DST_LOCAL",    "ICO_RD_VU_PLANES"};
+        "ICO_RD_FX_DST_LOCAL",    "ICO_RD_VU_PLANES",       "ICO_RD_UBER",
+        "ICO_RHI_BIND_CACHE"};
     IcoIni ini;
     size_t i;
 
@@ -484,6 +551,22 @@ static void test_dev_env(void)
     CHECK(strcmp(ico_dev_env_value("fog_path", "buffer"), "buffer") == 0);
     CHECK(ico_dev_env_value("fog_path", "test") == NULL);
     CHECK(ico_dev_env_value("fog_path", "") == NULL);
+    /* uber: GS state as shader data, auto (the default), on, off
+       (port/render/rd_uber.c rd__uber_asked_env) */
+    CHECK(strcmp(ico_dev_env_name("uber"), "ICO_RD_UBER") == 0);
+    CHECK(strcmp(ico_dev_env_value("uber", "auto"), "auto") == 0);
+    CHECK(strcmp(ico_dev_env_value("uber", "on"), "1") == 0);
+    CHECK(strcmp(ico_dev_env_value("uber", "false"), "0") == 0);
+    CHECK(ico_dev_env_value("uber", "sometimes") == NULL);
+    CHECK(strcmp(ico_config_ini_key("dev.uber"), "uber") == 0);
+    /* bind_cache: the bind cache's off switch (port/rhi/rhi_bind_cache.c),
+       true (the default) or false; the default branch's 1 / 0 */
+    CHECK(strcmp(ico_dev_env_name("bind_cache"), "ICO_RHI_BIND_CACHE") == 0);
+    CHECK(strcmp(ico_dev_env_value("bind_cache", "true"), "1") == 0);
+    CHECK(strcmp(ico_dev_env_value("bind_cache", "false"), "0") == 0);
+    CHECK(strcmp(ico_dev_env_value("bind_cache", "off"), "0") == 0);
+    CHECK(ico_dev_env_value("bind_cache", "sometimes") == NULL);
+    CHECK(strcmp(ico_config_ini_key("dev.bind_cache"), "bind_cache") == 0);
     /* the switches: on and off words, anything else nothing */
     CHECK(strcmp(ico_dev_env_value("gpu_checkpoints", "true"), "1") == 0);
     CHECK(strcmp(ico_dev_env_value("gpu_checkpoints", "1"), "1") == 0);
@@ -528,6 +611,65 @@ static void test_dev_env(void)
     CHECK(ico_dev_env_value("vu_extended", "1") == NULL);
     CHECK(strcmp(ico_config_ini_key("dev.vu_plain_only"), "vu_plain_only") == 0);
     CHECK(strcmp(ico_config_ini_key("dev.vu_extended"), "vu_extended") == 0);
+    /* vu_set: the VU program entries' set, the user's A/B on a device the
+       table leaves to the extended set (port/render/rd_pipeline.c
+       rd__vu_policy_init reads ICO_RD_VU_SET) */
+    CHECK(strcmp(ico_dev_env_name("vu_set"), "ICO_RD_VU_SET") == 0);
+    CHECK(strcmp(ico_dev_env_value("vu_set", "plain"), "plain") == 0);
+    CHECK(strcmp(ico_dev_env_value("vu_set", "extended"), "extended") == 0);
+    CHECK(strcmp(ico_dev_env_value("vu_set", "auto"), "auto") == 0);
+    CHECK(ico_dev_env_value("vu_set", "true") == NULL);
+    CHECK(ico_dev_env_value("vu_set", "1") == NULL);
+    CHECK(ico_dev_env_value("vu_set", "") == NULL);
+    CHECK(strcmp(ico_config_ini_key("dev.vu_set"), "vu_set") == 0);
+    /* sheet_shader: the menu text's bake off (port/render/rd_core.c reads
+       ICO_RD_SHEET_SHADER=1) */
+    CHECK(strcmp(ico_dev_env_name("sheet_shader"), "ICO_RD_SHEET_SHADER") == 0);
+    CHECK(strcmp(ico_dev_env_value("sheet_shader", "true"), "1") == 0);
+    CHECK(strcmp(ico_dev_env_value("sheet_shader", "false"), "0") == 0);
+    CHECK(ico_dev_env_value("sheet_shader", "maybe") == NULL);
+    CHECK(strcmp(ico_config_ini_key("dev.sheet_shader"), "sheet_shader") == 0);
+    /* aura_kernel: the aura's feedback read as a measurement
+       (port/render/rd_aura_kernel.c reads ICO_RD_AURA_KERNEL) */
+    CHECK(strcmp(ico_dev_env_name("aura_kernel"), "ICO_RD_AURA_KERNEL") == 0);
+    CHECK(strcmp(ico_dev_env_value("aura_kernel", "gs"), "gs") == 0);
+    CHECK(strcmp(ico_dev_env_value("aura_kernel", "box"), "box") == 0);
+    CHECK(ico_dev_env_value("aura_kernel", "true") == NULL);
+    CHECK(strcmp(ico_config_ini_key("dev.aura_kernel"), "aura_kernel") == 0);
+    /* aura_box: the aura's feedback read in two passes
+       (port/render/rd_aura_box.c reads ICO_RD_AURA_BOX) */
+    CHECK(strcmp(ico_dev_env_name("aura_box"), "ICO_RD_AURA_BOX") == 0);
+    CHECK(strcmp(ico_dev_env_value("aura_box", "auto"), "auto") == 0);
+    CHECK(strcmp(ico_dev_env_value("aura_box", "on"), "1") == 0);
+    CHECK(strcmp(ico_dev_env_value("aura_box", "off"), "0") == 0);
+    CHECK(strcmp(ico_dev_env_value("aura_box", "false"), "0") == 0);
+    CHECK(ico_dev_env_value("aura_box", "maybe") == NULL);
+    CHECK(strcmp(ico_config_ini_key("dev.aura_box"), "aura_box") == 0);
+    /* pass_area: the passes' render areas (port/render/rd_pass_area.c reads
+       ICO_RD_PASS_AREA) */
+    CHECK(strcmp(ico_dev_env_name("pass_area"), "ICO_RD_PASS_AREA") == 0);
+    CHECK(strcmp(ico_dev_env_value("pass_area", "auto"), "auto") == 0);
+    CHECK(strcmp(ico_dev_env_value("pass_area", "on"), "1") == 0);
+    CHECK(strcmp(ico_dev_env_value("pass_area", "off"), "0") == 0);
+    CHECK(strcmp(ico_dev_env_value("pass_area", "true"), "1") == 0);
+    CHECK(ico_dev_env_value("pass_area", "maybe") == NULL);
+    CHECK(strcmp(ico_config_ini_key("dev.pass_area"), "pass_area") == 0);
+    /* clear_carry, clear_skip, last_store: the passes cut
+       (port/render/rd_pass_cut.c reads ICO_RD_CLEAR_CARRY, ICO_RD_CLEAR_SKIP,
+       ICO_RD_LAST_STORE) */
+    CHECK(strcmp(ico_dev_env_name("clear_carry"), "ICO_RD_CLEAR_CARRY") == 0);
+    CHECK(strcmp(ico_dev_env_name("clear_skip"), "ICO_RD_CLEAR_SKIP") == 0);
+    CHECK(strcmp(ico_dev_env_name("last_store"), "ICO_RD_LAST_STORE") == 0);
+    CHECK(strcmp(ico_dev_env_value("clear_carry", "auto"), "auto") == 0);
+    CHECK(strcmp(ico_dev_env_value("clear_skip", "auto"), "auto") == 0);
+    CHECK(strcmp(ico_dev_env_value("last_store", "auto"), "auto") == 0);
+    CHECK(strcmp(ico_dev_env_value("clear_carry", "on"), "1") == 0);
+    CHECK(strcmp(ico_dev_env_value("clear_skip", "off"), "0") == 0);
+    CHECK(strcmp(ico_dev_env_value("last_store", "false"), "0") == 0);
+    CHECK(ico_dev_env_value("last_store", "maybe") == NULL);
+    CHECK(strcmp(ico_config_ini_key("dev.clear_carry"), "clear_carry") == 0);
+    CHECK(strcmp(ico_config_ini_key("dev.clear_skip"), "clear_skip") == 0);
+    CHECK(strcmp(ico_config_ini_key("dev.last_store"), "last_store") == 0);
     CHECK(ico_dev_env_value("pipeline_set", "true") == NULL);
     CHECK(ico_dev_env_value("pipeline_set", "") == NULL);
     CHECK(strcmp(ico_config_ini_key("dev.pipeline_set"), "pipeline_set") == 0);
@@ -565,6 +707,11 @@ static void test_dev_env(void)
     CHECK(strcmp(ico_dev_env_value("constant_reads", "true"), "1") == 0);
     CHECK(ico_dev_env_value("constant_reads", "maybe") == NULL);
     CHECK(strcmp(ico_config_ini_key("dev.constant_reads"), "constant_reads") == 0);
+    /* fades_fold: retired, the fades fold is how the game draws everywhere
+       (port/render/rd_fades_fold.c rd__fades_fold_on): no key, no export */
+    CHECK(ico_dev_env_name("fades_fold") == NULL);
+    CHECK(ico_dev_env_value("fades_fold", "false") == NULL);
+    CHECK(ico_config_ini_key("dev.fades_fold") == NULL);
     /* crack_fill: the crack filler above 1x's A/B switch
        (port/render/rd_crack_fill.c rd__crack_fill_init) */
     CHECK(strcmp(ico_dev_env_name("crack_fill"), "ICO_RD_CRACK_FILL") == 0);
@@ -572,6 +719,17 @@ static void test_dev_env(void)
     CHECK(strcmp(ico_dev_env_value("crack_fill", "true"), "1") == 0);
     CHECK(ico_dev_env_value("crack_fill", "maybe") == NULL);
     CHECK(strcmp(ico_config_ini_key("dev.crack_fill"), "crack_fill") == 0);
+    /* texture_decode_threads: the texture decode pool's size, auto or 0..4
+       (port/render/rd_tex_decode.c choose) */
+    CHECK(strcmp(ico_dev_env_name("texture_decode_threads"), "ICO_RD_TEXTURE_DECODE_THREADS") == 0);
+    CHECK(strcmp(ico_dev_env_value("texture_decode_threads", "auto"), "auto") == 0);
+    CHECK(strcmp(ico_dev_env_value("texture_decode_threads", "0"), "0") == 0);
+    CHECK(strcmp(ico_dev_env_value("texture_decode_threads", "off"), "0") == 0);
+    CHECK(strcmp(ico_dev_env_value("texture_decode_threads", "2"), "2") == 0);
+    CHECK(ico_dev_env_value("texture_decode_threads", "5") == NULL);
+    CHECK(ico_dev_env_value("texture_decode_threads", "12") == NULL);
+    CHECK(ico_dev_env_value("texture_decode_threads", "") == NULL);
+    CHECK(strcmp(ico_config_ini_key("dev.texture_decode_threads"), "texture_decode_threads") == 0);
     /* perf_passes: every replay timed pass by pass (port/render/rd_perf.c
        rd__perf_passes_init) */
     CHECK(strcmp(ico_dev_env_name("perf_passes"), "ICO_RD_PERF_PASSES") == 0);
@@ -595,6 +753,45 @@ static void test_dev_env(void)
     CHECK(strcmp(ico_dev_env_value("glow_redraw", "true"), "1") == 0);
     CHECK(strcmp(ico_dev_env_value("glow_redraw", "false"), "0") == 0);
     CHECK(strcmp(ico_config_ini_key("dev.glow_redraw"), "glow_redraw") == 0);
+    /* present_fallback: the FIFO fallback auto, off or fifo (window_host.c
+       ico_window_open, present_fallback.c) */
+    CHECK(strcmp(ico_dev_env_name("present_fallback"), "ICO_PRESENT_FALLBACK") == 0);
+    CHECK(strcmp(ico_dev_env_value("present_fallback", "auto"), "auto") == 0);
+    CHECK(strcmp(ico_dev_env_value("present_fallback", "off"), "off") == 0);
+    CHECK(strcmp(ico_dev_env_value("present_fallback", "false"), "off") == 0);
+    CHECK(strcmp(ico_dev_env_value("present_fallback", "fifo"), "fifo") == 0);
+    CHECK(ico_dev_env_value("present_fallback", "true") == NULL);
+    CHECK(ico_dev_env_value("present_fallback", "mailbox") == NULL);
+    CHECK(strcmp(ico_config_ini_key("dev.present_fallback"), "present_fallback") == 0);
+    /* render_thread: the window's render thread, read through the store
+       (render_thread.c), not exported */
+    CHECK(strcmp(ico_config_ini_key("dev.render_thread"), "render_thread") == 0);
+    CHECK(ico_dev_env_name("render_thread") == NULL);
+    /* big_cores: Android's render and submit threads kept to the faster
+       cores, read through the store (render_thread.c), not exported */
+    CHECK(strcmp(ico_config_ini_key("dev.big_cores"), "big_cores") == 0);
+    CHECK(ico_dev_env_name("big_cores") == NULL);
+    /* disc_reader: the disc's reads on a thread or the game thread, and the
+       thread's read-ahead in KB (port/data/cdvd_host.c reader_choose) */
+    CHECK(strcmp(ico_dev_env_name("disc_reader"), "ICO_DISC_READER") == 0);
+    CHECK(strcmp(ico_dev_env_value("disc_reader", "thread"), "thread") == 0);
+    CHECK(strcmp(ico_dev_env_value("disc_reader", "sync"), "sync") == 0);
+    CHECK(strcmp(ico_dev_env_value("disc_reader", "off"), "sync") == 0);
+    CHECK(strcmp(ico_dev_env_value("disc_reader", "false"), "sync") == 0);
+    CHECK(ico_dev_env_value("disc_reader", "true") == NULL);
+    CHECK(ico_dev_env_value("disc_reader", "worker") == NULL);
+    CHECK(ico_dev_env_value("disc_reader", "") == NULL);
+    CHECK(strcmp(ico_config_ini_key("dev.disc_reader"), "disc_reader") == 0);
+    CHECK(strcmp(ico_dev_env_name("disc_read_ahead_kb"), "ICO_DISC_READ_AHEAD_KB") == 0);
+    CHECK(strcmp(ico_dev_env_value("disc_read_ahead_kb", "256"), "256") == 0);
+    CHECK(strcmp(ico_dev_env_value("disc_read_ahead_kb", "0"), "0") == 0);
+    CHECK(strcmp(ico_dev_env_value("disc_read_ahead_kb", "4096"), "4096") == 0);
+    CHECK(strcmp(ico_dev_env_value("disc_read_ahead_kb", "off"), "0") == 0);
+    CHECK(ico_dev_env_value("disc_read_ahead_kb", "4097") == NULL);
+    CHECK(ico_dev_env_value("disc_read_ahead_kb", "-1") == NULL);
+    CHECK(ico_dev_env_value("disc_read_ahead_kb", "256k") == NULL);
+    CHECK(ico_dev_env_value("disc_read_ahead_kb", "") == NULL);
+    CHECK(strcmp(ico_config_ini_key("dev.disc_read_ahead_kb"), "disc_read_ahead_kb") == 0);
     /* the device profile's flags (port/render/rd_profile.c rd__profile_init):
        date_path stencil or snapshot as they are, store_plan and blur_fold
        on/off, uint_view on/off or work */
@@ -709,6 +906,16 @@ static void test_dev_env(void)
     ico_ini_export(&ini, "dev-env-test.ini", 0);
     CHECK(env_is("ICO_RD_VU_PLAIN", NULL));
     CHECK(env_is("ICO_RD_VU_EXTENDED", NULL));
+    /* ... and vu_set is exported as it is (the retired keys stay unread) */
+    unset_env("ICO_RD_VU_SET");
+    ico_ini_parse(&ini, "[dev]\nvu_set = plain\n");
+    ico_ini_export(&ini, "dev-env-test.ini", 0);
+    CHECK(env_is("ICO_RD_VU_SET", "plain"));
+    CHECK(env_is("ICO_RD_VU_PLAIN", NULL));
+    unset_env("ICO_RD_VU_SET");
+    ico_ini_parse(&ini, "[dev]\nvu_set = maybe\n");
+    ico_ini_export(&ini, "dev-env-test.ini", 0);
+    CHECK(env_is("ICO_RD_VU_SET", NULL));
     /* blend=attachment and attachment_read=true (config.toml's [dev]) */
     ico_ini_parse(&ini, "[dev]\nblend = attachment\nattachment_read = true\n");
     ico_ini_export(&ini, "dev-env-test.ini", 0);
@@ -731,12 +938,14 @@ static void test_dev_env(void)
         unset_env(vars[i]);
     }
     ico_ini_parse(&ini, "[dev]\nalpha_plan = false\nfx_plan = true\nfx_dst_local = on\n"
-                        "vu_planes = off\n");
+                        "vu_planes = off\nuber = off\nbind_cache = false\n");
     ico_ini_export(&ini, "dev-env-test.ini", 0);
     CHECK(env_is("ICO_RD_ALPHA_PLAN", "0"));
     CHECK(env_is("ICO_RD_FX_PLAN", "1"));
     CHECK(env_is("ICO_RD_FX_DST_LOCAL", "1"));
     CHECK(env_is("ICO_RD_VU_PLANES", "0"));
+    CHECK(env_is("ICO_RD_UBER", "0"));
+    CHECK(env_is("ICO_RHI_BIND_CACHE", "0"));
     for (i = 0; i < sizeof(vars) / sizeof(vars[0]); i++) {
         unset_env(vars[i]);
     }
@@ -1103,6 +1312,7 @@ int main(void)
     test_join_overflow();
     test_saves_dir_pure();
     test_saves_dir_layered();
+    test_saves2_second_card();
     test_paths();
     test_portable_value();
     test_dev_env();

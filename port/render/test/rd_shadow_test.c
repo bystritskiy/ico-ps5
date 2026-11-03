@@ -54,11 +54,30 @@
  *      Shadow.c's model and a rectangle at sub-pixel offsets, at 1x, at
  *      scale 2 and at 1931 x 1093 texels (a fractional scale both ways);
  *      each recording resolved by the path asked (g_rdPerf.shadowOne,
- *      shadowSeven).  The count's bytes for n = 0, 1, 63, 64, 128 and 255
+ *      shadowSeven); the one draw's stencil read four texels a gather and
+ *      then a texel a load (g_rd.shadowLoad, g_rdPerf.shadowGathered).  The count's bytes for n = 0, 1, 63, 64, 128 and 255
  *      (rd__shadow_table_texel, the one draw's table) against 4 n mod 256
  *      and A = 0x80 where that is non-zero.  Without the view (a backend
  *      whose RhiLimits.stencilView is false) the comparison is skipped
  *      with a line.
+ *   p  (with each (o) run) the count target's colour neither loaded nor
+ *      stored between the reset and the resolve (rd_store_plan.c
+ *      rd__store_plan_count_color): the synthetic volumes through the one
+ *      draw and the seven draws under ICO_RD_STORE_POISON=1 (the dropped
+ *      load clears the colour to 0x5A), the store plan off and on: the
+ *      count, the levels and SCENE byte for byte, the colour dropped only
+ *      with the plan (RdPerfRecord.shadowColorDropped, storeColorDropped),
+ *      and above 1x on the one draw the scaled count target poisoned at
+ *      every texel (nothing reads or redraws it).
+ *   m  (with each (o) run) the shadow volumes drawn in the scene's open
+ *      pass (rd_shadow_merge.c, forced off and on): the synthetic volumes
+ *      through the one draw and the seven draws, Shadow.c's model through
+ *      the one draw, under ICO_RD_STORE_POISON=1: the count, the levels and
+ *      SCENE byte for byte, list 0's pass armed and the reset taken in it
+ *      with the merge on (RdPerfRecord.shadowMergeArmed, shadowMerged), one
+ *      render pass fewer, the count target's new-target clear left
+ *      undrawn (shadowClearSkipped; the poison draws it as 0x5A, so a
+ *      reader would show), nothing armed, taken or left with it off.
  *   x  (`rd_shadow_test edges`, ctest rd_shadow_edges: this case alone)
  *      the two kernels at scene scale 2: the same frame (the synthetic
  *      volumes, Shadow.c's model, a rectangle at a sub-pixel offset, all
@@ -72,6 +91,19 @@
  *      may differ only where a composited level is not constant over that
  *      4 x 4 + 1 window (at 2x, N = 3 level texels = 12, 24 and 48 SCENE
  *      texels for levels 1, 2 and 3); some texels do differ.
+ *   8  (the step 8: the North American disc and the 2001 previews, their
+ *      face colours 0x08 / 0xF8; rd_shadow.c "The step") without a device:
+ *      Shadow.c's model recorded with ico_region the North American disc:
+ *      the packet's colours are 0x08 / 0xF8 and the recorded signs are the
+ *      packet's (both signs present: before the shadow step change every
+ *      face was recorded as a decrement), the reset and the resolve carry b[0] 8 (the European
+ *      recordings b[0] 0, the step 4, their bytes unchanged); the one draw's
+ *      table for the step 8 against 8 n mod 256 for n = 0, 1, 31, 32, 33,
+ *      63, 64, 255.  On the device (the seven draws, and the one draw where
+ *      the profile has it): the synthetic volumes' count against 8 n mod 256
+ *      (A = 0x80 where non-zero) at every pixel, n = 1, 31, 32, 33, 64 spelled
+ *      out; the one draw against the seven draws as in (o); every pipeline
+ *      created enumerated with the step 8's A key in the set.
  * Every pipeline created is enumerated; no validation errors. */
 #include <math.h>
 #include <stdarg.h>
@@ -94,6 +126,7 @@
 #include "Shadow.h"
 #include "main.h"
 #include "../../include/ico_frame.h"
+#include "../../core/region.h" /* ico_region: the step 8's recordings */
 
 static int failures;
 
@@ -398,15 +431,25 @@ static int expectedCount(int x, int y)
     return 0;
 }
 
-/* the GS: 0x04 or 0xFC per face, summed with COLCLAMP 0 */
-static uint8_t wrappedColour(int n)
+/* the GS: the step's face colour per face (0x04 / 0xFC, or 0x08 / 0xF8
+ * on the North American disc and the 2001 previews), summed with COLCLAMP 0 */
+static uint8_t wrappedColourStep(int n, int step)
 {
     uint8_t c = 0;
     for (int i = 0; i < (n < 0 ? -n : n); i++) {
-        c = (uint8_t)(c + (n < 0 ? 0xFC : 0x04));
+        c = (uint8_t)(c + (n < 0 ? 256 - step : step));
     }
     return c;
 }
+
+static uint8_t wrappedColour(int n)
+{
+    return wrappedColourStep(n, 4);
+}
+
+/* the step the frames being recorded carry (8 under ico_region's North
+ * American disc), which checkRecording expects in the reset and resolve */
+static int s_step = 4;
 
 /* --------------------------------------------- the synthetic shadow model
  * View = identity; the screen matrix (+0xC0) maps view (x, y, z) to GS
@@ -483,6 +526,9 @@ static void buildModel(void)
     p->stripCount = 1;
     x->partCount = 1;
     x->parts = p;
+    /* the part's box (eight vectors), which the 2001 builds' and the North
+       American disc's on-screen test reads (gsb_ClipBox is 1 here) */
+    x->boxes = zalloc(8 * 16);
     m->shadowLength = kLen;
     o->nodeNum = 1;
     o->nodeMtx = (ICO_WORD)node;
@@ -665,7 +711,7 @@ static uint32_t packetTris(const char *pkt, RdScreenVtx *tri, int8_t *sign, uint
             tri[n * 3 + 0] = pos[i - 2];
             tri[n * 3 + 1] = pos[i - 1];
             tri[n * 3 + 2] = pos[i];
-            sign[n] = r[i] == 0x04 ? 1 : r[i] == 0xFC ? -1 : 0;
+            sign[n] = r[i] == (uint8_t)s_step ? 1 : r[i] == (uint8_t)(256 - s_step) ? -1 : 0;
         }
         p += 26;
     }
@@ -704,7 +750,9 @@ static void checkRecording(void)
     expect1(cl, &i, RDC_ABE, 0, "reset: PRIM 0x406 ABE");
     expect1(cl, &i, RDC_SHADE, 0, "reset: PRIM 0x406 IIP");
     nextCmd(cl, &i, RDC_TEXTURE_OFF, "reset: PRIM 0x406 TME");
-    nextCmd(cl, &i, RDC_SHADOW_RESET, "reset: the clear of 0x142");
+    const RdCmd *rc = nextCmd(cl, &i, RDC_SHADOW_RESET, "reset: the clear of 0x142");
+    CHECK(rc && rc->b[0] == (s_step == 8 ? 8 : 0) && rd__shadow_step(rc) == (uint32_t)s_step,
+          "reset: carries the step %d (b[0] %u)", s_step, rc ? rc->b[0] : 0);
     expect1(cl, &i, RDC_FBA, 0, "reset: FBA");
     expect1(cl, &i, RDC_TEXA, RD_TEXA_80_80, "reset: TEXA");
     expectTest(cl, &i, 0x50000, "reset: TEST");
@@ -727,7 +775,8 @@ static void checkRecording(void)
         const RdScreenVtx *v = (const RdScreenVtx *)(f->payload + c->u[1]);
         uint32_t a = 0, b = c->u[0], bad = 0, inc = 0;
         for (uint32_t t = 0; t < pn; t++) {
-            CHECK(psign[t] != 0, "packet triangle %u: RGBAQ neither 0x04 nor 0xFC", t);
+            CHECK(psign[t] != 0, "packet triangle %u: RGBAQ neither 0x%02X nor 0x%02X", t, s_step,
+                  256 - s_step);
             uint32_t *at = psign[t] > 0 ? &a : &b;
             inc += psign[t] > 0;
             for (int k = 0; k < 3; k++) {
@@ -741,12 +790,16 @@ static void checkRecording(void)
               "volume: the triangles and signs are the packet's kicks, each vertex tagged with "
               "its triangle's place in the packet (V3) (%u mismatched vertices)",
               bad);
-        printf("  volume strip: %u triangles count +1 (RGBAQ 0x04), %u count -1 (0xFC)\n", inc,
-               pn - inc);
+        CHECK(inc > 0 && inc < pn, "volume: both signs recorded (%u of %u count +1, step %d)", inc,
+              pn, s_step);
+        printf("  volume strip: %u triangles count +1 (RGBAQ 0x%02X), %u count -1 (0x%02X)\n", inc,
+               s_step, pn - inc, 256 - s_step);
     }
     /* shadow_Draw */
     expectTarget(cl, &i, s_count.id, scene, (uint32_t)fw, H, "draw: the count before the resolve");
-    nextCmd(cl, &i, RDC_SHADOW_RESOLVE, "draw: the resolve");
+    rc = nextCmd(cl, &i, RDC_SHADOW_RESOLVE, "draw: the resolve");
+    CHECK(rc && rc->b[0] == (s_step == 8 ? 8 : 0) && rd__shadow_step(rc) == (uint32_t)s_step,
+          "resolve: carries the step %d (b[0] %u)", s_step, rc ? rc->b[0] : 0);
     expectTest(cl, &i, 0x30000, "draw: TEST");
     expect1(cl, &i, RDC_ZWRITE, RD_ZWRITE_OFF, "draw: ZBUF ZMSK");
     expect1(cl, &i, RDC_COLCLAMP, 1, "draw: COLCLAMP 1");
@@ -832,7 +885,7 @@ static void checkCount(void)
     for (int y = 0; y < H; y++) {
         for (int x = 0; x < W; x++) {
             const int n = expectedCount(x, y);
-            const uint8_t c = wrappedColour(n);
+            const uint8_t c = wrappedColourStep(n, s_step);
             const uint8_t *p = &s_cnt[(y * W + x) * 4];
             const uint8_t a = c ? 0x80 : 0;
             if (p[0] != c || p[1] != c || p[2] != c || p[3] != a) {
@@ -842,8 +895,9 @@ static void checkCount(void)
             }
         }
     }
-    CHECK(bad == 0, "(a) count: %d pixels differ from 4 n mod 256, first (%d,%d) n %d: %u %u %u %u",
-          bad, firstX, firstY, firstX >= 0 ? expectedCount(firstX, firstY) : 0,
+    CHECK(bad == 0,
+          "(a) count: %d pixels differ from %d n mod 256, first (%d,%d) n %d: %u %u %u %u", bad,
+          s_step, firstX, firstY, firstX >= 0 ? expectedCount(firstX, firstY) : 0,
           firstX >= 0 ? s_cnt[(firstY * W + firstX) * 4] : 0,
           firstX >= 0 ? s_cnt[(firstY * W + firstX) * 4 + 1] : 0,
           firstX >= 0 ? s_cnt[(firstY * W + firstX) * 4 + 2] : 0,
@@ -857,14 +911,31 @@ static void checkCount(void)
              {100, 150, 64, 0}, {260, 0, 65, 4},     {200, 150, 128, 0}, {300, 150, 256, 0},
              {400, 150, 3, 12}, {4, 70, -1, 0xFC},   {508, 70, -127, 4}, {8, 300, 0, 0}};
 
-    for (size_t i = 0; i < sizeof(k) / sizeof(k[0]); i++) {
+    /* the step 8's: 8 n mod 256 = 8 (n mod 32), so 32 and 64 are no shadow */
+    static const struct {
+        int x, y, n;
+        uint8_t c;
+    } k8[] = {{4, 0, 1, 8},      {124, 0, 31, 248}, {128, 0, 32, 0},  {132, 0, 33, 8},
+              {256, 0, 64, 0},   {4, 70, -1, 0xF8}, {32, 150, 2, 16}, {400, 150, 3, 24},
+              {100, 150, 64, 0}, {8, 300, 0, 0}};
+
+    for (size_t i = 0; s_step == 4 && i < sizeof(k) / sizeof(k[0]); i++) {
         const uint8_t *p = &s_cnt[(k[i].y * W + k[i].x) * 4];
         CHECK(expectedCount(k[i].x, k[i].y) == k[i].n && wrappedColour(k[i].n) == k[i].c &&
                   p[0] == k[i].c,
               "(a) n = %d at (%d,%d): colour %u, expected %u", k[i].n, k[i].x, k[i].y, p[0],
               k[i].c);
     }
-    printf("  (a) count: %d of %d pixels off the wrapped colour sum\n", bad, W * H);
+    for (size_t i = 0; s_step == 8 && i < sizeof(k8) / sizeof(k8[0]); i++) {
+        const uint8_t *p = &s_cnt[(k8[i].y * W + k8[i].x) * 4];
+        CHECK(expectedCount(k8[i].x, k8[i].y) == k8[i].n &&
+                  wrappedColourStep(k8[i].n, 8) == k8[i].c && p[0] == k8[i].c &&
+                  p[3] == (k8[i].c ? 0x80 : 0),
+              "(8) n = %d at (%d,%d): colour %u alpha %u, expected %u", k8[i].n, k8[i].x, k8[i].y,
+              p[0], p[3], k8[i].c);
+    }
+    printf("  (a) count, step %d: %d of %d pixels off the wrapped colour sum\n", s_step, bad,
+           W * H);
 }
 
 /* level l + 1 (size s) from level l (s_cnt for l = 0, else s_lv[l - 1]) */
@@ -1403,10 +1474,20 @@ static void checkTable(void)
     static const int kN[] = {0, 1, 63, 64, 128, 255};
     for (size_t i = 0; i < sizeof(kN) / sizeof(kN[0]); i++) {
         uint8_t t[4];
-        rd__shadow_table_texel((uint32_t)kN[i] & RD_SHADOW_STENCIL_MASK, t);
+        rd__shadow_table_texel((uint32_t)kN[i] & RD_SHADOW_STENCIL_MASK, 4, t);
         const uint8_t c = wrappedColour(kN[i]);
         CHECK(t[0] == c && t[1] == c && t[2] == c && t[3] == (c ? 0x80 : 0),
               "(o) table: n = %d gives %u %u %u %u, the GS %u %u %u %u", kN[i], t[0], t[1], t[2],
+              t[3], c, c, c, c ? 0x80 : 0);
+    }
+    /* the step 8's table: the stencil keeps n mod 64, the colour 8 n mod 256 */
+    static const int kN8[] = {0, 1, 31, 32, 33, 63, 64, 255, -1, -33};
+    for (size_t i = 0; i < sizeof(kN8) / sizeof(kN8[0]); i++) {
+        uint8_t t[4];
+        rd__shadow_table_texel((uint32_t)kN8[i] & RD_SHADOW_STENCIL_MASK, 8, t);
+        const uint8_t c = wrappedColourStep(kN8[i], 8);
+        CHECK(t[0] == c && t[1] == c && t[2] == c && t[3] == (c ? 0x80 : 0),
+              "(8) table: n = %d gives %u %u %u %u, the GS %u %u %u %u", kN8[i], t[0], t[1], t[2],
               t[3], c, c, c, c ? 0x80 : 0);
     }
 }
@@ -1414,6 +1495,13 @@ static void checkTable(void)
 typedef struct AbPics {
     uint8_t *cnt, *lv[3], *scene;
     uint32_t cw, ch, sw, sh;
+    /* the replay's count target colour passes left neither loaded nor
+     * stored (RdPerfRecord.shadowColorDropped), its colour stores dropped */
+    uint32_t colorDropped, storeColorDropped;
+    /* the shadow resets whose volumes were drawn in the scene's open pass,
+     * the passes armed for it (RdPerfRecord.shadowMerged, shadowMergeArmed;
+     * rd_shadow_merge.c) and the replay's passes (RhiStats) */
+    uint32_t merged, armed, passes, clears;
 } AbPics;
 
 static void abFree(AbPics *p)
@@ -1438,6 +1526,15 @@ static bool abRecord(int vol, bool one, AbPics *p, const char *what)
               : (g_rdPerf.shadowSeven >= 1 && g_rdPerf.shadowOne == 0),
           "(o) %s: the %s path resolved the count (one %u, seven %u)", what,
           one ? "one-draw" : "seven-draw", g_rdPerf.shadowOne, g_rdPerf.shadowSeven);
+    CHECK(g_rdPerf.shadowGathered == (g_rd.shadowLoad ? 0u : g_rdPerf.shadowOne),
+          "(o) %s: %u of %u one draws by gathers (loads asked %d)", what, g_rdPerf.shadowGathered,
+          g_rdPerf.shadowOne, (int)g_rd.shadowLoad);
+    p->colorDropped = g_rdPerf.shadowColorDropped;
+    p->storeColorDropped = g_rdPerf.storeColorDropped;
+    p->merged = g_rdPerf.shadowMerged;
+    p->armed = g_rdPerf.shadowMergeArmed;
+    p->passes = g_rdPerf.passKinds[RD_PERF_PASS_RENDER];
+    p->clears = g_rdPerf.shadowClearSkipped;
     const RdTargetRec *c = rd__target_rec(s_count.id);
     const RdTargetRec *sc = rd__target_rec(rd_target(RD_TARGET_SCENE).id);
     if (!c || !sc) {
@@ -1522,6 +1619,131 @@ static void abFrame(int vol, const char *what)
     abFree(&seven);
 }
 
+/* (p) the count target's colour neither loaded nor stored while the count
+ * is made (rd_store_plan.c rd__store_plan_count_color): the frame through
+ * the path asked under ICO_RD_STORE_POISON=1 (such a load clears the colour
+ * to 0x5A instead: lavapipe keeps an attachment's contents whatever its
+ * ops say) with the store plan off and on: the count, the three levels and
+ * SCENE byte for byte; no colour dropped with the plan off, at least one
+ * (the volumes' pass) with it, each also a colour store dropped; on the one
+ * draw above 1x the scaled count target holds the poison at every texel
+ * (nothing drew it after: the levels read the reduced count) */
+static void setPoison(bool on)
+{
+#ifdef _WIN32
+    _putenv_s("ICO_RD_STORE_POISON", on ? "1" : "");
+#else
+    if (on) {
+        setenv("ICO_RD_STORE_POISON", "1", 1);
+    } else {
+        unsetenv("ICO_RD_STORE_POISON");
+    }
+#endif
+}
+
+static void poisonFrame(int vol, bool one, const char *what)
+{
+    char w2[96];
+    snprintf(w2, sizeof w2, "%s, %s, poisoned", what, one ? "one draw" : "seven draws");
+    const bool plan = g_rd.profile.storePlan;
+    setPoison(true);
+    /* the volumes in their own pass on the count target, whose colour this
+     * case is about (rd_shadow_mali runs on a tile-based class, where they
+     * would go into the scene's pass: case m) */
+    rd__shadow_merge_force(0);
+    AbPics kept, planned;
+    g_rd.profile.storePlan = false;
+    const bool okKept = abRecord(vol, one, &kept, w2);
+    g_rd.profile.storePlan = true;
+    const bool okPlan = abRecord(vol, one, &planned, w2);
+    CHECK(kept.colorDropped == 0 && kept.storeColorDropped == 0,
+          "(p) %s: the store plan off dropped the count's colour %u times (%u colour stores)", w2,
+          kept.colorDropped, kept.storeColorDropped);
+    CHECK(planned.colorDropped >= 1 && planned.storeColorDropped >= planned.colorDropped,
+          "(p) %s: the plan dropped the count's colour %u times (%u colour stores)", w2,
+          planned.colorDropped, planned.storeColorDropped);
+    if (okKept && okPlan) {
+        abCompareOne(kept.cnt, planned.cnt, kept.cw, kept.ch, w2, "the count");
+        for (int l = 0; l < 3; l++) {
+            char pic[16];
+            snprintf(pic, sizeof pic, "SHADOW%d", l);
+            abCompareOne(kept.lv[l], planned.lv[l], 256u >> l, 256u >> l, w2, pic);
+        }
+        abCompareOne(kept.scene, planned.scene, kept.sw, kept.sh, w2, "SCENE");
+    }
+    const RdTargetRec *c = rd__target_rec(s_count.id);
+    if (one && c && (c->tw != c->w || c->th != c->h)) {
+        const size_t n = (size_t)c->tw * c->th;
+        uint8_t *px = malloc(n * 4);
+        uint32_t rw = 0, rh = 0;
+        size_t poisoned = 0;
+        if (px && rd__read_target(s_count, px, n * 4, &rw, &rh) && (size_t)rw * rh == n) {
+            for (size_t i = 0; i < n; i++) {
+                poisoned += px[i * 4] == 0x5A && px[i * 4 + 1] == 0x5A && px[i * 4 + 2] == 0x5A &&
+                            px[i * 4 + 3] == 0x5A;
+            }
+        }
+        CHECK(poisoned == n,
+              "(p) %s: the scaled count target holds the poison at %zu of %zu texels", w2, poisoned,
+              n);
+        free(px);
+    }
+    printf("  (p) %s: the count's colour dropped %u times, the count, levels and SCENE the same\n",
+           w2, planned.colorDropped);
+    abFree(&kept);
+    abFree(&planned);
+    setPoison(false);
+    rd__shadow_merge_force(-1);
+    g_rd.profile.storePlan = plan;
+}
+
+/* (m) the shadow volumes in the scene's open pass (rd_shadow_merge.c): the
+ * frame through the path asked with the merge off and on
+ * (rd__shadow_merge_force), under ICO_RD_STORE_POISON=1: the count, the
+ * three levels and SCENE byte for byte; off, no reset taken and no pass
+ * armed; on, list 0's pass (it took the frame's clear of SCENE's depth, the
+ * stencil with it) armed and the reset taken, one render pass fewer */
+static void mergeFrame(int vol, bool one, const char *what)
+{
+    char w2[96];
+    snprintf(w2, sizeof w2, "%s, %s, merge", what, one ? "one draw" : "seven draws");
+    setPoison(true);
+    AbPics off, on;
+    rd__shadow_merge_force(0);
+    const bool okOff = abRecord(vol, one, &off, w2);
+    rd__shadow_merge_force(1);
+    const bool okOn = abRecord(vol, one, &on, w2);
+    rd__shadow_merge_force(-1);
+    CHECK(off.merged == 0 && off.armed == 0, "(m) %s: off, %u resets taken, %u passes armed", w2,
+          off.merged, off.armed);
+    CHECK(on.merged == 1 && on.armed == 1,
+          "(m) %s: on, %u resets taken, %u passes armed (want 1 "
+          "and 1)",
+          w2, on.merged, on.armed);
+    CHECK(on.passes + 1u == off.passes, "(m) %s: %u render passes on, %u off (want one fewer)", w2,
+          on.passes, off.passes);
+    /* the count target's new-target clear: left undrawn on, drawn here with
+     * the poison's 0x5A (a reader would change the count or a level) */
+    CHECK(off.clears == 0 && on.clears == 1,
+          "(m) %s: the count target's clear left %u times off, %u on (want 0 and 1)", w2,
+          off.clears, on.clears);
+    if (okOff && okOn) {
+        abCompareOne(off.cnt, on.cnt, off.cw, off.ch, w2, "the count");
+        for (int l = 0; l < 3; l++) {
+            char pic[16];
+            snprintf(pic, sizeof pic, "SHADOW%d", l);
+            abCompareOne(off.lv[l], on.lv[l], 256u >> l, 256u >> l, w2, pic);
+        }
+        abCompareOne(off.scene, on.scene, off.sw, off.sh, w2, "SCENE");
+    }
+    printf("  (m) %s: %u reset taken in the scene's pass, render passes %u -> %u, the count, "
+           "levels and SCENE the same\n",
+           w2, on.merged, off.passes, on.passes);
+    abFree(&off);
+    abFree(&on);
+    setPoison(false);
+}
+
 /* the frames at the renderer's current scale */
 static void abFrames(const char *scale)
 {
@@ -1529,16 +1751,32 @@ static void abFrames(const char *scale)
     gif_HostForgetTextures();
     gif_HostFrameReset();
     dl_Clear();
-    snprintf(what, sizeof what, "%s, synthetic volumes", scale);
-    abFrame(VOL_SYNTH, what);
-    snprintf(what, sizeof what, "%s, Shadow.c's model", scale);
-    abFrame(VOL_MODEL, what);
-    for (int k = 0; k < 4; k++) {
-        s_subOff = 4 * k + 3;
-        snprintf(what, sizeof what, "%s, a rectangle at +%d/16", scale, s_subOff);
-        abFrame(VOL_SUB, what);
+    /* the one draw's stencil read four texels a gather (the default),
+     * then a texel a load (g_rd.shadowLoad, the self-test's fallback):
+     * both the seven draws' bytes */
+    for (int load = 0; load < 2; load++) {
+        const char *how = load ? "loads" : "gathers";
+        g_rd.shadowLoad = load != 0;
+        snprintf(what, sizeof what, "%s, synthetic volumes, %s", scale, how);
+        abFrame(VOL_SYNTH, what);
+        snprintf(what, sizeof what, "%s, Shadow.c's model, %s", scale, how);
+        abFrame(VOL_MODEL, what);
+        for (int k = 0; k < 4; k++) {
+            s_subOff = 4 * k + 3;
+            snprintf(what, sizeof what, "%s, a rectangle at +%d/16, %s", scale, s_subOff, how);
+            abFrame(VOL_SUB, what);
+        }
+        s_subOff = 0;
     }
-    s_subOff = 0;
+    g_rd.shadowLoad = false;
+    snprintf(what, sizeof what, "%s, synthetic volumes", scale);
+    poisonFrame(VOL_SYNTH, true, what);
+    poisonFrame(VOL_SYNTH, false, what);
+    mergeFrame(VOL_SYNTH, true, what);
+    mergeFrame(VOL_SYNTH, false, what);
+    snprintf(what, sizeof what, "%s, Shadow.c's model", scale);
+    mergeFrame(VOL_MODEL, true, what);
+    g_rd.profile.shadowOne = true;
 }
 
 /* (o) above 1x: at scale 2 and at 1931 x 1093 texels (Enhanced) */
@@ -1579,6 +1817,56 @@ static void checkOneScaled(void)
               rhi_vk_validation_error_count());
         rd_shutdown();
     }
+}
+
+/* ---------------------------------- (8) the step 8 on the device */
+
+/* the synthetic volumes recorded under the North American disc (the reset's
+ * step 8 from Shadow.c) at 1x: the count against 8 n mod 256 through the
+ * seven draws, then through the one draw (where the profile has it) and the
+ * one draw against the seven draws as in (o); every pipeline created
+ * enumerated (the step 8's A key in the set under that disc) */
+static void checkStep8(void)
+{
+    static const int kAll[4] = {0, kBlend[1], kBlend[2], kBlend[3]};
+    RdSettings st;
+    memset(&st, 0, sizeof(st));
+    st.preset = RD_PRESET_ORIGINAL;
+    ico_region = ICO_REGION_NTSC;
+    s_step = 8;
+    if (rd_init(W, H, &st, NULL)) {
+        gif_HostForgetTextures();
+        gif_HostFrameReset();
+        dl_Clear();
+        const bool one = g_rd.profile.shadowOne && rhi_limits()->stencilView;
+        g_rd.profile.shadowOne = false;
+        recordFrame(VOL_SYNTH, kAll);
+        CHECK(g_rdPerf.shadowSeven >= 1, "(8) the seven draws resolved the count");
+        if (readTarget(s_count, s_cnt, W, H)) {
+            checkCount();
+        }
+        if (one) {
+            g_rd.profile.shadowOne = true;
+            recordFrame(VOL_SYNTH, kAll);
+            CHECK(g_rdPerf.shadowOne >= 1, "(8) the one draw resolved the count");
+            if (readTarget(s_count, s_cnt, W, H)) {
+                checkCount();
+            }
+            abFrames("1x, step 8");
+        } else {
+            printf("  (8) no stencil view, or the profile has the seven draws (%s): the one draw "
+                   "not checked\n",
+                   rd__profile_text());
+        }
+        checkPipelines();
+        CHECK(rhi_vk_validation_error_count() == 0, "(8) %u validation errors",
+              rhi_vk_validation_error_count());
+        rd_shutdown();
+    } else {
+        CHECK(0, "(8) rd_init at 1x");
+    }
+    ico_region = ICO_REGION_PAL;
+    s_step = 4;
 }
 
 /* ---------------------------------- (x) the two kernels at scale 2 */
@@ -1905,6 +2193,21 @@ int main(int argc, char **argv)
         gsFrame.aspect = 4.0f / 3.0f;
         gif_HostSetFrameWidth(W);
     }
+    /* (8) the step 8 recorded: Shadow.c's model on the North American disc */
+    ico_region = ICO_REGION_NTSC;
+    s_step = 8;
+    if (!rd__init_record_only(W, H)) {
+        printf("FAIL rd__init_record_only (the step 8)\n");
+        return 1;
+    }
+    gif_HostForgetTextures();
+    gif_HostFrameReset();
+    dl_Clear();
+    recordFrame(VOL_MODEL, kAll);
+    checkRecording();
+    rd_shutdown();
+    ico_region = ICO_REGION_PAL;
+    s_step = 4;
     if (failures) {
         printf("rd_shadow_test: %d failures\n", failures);
         return 1;
@@ -1968,6 +2271,7 @@ int main(int argc, char **argv)
           rhi_vk_validation_error_count());
     CHECK(rd__not_implemented_count() == 0, "no stubbed command replayed");
     rd_shutdown();
+    checkStep8();
     checkScaledIntegral();
     checkOneScaled();
     if (failures) {

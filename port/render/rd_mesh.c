@@ -281,9 +281,17 @@ static void evict(void)
  * the game kept from before (a packet's mesh, Packet.c pac_HostMeshFor)
  * names no mesh of this renderer and is built again (rd_vu_mesh_valid) */
 static uint32_t s_genFloor;
+/* The slots live at rd_drop_vu_meshes: the next generation of each goes
+ * above the floor once, when it is next taken (a free slot's is raised at
+ * the drop itself).  The floor applies once per slot, so a slot keeps the
+ * full 16-bit cycle after a wrap (review finding 3: a floor applied at
+ * every allocation shrank a wrapped slot's cycle to 0xFFFF - floor values,
+ * and a stale packet id could name a new mesh). */
+static uint8_t s_floorPending[RD_MAX_MESHES / 8];
 
 static RdMeshRec *meshAlloc(uint32_t *id)
 {
+    rd__texlock_wait(); /* the render thread's reads of a picture ended (rd_thread.h) */
     if (!g_rd.meshes) {
         return NULL;
     }
@@ -293,7 +301,13 @@ static RdMeshRec *meshAlloc(uint32_t *id)
             if (m->live) {
                 continue;
             }
-            uint32_t gen = ((m->gen ? m->gen : s_genFloor) + 1) & 0xFFFF;
+            /* a slot first used since rd_init starts above the floor */
+            uint32_t base = m->gen ? m->gen : s_genFloor;
+            if (s_floorPending[i >> 3] & (1u << (i & 7))) {
+                s_floorPending[i >> 3] &= (uint8_t)~(1u << (i & 7));
+                base = base > s_genFloor ? base : s_genFloor;
+            }
+            uint32_t gen = (base + 1) & 0xFFFF;
             memset(m, 0, sizeof(*m));
             m->gen = gen ? gen : 1;
             m->live = 1;
@@ -1595,6 +1609,18 @@ bool rd__vu_mesh_copy_marks(RdMeshRec *dst, const RdMeshRec *src)
     return dst->kickMark != NULL;
 }
 
+/* the last stream serial handed out (RdMeshRec.streamSerial); a write of a
+ * stream never overlaps a picture's reads (the hand-over, rd_thread.h), and
+ * the count is atomic for the two threads that write streams */
+static uint64_t s_streamSerial;
+
+void rd__mesh_stream_written(RdMeshRec *m)
+{
+    if (m) {
+        m->streamSerial = __atomic_add_fetch(&s_streamSerial, 1, __ATOMIC_RELAXED);
+    }
+}
+
 uint32_t rd__vu_mesh_create_raw(const float (*stream)[4], uint32_t vertexCount,
                                 uint32_t qwPerVertex, const uint32_t *index, uint32_t indexCount,
                                 const RdVuBatchRec *batches, uint32_t batchCount, const char *name)
@@ -1633,6 +1659,7 @@ uint32_t rd__vu_mesh_create_raw(const float (*stream)[4], uint32_t vertexCount,
     markContentHidden(m);
     markJoinedStrips(m);
     cardStrips(m);
+    rd__mesh_stream_written(m); /* the stream as created, a sheet's tiles with it */
     return id;
 }
 
@@ -1916,6 +1943,7 @@ const float (*rd__mesh_stream_at(const RdMeshRec *m, uint32_t frame))[4]
 
 bool rd_update_vu_mesh(RdMesh mesh, const float (*qw)[4])
 {
+    rd__texlock_wait();
     RdMeshRec *m = rd__mesh_rec(mesh.id);
     if (!m || !m->vu || !qw || m->replaced) {
         return false; /* a replaced mesh: its stream is not the packet's layout */
@@ -1931,6 +1959,7 @@ bool rd_update_vu_mesh(RdMesh mesh, const float (*qw)[4])
     if (m->tiledFrom) {
         retileSheet(m);
     }
+    rd__mesh_stream_written(m);
     m->replaySeen = 0; /* upload again at the next replay */
     m->gpuDirty = 1;   /* the device copy too */
     return true;
@@ -1938,6 +1967,7 @@ bool rd_update_vu_mesh(RdMesh mesh, const float (*qw)[4])
 
 void rd_destroy_vu_mesh(RdMesh mesh)
 {
+    rd__texlock_wait();
     RdMeshRec *m = rd__mesh_rec(mesh.id);
     if (m) {
         meshFree(m);
@@ -1964,6 +1994,7 @@ bool rd_vu_mesh_replaced(RdMesh mesh)
 
 void rd_vu_mesh_retire(bool (*pred)(uint64_t hash, bool replaced, void *user), void *user)
 {
+    rd__texlock_wait();
     if (!g_rd.meshes) {
         return;
     }
@@ -1979,8 +2010,123 @@ void rd_vu_mesh_retire(bool (*pred)(uint64_t hash, bool replaced, void *user), v
     }
 }
 
+/* The mesh id fields (rd_mesh.h rd_vu_mesh_note_field): an open-addressed
+   table keyed by the field's address, the latest id per field.  Packets
+   number in the thousands in a stage; the table doubles from 4096 up to
+   1M fields. */
+typedef struct MeshField {
+    uintptr_t at; /* 0: empty */
+    uint32_t id;
+} MeshField;
+
+static MeshField *s_fields;
+static size_t s_fieldCap, s_fieldCount;
+static int s_fieldsFull;
+
+#define FIELD_CAP_MIN 4096u
+#define FIELD_CAP_MAX (1u << 20)
+
+static size_t fieldSlot(const MeshField *t, size_t cap, uintptr_t at)
+{
+    size_t i = (size_t)((at >> 2) * 0x9E3779B97F4A7C15ull) & (cap - 1);
+    while (t[i].at != 0 && t[i].at != at) {
+        i = (i + 1) & (cap - 1);
+    }
+    return i;
+}
+
+static int fieldsGrow(void)
+{
+    const size_t cap = s_fieldCap ? s_fieldCap * 2 : FIELD_CAP_MIN;
+    MeshField *t;
+    if (cap > FIELD_CAP_MAX || (t = (MeshField *)calloc(cap, sizeof *t)) == NULL) {
+        return 0;
+    }
+    for (size_t i = 0; i < s_fieldCap; i++) {
+        if (s_fields[i].at != 0) {
+            t[fieldSlot(t, cap, s_fields[i].at)] = s_fields[i];
+        }
+    }
+    free(s_fields);
+    s_fields = t;
+    s_fieldCap = cap;
+    return 1;
+}
+
+void rd_vu_mesh_note_field(void *field, uint32_t id)
+{
+    const uintptr_t at = (uintptr_t)field;
+    if (field == NULL || s_fieldsFull) {
+        return;
+    }
+    /* at most half full */
+    if ((s_fieldCount + 1) * 2 > s_fieldCap && !fieldsGrow()) {
+        s_fieldsFull = 1;
+        fprintf(stderr,
+                "rd: the mesh id fields' table is full (%zu fields); a save state's hash "
+                "counts the ones after it\n",
+                s_fieldCount);
+        return;
+    }
+    size_t i = fieldSlot(s_fields, s_fieldCap, at);
+    if (s_fields[i].at == 0) {
+        s_fields[i].at = at;
+        s_fieldCount++;
+    }
+    s_fields[i].id = id;
+}
+
+size_t rd_vu_mesh_each_field(const void *lo, const void *hi,
+                             void (*fn)(const void *field, void *user), void *user)
+{
+    size_t n = 0;
+    for (size_t i = 0; i < s_fieldCap; i++) {
+        uint32_t now;
+        if (s_fields[i].at == 0 || s_fields[i].at < (uintptr_t)lo ||
+            s_fields[i].at + sizeof now > (uintptr_t)hi) {
+            continue;
+        }
+        memcpy(&now, (const void *)s_fields[i].at, sizeof now);
+        if (now == s_fields[i].id) {
+            fn((const void *)s_fields[i].at, user);
+            n++;
+        }
+    }
+    return n;
+}
+
+uint32_t rd_vu_mesh_gen_high(void)
+{
+    uint32_t high = s_genFloor;
+    for (uint32_t i = 0; g_rd.meshes && i < RD_MAX_MESHES; i++) {
+        if (g_rd.meshes[i].gen > high) {
+            high = g_rd.meshes[i].gen;
+        }
+    }
+    return high;
+}
+
+void rd_drop_vu_meshes(uint32_t savedGenHigh)
+{
+    rd__texlock_wait();
+    const uint32_t high = rd_vu_mesh_gen_high();
+    rd_vu_mesh_retire(NULL, NULL);
+    s_genFloor = (savedGenHigh > high ? savedGenHigh : high) & 0xFFFF;
+    /* the floor once per slot: a free one's generation now, a live one's
+     * when it is next taken (meshAlloc) */
+    for (uint32_t i = 0; g_rd.meshes && i < RD_MAX_MESHES; i++) {
+        RdMeshRec *m = &g_rd.meshes[i];
+        if (!m->live) {
+            m->gen = m->gen > s_genFloor ? m->gen : s_genFloor;
+        } else {
+            s_floorPending[i >> 3] |= (uint8_t)(1u << (i & 7));
+        }
+    }
+}
+
 void rd__vu_mesh_sweep_stale(void)
 {
+    rd__texlock_wait();
     if (s_staleCount == 0 || !g_rd.meshes) {
         return;
     }
@@ -2006,6 +2152,8 @@ void rd__mesh_shutdown(void)
             s_genFloor = g_rd.meshes[i].gen;
         }
     }
+    /* the next rd_init's slots start at 0: the floor rule for a first use */
+    memset(s_floorPending, 0, sizeof(s_floorPending));
     s_staleCount = 0;
 }
 
@@ -2344,12 +2492,13 @@ static RdCmd *pushVu(uint8_t type, RdKey key, const RdVuPayload *p, const RdVuBl
     c->u[2] = total;
     c->keyLo = (uint32_t)key;
     c->keyHi = (uint32_t)(key >> 32);
-    g_rd.stats.draws++;
+    rd__stats_here()->draws++;
     return c;
 }
 
 void rd_draw_vu_mesh(RdMesh mesh, const RdVuDraw *d, RdKey key)
 {
+    rd__texlock_wait();
     RdMeshRec *m = rd__mesh_rec(mesh.id);
     if (!m || !m->vu || !d || !rd__draw_filter_pass(key)) {
         return;
@@ -2491,7 +2640,7 @@ void rd_draw_vu_particles(const RdVuParticleDraw *d, RdKey key)
  * targets have depth too).  The scissor batches' cut pass forces ABE on:
  * the same set.
  * With the vertex pre-pass (g_rd.vuPrepass, the record path; docs/port/
- * RENDER.md "The vertex and triangle pre-passes") the meshes and grids
+ * PIPELINES.md "The vertex and triangle pre-passes") the meshes and grids
  * draw through vu_main_vs, whose keys carry RD_PROG_PRELIT whatever the
  * program, and the particles through vu_particle_main_vs (RD_PROG_PARTICLE,
  * the particles' program), each also under TEST Z ALWAYS (0x30000), Z
@@ -2503,7 +2652,47 @@ void rd_draw_vu_particles(const RdVuParticleDraw *d, RdKey key)
  * module, g_rd.vsFallback), made on first use.  Without the pre-pass every
  * VU draw is the old way: the eleven program entries under the three tests
  * above, 16 keys each.  Both ways draw with vu_ps and vu_texa_ps (VuVSOut:
- * the planes as flat varyings). */
+ * the planes as flat varyings).
+ * Then the AFAIL RGB_ONLY half of a material's own TEST (VU_TEST_AT_GT64_RGBONLY: the
+ * TEST the disc's model data writes before a mesh or grid, ATE GREATER with
+ * its own AREF, AFAIL RGB_ONLY, Z GEQUAL; no game-code literal, so the list
+ * defaults above never had it): the failing pixels' pass writes R, G and B
+ * without Z (colour mask 7, Z write off; rd_pipeline.c
+ * rd__plan_screen_draw_ex), under ABE off, the LERP (0x44) and Cs*FIX + Cd
+ * (mode 0, the premultiplied add's path), the blends the dumps show it
+ * with; the passing pixels' pass is a key above.  6 more keys a shader, 9
+ * at a fractional scale with the vu_np_ps twins (a
+ * PowerVR phone's first-use lines: blend 4 and 12, mask 7,
+ * vu_prelit_merge_vs and vu_grid_spec_merge_vs with vu_np_ps, 0.6-0.8 s
+ * each). */
+static uint32_t addVuPlan(RdPipeKeyInt *out, uint32_t max, uint32_t n, uint64_t test, int zw,
+                          int blend, uint8_t prog, uint8_t vs)
+{
+    RdStateBlock s;
+    rd__reset_state_block(&s);
+    s.ds.test = rd_test_from_gs(test);
+    s.ds.zwrite = zw ? RD_ZWRITE_ON : RD_ZWRITE_OFF;
+    s.ds.abe = blend >= 0;
+    s.ds.blend = (uint8_t)(blend >= 0 ? blend : 0);
+    RdDrawPass dp[2];
+    const int np = rd__plan_screen_draw(&s, RD_PRIM_TRIANGLES, RD_SPACE_WORLD, RHI_FMT_RGBA8_UNORM,
+                                        RHI_FMT_D32F_S8, dp);
+    /* vu_ps and, for a 24- or 16-bit texture under AEM, vu_texa_ps */
+    for (int i = 0; i < np * 2; i++) {
+        RdPipeKeyInt k = dp[i / 2].key;
+        k.gs.program = prog;
+        k.vs = vs;
+        k.fs = (i & 1) ? RD_FS_VU_TEXA : RD_FS_VU;
+        n = rd__add_pipe_key(out, max, n, &k);
+        n = rd__vu_pixel_fs_enum(out, max, n, &k); /* rd_pixel_plan.c */
+    }
+    return n;
+}
+
+/* ATE GREATER AREF 0x40 AFAIL RGB_ONLY, ZTE, Z GEQUAL: the AREF is no key
+ * field (the dumps' materials take 0x01, 0x30, 0x40, 0x46 and 0x5A) */
+#define VU_TEST_AT_GT64_RGBONLY 0x5340Dull
+
 static uint32_t enumerateVuDraws(RdPipeKeyInt *out, uint32_t max, uint32_t n)
 {
     static const uint64_t kTests[] = {RD_TEST_Z_GEQUAL, RD_TEST_AT_GT64_FBONLY,
@@ -2535,27 +2724,16 @@ static uint32_t enumerateVuDraws(RdPipeKeyInt *out, uint32_t max, uint32_t n)
         for (size_t t = 0; t < nt; t++) {
             for (int zw = 0; zw < 2; zw++) {
                 for (size_t b = 0; b < sizeof(kBlends) / sizeof(kBlends[0]); b++) {
-                    RdStateBlock s;
-                    rd__reset_state_block(&s);
-                    s.ds.test = rd_test_from_gs(kTests[t]);
-                    s.ds.zwrite = zw ? RD_ZWRITE_ON : RD_ZWRITE_OFF;
-                    s.ds.abe = kBlends[b] >= 0;
-                    s.ds.blend = (uint8_t)(kBlends[b] >= 0 ? kBlends[b] : 0);
-                    RdDrawPass dp[2];
-                    int np = rd__plan_screen_draw(&s, RD_PRIM_TRIANGLES, RD_SPACE_WORLD,
-                                                  RHI_FMT_RGBA8_UNORM, RHI_FMT_D32F_S8, dp);
-                    /* vu_ps and, for a 24- or 16-bit texture
-                     * under AEM, vu_texa_ps */
-                    for (int i = 0; i < np * 2; i++) {
-                        RdPipeKeyInt k = dp[i / 2].key;
-                        k.gs.program = progList[v];
-                        k.vs = vsList[v];
-                        k.fs = (i & 1) ? RD_FS_VU_TEXA : RD_FS_VU;
-                        n = rd__add_pipe_key(out, max, n, &k);
-                        n = rd__vu_pixel_fs_enum(out, max, n, &k); /* rd_pixel_plan.c */
-                    }
+                    n = addVuPlan(out, max, n, kTests[t], zw, kBlends[b], progList[v], vsList[v]);
                 }
             }
+        }
+        /* the material TEST's RGB_ONLY half (its Z write on: the failing
+         * pass's key is the same with it off) */
+        static const int kRgbOnlyBlends[] = {-1, RD_BLEND_LERP_AS, RD_BLEND_CS_FIX_ADD_CD};
+        for (size_t b = 0; b < sizeof(kRgbOnlyBlends) / sizeof(kRgbOnlyBlends[0]); b++) {
+            n = addVuPlan(out, max, n, VU_TEST_AT_GT64_RGBONLY, 1, kRgbOnlyBlends[b], progList[v],
+                          vsList[v]);
         }
     }
     return n;

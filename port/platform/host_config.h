@@ -35,7 +35,10 @@
  *                    in the same way: port/core/region.h mc_save_dir);
  *                    default memcard beside the per-user folder
  *   saves2=PATH      a second card folder, the card in port 1; absent or
- *                    empty: port 1 has no card (the original behaviour)
+ *                    empty: port 1 has no card (the original behaviour),
+ *                    unless Options > Gameplay > Second memory card is on
+ *                    ([gameplay] second_memory_card): then memcard2 beside
+ *                    memcard in the per-user folder
  *   keep_image=1     Android: keep the copy of the disc image the first
  *                    start made in the app's folder (Ico_PAL, Ico_JPN or Ico_KOR:
  *                    .iso, .chd or .bin);
@@ -136,32 +139,41 @@ int ico_ini_load_file(IcoIni *ini, const char *path);
    other libraries read from the environment (ICO_AUDIO, ICO_AUDIO_DUMP,
    ICO_AUDIO_VOLUME, ICO_FIXED_CLOCK, ICO_RD_DUMP_*). */
 const char *ico_config_ini_key(const char *toml_path);
-/* The [dev] A/B switches (blend=, fog_path=, date_path=, store_plan=,
+/* The [dev] A/B switches (blend=, uber=, fog_path=, date_path=, store_plan=,
    blur_fold=, uint_view=, alpha_plan=, fx_plan=, fx_dst_local=,
    vu_planes=, shadow_one=, shadow_bspline=, dynamic_state=, gpu_checkpoints=,
    gpu_robust=, pass_split=, attachment_read=, storage_pass_merge=,
-   vu_prepass=, crack_fill=, joystick_directinput=, pipeline_set=): ico_dev_env_name
+   vu_prepass=, crack_fill=, joystick_directinput=, pipeline_set=, bind_cache=,
+   aura_box=, pass_area=, clear_carry=, clear_skip=, last_store=):
+   ico_dev_env_name
    gives the environment variable a key is exported as (ICO_RD_BLEND,
-   ICO_RD_FOG_PATH, ICO_RD_DATE_PATH, ICO_RD_STORE_PLAN, ICO_RD_BLUR_FOLD,
+   ICO_RD_UBER, ICO_RD_FOG_PATH, ICO_RD_DATE_PATH, ICO_RD_STORE_PLAN, ICO_RD_BLUR_FOLD,
    ICO_RD_UINT_VIEW, ICO_RD_ALPHA_PLAN, ICO_RD_FX_PLAN, ICO_RD_FX_DST_LOCAL,
    ICO_RD_VU_PLANES, ICO_RD_SHADOW_ONE, ICO_RD_SHADOW_BSPLINE, ICO_VK_FAKE_NO_DYNAMIC, ICO_GPU_CHECKPOINTS, ICO_GPU_ROBUST, ICO_RD_PASS_SPLIT,
    ICO_VK_ATTACHMENT_READ, ICO_RD_PASS_MERGE, ICO_RD_VU_PREPASS, ICO_RD_CRACK_FILL,
-   ICO_JOYSTICK_DIRECTINPUT, ICO_PIPELINE_SET), NULL for any other key (the
+   ICO_JOYSTICK_DIRECTINPUT, ICO_PIPELINE_SET, ICO_DISC_READER,
+   ICO_DISC_READ_AHEAD_KB, ICO_RHI_BIND_CACHE, ICO_RD_AURA_BOX, ICO_RD_PASS_AREA,
+   ICO_RD_CLEAR_CARRY, ICO_RD_CLEAR_SKIP, ICO_RD_LAST_STORE), NULL for any other key (the
    retired vu_plain_only= and vu_extended= among them: read, logged by
    ico_ini_export as "ico_pc: [dev] <key> = <value> is not used (every
    device compiles one set of 3D shaders); ignored", not exported);
    ico_dev_env_value the
-   value exported for an ini value, NULL when nothing is set: blend
+   value exported for an ini value, NULL when nothing is set: aura_box
+   pass_area, clear_carry, clear_skip and last_store "auto" as it is (else the default branch's 1 / 0); blend
    "fixed", "attachment", "storage" or "exact" as they are (the
    fixed-function blend is the default: nothing set; exact opts into the
-   device's best exact mode); fog_path local, inplace, copy or buffer as
+   device's best exact mode); uber "auto" as it is (else the default
+   branch's 1 / 0); fog_path local, inplace, copy or buffer as
    they are; date_path stencil or snapshot as they are; uint_view "work" as
    it is; dynamic_state true/on -> "0", false/off -> "1", depth -> "blend"
-   (the variable names what is static); pipeline_set full, careful or lazy as they are; pass_split a
+   (the variable names what is static); pipeline_set full, careful or lazy as they are;
+   present_fallback auto, off or fifo as they are (0/false/no -> "off");
+   disc_reader thread or sync as they are (0/false/off/no -> "sync");
+   disc_read_ahead_kb 0 to 4096 as it is (false/off/no -> "0"); pass_split a
    count; gpu_*, attachment_read, storage_pass_merge, store_plan,
    blur_fold, uint_view, alpha_plan, fx_plan, fx_dst_local, vu_planes,
    shadow_one, shadow_bspline, vu_prepass, vu_prepass_batch, still_represent, glow_redraw,
-   crack_fill and joystick_directinput (every other key: the default branch) 1/true/on/yes ->
+   crack_fill, joystick_directinput and bind_cache (every other key: the default branch) 1/true/on/yes ->
    "1", 0/false/off/no -> "0". ico_ini_export sets them. */
 const char *ico_dev_env_name(const char *key);
 const char *ico_dev_env_value(const char *key, const char *value);
@@ -188,10 +200,21 @@ int ico_host_fixed_clock(const IcoIni *ini);
    read (ico_ini_load_layered). 0, or -1 (then out is "memcard"). */
 int ico_host_saves_dir(char *out, size_t size);
 /* The port-1 card folder: saves2= or [paths] saves2, read as saves=
-   (relative to the executable's folder).
+   (relative to the executable's folder); with neither, <pref dir>/memcard2
+   when the second card is on (ico_host_second_card). An explicit saves2
+   wins over the option.
    1 with out set, 0 when not configured (no card in port 1; out ""), -1 when
-   the path does not fit (out ""). A pure read, like ico_host_saves_dir. */
+   the path does not fit (out ""). A pure read, like ico_host_saves_dir: the
+   folder is made by the game's first Mkdir on the card (port/save/mc_host.c),
+   as memcard is. */
 int ico_host_saves2_dir(char *out, size_t size);
+/* Options > Gameplay > Second memory card ([gameplay] second_memory_card,
+   default false). The options module sets it (port/game/options.h
+   ico_opt_set_second_memory_card's listener, main_host.c) from the run's
+   settings store; until it does (-1: tools and tests), it is read from
+   config.toml in the per-user folder. */
+void ico_host_set_second_card(int on);
+int ico_host_second_card(void);
 /* PC port: a card folder's sibling for a disc whose saves cannot share the
    card (the August 2001 preview: port/core/region.h mc_card_suffix): dir
    with suffix appended after any trailing separators ("memcard" ->
@@ -239,6 +262,14 @@ char *ico_toml_render(const IcoToml *t, const char *existing);
 /* Renders t over the file at path and writes it atomically (path.tmp, then
    rename over path). 0, or -1; the old file is intact on failure. */
 int ico_toml_save(const IcoToml *t, const char *path);
+/* The whole file at path as malloc'd text (NULL: missing, unreadable or out
+   of memory). With ico_toml_write_text, the achievements file's off-thread
+   path: the base text is read once and rendered in memory. */
+char *ico_toml_read_text(const char *path);
+/* Writes text atomically to path (path.tmp, fsync, rename over path): the
+   second half of ico_toml_save, for text rendered earlier. 0, or -1; the old
+   file is intact on failure. Any thread. */
+int ico_toml_write_text(const char *text, const char *path);
 
 /* SHA-1. */
 typedef struct IcoSha1 {
@@ -270,9 +301,10 @@ void ico_host_log_flush(void);
    goes to the file and logcat now (the app going to the background, where
    the system may end the process unasked). */
 void ico_host_log_flush_all(void);
-/* Windows: the file-open dialog for the disc image; 0 and the path, or -1
-   if cancelled. Elsewhere: -1. */
-int ico_host_pick_iso(char *out, size_t size);
+/* Windows: the file-open dialog for the disc image, with `title` (UTF-8; NULL:
+   "Choose your ICO disc image (one of the supported discs)"); 0 and the path,
+   or -1 if cancelled. Elsewhere: -1. */
+int ico_host_pick_iso(const char *title, char *out, size_t size);
 
 /* The disc a start plays (main_host.c), by the first rule that names one:
    the [game] disc pin (pin, a row of config/regions.txt, or -1 for auto),

@@ -24,6 +24,7 @@
 #include <stdio.h>
 #include <stdlib.h>
 #include <string.h>
+#include "ico_thread.h"
 #include "rd_internal.h"
 #include "rd_passring.h"
 
@@ -114,6 +115,9 @@ int rd_perf_pass_label(const RdPerfPass *p, char *buf, size_t n)
         if (p->post >= 0 && p->post < RD_PERF_POST_COUNT) {
             return snprintf(buf, n, "%s", rd_perf_post_name(p->post));
         }
+        if (p->target == RD_PERF_TARGET_SHADOW_COUNT) {
+            return snprintf(buf, n, "shadow"); /* "shadow count 848x448" */
+        }
         return snprintf(buf, n, "list %d", (int)p->list);
     }
     return snprintf(buf, n, "%s", rd_perf_pass_kind_name(p->kind));
@@ -141,33 +145,82 @@ int rd__perf_post_of_kind(uint32_t kind)
     }
 }
 
+/* the queues' lock: the render thread closes the records, the game thread
+ * takes them (rd_perf_pop, rd_perf_passes_of; rd_thread.h).  Made before
+ * the render thread starts (rd__perf_lock_init) */
+static IcoMutex *s_qLock;
+
+void rd__perf_lock_init(void)
+{
+    if (!s_qLock) {
+        s_qLock = ico_mutex_create();
+    }
+}
+
+static void qLock(void)
+{
+    if (s_qLock) {
+        ico_mutex_lock(s_qLock);
+    }
+}
+
+static void qUnlock(void)
+{
+    if (s_qLock) {
+        ico_mutex_unlock(s_qLock);
+    }
+}
+
 static void push(const RdPerfRecord *r)
 {
+    qLock();
     if (s_count == RD_PERF_QUEUE) {
         s_head = (s_head + 1) % RD_PERF_QUEUE; /* the oldest is dropped */
         s_count--;
     }
     s_queue[(s_head + s_count) % RD_PERF_QUEUE] = *r;
     s_count++;
+    qUnlock();
 }
 
 /* Direct3D 11's submit writes of the records popped since the last
  * rd_perf_backend_text, and their count; the re-shown presents and the
  * rendered ones that pasted the held glow among them; the draw merge's
- * draws (RdPerfRecord vuMergeIn, vuMergeGpu, vuMergeAlone); the fused
- * scissor pairs (vuFusePairs, vuFuseSame, vuFuseKept) */
+ * draws (RdPerfRecord vuMergeIn, vuMergeGpu, vuMergeAlone) and why draws
+ * stayed apart (vuMergeBlocked); the fused scissor pairs (vuFusePairs,
+ * vuFuseSame, vuFuseKept) */
 static uint64_t s_backendBytes;
 static uint32_t s_backendReplays, s_reshownReplays, s_glowHeldReplays;
-static uint64_t s_mergeIn, s_mergeGpu, s_mergeAlone;
+static uint64_t s_mergeIn, s_mergeGpu, s_mergeAlone, s_mergeBlocked[5];
 static uint64_t s_fusePairs, s_fuseSame, s_fuseKept[RD_VU_FUSE_WHY_COUNT];
 /* the store plan's (RdPerfRecord storePasses, storeDepthDropped,
  * storeColorDropped) and the replays it planned */
 static uint64_t s_storePasses, s_storeDepth, s_storeColor;
+/* the passes cut (rd_pass_cut.c; RdPerfRecord clearsCarried, clearsSkipped,
+ * storeLastDropped) */
+static uint64_t s_cutCarried, s_cutSkipped, s_cutLast, s_cutLastWhy[RD_LAST_WHY_COUNT];
 static uint32_t s_storePlanned;
+/* the shadow volumes in the scene's pass (rd_shadow_merge.c; RdPerfRecord
+ * shadowMerged, shadowMergeArmed, shadowClearSkipped) and the shadow resets
+ * replayed */
+static uint64_t s_smMerged, s_smArmed, s_smResets, s_smClears;
+/* the store plan's keep as the last planned record had it (RdPerfRecord
+ * storeKept, storeKeptTarget, storeKeptFrame) */
+static uint8_t s_storeKept, s_storeKeptTarget;
+static uint32_t s_storeKeptFrame;
+/* the planned replays that dropped no depth store with a depth bound, by
+ * why (RdPerfRecord.storeWhy, RD_STORE_WHY_*) */
+static uint32_t s_storeWhy[RD_STORE_WHY_COUNT];
+/* the pipeline cache by family as the last record popped had it
+ * (RdPerfRecord.pipeFamily, uber) */
+static uint16_t s_pipeFamily[RD_PERF_PIPE_FAMILIES];
+static uint8_t s_pipeUber;
 
 bool rd_perf_pop(RdPerfRecord *out)
 {
+    qLock();
     if (s_count == 0) {
+        qUnlock();
         return false;
     }
     s_backendBytes += s_queue[s_head].backendWriteBytes;
@@ -177,41 +230,138 @@ bool rd_perf_pop(RdPerfRecord *out)
     s_mergeIn += s_queue[s_head].vuMergeIn;
     s_mergeGpu += s_queue[s_head].vuMergeGpu;
     s_mergeAlone += s_queue[s_head].vuMergeAlone;
+    for (int k = 0; k < 5; k++) {
+        s_mergeBlocked[k] += s_queue[s_head].vuMergeBlocked[k];
+    }
     s_fusePairs += s_queue[s_head].vuFusePairs;
     s_fuseSame += s_queue[s_head].vuFuseSame;
     for (int k = 0; k < RD_VU_FUSE_WHY_COUNT; k++) {
         s_fuseKept[k] += s_queue[s_head].vuFuseKept[k];
     }
+    s_cutCarried += s_queue[s_head].clearsCarried;
+    s_cutSkipped += s_queue[s_head].clearsSkipped;
+    s_cutLast += s_queue[s_head].storeLastDropped;
+    s_smMerged += s_queue[s_head].shadowMerged;
+    s_smArmed += s_queue[s_head].shadowMergeArmed;
+    s_smResets += s_queue[s_head].shadowOne + s_queue[s_head].shadowSeven;
+    s_smClears += s_queue[s_head].shadowClearSkipped;
+    for (int k = 0; k < RD_LAST_WHY_COUNT; k++) {
+        s_cutLastWhy[k] += s_queue[s_head].lastStoreWhy[k];
+    }
     s_storePasses += s_queue[s_head].storePasses;
     s_storeDepth += s_queue[s_head].storeDepthDropped;
     s_storeColor += s_queue[s_head].storeColorDropped;
     s_storePlanned += s_queue[s_head].storePlanMode != 0;
+    if (s_queue[s_head].storeWhy < RD_STORE_WHY_COUNT) {
+        s_storeWhy[s_queue[s_head].storeWhy]++;
+    }
+    if (s_queue[s_head].storePlanMode != 0) {
+        s_storeKept = s_queue[s_head].storeKept;
+        s_storeKeptTarget = s_queue[s_head].storeKeptTarget;
+        s_storeKeptFrame = s_queue[s_head].storeKeptFrame;
+    }
+    memcpy(s_pipeFamily, s_queue[s_head].pipeFamily, sizeof(s_pipeFamily));
+    s_pipeUber = s_queue[s_head].uber;
     if (out) {
         *out = s_queue[s_head];
     }
     s_head = (s_head + 1) % RD_PERF_QUEUE;
     s_count--;
+    qUnlock();
     return true;
 }
 
 bool rd__perf_gpu_ms_of(uint32_t replay, double *ms)
 {
+    bool found = false;
+    qLock();
     for (uint32_t k = 0; k < s_count; k++) {
         const RdPerfRecord *r = &s_queue[(s_head + k) % RD_PERF_QUEUE];
         if (r->replay == replay) {
-            if (!r->gpuValid) {
-                return false;
+            if (r->gpuValid) {
+                *ms = r->gpuMs;
+                found = true;
             }
-            *ms = r->gpuMs;
-            return true;
+            break;
         }
     }
-    return false;
+    qUnlock();
+    return found;
+}
+
+static const char *const kAreaWhy[RD_AREA_WHY_COUNT] = {
+    "no scan of its commands",
+    "a clear as its load",
+    "MSAA",
+    "a storage pass",
+    "begun where no area starts",
+    "a 3D draw",
+    "the fog",
+    "a shadow command",
+    "a post sprite",
+    "a flat draw under DATE or the wrap",
+    "nothing drawn",
+    "its draws cover the picture",
+};
+
+static const char *const kLastWhy[RD_LAST_WHY_COUNT] = {
+    "no scan",
+    "MSAA, the exact blend, GS state as shader data, the pass split or a pass window",
+    "begun outside a draw on its colour and depth",
+    "the depth cleared, not loaded",
+    "a shadow window open",
+    "a command the store plan does not know",
+    "a DATE draw",
+    "a draw reading its own target, a depth or a target not ready",
+    "COLCLAMP 0's wrap",
+    "a post sprite",
+    "the fog with a probe, an edge read or not on the local read",
+    "a draw on another target",
+    "a clear, a copy or another action",
+};
+
+void rd_perf_why_text(char *buf, size_t size, int which, const uint64_t *counts, double replays)
+{
+    if (!buf || size == 0) {
+        return;
+    }
+    buf[0] = '\0';
+    const int count = which ? RD_LAST_WHY_COUNT : RD_AREA_WHY_COUNT;
+    const char *const *words = which ? kLastWhy : kAreaWhy;
+    uint64_t all = 0;
+    for (int k = 0; k < count; k++) {
+        all += counts[k];
+    }
+    if (!all || !(replays > 0.0)) {
+        return;
+    }
+    const bool one = replays == 1.0; /* the tool's: whole numbers */
+    size_t at = 0;
+    int n = one ? snprintf(buf, size, "%llu %s (", (unsigned long long)all,
+                           which ? "last stores kept" : "passes kept whole")
+                : snprintf(buf, size, "%.1f %s a replay (", (double)all / replays,
+                           which ? "last stores kept" : "passes kept whole");
+    at = n > 0 && (size_t)n < size ? (size_t)n : size - 1;
+    bool first = true;
+    for (int k = 0; k < count && at < size - 1; k++) {
+        if (!counts[k]) {
+            continue;
+        }
+        n = one ? snprintf(buf + at, size - at, "%s%llu %s", first ? "" : ", ",
+                           (unsigned long long)counts[k], words[k])
+                : snprintf(buf + at, size - at, "%s%.1f %s", first ? "" : ", ",
+                           (double)counts[k] / replays, words[k]);
+        at += n > 0 && (size_t)n < size - at ? (size_t)n : size - 1 - at;
+        first = false;
+    }
+    if (at < size - 1) {
+        snprintf(buf + at, size - at, ")");
+    }
 }
 
 const char *rd_perf_backend_text(void)
 {
-    static char s_text[1024];
+    static char s_text[2048];
     size_t at = 0;
     s_text[0] = '\0';
     if (s_backendBytes && s_backendReplays) {
@@ -236,12 +386,19 @@ const char *rd_perf_backend_text(void)
     }
     if ((s_mergeIn || s_mergeAlone) && s_backendReplays) {
         /* the draw merge (rd_replay_vu.c): per replay, the VU draws joined
-           into GPU draws of two or more, those GPU draws, the draws alone */
+           into GPU draws of two or more, those GPU draws, the draws alone,
+           and what kept a draw from the run before it (vuMergeNote's first
+           differing key, as rd_replay_tool --stats prints it) */
         const double n = (double)s_backendReplays;
-        const int k = snprintf(
-            s_text + at, sizeof(s_text) - at,
-            "; VU merge: %.0f draws a replay in %.0f GPU draws, %.0f alone ([dev] vu_merge)",
-            (double)s_mergeIn / n, (double)s_mergeGpu / n, (double)s_mergeAlone / n);
+        const int k =
+            snprintf(s_text + at, sizeof(s_text) - at,
+                     "; VU merge: %.0f draws a replay in %.0f GPU draws, %.0f alone (kept apart by "
+                     "pipeline %.0f, texture group %.0f, DrawCB %.0f, split/DATE/dst %.0f, "
+                     "scissor/FrameCB %.0f) ([dev] vu_merge)",
+                     (double)s_mergeIn / n, (double)s_mergeGpu / n, (double)s_mergeAlone / n,
+                     (double)s_mergeBlocked[0] / n, (double)s_mergeBlocked[1] / n,
+                     (double)s_mergeBlocked[2] / n, (double)s_mergeBlocked[3] / n,
+                     (double)s_mergeBlocked[4] / n);
         at += k > 0 && (size_t)k < sizeof(s_text) - at ? (size_t)k : 0;
     }
     uint64_t kept = 0;
@@ -269,21 +426,108 @@ const char *rd_perf_backend_text(void)
            loads) dropped and the colour stores dropped, of the walk's
            passes; "planned" when a replay of them planned */
         const double n = (double)s_backendReplays;
-        snprintf(s_text + at, sizeof(s_text) - at,
-                 "; stores: %.0f depth and %.0f colour stores dropped a replay of %.0f passes "
-                 "(%s; [dev] store_plan)",
-                 (double)s_storeDepth / n, (double)s_storeColor / n, (double)s_storePasses / n,
-                 s_storePlanned ? "planned" : "every store kept");
+        /* the keep in force at the last planned replay: its depths, the
+           first one's target and the frame that kept it (rd_store_plan.c) */
+        char kept[128] = "";
+        if (s_storePlanned && s_storeKept) {
+            snprintf(kept, sizeof(kept),
+                     "; %u depths' stores kept (a read before the clear or a readback), %s's "
+                     "since frame %u",
+                     s_storeKept, rd_perf_target_name(s_storeKeptTarget), s_storeKeptFrame);
+        }
+        /* the planned replays that dropped nothing, and the reason most of
+           them had (rd_store_plan.c planNothingDropped) */
+        char none[128] = "";
+        uint32_t nNone = 0, nMost = 0;
+        int most = RD_STORE_WHY_NONE;
+        for (int w = RD_STORE_WHY_NONE + 1; w < RD_STORE_WHY_COUNT; w++) {
+            nNone += s_storeWhy[w];
+            if (s_storeWhy[w] > nMost) {
+                nMost = s_storeWhy[w];
+                most = w;
+            }
+        }
+        if (nNone) {
+            snprintf(none, sizeof(none), "; nothing dropped in %u replays, %u of them: %s", nNone,
+                     nMost, rd__store_why_text(most));
+        }
+        const int k =
+            snprintf(s_text + at, sizeof(s_text) - at,
+                     "; stores: %.0f depth and %.0f colour stores dropped a replay of "
+                     "%.0f passes (%s%s%s; [dev] store_plan)",
+                     (double)s_storeDepth / n, (double)s_storeColor / n, (double)s_storePasses / n,
+                     s_storePlanned ? "planned" : "every store kept", kept, none);
+        at += k > 0 && (size_t)k < sizeof(s_text) - at ? (size_t)k : 0;
+    }
+    if (s_backendReplays &&
+        (s_cutCarried || s_cutSkipped || s_cutLast || rd__pass_cut_on(RD_CUT_CARRY) ||
+         rd__pass_cut_on(RD_CUT_SKIP) || rd__pass_cut_on(RD_CUT_LAST))) {
+        /* the passes cut (rd_pass_cut.c): per replay, the clears the next
+           pass took as its load (a pass fewer each), the clears not drawn,
+           the depth stores dropped at the last touch (in "stores" too) */
+        const double n = (double)s_backendReplays;
+        const int k =
+            snprintf(s_text + at, sizeof(s_text) - at,
+                     "; passes cut: %.1f clears taken by the next pass, %.1f clears "
+                     "skipped, %.1f depth stores dropped at the last touch a replay "
+                     "([dev] clear_carry, clear_skip, last_store)",
+                     (double)s_cutCarried / n, (double)s_cutSkipped / n, (double)s_cutLast / n);
+        at += k > 0 && (size_t)k < sizeof(s_text) - at ? (size_t)k : 0;
+        /* why the others kept it (RD_LAST_WHY_*): "; 0.7 last stores kept a
+           replay (0.5 a DATE draw, 0.2 a post sprite)" */
+        char why[512];
+        rd_perf_why_text(why, sizeof why, 1, s_cutLastWhy, n);
+        if (why[0]) {
+            const int w = snprintf(s_text + at, sizeof(s_text) - at, "; %s", why);
+            at += w > 0 && (size_t)w < sizeof(s_text) - at ? (size_t)w : 0;
+        }
+    }
+    if (s_backendReplays && (s_smMerged || s_smArmed || s_smClears || rd__shadow_merge_on())) {
+        /* the shadow volumes in the scene's pass (rd_shadow_merge.c): per
+           replay, the counts resolved, how many of them had their volumes
+           drawn in the scene's open pass (a pass fewer each), the passes
+           that stored their stencil for it, the count targets' new-target
+           clears not drawn */
+        const double n = (double)s_backendReplays;
+        const int k = snprintf(s_text + at, sizeof(s_text) - at,
+                               "; shadow volumes in the scene's pass: %.1f of %.1f counts, %.1f "
+                               "passes armed, %.1f count clears not drawn a replay",
+                               (double)s_smMerged / n, (double)s_smResets / n,
+                               (double)s_smArmed / n, (double)s_smClears / n);
+        at += k > 0 && (size_t)k < sizeof(s_text) - at ? (size_t)k : 0;
+    }
+    if (s_backendReplays) {
+        /* the pipelines made so far by family (rd_uber.c rd__uber_perf_note:
+           where GS state as shader data shrinks the set, which part) */
+        uint32_t total = 0;
+        for (int f = 0; f < RD_PERF_PIPE_FAMILIES; f++) {
+            total += s_pipeFamily[f];
+        }
+        for (int f = 0; f < RD_PERF_PIPE_FAMILIES && total; f++) {
+            const int k = snprintf(s_text + at, sizeof(s_text) - at, "%s%s %u",
+                                   f ? ", " : "; pipelines made by family: ",
+                                   rd__pipe_family_name((RdKeyFamily)f), s_pipeFamily[f]);
+            at += k > 0 && (size_t)k < sizeof(s_text) - at ? (size_t)k : 0;
+        }
+        if (total) {
+            snprintf(s_text + at, sizeof(s_text) - at, " (%u%s)", total,
+                     s_pipeUber ? ", GS state as shader data" : "");
+        }
     }
     s_backendBytes = 0;
     s_backendReplays = 0;
     s_reshownReplays = 0;
     s_glowHeldReplays = 0;
     s_mergeIn = s_mergeGpu = s_mergeAlone = 0;
+    memset(s_mergeBlocked, 0, sizeof(s_mergeBlocked));
     s_fusePairs = s_fuseSame = 0;
     memset(s_fuseKept, 0, sizeof(s_fuseKept));
+    s_cutCarried = s_cutSkipped = s_cutLast = 0;
+    memset(s_cutLastWhy, 0, sizeof(s_cutLastWhy));
+    s_smMerged = s_smArmed = s_smResets = s_smClears = 0;
     s_storePasses = s_storeDepth = s_storeColor = 0;
     s_storePlanned = 0;
+    memset(s_storeWhy, 0, sizeof(s_storeWhy));
     return s_text;
 }
 
@@ -404,6 +648,12 @@ static uint8_t passTarget(uint32_t id)
     if (id == RD_PERF_ID_WINDOW) {
         return RD_PERF_TARGET_WINDOW;
     }
+    if (id == RD_PERF_ID_ROWBOX) {
+        return RD_PERF_TARGET_ROWBOX;
+    }
+    if (id == RD_PERF_ID_SHADOW_COUNT) {
+        return RD_PERF_TARGET_SHADOW_COUNT;
+    }
     return rd__target_code(id);
 }
 
@@ -445,6 +695,18 @@ void rd__perf_pass(RhiCommandList cl, int kind, uint32_t target, uint32_t w, uin
     s_passCpu0 = now;
 }
 
+void rd__perf_pass_area(const RhiRect *area)
+{
+    if (!s_passOn || s_passRec.count == 0 || s_passRec.closed || !area || g_rdPerf.passPartial) {
+        return; /* (a full record opened no piece: the last is another's) */
+    }
+    RdPerfPass *p = &s_passRec.pass[s_passRec.count - 1u];
+    p->ax = clamp16(area->x > 0 ? (uint32_t)area->x : 0u);
+    p->ay = clamp16(area->y > 0 ? (uint32_t)area->y : 0u);
+    p->aw = clamp16(area->w);
+    p->ah = clamp16(area->h);
+}
+
 void rd__perf_pass_end(RhiCommandList cl)
 {
     if (!s_passOn || s_passRec.count == 0 || s_passRec.closed) {
@@ -479,6 +741,7 @@ static void passFinish(PassTable *t, const uint64_t *ts, uint32_t n, const uint6
             }
         }
     }
+    qLock();
     if (s_passCount == RD_PERF_PASS_QUEUE) {
         s_passHead = (s_passHead + 1u) % RD_PERF_PASS_QUEUE;
         s_passCount--;
@@ -489,24 +752,33 @@ static void passFinish(PassTable *t, const uint64_t *ts, uint32_t n, const uint6
     q->closed = t->closed;
     memcpy(q->pass, t->pass, (size_t)t->count * sizeof(t->pass[0]));
     s_passCount++;
+    qUnlock();
 }
 
 uint32_t rd_perf_passes_of(uint32_t replay, const RdPerfPass **out)
 {
+    /* a copy: the render thread may write the slot again meanwhile */
+    static PassTable s_passOut;
+    uint32_t n = 0;
     *out = NULL;
+    qLock();
     while (s_passCount) {
         const PassTable *t = &s_passQueue[s_passHead];
         if (t->replay > replay) {
-            return 0; /* a later replay's: kept for its record */
+            break; /* a later replay's: kept for its record */
         }
         s_passHead = (s_passHead + 1u) % RD_PERF_PASS_QUEUE;
         s_passCount--;
         if (t->replay == replay) {
-            *out = t->pass; /* the slot is written again only by a later replay */
-            return t->count;
+            s_passOut.count = t->count;
+            memcpy(s_passOut.pass, t->pass, (size_t)t->count * sizeof(t->pass[0]));
+            *out = s_passOut.pass;
+            n = t->count;
+            break;
         }
     }
-    return 0;
+    qUnlock();
+    return n;
 }
 
 void rd__perf_reset(void)
@@ -524,6 +796,7 @@ void rd__perf_reset(void)
 void rd__perf_interp_ms(double ms)
 {
     s_interpMs += ms;
+    rd__thread_note_interp(ms); /* the render thread's 10 s numbers */
 }
 
 /* the alpha of the present about to replay (rd_present) */
@@ -558,9 +831,13 @@ void rd__perf_readback_ms(double ms)
     s_readbackMs += ms;
 }
 
+/* g_rdPerf is a replay's record being made: rd__perf_begin to rd__perf_end */
+static bool s_recOpen;
+
 void rd__perf_begin(const RdFrame *f, int keep, bool present)
 {
     memset(&g_rdPerf, 0, sizeof(g_rdPerf));
+    s_recOpen = true;
     g_rdPerf.replay = ++s_replay;
     g_rdPerf.frame = f ? f->number : 0;
     g_rdPerf.keep = (uint8_t)(keep != 0);
@@ -581,7 +858,7 @@ void rd__perf_begin(const RdFrame *f, int keep, bool present)
         rhi_get_stats(&s_last);
         s_haveLast = true;
     }
-    s_pipelineCreates = g_rd.stats.pipelineCreates;
+    s_pipelineCreates = rd__stats_here()->pipelineCreates;
     s_a1xDraws = g_rd.above1xDraws;
     memset(&s_stamps, 0, sizeof(s_stamps));
     s_post = -1;
@@ -601,6 +878,50 @@ void rd__perf_begin(const RdFrame *f, int keep, bool present)
         s_passLastMs = s_t0;
     }
 #endif
+}
+
+void rd__perf_submit_times(uint32_t replay, double submitMs, double presentMs)
+{
+    if (replay == 0) {
+        return;
+    }
+    if (g_rdPerf.replay == replay) {
+        g_rdPerf.submitMs = submitMs;
+        g_rdPerf.presentMs = presentMs;
+        if (!s_recOpen) {
+            g_rdPerf.totalMs += submitMs + presentMs; /* rd_last_replay_ms */
+        }
+    }
+    for (uint32_t i = 0; i < RHI_FRAMES_IN_FLIGHT; i++) {
+        if (s_pendingValid[i] && s_pending[i].replay == replay) {
+            /* rd__perf_end left it here: the submit's times were not in it */
+            s_pending[i].submitMs = submitMs;
+            s_pending[i].presentMs = presentMs;
+            s_pending[i].totalMs += submitMs + presentMs;
+        }
+    }
+}
+
+/* the last record's last timestamp and its replay, for the next one's
+   gpuGapNs (0: none, or the last record had no timestamps) */
+static uint64_t s_gapLastNs;
+static uint32_t s_gapLastReplay;
+
+/* the GPU's time between this replay and the one before (rd.h
+   RdPerfRecord.gpuGapNs): only for the replay right after it, both timed,
+   within a second (a clock that jumped is no gap) */
+static void gpuGap(RdPerfRecord *r, uint64_t t0, uint64_t last)
+{
+    if (s_gapLastReplay != 0 && r->replay == s_gapLastReplay + 1u) {
+        const int64_t gap = (int64_t)(t0 - s_gapLastNs);
+
+        if (gap > -1000000000ll && gap < 1000000000ll) {
+            r->gpuGapNs = gap;
+            r->gpuGapValid = 1;
+        }
+    }
+    s_gapLastNs = last;
+    s_gapLastReplay = r->replay;
 }
 
 /* timestamps of the slot just recycled: the replay RHI_FRAMES_IN_FLIGHT ago */
@@ -661,11 +982,14 @@ void rd__perf_collect_gpu(void)
         }
         r->gpuMs = (double)(last - t0) / 1e6;
         r->gpuValid = 1;
+        gpuGap(r, t0, last);
         if (lastIndex < nb && busy[RD_PERF_TS_BEGIN] != 0 &&
             busy[lastIndex] >= busy[RD_PERF_TS_BEGIN]) {
             r->gpuBusyMs = (double)(busy[lastIndex] - busy[RD_PERF_TS_BEGIN]) / 1e6;
             r->gpuBusyValid = 1;
         }
+    } else {
+        s_gapLastReplay = 0; /* no stamps: the next record has no gap */
     }
     if (r->passTimed) {
         passFinish(&s_passPending[slot], ts, n, busy, nb);
@@ -717,9 +1041,11 @@ static void walkBreakdown(const RdPerfRecord *r)
 void rd__perf_end(void)
 {
     RdPerfRecord *r = &g_rdPerf;
+    s_recOpen = false;
     r->totalMs = rd__now_ms() - s_t0 + r->interpMs;
-    r->pipelineCreates = g_rd.stats.pipelineCreates - s_pipelineCreates;
+    r->pipelineCreates = rd__stats_here()->pipelineCreates - s_pipelineCreates;
     r->a1xDraws = g_rd.above1xDraws - s_a1xDraws;
+    rd__uber_perf_note(r); /* the pipeline cache by family (the 10 s summary) */
     if (g_rd.hasDevice) {
         RhiStats s;
         rhi_get_stats(&s);
@@ -736,6 +1062,9 @@ void rd__perf_end(void)
         r->blendEqOffSets = D(blendEqOffSets);
         r->dualLeftovers = D(dualLeftovers);
         r->bindGroupBinds = D(bindGroupBinds);
+        r->pipelineBindsSkipped = D(pipelineBindsSkipped);
+        r->bindGroupBindsSkipped = D(bindGroupBindsSkipped);
+        r->stateSetsSkipped = D(stateSetsSkipped);
         r->draws = D(draws);
         r->renderPasses = D(renderPasses);
         r->barriers = D(barriers);
@@ -814,7 +1143,7 @@ void rd__perf_stamp(RhiCommandList cl, uint32_t index)
     if (index == RD_PERF_TS_PREPASS) {
         /* the walk starts: the vertex pre-pass, then the lists */
         s_walkPipeMs = s_walkEndPipeMs = rd__pipeline_create_ms();
-        s_walkPipes = s_walkEndPipes = g_rd.stats.pipelineCreates;
+        s_walkPipes = s_walkEndPipes = rd__stats_here()->pipelineCreates;
         if (g_rd.hasDevice) {
             rhi_get_stats(&s_walkStats);
             s_walkEndStats = s_walkStats;
@@ -830,7 +1159,7 @@ void rd__perf_stamp(RhiCommandList cl, uint32_t index)
 void rd__perf_walk_end(void)
 {
     s_walkEndPipeMs = rd__pipeline_create_ms();
-    s_walkEndPipes = g_rd.stats.pipelineCreates;
+    s_walkEndPipes = rd__stats_here()->pipelineCreates;
     if (g_rd.hasDevice) {
         rhi_get_stats(&s_walkEndStats);
     }

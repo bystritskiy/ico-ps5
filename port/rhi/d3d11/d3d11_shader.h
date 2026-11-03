@@ -85,9 +85,9 @@ bool d3d11_shader_cache_mkdir(const char *dir);
 
 /* The DXBC cache folder and the build its keys carry, from the path
  * rhi_set_pipeline_cache_path takes.  The window's
- * <pref>/pipelines-<build>.vkcache gives <pref>/pipelines-<build>.d3d11 and
- * <build>, with *window true (the backend then drops other builds'
- * folders); any other path gives <path>.d3d11 and the path's last
+ * <pref>/pipelines-<key>.vkcache (the shader set's key, rd_cache_name.h)
+ * gives <pref>/pipelines-<key>.d3d11 and <key>, with *window true (the
+ * backend then drops other keys' folders); any other path gives <path>.d3d11 and the path's last
  * component.  false, both "", for NULL, "" or a result past dirn/buildn. */
 bool d3d11_shader_cache_folder(const char *path, char *dir, size_t dirn, char *build, size_t buildn,
                                bool *window);
@@ -120,6 +120,15 @@ bool d3d11_shader_log_failure(uint32_t n);
  * Windows only; elsewhere it fails with a message. */
 bool d3d11_shader_compile(const RhiShaderDesc *d, const char *cacheDir, const char *icoVersion,
                           void **dxbc, size_t *len, char *err, size_t errn);
+/* One of the backend's own shaders (no table entry, no macros, no includes,
+ * no cache: the texture-to-buffer copy's compute shader, d3d11_cmd.c): the
+ * DXBC of `text`'s `entry` compiled as `target` ("cs_5_0").  *dxbc is
+ * malloc'd; the caller frees.  On failure, false and the compiler's message
+ * (or the reason) in err; nothing is logged or counted here.  Windows only;
+ * elsewhere it fails with a message. */
+bool d3d11_shader_compile_text(const char *name, const char *text, size_t textLen,
+                               const char *entry, const char *target, void **dxbc, size_t *len,
+                               char *err, size_t errn);
 /* "10.0.22621.3233" once the compiler is loaded ("version unknown" when its
  * file says none); NULL before the first compile or when it is missing */
 const char *d3d11_shader_compiler_version(void);

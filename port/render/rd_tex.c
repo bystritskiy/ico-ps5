@@ -2,9 +2,11 @@
  * rd_create_texture_sheet).  rd_tex.h describes the decoding and the cache. */
 #include "rd_tex.h"
 #include <math.h>
+#include <stdio.h>
 #include <stdlib.h>
 #include <string.h>
 #include "rd_internal.h"
+#include "rd_tex_decode.h"
 #include "shader_consts.h"
 #include "texpack.h"
 
@@ -110,14 +112,15 @@ static int clutSrc(uint32_t cpsm, RdTexSrc *src)
     }
 }
 
-int rdtex_decode(const RdTexImage *im, uint8_t *out, RdTexSrc *src)
+/* What rdtex_decode checks before it writes anything: 0 with *src and
+   *indexed set, or -1 */
+static int decodeCheck(const RdTexImage *im, RdTexSrc *src, int *indexed)
 {
-    const uint8_t *p = im->pixels;
     uint32_t pw = im->padW ? im->padW : im->w;
     uint32_t ph = im->padH ? im->padH : im->h;
-    int indexed = 0;
 
-    if (p == NULL || im->w == 0 || im->h == 0 || pw < im->w || ph < im->h) {
+    *indexed = 0;
+    if (im->pixels == NULL || im->w == 0 || im->h == 0 || pw < im->w || ph < im->h) {
         return -1;
     }
     switch (im->psm) {
@@ -143,9 +146,22 @@ int rdtex_decode(const RdTexImage *im, uint8_t *out, RdTexSrc *src)
         if (im->clut == NULL || clutSrc(im->cpsm, src) != 0) {
             return -1;
         }
-        indexed = 1;
+        *indexed = 1;
         break;
     default:
+        return -1;
+    }
+    return 0;
+}
+
+int rdtex_decode(const RdTexImage *im, uint8_t *out, RdTexSrc *src)
+{
+    const uint8_t *p = im->pixels;
+    uint32_t pw = im->padW ? im->padW : im->w;
+    uint32_t ph = im->padH ? im->padH : im->h;
+    int indexed = 0;
+
+    if (decodeCheck(im, src, &indexed) != 0) {
         return -1;
     }
     memset(out, 0, (size_t)pw * ph * 4);
@@ -485,6 +501,7 @@ static void freeEntry(RdTexEntry *e)
 
 RdTex rdtex_find(uint32_t id, uint32_t gen, int texa)
 {
+    rd__texlock_wait(); /* the render thread's reads of a picture ended (rd_thread.h) */
     RdTexEntry *e = entryOf(id, texa);
     const RdTexRec *r = e && e->gen == gen ? rd__tex_rec(e->tex.id) : NULL;
 
@@ -501,91 +518,6 @@ RdTex rdtex_find(uint32_t id, uint32_t gen, int texa)
     }
     s_tc.stats.misses++;
     return (RdTex){0};
-}
-
-RdTex rdtex_store(uint32_t id, uint32_t gen, int texa, const RdTexImage *im,
-                  const RdTexSampler *smp, const char *debugName)
-{
-    uint32_t pw = im->padW ? im->padW : im->w;
-    uint32_t ph = im->padH ? im->padH : im->h;
-    RdTexEntry *e = entryOf(id, texa);
-    uint8_t *px;
-    RdTexSrc src;
-
-    if (pw == 0 || ph == 0 || pw > 4096 || ph > 4096) {
-        s_tc.stats.failures++;
-        return (RdTex){0};
-    }
-    px = malloc((size_t)pw * ph * 4);
-    if (px == NULL || rdtex_decode(im, px, &src) != 0) {
-        free(px);
-        s_tc.stats.failures++;
-        return (RdTex){0};
-    }
-    if (texa != RDTEX_TEXA_REPLAY) {
-        rdtex_apply_texa(px, (size_t)pw * ph, src, (RdTexA)texa);
-        src = RD_TEXSRC_RGBA32;
-    }
-    s_tc.stats.decodes++;
-    if (e == NULL) {
-        for (uint32_t i = 0; i < RDTEX_MAX_ENTRIES; i++) {
-            if (!s_tc.e[i].used) {
-                e = &s_tc.e[i];
-                break;
-            }
-        }
-        if (e == NULL) {
-            rd__log("the texture cache is full (%d entries)", RDTEX_MAX_ENTRIES);
-            free(px);
-            s_tc.stats.failures++;
-            return (RdTex){0};
-        }
-        memset(e, 0, sizeof(*e));
-        e->used = 1;
-        e->id = id;
-        e->texa = (uint16_t)texa;
-        s_tc.stats.entries++;
-    }
-    if (e->tex.id != 0 && !e->replaced && rd__tex_rec(e->tex.id) != NULL && e->w == pw &&
-        e->h == ph && e->src == (uint8_t)src) {
-        /* same shape: re-expand in place */
-        rd_update_texture(e->tex, px);
-        s_tc.stats.updates++;
-    } else {
-        RdTex t;
-
-        if (texa != RDTEX_TEXA_REPLAY) {
-            t = rd_create_texture(pw, ph, px, (RdTexA)texa, debugName);
-        } else {
-            t = rd_create_texture_src(pw, ph, px, src, debugName);
-        }
-        if (t.id == 0) {
-            free(px);
-            freeEntry(e);
-            s_tc.stats.failures++;
-            return (RdTex){0};
-        }
-        /* a replaced entry's new generation gets a texture of the game's
-           own: the replacement was for the old one */
-        releaseReplaced(e);
-        if (rd__tex_rec(e->tex.id) != NULL) {
-            retire(e->tex);
-        }
-        e->tex = t;
-        e->w = pw;
-        e->h = ph;
-        e->src = (uint8_t)src;
-        s_tc.stats.creates++;
-    }
-    e->gen = gen;
-    if (smp) {
-        e->smp = *smp;
-    }
-    free(px);
-    /* stored as one level: GS levels an earlier store gave the same
-       texture go (rdtex_store_levels adds them back after this) */
-    rd__tex_set_levels(e->tex, NULL, 0);
-    return e->tex;
 }
 
 /* Authored levels: a TIM2's further levels are drawn at the GS's level only
@@ -665,56 +597,322 @@ static void logAuthored(const char *name, int authored, double worst, uint32_t l
                      : "reductions of the base, the base alone kept");
 }
 
+/* ------------------------------------------------------ the stores
+ *
+ * A store makes or finds the entry and its rd texture at once and leaves
+ * the decode to a job (rd_tex_decode.h): queued to the pool's workers with
+ * a copy of the images' bytes, or run at once on this thread.  The job's
+ * result goes into the texture at rdtex_settle, in the stores' order, by
+ * the same calls the store made when it decoded before it returned. */
+
+/* The bytes of one CLUT entry of an indexed image's CLUT format */
+static uint32_t clutEntryBytes(uint32_t cpsm)
+{
+    switch (cpsm) {
+    case RDTEX_PSMCT16:
+    case RDTEX_PSMCT16S:
+        return 2;
+    case RDTEX_PSMCT24:
+        return 3;
+    default:
+        return 4;
+    }
+}
+
+/* The images a job decodes at most: the base, then the further levels
+   rdtex__job_run decodes before it stops at the first that does not fit
+   its padded size or does not decode */
+static uint32_t jobImages(const RdTexJob *j)
+{
+    uint32_t w = j->pw, h = j->ph;
+    uint32_t n = 1;
+    for (; n < j->n; n++) {
+        RdTexImage im = j->im[n];
+        RdTexSrc src;
+        int indexed;
+        w = w > 1 ? w / 2 : 1;
+        h = h > 1 ? h / 2 : 1;
+        im.padW = w;
+        im.padH = h;
+        if (im.w > w || im.h > h || im.w == 0 || im.h == 0 || decodeCheck(&im, &src, &indexed)) {
+            break;
+        }
+    }
+    return n;
+}
+
+/* The job's images re-pointed into one copy of their texels and CLUTs, so
+   the caller's may change before the job runs (a CLUT the levels share is
+   copied once).  The decode reads at most rdtex_image_bytes of the texels
+   and, for an indexed format, the CLUT entries below max(clutColors, 1)
+   (rdtex_decode: an index past them is masked) and below the format's 16
+   or 256 indices (a 256-entry CLUT's CSM1 order stays inside 256).  0, or -1 (no memory:
+   the job unchanged) */
+static int copySource(RdTexJob *j)
+{
+    const uint32_t n = jobImages(j);
+    size_t pix[RDTEX_JOB_LEVELS], clut[RDTEX_JOB_LEVELS];
+    int share[RDTEX_JOB_LEVELS]; /* the level whose CLUT copy it shares, or -1 */
+    size_t total = 0;
+    for (uint32_t l = 0; l < n; l++) {
+        const RdTexImage *im = &j->im[l];
+        RdTexSrc src;
+        int indexed = 0;
+        (void)decodeCheck(im, &src, &indexed); /* every level up to n decodes */
+        pix[l] = rdtex_image_bytes(im->psm, im->w, im->h);
+        clut[l] = 0;
+        share[l] = -1;
+        if (indexed) {
+            for (uint32_t k = 0; k < l; k++) {
+                if (clut[k] && j->im[k].clut == im->clut) {
+                    share[l] = (int)k;
+                    break;
+                }
+            }
+            if (share[l] < 0) {
+                /* the entries an index can reach: below max(clutColors, 1),
+                   and below the format's 16 or 256 */
+                const uint32_t most =
+                    im->psm == RDTEX_PSMT8 || im->psm == RDTEX_PSMT8H ? 256u : 16u;
+                uint32_t colors = im->clutColors ? im->clutColors : 1u;
+                colors = colors < most ? colors : most;
+                clut[l] = (size_t)colors * clutEntryBytes(im->cpsm);
+            }
+        }
+        total += pix[l] + clut[l];
+    }
+    uint8_t *copy = malloc(total ? total : 1);
+    if (!copy) {
+        return -1;
+    }
+    const void *clutAt[RDTEX_JOB_LEVELS];
+    uint8_t *at = copy;
+    for (uint32_t l = 0; l < n; l++) {
+        RdTexImage *im = &j->im[l];
+        memcpy(at, im->pixels, pix[l]);
+        im->pixels = at;
+        at += pix[l];
+        clutAt[l] = NULL; /* a format without a CLUT reads none */
+        if (clut[l]) {
+            memcpy(at, im->clut, clut[l]);
+            clutAt[l] = at;
+            at += clut[l];
+        } else if (share[l] >= 0) {
+            clutAt[l] = clutAt[share[l]];
+        }
+    }
+    for (uint32_t l = 0; l < n; l++) {
+        j->im[l].clut = clutAt[l];
+    }
+    j->n = n;
+    j->src = copy;
+    return 0;
+}
+
+void rdtex__job_run(RdTexJob *j)
+{
+    RdTexSrc src;
+    /* the store checked the base: it decodes */
+    if (rdtex_decode(&j->im[0], j->px, &src) != 0) {
+        memset(j->px, 0, (size_t)j->pw * j->ph * 4);
+        return;
+    }
+    if (j->texa != RDTEX_TEXA_REPLAY) {
+        rdtex_apply_texa(j->px, (size_t)j->pw * j->ph, src, (RdTexA)j->texa);
+    }
+    j->levels = 1;
+    j->worst = 1.0;
+    j->authored = 0;
+    if (j->n < 2 || !j->chain) {
+        return;
+    }
+    /* each level padded as the base is: the GS addresses level l at
+       2^(TW - l) x 2^(TH - l), the base's padded size halved */
+    uint32_t w = j->pw, h = j->ph, levels = 1;
+    uint8_t *at = j->chain;
+    for (uint32_t l = 1; l < j->n; l++) {
+        w = w > 1 ? w / 2 : 1;
+        h = h > 1 ? h / 2 : 1;
+        RdTexImage im = j->im[l];
+        RdTexSrc ls;
+        im.padW = w;
+        im.padH = h;
+        if (im.w > w || im.h > h || im.w == 0 || im.h == 0 || rdtex_decode(&im, at, &ls) != 0) {
+            break;
+        }
+        if (j->texa != RDTEX_TEXA_REPLAY) {
+            rdtex_apply_texa(at, (size_t)w * h, ls, (RdTexA)j->texa);
+        }
+        at += (size_t)w * h * 4;
+        levels++;
+    }
+    j->levels = levels;
+    /* only authored levels take the GS's level; reductions of the base keep
+       the texture as the base alone (one level; the Enhanced filter's box
+       mips) */
+    j->authored = (uint8_t)(levels > 1 && levelsAuthored(j->px, j->pw, j->ph, j->chain, levels,
+                                                         j->im, &j->worst));
+}
+
+void rdtex__job_finish(RdTexJob *j)
+{
+    const RdTex t = {j->texId};
+    if (rd__tex_rec(t.id) != NULL) {
+        if (j->update) {
+            rd_update_texture(t, j->px); /* same shape: re-expanded in place */
+        } else if (rd__tex_take_pixels(t, j->px)) {
+            j->px = NULL; /* the new texture's texels now */
+        } else {
+            rd_update_texture(t, j->px);
+        }
+        /* stored as one level: GS levels an earlier store gave the same
+           texture go (the levels below add them back) */
+        rd__tex_set_levels(t, NULL, 0);
+    }
+    if (j->n >= 2 && j->chain) {
+        if (j->levels > 1) {
+            logAuthored(j->name, j->authored, j->worst, j->levels);
+        }
+        rd__tex_set_levels(t, j->authored ? j->chain : NULL, j->authored ? j->levels : 0);
+    }
+    free(j->px);
+    free(j->chain);
+    free(j->src);
+    free(j);
+}
+
+/* rdtex_store and rdtex_store_levels: n images, the base first */
+static RdTex store(uint32_t id, uint32_t gen, int texa, const RdTexImage *ims, uint32_t n,
+                   const RdTexSampler *smp, const char *debugName)
+{
+    rd__texlock_wait();
+    const RdTexImage *im = &ims[0];
+    uint32_t pw = im->padW ? im->padW : im->w;
+    uint32_t ph = im->padH ? im->padH : im->h;
+    RdTexEntry *e = entryOf(id, texa);
+    RdTexJob *j;
+    RdTexSrc src;
+    int indexed;
+
+    if (pw == 0 || ph == 0 || pw > 4096 || ph > 4096) {
+        s_tc.stats.failures++;
+        return (RdTex){0};
+    }
+    j = calloc(1, sizeof(*j));
+    if (j == NULL || (j->px = malloc((size_t)pw * ph * 4)) == NULL ||
+        decodeCheck(im, &src, &indexed) != 0) {
+        if (j) {
+            free(j->px);
+        }
+        free(j);
+        s_tc.stats.failures++;
+        return (RdTex){0};
+    }
+    if (texa != RDTEX_TEXA_REPLAY) {
+        src = RD_TEXSRC_RGBA32; /* the TEXA baked into the alpha */
+    }
+    s_tc.stats.decodes++;
+    if (e == NULL) {
+        for (uint32_t i = 0; i < RDTEX_MAX_ENTRIES; i++) {
+            if (!s_tc.e[i].used) {
+                e = &s_tc.e[i];
+                break;
+            }
+        }
+        if (e == NULL) {
+            rd__log("the texture cache is full (%d entries)", RDTEX_MAX_ENTRIES);
+            free(j->px);
+            free(j);
+            s_tc.stats.failures++;
+            return (RdTex){0};
+        }
+        memset(e, 0, sizeof(*e));
+        e->used = 1;
+        e->id = id;
+        e->texa = (uint16_t)texa;
+        s_tc.stats.entries++;
+    }
+    if (e->tex.id != 0 && !e->replaced && rd__tex_rec(e->tex.id) != NULL && e->w == pw &&
+        e->h == ph && e->src == (uint8_t)src) {
+        /* same shape: re-expanded in place (rdtex__job_finish) */
+        j->update = 1;
+        s_tc.stats.updates++;
+    } else {
+        RdTex t;
+
+        /* made with zero texels: the job's pixels replace them before
+           anything reads them (rdtex_settle) */
+        if (texa != RDTEX_TEXA_REPLAY) {
+            t = rd_create_texture(pw, ph, NULL, (RdTexA)texa, debugName);
+        } else {
+            t = rd_create_texture_src(pw, ph, NULL, src, debugName);
+        }
+        if (t.id == 0) {
+            free(j->px);
+            free(j);
+            freeEntry(e);
+            s_tc.stats.failures++;
+            return (RdTex){0};
+        }
+        /* a replaced entry's new generation gets a texture of the game's
+           own: the replacement was for the old one */
+        releaseReplaced(e);
+        if (rd__tex_rec(e->tex.id) != NULL) {
+            retire(e->tex);
+        }
+        e->tex = t;
+        e->w = pw;
+        e->h = ph;
+        e->src = (uint8_t)src;
+        s_tc.stats.creates++;
+    }
+    e->gen = gen;
+    if (smp) {
+        e->smp = *smp;
+    }
+    /* the job */
+    j->texId = e->tex.id;
+    j->texa = texa;
+    j->pw = pw;
+    j->ph = ph;
+    j->n = n < RDTEX_JOB_LEVELS ? n : RDTEX_JOB_LEVELS;
+    memcpy(j->im, ims, j->n * sizeof(ims[0]));
+    snprintf(j->name, sizeof(j->name), "%s", debugName ? debugName : "?");
+    if (j->n >= 2) {
+        /* the further levels' room, as the base's padded size halves */
+        const size_t bytes = rd__gs_chain_bytes(pw, ph, j->n);
+        j->chain = malloc(bytes ? bytes : 1);
+    }
+    const int pool = rdtex__decode_threads() > 0;
+    const int queued =
+        pool && rdtex__decode_pending() < RDTEX_DECODE_QUEUE_MAX && copySource(j) == 0;
+    if (queued) {
+        s_tc.stats.pooled++;
+    } else {
+        s_tc.stats.fallbacks += (uint32_t)pool;
+        rdtex__job_run(j); /* from the caller's bytes, now */
+    }
+    if (queued || rdtex__decode_pending() > 0) {
+        rdtex__decode_add(j, queued); /* after the jobs before it */
+    } else {
+        rdtex__job_finish(j);
+    }
+    return e->tex;
+}
+
+RdTex rdtex_store(uint32_t id, uint32_t gen, int texa, const RdTexImage *im,
+                  const RdTexSampler *smp, const char *debugName)
+{
+    return store(id, gen, texa, im, 1, smp, debugName);
+}
+
 RdTex rdtex_store_levels(uint32_t id, uint32_t gen, int texa, const RdTexImage *ims, uint32_t n,
                          const RdTexSampler *smp, const char *debugName)
 {
     if (!ims || n == 0) {
         return (RdTex){0};
     }
-    RdTex t = rdtex_store(id, gen, texa, &ims[0], smp, debugName);
-    const RdTexRec *r = rd__tex_rec(t.id);
-    if (!r || n < 2 || r->format != RD_TEXEL_RGBA8 || r->replacement || !r->pixels) {
-        rd__tex_set_levels(t, NULL, 0);
-        return t;
-    }
-    /* each level padded as the base is: the GS addresses level l at
-       2^(TW - l) x 2^(TH - l), the base's padded size halved */
-    const size_t bytes = rd__gs_chain_bytes(r->w, r->h, n);
-    uint8_t *chain = malloc(bytes ? bytes : 1);
-    if (!chain) {
-        rd__tex_set_levels(t, NULL, 0);
-        return t;
-    }
-    uint32_t w = r->w, h = r->h, levels = 1;
-    uint8_t *at = chain;
-    for (uint32_t l = 1; l < n; l++) {
-        w = w > 1 ? w / 2 : 1;
-        h = h > 1 ? h / 2 : 1;
-        RdTexImage im = ims[l];
-        RdTexSrc src;
-        im.padW = w;
-        im.padH = h;
-        if (im.w > w || im.h > h || im.w == 0 || im.h == 0 || rdtex_decode(&im, at, &src) != 0) {
-            break;
-        }
-        if (texa != RDTEX_TEXA_REPLAY) {
-            rdtex_apply_texa(at, (size_t)w * h, src, (RdTexA)texa);
-        }
-        at += (size_t)w * h * 4;
-        levels++;
-    }
-    /* only authored levels take the GS's level; reductions of the base keep
-       the texture as rdtex_store left it (one level; the Enhanced filter's
-       box mips) */
-    double worst = 1.0;
-    const int authored =
-        levels > 1 && levelsAuthored(r->pixels, r->w, r->h, chain, levels, ims, &worst);
-    if (levels > 1) {
-        logAuthored(debugName, authored, worst, levels);
-    }
-    rd__tex_set_levels(t, authored ? chain : NULL, authored ? levels : 0);
-    free(chain);
-    return t;
+    return store(id, gen, texa, ims, n, smp, debugName);
 }
 
 const RdTexSampler *rdtex_sampler(uint32_t id, int texa)
@@ -726,6 +924,7 @@ const RdTexSampler *rdtex_sampler(uint32_t id, int texa)
 
 void rdtex_drop(uint32_t id)
 {
+    rd__texlock_wait();
     for (uint32_t i = 0; i < RDTEX_MAX_ENTRIES; i++) {
         if (s_tc.e[i].used && s_tc.e[i].id == id) {
             freeEntry(&s_tc.e[i]);
@@ -735,6 +934,7 @@ void rdtex_drop(uint32_t id)
 
 void rdtex_frame_tick(void)
 {
+    rd__texlock_wait();
     uint32_t keep = 0;
 
     s_tc.tick++;
@@ -750,6 +950,8 @@ void rdtex_frame_tick(void)
 
 void rdtex_reset(void)
 {
+    rd__texlock_wait();
+    rdtex_settle(); /* no job outlives the entries (their textures are gone) */
     for (uint32_t i = 0; i < RDTEX_MAX_ENTRIES; i++) {
         if (s_tc.e[i].used) {
             releaseReplaced(&s_tc.e[i]);
@@ -827,6 +1029,7 @@ int rdtex_replacement_refused(RdTex t)
 
 RdTex rdtex_create_replacement(TexpackImage *img, uint32_t uvW, uint32_t uvH, const char *debugName)
 {
+    rd__texlock_wait();
     if (!g_rd.inited || !img || !img->blob || img->levels == 0 || img->w == 0 || img->h == 0) {
         return (RdTex){0};
     }
@@ -887,6 +1090,7 @@ int rdtex_replace(uint32_t id, uint32_t gen, int texa, RdTex rep)
 
 void rdtex_revert_replacements(void)
 {
+    rd__texlock_wait();
     for (uint32_t i = 0; i < RDTEX_MAX_ENTRIES; i++) {
         if (s_tc.e[i].used && s_tc.e[i].replaced) {
             /* forgotten: the next bind misses (rdtex_find) and decodes the
@@ -908,7 +1112,394 @@ const RdTexCacheStats *rdtex_stats(void)
 
 /* --------------------------------------------------------------- sheet text
  * rd.h rd_create_texture_sheet: an R8 image of coverage with the style the
- * replay hands font_sheet_ps (rd_replay.c fillDrawCB, rd__overlay_draw). */
+ * replay hands font_sheet_ps (rd_replay.c fillDrawCB, rd__overlay_draw).
+ * At 1x the device holds the finished texels instead (rd__sheet_baked):
+ * rd_upload.c bakes the dirty rectangle, grown by the rim's reach, through
+ * rd__sheet_bake_rect into an RGBA8 texture with an apron
+ * (ICO_SHEET_BAKE_AX/AY), and font_sheet_baked_ps reads four texels where
+ * font_sheet_ps rebuilds each from a 14 x 10 coverage grid, 40 ms and more a
+ * picture of menu text on a Mali-G52 (issue 173). */
+
+/* the rim's falloff across (|dx|) and down (|dy|), per mille */
+static const uint32_t kSheetWx[ICO_SHEET_RX + 1] = {ICO_SHEET_WX_0, ICO_SHEET_WX_1, ICO_SHEET_WX_2,
+                                                    ICO_SHEET_WX_3, ICO_SHEET_WX_4, ICO_SHEET_WX_5,
+                                                    ICO_SHEET_WX_6};
+static const uint32_t kSheetWy[ICO_SHEET_RY + 1] = {ICO_SHEET_WY_0, ICO_SHEET_WY_1, ICO_SHEET_WY_2,
+                                                    ICO_SHEET_WY_3, ICO_SHEET_WY_4};
+_Static_assert(ICO_SHEET_BAKE_AX == ICO_SHEET_RX + 1 && ICO_SHEET_BAKE_AY == ICO_SHEET_RY + 1,
+               "the apron's outermost texels are one past the rim's reach");
+
+int rd__sheet_bake_scale(uint32_t scale)
+{
+    /* 1 (the 1x bake) and 2.  Above 1x the bake is exact at the scales
+       whose magnified rim font_sheet_ps blends by fractions with a power of
+       two below them (2: odd 4ths, 4: odd 8ths): every lerp of its integer
+       levels, and the lerp of two such, is a float the shader computes
+       without a rounding, so the integers of rd__sheet_bake_scaled_rect are
+       its values on any device; 3 blends by 6ths, which round, and stays
+       the shader's.  4 is exact too but not baked: its pages are 4096 x
+       2048 (8 MB of coverage, 34 MB baked), a 4K desktop's, whose card
+       draws the shader anyway; 2 is the phone's (a scene 2.1 times the PS2's
+       height at Resolution Auto or 2x, port/ui/menu_font.c mfScale) */
+    return scale <= 1u || scale == 2u;
+}
+
+int rd__sheet_baked(const RdTexRec *t)
+{
+    return t && t->kind == RD_TEXKIND_IMAGE && t->format == RD_TEXEL_SHEET &&
+           rd__sheet_bake_scale(t->sheetScale) && !g_rd.sheetShader && !t->sheetShader;
+}
+
+uint32_t rd__tex_device_w(const RdTexRec *t)
+{
+    return rd__sheet_baked(t) ? t->w + 2u * ICO_SHEET_BAKE_AX : t->w;
+}
+
+uint32_t rd__tex_device_h(const RdTexRec *t)
+{
+    return rd__sheet_baked(t) ? t->h + 2u * ICO_SHEET_BAKE_AY : t->h;
+}
+
+uint32_t rd__tex_device_bytes(const RdTexRec *t)
+{
+    return rd__sheet_baked(t) ? 4u : rd__texel_bytes(t->format);
+}
+
+RhiFormat rd__tex_rhi_format(const RdTexRec *t)
+{
+    return rd__sheet_baked(t) ? RHI_FMT_RGBA8_UNORM : rd__texel_rhi_format(t->format);
+}
+
+/* sheet_text.hlsli sheet_quantise: v 0..255 to ICO_SHEET_LEVELS levels
+   against the threshold th (32nds), on the 0..255 scale */
+static uint32_t sheetQuantise(uint32_t v, uint32_t th)
+{
+    const uint32_t n = ICO_SHEET_LEVELS - 1u;
+    const uint32_t q = (v * n * 32u + th * 255u) / (255u * 32u);
+    return ((q < n ? q : n) * 255u + n / 2u) / n;
+}
+
+/* sheet_text.hlsli sheet_threshold: the Bayer entry of page texel (x, y)
+   (the texel's coordinates as unsigned, low two bits: -1 is column 3, as
+   the shader's (uint) of an int), 2 * entry + 1 in 32nds; with dither off
+   ICO_SHEET_T_OFF */
+static uint32_t sheetThreshold(int32_t x, int32_t y, uint32_t dither)
+{
+    static const uint32_t kRows[4] = {ICO_SHEET_BAYER_ROW0, ICO_SHEET_BAYER_ROW1,
+                                      ICO_SHEET_BAYER_ROW2, ICO_SHEET_BAYER_ROW3};
+    if (!dither) {
+        return ICO_SHEET_T_OFF;
+    }
+    const uint32_t row = kRows[(uint32_t)y & 3u];
+    return 2u * ((row >> (4u * ((uint32_t)x & 3u))) & 15u) + 1u;
+}
+
+/* sheet_text.hlsli sheet_texel: coverage c and rim r (0..255) under style
+   at threshold th into an RGBA8 texel (grey, grey, grey, alpha in GS
+   units) */
+static void sheetTexel(uint32_t c, uint32_t r, const uint8_t style[4], uint32_t th, uint8_t *o)
+{
+    const uint32_t rw = (r * style[0] + 32u) / 64u;
+    const uint32_t a = style[0] != 0 ? (c > rw ? c : rw) : c;
+    const uint32_t t = a != 0 ? (c * 255u + a / 2u) / a : 0u;
+    const uint32_t aq = sheetQuantise(a, th), tq = sheetQuantise(t, th);
+    const uint32_t grey =
+        ((uint32_t)style[1] * (255u - tq) + (uint32_t)style[2] * tq + 127u) / 255u;
+    o[0] = o[1] = o[2] = (uint8_t)grey;
+    o[3] = (uint8_t)((aq * 128u + 127u) / 255u);
+}
+
+_Static_assert(ICO_SHEET_T_OFF <= 31 && 31u * 255u < 255u * 32u,
+               "every threshold leaves a texel without coverage or rim at level 0");
+
+int rd__sheet_bake_rect(const uint8_t *cov, uint32_t w, uint32_t h, const uint8_t style[4],
+                        int32_t x, int32_t y, int32_t rw, int32_t rh, uint8_t *out, size_t pitch)
+{
+    enum { NR = 2 * ICO_SHEET_RY + 1 }; /* the rows one output row's rim reads */
+
+    if (rw <= 0 || rh <= 0) {
+        return 1;
+    }
+    if (!cov || !style || !out || !w || !h || w > 0x7FFFFFFFu || h > 0x7FFFFFFFu) {
+        return 0;
+    }
+    const int32_t W = (int32_t)w, H = (int32_t)h;
+    /* the columns the rectangle's rims read, clipped to the page */
+    const int32_t cx0 = x - ICO_SHEET_RX < 0 ? 0 : x - ICO_SHEET_RX;
+    const int32_t cx1 = x + rw + ICO_SHEET_RX > W ? W : x + rw + ICO_SHEET_RX;
+    /* each page row's largest c * wx for the rectangle's columns, in a ring
+       of NR rows (row k in slot k % NR, made once as the output rows go
+       down); ink: the row has coverage in [cx0, cx1) (else its maxima are 0
+       and are not computed) */
+    uint32_t *hm = malloc(sizeof(uint32_t) * NR * (size_t)rw);
+    if (!hm) {
+        return 0;
+    }
+    int32_t rowOf[NR];
+    uint8_t ink[NR];
+    for (int i = 0; i < NR; i++) {
+        rowOf[i] = -1;
+        ink[i] = 0;
+    }
+    for (int32_t yy = y; yy < y + rh; yy++) {
+        int any = 0;
+        for (int32_t k = yy - ICO_SHEET_RY; k <= yy + ICO_SHEET_RY; k++) {
+            if (k < 0 || k >= H) {
+                continue;
+            }
+            const int slot = k % NR;
+            if (rowOf[slot] != k) {
+                rowOf[slot] = k;
+                const uint8_t *row = cov + (size_t)k * w;
+                int32_t c = cx0;
+                while (c < cx1 && row[c] == 0) {
+                    c++;
+                }
+                ink[slot] = c < cx1;
+                uint32_t *hr = hm + (size_t)slot * (size_t)rw;
+                for (int32_t i = 0; ink[slot] && i < rw; i++) {
+                    const int32_t xx = x + i;
+                    const int32_t k0 = xx - ICO_SHEET_RX < 0 ? 0 : xx - ICO_SHEET_RX;
+                    const int32_t k1 = xx + ICO_SHEET_RX >= W ? W - 1 : xx + ICO_SHEET_RX;
+                    uint32_t m = 0;
+                    for (int32_t kk = k0; kk <= k1; kk++) {
+                        const uint32_t v = row[kk] * kSheetWx[kk < xx ? xx - kk : kk - xx];
+                        m = v > m ? v : m;
+                    }
+                    hr[i] = m;
+                }
+            }
+            any |= ink[slot];
+        }
+        uint8_t *o = out + (size_t)(yy - y) * pitch;
+        if (!any) {
+            /* no coverage within the rim's reach of the row (the row's
+               own is in it): every texel is c = 0, r = 0, the same at
+               every threshold (quantise(0, th) is 0 for th <= 31) */
+            uint8_t zero[4];
+            sheetTexel(0, 0, style, ICO_SHEET_T_OFF, zero);
+            for (int32_t i = 0; i < rw; i++, o += 4) {
+                memcpy(o, zero, 4);
+            }
+            continue;
+        }
+        const uint8_t *crow = yy >= 0 && yy < H ? cov + (size_t)yy * w : NULL;
+        for (int32_t i = 0; i < rw; i++, o += 4) {
+            const int32_t xx = x + i;
+            uint32_t m = 0;
+            for (int32_t k = yy - ICO_SHEET_RY; k <= yy + ICO_SHEET_RY; k++) {
+                if (k < 0 || k >= H || !ink[k % NR]) {
+                    continue;
+                }
+                const uint32_t v = hm[(size_t)(k % NR) * (size_t)rw + (size_t)i] *
+                                   kSheetWy[k < yy ? yy - k : k - yy];
+                m = v > m ? v : m;
+            }
+            const uint32_t c = crow && xx >= 0 && xx < W ? crow[xx] : 0u;
+            sheetTexel(c, (m + 500000u) / 1000000u, style, sheetThreshold(xx, yy, style[3]), o);
+        }
+    }
+    free(hm);
+    return 1;
+}
+
+/* sheet_text.hlsli sheet_rim_level: the rim r's level alone (no letters)
+   under the style's weight at threshold th */
+static uint32_t sheetRimLevel(uint32_t r, const uint8_t style[4], uint32_t th)
+{
+    return sheetQuantise(style[0] != 0 ? (r * style[0] + 32u) / 64u : 0u, th);
+}
+
+/* floor(v / d) for d > 0, as the shader keeps its operands positive */
+static int32_t sheetFloorDiv(int32_t v, int32_t d)
+{
+    return v >= 0 ? v / d : -((-v + d - 1) / d);
+}
+
+int rd__sheet_bake_scaled_rect(const uint8_t *tex, uint32_t w, uint32_t h, const uint8_t style[4],
+                               uint32_t scale, int32_t x, int32_t y, int32_t rw, int32_t rh,
+                               uint8_t *out, size_t pitch)
+{
+    if (rw <= 0 || rh <= 0) {
+        return 1;
+    }
+    if (!tex || !style || !out || !w || h < 2 || w > 0x7FFFFFFFu || h > 0x7FFFFFFFu ||
+        (scale != 2u && scale != 4u)) {
+        return 0;
+    }
+    const int32_t W = (int32_t)w, HH = (int32_t)(h / 2u), S = (int32_t)scale;
+    /* the bilinear's denominator on an axis (2 s: font.hlsl sheet_scaled's
+       g = (n - 2 s q0) / (2 s)), and on both */
+    const uint32_t D = 2u * scale, DD = D * D;
+    /* a texel without coverage whose four rims are 0: c 0 and every level 0
+       (quantise(0, th) is 0 for th <= 31), so its grey is the rim level and
+       its alpha 0 at any threshold (sheet_texel_scaled with tq 0, cq 0) */
+    uint8_t blank[4];
+    blank[0] = blank[1] = blank[2] = (uint8_t)(((uint32_t)style[1] * 255u + 127u) / 255u);
+    blank[3] = 0;
+    for (int32_t yy = y; yy < y + rh; yy++) {
+        uint8_t *o = out + (size_t)(yy - y) * pitch;
+        /* the texel's centre in 2s-ths of a sheet texel, the sheet texel
+           before it and the weight of the one after (sheet_scaled: n, q0,
+           n - 2 s q0) */
+        const int32_t ny = 2 * yy + 1 - S;
+        const int32_t qy = sheetFloorDiv(ny, (int32_t)D);
+        const uint32_t gy = (uint32_t)(ny - (int32_t)D * qy);
+        /* the coverage row: the top half only (sheet_cov4 and the in-half
+           test), 0 outside the texture */
+        const uint8_t *crow = yy >= 0 && yy < HH ? tex + (size_t)yy * w : NULL;
+        /* a row whose coverage and the two rim rows it blends are 0 across
+           the page (most rows: the shelves' gaps, the empty bands) is
+           blank */
+        int ink = 0;
+        for (int32_t k = 0; crow && k < W && !ink; k++) {
+            ink = crow[k] != 0;
+        }
+        for (int j = 0; j < 2 && !ink; j++) {
+            const int32_t ty = (qy + j) * S;
+            const uint8_t *rr = ty >= 0 && ty < HH ? tex + (size_t)(HH + ty) * w : NULL;
+            for (int32_t k = 0; rr && k < W && !ink; k++) {
+                ink = rr[k] != 0;
+            }
+        }
+        if (!ink) {
+            for (int32_t i = 0; i < rw; i++, o += 4) {
+                memcpy(o, blank, 4);
+            }
+            continue;
+        }
+        for (int32_t i = 0; i < rw; i++, o += 4) {
+            const int32_t xx = x + i;
+            const int32_t nx = 2 * xx + 1 - S;
+            const int32_t qx = sheetFloorDiv(nx, (int32_t)D);
+            const uint32_t gx = (uint32_t)(nx - (int32_t)D * qx);
+            /* the four sheet texels' rim levels: sheet texel q's rim at
+               texel q s of the bottom half, 0 where q s is outside the top
+               half's texels; each at its own Bayer threshold */
+            uint32_t lq[2][2], la[2][2];
+            for (int j = 0; j < 2; j++) {
+                for (int k = 0; k < 2; k++) {
+                    const int32_t tx = (qx + k) * S, ty = (qy + j) * S;
+                    const uint32_t r = tx >= 0 && tx < W && ty >= 0 && ty < HH
+                                           ? tex[(size_t)(HH + ty) * w + (size_t)tx]
+                                           : 0u;
+                    const uint32_t l =
+                        sheetRimLevel(r, style, sheetThreshold(qx + k, qy + j, style[3]));
+                    lq[j][k] = l;
+                    la[j][k] = (l * 128u + 127u) / 255u;
+                }
+            }
+            const uint32_t c = crow && xx >= 0 && xx < W ? crow[xx] : 0u;
+            if (c == 0u && (lq[0][0] | lq[0][1] | lq[1][0] | lq[1][1]) == 0u) {
+                memcpy(o, blank, 4);
+                continue;
+            }
+            /* the two lerps in DD-ths (exact: the shader's floats hold
+               them without a rounding), then floor(v + 0.5) */
+            const uint32_t q = (lq[0][0] * (D - gx) + lq[0][1] * gx) * (D - gy) +
+                               (lq[1][0] * (D - gx) + lq[1][1] * gx) * gy;
+            const uint32_t qa = (la[0][0] * (D - gx) + la[0][1] * gx) * (D - gy) +
+                                (la[1][0] * (D - gx) + la[1][1] * gx) * gy;
+            const uint32_t rm = (2u * q + DD) / (2u * DD);
+            /* sheet_texel_scaled at the threshold of the sheet texel the
+               texel lies in */
+            const uint32_t th =
+                sheetThreshold(sheetFloorDiv(xx, S), sheetFloorDiv(yy, S), style[3]);
+            const uint32_t a = c > rm ? c : rm;
+            const uint32_t t = a != 0 ? (c * 255u + a / 2u) / a : 0u;
+            const uint32_t cq = sheetQuantise(c, th), tq = sheetQuantise(t, th);
+            const uint32_t grey =
+                ((uint32_t)style[1] * (255u - tq) + (uint32_t)style[2] * tq + 127u) / 255u;
+            const uint32_t af = (cq * 128u + 127u) / 255u;
+            const uint32_t m = qa > af * DD ? qa : af * DD;
+            o[0] = o[1] = o[2] = (uint8_t)grey;
+            o[3] = (uint8_t)((2u * m + DD) / (2u * DD));
+        }
+    }
+    return 1;
+}
+
+int rd__sheet_bake_texels(const RdTexRec *t, int32_t x, int32_t y, int32_t rw, int32_t rh,
+                          uint8_t *out, size_t pitch)
+{
+    if (!t) {
+        return 0;
+    }
+    return t->sheetScale > 1
+               ? rd__sheet_bake_scaled_rect(t->pixels, t->w, t->h, t->sheet, t->sheetScale, x, y,
+                                            rw, rh, out, pitch)
+               : rd__sheet_bake_rect(t->pixels, t->w, t->h, t->sheet, x, y, rw, rh, out, pitch);
+}
+
+void rd__sheet_bake_grow(const RdTexRec *t, uint32_t dw, uint32_t dh, uint32_t *rx, uint32_t *ry,
+                         uint32_t *rw, uint32_t *rh)
+{
+    /* the changed rectangle [x0, x1) x [y0, y1) in the texture's texels */
+    const int64_t x0 = *rx, y0 = *ry, x1 = x0 + *rw, y1 = y0 + *rh;
+    int64_t px0, px1, py0, py1; /* the page texels to bake again */
+    if (t->sheetScale <= 1) {
+        /* every texel whose rim reads a changed one: the apron's reach (the
+           rim's and one) round it */
+        px0 = x0 - ICO_SHEET_BAKE_AX;
+        px1 = x1 + ICO_SHEET_BAKE_AX;
+        py0 = y0 - ICO_SHEET_BAKE_AY;
+        py1 = y1 + ICO_SHEET_BAKE_AY;
+    } else {
+        /* a texel reads its own coverage and the rims of the sheet texels
+           q0, q0 + 1 around its centre, kept at texel q s of the bottom
+           half: a changed rim row hh + r moves the texels of rows r - s ..
+           r + 2 s (2 s each way, the bottom half's own texels with them) */
+        const int64_t g = 2 * (int64_t)t->sheetScale, hh = t->h / 2u;
+        px0 = x0 - g;
+        px1 = x1 + g;
+        py0 = y0 - g;
+        py1 = y1 + g;
+        if (y1 > hh) {
+            const int64_t r0 = (y0 > hh ? y0 : hh) - hh - g, r1 = y1 - hh + g;
+            py0 = r0 < py0 ? r0 : py0;
+            py1 = r1 > py1 ? r1 : py1;
+        }
+    }
+    /* in the device's texels (the page's (x, y) at (x + AX, y + AY)),
+       clipped to the texture */
+    int64_t dx0 = px0 + ICO_SHEET_BAKE_AX, dx1 = px1 + ICO_SHEET_BAKE_AX;
+    int64_t dy0 = py0 + ICO_SHEET_BAKE_AY, dy1 = py1 + ICO_SHEET_BAKE_AY;
+    dx0 = dx0 < 0 ? 0 : dx0;
+    dy0 = dy0 < 0 ? 0 : dy0;
+    dx1 = dx1 > dw ? dw : dx1;
+    dy1 = dy1 > dh ? dh : dy1;
+    *rx = (uint32_t)dx0;
+    *ry = (uint32_t)dy0;
+    *rw = dx1 > dx0 ? (uint32_t)(dx1 - dx0) : 0u;
+    *rh = dy1 > dy0 ? (uint32_t)(dy1 - dy0) : 0u;
+}
+
+/* t's texels uploaded whole at the next replay */
+static void sheetDirtyAll(RdTexRec *t)
+{
+    if (!t->dirty) {
+        g_rd.texDirtyCount++;
+    }
+    t->dirty = 1;
+    t->dirtyX0 = t->dirtyY0 = 0;
+    t->dirtyX1 = t->w;
+    t->dirtyY1 = t->h;
+}
+
+void rd__set_sheet_shader(bool on)
+{
+    if (g_rd.sheetShader == on) {
+        return;
+    }
+    g_rd.sheetShader = on;
+    for (uint32_t i = 0; g_rd.textures && i < RD_MAX_TEXTURES; i++) {
+        RdTexRec *t = &g_rd.textures[i];
+        if (t->live && t->kind == RD_TEXKIND_IMAGE && t->format == RD_TEXEL_SHEET &&
+            rd__sheet_bake_scale(t->sheetScale)) {
+            sheetDirtyAll(t);
+        }
+    }
+}
 
 static void sheetStyleSet(RdTexRec *t, const RdSheetStyle *style)
 {
@@ -941,11 +1532,6 @@ RdTex rd_create_texture_sheet(uint32_t w, uint32_t h, const uint8_t *coverage,
 void rd_sheet_rim(const uint8_t *cov, uint32_t w, uint32_t h, uint32_t scale, int32_t x, int32_t y,
                   int32_t rw, int32_t rh, uint8_t *rim)
 {
-    static const uint32_t kWx[ICO_SHEET_RX + 1] = {ICO_SHEET_WX_0, ICO_SHEET_WX_1, ICO_SHEET_WX_2,
-                                                   ICO_SHEET_WX_3, ICO_SHEET_WX_4, ICO_SHEET_WX_5,
-                                                   ICO_SHEET_WX_6};
-    static const uint32_t kWy[ICO_SHEET_RY + 1] = {ICO_SHEET_WY_0, ICO_SHEET_WY_1, ICO_SHEET_WY_2,
-                                                   ICO_SHEET_WY_3, ICO_SHEET_WY_4};
     const int32_t s = scale < 1                     ? 1
                       : scale > ICO_SHEET_SCALE_MAX ? ICO_SHEET_SCALE_MAX
                                                     : (int)scale;
@@ -994,7 +1580,7 @@ void rd_sheet_rim(const uint8_t *cov, uint32_t w, uint32_t h, uint32_t scale, in
             for (int32_t k = qx - ICO_SHEET_RX; k <= qx + ICO_SHEET_RX; k++) {
                 if (k >= cx0 && k < cx1) {
                     const uint32_t v = c[(size_t)(qy - cy0) * (size_t)cw + (size_t)(k - cx0)] *
-                                       kWx[k < qx ? qx - k : k - qx];
+                                       kSheetWx[k < qx ? qx - k : k - qx];
                     m = v > m ? v : m;
                 }
             }
@@ -1007,7 +1593,7 @@ void rd_sheet_rim(const uint8_t *cov, uint32_t w, uint32_t h, uint32_t scale, in
             for (int32_t k = qy - ICO_SHEET_RY; k <= qy + ICO_SHEET_RY; k++) {
                 if (k >= cy0 && k < cy1) {
                     const uint32_t v = hm[(size_t)(k - cy0) * (size_t)ow + (size_t)(qx - qx0)] *
-                                       kWy[k < qy ? qy - k : k - qy];
+                                       kSheetWy[k < qy ? qy - k : k - qy];
                     m = v > m ? v : m;
                 }
             }
@@ -1028,7 +1614,18 @@ void rd_set_texture_sheet_style(RdTex t, const RdSheetStyle *style)
 {
     RdTexRec *r = rd__tex_rec(t.id);
     if (r && r->kind == RD_TEXKIND_IMAGE && r->format == RD_TEXEL_SHEET) {
+        const uint8_t before[5] = {r->sheet[0], r->sheet[1], r->sheet[2], r->sheet[3],
+                                   r->sheetScale};
+        const int baked = rd__sheet_baked(r);
         sheetStyleSet(r, style);
+        const uint8_t after[5] = {r->sheet[0], r->sheet[1], r->sheet[2], r->sheet[3],
+                                  r->sheetScale};
+        /* a baked page holds its style in its texels: baked again whole (a
+           menu-language change); a page the shader draws (scale 3, or under
+           ICO_RD_SHEET_SHADER) has the style as the draw's uniform */
+        if ((baked || rd__sheet_baked(r)) && memcmp(before, after, sizeof(before)) != 0) {
+            sheetDirtyAll(r);
+        }
     }
 }
 

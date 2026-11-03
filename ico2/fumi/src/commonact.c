@@ -423,6 +423,8 @@ static int ChangeMailInLadder(GObj *self, int mail)
     return ret;
 }
 
+/* PC port: port/game/options.c: [gameplay] shadow_speed, the factor 0.75 to 1.5 */
+extern float ico_opt_shadow_speed_factor(void);
 /* motionOrientManager.h declares none of the motion tables */
 extern MotionDef motionKind[];
 
@@ -3754,6 +3756,7 @@ static void actCommonDie_jun26(GObj *volatile self)
         }
         if (self == boyGObj || self == girlGObj) {
             if (((60 - systemStatus[0] * 10) / systemStatus[1]) * 2 < cnt) {
+                ico_gs_signal_game_over_once(); /* PC port: this death path skips ACT_LAYOUT_GAMEOVER */
                 lt_switch_layout(58);
                 _ACTWait(0);
             }
@@ -3911,6 +3914,7 @@ static inline void actCommonStoneDead_jun26(GObj *volatile self)
 {
     SetMotionDirection(self, GOBJ_ACT(self)->attackDir);
     _ACTWait(600);
+    ico_gs_signal_game_over_once(); /* PC port: this death path skips ACT_LAYOUT_GAMEOVER */
     lt_switch_layout(58);
     _ACTWait(0);
 }
@@ -4022,6 +4026,7 @@ static void actCommonStone_jun26(GObj *volatile self)
         }
         if (ICO_RAW(int, s, 0x4C, GOBJ_ACT(self)->modeFrame) >= 0x3D &&
             GOBJ_ACT(self)->enemy->stoneLevel >= 3) {
+            ico_gs_signal_game_over_once(); /* PC port: this death path skips ACT_LAYOUT_GAMEOVER */
             lt_switch_layout(58);
         }
         ACTSendMailCorrect(self, 103);
@@ -5925,6 +5930,11 @@ static void flyCoreLoop_ntsc(GObj *self, GObj *target, int checkStuck)
         if (((int)(act->flags20.ll >> 10) & 1) == 0) {
             FlyPt v = {{0.0f, 0.0f, stage_no == 84 || stage_no == 3 || stage_no == 46 ? 3.0f : 1.0f,
                         0.0f}};
+            /* PC port: [gameplay] shadow_speed scales a flying shadow's forward push
+               (the top speed is the push over the 0.08 the damping leaves) */
+            if (self->kind == 4) {
+                v.f[2] *= ico_opt_shadow_speed_factor();
+            }
 
             _ApplyMatrix(&v, mat, &v);
             v.f[1] = 0.0f;
@@ -6062,6 +6072,11 @@ static void flyCoreLoop_aug6jun26(GObj *self, GObj *target, int checkStuck)
         if (((int)(act->flags20.ll >> 7) & 1) == 0) {
             FlyPt v = {{0.0f, 0.0f, stage_no == 84 || stage_no == 3 || stage_no == 46 ? 3.0f : 1.0f,
                         0.0f}};
+            /* PC port: [gameplay] shadow_speed scales a flying shadow's forward push
+               (the top speed is the push over the 0.08 the damping leaves) */
+            if (self->kind == 4) {
+                v.f[2] *= ico_opt_shadow_speed_factor();
+            }
 
             _ApplyMatrix(&v, mat, &v);
             v.f[1] = 0.0f;
@@ -6215,6 +6230,11 @@ static void flyCoreLoop(GObj *self, GObj *target, int checkStuck)
                             ? 3.0f
                             : (checkStuck ? GetEnemyFlyXZAccel(self) : 1.0f),
                         0.0f}};
+            /* PC port: [gameplay] shadow_speed scales a flying shadow's forward push
+               (the top speed is the push over the 0.08 the damping leaves) */
+            if (self->kind == 4) {
+                v.f[2] *= ico_opt_shadow_speed_factor();
+            }
 
             _ApplyMatrix(&v, mat, &v);
             v.f[1] = 0.0f;

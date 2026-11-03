@@ -12,16 +12,19 @@ In reading order.
 | File | What it answers |
 | --- | --- |
 | [ARCHITECTURE.md](ARCHITECTURE.md) | What runs, what stands in for each PS2 component, and the Terms glossary. |
-| [PLATFORM.md](PLATFORM.md) | Entry points, fibers and the scheduler, the host loop, the arena, folders and diagnostics. |
+| [PLATFORM.md](PLATFORM.md) | Entry points, fibers and the scheduler, the host loop, the arena, the game data ranges, save states, folders, diagnostics, Android graphics driver packages and the Steam shortcut. |
 | [GAME_CODE.md](GAME_CODE.md) | How `ico2/` is compiled: the sources, options, host paths, layout asserts and audits. |
 | [CONVENTIONS.md](CONVENTIONS.md) | The pre-commit hook, formatting, names, log lines, tests and scripts. |
 | [DATA.md](DATA.md) | The disc layer: the VFS, disc images, `ico.o2r`, the extractor, libcdvd, SIF and the data tables. |
 | [MATH.md](MATH.md) | The FP environment, the PS2 float models, the soft `double`, the libm copies and VU0 in C. |
 | [GS.md](GS.md) | What the port adds under the game's GS layer: the register decoder and the hand-offs to rd. |
 | [VU1_PROGRAMS.md](VU1_PROGRAMS.md) | The five VU1 microprograms, their shaders, their CPU oracles and the region rule. |
-| [RENDER.md](RENDER.md) | rd: recording, state, the replay, pipelines, post passes, dumps and the replay tool. |
+| [RENDER.md](RENDER.md) | rd: recording, state, the replay, the device profile, camera blending, performance records, dumps and the replay tool. |
+| [RENDER_POST.md](RENDER_POST.md) | rd's post passes: the fades fold, the motion blur, above 1x, shadows, water blocks, the fog path and crack filling. |
+| [PIPELINES.md](PIPELINES.md) | the pipeline key and blend paths, the start-up set, the fallback entries, the vertex and triangle pre-passes. |
 | [MSAA.md](MSAA.md) | The MSAA resolve: where the multisampled part of a frame ends, the covered-majority rule, one resolve a picture, its lines and tests. |
 | [WORK_BUFFERS.md](WORK_BUFFERS.md) | The post effects' work buffers: sizes per frame width, the glow chain's rects, its left edge on a wide frame, what stays across frames and the work clear. |
+| [TEXTURES.md](TEXTURES.md) | Texture decodes off the game thread: the decode pool, the job a store makes, the settle, its bound, key, lines and tests. |
 | [DISPLAY.md](DISPLAY.md) | The native frame, the video options and presets, pacing and the vsync lock, presentation, interpolation and the CRT filter. |
 | [RHI.md](RHI.md) | The render hardware interface and its Vulkan, Direct3D 12, Direct3D 11, OpenGL and MoltenVK backends. |
 | [BACKENDS.md](BACKENDS.md) | The four backends as the renderer sees them: its branches, limits and policies, the OpenGL and Direct3D 11 profile rows, the window and the fallback order. |
@@ -34,7 +37,8 @@ In reading order.
 | [UI.md](UI.md) | The port's menus: the layout extension, the Settings menu, strings, the font, popups, touch and mouse. |
 | [GAME_FEATURES.md](GAME_FEATURES.md) | Gameplay options and their hooks, achievements, photo mode, the model viewer, gallery and credits. |
 | [PACKS.md](PACKS.md) | Texture and model packs: names, loading, formats, log lines and dumping. |
-| [TESTING.md](TESTING.md) | The test framework, every test program, the render gates, dumps, traces and CI. |
+| [TESTING.md](TESTING.md) | The test framework, the render gates, the suites per backend, the disc tests, switches, dumps, traces, audits and CI. |
+| [TESTING_PROGRAMS.md](TESTING_PROGRAMS.md) | Every test program by area: what it checks and its ctest names. |
 | [DIVERGENCES.md](DIVERGENCES.md) | Every known way the port's behaviour or output differs from the PS2 game. |
 
 ## Elsewhere

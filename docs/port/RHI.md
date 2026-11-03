@@ -17,6 +17,7 @@ window paces and presents is [DISPLAY.md](DISPLAY.md).
 | `port/rhi/rhi_backend_names.h` | the renaming of every entry point to `rhi_<prefix>_*` inside a backend |
 | `port/rhi/rhi_backend.c` | the real `rhi_*` functions, forwarding to the selected table; the layer classifiers |
 | `port/rhi/rhi_driver_version.h`, `rhi_driver_version.c` | a Vulkan `driverVersion` decoded the way its vendor writes it, for the adapter log line |
+| `port/rhi/rhi_adapter.h`, `rhi_adapter.c` | the `[video] adapter` name match and the device-list line's text, linked by the Vulkan and Direct3D backends |
 | `port/rhi/CMakeLists.txt` | the libraries, SDL3's prefix per target, the tests |
 | `port/rhi/vk/rhi_vk.h` | Vulkan extras for tests and tools only |
 | `port/rhi/vk/vk_device.c` | instance, device pick, features, limits, validation, the `ICO_VK_*` switches, handle pools |
@@ -73,6 +74,66 @@ attachment (`RHI_BIND_INPUT_ATTACHMENT`, Vulkan only) sits behind its own limits
 per-frame resources outside the RHI. `rhi_wait_idle` idles the GPU; `rhi_collect_garbage_now` also
 carries out every deferred destroy (`port/rhi/rhi.h`, commands).
 
+**Threads.** A list may be recorded on one thread and ended, submitted and presented on another
+(the window's render thread, [PLATFORM.md](PLATFORM.md#the-render-thread)) on Vulkan and Direct3D 12;
+OpenGL and Direct3D 11 run each call at once on one context and set
+`RhiLimits.singleThreadCommands`: there the render thread makes every call, the OpenGL context
+moved to a game-thread call's thread through the call guard and back at the render thread's next
+job. Two threads never run in the backend at once: with a call guard
+set (`rhi_set_call_guard`) every entry point that changes the device's state waits while the other
+thread works, the queries listed in `rhi.h` do not, and `rhi_get_stats` then answers with the
+counters the hand-over left (`rhi_call_guard_snapshot`) (`port/rhi/rhi_backend.c` (`RHI_GUARD`)).
+A callback a backend makes in the middle of an entry point (`RhiPipelineBatch.wait`) may hand work
+to the other thread (a display change's progress screen presents through it), so the renderer's
+wait function makes the guard's wait again before the batch goes on (`rhi_call_guard_settle`;
+`port/render/rd_pipeline.c` (`preWait`)): with OpenGL that takes the context back.
+The swapchain's acquire, present and rebuilds also hold a recursive lock of their own
+(`port/rhi/vk/vk_swapchain.c` (`vkr_swap_lock`), `port/rhi/d3d12/d3d12_swapchain.c`
+(`dx_swap_lock`)), and `rhi_device_lost` reads an atomic flag. Without a guard every call runs at
+once, as the tests and the tools have it.
+
+**Frame slots and the submit thread.** With `RhiLimits.slotOverlap` (Vulkan with the timeline sync;
+`ICO_VK_SLOT_OVERLAP=0` turns it off, and Direct3D 12, Vulkan's fence ring, OpenGL and Direct3D 11
+keep one call at a time) the frame slots are apart: the submit thread
+([PLATFORM.md](PLATFORM.md#the-render-thread), `port/render/rd_submit_thread.h` "the slots") ends and
+submits picture N's list of slot A and presents its image while the render thread recycles slot B,
+acquires B's image and records B's list. The device line is followed by `rhi_vk: frame slots: apart
+(...)` or `one call at a time (<why>)`. The partition (`port/rhi/vk/vk_cmd.c`, header comment):
+
+| state | written by | how it stays apart |
+| --- | --- | --- |
+| `frameIndex`, slot B's command pool, lists, descriptor pools, sets, deferred destroys, query pools, submit tag, acquire record | the recording thread | a list's handle tag names its slot (`VkrFrame.gen`, `vkr_get_cmd`), the list carries it (`VkrCmdList.slot`); nothing of the submit thread asks for the current frame (`vkr_cur_frame`) |
+| slot A's lists (their end), `waitValue` and acquire record (`VkrAcquire`) | the submit thread | the slot guard lets the recording thread recycle slot A only when no job of A is queued or running |
+| `hzEpoch`, `stats`, `tsResult`, `occResult`, the textures' and buffers' tracking state | the recording thread | the submit thread's end, submit and present touch none of them |
+| the counters an end, a submit and a present add | either | `VkrState.late`, atomic adds; `rhi_get_stats` adds them in, so the recording thread reads live counters while the submit thread works |
+| the submission counter `timelineValue`, the submit history | the submit thread (any thread while it is idle) | the counter stored and read with `__atomic`; the history read only by the loss report |
+| the queue (`vkQueueSubmit`, `vkQueuePresentKHR`, `vkDeviceWaitIdle`) | the submit thread while it works | every call that submits or waits idle is a call the guard holds until the submit thread is idle; `rhi_cmd_begin_occlusion`'s first use (its reset submit) waits for the guard first |
+| the swapchain's acquire and present | the recording thread's acquire, the submit thread's present | the swapchain's lock (`vkr_swap_lock`); the present on the submit thread leaves a rebuild, a size change, the surface poll's size and a lost surface to the next acquire (`VKR_DEFER_*`, `vkr_take_deferred`, after the guard's wait), with the line `a present on the submit thread found <what>: the swapchain made again at the next acquire (N times so far)` (first 8, then every 100th) |
+| the object pools, the pipeline cache, the framebuffer and render pass caches | the recording thread | read only by the submit thread (a swapchain image's entry); a creation or destroy is not a slot call |
+
+The slot calls the guard lets through (`rhi.h` `rhi_set_slot_guard`, `port/rhi/rhi_backend.c`
+`RHI_GUARD_SLOT`): `rhi_wait_frame` (for the slot it recycles), `rhi_begin_commands`,
+`rhi_create_bind_group`, `rhi_map_buffer`, `rhi_unmap_buffer`, `rhi_read_timestamps`,
+`rhi_read_timestamps_busy`, `rhi_read_occlusion` and `rhi_acquire_backbuffer`, each when the slot
+guard's `free` says the calling thread is the render thread, keeps no list of its own for the submit
+thread and the submit thread has no job of that slot. Every other call that changes the device's
+state waits as before. The acquire may come before the present of the picture before while the
+swapchain has an image to spare (the spec's limit for an acquire without a timeout: no more images
+acquired than `swapImageCount - minImageCount`, `vkr_acquire_ahead_ok`), else it waits for the
+guard (`rhi_call_guard_settle`). Ahead it does not wait for an image (a timeout of 0, so it never
+holds the swapchain's lock, and with it the present before, while the presentation engine frees
+one); when none is free it waits for the guard and acquires again (`rhi_vk: an acquire beside the
+submit thread found no image free: it waits for the present before (N times so far)`, first 8,
+then every 100th). The present shows the oldest image acquired, and an image a failed
+replay gave up in a slot with no job is taken over by the next acquire with its semaphore
+(`vkr_acquire_backbuffer`). The invariants: the queue receives picture N's list and present before
+anything of picture N+1 (the render thread submits nothing beside the submit thread), so every
+picture's bytes are those of one thread; a slot is recycled only after its own jobs were submitted
+and its fence passed; a command buffer is used by one thread at a time (recorded by the render
+thread, ended by the submit thread after the hand-over's lock). Tests: `rhi_test_common.c`
+`threadSlotsCell` (`rhi_vk*`), `rd_submit_queue`, `rd_thread_ab` (`--repeat 3`), and the TSan
+tree's `rd_tex_test`.
+
 **Formats** (`RhiFormat`): RGBA8 UNORM (alpha holds raw [GS](ARCHITECTURE.md#terms) alpha, 0x80 =
 1.0), RGBA8 UINT (the exact integer blend's targets), R8 UNORM and UINT, R16 UINT, RGBA16F, D32F,
 D32F_S8 (the scene's depth-stencil; the Vulkan backend may back it with D24S8,
@@ -81,7 +142,10 @@ D32F_S8 (the scene's depth-stencil; the Vulkan backend may back it with D24S8,
 fog), RGBA32 UINT (the VU vertex pre-pass's record planes, a colour target and copy source: a
 colour attachment and sampled on every Vulkan device by the specification's required format
 support, a render target at Direct3D 12 feature level 11_0; D3D12 makes it typeless, viewed UINT,
-[RENDER.md](RENDER.md#the-vertex-and-triangle-pre-passes)). Vertex formats are F32x1..4, U8x4 UNORM and UINT, U16x2 UINT, U32x1 (`port/rhi/rhi.h`,
+[RENDER.md](PIPELINES.md#the-vertex-and-triangle-pre-passes)), RGBA16 UINT (the aura's row sums,
+ROWBOX, `port/render/rd_aura_box.c`: a colour target and sampled with Load, never blended; Vulkan's
+required format support, Direct3D 11 and 12 typeless viewed UINT, OpenGL `GL_RGBA16UI`, which
+OpenGL 3.0 and OpenGL ES 3.0 render to; [WORK_BUFFERS.md](WORK_BUFFERS.md#the-auras-feedback-read)). Vertex formats are F32x1..4, U8x4 UNORM and UINT, U16x2 UINT, U32x1 (`port/rhi/rhi.h`,
 formats).
 
 **Resources.** Buffers have a usage mask and a memory kind: DEVICE (static meshes), UPLOAD (the
@@ -151,7 +215,13 @@ rasterizer-ordered storage texture, no colour target) or ATTACHMENT (colour atta
 input attachment in rasterization order, Vulkan only). Culling is always off: the GS has none. A
 render pass names its colour and depth attachments with load ops (LOAD, CLEAR, DONT_CARE) and store
 ops (STORE, or DONT_CARE so a tile-based GPU can skip the write-back) (`port/rhi/rhi.h`, pipelines,
-passes).
+passes), its size, and optionally an area inside it (`RhiRenderPassDesc.area`, x, y, w, h; w or h 0,
+a zeroed desc, is the whole size): the part the pass loads, draws and stores. On Vulkan it is the
+render area (below); every draw of the pass must lie inside it, the default scissor is the area,
+every scissor set in the pass is cut to it, and the default viewport stays the whole size. D3D11,
+D3D12 and OpenGL ignore it (no tiles to spare; the caller's draws lie inside it anyway), so a
+CLEAR load with an area clears the area on Vulkan and the whole target elsewhere: the renderer
+gives no area to a pass that clears ([WORK_BUFFERS.md](WORK_BUFFERS.md#the-pass-area)).
 
 **Several pipelines at once.** `rhi_create_pipelines(descs, n, out, batch)` creates a set of
 pipelines with the driver's compiles on worker threads: the logical cores less one, at least one, at
@@ -168,9 +238,21 @@ as `rhi_create_pipeline` logs it, and the call returns the count made. The optio
 start-up screen presents frames from it), since the workers touch nothing but the driver. It hands
 back each pipeline's compile time as the worker measured it around the driver call, and the threads
 used; its `maxThreads` (0: the count above) caps the workers on both backends, the renderer's
-careful start-up set taking 1 ([RENDER.md](RENDER.md#the-start-up-set)). `rhi_create_pipeline` stays the single creation, the same three steps on the calling thread
+careful start-up set taking 1 ([RENDER.md](PIPELINES.md#the-start-up-set)). `rhi_create_pipeline` stays the single creation, the same three steps on the calling thread
 (`port/rhi/rhi.h` (`rhi_create_pipelines`); `port/rhi/vk/vk_pipeline.c`,
 `port/rhi/d3d12/d3d12_pipeline.c`).
+
+**Several pipelines while the caller goes on.** `rhi_create_pipelines_begin(descs, n, maxThreads,
+lowPriority)` makes on the calling thread what `rhi_create_pipelines` makes there before its workers
+start, starts the workers (at most `maxThreads`, each at `SDL_THREAD_PRIORITY_LOW` with
+`lowPriority`) and returns at once; `rhi_create_pipelines_end(jobs, wait, out, ms, threads)`, on
+the thread that began, returns false at once while any compile goes on (`wait` false), else waits
+for the workers, fills the pipelines in as `rhi_create_pipelines` does after its workers (`out`
+NULL destroys them), frees the jobs and returns true. Only Vulkan offers it (a build without SDL, or
+no worker started, compiles at the begin and the end finds them done); Direct3D 12, Direct3D 11 and
+OpenGL return NULL and false. The renderer's background finisher uses it
+([PIPELINES.md](PIPELINES.md#the-background-finisher)); a begun set is ended before the device goes
+(`rd__pipeline_cache_clear`).
 
 **Commands.** Begin, end and submit a list; barriers; begin and end a render pass; viewport,
 scissor, pipeline, bind groups, vertex and index buffers, stencil reference, blend constant; draw
@@ -180,7 +262,7 @@ submit tag of the [device-loss report](#device-loss). `rhi_readback_texture` rea
 whole texture synchronously for dumps and tests (`port/rhi/rhi.h`, commands, verification helpers).
 
 **Limits** (`RhiLimits`): the uniform alignment (256 on D3D12), the largest texture and render
-target, dual-source blending (optional: without it rd blends in two passes), depth readback and
+target, dual-source blending (optional: without it rd blends in two passes), `depth32Attachment` (D32F can be a depth attachment; false on a Vulkan driver without the bit), depth readback and
 sampling of the depth-stencil format, copy pitch and offset alignment (D3D12 256 and 512, Vulkan 1
 and 4), mips and anisotropy, dynamic uniforms and the storage range, BC textures, `tiler` (a
 tile-based phone GPU: Qualcomm, ARM, Imagination, Samsung, Apple, Broadcom or any Android device;
@@ -194,7 +276,7 @@ bound) on D3D12 and Vulkan, under MoltenVK the Apple GPU's Metal implicit image 
 reasons (Vulkan, `kVuPlainOnly` in `port/rhi/vk/vk_device.c`; NULL elsewhere and on D3D12):
 `vuFallbackPlain`, why the renderer's VU fallback takes the plain program entries on this device,
 and `carefulPipelines`, why its start-up set is made under the careful policy
-([RENDER.md](RENDER.md#the-fallback-entries), [RENDER.md](RENDER.md#the-start-up-set))
+([RENDER.md](PIPELINES.md#the-fallback-entries), [RENDER.md](PIPELINES.md#the-start-up-set))
 (`port/rhi/rhi.h` (`RhiLimits`)).
 
 **Device and swapchain.** Each Vulkan swapchain creation that changes the mode, image count or size logs one `rhi_vk: swapchain` line (extent, images asked and got, present mode, surface format and colour space, composite alpha, pre-transform, the window's pixel size, SDL's video driver) and the first also a `rhi_vk: surface formats` line, so a driver-side mismatch reads from a log alone; the device report keeps the latest of the swapchain line. `rhi_init` takes an `SDL_Window` (NULL: headless, no swapchain),
@@ -230,6 +312,17 @@ figures read higher than Vulkan's.
 Both backends fill the pipeline pool's fields ([The pipeline pool](#the-pipeline-pool)).
 `uploadWriteBytes` is Direct3D 11's alone: the bytes its submits wrote from upload buffers' CPU
 copies into their GPU buffers ([Direct3D 11](#direct3d-11), **The written mark**); 0 elsewhere.
+`videoMemBudget`, `videoMemUsage` and `videoMemAvailable` are Direct3D 11's and 12's: the adapter's
+local video memory segment as `IDXGIAdapter3::QueryVideoMemoryInfo` gives it (the budget Windows
+grants this process, its current usage, and what it can still reserve), in bytes. The backends ask
+at most every 250 ms (`d11_video_memory`, `dx_video_memory`: the query is a kernel call, and
+`rhi_get_stats` runs every replay); the adapter is queried for `IDXGIAdapter3` once at start, and
+when it is not offered (or answers a budget of 0) the fields read 0 and the init log says
+`video memory budget: not reported by this adapter`. 0 on Vulkan and OpenGL. The window prints them
+in the 10 s `window: memory:` line, in `window: slow replay` lines whose fence wait is over 50 ms,
+and once a block when the usage reaches 90 % of the budget (`port/platform/window_lines.c`;
+[WORK_BUFFERS.md](WORK_BUFFERS.md#the-upload-ring-shrinks) for the other half of issue 126's
+memory finding).
 The Vulkan-only fields read 0 on D3D12: the memory gauges (live and peak allocations, their bytes,
 the device's limit), `memoryAllocs`, `memoryFrees`, `memoryFallbacks`, `orderBarriers`
 (`port/rhi/rhi.h` (`RhiStats`); `port/rhi/vk/vk_swapchain.c` (`rhi_acquire_backbuffer`,
@@ -237,7 +330,7 @@ the device's limit), `memoryAllocs`, `memoryFrees`, `memoryFallbacks`, `orderBar
 (`dx_wait_fence`, the draw, pass, bind and copy calls)). `createNs` is the CPU time in
 `rhi_create_buffer` and `rhi_create_texture`, the memory allocation and the object's creation, on
 both backends (`port/rhi/vk/vk_resource.c`, `port/rhi/d3d12/d3d12_resource.c`); the renderer's
-slow-walk line reads it ([RENDER.md](RENDER.md#the-start-up-set)). `window: per replay N draws, ...` therefore
+slow-walk line reads it ([RENDER.md](PIPELINES.md#the-start-up-set)). `window: per replay N draws, ...` therefore
 reads real numbers on both backends.
 
 **Timestamps.** `RHI_MAX_TIMESTAMPS` (256) a [frame slot](ARCHITECTURE.md#terms): the
@@ -260,9 +353,33 @@ frequency and every slot got its heap and buffer; otherwise the device log says 
 `rhi_d3d12: GPU timestamps: on (<Hz> Hz, 256 per frame slot)`. `ICO_DX_FAKE_NO_TIMESTAMPS=1` turns
 them off for a test of the fallback.
 
+**Occlusion queries.** `RHI_MAX_OCCLUSION` (8192) a frame slot, a count of their own beside the
+timestamps', for the replay tool's hidden-draw measurement ([RENDER.md](RENDER.md#culling);
+`port/render/rd_occlusion.c`). `rhi_cmd_begin_occlusion(cl, i)` and `rhi_cmd_end_occlusion(cl, i)`
+around draws inside one render pass count the samples that passed the depth and stencil tests;
+one query is open at a time, each index once a slot; a begin outside a pass, a second begin of an
+index or one past the count is dropped with its end, and a pass that ends with a query open ends
+it first. `rhi_read_occlusion` hands back the slot `rhi_wait_frame` last recycled, as
+`rhi_read_timestamps` does: the count, or `RHI_OCCLUSION_NONE` for an index the frame did not
+write; it returns 1 + the highest index written. Vulkan only (`port/rhi/vk/vk_cmd.c`
+(`vkr_occ_make`, `vkr_collect_occlusion`)): a `VK_QUERY_TYPE_OCCLUSION` pool a slot made at the
+first begin of the run (the game never asks for one, so it pays nothing), the current slot's pool
+reset by a one-time submit at that begin and every slot's in its first command list from then on,
+`VK_QUERY_CONTROL_PRECISE_BIT` where the device has `occlusionQueryPrecise` (enabled at device
+creation; without it a count is exact only as zero or not zero, which is all the measurement
+reads). The first begin logs `rhi_vk: occlusion queries: on (8192 a frame slot, precise sample
+counts|not precise: ...)`. Direct3D 12, Direct3D 11 and OpenGL report `rhi_occlusion_supported`
+false, the calls do nothing and the read is 0 (their forms would be an occlusion query heap
+resolved like the timestamps, `D3D11_QUERY_OCCLUSION`, `GL_SAMPLES_PASSED`).
+
 **Present mode and timing.** `rhi_prefer_mailbox` asks for mailbox with vsync from the next
 swapchain (D3D12: not offered); `rhi_present_mailbox` and `rhi_present_mode_name` say what the
-swapchain has. `rhi_present_timing`, `rhi_present_timing_use`, `rhi_present_last_id` and
+swapchain has. `rhi_present_fifo_fallback(true)` makes every later swapchain FIFO whatever vsync
+and the mailbox preference ask, with the surface's minimum image count; the flag is kept across
+`rhi_init` like the preference and `rhi_present_fifo_fallback_on` returns it (Vulkan only; D3D12,
+D3D11 and OpenGL ignore it). The window sets it when presents keep blocking under mailbox
+([DISPLAY.md](DISPLAY.md#the-fifo-fallback)). `RhiStats.swapImages` is the current swapchain's
+image count (Vulkan; 0 elsewhere). `rhi_present_timing`, `rhi_present_timing_use`, `rhi_present_last_id` and
 `rhi_present_timing_next` are the display's timing of presents (Vulkan's present wait, below; D3D12:
 false, nothing, 0, -1).
 `rhi_present_statistics(&presentCount, &presentRefresh, &syncRefresh, &syncNs)` is the swapchain's
@@ -305,7 +422,7 @@ count), `pipelineFailures` (creations that failed otherwise: the driver's error,
 the backend refused with its own line) and `pipelineLastError` (the driver's error of the last such
 failure that had one, a `VkResult` or an `HRESULT`; 0 when the last was the description's). The
 renderer reads them around a creation to name the failure's reason in its line
-([RENDER.md](RENDER.md#the-start-up-set), "The set against the pool"). A full pool's line is written the first 8 times
+([RENDER.md](PIPELINES.md#the-start-up-set), "The set against the pool"). A full pool's line is written the first 8 times
 and then every 100th, with the running count (Vulkan `vkr_pool_alloc`, any pool; D3D12 at the
 pipeline's allocation, `dx_pipe_finish`):
 
@@ -377,6 +494,106 @@ column; [Tests](#tests)). OpenGL counts the equation the same way, in Vulkan's t
 (`gl_cmd.c` `gl_count_dynamic`); it already sent the blend function whenever it changed, whatever the
 enable.
 
+### The bind cache
+
+Every backend remembers, per command list, what the list has bound and returns at once from a bind
+or a state set that asks for what is already in force (issue 126's Direct3D 11 log showed
+743 pipeline binds and 2836 bind group binds for 945 draws in one 10 s window, issue 179's Mali log
+pipeline binds about equal to draws with a 14 to 33 ms walk). What is remembered, and how it is
+compared:
+
+- the pipeline, by its RHI id (`rhi_cmd_set_pipeline`). Not by the backend's object: a pipeline
+  destroyed and another made at once takes the freed pool slot (the pools hand slots back last in,
+  first out), so the slot's pointer is the same while the id is not (the slot's generation, bumped
+  at the release: `vk_device.c` `vkr_pool_release`, `d3d12_plan.c` `d3dp_pool_release`). Compared
+  by pointer, such a new pipeline would be taken for the bound one and its bind skipped; a new
+  pipeline found in the bound one's slot binds every group (Vulkan) and every vertex buffer view
+  (Direct3D 12) again, since its layout and strides are its own.
+- each bind group slot: the group's id and its dynamic offsets
+  (`rhi_cmd_set_bind_group_offsets`). The ids are the frame's (a transient group lives one frame),
+  so an id never names two groups inside one list. A skipped bind keeps the slot's dirty bit as it
+  was: a group still waiting for the next draw (after a pass's start on Direct3D 11, after a
+  pipeline change on Vulkan) is still bound then.
+- the viewport and the scissor (as recorded: on Vulkan the scissor cut to the pass's area), each
+  vertex buffer binding (the buffer's id and offset; Direct3D 12 the view's address and size), the
+  index buffer (id, offset and type; Direct3D 12 the view), the stencil reference and the blend
+  constant. Compared bit for bit (`memcmp`), so a -0.0 against a 0.0 is a change.
+- the dynamic depth and blend state (Vulkan and OpenGL): skipped per command at the draw
+  ([Dynamic state](#dynamic-state)); the bind cache counts the commands a set since the last draw
+  asked for and found in force.
+
+Byte-identical by construction: a skipped call is one that would have set what the list holds.
+When the memory is forgotten:
+
+- the list's start (`rhi_begin_commands`): everything (each backend also zeroes it at the frame
+  slot's recycle). Vulkan and Direct3D 12 command lists start with nothing bound; Direct3D 11's
+  deferred context is cleared by `FinishCommandList(FALSE)`; OpenGL forgets every binding at a
+  list's start already (`gl_forget_bindings`).
+- a pass's start (`rhi_cmd_begin_render_pass`): the viewport and scissor, which the pass then sets
+  to the whole target, recorded. Nothing else: Vulkan's pipeline, descriptor sets, vertex and index
+  buffers and dynamic state are command buffer state that a render pass does not reset, as are
+  Direct3D 12's (`OMSetRenderTargets` leaves them) and OpenGL's. Direct3D 11 unbinds the shader
+  resources the list bound at a pass's start and before its compute copy (`d11_unbind_srvs`: a
+  texture about to be a target must not stay a shader resource), which marks every group slot dirty,
+  so the next draw binds them again whether the caller's bind was skipped or not.
+- Direct3D 11's registers: the backend binds a group as registers of one flat namespace (b, t and s
+  per stage; the shaders keep them distinct across groups, `port/shaders/reg.hlsli`). Each slot
+  keeps the registers its last flush wrote (`D11CmdState.groupRegs`); a flush that writes one of
+  another slot's marks that slot stale (`groupStale`, `d3d11_cmd.c` `d11_group_regs_note`), and a
+  stale slot's group bound again is flushed again, as any changed bind is.
+- a pipeline change on Vulkan: the descriptor sets from the first set whose layout differs on (the
+  new pipeline's `setLayoutIds` against the old one's, `vk_cmd.c` `vkr_groups_disturbed`). Vulkan
+  keeps a set bound for every later pipeline whose layout is compatible for that set: the same set
+  layouts up to it and the same push constants (none here). Each pipeline has its own
+  `VkPipelineLayout`: comparing those would bind every group again at every pipeline change, while
+  the renderer's pipelines share their set layouts, so a change binds only the groups whose own
+  binds changed (on the 179 log's Mali every draw changed the pipeline).
+- a pipeline's destruction: nothing to forget, its id is never given again inside a list (the
+  generation wraps after 4096 releases of one slot).
+
+Direct3D 11 also sets only the objects of a pipeline change that differ from those the context holds
+(`rhi_cmd_set_pipeline`): the input layout, the topology, the two shaders, the rasterizer state, the
+blend state with the blend constant and the depth-stencil state with the stencil reference; the
+pipelines of one shader pair share their shaders and input layout, and the state tables their
+rasterizer, blend and depth-stencil objects. Its constant buffers, shader resources and samplers
+were already set per register only when they changed (`d11_set_cb`, `d11_bind_entry`), and OpenGL's
+units per binding point (`gl_bind_groups`); the bind cache spares the walk of a group whose bind
+changed nothing.
+
+`RhiStats.pipelineBindsSkipped`, `bindGroupBindsSkipped` and `stateSetsSkipped` count the calls
+that recorded nothing (state: the six setters, the dynamic commands found in force, and Direct3D
+11's pipeline objects already bound); `pipelineBinds` and `bindGroupBinds` still count what was
+recorded. The window's 10 s line shows them per replay (`window: per replay N draws, P passes, A
+pipeline and B bind group binds (repeats skipped: X pipeline, Y bind group, Z state), ...`), the
+replay tool's `--stats` (`<dump>: stats: bind cache: X pipeline, Y bind group and Z state repeats
+skipped`) and `--time` (`<dump>: time: bind cache: X pipeline, Y bind group and Z state repeats
+skipped a replay`) too. The cells' bind cache check ([Tests](#tests)) records one list twice, every
+bind once and then each three times, and wants the same pictures, the same binds recorded and
+exactly two more skips for each repeated call.
+
+`[dev] bind_cache = false` (`ICO_RHI_BIND_CACHE=0`; `rhi_bind_cache.c` `rhi_bind_cache_enabled`
+reads it once, at the backend's start line, and every backend library compiles the file, so the
+replay tool and the tests read the same switch) turns every skip off, on every backend: each bind
+and state set is recorded as given; a Vulkan pipeline bind marks every descriptor set dirty
+whatever the layouts share (`vkr_groups_disturbed` is not consulted), and the dynamic depth and
+blend commands are all sent at every draw (`vkr_flush_dynamic`, `gl_count_dynamic`: `all`);
+OpenGL binds the program pipeline, the VAO and its buffers again at each draw, walks every entry
+of a dirty group past its unit shadows and applies the whole raster state (`gl_flush`,
+`gl_bind_groups`, `gl_apply_raster`); Direct3D 11 sets all seven objects of a pipeline change and
+every register of a flushed group (`d11_set_cb`, `d11_bind_entry`); Direct3D 12 sets the root
+signature (so every root argument) and the topology at every draw (`dx_flush`). The pictures are
+the same; the `*Skipped` counts are 0. It is the bisect for a device whose driver mishandles a
+kept binding (a descriptor set kept across a pipeline-layout change is the risk the cache took on
+without such a device to try), not a mode to play in. The backend's start line says
+`bind cache: on` or `bind cache: off ([dev] bind_cache = false, ICO_RHI_BIND_CACHE=0)`
+(`rhi_bind_cache_words`: Vulkan's after its `dynamic state:` line, OpenGL's after `GPU timestamps:`,
+Direct3D 11's before its device line, Direct3D 12's after the video memory budget).
+`rhi_vk_nobindcache` and `rhi_gl_nobindcache` run the cells under it ([Tests](#tests)): the bind
+cache cell wants no skip, the repeats' pipeline binds recorded (two more at each of its three
+sites) and the group binds the same (a repeated set marks the slot dirty once); the dynamic state
+cell wants every command of its repeats sent again and none counted, and the dual-source leftover
+cell 3 commands with no leftover (nothing is kept to be left over).
+
 ### Local read
 
 Where `RhiLimits.localRead` is true a pass's fragment shaders can read its own attachments as
@@ -401,7 +618,13 @@ attachment reads, `RHI_LOCAL_READ_DEPTH` the early and late fragment tests and t
 writes to the same reads, `RHI_LOCAL_READ_BACK` those reads to the next draws' depth-stencil and
 colour writes. Outside a pass, or without local read, it records nothing. The exact blend's
 attachment read (`RHI_DST_READ_ATTACHMENT`) reads the colour in rasterization order instead and
-needs no barrier (`port/rhi/rhi.h` (`rhi_cmd_local_read_barrier`); `port/rhi/vk/vk_cmd.c`
+needs no barrier between draws, nor between the triangles of one draw (the order guarantees a
+fragment's read sees every earlier fragment's write of the pixel, primitive by primitive); the
+rasterization order covers fragment writes, not the pass's load op, so a pass begun with its
+colour `RHI_LOAD_CLEAR` and read that way gets one `RHI_LOCAL_READ_COLOR` barrier right after it
+begins (the renderer's GS state as shader data, which takes a pending clear as the load op of a
+readable pass: [PIPELINES.md](PIPELINES.md#gs-state-as-data); `port/render/rd_replay.c`
+(`beginPass`)) (`port/rhi/rhi.h` (`rhi_cmd_local_read_barrier`); `port/rhi/vk/vk_cmd.c`
 (`rhi_cmd_begin_render_pass`, `rhi_cmd_local_read_barrier`); `port/rhi/vk/vk_pipeline.c`
 (`rhi_create_bind_group`); `port/rhi/vk/vk_resource.c` (`createTexture`)). The renderer reads the
 fog's depth and DATE's alpha this way ([RENDER.md](RENDER.md#the-replay)).
@@ -449,18 +672,65 @@ rather than a blob, and `d3d11_shader_compile` (`port/rhi/d3d11/d3d11_shader.c`)
 DXBC with `d3dcompiler_47.dll`, cached on disk per shader. The route, the cache file, its key and
 its log lines are in [SHADERS.md](SHADERS.md#direct3d-11-run-time-compile).
 
+### Choosing the device
+
+`rhi_adapter_list(out, max)` (a table entry) copies the devices the backend's last `rhi_init`
+looked at, at most `RHI_MAX_ADAPTERS` (8), each a `RhiAdapterInfo`: the name, `suitable`
+(hardware that can run the renderer; a software renderer, lavapipe's CPU device or WARP, is
+listed unsuitable), `current`, `automatic` (the one the automatic rule picks), Vulkan's score (0 on
+Direct3D, -1 for a device that cannot run) and the reason it is unsuitable. The device taken is,
+in order (`port/rhi/rhi.h` (`rhi_set_adapter_wanted`)):
+
+1. the backend's variable when set: `ICO_VK_DEVICE`, `ICO_D3D12_ADAPTER`, `ICO_D3D11_ADAPTER`
+   (an index or a part of the name, or `warp` on Direct3D);
+2. `[video] adapter`, the name the player picked, matched byte for byte among the runnable
+   devices, the first of equal names (`rhi_adapter_match`); the dispatcher keeps it across
+   `rhi_create_backend` (`rhi_set_adapter_wanted`, `rhi_adapter_wanted`, `port/rhi/rhi_backend.c`)
+   and hands it to the selected backend at each `rhi_init` (the table's `set_adapter_wanted`);
+   the window sets it from the config before `rd_init` and before each in-process switch
+   (`ico_window_open`; `port/platform/window_switch.c` (`ico_window_switch_backend`)); a name no
+   runnable device has logs `rhi_vk: [video] adapter "<name>" is not among the devices; automatic
+   pick` (`rhi_d3d12:`, `rhi_d3d11:` the same) and takes step 3;
+3. automatic: Vulkan's highest score ([Vulkan](#vulkan)), Direct3D's first suitable adapter in the
+   high-performance order, else WARP.
+
+One line lists them all and says which was taken and why (`rhi_adapter_list_text`):
+`rhi_vk: devices: 0 <name> (suitable, score 1065) 1 <name> (unsuitable: a software renderer; score
+165); picked 0 (automatic|[video] adapter "<name>"|ICO_VK_DEVICE=<v>)`; on Direct3D the same
+without scores, `picked WARP (...)` for the software device. OpenGL lists the one `GL_RENDERER`
+names and ignores the name (the system's driver picks the device). Windows' per-app graphics
+preference does not reach the pick: Vulkan's score reads the device type and Direct3D asks for
+`DXGI_GPU_PREFERENCE_HIGH_PERFORMANCE`, so Automatic is the same on every start and the Options
+row ([OPTIONS.md](../OPTIONS.md#choosing-the-graphics-card)) is how a player picks another card.
+
 ## Vulkan
 
-**Device** (`port/rhi/vk/vk_device.c`). The loader must be Vulkan 1.1 or later; the instance asks
+**Device** (`port/rhi/vk/vk_device.c`). The loader may be Vulkan 1.0 (issue 158: Android 8's loader
+has no `vkEnumerateInstanceVersion`, so volk reports 1.0): when it offers
+`VK_KHR_get_physical_device_properties2` the extension is enabled on the instance and its KHR queries
+stand in for the core ones, `vkr_features2` and `vkr_props2` (the log says `Vulkan 1.0 loader:
+VK_KHR_get_physical_device_properties2`); a 1.0 loader without it (a driver older than the
+extension) is taken too, the device then made without the extended queries and the optional
+features off, as a 1.0 device on a newer loader (`vkr_has_props2`; review finding 5; the line
+`Vulkan 1.0 loader without VK_KHR_get_physical_device_properties2: the device is used without the
+extended queries (the optional features off)`; `ICO_VK_FAKE_API=1.0bare` and ctest
+`rhi_vk_vk10bare`). The instance asks
 for the loader's version at most 1.3, and a device is used at its own version at most the
 instance's (`vkr_effective_api`; an instance at 1.3 leaves a 1.4 device its 1.4 outside MoltenVK).
-A device needs Vulkan 1.1 at that version, the swapchain extension on a window, a graphics queue
-that can present, and RGBA8, RGBA8 UINT, R8, D32F and D32F_S8 or D24S8 formats; dynamic rendering
+A device needs Vulkan 1.1 at that version, or 1.0 with `VK_KHR_maintenance1` (the negative-height
+viewport, `vk_cmd.c` `rhi_cmd_set_viewport`, and the transfer format features), which is enabled
+with `VK_KHR_maintenance2` when offered (the UINT views' `VkImageViewUsageCreateInfo`,
+`VkrState.viewUsage`; without it the view keeps the image's usages, `vk_resource.c`); a 1.0 device
+takes the `VkRenderPass` path (dynamic rendering needs 1.1's multiview and render pass 2), logs
+`Vulkan 1.0 device: VK_KHR_maintenance1; VK_KHR_maintenance2 yes|no; extended queries yes|no`, and
+without the extended queries (a 1.0 device on a 1.1 loader) every optional feature is off and the
+device is made without `VkPhysicalDeviceFeatures2`. Every device needs the swapchain extension on a window, a graphics queue
+that can present, and RGBA8, RGBA8 UINT, R8 and D32F_S8 or D24S8 formats (D32F alone as a depth attachment is optional: some 1.0 drivers lack it, `RhiLimits.depth32Attachment` is then false and the effects depth is off, the device line saying `depth D32F attachment: yes|no (the effects depth is off)`); dynamic rendering
 (core 1.3 or `VK_KHR_dynamic_rendering`) and timeline semaphores are not required (without them
 `VkRenderPass` objects, [Render passes](#vulkan), and the fence ring,
 [Bindings and synchronisation](#vulkan); `VKR_LEGACY_PASSES` 0 in `vk_internal.h` makes dynamic
 rendering required again). Devices score discrete 1000,
-integrated 500, virtual 200, CPU 100, plus 10 for core 1.3, 5 for dual-source blending, 20 for
+integrated 500, virtual 200, CPU 100, plus 10 for core 1.3, 10 for core 1.1, 5 for dual-source blending, 20 for
 dynamic rendering and 20 for timeline semaphores (`vkr_rate_device`). Below 1.2 the core 1.2 parts
 are taken by their KHR names when offered: `VK_KHR_create_renderpass2` and
 `VK_KHR_depth_stencil_resolve` (which `VK_KHR_dynamic_rendering` needs there),
@@ -497,19 +767,21 @@ transfer features (`vkr_choose_depth_stencil`).
 | variable | effect |
 | --- | --- |
 | `ICO_VK_VALIDATION` | 1 adds `VK_LAYER_KHRONOS_validation` and debug utils; 0 keeps them off |
-| `ICO_VK_DEVICE` | an index or a substring of the device name forces the pick |
+| `ICO_VK_DEVICE` | an index or a substring of the device name forces the pick (it wins over `[video] adapter`, [Choosing the device](#choosing-the-device)) |
 | `ICO_VK_FAKE_LIMITS` | `mali` clamps the limits to a Mali-G68's (4 descriptor sets, 128 bytes of push constants, 16 sampled images a stage, 4096 allocations, ...); `min` holds the alignment, texture, render target, dynamic uniform, storage range and anisotropy limits to 256, 4096, 4096, 8, 2^27 and 16 |
 | `ICO_VK_FAKE_LIMITS=moltenvk` | no limit clamped: the device is reported as MoltenVK (`RhiLimits.moltenvk`) without the attachment read (`rd_blend_selftest_moltenvk_storage`) |
 | `ICO_VK_FAKE_D24S8` | 1 takes D24S8 where the device has it |
 | `ICO_VK_FAKE_NO_DUAL` | 1 leaves dual-source blending off |
+| `ICO_VK_FAKE_NO_D32F_ATTACHMENT` | 1 hides the D32F depth-attachment bit: the device is still picked, `RhiLimits.depth32Attachment` is false (`rhi_vk_vk10_nod32f`) |
 | `ICO_VK_FAKE_NO_DYNAMIC` | 1 leaves the dynamic depth and blend state off, `blend` the blend alone ([Dynamic state](#dynamic-state)) |
 | `ICO_VK_FAKE_NO_MSAA` | 1 reports single sampling only |
 | `ICO_VK_FAKE_NO_DST` | 1 reports no destination read and no local read |
 | `ICO_VK_FAKE_ADRENO` | 1 takes the Qualcomm driver's branch: the attachment read not offered |
-| `ICO_VK_FAKE_API` | `1.1` uses the device as a stock Vulkan 1.1 driver (Adreno 618 class): the instance and the device held to 1.1 (the KHR and EXT names of what is core later), and `VK_KHR_timeline_semaphore`, `VK_KHR_dynamic_rendering_local_read`, `VK_KHR_driver_properties`, `VK_KHR_image_format_list`, `VK_KHR_load_store_op_none`, `VK_EXT_load_store_op_none` and `VK_QCOM_render_pass_store_ops` reported absent (`vkr_fake_hidden`): the fence ring ([Bindings and synchronisation](#vulkan)), no local read, the driver unnamed; `VK_KHR_dynamic_rendering` is hidden too (`VKR_LEGACY_PASSES`), so the passes are `VkRenderPass` objects ([Render passes](#vulkan)) and the device line says `render passes legacy`; the line `ICO_VK_FAKE_API=1.1: the device is used as a Vulkan 1.1 driver without timeline semaphores, dynamic rendering, local read, driver properties, image format list or store op none`. `1.1ext` holds the versions to 1.1 and hides nothing (a 1.1 driver with the extensions: the timeline through `VK_KHR_timeline_semaphore`, dynamic rendering through `VK_KHR_dynamic_rendering`), local read off (it needs 1.3). Both compose with `ICO_VK_FAKE_LIMITS=mali`; the device line ends `; ICO_VK_FAKE_API=<profile>`; another value is logged and hides nothing (`rhi_vk_vk11`, `rhi_vk_swapchain_vk11`, the render twins `rd_*_vk11` and `rd_pixel_vk11ext`, `rd_present_vk11ext`, label `vk11`: [TESTING.md](TESTING.md#the-render-suite-on-a-vulkan-11-driver)) |
+| `ICO_VK_FAKE_API` | `1.1` uses the device as a stock Vulkan 1.1 driver (Adreno 618 class): the instance and the device held to 1.1 (the KHR and EXT names of what is core later), and `VK_KHR_timeline_semaphore`, `VK_KHR_dynamic_rendering_local_read`, `VK_KHR_driver_properties`, `VK_KHR_image_format_list`, `VK_KHR_load_store_op_none`, `VK_EXT_load_store_op_none` and `VK_QCOM_render_pass_store_ops` reported absent (`vkr_fake_hidden`): the fence ring ([Bindings and synchronisation](#vulkan)), no local read, the driver unnamed; `VK_KHR_dynamic_rendering` is hidden too (`VKR_LEGACY_PASSES`), so the passes are `VkRenderPass` objects ([Render passes](#vulkan)) and the device line says `render passes legacy`; the line `ICO_VK_FAKE_API=1.1: the device is used as a Vulkan 1.1 driver without timeline semaphores, dynamic rendering, local read, driver properties, image format list or store op none`. `1.1ext` holds the versions to 1.1 and hides nothing (a 1.1 driver with the extensions: the timeline through `VK_KHR_timeline_semaphore`, dynamic rendering through `VK_KHR_dynamic_rendering`), local read off (it needs 1.3). `1.0` (issue 158) creates the instance at Vulkan 1.0 with `VK_KHR_get_physical_device_properties2`, as a 1.0 loader would, uses the device at 1.0 with `VK_KHR_maintenance1` and `VK_KHR_maintenance2`, hides what `1.1` hides, and clears volk's core 1.1 entry points after the instance and the device are made (`vkr_fake_10_entry_points`: the system's loader still hands out the instance-level ones at 1.0, so a core 1.1 call left unguarded stops the test at a NULL call); the line `ICO_VK_FAKE_API=1.0: the device is used as a Vulkan 1.0 driver (a 1.0 instance with VK_KHR_get_physical_device_properties2) without ...` (`rhi_vk_vk10`, `rhi_vk_swapchain_vk10`, the render twins `rd_*_vk10`, all with `ICO_VK_FAKE_NO_DYNAMIC=1` as on Android, label `vk10`: [TESTING.md](TESTING.md#the-render-suite-on-a-vulkan-10-driver)). `1.0bare` is `1.0` on a loader without `VK_KHR_get_physical_device_properties2`: the instance is made without it and the device without the extended queries (`rhi_vk_vk10bare`, review finding 5). All compose with `ICO_VK_FAKE_LIMITS=mali`; the device line ends `; ICO_VK_FAKE_API=<profile>`; another value is logged and hides nothing (`rhi_vk_vk11`, `rhi_vk_swapchain_vk11`, the render twins `rd_*_vk11` and `rd_pixel_vk11ext`, `rd_present_vk11ext`, label `vk11`: [TESTING.md](TESTING.md#the-render-suite-on-a-vulkan-11-driver)) |
 | `ICO_VK_ATTACHMENT_READ` | 1 offers the attachment read on Qualcomm's driver too; ico-pc.ini `attachment_read` |
 | `ICO_VK_STORAGE_BARRIERS` | 1 puts the by-region barrier before a destination-read draw that only the validation layer needs |
 | `ICO_VK_GLOBAL_BARRIERS` | 1 records a global barrier before every render pass and copy (`vk_cmd.c`) |
+| `ICO_VK_DEPTH_ALWAYS` | 1 makes every depth test compare `ALWAYS`, static and dynamic (`vk_pipeline.c`, `rhi_cmd_set_depth_state`), with the line `ICO_VK_DEPTH_ALWAYS: every depth test passes (...)`: the occlusion measurement's run without the depth ([RENDER.md](RENDER.md#culling)); the picture is not the game's |
 | `ICO_VK_PRESENT_WAIT` | 1 uses `VK_KHR_present_id` and `VK_KHR_present_wait` where offered (off otherwise) |
 | `ICO_VK_FIFO_LATEST_READY` | 1 uses `VK_PRESENT_MODE_FIFO_LATEST_READY_EXT` where FIFO would be taken, when offered |
 | `ICO_VK_POLL_SURFACE` | 1 polls the surface size after presents, as Android always does (`vk_swapchain.c`) |
@@ -519,7 +791,8 @@ transfer features (`vkr_choose_depth_stencil`).
 (`port/rhi/vk/vk_device.c` (`vkr_fake_limits`, `vkr_choose_depth_stencil`, `vkr_pick_device`);
 `port/rhi/vk/vk_cmd.c`; `port/rhi/vk/vk_swapchain.c` (`vkr_poll_surface_on`)).
 
-**Present mode** (`port/rhi/vk/vk_present_mode.c`, pure so its test compiles it alone). With vsync:
+**Present mode** (`port/rhi/vk/vk_present_mode.c`, pure so its test compiles it alone). Under the
+FIFO fallback (`forceFifo`, `s_fifoFallback` in `port/rhi/vk/vk_swapchain.c`, which also asks for exactly `minImageCount` images, two at least, and adds `, fifo fallback` to the `rhi_vk: swapchain` line): FIFO. With vsync:
 mailbox when preferred and offered; FIFO latest ready when asked for and offered; else FIFO. Without
 vsync: immediate wherever offered (the picture tears where the compositor lets it), then mailbox,
 then FIFO (`vkr_choose_present_mode`). `vkr_present_wait_wanted` is true only when
@@ -544,15 +817,24 @@ again or destroyed the thread is held out of its waits for at most 100 ms (`vkr_
 still in a wait then stops the timing and the swapchain goes on; at shutdown a thread that does not
 end is left to end on its own (`port/rhi/vk/vk_swapchain.c`, the display's timing).
 
-**Pipeline cache.** The window sets `pipelines-<build>.vkcache` in the [user folder](ARCHITECTURE.md#terms)
-(Android: the app's cache folder), where `<build>` is `ICO_BUILD_COMMIT` (`git describe`: tag, commits since, short
-hash, `-dirty`) with every character but letters, digits, `.` and `-` made `_`
-(`port/platform/window_host.c` (`ico_window_open`)); a build without git names it `unknown`. `rhi_init`
+**Pipeline cache.** The window sets `pipelines-<key>.vkcache` in the [user folder](ARCHITECTURE.md#terms)
+(Android: the app's cache folder), where `<key>` is 16 hex digits of a 64-bit hash of what the
+driver's pipelines are made from, not of the build: every module of the embedded shader table
+(`g_icoShaders`) by its name, stage, length and the XXH3-64 of its SPIR-V, in the table's order,
+and `RD_PIPELINE_CACHE_FORMAT`, a number raised by hand when a change must not reuse the caches
+written before it (`port/render/rd_cache_name.h`, `rd_pipeline.c` (`rd_pipeline_cache_file`),
+`port/platform/window_host.c` (`ico_window_open`)). The driver's data holds its compiled pipelines,
+each found by the driver's own hash of the whole creation (the modules and every state), so a
+build whose shaders are the same as the last one's reads the file the last one wrote and starts
+warm, and a state that changed only makes new pipelines in it; the header check below keeps the
+data per device and driver. A build that changed any module names another file. The key's source
+is logged once a run, `pipeline cache pipelines-<key>.vkcache (keyed by the shader set and the
+pipeline format, not the build: a build with the same shaders starts warm)`. `rhi_init`
 first removes every other `pipelines*.vkcache` and `pipelines*.vkcache.tmp` in that folder (the current
 file and its `.tmp` stay, files of other names stay, a folder that cannot be listed logs
 `pipeline cache: could not list <dir>; no other cache dropped` and goes on, a missing one nothing), one
-line each: `pipeline cache: dropped <name> (another version of the game); this start prepares the graphics
-from nothing` (`port/rhi/vk/vk_pipeline.c` (`vkr_cache_drop_others`); not done for a path whose file name does
+line each: `pipeline cache: dropped <name> (made for other shaders, or named after a build)`, the build-named `pipelines-<commit>.vkcache` files among them
+(`port/rhi/vk/vk_pipeline.c` (`vkr_cache_drop_others`); not done for a path whose file name does
 not start `pipelines` and end `.vkcache`). It then loads the file when the file is 32 bytes to 64 MB and its
 header (`VkPipelineCacheHeaderVersionOne`: header size, version one, vendor id, device id,
 `pipelineCacheUUID`) names this device; anything else logs "is for another device or driver" and
@@ -576,8 +858,9 @@ window passes it to the crash diagnostics, whose start-up retry deletes the file
 shift (`port/rhi/vk/vk_enums.h` (`vkr_bindTypeMap`): b 0, t 16, s 32, u 48, the shifts DXC compiles
 with). Each frame slot owns a command pool, descriptor pools and the objects destroyed while it
 recorded; every submit takes the next number of the port's counter (`VkrState.timelineValue`), which
-`rhi_wait_frame` waits for; the first submit after an acquire waits on its semaphore and the present on
-the image's `renderDone` (`port/rhi/vk/vk_pipeline.c`; `port/rhi/vk/vk_cmd.c`, header comment). The
+`rhi_wait_frame` waits for; the first submit of a slot after its acquire waits on the slot's
+semaphore and the present on the image's `renderDone` ([Frame slots and the submit
+thread](#the-interface)) (`port/rhi/vk/vk_pipeline.c`; `port/rhi/vk/vk_cmd.c`, header comment). The
 submission sync behind the counter (`port/rhi/vk/vk_sync.c`, `VkrSyncKind`) is one timeline semaphore
 whose value is the number (Vulkan 1.2), or on a device without timeline semaphores a ring of 8
 fences, number n signalling the fence at slot n % 8: one queue signals in submission order, so the
@@ -633,7 +916,15 @@ of SDL's; the surface is NULL while the app is in the background and the caller 
 counts it and clamps the area, viewport and scissor to the smallest attachment, and every scissor set
 while the pass is open is cut to that area, so the renderer's own full-target scissor cannot reach
 past it; a pass that fits is untouched (`port/rhi/vk/vk_cmd.c` (`vkr_pass_area_fits`,
-`rhi_cmd_set_scissor`)). The D3D12 backend clamps its default
+`rhi_cmd_set_scissor`)). Inside that size the pass's own area (`RhiRenderPassDesc.area`, cut to
+it; one that leaves nothing is the whole size, Vulkan wanting an extent above zero) is the
+`renderArea` offset and extent of `VkRenderingInfo` and of `VkRenderPassBeginInfo` (the legacy
+path's framebuffer stays the attachments' size, `vk_renderpass.c`); the default scissor is the
+area, the default viewport the whole size, and every scissor set while the pass is open is the
+intersection of the asked one and the area (an empty one keeps its offset, extent 0): the
+specification asks that all rendering stay inside the render area and restricts the load, store
+and resolve operations to the pixels inside it (`VkRenderPassBeginInfo`), so the pixels
+outside keep their contents on every device (`rhi_vk`'s `renderAreaCell`). The D3D12 backend clamps its default
 viewport and scissor the same way (`port/rhi/d3d12/d3d12_cmd.c` (`dx_pass_area_check`)).
 
 **Test hooks** (`port/rhi/vk/rhi_vk.h`): the validation error count, a forced present result
@@ -650,14 +941,15 @@ system directory (ReShade's `dxgi.dll` beside the program) makes `rhi_injector_n
 Adapters are enumerated discrete first (`EnumAdapterByGpuPreference`); a software adapter or one
 without feature level 11_0 is skipped; with none the device runs on WARP (`dx_pick_adapter`). Each
 enumerated adapter logs `rhi_d3d12: adapter N: <name>`, followed by
-`(unsuitable: a software adapter, or no feature level 11_0)` for one it skips, and the device line
+`(unsuitable: a software adapter, or no feature level 11_0)` for one it skips, then the devices
+line ([Choosing the device](#choosing-the-device)), and the device line
 is `rhi_d3d12: <adapter> (D3D12, feature level 11_0[, WARP][; driver version a.b.c.d])[, headless]`,
 the user-mode driver's version in four 16-bit parts (`dx_driver_text`, `rhi_init`).
 
 | variable | effect |
 | --- | --- |
 | `ICO_D3D12_DEBUG` | 1 the debug layer and the DXGI debug factory; 0 off |
-| `ICO_D3D12_ADAPTER` | `warp`, an adapter index or a substring of its name |
+| `ICO_D3D12_ADAPTER` | `warp`, an adapter index or a substring of its name (it wins over `[video] adapter`) |
 | `ICO_DX_FAKE_NO_DST` | 1 reports no destination read (no ROVs) |
 | `ICO_DX_FAKE_NO_TIMESTAMPS` | 1 turns GPU timestamps off (`rhi_timestamps_supported` false) |
 | `ICO_D3D12_FRAME_LATENCY` | the swapchain's frame latency (below) |
@@ -759,7 +1051,7 @@ buffers** below)
 | variable | effect |
 | --- | --- |
 | `ICO_D3D11_DEBUG` | 1 the debug layer (`D3D11_CREATE_DEVICE_DEBUG`, its info queue drained into the log as `rhi_d3d11 debug <severity> (id N): <text>`) and the DXGI debug factory; 0 off |
-| `ICO_D3D11_ADAPTER` | `warp`, an adapter index or a substring of its name |
+| `ICO_D3D11_ADAPTER` | `warp`, an adapter index or a substring of its name (it wins over `[video] adapter`) |
 | `ICO_DX_FAKE_NO_TIMESTAMPS` | 1 turns GPU timestamps off, as on D3D12 |
 | `ICO_D3D11_FAKE_NO_PARTIAL_CB` | 1 takes the path of a device without partial constant buffer updates (the upload buffers' constant buffers mapped) on any device; logs `rhi_d3d11: partial constant buffer updates: off (ICO_D3D11_FAKE_NO_PARTIAL_CB)` (`rhi_d3d11_test`'s section 1b) |
 | `ICO_D3D11_FRAME_LATENCY` | the swapchain's frame latency, as `ICO_D3D12_FRAME_LATENCY` |
@@ -770,9 +1062,11 @@ logged once with its removed reason and the last eight submissions (`d11_check`)
 **Limits** (`d11_fill_limits`). As D3D12's except: `copyRowPitchAlign` 1 and `copyOffsetAlign` 4
 (uploads to textures are `UpdateSubresource` from the CPU copy), `maxDynamicUniforms` 4, `rov`
 false (Direct3D 11.3 has rasterizer-ordered views; they stay off, untested), and
-`colorBytesPerPixel` 32, which keeps the VU vertex pre-pass off as on the Apple A9 and A10
-(`port/render/rd_replay_vu.c`): its record goes back through a texture-to-buffer copy Direct3D 11
-does not have. The sample counts come from `CheckMultisampleQualityLevels` over RGBA8 UNORM and UINT
+`colorBytesPerPixel` 0 (no bound: eight RGBA32 targets at feature level 11_0), so the VU vertex
+pre-pass is on as on the other backends (`port/render/rd_replay_vu.c`), its record copied into its
+storage buffer by the compute shader below; below feature level 11_0 (which `rhi_init` never
+takes) it would be 32 with the line `rhi_d3d11: feature level below 11_0: no compute shader for
+the texture-to-buffer copy: the VU vertex pre-pass stays off`. The sample counts come from `CheckMultisampleQualityLevels` over RGBA8 UNORM and UINT
 and D32S8, logged as `rhi_d3d11: multisampling: sample counts 0x..`.
 
 **Frames** (`d3d11_device.c`). Each frame slot has eight command lists, each a deferred context made
@@ -924,12 +1218,44 @@ line), whose deferred `UpdateSubresource` applies a box's offset to the source t
 become a texture of their own (created with them as its contents) copied in on the GPU;
 `rhi_cmd_copy_texture` is `CopySubresourceRegion` (depth formats whole only);
 `rhi_cmd_resolve_color` is `ResolveSubresource`; `rhi_cmd_copy_texture_to_buffer` goes into a
-readback buffer through its staging texture and is skipped otherwise
-(`rhi_d3d11: rhi_cmd_copy_texture_to_buffer: only into a readback buffer on Direct3D 11; skipped
-(logged once)`: its other callers are the vertex pre-pass (`rd_replay_vu.c`), off on Direct3D 11,
-the fog paths (`rd_fog_path.c`: the buffer path's depth copy, the fog probe and the edge probe),
-all gated off on Direct3D 11, and `rd_crack_fill.c`'s count copy, which goes into a readback
-buffer and so is served).
+readback buffer through its staging texture (`rd_crack_fill.c`'s count copy), and into a
+storage-only device buffer through the compute copy below (the VU vertex pre-pass's record,
+`rd_replay_vu.c` `vuRecPassCopy`); anything else is refused (the fog paths, `rd_fog_path.c`: the
+buffer path's depth copy, the fog probe and the edge probe, are gated off on Direct3D 11).
+
+**The compute copy** (`d3d11_cmd.c` `d11_copy_texture_to_storage`). Direct3D 11 has no copy from a
+texture into a buffer on the GPU, and the pre-pass needs one between two passes of one list: its
+three RGBA32_UINT planes into the frame slot's record buffer, read by the next pass's vertex
+shaders and the main ones as `StructuredBuffer<uint4> vu_rec_buf`. The backend's own compute
+shader (`cs_5_0`, HLSL embedded in `d3d11_cmd.c`, compiled at the first such copy through the
+same `d3dcompiler_47.dll` as the game's shaders, `d3d11_shader_compile_text`, no cache) runs a
+thread a texel, 64 a group: `Texture2D<uint4>.Load` of texel (x + i, y + j) into element
+`dstOffset / 16 + j * rowPitch / 16 + i` of a `RWStructuredBuffer<uint4>`; its 32-byte constant
+buffer (the region, the first element, the pitch) is written with `UpdateSubresource` on the list's
+deferred context before each dispatch. The resources: an RGBA32_UINT texture made with
+`RHI_TEX_COPY_SRC` (single-sampled) gets `D3D11_BIND_SHADER_RESOURCE` and its SRV; a storage-only
+device buffer (`RHI_BUF_STORAGE_READ | RHI_BUF_COPY_DST`, no vertex, index or uniform use) gets
+`D3D11_BIND_UNORDERED_ACCESS` on its structured part and a UAV over the whole part (a device that
+refuses them gets the plain part, logged once, and its copies are refused). Before the dispatch
+every SRV the list bound is unbound (a buffer cannot be a UAV and an SRV at once; the bind groups
+are bound again at the next draw, as at a pass's start); after it the copy's SRV and UAV are
+unbound (the texture becomes a target again in the next pass). The runtime orders the dispatch
+after the draws that read the buffer before it and before every later read. Its limits, each
+refused with `rhi_d3d11: rhi_cmd_copy_texture_to_buffer: <why>; skipped (N so far)` (the first 8,
+then every 100th): an RGBA32_UINT single-sampled source, a storage-only device destination,
+`dstOffset` and `rowPitch` in whole 16-byte elements (the structured part's rule), the region inside
+the texture and the rows inside the buffer, outside a render pass. Its lines:
+
+```
+rhi_d3d11: texture-to-buffer copies into storage buffers: a compute shader (cs_5_0, 64 texels a group, made in <t> ms; the VU vertex pre-pass's record)
+rhi_d3d11: texture-to-buffer copy by the compute shader: the first, <w>x<h> texels at (<x>,<y>) into byte <offset>, rows <pitch> bytes apart (logged once)
+rhi_d3d11: texture-to-buffer copies into storage buffers: the compute shader could not be made (<the compiler's message>): every such copy is skipped, and the VU vertex pre-pass's start-up self-test turns the pre-pass off
+```
+
+A copy the shader could not serve leaves the record's words zero, so the renderer's start-up
+self-test (`rd_vuprepass_selftest.c`) finds the pictures different and turns the pre-pass off for
+the run, followed on Direct3D 11 by `rd: VU pre-pass: self-test failed on Direct3D 11; its last
+draw: ...`.
 
 A pass whose colour target and depth target differ in size logs `rhi_d3d11: render pass: colour
 target WxH with a depth target WxH: Direct3D 11 binds a depth-stencil view only with targets of its
@@ -960,9 +1286,11 @@ texture; its RTV is made again after every `ResizeBuffers`. Creation logs
 `..., no waitable object`.
 
 **The shader cache folder** (`d3d11_device.c`, `d11_cache_setup`). The window's pipeline cache path
-`<pref>/pipelines-<build>.vkcache` becomes the folder `<pref>/pipelines-<build>.d3d11`, one DXBC
-file per shader, keyed with `<build>` among the rest ([SHADERS.md](SHADERS.md#direct3d-11-run-time-compile));
-another build's `pipelines-*.d3d11` folder is removed at `rhi_init` with
+`<pref>/pipelines-<key>.vkcache` becomes the folder `<pref>/pipelines-<key>.d3d11`, one DXBC
+file per shader, keyed with `<key>` and the HLSL sources themselves among the rest
+([SHADERS.md](SHADERS.md#direct3d-11-run-time-compile)), so a source change the SPIR-V does not show
+still compiles again; another key's `pipelines-*.d3d11` folder (a build-named one among them) is
+removed at `rhi_init` with
 `rhi_d3d11: shader cache: dropped <name> (another version of the game)`. Any other path (a test's)
 gets `<path>.d3d11`, nothing dropped. A folder that cannot be made logs
 `rhi_d3d11: shader cache folder <dir> could not be made: the shaders are compiled at every start`.
@@ -1011,7 +1339,7 @@ draws less than it should and nothing else says so.
    query a slot ended are read when it comes round, with `D3D11_ASYNC_GETDATA_DONOTFLUSH` for the
    stamps (the slot's event has passed, so nothing waits).
 
-**Not implemented on Direct3D 11**: the destination read, the VU vertex pre-pass, the
+**Not implemented on Direct3D 11**: the destination read, the
 `gpu_checkpoints` breadcrumbs, mailbox with vsync, the display's timing of presents, and the
 memory gauges.
 
@@ -1023,8 +1351,9 @@ recorded on deferred contexts; WARP has partial updates, so only `ICO_D3D11_FAKE
 reaches it), the single window bind on a driver that records command lists, the constant buffer windows' offsets, the order of the deferred lists against
 the uploads at submit, `UpdateSubresource1` with a box on a deferred context of a driver that
 records command lists itself and the texture-and-copy route where it does not,
-`CopySubresourceRegion` into a constant buffer part of a device buffer, FXC's acceptance of every
-game entry under `vs_5_0`/`ps_5_0`, the input layouts against FXC's input signatures, the
+`CopySubresourceRegion` into a constant buffer part of a device buffer, the compute copy on a
+real card (WARP runs it in `rhi_d3d11_test`'s section 1f and the pre-pass checks of the render
+suite), FXC's acceptance of every game entry under `vs_5_0`/`ps_5_0`, the input layouts against FXC's input signatures, the
 flip-model resize, the first `rhi_init` on a real card. CI's `windows` job (WARP, the debug layer
 where the runner can add it) is the first evidence on any of these; its logs are the artifact
 `d3d11-warp-logs`. On a Windows machine, `rhi_d3d11_test.exe` (below, [Tests](#tests)) is the first
@@ -1383,9 +1712,11 @@ device-loss order's `robust` step (`port/platform/startup_retry.h`) exports `ICO
 its run, which only a platform that can start the game again reaches, and only a run whose caller
 sets `StartupRetryRun.robustOffDefault`. One start-up line says what is on:
 `rhi_vk: loss diagnostics: fault report on|not offered; checkpoints ...; resource addresses ...;
-robust access ...` (`off (the default; gpu_robust = true turns it on)`, `off (gpu_robust)`, or `on,
+robust access ...; hang limit ...` (`off (the default; gpu_robust = true turns it on)`, `off (gpu_robust)`, or `on,
 buffers (robustness2) and images (robustness2) (gpu_robust)`, `(the restart after the graphics card
-stopped responding)` at the robust step) (`port/rhi/vk/vk_device.c` (`vkr_create_device`)). Both switches come from the
+stopped responding)` at the robust step; the hang limit `15 s`, `off (watchdog = 0)`, or `not set
+(the watchdog's own limits)` in a tool: the GPU hang limit the host exports as
+`ICO_GPU_HANG_LIMIT`, [PLATFORM.md](PLATFORM.md)) (`port/rhi/vk/vk_device.c` (`vkr_create_device`)). Both switches come from the
 environment (`ICO_GPU_CHECKPOINTS`, `ICO_GPU_ROBUST`) or ico-pc.ini's `[dev]` keys
 ([CONFIG.md](CONFIG.md#dev)).
 
@@ -1413,28 +1744,29 @@ size, per pixel, per sample, when using multiple color render targets" (Metal Fe
 for the Apple GPU the device name gives (`rhi_metal_color_bytes`: `Apple A9 GPU` and `Apple A10 GPU`
 32 bytes, A11 to A13 64, A14 and later and the M-series 128; an Intel or AMD GPU of a Mac 0, no
 bound), so the renderer leaves the VU vertex pre-pass (48 bytes a pixel) off on an A9 or A10
-([RENDER.md](RENDER.md#the-vertex-and-triangle-pre-passes); `port/rhi/rhi_driver_version.c`;
+([RENDER.md](PIPELINES.md#the-vertex-and-triangle-pre-passes); `port/rhi/rhi_driver_version.c`;
 `port/rhi/vk/vk_device.c` (`vkr_fill_limits`)).
 
 ## Tests
 
 | test | checks |
 | --- | --- |
-| `rhi_test_common.c`, `rhi_test_common.h` | headless rendering on any backend, texel by texel: a 64x32 target in eight cells (dual-source blending, stencil wrap, reversed depth, colour mask, a copied texture drawn indexed), the fill rule (`fillRuleCell`: two quads with every edge through pixel centres, the top and left edges' pixels taken and the bottom and right ones left, the shared edge's row once), an RGBA8 UINT target, R8 copies and same-state ordering, a device-local buffer, depth readback, three frames; seven of the cells' pipelines come from one `rhi_create_pipelines` call with an uncreatable description among them (only that one fails, the ids are distinct, the finished count never goes back); the dynamic state cell (`dynamicCell`: sixteen cells of the renderer's depth tests, Z writes, blends and masks drawn with every state static, from one `rhi_create_pipelines` batch with `maxThreads` 1 on one thread, then with the device's dynamic groups set after each bind: texel-equal, three commands a group after each static bind, none for a repeat; skipped but for the static pass without dynamic state; then `dualLeftoverCell`, an opaque draw after a SRC1 lerp on one dynamic-blend pipeline: 2 commands, `blendEqOffSets` and `dualLeftovers` +1, the colour exact on an even and an odd column; skipped without dual-source blending or dynamic blend) |
-| `rhi_vk_test.c` | the common cells on Vulkan, a hazard-tracking cell, the render-area check (a pass wider than its colour target, one taller than its depth: each clamped and counted, no validation error; a fitting pass untouched), and the pipeline cache file (written while up by `rhi_pipeline_cache_save` and at shutdown, read back, another device's or garbage ignored; the drop of other builds' cache files in a temporary folder: the current file, its `.tmp` and unrelated names stay), and the pipeline pool filled (`poolCell`, [The pipeline pool](#the-pipeline-pool); not under the fake switches); ctest `rhi_vk`, and `rhi_vk_nodual`, `rhi_vk_d24s8`, `rhi_vk_mali` under the fake switches |
+| `rhi_test_common.c`, `rhi_test_common.h` | headless rendering on any backend, texel by texel: a 64x32 target in eight cells (dual-source blending, stencil wrap, reversed depth, colour mask, a copied texture drawn indexed), the fill rule (`fillRuleCell`: two quads with every edge through pixel centres, the top and left edges' pixels taken and the bottom and right ones left, the shared edge's row once), an RGBA8 UINT target, R8 copies and same-state ordering, a device-local buffer, depth readback, three frames; seven of the cells' pipelines come from one `rhi_create_pipelines` call with an uncreatable description among them (only that one fails, the ids are distinct, the finished count never goes back); the dynamic state cell (`dynamicCell`: sixteen cells of the renderer's depth tests, Z writes, blends and masks drawn with every state static, from one `rhi_create_pipelines` batch with `maxThreads` 1 on one thread, then with the device's dynamic groups set after each bind: texel-equal, three commands a group after each static bind, none for a repeat; skipped but for the static pass without dynamic state; then `dualLeftoverCell`, an opaque draw after a SRC1 lerp on one dynamic-blend pipeline: 2 commands, `blendEqOffSets` and `dualLeftovers` +1, the colour exact on an even and an odd column; skipped without dual-source blending or dynamic blend; the repeats' sets counted in `stateSetsSkipped`, every command of their groups); the bind cache cell (`bindCacheCell`, [The bind cache](#the-bind-cache)): one list recorded with every bind once, then with each bind and state set given three times in a row: the same exact pictures, the same `pipelineBinds` and `bindGroupBinds`, and exactly 6 pipeline, 8 bind group and 16 state skips more; in both, the group bound again at another dynamic offset draws that offset's value, a second pass binding the first pass's texture group draws the texture, and a pipeline destroyed in the list with a new one made in its pool slot (a new id) draws with the new one's write mask; with the bind cache off (`ICO_RHI_BIND_CACHE=0`: `rhi_vk_nobindcache`, `rhi_gl_nobindcache`) no skip counted, the repeats' pipeline binds recorded, the same pictures, and the dynamic state cells' repeats sent again |
+| `rhi_vk_test.c` | the common cells on Vulkan, a hazard-tracking cell, the render-area check (a pass wider than its colour target, one taller than its depth: each clamped and counted, no validation error; a fitting pass untouched), and the pipeline cache file (written while up by `rhi_pipeline_cache_save` and at shutdown, read back, another device's or garbage ignored; the drop of other builds' cache files in a temporary folder: the current file, its `.tmp` and unrelated names stay), and the pipeline pool filled (`poolCell`, [The pipeline pool](#the-pipeline-pool); not under the fake switches); ctest `rhi_vk`, and `rhi_vk_nodual`, `rhi_vk_d24s8`, `rhi_vk_mali` under the fake switches, `rhi_vk_nobindcache` with the bind cache off ([The bind cache](#the-bind-cache)) |
 | `rhi_vk_swapchain_test.c` | the window path on SDL's offscreen driver: frames, readback order, surface release and recreation, suboptimal and lost presents, resizes, the surface poll, submits per frame, the present-wait stand-in and a hanging wait; ctest `rhi_vk_swapchain` |
 | `rhi_vk_present_mode_test.c` | `vkr_choose_present_mode` over the mode sets drivers offer, and `vkr_present_wait_wanted`; ctest `rhi_vk_present_mode` |
 | `rhi_vk_enum_test.c` | every `rhi.h` enumeration has a Vulkan mapping; the layer classifiers and `rhi_layer_switched_on`; ctest `rhi_vk_enum` |
 | `rhi_driver_version_test.c` | the driver version text of each vendor's encoding; ctest `rhi_driver_version` |
+| `rhi_adapter_match_test.c` | the `[video] adapter` name match and the device-list text; ctest `rhi_adapter_match` |
 | `rhi_d3d12_plan_test.c` | `d3d12_plan.c` on every host; with the shader table, every vertex shader's DXIL inputs against its SPIR-V locations and every DXIL blob signed; ctest `rhi_d3d12_plan` |
 | `rhi_d3d11_shader_plan_test.c` | `d3d11_shader.c`'s portable part on every host: the macros text, the include lookup, the flat-register rule over the game's sources and `rhi_test_hlsl.h` (checked against `rhi_test.hlsl`), the cache key over every table entry, the cache file's round trip and the corrupt files it refuses, the failure log's limit; ctest `rhi_d3d11_shader_plan` |
 | `rhi_gl_test.c` | the common cells on OpenGL with the driver's debug output failing the run, the copies the cells do not make (a colour region into a vertex-read device buffer and on into a readback buffer, a D32F_S8 depth as floats, RGBA32_UINT words, each at a wider row pitch; a target made after one whose framebuffer was dropped), and six swapchain frames on SDL's offscreen driver with a resize; ctest `rhi_gl`, and `rhi_gl_nodual` under `ICO_GL_FAKE_NO_DUAL=1`, both on llvmpipe (`LIBGL_ALWAYS_SOFTWARE=1`, `SDL_VIDEO_DRIVER=offscreen`), skipped without a context |
 | `rhi_d3d12_test.c` | Windows, double-clickable: the cells on WARP, on the hardware adapter, the swapchain on a hidden window, then Vulkan for comparison; writes `rhi_d3d12_test.log` and shows a message box (`--console` for ctest); ctest `rhi_d3d12` |
-| `rhi_d3d11_test.c` | Windows, double-clickable, as `rhi_d3d12_test.c` on Direct3D 11 (the cells' shaders compiled at run time from `rhi_test_hlsl.h` through a one-source table; the destination-read cell skipped by the limits); writes `rhi_d3d11_test.log`; ctest `rhi_d3d11` on a native Windows build only; CI's `windows` job runs it with `--console` (WARP; the hardware and Vulkan sections skip on the runner) |
+| `rhi_d3d11_test.c` | Windows, double-clickable, as `rhi_d3d12_test.c` on Direct3D 11 (the cells' shaders compiled at run time from `rhi_test_hlsl.h` through a one-source table; the destination-read cell skipped by the limits; section 1f the compute copy into a storage buffer: every element of three copies where it belongs and 0xEE elsewhere, a pixel shader reading the buffer before and after a copy in one list, three refusals that write nothing, the copies counted); writes `rhi_d3d11_test.log`; ctest `rhi_d3d11` on a native Windows build only; CI's `windows` job runs it with `--console` (WARP; the hardware and Vulkan sections skip on the runner) |
 | `compare_backends.cmd`, `compare_png.ps1` | Windows: every dump in `dumps\` rendered by `rd_replay_tool` on both backends, DISPLAY and the presented picture, each pair compared texel by texel and passing within 1 LSB (DISPLAY is expected identical) |
 | `shaders/rhi_test.hlsl`, `gen_shaders.sh` | the tests' shaders, committed as `rhi_test_spv.h` and `rhi_test_dxil.h` so the tests build without DXC, and as `rhi_test_hlsl.h` (the text as a C string, its registers flat under `ICO_D3D11`) for a run-time compile |
 
 The Vulkan tests exit 77 (skipped) without a device; under the fetched validation layer `rhi_vk`
 fails on any validation error (`port/rhi/CMakeLists.txt`; `port/rhi/test/*`, header comments).
-`ctest --test-dir <build> -R '^rhi_'` runs them; [TESTING.md](TESTING.md#portrhitest) lists every
-test of the tree.
+`ctest --test-dir <build> -R '^rhi_'` runs them;
+[TESTING_PROGRAMS.md](TESTING_PROGRAMS.md#portrhitest) lists every test of the tree.

@@ -39,6 +39,12 @@ const char *const ui_strings_it[UI_STR_COUNT] = {
     [UI_STR_VAL_PIT_LONGER] = "Più lungo",
     [UI_STR_VAL_PIT_DOUBLE] = "Doppio",
     [UI_STR_VAL_PIT_TRIPLE] = "Triplo",
+    [UI_STR_OPT_SHADOW_SPEED] = "Velocità delle ombre",
+    [UI_STR_OPT_SHADOW_SPEED_NOTE] =
+        "Quanto velocemente le ombre camminano, corrono e volano. Non cambia la frequenza dei loro attacchi.",
+    [UI_STR_VAL_SPEED_SLOWER] = "Più lento",
+    [UI_STR_VAL_SPEED_FASTER] = "Più veloce",
+    [UI_STR_VAL_SPEED_FASTEST] = "Velocissimo",
     [UI_STR_LANG_EN] = "English",
     [UI_STR_LANG_FR] = "Français",
     [UI_STR_LANG_DE] = "Deutsch",
@@ -434,7 +440,7 @@ const char *const ui_strings_it[UI_STR_COUNT] = {
     [UI_STR_OPT_EFFECT_MOTION_BLUR] = "Sfocatura di movimento",
     [UI_STR_OPT_EFFECT_FOG] = "Nebbia",
     [UI_STR_EFFECTS_NOTE] =
-        "Gli effetti grafici del gioco. Tutto attivo è l’immagine PS2; la preimpostazione non li modifica.",
+        "Gli effetti grafici del gioco. Tutto attivo è l’immagine PS2; la preimpostazione non li modifica, tranne Bagliore tra i fotogrammi.",
     [UI_STR_STATS_PLAY_TIME] = "Tempo di gioco",
     [UI_STR_STATS_DEATHS] = "Morti",
     [UI_STR_STATS_CAPTURES] = "Yorda rapita",
@@ -526,6 +532,10 @@ const char *const ui_strings_it[UI_STR_COUNT] = {
     [UI_STR_VAL_GRAPHICS_AUTOMATIC] = "Automatico",
     [UI_STR_GRAPHICS_API_NOTE] =
         "Applica cambia subito; senza Applica la scelta vale dal prossimo avvio.",
+    [UI_STR_OPT_GRAPHICS_ADAPTER] = "Scheda grafica",
+    [UI_STR_GRAPHICS_ADAPTER_NOTE] =
+        "Quale scheda grafica disegna il gioco. Applica cambia subito; senza Applica la scelta vale dal prossimo avvio.",
+    [UI_STR_GRAPHICS_ADAPTER_FAILED] = "La scheda grafica %s non è partita; resta %s",
     [UI_STR_GRAPHICS_APPLY] = "Applica",
     [UI_STR_GRAPHICS_APPLY_NOTE] =
         "Cambia subito, senza uscire dal gioco. Una breve pausa è normale.",
@@ -570,12 +580,18 @@ const char *const ui_strings_it[UI_STR_COUNT] = {
     [UI_STR_OPT_DOOR_FIX] = "Porta del riflettore est",
     [UI_STR_OPT_DOOR_FIX_NOTE] =
         "Mano nella mano, Ico e Yorda non tornano più subito fuori da una porta.",
+    [UI_STR_OPT_YORDA_TRIPS] = "Yorda inciampa",
+    [UI_STR_OPT_YORDA_TRIPS_NOTE] =
+        "Disattivato: come l’originale. Attivato: come alla porta principale, cade dopo tre secondi di corsa mano nella mano.",
     [UI_STR_OPT_NATURAL_CHAINS] = "Catene naturali",
     [UI_STR_OPT_NATURAL_CHAINS_NOTE] =
         "Una catena che scende per Ico mantiene gli anelli della giusta misura per tutta la discesa.",
     [UI_STR_OPT_SKIP_OPENING] = "Salta l’introduzione",
     [UI_STR_OPT_SKIP_OPENING_NOTE] =
         "Il gioco parte dalla schermata del titolo, senza il cartello Sony e senza la scena d’apertura. Si applica al prossimo avvio.",
+    [UI_STR_OPT_SECOND_CARD] = "Seconda memory card",
+    [UI_STR_OPT_SECOND_CARD_NOTE] =
+        "Disattivato: una scheda, come l’originale. Attivato: una seconda scheda con dieci salvataggi in più, offerta al salvataggio e al caricamento.",
     [UI_STR_OPT_AA] = "Anti-aliasing",
     [UI_STR_OPT_AA_NOTE] =
         "Attenua i bordi seghettati. Il supersampling disegna 4 volte (2x) o 16 volte (4x) i pixel; abbassalo se il contatore scende a 30.",
@@ -614,6 +630,51 @@ const char *const ui_strings_it[UI_STR_COUNT] = {
     [UI_STR_EXPORT_TEXTURES_STOPPED_BODY] = "Interrotta dopo %d immagini",
     [UI_STR_EXPORT_TEXTURES_FAILED] = "Impossibile esportare le texture",
     [UI_STR_EXPORT_TEXTURES_FAILED_BODY] = "Impossibile scrivere nella cartella\n%s",
+    [UI_STR_EXTRAS_BACKUP] = "Fai un backup dei dati",
+    [UI_STR_EXTRAS_RESTORE] = "Ripristina da un backup",
+    [UI_STR_BACKUP_NOTE] =
+        "Salva memory card, stati salvati, impostazioni e obiettivi in un file .zip, da conservare o da portare altrove.",
+    [UI_STR_RESTORE_NOTE] =
+        "Rimette memory card, stati salvati, impostazioni e obiettivi da un backup .zip. Poi il gioco si riavvia.",
+    [UI_STR_BACKUP_CHOOSING] = "Scegli dove salvare il backup.",
+    [UI_STR_BACKUP_PROGRESS] = "Backup: %d file su %d",
+    [UI_STR_RESTORE_AGAIN] = "Premi di nuovo per scegliere",
+    [UI_STR_RESTORE_CONFIRM_TITLE] = "Ripristinare da un backup?",
+    [UI_STR_RESTORE_CONFIRM_BODY] =
+        "Memory card, stati salvati, impostazioni e obiettivi presenti verranno sostituiti da quelli del backup e il gioco si riavvierà.\nPremi di nuovo per scegliere il backup.",
+    [UI_STR_RESTORE_CHOOSING] = "Scegli il backup da ripristinare.",
+    [UI_STR_RESTORE_READING] = "Lettura del backup…",
+    [UI_STR_RESTORE_PROGRESS] = "Ripristino: %d file su %d",
+    [UI_STR_RESTORE_THIS] = "Ripristina questo backup",
+    [UI_STR_RESTORE_ASK_NOTE] = "Creato dalla versione %s. Premi di nuovo per ripristinarlo.",
+    [UI_STR_RESTORE_ASK_TITLE] = "Ripristinare questo backup?",
+    [UI_STR_RESTORE_VERSION] = "Versione: %s",
+    [UI_STR_RESTORE_SAVED] = "Salvato il: %s",
+    [UI_STR_RESTORE_DISCS] = "Dischi: %s",
+    [UI_STR_RESTORE_OTHER_DISC] = "Creato mentre si giocava un altro disco",
+    [UI_STR_RESTORE_PRESS] = "Premi di nuovo per ripristinarlo",
+    [UI_STR_BACKUP_DONE] = "Backup dei dati completato",
+    [UI_STR_BACKUP_DONE_BODY] = "%d file salvati in\n%s",
+    [UI_STR_BACKUP_FAILED] = "Impossibile fare il backup dei dati",
+    [UI_STR_RESTORE_DONE] = "Ripristino dei dati",
+    [UI_STR_RESTORE_DONE_RESTART] = "Il gioco ora si riavvia e mette al suo posto il backup.",
+    [UI_STR_RESTORE_DONE_CLOSE] =
+        "Il gioco ora si chiude. Avvialo di nuovo: all’avvio metterà al suo posto il backup.",
+    [UI_STR_RESTORE_FAILED] = "Impossibile ripristinare il backup",
+    [UI_STR_BACKUP_WHY_BUSY] = "Non ora: il gioco sta salvando. Riprova tra un momento.",
+    [UI_STR_BACKUP_WHY_NOTHING] = "Non c’è ancora nulla di cui fare il backup.",
+    [UI_STR_BACKUP_WHY_WRITE] =
+        "Impossibile scrivere i dati. Controlla lo spazio libero e riprova.",
+    [UI_STR_BACKUP_WHY_READ] = "Impossibile leggere il file.",
+    [UI_STR_BACKUP_WHY_NOT_BACKUP] = "Questo file non è un backup creato da questo gioco.",
+    [UI_STR_BACKUP_WHY_NEWER] =
+        "Questo backup è stato creato da una versione più recente. Aggiorna il gioco per ripristinarlo.",
+    [UI_STR_BACKUP_WHY_DAMAGED] = "Questo backup è danneggiato.",
+    [UI_STR_BACKUP_WHY_UNSAFE] =
+        "Questo backup contiene file fuori dalle cartelle del gioco, quindi non viene usato.",
+    [UI_STR_BACKUP_WHY_TOO_BIG] = "Questo backup è più grande di quanto il gioco accetti.",
+    [UI_STR_BACKUP_WHY_NO_DIALOG] = "Impossibile aprire una finestra di scelta dei file.",
+    [UI_STR_BACKUP_WHY_NO_SPACE] = "Lo spazio libero sul dispositivo non è sufficiente.",
     [UI_STR_LANG_KO] = "한국어",
     [UI_STR_LANG_ZH] = "繁體中文",
     /* Controls > Touch screen and the touch layout editor */
@@ -695,4 +756,46 @@ const char *const ui_strings_it[UI_STR_COUNT] = {
         "Questa versione del gioco non dà suggerimenti, quindi non cambia nulla. Gli obiettivi restano attivi.",
     [UI_STR_OPT_VAR_NO_LOOK_NOTE_2001] =
         "In questa versione del gioco la visuale non si muove durante i filmati, quindi non cambia nulla. Gli obiettivi restano attivi.",
+    [UI_STR_GPU_HANG_TURNIP] =
+        "Con il driver Qualcomm di questo dispositivo, un driver Turnip può aiutare: aggiungine uno in Opzioni > Driver grafico > Aggiungi un driver. Si applica al prossimo avvio.",
+    [UI_STR_STATES] = "Stati salvati",
+    [UI_STR_STATES_SLOT] = "Slot %d",
+    [UI_STR_STATES_EMPTY] = "Vuoto",
+    [UI_STR_STATES_ACT_SAVE] = "Salva",
+    [UI_STR_STATES_ACT_LOAD] = "Carica",
+    [UI_STR_STATES_ACT_DELETE] = "Elimina",
+    [UI_STR_STATES_CONFIRM] = "Premi di nuovo: %s",
+    [UI_STR_STATES_SAVED] = "Stato salvato nello slot %d",
+    [UI_STR_STATES_LOADED] = "Stato caricato dallo slot %d",
+    [UI_STR_STATES_DELETED] = "Slot %d svuotato",
+    [UI_STR_STATES_NOTE] =
+        "Uno stato appartiene a questo disco. Anche le versioni successive possono caricarlo. Sinistra e destra scelgono l'azione.",
+    [UI_STR_STATES_PAUSE_FIRST] = "Metti il gioco in pausa per salvare uno stato",
+    [UI_STR_STATES_REFUSED_BUILD] = "Salvato da un'altra versione del gioco",
+    [UI_STR_STATES_REFUSED_DISC] = "Salvato da un altro disco",
+    [UI_STR_STATES_REFUSED_SETTINGS] = "Un'impostazione di gioco è diversa: %s",
+    [UI_STR_STATES_REFUSED_BUSY] = "Non ora: il gioco sta caricando o salvando",
+    [UI_STR_STATES_REFUSED_CHECK] = "Impossibile ripristinare lo stato; il gioco prosegue",
+    [UI_STR_STATES_OFF] = "Gli stati salvati sono disattivati in questa versione",
+    [UI_STR_STATES_TITLE_HINT] = "Si salva dal menu di pausa",
+    [UI_STR_STATES_SAVE_FAILED] = "Impossibile salvare lo stato",
+    [UI_STR_STATES_XB_OLD] =
+        "Questo stato è stato creato dalla versione %s,\nprima che gli stati salvati potessero passare\nalle versioni più recenti.\nI salvataggi sulla memory card funzionano ancora.",
+    [UI_STR_STATES_XB_CODE] =
+        "Questo stato è stato creato dalla versione %s.\nLa versione %s ha cambiato la parte del gioco\nin cui è stato salvato, quindi non può essere\nripreso.\nI salvataggi sulla memory card funzionano ancora.",
+    [UI_STR_STATES_XB_DATA] =
+        "Questo stato è stato creato dalla versione %s.\nLa versione %s ha cambiato il modo in cui il gioco\ntiene i suoi progressi in memoria, quindi non può\nessere ripreso.\nI salvataggi sulla memory card funzionano ancora.",
+    [UI_STR_STATES_XB_PINNED] =
+        "Questo stato è stato creato dalla versione %s\ne solo quella versione può riprenderlo.\nI salvataggi sulla memory card funzionano ancora.",
+    [UI_STR_OPT_EFFECT_GLOW_SMOOTH] = "Bagliore tra i fotogrammi",
+    [UI_STR_EFFECT_GLOW_SMOOTH_NOTE] =
+        "Originale mantiene il bagliore del fotogramma del gioco tra i fotogrammi. Fluido lo rifà per ogni fotogramma mostrato; costa più tempo grafico.",
+    [UI_STR_EFFECT_GLOW_SMOOTH_LOCKED] =
+        "Conta solo sopra la frequenza fotogrammi Originale, con il bagliore attivo.",
+    [UI_STR_OPT_EFFECT_MOTION_BLUR_STRENGTH] = "Intensità della sfocatura",
+    [UI_STR_EFFECT_MOTION_BLUR_STRENGTH_NOTE] =
+        "Valori più bassi fanno svanire la scia più in fretta; 100 è quella della PS2.",
+    [UI_STR_LANG_RU_BOBTTZ] = "Русский (bob-ttz)",
+    [UI_STR_LANG_RU_COBRA838] = "Русский (cobra838)",
+    [UI_STR_LANG_PT_BR] = "Português (Brasil) (ichagas7)",
 };

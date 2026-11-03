@@ -61,9 +61,15 @@
 #include <stdio.h>
 #include <stdlib.h>
 #include <string.h>
+#ifdef _WIN32
+#include <windows.h>
+#else
+#include <time.h>
+#endif
 #include "rd_internal.h"
 #include "rd_mesh.h"
 #include "rd_passring.h"
+#include "rd_pipe_finish.h"
 
 /* a sanitizer build (gcc defines __SANITIZE_*, clang answers __has_feature) */
 #if defined(__SANITIZE_ADDRESS__) || defined(__SANITIZE_THREAD__)
@@ -698,6 +704,152 @@ static void checkPipelineProgress(void)
     CHECK(p.calls == calls, "pipeline progress: called %u times after it was cleared", p.calls);
 }
 
+/* ------------------------------- the stopped set finished in the background
+ * (rd.h rd_pipelines_background_start, rd_pipe_finish.h): the set stopped
+ * after its first batch by the low-memory function (as the free-memory
+ * floor stops it), the finisher's batches begun and taken after each
+ * "picture" (rd__pipe_finish_tick); its memory function asked before each
+ * batch */
+static int s_bgMemory, s_bgMemoryCalls;
+
+static int stopAfterFirstBatch(char *why, size_t size)
+{
+    snprintf(why, size, "a test floor");
+    return 1;
+}
+
+static int bgMemory(char *why, size_t size)
+{
+    s_bgMemoryCalls++;
+    snprintf(why, size, s_bgMemory == 2 ? "a test signal" : "a test reading");
+    return s_bgMemory;
+}
+
+static void shortWait(void)
+{
+#ifdef _WIN32
+    Sleep(1);
+#else
+    const struct timespec ts = {0, 1000000L};
+    nanosleep(&ts, NULL);
+#endif
+}
+
+/* ticks until the batch in flight is taken or the finisher ends (at most
+ * 600 s of compiles on the software rasteriser) */
+static void bgTickUntil(uint32_t pipelines, bool toEnd)
+{
+    const double until = rd__now_ms() + 600000.0;
+    while (rd_pipelines_background_on() && rd__now_ms() < until) {
+        rd__pipe_finish_tick(0.0);
+        if (!toEnd && rd__pipeline_count() != pipelines) {
+            return;
+        }
+        shortWait();
+    }
+}
+
+/* the graphics API's name for the background set's lines */
+static const char *bgApi(void)
+{
+    switch (rhi_backend()) {
+    case RHI_BACKEND_VULKAN:
+        return "Vulkan";
+    case RHI_BACKEND_D3D12:
+        return "Direct3D 12";
+    case RHI_BACKEND_OPENGL:
+        return "OpenGL";
+    case RHI_BACKEND_D3D11:
+        return "Direct3D 11";
+    default:
+        return "another API";
+    }
+}
+
+static void checkBackgroundSet(void)
+{
+    static RdPipeKeyInt keys[RD_PIPELINE_CACHE_MAX];
+    const uint32_t n = rd__enumerate_reachable(keys, RD_PIPELINE_CACHE_MAX);
+
+    /* the set stopped after its first batch: made on first use from there,
+       the rest offered to the finisher */
+    rd__pipeline_cache_clear();
+    rd_set_low_memory_fn(stopAfterFirstBatch);
+    rd_precreate_pipelines();
+    rd_set_low_memory_fn(NULL);
+    const uint32_t stopped = rd__pipeline_count();
+    CHECK(rd_pipelines_lazy_on() && stopped > 0 && stopped <= 32 && stopped < n,
+          "background set: the stopped set made %u of %u (want one batch, lazy on)", stopped, n);
+    s_bgMemory = 0;
+    s_bgMemoryCalls = 0;
+    if (rhi_backend() != RHI_BACKEND_VULKAN) {
+        /* no background creation off Vulkan (rhi_create_pipelines_begin
+           returns NULL there): the start is refused, the memory never
+           asked, and the stopped set's rest made on first use */
+        const uint32_t none = rd_pipelines_background_start(bgMemory);
+        CHECK(none == 0 && !rd_pipelines_background_on() && s_bgMemoryCalls == 0,
+              "background set (%s): the start gave %u keys, on %d, the memory asked %d times "
+              "(want 0, off, 0)",
+              bgApi(), none, (int)rd_pipelines_background_on(), s_bgMemoryCalls);
+        CHECK(rd_pipelines_background_start(bgMemory) == 0 && rd__pipeline_count() == stopped,
+              "background set (%s): a second start was taken, %u pipelines (want %u)", bgApi(),
+              rd__pipeline_count(), stopped);
+        uint32_t missing = 0;
+        for (uint32_t i = 0; i < n; i++) {
+            missing += rd__get_pipeline(&keys[i]).id == 0;
+        }
+        CHECK(missing == 0 && rd__pipeline_count() > stopped,
+              "background set (%s): %u of %u keys without a pipeline on first use, %u pipelines "
+              "after it (stopped at %u)",
+              bgApi(), missing, n, rd__pipeline_count(), stopped);
+        printf("background set: %u keys, stopped at %u pipelines, not resumed on %s (%u made on "
+               "first use)\n",
+               n, stopped, bgApi(), rd__pipeline_count() - stopped);
+        return;
+    }
+    const uint32_t left = rd_pipelines_background_start(bgMemory);
+    CHECK(left > 0 && rd_pipelines_background_on(), "background set: %u keys left, on %d", left,
+          (int)rd_pipelines_background_on());
+    CHECK(rd_pipelines_background_start(bgMemory) == 0, "background set: a second start was taken");
+    /* one batch: the memory asked once before it, its pipelines kept when
+       its compiles end, at most a batch of them */
+    rd__pipe_finish_tick(0.0);
+    CHECK(s_bgMemoryCalls == 1, "background set: the memory asked %d times before the batch",
+          s_bgMemoryCalls);
+    bgTickUntil(stopped, false);
+    const uint32_t one = rd__pipeline_count();
+    CHECK(one > stopped && one <= stopped + RD_FINISH_BATCH,
+          "background set: one batch took the count from %u to %u", stopped, one);
+    /* the system's signal before the next batch: the finisher ends */
+    s_bgMemory = 2;
+    rd__pipe_finish_tick(0.0);
+    CHECK(!rd_pipelines_background_on() && rd__pipeline_count() == one,
+          "background set: after the signal on %d, %u pipelines (want off, %u)",
+          (int)rd_pipelines_background_on(), rd__pipeline_count(), one);
+
+    /* again to the end: every key of the set made, none left to first use */
+    rd__pipeline_cache_clear();
+    rd_set_low_memory_fn(stopAfterFirstBatch);
+    rd_precreate_pipelines();
+    rd_set_low_memory_fn(NULL);
+    s_bgMemory = 0;
+    s_bgMemoryCalls = 0;
+    CHECK(rd_pipelines_background_start(bgMemory) > 0, "background set: not started again");
+    bgTickUntil(rd__pipeline_count(), true);
+    CHECK(!rd_pipelines_background_on(), "background set: still on after 600 s");
+    CHECK(s_bgMemoryCalls >= 2, "background set: the memory asked %d times", s_bgMemoryCalls);
+    const uint32_t done = rd__pipeline_count();
+    uint32_t missing = 0;
+    for (uint32_t i = 0; i < n; i++) {
+        missing += rd__get_pipeline(&keys[i]).id == 0;
+    }
+    CHECK(missing == 0 && rd__pipeline_count() == done,
+          "background set: %u of %u keys without a pipeline, %u made on first use after it",
+          missing, n, rd__pipeline_count() - done);
+    printf("background set: %u keys, stopped at %u pipelines, %u after the finisher\n", n, stopped,
+           done);
+}
+
 /* ---------------------------------------------- the pieces' texts (pure) */
 
 static void checkPassTexts(void)
@@ -709,12 +861,13 @@ static void checkPassTexts(void)
           "csv header: %s", buf);
     const RdPerfPass p[4] = {
         {RD_PERF_PASS_RENDER, RD_TARGET_SCENE, 0, -1, 848, 448, 420, 300, 4120.0f, 900.0f, 0.0f, 0,
-         0, 0},
+         0, 0, 0, 0, 0, 0},
         {RD_PERF_PASS_RENDER, RD_TARGET_WORK1, 7, RD_PERF_POST_GLOW, 256, 128, 1, 1, 60.0f, 5.0f,
-         0.0f, 0, 0, 0},
+         0.0f, 0, 0, 0, 0, 0, 0, 0},
         {RD_PERF_PASS_RENDER, RD_TARGET_WORK1, 7, RD_PERF_POST_GLOW, 256, 128, 1, 1, 40.0f, 5.0f,
-         0.0f, 0, 0, 0},
-        {RD_PERF_PASS_DATE, RD_TARGET_SCENE, 3, -1, 848, 448, 1, 1, 30.0f, 2.0f, 0.0f, 0, 0, 0},
+         0.0f, 0, 0, 0, 0, 0, 0, 0},
+        {RD_PERF_PASS_DATE, RD_TARGET_SCENE, 3, -1, 848, 448, 1, 1, 30.0f, 2.0f, 0.0f, 0, 0, 0, 0,
+         0, 0, 0},
     };
     rd_perf_pass_csv_line(12, 34, 1, &p[1], buf, sizeof(buf));
     CHECK(strcmp(buf, "12,34,1,render pass,7,glow,WORK1,256,128,1,1,60.0,5.0\n") == 0,
@@ -824,8 +977,10 @@ static void checkPieces(const RdPerfRecord *r, const RdPerfPass *p, uint32_t n, 
             continue;
         }
         entries++;
-        /* the next piece the ring notes (a render pass without a target,
-           the shadow count's reduction, is not in the ring) */
+        /* the next piece the ring notes (a render pass without a target
+           is not in the ring; the shadow count's reduction is, as the
+           count target's pass at its GS size, since the shadow step
+           change) */
         while (k < n && (!ringKind(p[k].kind) || (p[k].kind == RD_PERF_PASS_RENDER &&
                                                   p[k].target == RD_PERF_TARGET_NONE))) {
             k++;
@@ -1215,6 +1370,8 @@ static int synthetic(void)
         printf("reachable set: %u keys, %u without a pipeline\n", n, missing);
         CHECK(n > 0 && missing == 0, "reachable set: %u of %u keys without a pipeline", missing, n);
     }
+    /* last: it leaves the run on first use (rd_pipelines_lazy) */
+    checkBackgroundSet();
     rd_shutdown();
     return 0;
 }
@@ -1326,6 +1483,11 @@ int main(int argc, char **argv)
         return dumpMode(argc, argv);
     }
     checkPassTexts(); /* pure: before any device */
+    /* the shadow volumes in their own pass and the count target cleared
+     * (rd_shadow_merge.c, on on the tile-based classes: rd_perf_mali's):
+     * the barrier and pass counts below are those of that frame; the merge
+     * has its own tests (rd_shadow case m, rd_shadow_merge_ab) */
+    rd__shadow_merge_force(0);
     const int rc = synthetic();
     if (rc != 0) {
         return rc;

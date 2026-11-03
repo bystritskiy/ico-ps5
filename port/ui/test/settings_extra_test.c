@@ -808,7 +808,7 @@ static const char *fakeGfxRunning(void)
     return s_gfxRunning;
 }
 
-static int fakeGfxBegin(const char *name, int why)
+static int fakeGfxBegin(const char *name, const char *adapter, int why)
 {
     const int i = s_gfxBegins < 16 ? s_gfxBegins : 15;
     snprintf(s_gfxAsked[i], sizeof(s_gfxAsked[i]), "%s", name);
@@ -878,7 +878,8 @@ static void testGraphicsApply(void)
     {
         int labels[8];
         const int n = ui_settings_page_rows(UI_PAGE_GRAPHICS, labels, NULL, NULL, 8);
-        CHECK(n == 5, "the page holds Graphics API, Apply, Keep, Revert, Back (%d)", n);
+        CHECK(n == 6, "the page holds Graphics API, Graphics card, Apply, Keep, Revert, Back (%d)",
+              n);
     }
 
     /* no host: no Apply, whatever the value */
@@ -1335,11 +1336,13 @@ static void testAddToSteam(void)
     CHECK(strcmp(lt_ext_row_text(row), "Add to Steam") == 0, "the row's text \"%s\"",
           lt_ext_row_text(row));
     {
-        int el[9];
-        const int en = ui_settings_page_rows(UI_PAGE_EXTRAS, el, NULL, NULL, 9);
+        int el[11];
+        const int en = ui_settings_page_rows(UI_PAGE_EXTRAS, el, NULL, NULL, 11);
 
-        CHECK(en == 9 && el[5] == row,
-              "nine rows, Add to Steam then Export textures, the pop-ups and Back (%d)", en);
+        CHECK(en == 11 && el[5] == row,
+              "eleven rows, Add to Steam then Export textures, the backup rows, the pop-ups and "
+              "Back (%d)",
+              en);
     }
 
     /* Cross: the handler once, its answer as the popup */
@@ -1438,19 +1441,22 @@ static void testExportTextures(void)
     CHECK(strcmp(lt_ext_row_text(row), "Export textures") == 0, "export: the row's text \"%s\"",
           lt_ext_row_text(row));
     {
-        int el[9];
-        const int en = ui_settings_page_rows(UI_PAGE_EXTRAS, el, NULL, NULL, 9);
+        int el[11];
+        const int en = ui_settings_page_rows(UI_PAGE_EXTRAS, el, NULL, NULL, 11);
 
-        CHECK(en == 9 && el[5] == ui_settings_row_of(UI_PAGE_EXTRAS, UI_OPT_EXTRAS_STEAM) &&
-                  el[6] == row && el[7] == ui_settings_row_of(UI_PAGE_EXTRAS, UI_OPT_ACH_POPUPS),
-              "export: nine rows, Add to Steam, Export textures, the pop-ups (%d)", en);
-        /* Down from Add to Steam lands on it, Down again on the pop-ups */
+        CHECK(en == 11 && el[5] == ui_settings_row_of(UI_PAGE_EXTRAS, UI_OPT_EXTRAS_STEAM) &&
+                  el[6] == row && el[9] == ui_settings_row_of(UI_PAGE_EXTRAS, UI_OPT_ACH_POPUPS),
+              "export: eleven rows, Add to Steam, Export textures, the backup rows, the pop-ups "
+              "(%d)",
+              en);
+        /* Down from Add to Steam lands on it, Down again on the pop-ups
+           (the backup rows hidden without their host) */
         lt_ext_layout(exL)->curItem = el[5];
         frame(0);
         press(0x4000);
         CHECK(lt_ext_layout(exL)->curItem == row, "export: Down from Add to Steam lands on it");
         press(0x4000);
-        CHECK(lt_ext_layout(exL)->curItem == el[7], "export: Down from it lands on the pop-ups");
+        CHECK(lt_ext_layout(exL)->curItem == el[9], "export: Down from it lands on the pop-ups");
     }
     ui_settings_set_steam_handler(NULL);
     lt_ext_layout(exL)->curItem = row;
@@ -3430,6 +3436,86 @@ static void testSkipOpening(void)
     gFlagGameClear = 0;
 }
 
+/* Gameplay > Second memory card ([gameplay] second_memory_card): a row from
+   the title and the pause menu after Skip the opening, Off by default; a step
+   turns it on at once (the listener, which main_host.c points at the card's
+   port 1: host_config.h ico_host_set_second_card, mc_host.h
+   ico_mc_host_second_card_changed) and sets the key, the saved file has it,
+   its note shows on the cursor, a step back takes the card out, and the page
+   with the game finished (every row shown) still fits */
+static int s_cardCalls, s_cardLast = -1;
+
+static void cardListener(int on)
+{
+    s_cardCalls++;
+    s_cardLast = on;
+}
+
+static void testSecondCard(void)
+{
+    char p[1100];
+
+    gFlagGameClear = 0;
+    for (int title = 1; title >= 0; title--) {
+        stage_no = title ? 1 : 11;
+        const int mainL = enterMain(title);
+        openPage(mainL, 5, UI_PAGE_GAMEPLAY);
+        const int row = ui_settings_row_of(UI_PAGE_GAMEPLAY, UI_OPT_SECOND_CARD);
+        CHECK(row >= 0 && ui_settings_row_shown(row), "title %d: the Second memory card row",
+              title);
+        CHECK(row >= 0 && strcmp(lt_ext_row_text(row), "Second memory card") == 0,
+              "title %d: its label \"%s\"", title, row >= 0 ? lt_ext_row_text(row) : "");
+        CHECK(row > ui_settings_row_of(UI_PAGE_GAMEPLAY, UI_OPT_SKIP_OPENING) &&
+                  row < ui_settings_row_of(UI_PAGE_GAMEPLAY, UI_OPT_FILM_EFFECT),
+              "title %d: after Skip the opening, before the Film effect", title);
+        CHECK(ico_opt_second_memory_card() == 0 &&
+                  strcmp(ui_settings_value_text(UI_OPT_SECOND_CARD), "Off") == 0,
+              "title %d: Off by default", title);
+        press(0x10);
+        CHECK(settle(mainL, 60), "Gameplay: back");
+    }
+
+    s_cardCalls = 0;
+    ico_opt_set_second_memory_card_listener(cardListener);
+    CHECK(s_cardCalls == 1 && s_cardLast == 0, "the listener told the current value, Off (%d, %d)",
+          s_cardCalls, s_cardLast);
+    gFlagGameClear = 1;
+    stage_no = 11;
+    const int mainL = enterMain(0);
+    const int gameL = openPage(mainL, 5, UI_PAGE_GAMEPLAY);
+    checkPageFits(UI_PAGE_GAMEPLAY, "Gameplay (cleared, with Second memory card)");
+    const int row = ui_settings_row_of(UI_PAGE_GAMEPLAY, UI_OPT_SECOND_CARD);
+    lt_ext_layout(gameL)->curItem = row;
+    press(0x2000);
+    CHECK(ico_opt_second_memory_card() == 1 &&
+              strcmp(ui_settings_value_text(UI_OPT_SECOND_CARD), "On") == 0 &&
+              ico_config_get_bool("gameplay.second_memory_card", 0) == 1,
+          "Right: Second memory card On and the key set");
+    CHECK(s_cardCalls == 2 && s_cardLast == 1, "Right: the card put in at once (%d, %d)",
+          s_cardCalls, s_cardLast);
+    const int note = noteStarting(UI_PAGE_GAMEPLAY, "Off: one memory card");
+    CHECK(note >= 0 && !lt_ext_prop(note)->masked, "the Second memory card note on the cursor");
+    CHECK(ui_settings_save() == 0, "save");
+    path(p, sizeof(p), "settings_test.toml");
+    IcoToml *t = ico_toml_load(p);
+    CHECK(t != NULL && ico_toml_get_bool(t, "gameplay.second_memory_card", 0) == 1,
+          "saved: gameplay.second_memory_card = true");
+    if (t != NULL) {
+        ico_toml_free(t);
+    }
+    press(0x8000);
+    CHECK(ico_opt_second_memory_card() == 0 &&
+              ico_config_get_bool("gameplay.second_memory_card", 1) == 0,
+          "Left: Second memory card Off again");
+    CHECK(s_cardCalls == 3 && s_cardLast == 0, "Left: the card taken out at once (%d, %d)",
+          s_cardCalls, s_cardLast);
+    press(0x10);
+    CHECK(settle(mainL, 60), "Gameplay: back");
+    ico_opt_set_second_memory_card_listener(NULL);
+    ico_opt_set_second_memory_card(0);
+    gFlagGameClear = 0;
+}
+
 /* Skip the opening at the boot (ico2/script/src/op.c actOpDemo01, GL-14) on
    the real layout_texture.c, with the disc's fade times (texLayout, the same
    on the three discs): the boot's layout (PAL 7, la_boot_memory_card_check:
@@ -3449,11 +3535,15 @@ static void testSkipOpening(void)
    decided) */
 static int s_bootEnded, s_sceneFirst;
 
+/* la_boot_memory_card_check's hand-over: the scene layout, 0x37 on the
+   European disc, 0x34 on the Japanese program's, 0x33 on the 2001 discs */
+#define BOOT_HANDS_OVER_TO PAL_JPNKORCN_NTSCAUG6JUN26(0x37, 0x34, 0x33)
+
 static int bootCheckProc(int first, int item)
 {
     (void)first;
     (void)item;
-    return s_bootEnded ? PAL_JPNKORCN(0x37, 0x34) : -1; /* la_boot_memory_card_check */
+    return s_bootEnded ? BOOT_HANDS_OVER_TO : -1; /* la_boot_memory_card_check */
 }
 
 static int sceneProc(int first, int item)
@@ -3468,8 +3558,9 @@ static int sceneProc(int first, int item)
    layouts */
 static void bootToEnd(const char *slug)
 {
-    /* the Japanese program's boot layout on the Japanese, Korean and Asian discs */
-    const int boot = PAL_JPNKORCN(7, 4);
+    /* init_layout_texture's boot layout: the European disc's 7, 4 on every
+       other (the Japanese program's discs and the 2001 discs: issue 160) */
+    const int boot = PAL_JPNKORNTSCAUG6JUN26CN(7, 4);
     const int scene = fxLayout(55);
 
     fakeTables();
@@ -3510,7 +3601,7 @@ static void testSkipOpeningTitle(const char *slug)
     const int scene = fxLayout(55);
     const int title = fxLayout(12);
 
-    CHECK(PAL_JPNKORCN(0x37, 0x34) == scene, "%s: the boot's layout hands over to %d", slug, scene);
+    CHECK(BOOT_HANDS_OVER_TO == scene, "%s: the boot's layout hands over to %d", slug, scene);
     /* 50 Hz and 60 Hz: 25 and 30 ticks a second */
     for (int hz60 = 0; hz60 < 2; hz60++) {
         systemStatus[0] = hz60 ? 0 : 1;
@@ -3662,7 +3753,7 @@ static void testMenuLanguage(void)
     CHECK(strcmp(ui_settings_value_text(UI_OPT_MENU_LANGUAGE), "Automatisch") == 0 ||
               ui_settings_value_text(UI_OPT_MENU_LANGUAGE)[0] != '\0',
           "the row's value: %s", ui_settings_value_text(UI_OPT_MENU_LANGUAGE));
-    /* Auto, en, fr, de, it, es, ja, ko, zh, Auto */
+    /* Auto, en, fr, de, it, es, ja, ko, zh, ru-bobttz, ru-cobra838, pt-br, Auto */
     ui_settings_step(UI_OPT_MENU_LANGUAGE, 1);
     CHECK(ico_opt_ui_language() == UI_LANG_EN && ui_get_language() == UI_LANG_EN &&
               ui_sheet_language() == UI_LANG_DE,
@@ -3695,6 +3786,31 @@ static void testMenuLanguage(void)
     CHECK(strcmp(ui_settings_value_text(UI_OPT_MENU_LANGUAGE),
                  "\xE7\xB9\x81\xE9\xAB\x94\xE4\xB8\xAD\xE6\x96\x87") == 0,
           "the row names Chinese in Chinese: %s", ui_settings_value_text(UI_OPT_MENU_LANGUAGE));
+    /* the community translation as a Menu language of its own: the port's
+       text in it, the game's words still the game's (Italian here) */
+    ui_settings_step(UI_OPT_MENU_LANGUAGE, 1);
+    CHECK(ico_opt_ui_language() == UI_LANG_RU_BOBTTZ && ui_get_language() == UI_LANG_RU_BOBTTZ &&
+              ui_sheet_language() == UI_LANG_IT && !ui__font_chinese_first() &&
+              strcmp(ico_config_get_string("ui.language", ""), "ru-bobttz") == 0,
+          "Russian (bob-ttz) menus over the Italian game (%d, %d)", ui_get_language(),
+          ui_sheet_language());
+    CHECK(strcmp(ui_settings_value_text(UI_OPT_MENU_LANGUAGE), "Русский (bob-ttz)") == 0,
+          "the row names Russian in Russian: %s", ui_settings_value_text(UI_OPT_MENU_LANGUAGE));
+    ui_settings_step(UI_OPT_MENU_LANGUAGE, 1);
+    CHECK(ico_opt_ui_language() == UI_LANG_RU_COBRA838 &&
+              ui_get_language() == UI_LANG_RU_COBRA838 && ui_sheet_language() == UI_LANG_IT &&
+              strcmp(ico_config_get_string("ui.language", ""), "ru-cobra838") == 0 &&
+              strcmp(ui_settings_value_text(UI_OPT_MENU_LANGUAGE), "Русский (cobra838)") == 0,
+          "Russian (cobra838) menus over the Italian game (%d, %s)", ui_get_language(),
+          ui_settings_value_text(UI_OPT_MENU_LANGUAGE));
+    ui_settings_step(UI_OPT_MENU_LANGUAGE, 1);
+    CHECK(ico_opt_ui_language() == UI_LANG_PT_BR && ui_get_language() == UI_LANG_PT_BR &&
+              ui_sheet_language() == UI_LANG_IT &&
+              strcmp(ico_config_get_string("ui.language", ""), "pt-br") == 0 &&
+              strcmp(ui_settings_value_text(UI_OPT_MENU_LANGUAGE),
+                     "Português (Brasil) (ichagas7)") == 0,
+          "Brazilian Portuguese menus over the Italian game (%d, %s)", ui_get_language(),
+          ui_settings_value_text(UI_OPT_MENU_LANGUAGE));
     ui_settings_step(UI_OPT_MENU_LANGUAGE, 1);
     CHECK(!ui__font_chinese_first(), "Auto: the Japanese face is first again");
     CHECK(ico_opt_ui_language() == -1 && ui_get_language() == UI_LANG_IT, "Auto again: Italian");
@@ -4313,9 +4429,9 @@ static void testVariantsPage(const char *who, int title, int *debugPressed)
     stage_no = title ? 1 : 11;
     const int mainL = enterMainKeep(title);
     const int exL = openPage(mainL, 8, UI_PAGE_EXTRAS);
-    int el[9];
-    const int en = ui_settings_page_rows(UI_PAGE_EXTRAS, el, NULL, NULL, 9);
-    CHECK(en == 9 && strcmp(lt_ext_row_text(el[4]), "Game variants") == 0 &&
+    int el[11];
+    const int en = ui_settings_page_rows(UI_PAGE_EXTRAS, el, NULL, NULL, 11);
+    CHECK(en == 11 && strcmp(lt_ext_row_text(el[4]), "Game variants") == 0 &&
               !lt_ext_prop(el[4])->defaultMask &&
               lt_ext_prop(el[4])->right == ui_settings_page_layout(UI_PAGE_VARIANTS),
           "%s %s: the Game variants link after Characters, on both entries", who,
@@ -4921,8 +5037,10 @@ int main(int argc, char **argv)
         /* ctests settings_extra_ntsc, _aug6, _jun26: the three 2001 discs
            (Cross confirms, as on the European disc): Extras > Game variants
            on that disc (the demo's 7-hit barrier and its toughness row, the
-           2001 discs' notes). The Japanese-program runs' other checks
-           (Circle confirms, the boot's layout 0x34) are not these discs' */
+           2001 discs' notes), the Options window, and Skip the opening's
+           title with its menu (the boot's layout 4, handing over to 0x33:
+           issue 160). The Japanese-program runs' pad, pointer and hint
+           checks (Circle confirms) are not these discs' */
         CHECK(ico_region_select(argv[2]) == 0 && lt_ext_confirm_button() == 0x40,
               "the %s disc: Cross confirms", argv[2]);
         CHECK(ico_region_select("pal") == 0, "the European disc again");
@@ -4932,6 +5050,8 @@ int main(int argc, char **argv)
         CHECK(ico_region_select(argv[2]) == 0, "the %s disc selected", argv[2]);
         testScroll(argv[2]);
         CHECK(ico_region_select("pal") == 0, "the European disc again");
+        /* Skip the opening: the title's menu after the boot, on that disc */
+        testSkipOpeningTitle(argv[2]);
         printf("settings_extra_test %s: %s\n", argv[2], failures ? "failed" : "ok");
         return failures ? 1 : 0;
     }
@@ -4997,6 +5117,8 @@ int main(int argc, char **argv)
     testNaturalChains();
     testSkipOpening();
     testSkipOpeningTitle("pal");
+    /* Gameplay > Second memory card */
+    testSecondCard();
     /* Extras > Game variants */
     testVariants();
     /* the version in the Options menu */

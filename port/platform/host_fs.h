@@ -56,6 +56,21 @@ int ico_path_kind(const char *path, unsigned long long *size, long long *mtime);
 typedef int (*IcoDirWalkFn)(const char *path, const char *name, void *user);
 int ico_dir_walk(const char *dir, int depth, IcoDirWalkFn fn, void *user);
 
+/* The entries of the folder dir itself (no deeper), in byte order of
+   their names, "." and ".." left out and the hidden ones (a leading '.')
+   too unless hidden is 1: fn(name, kind, user) for each, kind 0 a file, 1
+   a folder, 2 a link to a folder or a link to nothing (a link to a file is
+   0), until fn returns non-zero.  The number visited, or -1 when dir
+   cannot be read. */
+typedef int (*IcoDirEntryFn)(const char *name, int kind, void *user);
+int ico_dir_entries(const char *dir, int hidden, IcoDirEntryFn fn, void *user);
+/* Deletes path: a file, or a folder with everything below it, the hidden
+   entries too; a link (to a file or a folder, a symbolic link or a Windows
+   junction) is deleted itself, never followed.  0 when nothing is left at
+   path (nothing there is 0 too), -1 when something could not be deleted
+   (what could be is gone). */
+int ico_remove_tree(const char *path);
+
 /* The AppImage this program runs from (Linux). The AppImage runtime mounts
    the file's contents read-only at $APPDIR (or extracts them there, with
    --appimage-extract-and-run) and starts the program inside with $APPIMAGE
@@ -78,4 +93,37 @@ wchar_t *ico_widen(const char *s);
 int ico_narrow(const wchar_t *s, char *out, size_t size);
 
 #endif
+
+/* The kind of drive the path sits on, as a word in out: "fixed", "removable",
+   "network", "RAM disk", "CD-ROM", "fuse" (a user-space file system whose
+   medium is not known) or "unknown" (the path is empty or cannot be asked
+   about). Windows: GetDriveTypeW on the path's root (a UNC path is
+   network). Linux and Android: the file system type of statfs (nfs, smb,
+   cifs, ceph, afs and 9p are network; tmpfs and ramfs are RAM disk).
+   macOS and iOS: f_fstypename (nfs, smbfs, afpfs, webdav are network).
+   Returns 0, or -1 when out is too small (out is then empty). */
+int ico_host_drive_kind(const char *path, char *out, size_t n);
+/* The file system the path sits on, as its name in out ("NTFS", "exFAT",
+   "ext4", "apfs"). Windows: GetVolumeInformationW's file-system name of
+   the path's volume (GetVolumePathNameW). macOS and iOS: f_fstypename.
+   Linux and Android: the name of statfs's f_type for the common ones (ext4
+   for ext2 to ext4, btrfs, xfs, f2fs, NTFS, FAT, exFAT, tmpfs, overlay,
+   FUSE, NFS, SMB, ...). Returns 0, or -1 when it is not known or out is too
+   small (out is then empty). */
+int ico_host_drive_fs_name(const char *path, char *out, size_t n);
+
+/* Notes a place the port reads or writes (which: ICO_DRIVE_DATA or
+   ICO_DRIVE_USER) for the start-up lines: returns the words to append to the
+   place's line (" on a network drive", " on a removable drive", else "") and
+   remembers the kind for the summary. */
+enum { ICO_DRIVE_DATA = 0, ICO_DRIVE_USER = 1 };
+
+const char *ico_host_drive_note(int which, const char *path);
+/* After that line: the one warning line to stderr when the noted drive is a
+   network, removable or CD one ("the game data is on a network drive: ..."). */
+void ico_host_drive_warn(int which);
+/* "drives: data fixed, user network" for the summary line (a place not yet
+   noted reads "unknown") */
+void ico_host_drive_summary(char *out, size_t n);
+
 #endif /* ICO_PLATFORM_HOST_FS_H */

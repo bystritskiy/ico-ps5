@@ -76,7 +76,11 @@ typedef struct IcoDrawCB {
      * 12.4 rect and UVs as 16-bit pairs: x x0 | y0 << 16, y x1 | y1 << 16,
      * z u0 | v0 << 16, w u1 | v1 << 16 (its colour in scale.zw, R + 256 G
      * and B + 256 A); aux1: the GS divide's reciprocals and the per-draw
-     * texel sizes (fx_sprite.hlsl).  Zero in every other draw. */
+     * texel sizes (fx_sprite.hlsl).  The reduction's sprite with the fades
+     * fold (port/render/rd_fades_fold.c): aux0 the fold's four steps, in
+     * fx_sprite_ps (FXF_FOLD) with the fold's other words in blend.xyz
+     * (no blend there), in sprite_ps (ICO_DF_FOLD) in aux1.xyz.  Zero in
+     * every other draw. */
     uint32_t aux0[4];
     uint32_t aux1[4];
 } IcoDrawCB;
@@ -169,6 +173,20 @@ enum { ICO_DF_GS_BILINEAR_GRID = 67108864 };
  * (port/render/rd_replay_aa1.inc aa1DateDraw).  Neither: every fragment. */
 enum { ICO_DF_AA1_MSB_SET = 134217728, ICO_DF_AA1_MSB_CLEAR = 268435456 };
 
+/* DrawCB.mode[0] bit 29 (common.hlsli DF_FOLD): the reduction's hardware
+ * sprite above 1x applies the fades fold (port/render/rd_fades_fold.c) to
+ * the texel it samples: DrawCB.aux0 the steps, aux1.x the count and the bar
+ * steps, aux1.y their alphas, aux1.z the bars' texel rows (sprite.hlsl
+ * sprite_fold). */
+enum { ICO_DF_FOLD = 536870912 };
+
+/* DrawCB.mode[0] bit 30 (common.hlsli DF_DATE_DST): with ICO_DF_DATE, the
+ * *_dstatt entries test DATE against the alpha they read from the colour
+ * attachment (common.hlsli GS_DATE_SNAP), each fragment after the earlier
+ * primitives' writes in rasterization order, not against the R8 snapshot:
+ * GS state as shader data (port/render/rd_uber.c). */
+enum { ICO_DF_DATE_DST = 1073741824 };
+
 /* DrawCB.mode[1] bits 8..: TEXFMT_* in gs_math.hlsli. */
 enum { ICO_TEXFMT_RGBA32 = 0, ICO_TEXFMT_RGB24 = 1, ICO_TEXFMT_RGBA16 = 2 };
 
@@ -176,7 +194,10 @@ enum { ICO_TEXFMT_RGBA32 = 0, ICO_TEXFMT_RGB24 = 1, ICO_TEXFMT_RGBA16 = 2 };
  * sheet_text.hlsli (the same values; port/render/test/sheet_ref.c
  * static-asserts each pair).  rd.h rd_create_texture_sheet says what they do.
  * The style reaches the shader in DrawCB.param: the rim's weight (0 off,
- * 64 full), rimLevel, fillLevel, dither (rd_replay.c, from RdTexRec.sheet). */
+ * 64 full), rimLevel, fillLevel, dither (rd_replay.c, from RdTexRec.sheet).
+ * At 1x the renderer computes the same texels on the CPU instead
+ * (rd_tex.c rd__sheet_bake_rect, into an RGBA8 texture font_sheet_baked_ps
+ * reads), with the same constants. */
 /* The values are the sheets' survey (the comment above kSheetInk in
  * port/ui/menu_font.c; ctest menu_look testSurvey).  The rim is
  * a weighted dilation: the largest coverage within ICO_SHEET_RX texels across
@@ -219,6 +240,16 @@ enum { ICO_TEXFMT_RGBA32 = 0, ICO_TEXFMT_RGB24 = 1, ICO_TEXFMT_RGBA16 = 2 };
  * shader in DrawCB.param.w above the dither bit: dither | (s - 1) << 1
  * (rd_replay.c sheetParam), so s = 1 leaves the dither word as it is. */
 #define ICO_SHEET_SCALE_MAX 4
+/* A 1x sheet's baked texture (rd_tex.c rd__sheet_bake_rect,
+ * font_sheet_baked_ps): the page's texels with an apron of ICO_SHEET_BAKE_AX
+ * texels left and right and ICO_SHEET_BAKE_AY above and below, so it is
+ * (w + 2 AX) x (h + 2 AY).  The apron holds the texels font_sheet_ps
+ * rebuilds outside the page (no coverage, the rim of the ink near the
+ * edge); one texel past the rim's reach every texel outside is the same
+ * (no coverage, no rim), so a read clamped to the apron is the shader's
+ * texel at any position. */
+#define ICO_SHEET_BAKE_AX (ICO_SHEET_RX + 1)
+#define ICO_SHEET_BAKE_AY (ICO_SHEET_RY + 1)
 
 /* Vertex of sprite.hlsl and font.hlsl: 20 bytes.
  *   loc 0 RHI_VTX_U16x2_UINT, loc 1 RHI_VTX_U32x1, loc 2 RHI_VTX_U8x4_UINT,

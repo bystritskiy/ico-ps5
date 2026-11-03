@@ -2,8 +2,9 @@
 
 How the port keeps the game's saves: [libmc](ARCHITECTURE.md#terms) answered from a folder on the
 host in the layout PCSX2's folder memory cards use, a second card in port 1 when one is configured,
-where those folders are on each platform, each disc's save directory and record, and the importer
-that copies an existing PS2 save into a card folder. The game's own card code
+where those folders are on each platform, each disc's save directory and record, the importer
+that copies an existing PS2 save into a card folder, and the rescue of an old save state's
+progress as a card save. The game's own card code
 (`ico2/fumi/ios/mcard.c`, `mcdata.c`) runs unchanged but for its region forms.
 
 ## Files
@@ -15,6 +16,10 @@ that copies an existing PS2 save into a card folder. The game's own card code
 | `port/compat/libmc.h` | the host's libmc header: the directory entry, the result codes, the function numbers, the calls |
 | `port/save/mc_import.h`, `mc_import.c` | the importer: a raw card image or a `.psu` archive into a card folder |
 | `tools/mc_import.c` | `mc_import`, the command-line importer |
+| `tools/state_recover.py` | the reader of an old save state and its build's symbol table: the side file |
+| `port/save/state_recover.h`, `state_recover.c` | the card save from a side file through the game's card code |
+| `port/save/tools/state_recover_tool.c` | `state_recover_tool`, its command line |
+| `port/save/test/state_recover_test.c` | the `state_recover` tests |
 | `port/platform/host_config.c` | `ico_host_saves_dir`, `ico_host_saves2_dir`: where the card folders are |
 | `port/save/CMakeLists.txt` | `ico_save` (the card), `ico_save_import` (the importer), the `mc_import` tool, the `save`, `save_jpn`, `save_kor`, `save_cn`, `save_ntsc`, `save_aug6` and `save_jun26` tests |
 | `port/save/test/save_test.c` | the same tests |
@@ -24,8 +29,8 @@ that copies an existing PS2 save into a card folder. The game's own card code
 ## The card
 
 Port 0 always holds a formatted 8 MB card whose root is the card folder; port 1 holds a second card
-only when a folder is configured for it, and is empty otherwise, as on a PS2 with one card
-(`port/save/mc_host.c`, header comment, `slot_ok`). Slot 0 is the only slot. `sceMcGetInfo`
+only when a folder is configured for it or Options > Gameplay > Second memory card is on, and is
+empty otherwise, as on a PS2 with one card (`port/save/mc_host.c`, header comment, `slot_ok`). Slot 0 is the only slot. `sceMcGetInfo`
 reports a PS2 card (type 2), formatted, with its free space in 1 KB clusters: 8000 less the
 clusters the folder's tree takes, each file rounded up to whole clusters and each directory one
 cluster (`port/save/mc_host.c` (`sceMcGetInfo`, `used_clusters`); `port/save/mc_host.h`
@@ -116,12 +121,22 @@ The other three discs (the North American disc, the August 2001 preview and the 
 shorter product file, 0x18C bytes (`mc_product_size`): upstream's `McProductFile` for them is twenty
 16-byte file summaries (0x140), then the sound, output and vibration options and the 64-byte pad
 configuration, with no `controlType`, current file, serial, `cameraMove` or `palMode` (upstream's
-`ico2/common/include/typedef.h`, its `VERSION_NTSC`/`AUG6`/`JUN26` arm; the file summary differs
-inside it: the North American disc's has `playTime`, `sofa` and an unread word, the preview's and the
-demo's a `cleared` word, `playTime` and `sofa`). The North American disc and the preview write the
-same directory, `BASCUS-97113ico`, but not the same records: the preview's file summaries are
-`stage`, `cleared`, `playTime`, `sofa` against the North American `stage`, `playTime`, `sofa`, unread
-word, and its story flags from 300 on are one lower (New Game 348 against 349, the queen 306 against
+`ico2/common/include/typedef.h`, its `VERSION_NTSC`/`AUG6`/`JUN26` arm). Each file summary is four
+words on all three discs: the stage, the play time in frames, the sofa and a word no code reads.
+That is how their code uses the record (upstream's 2001 `McPreview` in `layout_action.c`:
+`la_playtime_count` and `la_game_loop` count `IosMcPreviewInfo[1]`, `la_save_processing` puts the
+sofa in `[2]`, and the record is copied whole between `IosMcPreviewInfo` and the product file);
+upstream's `McFileInfo` names for the preview and the demo (`cleared`, `playTime`, `sofa`) have no
+reader. The host keeps the European `McFileInfo` on every disc and `mc_product_from_2001` /
+`mc_product_to_2001` (`ico2/fumi/ios/mcard.c`) move the four words in the disc's order into its
+first four, so on these discs the words named `cleared` and `playTime` hold the play time and the
+sofa: `layout_action.c` reads them through `la_preview_play` / `la_preview_sofa`, and the game-state
+view through the region row's `mc_preview_play` (1) and `mc_preview_sofa` (2) (the European
+program's 2 and 3). Earlier the North American disc's summaries were converted to the European
+places while the game kept writing the disc's, so every save put the sofa where the play time goes
+and a load restarted the count (issue 160). The North American disc and the preview write the
+same directory, `BASCUS-97113ico`, but not the same records: the preview's story flags from 300 on
+are one lower (New Game 348 against 349, the queen 306 against
 307: `region_ntsc.c`, `region_aug6.c` `gflag_*`; upstream `layout_action.c` keepFlagNo). On one
 card each would misread and rewrite the other's saves, so the port gives the preview a card folder
 of its own beside the configured one (a PC port divergence): `IcoRegionInfo.mc_card_suffix`
@@ -230,9 +245,34 @@ The first `sceMcInit` reads the folders unless a caller set them first with
   [user folder](ARCHITECTURE.md#terms) (`port/platform/host_config.c` (`ico_host_saves_dir`,
   `card_dir_key`)). A path too long for the buffer falls back to `memcard` in the working folder,
   with a log line (`port/save/mc_host.c` (`sceMcInit`)).
-- Port 1: `saves2=` in `ico-pc.ini`, else `[paths] saves2`, relative paths likewise; absent or
-  empty, port 1 has no card. With two cards the log says `mc: two cards: port 0 ..., port 1 ...`
-  (`port/platform/host_config.c` (`ico_host_saves2_dir`); `port/save/mc_host.c` (`sceMcInit`)).
+- Port 1: `saves2=` in `ico-pc.ini`, else `[paths] saves2`, relative paths likewise; with
+  neither, `memcard2/` in the user folder (beside `memcard/`) while `[gameplay]
+  second_memory_card` is on (Options > Gameplay > Second memory card), else no card. An explicit
+  `saves2` wins over the option. The option's value comes from the options module
+  (`ico_host_set_second_card`, set by `main_host.c`'s listener of
+  `ico_opt_set_second_memory_card`), or from `config.toml` before it is set (tools and tests;
+  `ico_host_second_card`). The log says `mc: two cards: port 0 ..., port 1 ... (Second memory
+  card on|off, saves2)` or `mc: one card: port 0 ..., port 1 empty (Second memory card off)`
+  (`port/platform/host_config.c` (`ico_host_saves2_dir`, `ico_host_second_card`);
+  `port/save/mc_host.c` (`sceMcInit`)).
+- The option changes port 1 at once: the listener calls `ico_mc_host_second_card_changed`, which
+  asks `ico_host_saves2_dir` again (the preview's `-preview` folder as `sceMcInit` does), and a
+  folder that differs goes in (or out, when empty) with `mc.changed[1]` set, so the next
+  `sceMcGetInfo` on port 1 answers `sceMcResChangedCard` once, a card freshly inserted. Its files
+  stay when it goes out. Log: `mc: Second memory card on: port 1 holds the card ...; the next save
+  or load screen offers both cards`, `mc: Second memory card off: port 1 is empty (its saves stay
+  in their folder)`, or `mc: Second memory card on|off: port 1 unchanged (...)` (an explicit
+  `saves2`) (`port/save/mc_host.c` (`ico_mc_host_second_card_changed`)). This is enough because
+  the game reads both ports each time a save or load screen opens: the load screen's check
+  `_la_set_current_port_2` and the save screen's `_la_set_current_port_new` (two
+  `_la_set_current_port_lock_2` passes) start from step 0 of `_la_memory_card_check` on port 0 and
+  then on port 1 when the screen opens (`first`), and step 0 clears that port's `mcPortInfo`
+  record and calls `iosMcGetInfo` (`ico2/common/src/layout_action.c`). Step 0's
+  `sceMcResChangedCard` is not checked there (steps 1 to 3 read only the type and format), and
+  `iosMcMgrChdirProduct` takes it as a card (`ico2/fumi/ios/mcard.c`). With both cards found the
+  game's own two-card screens show (the load screen's slot choice, layout 17 on the European disc,
+  and the save screen's, layout 18; `menu_text` rows 176/177/185, "MEMORY CARD slot 1/2"), as on a
+  PS2 with two cards.
 - On the August 2001 preview both folders get `-preview` appended (`memcard-preview`; see the
   North American disc and the preview above; `port/save/mc_host.c` (`sceMcInit`)).
 
@@ -294,6 +334,79 @@ file gave a save, 1 when one held none, 2 on an error (`tools/mc_import.c` (`mai
 tool is built by `port/save/CMakeLists.txt` and kept in every build (`cmake/IcoTests.cmake`
 (`ICO_KEEP_IN_ALL`)). The program itself does not call the importer.
 
+### Recovering progress from an old save state
+
+A save state loads only into a version that can resume it ([PLATFORM.md](PLATFORM.md)); a state
+of format 1 loads only into the build that made it. `tools/state_recover.py`
+and `state_recover_tool` take the progress such a state holds into a memory-card save that any
+version loads. No game starts and no disc is read.
+
+What a state holds that a card save needs: the game's globals as they were, among them
+`gameSysMainSaveBuff`, the save image the game's own `gamesysMemorySave` wrote at its last
+checkpoint. `CheckPoint` writes it whenever `systemStatus[2]` is set, which the boot sets for
+good (`ico2/common/src/StageManager.c` (`CheckPoint`); `ico2/common/src/main.c` (`boot`)); the
+stage scripts' checkpoints, the idol doors (`ico2/script/src/script.c`
+(`scpSekizouCheckPoint`)) and every sofa save run it, and a sofa save writes that image to the
+card right after (`ico2/common/src/layout_action.c` (`la_save_processing`, step 7)). After a game
+over the game puts that image back itself (`ico2/common/src/icoMisc.c`, `systemStatus[3]` and
+`[4]`). The image is the game's own: the records are not rebuilt from the state's other globals,
+which could not be done offline (the story flags `gflags` are a file-static the Android symbol
+table does not name, and the character and back-stage records read the live objects through
+pointers: `ico2/fumi/src/boyact.c` (`MakeCharacterPacket`), `ico2/common/src/backStage.c`
+(`backStageSave`)).
+
+The script reads the state file (format 1 or 2: the header, the section table, each section
+inflated and its CRC checked) and the symbol table of the build that wrote it: the Android
+package (its `lib/arm64-v8a/libmain.so`, whose dynamic symbol table names the game's globals with
+their sizes; a `libmain.syms.gz` that names only functions, as the format 1 packages' do, is
+refused), an
+ELF program or library, GNU ld's map beside a desktop program (the ELF map's `ico_gdata` and
+`ico_gbss` output sections, the PE map's `.data$ico_a` and `.data$ico_n` brackets of
+`port/platform/game_data_range.c`) or an nm table. The game data ranges' starts in the table
+against the `gdata` and `gbss` sections' saved addresses place every symbol; the two must agree,
+`stage_no` in the state must read the header's stage and the image must start with the disc's
+version stamp (`gamesys.c` `stamp_str_*`, or 18 zeros when the card it came from was another
+version's), else the table is not the state's build and the script refuses. It writes a side file
+(`port/save/state_recover.h`, header comment) with `gameSysMainSaveBuff`, `systemStatus`,
+`IosMcPreviewInfo`, `optionScreenMode`, `girlControlMode` and `IosMcProductFile`, then runs the
+tool on it when `--card` is given (`tools/state_recover.py`, docstring).
+
+The tool copies each blob into its own global of the same name, refusing a size that is not its
+own, a missing one, a state with no checkpoint since the game started or loaded
+(`systemStatus[3]` 0) and an image without the disc's stamp (`port/save/state_recover.c`
+(`ico_recover_apply`)). It then runs the game's card code as a save does
+(`ico_recover_write_card`; `ico2/fumi/ios/mcard.c` on the [fiber](ARCHITECTURE.md#terms)
+scheduler over `port/save/mc_host.c`, as `save_test` part B does): the card's product file read
+when there is one (a damaged one refuses the write), else made as a first save makes it (ten
+empty previews, the state's serial and options); the chosen slot's preview set as
+`la_save_processing` step 4 sets it (the image's stage and cleared flag, the sofa when the image is
+a sofa save, else -1, the state's play time), the record's current file set to the slot; the
+product file written, then the game block (`gameblock_write`: the image's first 25,588 bytes and
+the two option words, or the 2001 discs' block) and its sum; the file read back through the card
+and compared. The slot is the lowest one with no `game.00N`, or `--slot`; a slot that holds a save
+needs `--overwrite`. The icon files are never written (they come from the disc); a directory
+without them gets them at the game's next save. `config.toml`'s `[mirror]` and
+`achievements.toml` are not touched, so the slot has no mirror flag or achievement run of its own.
+
+Where the game resumes: a load starts the image's stage, `gflagSave`'s `gFlagSaveStage`
+(`layout_action.c` (`la_load_processing`): `stgmgrForceSwitchWithFade(gFlagSaveStage, ...)`),
+and puts the boy, and Yorda when the stage has her, at the end of the first exit into that stage
+in the exit table (`ico2/fumi/src/act-game.c` (`ACTGame_SetActors_Debug`,
+`getExitIndexOfStage`)), on the sofa when the image is a sofa save (`boyact.c`
+(`InitSwapWeapon`), the character record's layout id). The story flags, the objects' records,
+the generators, the hints and Yorda's state are the checkpoint's, not the moment of the state;
+the tool prints both stages.
+
+```
+python3 -I tools/state_recover.py SLOT.ics SYMBOLS [--disc SLUG] [--side OUT]
+    [--card CARD_FOLDER [--slot N] [--overwrite] [--tool PATH]]
+state_recover_tool SIDE_FILE --card CARD_FOLDER [--slot N] [--overwrite]
+```
+
+Both exit 0 when written, 1 when refused (the reason printed), 2 on a usage or card error. The
+tool is built by `port/save/CMakeLists.txt` and kept in every build (`cmake/IcoTests.cmake`
+(`ICO_KEEP_IN_ALL`)); the script finds the newest one under `build-host/*/port/save/`.
+
 ## Tests
 
 `port/save/test/save_test.c` is the ctests `save` (the European disc), `save_jpn` (the
@@ -324,5 +437,18 @@ game data (`port/save/test/save_test.c`, header comment; `port/save/CMakeLists.t
   is the test's second argument) on the same files, and the directories it prints; and the second
   card in port 1.
 
+`port/save/test/state_recover_test.c` is the ctests `state_recover` (the European disc) and
+`state_recover_jpn`, `_kor`, `_cn`, `_ntsc`, `_aug6` and `_jun26`: the side file, the globals and
+their refusals, and the card writes through `mcard.c` laid out byte by byte (the product record in
+each disc's own layout, the game block, the option words, the sums), a second write to the next
+free slot keeping the card's record, a taken slot, a damaged product file, a full card, and both
+read back through the game's loader. `state_recover_files`, `state_recover_py_apk`,
+`state_recover_py_map`, `state_recover_py_win`, `state_recover_py_refuse` and `state_recover_check`
+run the script on three builds' state files written by the state writer and their symbol tables
+(an ELF library in a package, GNU ld's ELF and PE maps; a functions-only nm table refused), the
+package's run writing the card through the tool, then compare the side files and the card save
+with the fixture (`port/save/test/state_recover_test.c`, header comment).
+
 Run them with `ctest --preset linux-x64 -R '^save(_jpn|_kor|_cn|_ntsc|_aug6|_jun26)?$'`; it needs the `mc_import` target, which every
-build keeps (`cmake/IcoTests.cmake` (`ICO_KEEP_IN_ALL`)).
+build keeps (`cmake/IcoTests.cmake` (`ICO_KEEP_IN_ALL`)); the rescue's with `ctest --preset
+linux-x64 -R '^state_recover'` (the script's tests need Python 3, `Python3_EXECUTABLE`).

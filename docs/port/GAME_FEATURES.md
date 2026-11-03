@@ -2,8 +2,8 @@
 
 The port's own features that reach into the game: the gameplay options and the places in `ico2/`
 that read them, achievements over a read-only view of the game state, photo mode, the model
-viewer and the characters' colours, the music gallery, the credits, the title logo, Add to
-Steam (Windows and Linux) and the Android build's graphics driver packages. The menus that show
+viewer and the characters' colours, the music gallery, the credits, the title logo, the community
+translations, Add to Steam (Windows and Linux) and the Android build's graphics driver packages. The menus that show
 them are [UI.md](UI.md)'s; the picture options are [DISPLAY.md](DISPLAY.md)'s.
 
 ## Files
@@ -12,12 +12,14 @@ them are [UI.md](UI.md)'s; the picture options are [DISPLAY.md](DISPLAY.md)'s.
 | --- | --- |
 | `port/game/options.h`, `options.c` | the gameplay options, their config keys and defaults, the mirror flag per save slot, the stereo/mono choice |
 | `port/game/door_grace.h`, `door_grace.c` | the doorway fix's arm and arrival grace |
+| `port/game/yorda_trip.h`, `yorda_trip.c`, `yorda_trip_live.c`, `yorda_trip_source.c` | Yorda trips: the rule (the main gate scene's 3 s count), the game's side (the stage load's motions, the run-pulled tick), her fall's motions read from the disc |
 | `port/game/variants.h`, `variants.c` | the game variants ([variants]): values, config keys, the achievements rule, the debug switches and debug-menu opener the game binds, the hint rule, the enemy row reader |
 | `port/render/rd_chain.h`, `rd_content_chain.c` | Natural chains: the two chains, the Null's transform, the links' clip planes |
 | `port/game/achievements.h`, `achievements.c` | the achievement table, its conditions, the counters, `achievements.toml`, the popups |
 | `port/include/ico_gamestate.h`, `port/game/gamestate.c` | the read-only game-state view: the snapshot, the signals, the run, the retail address table |
 | `port/game/photo_mode.h`, `photo_mode.c` | photo mode's state: the free and orbit cameras, the controls, the `[photo]` keys |
 | `port/game/photo_view.h`, `photo_view.c` | photo mode's camera put into the game's own matrices |
+| `port/game/eye_trail.h`, `eye_trail.c` | the shadows' eye trails in the world, redrawn from photo mode's camera |
 | `port/game/model_viewer.h`, `model_viewer.c` | Extras > Models and the game side of Extras > Characters |
 | `port/game/model_viewer_table.c` | the viewer's models and the motion-kind blocks |
 | `port/game/model_viewer_motion.c` | which motions of a block the loaded stage can play (`ico_mv_motion_playable`) |
@@ -27,8 +29,12 @@ them are [UI.md](UI.md)'s; the picture options are [DISPLAY.md](DISPLAY.md)'s.
 | `port/data/df_pack.h` | reading one member of a `DATA.DF` stage pack outside the game's disc thread |
 | `port/include/ico_credits.h`, `port/game/credits.c`, `credits_live.c` | the staff roll's port credit and the Extras credits playback |
 | `port/game/title_logo.h`, `title_logo.c` | the title logo hidden under the port's menus, the title's full-frame models |
+| `port/game/subtitles.h`, `subtitles_ru_bobttz.c`, `subtitles_ru_cobra838.c`, `subtitles_pt_br.c` | the community translations' subtitle tables: the words of each record each translates |
+| `port/ui/subtitle_text.h`, `subtitle_text.c` | the subtitles of the community translation in force, drawn as text in `jimakuDisp`'s place of the strips |
+| `port/ui/strings_ru_bobttz.c`, `strings_ru_cobra838.c`, `strings_pt_br.c` | the Russian (bob-ttz), Russian (cobra838) and Brazilian Portuguese (Igor Chagas, ichagas7) tables of the port's strings and the European disc's menu words |
 | `port/platform/steam_shortcut.h` | Add to Steam |
 | `port/platform/gpu_driver.h` | the Android build's graphics driver packages |
+| `port/game/state_host.c`, `state_rules.h`, `state_rules.c` | save states: the save, the load, the slots, the picture, the [dev] keys; the conditions and the listing |
 
 ## Gameplay options
 
@@ -49,6 +55,7 @@ defaults are [CONFIG.md](CONFIG.md#gameplay)'s; the differences from the PS2 are
 | `[gameplay] stick_fix` | `port/input/pad_host.c` |
 | `[gameplay] yorda_safe` | `ebrain.c`, `enemy_act.c`, `backStage.c` |
 | `[gameplay] door_fix` | `door_grace.c`, from `boyact.c` |
+| `[gameplay] yorda_trips` | `yorda_trip_live.c`, from `icoMisc.c` and `girl_act.c` |
 | `[gameplay] natural_chains` | `BgAnimation.c` (window build) |
 | `[gameplay] skip_opening` | `kanbanBoot.c`, `op.c`, `main_host.c` (its log line) |
 | `[gameplay] hold_type` | `mcard.c`, `layout_action.c`, `settings.c` |
@@ -116,6 +123,75 @@ The hooks are all in `ico2/fumi/src/boyact.c`:
 `port/game/test/door_grace_test.c` runs the arm and grace with the option off and on, holding
 hands or not, and a copy of the exit check's guard.
 
+### Yorda trips
+
+In the original game Yorda trips and falls in one place, the main gate's second stage
+(`st04a (GATE_2ND)`): its script counts the ticks her run-pulled bit is set and, once more than
+3 seconds' worth have passed, mails her the sit-down interrupt (`ico2/script/src/st04a.c`
+(`actSt04aGirlSitChk`): mail 109 on the European, Japanese, Korean and Asian discs, 102 on the
+North American disc, 101 on the August 2001 preview, 100 on the June 2001 demo). `actGirlHand` sets
+the bit in its pull state 2, where Ico runs pulling her (`ico2/fumi/src/girl_act.c`, one copy per
+disc). The interrupt's motion-orient row from her run loop, `GIRL HAND_RUNLOOP`, plays
+`GIRL SIT(HETARI)`, then `SITLOOP(HETARI)` until Ico moves on, then `SITEND(HETARI)` back into the
+hand walk or run loop (`SIT3END` when he stops); she stays in the hand mode, and Ico's reaction is
+the game's own. The watcher also sets her exhausted motion set's bit (paraStatus 42 on the European
+program, `ico2/fumi/src/act-game.c` (`ACTParaStatus_Exec` and its 2001 copies)); the port never
+sets it.
+
+The three fall motions are per-stage data (motion area 4), which every stage change clears
+(`ico2/sugipon/src/motionFileManager.c` (`ResetDynamicMotionManager`)), and only the pack of the
+main gate's second stage carries them (`STG4A2ND.DF` on the European, Japanese, North American and
+August 2001 discs, measured from the discs; the June 2001 demo's `DATA.DF` has no pack with them).
+With the option on, each `InitIcoMisc` copy calls `ico_yorda_trip_stage_loaded` right after the
+stage's pack (`ico2/common/src/icoMisc.c`), and every per-stage motion of hers named `HETARI`
+that the stage did not load goes into the stage's motion memory as `ReadMotionFile` puts one
+there (`ico2/common/src/charFileManager.c`): a block of `ios_partition_dmotion`, the file copied in,
+`InitMotionFile` (which relocates it in place, so it lies in the arena) and `AddMotionMemorySize`
+on the stage segment; the next stage change clears them with the rest
+(`port/game/yorda_trip_live.c` (`ico_yorda_trip_stage_loaded`)). Nothing is added in the two main
+gate stages, or while less than 1 MB of the partition would stay free. The motions (six, about
+116 KB, on the European disc; five, about 120 KB, on the 2001 discs) are found by name in the disc's
+motion table and read once a run from the first pack whose motion files hold `SIT(HETARI)`, on a
+second mount of the disc with an index of its own (`port/game/yorda_trip_source.c`
+(`ico_yorda_trip_find_ids`, `ico_yorda_trip_source_read`)); the read is the port's disc I/O on the
+game thread during the stage load, and the only lock it takes is that mount's own. A save state
+carries the motions with the arena and `motionTable`; nothing in it points at the host copies.
+
+The hook is `ico_opt_yorda_trip_tick` right after each `actGirlHand` copy sets the run-pulled bit,
+with that disc's mail. The rule (`port/game/yorda_trip.c` (`ico_yorda_trip_step`)) is the main
+gate scene's own (`ico2/script/src/st04a.c` (`actSt04aGirlSitChk`, and the June 2001 demo's
+`actSt04aGirlSitChk_jun26`)): consecutive run-pulled ticks are counted by `frame_count` (a missed
+tick, the scene's tick without the bit, starts the count again); once the count passes
+`((60 - systemStatus[0] * 10) / systemStatus[1]) * 3` ticks (3 seconds: 25 ticks a second at
+50 Hz, 30 at 60 Hz, so the trip comes on the 76th or the 91st tick of a run), the count starts
+again from 0 and the mail goes, the watcher's own `iosOmSendMail(girl, mail, girl)`, so every
+further 3 seconds of running hand in hand trip her again. There is no random roll and no wait
+between trips. Where a guard fails on that tick no mail goes and the count starts again all the
+same, as the scene's count does after a mail that does not take effect.
+The guards (`yorda_trip_live.c` (`guards`)): she is in `GIRL HAND_RUNLOOP`; the three fall motions
+are loaded, and every motion their motion-orient rows lead on to is the stage's own or loaded (the
+European disc's second motion set, six stages, has no `SIT3END` and no hand loops); her exhausted
+bit is clear; the game is not paused (`systemStatus[5]`) and Ico is under control
+(`IsAbleBoyControl`, `scpBoyControlReadDisable`); no game over; the stage is not one of the main
+gate's two (its name starts `st04a `). The count and its tick stamp are save state blocks
+(`yorda_trip.run_ticks`, `yorda_trip.last_tick`; `port/platform/state_port.c`), so a state resumes
+the count; both are FRESH ([PLATFORM.md](PLATFORM.md#the-registry)), so a state another build made
+without them still loads and the count goes on from the running game's. `gameplay.yorda_trips` is
+a simulation key (`port/platform/sim_keys.c`, default `false`): a state saved before the key
+existed loads while the option is off.
+
+Log lines: `gameplay: yorda trips on|off` at the first read and on a change; at the first read of
+the motions `yorda trips: N of her M motions read from STG4A2ND.DF (B bytes) in T ms`, or why
+not and `she does not trip on this disc`; at each stage load with the option on `yorda trips: N
+motions (K KB) added to the stage's motion memory (stage S, F KB left)`, `stage S loads her N
+motions itself`, `stage S (name) plays her own fall: nothing added`, or `the stage's motion memory
+is full (...): Yorda does not trip here`; on a trip (the first 8, then every 100th) `yorda trips:
+tripped at stage S after 3 s of running (trip N this run)`.
+
+`port/game/test/yorda_trip_test.c` runs the rule, the guards and the stage load on each disc;
+`yorda_trip_disc_test.c` lists the motions and their pack on the configured disc image
+([TESTING_PROGRAMS.md](TESTING_PROGRAMS.md)).
+
 ### Natural chains
 
 Two stage animations let a chain down for the player, `st10l_chain_down` (stage 17) and
@@ -132,7 +208,7 @@ The hooks are in `ico2/seki/src/BgAnimation.c`, under `ICO_RD` only (the
 rd_chain_find(p->group)` and `bgaHostNatural = bgaHostChain != 0 && ico_opt_natural_chains()`;
 `bga_CalcObject` reads them at the Null and at its children. The plane travels from
 `RegistPacket.c`'s `regHostMesh` to `rd_draw_vu_mesh`. Being a draw-only change, the key is not
-among the keys a pad recording's header records (`port/platform/main_host.c` (`record_keys`);
+among the keys a pad recording's header records (`port/platform/sim_keys.c` (`ICO_SIM_KEYS`);
 `port/game/options.h`, header comment). `hold_type` is recorded, as R1's meaning changes the simulation.
 
 ### Mirror
@@ -299,6 +375,7 @@ hold the rest.
 | --- | --- | --- | --- | --- | --- | --- | --- | --- |
 | Display: 50 Hz (title only) | W | H | H | H | H | H | H | `has_50hz_row`; `settings_discs`, `settings_<slug>` |
 | Main: Game language | W | H | H | H | H | H | H | `has_game_language`; `settings_discs`, `settings_<slug>` |
+| Main: Game language's community entries (Русский (bob-ttz), Русский (cobra838), Português (Brasil) (ichagas7)) | W | H | H | H | H | H | H | the row's own rule (`has_game_language`); in force only there with the game in English (`ui_settings_text_language`), so `[game] text_language` changes nothing on the other discs ([Community translations](#community-translations)); `subtitles_ru`, `subtitles_ru_<slug>` (jpn, kor, cn), `subtitles_ru_cobra838`, `subtitles_ru_cobra838_<slug>`, `subtitles_pt_br`, `subtitles_pt_br_<slug>`, `jimaku_text` |
 | Main: Menu language | W | W | W | W | W | W | W | Auto is `ui_lang_default`, the sheets `menu_sheet`; `settings_<slug>`, `settings_render_<slug>` |
 | Controls: Hold type | W | W | W | W | W | W | W | `hold_type_own`, the default `"disc"`: A on pal/jpn/kor/cn, B on ntsc/aug6/jun26 (the 2001 arms `_ACTCommonMailTest_<disc>` read `optionControlType` in the port); `settings_discs`, `options_<slug>`, `save` (per disc) |
 | Controls: Circle goes back | W | H | H | W | W | W | H | `pad_back` is Triangle (`lt_ext_has_circle_back`); the 2001 arms cancel through `LA_BACK` too; `settings_discs`, `settings_<slug>` |
@@ -306,7 +383,10 @@ hold the rest.
 | Picture: Downsampling | W | W | W | W | W | W | W | the port's own renderer option (`[video] downsample`, `ico_video_downsample`), no game hook; `options`, `settings` |
 | Gameplay: stick fix, Yorda, door fix, natural chains | W | W | W | W | W | W | W | the hooks sit in every disc's arm (`backStage.c`, `ebrain.c`, `enemy_act.c`, `boyact.c` `CheckCollisionAttr_ntscaug6jun26`, `BgAnimation.c` `bga_CalcAnimation_<disc>`); `options_<slug>` |
 | Gameplay: Time to rescue Yorda | W | W | W | W | W | W | W | one hook in each `actEnemyKidnapEnd` copy (`enemy_act.c`: motion 952 on pal/jpn/kor/cn, 903 ntsc, 905 aug6, 938 jun26): the dive's play speed is reserved at priority 0 as `1/factor` (`2/factor` under a stage camera effect, which the demo has none of) and the camera's 5 s timeout is scaled by the factor; the frame-50 test, the dissolve and the freeze (priority 9) are the game's; `options_<slug>` (the hook scan), `settings_discs` |
+| Gameplay: Shadow speed | W | W | W | W | W | W | W | `ACTGame_SetMotionPlaySpeedRatio_Exec` (`act-game.c`, one copy for every disc) multiplies the resolved play-speed ratio of a `kind == 4` actor by the factor (0.75, 1, 1.25, 1.5), except the freeze (ratio <= 0.001) and this disc's kidnap-end motion (the pit dive, `pit_time`'s); walking and running are root motion, so the ground speed scales in step; the forward push of `flyCoreLoop` and its two per-disc copies (`commonact.c`) is multiplied for `kind == 4`; brain and wait timers, turn smoothing and path finding are untouched; log `gameplay: shadow speed <name> (x<factor>)`; `options_<slug>` (the source scan), `settings` |
+| Gameplay: Yorda trips | W | W | W | W | W | K | W | each `actGirlHand` copy's run-pulled tick with the disc's mail (109 on pal/jpn/kor/cn, 102 ntsc, 101 aug6, 100 jun26) and both `InitIcoMisc` copies; the motions found by name; the June 2001 demo's `DATA.DF` holds no pack with her fall, so nothing is added and she never trips there (logged); `options_<slug>` (the hook scan), `yorda_trip_<slug>`, `settings_discs` |
 | Gameplay: Skip the opening | W | W | W | W | W | W | W | `kanbanBootMain`/`_jun26`, `actOpDemo01`/`_ntsc`/`_aug6jun26`; `kanban_boot_<slug>`, `settings_extra_<slug>` |
+| Gameplay: Second memory card | W | W | W | W | W | W | W | no game hook: port 1's folder (`ico_host_saves2_dir`, `memcard2-preview` on the preview); every disc's `_la_memory_card_check` (and `_jun26`) reads both ports when a save or load screen opens; `save_<slug>`, `settings_discs_<slug>` |
 | Gameplay: Film effect (pause, once cleared) | W | W | W | H | H | H | W | `has_film_effect` (no `film_noise` in the 2001 stage tables, `reel_row` -1); `settings_discs` |
 | Gameplay: Players (pause, once cleared) | W | W | W | W | W | W | W | the 2001 arms carry the European second-pad branches ([Players on the 2001 discs](#players-on-the-2001-discs)); the count kept per save beside the card there (`[players]`); `settings_discs`, `options_<slug>` |
 | Audio: Sound output | W | W | W | W | W | W | W | `soundOutputModeSet` on every disc; `options_<slug>` |
@@ -320,12 +400,13 @@ hold the rest.
 | Extras > Characters | W | W | W | W | W | W | W | the characters' textures by name (`appearance.c`); `appearance`, `settings_extras` (from the title it runs in the model viewer) |
 | Extras > Credits (title, once unlocked) | W | W | W | W | W | H | W | `credits_staff_packs` (the demo's DATA.DF has no `STGSTAFF*.DF`); `settings_discs`, `settings_extras_<slug>`, `credits_<slug>` |
 | Extras > Export textures, Add to Steam | W | W | W | W | W | W | W | the running disc's `DATA.DF`; disc-independent |
+| Extras > Back up your data, Restore from a backup (title) | W | W | W | W | W | W | W | the user folder's files, every disc's at once (the card folders hold each disc's directory; `states/<slug>/`); the manifest names the disc played; `backup`, `settings_backup`, `settings_backup_<slug>` (jpn, kor, cn) |
 | Photo mode (Film effect 1 to 4, Deja vu) | W | W | W | W | W | W | W | the grain is `gsb_filmNoise` on every disc (the 2001 arm's call is the port's); no reel scratches where `reel_row` is -1 (logged) |
 | Achievements | W | W | W | W | W | W | W | `ach_stages`, `key_suffix`; `achievements_<slug>` |
 | The New Game screen (Mirror mode, New Game+) | W | W | W | W | W | W | W | the start flag `gflag_new_game` (issue 147); `settings` `testNewGameStartFlags`, `settings_discs` |
 | The title's Settings and Quit rows, the quit screen | W | W | W | W | W | W | W | `row_title_*` (placeTitle); `settings_<slug>`, `settings_render_<slug>` |
 | The pause menu's Options (and its Extras) | W | W | W | W | W | W | W | `row_pause_options`, `layout_pause`; `settings_<slug>`, `settings_extra_<slug>` |
-| Continue and the save slots | W | W | W | W | W | W | W | `layout_mc_files`, `row_mc_*`, `la_host_mc_slot_pickable`; `settings_extra` (pointer), `save` runs per disc |
+| Continue and the save slots | W | W | W | W | W | W | W | `layout_mc_files`, `row_mc_*`, `la_host_mc_slot_pickable`; `settings_extra` (pointer), `save` runs per disc; the Save states prompt (`layout_load_files`, `la_host_mc_files_shown`) is unit-tested per disc (`settings_states_*`), not played |
 
 A port site that writes one of these numbers itself, instead of reading the region table, is what
 `region_literals_check` (`tools/check_region_literals.py`, [TESTING.md](TESTING.md)) fails on.
@@ -452,6 +533,24 @@ counters are one set for the player ([SAVES.md](SAVES.md#the-seven-discs); `port
 (`run_key`, `write_file`, `read_file`)). The ctests `achievements`, `achievements_jpn` and `achievements_kor` run the
 same program with each disc selected (`port/game/test/achievements_test.c`, `test_discs`).
 
+When the file is written (issue 126, finding F2): `write_file` renders the whole text on the game
+thread, in memory, over the text the file had when it was read (`s_base`, read once on first use and
+then kept as the text last rendered, so the keys and comments the port does not know stay without
+reading the disk again), and `writer_submit` hands a copy to one writer thread
+(`port/platform/ico_thread.h`), which writes `achievements.toml.tmp`, syncs and renames it
+(`ico_toml_write_text`). At most one text waits: a newer one replaces it (the latest wins). An
+unlock, a save slot and the counters all go through the same `commit`, so the base always holds
+every key. The counters write `ICO_ACH_STATS_FLUSH_TICKS` after the last write, but while the only
+change is the hand-held time (it changes every tick Yorda is led) the period is
+`ICO_ACH_HAND_FLUSH_SECONDS` (60 s) at the Main tick rate (`ico_ach_flush_due_ticks`). A write that
+fails on the thread makes the counters pending again at the next tick; `ico_ach_flush` (the exit
+and shutdown hook) writes what is dirty, joins the thread and tries once more after a failure. A
+write over 20 ms logs `achievements: the file write took N ms (<path>)` (the first 8, then every
+100th). The game thread's cost per write is the render (a few hundred bytes to a few KiB), so the
+slow-step line's `achievements` component holds the render alone, not the drive. `test_write_path` in
+`achievements_test.c` holds the writer (`ico_ach_writer_hold`) to check the replaced text, the two
+periods and the retry after a failed write.
+
 Achievements are suspended, no counter advancing and nothing unlocking, while developer mode or
 `[dev] start_stage` is on, the model viewer is up or the Extras credits are playing, and for the
 rest of a run in which any of them was; Yorda safe, the stick fix and mirror do not suspend them
@@ -489,6 +588,36 @@ The game raises signals through one-line calls (`ico_gs_signal(event, arg)`):
 host thread or the host loop between scheduler runs (`ico_gs_signal`). `ico_gs_peek` serves a few
 bytes at a retail PAL [EE](ARCHITECTURE.md#terms) address from the snapshot's fixed globals, with
 its table from `ico_gs_peek_table`; every other address is refused (`ico_gs_peek`).
+
+### How the pause menu's stats are counted
+
+The panel's lines (`port/ui/settings.c` `pauseStats`) read the run's counters (`ico_gs_run_*`),
+each fed by one path (issue 162):
+
+- Yorda captured: the `YORDA_GRABBED` hook counts the capture the moment the shadow sets `carrier`
+  (`actEnemyForceSwitchToCarry`, `enemy_act.c`). Her `actMode` changes only when her own fiber reads
+  the reserve mail (`ACTReserveTarget`, `act.c`), a tick or so later, so the snapshot's
+  `yorda_carried_by_enemy` rises after the hook. `ico_gs_tick` counts that rise only for a capture
+  the hook missed: not within `CAPTURE_MAIL_TICKS` (4) of a counted hook, and not while a
+  hook-counted capture is still carried (cleared when she is dropped or a stage is entered). A second
+  capture after a drop fires the hook again and counts. The carried mode is per disc
+  (`ico_gs_carried_act_mode`): `0x6F` on the European, Japanese, Korean and Asian discs, 107 on the
+  North American and August 2001 discs, 106 on the June 2001 demo (the game's
+  `PAL_NTSCAUG6_JUN26(0x6F, 107, 106)`); the rise also raises `YORDA_RESCUED` when she is freed, so
+  the rescue achievement needs it right.
+- Deaths: `GAME_OVER`, raised by `ACT_LAYOUT_GAMEOVER` (`commonact.c`), which runs once per stage
+  entry (`gameover_layout_flag`, cleared by `InitSceneObjects`). The June 2001 demo's death paths
+  switch layouts without it (`actCommonDie_jun26`, `actCommonStoneDead_jun26`, `actCommonStone_jun26`,
+  `actEnemyKidnapEnd_jun26`), so they call `ico_gs_signal_game_over_once`: one signal per stage entry.
+- Saves: `SAVE_DONE` on the rise of the save-complete layout, which `la_save_processing` returns
+  only after the last write.
+- Enemies: `ENEMY_KILLED` from the two die procs; each ends in `_ACTWait(0)`, which never returns.
+- Play time: the card preview's play-time word, read, not counted.
+
+Log lines (`stats:`): `Yorda captured N (hook|flag) at tick T, stage S` at each counted capture,
+`Yorda carried (the capture counted K ticks ago)` for a rise the hook already counted, and
+`game over not counted (already counted on this stage entry)`; the first 8 of each, then every
+100th. The ctest `achievements` (`test_capture_once`) drives the sequences and the per-disc mode.
 
 ## Photo mode
 
@@ -545,6 +674,28 @@ zoomed is marked as a free camera (`rd_free_camera`, `RdCamera.freeCamera`): the
 keeps the triangles with a vertex behind it, which the game's own cameras rely on being dropped;
 the game's rule stays while the aspect sweep runs and while the photo camera is still the game's
 (`port/game/photo_view.c` (`ico_photo_view_tick`, `photoIsGameCamera`)).
+
+The shadows' eye trails are the one draw that keeps screen positions from tick to tick: each eye
+trails a strip of ten point pairs, the newest built once a tick by projecting the eye's point
+through `+0x80` and `+0xC0` and joining it to the point before, the older ones the earlier ticks'
+pairs shifted along (`ico2/sugipon/src/enemyParts.c` (`UpdatePointBlur`, `moveDataElements`)). The
+paused game does not update them, so under a moved camera the eye's model follows the camera and
+its strip would stay where the game camera put it. `UpdatePointBlur` also hands each point to a
+side table of 64 trails keyed by the blur: the point's world position, the world position it is
+joined to, its width and the pair the game wrote; a reset (the blur's dirty flag) fills the trail
+with the newest point as the game copies the newest pair (`port/game/eye_trail.c`
+(`ico_eye_trail_push`)). While `ico_photo_view_moved` is 1 (this tick's photo camera is not the
+game camera at enter: moved or zoomed; 0 after leave), `DispEnemyEye` draws a strip rebuilt
+from those points with the same arithmetic through the matrices now in `+0x80` and `+0xC0`,
+frame-projected in the window build (`gif_HostFrameProjected`), and leaves the game's strip and colours as they
+are, so play resumes from them (`ico_eye_trail_rebuild`). Through the game's own matrices the
+rebuild is the game's strip byte for byte. A trail the table cannot rebuild is drawn as the game
+drew it: one just started (its newest point joined to no point the trail saw), one the table does
+not hold (after a save state load), or one whose strip is not the one its points recorded. The
+first rebuild of a session writes `photo: eye trails drawn from the photo camera (10 points
+each)`, and leave writes the session's counts (`photo: eye trails: N drawn from the photo camera,
+M as the game drew them (...)`, `ico_eye_trail_photo_end`). Photo mode only: in play the strip is
+the game's, not frame-projected.
 
 ### The Deja vu filter
 
@@ -719,10 +870,19 @@ headless `gallery_sweep` test drives (`port/ui/gallery.c`, `scriptParse`; [TESTI
 
 The staff roll posts the lines of the disc's `staffRollNameData` and then the port's own lines, in
 every roll, the real ending's and the Extras playback's; the disc's table is not changed
-(`port/include/ico_credits.h`, header comment). The port lines are twelve blank lines, the heading
-`{R}< Decompilation and PC Port > `, four blank lines and the name `{R}Nathanial Fine `, in the
-roll's own forms and ASCII only, because the roll draws with `font_Print`'s bitmap font
-(`port/game/credits.c` (`s_lines`)). The game's side is three host lines in
+(`port/include/ico_credits.h`, header comment). The port lines are four blocks, each twelve blank
+lines, a heading, four blank lines and its names with two blank lines between them, as the disc's
+own `< Special Thanks >` spaces its names: `{R}< Decompilation and PC Port > ` and
+`{R}Nathanial Fine `; `{R}< Translation > `, `{R}bob-ttz `, `{R}cobra838 ` and `{R}ichagas7 `;
+`{R}< Contributors > `, `{R}katsifolis `, `{R}braito4 `, `{R}neetgon ` and `{R}KClough `;
+`{R}< Special Thanks > ` (the disc's own heading text) and `{R}Sad Origami `, 87 lines in all
+(`ICO_ROLL_PORT_LAST` 86). They are in the roll's own forms and ASCII without the backtick only,
+because the roll draws with `font_Print`'s bitmap font (`port/game/credits.c` (`s_lines`, a table
+of the non-blank lines at their indices, the others blank)). The roll logs
+`credits: the port credit is posted` at the port's first heading and
+`credits: the port's last line is posted` at Sad Origami. The 87 lines take about 16 s of the roll
+at its 60 units a second (11 units a line), so the ending's later scenes come that much later
+([DIVERGENCES.md](DIVERGENCES.md) GL-7). The game's side is three host lines in
 `ico2/common/src/staffroll.c`: `staffRollStart` logs the roll's length through `ico_roll_started`,
 `staffRollNameOut` takes `ico_roll_port_line(rollNameIdx - staffRollNameDataNum)` past the disc's
 lines, and the roll ends after `staffRollNameDataNum + ico_roll_port_count()` lines.
@@ -768,6 +928,71 @@ screen, to the [native frame](ARCHITECTURE.md#terms) by scaling its node matrice
 `gsFrame.w / 512` when `ico_title_fullframe_model` names it (`port/game/title_logo.h`
 (`ico_title_fullframe_model`)).
 
+## Community translations
+
+A community translation is a player's translation of the game into a language the disc does not
+have, built into the port as text ([TRANSLATING.md](../TRANSLATING.md) for the contributor and the
+maintainer). Russian, by bob-ttz, is the first (`UI_LANG_RU_BOBTTZ`), Russian by cobra838 the
+second (`UI_LANG_RU_COBRA838`, `[game] text_language = "ru-cobra838"`, the same path with its own
+two tables), Brazilian Portuguese by Igor Chagas (ichagas7) the third (`UI_LANG_PT_BR`,
+`[game] text_language = "pt-br"`, likewise); the Language row offers them after the European disc's
+five (entries 5, 6 and 7 of eight), and choosing one sets the game's language to English
+(`NonLinearCameraMove` 2: the English subtitle files, menu sheets and stage animations, and the
+English language byte in the save's product file, so the saves are the English game's) and writes
+`[game] text_language = "ru-bobttz"` (`port/ui/settings.c` (`setLanguageEntry`, `languageEntry`)).
+The five disc languages keep their order, their values and their path. The translation is in force
+on a disc whose game has a language of its own (the European disc) while that language is English
+(`port/ui/ui_lang.h` (`ui_settings_text_language`)); a `[game] language` other than English, or any
+other disc, leaves the disc's own pictures, whatever the key says. In force:
+
+- the port's text follows it while the Menu language is Auto (`ui_settings_resolve_language`);
+- the game's own menu words (the European disc's menu text table, [UI.md](UI.md#the-games-own-menu-words))
+  are the translation's `UI_STR_MT_*` strings, laid out with the English sheet's geometry
+  (`port/ui/strings.h` (`ui_menu_words_language`), `port/ui/menu_font.c` (`itemWords`)); an id it
+  leaves untranslated is the English sheet's word;
+- the subtitles: `jimakuDisp` (`ico2/fumi/src/jimaku.c`, the arm the European, Japanese and Korean
+  discs share) asks `ui_subtitle_words` for the shown record's words before it draws the record's
+  two strips (texProperty 434 and 435), under the same conditions (the record shown, its picture
+  loaded, subtitles on); with words it opens `display_texture`'s packet (list 11, ALPHA
+  `(1, 7, 0)`, register 74, no Z) and calls `ui_subtitle_draw` with the strips' colour (the fade's
+  `~reductionCol`) instead of the two `display_texture` calls (`display_words`). The words are
+  centred in the band the strips cover (grid x 64 to 576, field lines 144 to 192), one or two
+  lines 44 y units apart about its middle, in the menus' look at `UI_SUBTITLE_EM` (the menu rows'
+  em), set smaller as a whole when the widest line passes 496 x units (`port/ui/subtitle_text.h`).
+  The record's picture is still read and made a texture, the semaphores and the display time are
+  the game's, photo mode shows neither. A record the table leaves out keeps its picture, and so
+  do Yorda's records on a first play: the disc's first-play files show her own script there and
+  the cleared game's files English (`IcoSubtitle.secondOnly`; records 9, 29, 31, 48, 49, 86, 91,
+  112). The North American disc, the 2001 previews and the Asian disc have their own `jimakuDisp`
+  arms, which do not ask.
+
+What stays in English under a translation: the pictures the menu text table leaves out (the
+"Sony Computer Entertainment Europe Presents" plate and the copyright line, the logos, the
+LANGUAGE and TV headers, the 50/60 Hz notes: [UI.md](UI.md#the-games-own-menu-words)), the language
+versions of the title and ending logo animations (`ico2/script/src/e3.c` (`actE3TitleFrameChk`),
+`ico2/script/src/end.c` (`actEndLogoChk`) pick by `NonLinearCameraMove`), and the staff roll, whose
+bitmap font has ASCII only ([The credits](#the-credits)).
+
+The log names the change of every subtitle record under a translation, the first eight and then
+every hundredth (`ui: subtitles: record N (first|second play) drawn as text|keeps the disc's
+picture (ru-bobttz, 42 entries)`), the Language row's step (`settings: Language ru-bobttz (game
+language 2, [game] text_language "ru-bobttz")`) and the key as read (`options: [game]
+text_language = "ru-bobttz": a community translation`, or the word it does not know).
+
+Russian (cobra838) came as C tables in pull request 180 (`port/ui/strings_ru.c`,
+`port/ui/subtitles_rus.c` there) rather than the two CSV files; they were converted once into
+`strings_ru_cobra838.c` and `subtitles_ru_cobra838.c` by the steps and checks of
+[TRANSLATING.md](../TRANSLATING.md#adding-a-translation), its log lines name `ru-cobra838`.
+
+Brazilian Portuguese came as the two CSV files of issue 157, saved from a spreadsheet that holds
+each template row in its first column (split in two where the English has a `;`) and the
+translation from its third; they were converted once into `strings_pt_br.c` and
+`subtitles_pt_br.c` by the same steps and checks, its log lines name `pt-br`. cobra838's copy of
+the same menu table (PR 180) then corrected 7 of its rows and filled 55 of its NULL ones (marked
+`[cobra838]` in the table; the subtitles are Igor Chagas's alone). The language's
+letters (á â ã à ç é ê í ó ô õ ú and their capitals, …) were already in Arimo's subset (Latin-1),
+so the font did not change.
+
 ## Add to Steam
 
 Settings > Extras > Add to Steam writes a non-Steam shortcut named "ICO" for the program into the
@@ -779,6 +1004,35 @@ name with the top bit set (`port/platform/steam_shortcut.h` (`ico_steam_add_this
 the Android and iOS builds do not compile it and the macOS build does not offer the row
 (`CMakeLists.txt`, the window build section; `port/platform/window_host.c` (`steam_add_handler`)).
 `port/platform/test/steam_shortcut_test.c` has the checks.
+
+## Save states
+
+Four slots per disc hold a snapshot of the whole running game (`port/platform/state.h`;
+[PLATFORM.md](PLATFORM.md#saving-and-loading) has the file, the sequences and the log lines).
+What a player sees:
+
+- **Saving** is done from the pause menu (its Save states row, or F5 for slot 1 in the desktop
+  build) and only while nothing else is under way: no stage change, no memory card save or load,
+  no disc read in flight, no movie, not photo mode, the Extras credits or the music gallery. F5
+  away from the pause menu says to pause first. A popup says "State saved to slot N" once the file
+  is written; the slot shows the picture of the frame shown after the save (the pause menu in it),
+  the area and the play time.
+- **Loading** works from the pause menu and from the title (Options > Extras > Save states), or F9
+  for slot 1, under the same conditions but the pause. The game comes back exactly where it was,
+  on the pause menu. A state saved by another version of the program, from another disc, on
+  another platform, or with a gameplay setting that changes the simulation set otherwise
+  (`port/platform/sim_keys.h`: the popup names the setting) is refused, and so is a damaged file;
+  the game goes on. A state whose memory fails the checks after it is put back is undone the same
+  way.
+- **What a load keeps**: the achievements, their counters, the session's and the run's counts
+  (fresh, captures, game overs) stay as they were (DIVERGENCES.md GL-17); the options are the
+  player's, not the state's.
+- **Off**: a build where the game's data cannot be found as a whole (`state: the game's data
+  ranges are not bracketed ...`), a sanitizer build, or no folder to write to: the row and the keys
+  say "Save states are off on this build".
+
+The files are `<pref>/states/<disc>/slot<n>.ics` and `slot<n>.png` (on Android, the app's files
+folder). The page itself is [UI.md](UI.md)'s.
 
 ## Android driver packages
 
@@ -796,10 +1050,10 @@ are [PLATFORM.md](PLATFORM.md#android-graphics-driver-packages)'s.
 
 Each is a ctest: `settings_discs` and its six other-disc runs (the rows each disc shows,
 [Options on each disc](#options-on-each-disc)), `options` (`port/game/test/options_test.c`: the defaults, the setters,
-`eBrainGetTarget` with Yorda safe), `door_grace`, `achievements`, `photo`, `appearance` and
-`appearance_disc`, `credits`, `title_logo` and `model_viewer_headless` (`port/game/CMakeLists.txt`);
+`eBrainGetTarget` with Yorda safe), `door_grace`, `yorda_trip` and its six other-disc runs, `yorda_trip_disc`, `achievements`, `photo`, `appearance` and
+`appearance_disc`, `credits`, `title_logo`, `state_host`, `jimaku_text` (the subtitle hook) and `model_viewer_headless` (`port/game/CMakeLists.txt`);
 `gallery`, `gallery_sweep`, `credits_headless`, `model_viewer`, `model_viewer_cam`,
-`model_viewer_effects` and `model_viewer_effects_elf` (`port/ui/CMakeLists.txt`); `steam_shortcut` and `gpu_driver` (`port/platform/CMakeLists.txt`).
+`model_viewer_effects`, `model_viewer_effects_elf`, `subtitles_ru` and its three other-disc runs (`port/ui/CMakeLists.txt`); `steam_shortcut` and `gpu_driver` (`port/platform/CMakeLists.txt`).
 [TESTING.md](TESTING.md) has how to run them.
 
 ## Video options

@@ -39,6 +39,12 @@ const char *const ui_strings_de[UI_STR_COUNT] = {
     [UI_STR_VAL_PIT_LONGER] = "Länger",
     [UI_STR_VAL_PIT_DOUBLE] = "Doppelt",
     [UI_STR_VAL_PIT_TRIPLE] = "Dreifach",
+    [UI_STR_OPT_SHADOW_SPEED] = "Tempo der Schatten",
+    [UI_STR_OPT_SHADOW_SPEED_NOTE] =
+        "Wie schnell Schatten gehen, rennen und fliegen. Wie oft sie angreifen, ändert sich nicht.",
+    [UI_STR_VAL_SPEED_SLOWER] = "Langsamer",
+    [UI_STR_VAL_SPEED_FASTER] = "Schneller",
+    [UI_STR_VAL_SPEED_FASTEST] = "Am schnellsten",
     [UI_STR_LANG_EN] = "English",
     [UI_STR_LANG_FR] = "Français",
     [UI_STR_LANG_DE] = "Deutsch",
@@ -437,7 +443,7 @@ const char *const ui_strings_de[UI_STR_COUNT] = {
     [UI_STR_OPT_EFFECT_MOTION_BLUR] = "Bewegungsunschärfe",
     [UI_STR_OPT_EFFECT_FOG] = "Nebel",
     [UI_STR_EFFECTS_NOTE] =
-        "Die Bildeffekte des Spiels. Alles An ist das PS2-Bild; die Voreinstellung ändert sie nicht.",
+        "Die Bildeffekte des Spiels. Alles An ist das PS2-Bild; die Voreinstellung ändert sie nicht, außer Leuchten zwischen Bildern.",
     [UI_STR_STATS_PLAY_TIME] = "Spielzeit",
     [UI_STR_STATS_DEATHS] = "Tode",
     [UI_STR_STATS_CAPTURES] = "Yorda entführt",
@@ -529,6 +535,10 @@ const char *const ui_strings_de[UI_STR_COUNT] = {
     [UI_STR_VAL_GRAPHICS_AUTOMATIC] = "Automatisch",
     [UI_STR_GRAPHICS_API_NOTE] =
         "Übernehmen wechselt sofort; ohne Übernehmen gilt die Wahl ab dem nächsten Start.",
+    [UI_STR_OPT_GRAPHICS_ADAPTER] = "Grafikkarte",
+    [UI_STR_GRAPHICS_ADAPTER_NOTE] =
+        "Welche Grafikkarte das Spiel zeichnet. Übernehmen wechselt sofort; ohne Übernehmen gilt die Wahl ab dem nächsten Start.",
+    [UI_STR_GRAPHICS_ADAPTER_FAILED] = "Die Grafikkarte %s konnte nicht starten; %s bleibt",
     [UI_STR_GRAPHICS_APPLY] = "Übernehmen",
     [UI_STR_GRAPHICS_APPLY_NOTE] =
         "Wechselt sofort, ohne das Spiel zu verlassen. Eine kurze Pause ist normal.",
@@ -573,12 +583,18 @@ const char *const ui_strings_de[UI_STR_COUNT] = {
     [UI_STR_OPT_DOOR_FIX] = "Tür am Ost-Reflektor",
     [UI_STR_OPT_DOOR_FIX_NOTE] =
         "Hand in Hand kommen Ico und Yorda nicht mehr sofort wieder aus einer Tür heraus.",
+    [UI_STR_OPT_YORDA_TRIPS] = "Yorda stolpert",
+    [UI_STR_OPT_YORDA_TRIPS_NOTE] =
+        "Aus: wie im Original. Ein: wie nach dem Haupttor: rennt sie drei Sekunden an der Hand, fällt sie hin.",
     [UI_STR_OPT_NATURAL_CHAINS] = "Natürliche Ketten",
     [UI_STR_OPT_NATURAL_CHAINS_NOTE] =
         "Eine Kette, die für Ico herabgelassen wird, behält auf dem ganzen Weg die richtige Gliedergröße.",
     [UI_STR_OPT_SKIP_OPENING] = "Vorspann überspringen",
     [UI_STR_OPT_SKIP_OPENING_NOTE] =
         "Das Spiel beginnt im Titelbildschirm, ohne das Sony-Schild und ohne die Eröffnungsszene. Gilt ab dem nächsten Start.",
+    [UI_STR_OPT_SECOND_CARD] = "Zweite Memory Card",
+    [UI_STR_OPT_SECOND_CARD_NOTE] =
+        "Aus: eine Memory Card, wie im Original. Ein: eine zweite Karte mit zehn weiteren Spielständen; Speichern und Laden bieten beide an.",
     [UI_STR_OPT_AA] = "Kantenglättung",
     [UI_STR_OPT_AA_NOTE] =
         "Glättet gezackte Kanten. Supersampling zeichnet 4mal (2x) oder 16mal (4x) so viele Pixel; wähle weniger, wenn die Anzeige auf 30 fällt.",
@@ -618,6 +634,57 @@ const char *const ui_strings_de[UI_STR_COUNT] = {
     [UI_STR_EXPORT_TEXTURES_STOPPED_BODY] = "Angehalten nach %d Bildern",
     [UI_STR_EXPORT_TEXTURES_FAILED] = "Export der Texturen fehlgeschlagen",
     [UI_STR_EXPORT_TEXTURES_FAILED_BODY] = "Der Ordner %s\nkonnte nicht beschrieben werden",
+    [UI_STR_EXTRAS_BACKUP] = "Daten sichern",
+    [UI_STR_EXTRAS_RESTORE] = "Aus Sicherung wiederherstellen",
+    [UI_STR_BACKUP_NOTE] =
+        "Speichert Memory Card, Spielzustände, Einstellungen und Erfolge in einer .zip-Datei, "
+        "zum Aufheben oder Umziehen.",
+    [UI_STR_RESTORE_NOTE] =
+        "Holt Memory Card, Spielzustände, Einstellungen und Erfolge aus einer .zip-Sicherung "
+        "zurück. Danach startet das Spiel neu.",
+    [UI_STR_BACKUP_CHOOSING] = "Wähle, wo die Sicherung gespeichert wird.",
+    [UI_STR_BACKUP_PROGRESS] = "Sichern: %d von %d Dateien",
+    [UI_STR_RESTORE_AGAIN] = "Erneut drücken zum Auswählen",
+    [UI_STR_RESTORE_CONFIRM_TITLE] = "Aus Sicherung wiederherstellen?",
+    [UI_STR_RESTORE_CONFIRM_BODY] =
+        "Memory Card, Spielzustände, Einstellungen und Erfolge hier werden durch die der "
+        "Sicherung ersetzt, und das Spiel startet neu.\nErneut drücken, um die Sicherung zu "
+        "wählen.",
+    [UI_STR_RESTORE_CHOOSING] = "Wähle die Sicherung zum Wiederherstellen.",
+    [UI_STR_RESTORE_READING] = "Sicherung wird gelesen…",
+    [UI_STR_RESTORE_PROGRESS] = "Wiederherstellen: %d von %d Dateien",
+    [UI_STR_RESTORE_THIS] = "Diese Sicherung wiederherstellen",
+    [UI_STR_RESTORE_ASK_NOTE] = "Erstellt mit Version %s. Erneut drücken zum Wiederherstellen.",
+    [UI_STR_RESTORE_ASK_TITLE] = "Diese Sicherung wiederherstellen?",
+    [UI_STR_RESTORE_VERSION] = "Version: %s",
+    [UI_STR_RESTORE_SAVED] = "Gesichert: %s",
+    [UI_STR_RESTORE_DISCS] = "Discs: %s",
+    [UI_STR_RESTORE_OTHER_DISC] = "Erstellt, während eine andere Disc gespielt wurde",
+    [UI_STR_RESTORE_PRESS] = "Erneut drücken zum Wiederherstellen",
+    [UI_STR_BACKUP_DONE] = "Deine Daten sind gesichert",
+    [UI_STR_BACKUP_DONE_BODY] = "%d Dateien gespeichert in\n%s",
+    [UI_STR_BACKUP_FAILED] = "Daten konnten nicht gesichert werden",
+    [UI_STR_RESTORE_DONE] = "Daten werden wiederhergestellt",
+    [UI_STR_RESTORE_DONE_RESTART] = "Das Spiel startet jetzt neu und setzt die Sicherung ein.",
+    [UI_STR_RESTORE_DONE_CLOSE] =
+        "Das Spiel wird jetzt beendet. Starte es erneut: Beim Start setzt es die Sicherung ein.",
+    [UI_STR_RESTORE_FAILED] = "Sicherung konnte nicht wiederhergestellt werden",
+    [UI_STR_BACKUP_WHY_BUSY] = "Jetzt nicht: Das Spiel speichert. Versuche es gleich noch einmal.",
+    [UI_STR_BACKUP_WHY_NOTHING] = "Es gibt noch nichts zu sichern.",
+    [UI_STR_BACKUP_WHY_WRITE] =
+        "Die Daten konnten nicht geschrieben werden. Prüfe den freien Speicher und versuche es "
+        "erneut.",
+    [UI_STR_BACKUP_WHY_READ] = "Die Datei konnte nicht gelesen werden.",
+    [UI_STR_BACKUP_WHY_NOT_BACKUP] = "Diese Datei ist keine Sicherung dieses Spiels.",
+    [UI_STR_BACKUP_WHY_NEWER] =
+        "Diese Sicherung stammt aus einer neueren Version. Aktualisiere das Spiel, um sie "
+        "wiederherzustellen.",
+    [UI_STR_BACKUP_WHY_DAMAGED] = "Diese Sicherung ist beschädigt.",
+    [UI_STR_BACKUP_WHY_UNSAFE] =
+        "Diese Sicherung enthält Dateien außerhalb der Ordner des Spiels und wird nicht verwendet.",
+    [UI_STR_BACKUP_WHY_TOO_BIG] = "Diese Sicherung ist größer, als das Spiel annimmt.",
+    [UI_STR_BACKUP_WHY_NO_DIALOG] = "Es konnte keine Dateiauswahl geöffnet werden.",
+    [UI_STR_BACKUP_WHY_NO_SPACE] = "Auf dem Gerät ist nicht genug Speicher frei.",
     [UI_STR_LANG_KO] = "한국어",
     [UI_STR_LANG_ZH] = "繁體中文",
     /* Controls > Touch screen and the touch layout editor */
@@ -700,4 +767,47 @@ const char *const ui_strings_de[UI_STR_COUNT] = {
         "Diese Version des Spiels gibt keine Hinweise, also ändert das nichts. Die Erfolge bleiben aktiv.",
     [UI_STR_OPT_VAR_NO_LOOK_NOTE_2001] =
         "In dieser Version des Spiels kann man sich in Zwischensequenzen nicht umsehen, also ändert das nichts. Die Erfolge bleiben aktiv.",
+    [UI_STR_GPU_HANG_TURNIP] =
+        "Mit dem Qualcomm-Treiber dieses Geräts kann ein Turnip-Treiberpaket helfen: Fügen Sie eines unter Optionen > Grafiktreiber > Treiber hinzufügen hinzu. Gilt ab dem nächsten Start.",
+    [UI_STR_STATES] = "Spielzustände",
+    [UI_STR_STATES_SLOT] = "Platz %d",
+    [UI_STR_STATES_EMPTY] = "Leer",
+    [UI_STR_STATES_ACT_SAVE] = "Speichern",
+    [UI_STR_STATES_ACT_LOAD] = "Laden",
+    [UI_STR_STATES_ACT_DELETE] = "Löschen",
+    [UI_STR_STATES_CONFIRM] = "Nochmal drücken: %s",
+    [UI_STR_STATES_SAVED] = "Zustand in Platz %d gespeichert",
+    [UI_STR_STATES_LOADED] = "Zustand aus Platz %d geladen",
+    [UI_STR_STATES_DELETED] = "Platz %d geleert",
+    [UI_STR_STATES_NOTE] =
+        "Ein Zustand gehört zu dieser Disc. Spätere Versionen können ihn auch laden. Links und Rechts wählen die Aktion.",
+    [UI_STR_STATES_PAUSE_FIRST] = "Pausiere das Spiel, um einen Zustand zu speichern",
+    [UI_STR_STATES_REFUSED_BUILD] = "Von einer anderen Version des Spiels gespeichert",
+    [UI_STR_STATES_REFUSED_DISC] = "Von einer anderen Disc gespeichert",
+    [UI_STR_STATES_REFUSED_SETTINGS] = "Eine Spieleinstellung weicht ab: %s",
+    [UI_STR_STATES_REFUSED_BUSY] = "Jetzt nicht: Das Spiel lädt oder speichert gerade",
+    [UI_STR_STATES_REFUSED_CHECK] =
+        "Der Zustand konnte nicht wiederhergestellt werden; das Spiel läuft weiter",
+    [UI_STR_STATES_OFF] = "Spielzustände sind in dieser Version aus",
+    [UI_STR_STATES_TITLE_HINT] = "Gespeichert wird im Pausenmenü",
+    [UI_STR_STATES_SAVE_FAILED] = "Der Zustand konnte nicht gespeichert werden",
+    [UI_STR_STATES_XB_OLD] =
+        "Dieser Spielzustand stammt aus Version %s,\nbevor Spielzustände in neuere Versionen\nübernommen werden konnten.\nDeine Speicherstände auf der Memory Card\nfunktionieren weiterhin.",
+    [UI_STR_STATES_XB_CODE] =
+        "Dieser Spielzustand stammt aus Version %s.\nVersion %s hat den Teil des Spiels geändert,\nin dem er gespeichert wurde, deshalb kann er\nnicht fortgesetzt werden.\nDeine Speicherstände auf der Memory Card\nfunktionieren weiterhin.",
+    [UI_STR_STATES_XB_DATA] =
+        "Dieser Spielzustand stammt aus Version %s.\nVersion %s hat geändert, wie das Spiel seinen\nFortschritt im Speicher hält, deshalb kann er\nnicht fortgesetzt werden.\nDeine Speicherstände auf der Memory Card\nfunktionieren weiterhin.",
+    [UI_STR_STATES_XB_PINNED] =
+        "Dieser Spielzustand stammt aus Version %s\nund kann nur mit dieser Version\nfortgesetzt werden.\nDeine Speicherstände auf der Memory Card\nfunktionieren weiterhin.",
+    [UI_STR_OPT_EFFECT_GLOW_SMOOTH] = "Leuchten zwischen Bildern",
+    [UI_STR_EFFECT_GLOW_SMOOTH_NOTE] =
+        "Original behält das Leuchten des Spielbildes zwischen den Bildern. Flüssig berechnet es für jedes gezeigte Bild neu; das kostet mehr Grafikzeit.",
+    [UI_STR_EFFECT_GLOW_SMOOTH_LOCKED] =
+        "Wirkt nur oberhalb der Bildrate Original und bei eingeschaltetem Leuchten.",
+    [UI_STR_OPT_EFFECT_MOTION_BLUR_STRENGTH] = "Stärke der Unschärfe",
+    [UI_STR_EFFECT_MOTION_BLUR_STRENGTH_NOTE] =
+        "Niedrigere Werte lassen die Spur schneller verblassen; 100 ist die Spur der PS2.",
+    [UI_STR_LANG_RU_BOBTTZ] = "Русский (bob-ttz)",
+    [UI_STR_LANG_RU_COBRA838] = "Русский (cobra838)",
+    [UI_STR_LANG_PT_BR] = "Português (Brasil) (ichagas7)",
 };

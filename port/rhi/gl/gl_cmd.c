@@ -20,6 +20,7 @@
  * and texture reads itself; only a texture leaving or entering
  * RHI_STATE_STORAGE (image loads and stores) takes a glMemoryBarrier. */
 #include "gl_internal.h"
+#include "../rhi_bind_cache.h"
 #include <stdlib.h>
 #include <string.h>
 
@@ -94,7 +95,8 @@ static struct {
 static void gl_apply_raster(const GlRaster *w)
 {
     GlRaster *h = &s.raster;
-    const bool all = !s.rasterValid;
+    /* the bind cache off (rhi_bind_cache.h): every state at every draw */
+    const bool all = !s.rasterValid || !rhi_bind_cache_enabled();
     for (uint32_t i = 0; i < RHI_MAX_COLOR_TARGETS; i++) {
         if (all || w->blend[i] != h->blend[i]) {
             if (w->blend[i]) {
@@ -315,6 +317,8 @@ static void gl_count_dynamic(GlCmdList *c, const GlPipeline *p)
     if (!dyn) {
         return;
     }
+    /* the cache off: every command of a dynamic group at every draw */
+    const bool cache = rhi_bind_cache_enabled();
     if ((dyn & ~c->dynSet) != 0u && !s_unsetLogged) {
         s_unsetLogged = true;
         GL_LOG("dynamic state: a draw with its pipeline's %s%s%s left unset since the bind (the "
@@ -324,18 +328,23 @@ static void gl_count_dynamic(GlCmdList *c, const GlPipeline *p)
                (dyn & ~c->dynSet & RHI_DYN_BLEND) ? "blend" : "");
     }
     if (dyn & RHI_DYN_DEPTH) {
-        const bool all = !(c->dynValid & RHI_DYN_DEPTH);
+        const bool all = !cache || !(c->dynValid & RHI_DYN_DEPTH);
         const GlDepthDyn *w = &c->depthWant, *h = &c->depthHave;
-        g_gl.counts.dynamicSets += (uint64_t)(all || w->test != h->test) +
-                                   (uint64_t)(all || w->write != h->write) +
-                                   (uint64_t)(all || w->func != h->func);
+        const uint64_t sent = (uint64_t)(all || w->test != h->test) +
+                              (uint64_t)(all || w->write != h->write) +
+                              (uint64_t)(all || w->func != h->func);
+        g_gl.counts.dynamicSets += sent;
+        if (c->dynFresh & RHI_DYN_DEPTH) {
+            g_gl.counts.stateSetsSkipped += 3u - sent; /* the set's values in force */
+        }
         c->depthHave = *w;
         c->dynValid |= RHI_DYN_DEPTH;
     }
     if (dyn & RHI_DYN_BLEND) {
-        const bool all = !(c->dynValid & RHI_DYN_BLEND);
+        const bool all = !cache || !(c->dynValid & RHI_DYN_BLEND);
         const GlBlendDyn *w = &c->blendWant;
         GlBlendDyn *h = &c->blendHave;
+        const uint64_t before = g_gl.counts.dynamicSets;
         if (all || w->enable != h->enable) {
             g_gl.counts.dynamicSets++;
             h->enable = w->enable;
@@ -363,8 +372,12 @@ static void gl_count_dynamic(GlCmdList *c, const GlPipeline *p)
             g_gl.counts.dynamicSets++;
             h->mask = w->mask;
         }
+        if (c->dynFresh & RHI_DYN_BLEND) {
+            g_gl.counts.stateSetsSkipped += 3u - (g_gl.counts.dynamicSets - before);
+        }
         c->dynValid |= RHI_DYN_BLEND;
     }
+    c->dynFresh = 0;
 }
 
 /* ------------------------------------------------------- framebuffers */
@@ -697,6 +710,9 @@ static void gl_pass_area_check(uint32_t *w, uint32_t *h, GlTexture *const *colou
 
 void rhi_cmd_begin_render_pass(RhiCommandList cl, const RhiRenderPassDesc *pass)
 {
+    /* pass->area (rhi.h RhiRenderPassDesc) is ignored: OpenGL has no render area; the
+     * pass covers its whole size, and the caller's draws lie inside the
+     * area anyway (a tile-based GPU's saving, Vulkan only) */
     GlCmdList *c = gl_cmd(cl);
     if (!c || !pass) {
         return;
@@ -814,7 +830,10 @@ void rhi_cmd_begin_render_pass(RhiCommandList cl, const RhiRenderPassDesc *pass)
         glf.InvalidateFramebuffer(GL_FRAMEBUFFER, n, discard);
     }
     /* the store ops are not acted on: OpenGL keeps both aspects, which
-     * DONT_CARE allows (as D3D12) */
+     * DONT_CARE allows (as D3D12).  The defaults are given whatever the
+     * list held (the bind cache forgets the viewport and scissor at a
+     * pass's start) */
+    c->viewportSet = c->scissorSet = false;
     const RhiViewport vp = {0.0f, 0.0f, (float)areaW, (float)areaH, 0.0f, 1.0f};
     const RhiRect sc = {0, 0, areaW, areaH};
     rhi_cmd_set_viewport(cl, &vp);
@@ -843,6 +862,12 @@ void rhi_cmd_set_viewport(RhiCommandList cl, const RhiViewport *v)
     if (!c || !v) {
         return;
     }
+    /* the list's viewport is OpenGL's while the list is the active one
+     * (gl_cmd_activate gives it again on a switch) */
+    if (rhi_bind_cache_enabled() && c->viewportSet && memcmp(&c->viewport, v, sizeof(*v)) == 0) {
+        g_gl.counts.stateSetsSkipped++;
+        return;
+    }
     c->viewport = *v;
     c->viewportSet = true;
     gl_apply_viewport(v);
@@ -852,6 +877,10 @@ void rhi_cmd_set_scissor(RhiCommandList cl, const RhiRect *r)
 {
     GlCmdList *c = gl_cmd(cl);
     if (!c || !r) {
+        return;
+    }
+    if (rhi_bind_cache_enabled() && c->scissorSet && memcmp(&c->scissor, r, sizeof(*r)) == 0) {
+        g_gl.counts.stateSetsSkipped++;
         return;
     }
     c->scissor = *r;
@@ -867,15 +896,18 @@ void rhi_cmd_set_pipeline(RhiCommandList cl, RhiPipeline p)
     if (!c || !pp) {
         return;
     }
-    if (c->pipeline != p.id) {
+    if (!rhi_bind_cache_enabled() || c->pipeline != p.id) {
         c->pipeline = p.id;
         g_gl.counts.pipelineBinds++;
         /* a group the new pipeline has static: its own values replace the
          * ones given before, which a later dynamic pipeline gives again */
         c->dynValid &= pp->dynamic;
+    } else {
+        g_gl.counts.pipelineBindsSkipped++;
     }
     /* the next draw's dynamic values: the pipeline's own until a set */
     c->dynSet = 0;
+    c->dynFresh = 0;
     const RhiDepthStencilState *ds = &pp->depthStencil;
     c->depthWant = gl_depth_dyn(ds->depthTest, ds->depthWrite, ds->depthCompare);
     c->blendWant =
@@ -905,10 +937,13 @@ void rhi_cmd_set_bind_group_offsets(RhiCommandList cl, uint32_t group, RhiBindGr
         off[i] = offsets[i];
     }
     /* the group already bound with the same offsets is not bound again */
-    if (c->groups[group] != bg.id || memcmp(c->offsets[group], off, sizeof(off)) != 0) {
+    if (!rhi_bind_cache_enabled() || c->groups[group] != bg.id ||
+        memcmp(c->offsets[group], off, sizeof(off)) != 0) {
         c->groups[group] = bg.id;
         memcpy(c->offsets[group], off, sizeof(off));
         c->groupDirty |= 1u << group;
+    } else {
+        g_gl.counts.bindGroupBindsSkipped++;
     }
 }
 
@@ -924,10 +959,13 @@ void rhi_cmd_set_vertex_buffer(RhiCommandList cl, uint32_t binding, RhiBuffer b,
     if (!c || !buf || binding >= RHI_MAX_VERTEX_ATTRS || offset >= buf->size) {
         return;
     }
-    if (c->vbName[binding] != buf->name || c->vbOffset[binding] != offset) {
+    if (!rhi_bind_cache_enabled() || c->vbName[binding] != buf->name ||
+        c->vbOffset[binding] != offset) {
         c->vbName[binding] = buf->name;
         c->vbOffset[binding] = offset;
         c->vbDirty |= 1u << binding;
+    } else {
+        g_gl.counts.stateSetsSkipped++;
     }
 }
 
@@ -940,16 +978,28 @@ void rhi_cmd_set_index_buffer(RhiCommandList cl, RhiBuffer b, uint64_t offset, b
     if (!c || !buf || offset >= buf->size) {
         return;
     }
+    if (rhi_bind_cache_enabled() && c->ibName == buf->name && c->ibOffset == offset &&
+        c->ibU32 == u32) {
+        g_gl.counts.stateSetsSkipped++;
+        return;
+    }
+    /* the binding is the VAO's: bound again only for another buffer (a
+     * VAO change binds it again too, gl_flush); the offset and type are
+     * the draw's arguments */
+    if (!rhi_bind_cache_enabled() || c->ibName != buf->name) {
+        c->ibDirty = true;
+    }
     c->ibName = buf->name;
     c->ibOffset = offset;
     c->ibU32 = u32;
-    c->ibDirty = true;
 }
 
 void rhi_cmd_set_stencil_ref(RhiCommandList cl, uint8_t ref)
 {
     GlCmdList *c = gl_cmd(cl);
-    if (c) {
+    if (c && rhi_bind_cache_enabled() && c->stencilRef == ref) {
+        g_gl.counts.stateSetsSkipped++; /* the next draw's already */
+    } else if (c) {
         c->stencilRef = ref; /* glStencilFuncSeparate at the next draw */
     }
 }
@@ -958,6 +1008,11 @@ void rhi_cmd_set_blend_constant(RhiCommandList cl, const float rgba[4])
 {
     GlCmdList *c = gl_cmd(cl);
     if (!c || !rgba) {
+        return;
+    }
+    if (rhi_bind_cache_enabled() && c->blendConstSet &&
+        memcmp(c->blendConst, rgba, sizeof(c->blendConst)) == 0) {
+        g_gl.counts.stateSetsSkipped++;
         return;
     }
     memcpy(c->blendConst, rgba, sizeof(c->blendConst));
@@ -979,6 +1034,7 @@ void rhi_cmd_set_depth_state(RhiCommandList cl, bool test, bool write, RhiCompar
     }
     c->depthWant = gl_depth_dyn(test, write, cmp);
     c->dynSet |= RHI_DYN_DEPTH;
+    c->dynFresh |= RHI_DYN_DEPTH;
 }
 
 void rhi_cmd_set_blend_state(RhiCommandList cl, const RhiBlendState *blend)
@@ -993,6 +1049,7 @@ void rhi_cmd_set_blend_state(RhiCommandList cl, const RhiBlendState *blend)
     }
     c->blendWant = gl_blend_dyn(blend, p->colorCount ? p->colorFormats[0] : RHI_FMT_RGBA8_UNORM);
     c->dynSet |= RHI_DYN_BLEND;
+    c->dynFresh |= RHI_DYN_BLEND;
 }
 
 /* ------------------------------------------------------------------ draws */
@@ -1023,6 +1080,8 @@ static bool gl_range_bound(GlRangeBind *shadow, uint32_t point, GLuint name, uin
  * of their entries bind what the draw before bound. */
 static void gl_bind_groups(GlCmdList *c)
 {
+    /* the bind cache off (rhi_bind_cache.h): every entry bound again */
+    const bool cache = rhi_bind_cache_enabled();
     for (uint32_t g = 0; g < RHI_MAX_BIND_SLOTS && c->groupDirty; g++) {
         if (!(c->groupDirty & (1u << g)) || !c->groups[g]) {
             continue;
@@ -1033,7 +1092,7 @@ static void gl_bind_groups(GlCmdList *c)
         }
         /* PC port: the group and offsets this slot already holds (set to
          * another group and back between two draws): nothing to walk */
-        if (s.grp[g].id == c->groups[g] &&
+        if (cache && s.grp[g].id == c->groups[g] &&
             memcmp(s.grp[g].off, c->offsets[g], sizeof(s.grp[g].off)) == 0) {
             g_gl.counts.entryBinds += bg->count;
             g_gl.counts.entryBindsSkipped += bg->count;
@@ -1056,7 +1115,7 @@ static void gl_bind_groups(GlCmdList *c)
             case GL_BIND_UNIFORM: {
                 const uint64_t off =
                     e->offset + (e->dyn < RHI_MAX_DYNAMIC_OFFSETS ? c->offsets[g][e->dyn] : 0u);
-                skipped = gl_range_bound(s.uniform, pt, e->name, off, e->size);
+                skipped = cache && gl_range_bound(s.uniform, pt, e->name, off, e->size);
                 if (skipped) {
                     break;
                 }
@@ -1073,7 +1132,7 @@ static void gl_bind_groups(GlCmdList *c)
                 break;
             }
             case GL_BIND_STORAGE:
-                skipped = gl_range_bound(s.storage, pt, e->name, e->offset, e->size);
+                skipped = cache && gl_range_bound(s.storage, pt, e->name, e->offset, e->size);
                 if (!skipped) {
                     glf.BindBufferRange(GL_SHADER_STORAGE_BUFFER, pt, e->name, (GLintptr)e->offset,
                                         (GLsizeiptr)e->size);
@@ -1084,8 +1143,8 @@ static void gl_bind_groups(GlCmdList *c)
                    sampler apart */
                 const bool known = pt < GL_SHADOW_POINTS;
                 const bool texSame =
-                    known && s.texName[pt] == e->name && s.texTarget[pt] == e->target;
-                const bool samplerSame = known && s.sampler[pt] == e->sampler;
+                    cache && known && s.texName[pt] == e->name && s.texTarget[pt] == e->target;
+                const bool samplerSame = cache && known && s.sampler[pt] == e->sampler;
                 if (!texSame) {
                     glf.ActiveTexture(GL_TEXTURE0 + pt);
                     glf.BindTexture(e->target, e->name);
@@ -1102,7 +1161,7 @@ static void gl_bind_groups(GlCmdList *c)
                 break;
             }
             case GL_BIND_IMAGE:
-                skipped = pt < GL_SHADOW_POINTS && s.image[pt] == e->name;
+                skipped = cache && pt < GL_SHADOW_POINTS && s.image[pt] == e->name;
                 if (!skipped) {
                     glf.BindImageTexture(pt, e->name, 0, GL_FALSE, 0, GL_READ_WRITE, GL_RGBA8);
                     if (pt < GL_SHADOW_POINTS) {
@@ -1172,15 +1231,18 @@ static const GlPipeline *gl_flush(GlCmdList *c, bool indexed)
         }
         return NULL;
     }
-    if (s.ppo != p->ppo) {
+    /* the bind cache off (rhi_bind_cache.h): the program pipeline, the
+     * VAO and its buffers bound again at every draw */
+    const bool cache = rhi_bind_cache_enabled();
+    if (!cache || s.ppo != p->ppo) {
         glf.BindProgramPipeline(p->ppo);
         s.ppo = p->ppo;
     }
-    if (s.vao != p->vao) {
+    if (!cache || s.vao != p->vao) {
         glf.BindVertexArray(p->vao);
         s.vao = p->vao;
     }
-    if (c->vbVao != p->vao) {
+    if (!cache || c->vbVao != p->vao) {
         /* the buffer bindings are the VAO's state */
         c->vbVao = p->vao;
         c->vbDirty = 0xFFFFFFFFu;

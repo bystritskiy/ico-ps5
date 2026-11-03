@@ -237,8 +237,10 @@ static Lum measure(const uint8_t *px, uint32_t w, uint32_t h)
 
 static const char *snapName(int snap)
 {
-    static const char *const kNames[RD_SNAP_COUNT] = {
-        "blended", "no previous", "gap", "keep", "cut", "camera", "fade", "history", "size"};
+    static const char *const kNames[] = {"blended", "no previous", "gap",     "keep", "cut",
+                                         "camera",  "fade",        "history", "size", "wall"};
+    _Static_assert(sizeof(kNames) / sizeof(kNames[0]) == RD_SNAP_COUNT,
+                   "a name for every RD_SNAP_* (rd_internal.h)");
     return snap >= 0 && snap < RD_SNAP_COUNT ? kNames[snap] : "?";
 }
 
@@ -347,6 +349,15 @@ static bool runConfig(const BootConfig *cfg, uint32_t gw, uint32_t gh, uint8_t *
 
 int main(int argc, char **argv)
 {
+    /* the frames here hold golden bytes (or read SCENE back) with list
+       11's last sprites drawn into SCENE; the fades fold, how the game
+       draws them, is ctest rd_fades_fold's and rd_fades_fold_ab's
+       (rd_fades_fold.c): drawn here as before */
+#ifdef _WIN32
+    _putenv_s("ICO_RD_FADES_FOLD", "0");
+#else
+    setenv("ICO_RD_FADES_FOLD", "0", 1);
+#endif
     const char *dir = argc > 1 && argv[1][0] ? argv[1] : getenv("ICO_BOOT_DUMPS");
     if (!dir || !dir[0]) {
         printf("SKIP: no dump folder (ICO_BOOT_DUMP_DIR, or ICO_BOOT_DUMPS)\n");

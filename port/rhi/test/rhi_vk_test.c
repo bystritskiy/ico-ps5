@@ -1,14 +1,23 @@
 /* rhi_vk_test.c: the exact-texel RHI checks (rhi_test_common.c) on the
  * Vulkan backend, headless, then a hazard-tracking cell, the render-area
- * check (a pass larger than an attachment is clamped) and the pipeline
+ * check (a pass larger than an attachment is clamped), a pass with a
+ * render area inside its target (renderAreaCell: only the area's texels
+ * are loaded, drawn, cleared and stored) and the pipeline
  * cache file (rhi_set_pipeline_cache_path: written by rhi_pipeline_cache_save
  * while the device is up and at shutdown, each with a version
  * one header, read back at the next init, a file of another device or of
  * garbage ignored and replaced), the drop of other builds' cache files
  * (vkr_cache_drop_others), the pipeline pool (poolCell: every
  * pipeline the pool holds, RHI_PIPELINE_POOL_MAX, made and alive at once)
+ * the occlusion queries (occlusionCell: a quad, a quad behind it, one in
+ * front: W*H, 0, W*H samples, read after the slot is recycled)
  * and the submission sync (syncCell: the timeline semaphore, or the fence
- * ring under ICO_VK_FAKE_API=1.1, ctest rhi_vk_vk11).
+ * ring under ICO_VK_FAKE_API=1.1 and =1.0, ctests rhi_vk_vk11 and rhi_vk_vk10;
+ * =1.0bare, ctest rhi_vk_vk10bare: a 1.0 loader without
+ * VK_KHR_get_physical_device_properties2 is taken, the device without the
+ * extended queries; review finding 5), and the [video] adapter rule
+ * (adapterCell: a wanted name no device has still starts the device, the
+ * same one a plain start picks, with one device marked current).
  *
  * Exit 0 on success, 1 on a mismatch or a validation error, 77 (skipped)
  * when no Vulkan device can be created.  Set VK_ICD_FILENAMES to pick a
@@ -269,7 +278,7 @@ static int fileExists(const char *dir, const char *name)
     return fp != NULL;
 }
 
-/* The other builds' caches: with the file pipelines-<build>.vkcache, every
+/* The other builds' caches: with the file pipelines-<key>.vkcache, every
  * other pipelines*.vkcache and pipelines*.vkcache.tmp in its folder goes
  * (one log name each), the current file, its own .tmp and unrelated files
  * stay; a missing folder and a file of another name drop nothing. */
@@ -647,9 +656,355 @@ static int poolCell(void)
     return failures + (int)rhi_vk_validation_error_count();
 }
 
+/* A pass with a render area (rhi.h RhiRenderPassDesc.area; vk_cmd.c
+ * rhi_cmd_begin_render_pass): on a 16x16 target cleared blue by a pass of
+ * its own, a pass loaded with the area (4, 6) 5x3 draws a quad over the
+ * whole target in red, after a scissor set to the whole target (the
+ * backend cuts it to the area): the area's 15 texels red, every other
+ * texel still blue.  The Vulkan specification restricts "the effects of
+ * attachment load, store, and multisample resolve operations" to the
+ * pixels inside the render area (VkRenderPassBeginInfo, VkRenderingInfo)
+ * and asks that all rendering stay inside it ("using scissor if
+ * necessary": the cut scissor), so the texels outside keep the
+ * first pass's blue on every device, a tile-based one too.  A third pass
+ * with the area (10, 0) 6x2 and a CLEAR load to green, no draw: those 12
+ * texels green, the rest as the second pass left them (the clear is a
+ * load operation: the area only).  An area past the target's edge is cut
+ * to it, one that leaves nothing is the whole target (an extent above
+ * zero).  Both pass paths: dynamic rendering here, the VkRenderPass under
+ * ICO_VK_FAKE_API=1.0 / 1.1 (the rhi_vk_vk10 and rhi_vk_vk11 ctests).  No
+ * validation message. */
+static int renderAreaCell(void)
+{
+    RhiDeviceDesc dd = {NULL, false, true, "rhi_vk_test render area"};
+    if (!rhi_create_backend("vulkan") || !rhi_init(&dd)) {
+        rhi_test_log("FAIL render area cell: init\n");
+        return 1;
+    }
+    int failures = 0;
+#define AREA_CHECK(cond, ...)                                                                      \
+    do {                                                                                           \
+        if (!(cond)) {                                                                             \
+            rhi_test_log("FAIL render area cell: " __VA_ARGS__);                                   \
+            failures++;                                                                            \
+        }                                                                                          \
+    } while (0)
+    const RhiShader vs = rhi_create_shader(&(RhiShaderDesc){.stage = RHI_STAGE_VERTEX,
+                                                            .bytecode = spv_vs_main,
+                                                            .bytecodeSize = sizeof(spv_vs_main),
+                                                            .entryPoint = "vs_main",
+                                                            .debugName = "area vs_main"});
+    const RhiShader ps = rhi_create_shader(&(RhiShaderDesc){.stage = RHI_STAGE_FRAGMENT,
+                                                            .bytecode = spv_ps_color,
+                                                            .bytecodeSize = sizeof(spv_ps_color),
+                                                            .entryPoint = "ps_color",
+                                                            .debugName = "area ps_color"});
+    static const RhiVertexBinding vb = {0, sizeof(PoolVtx), false};
+    static const RhiVertexAttr va[3] = {
+        {0, 0, RHI_VTX_F32x3, offsetof(PoolVtx, x)},
+        {1, 0, RHI_VTX_U8x4_UNORM, offsetof(PoolVtx, rgba)},
+        {2, 0, RHI_VTX_F32x2, offsetof(PoolVtx, u)},
+    };
+    RhiPipelineDesc d;
+    memset(&d, 0, sizeof(d));
+    d.vertex = vs;
+    d.fragment = ps;
+    d.vertexBindings = &vb;
+    d.vertexBindingCount = 1;
+    d.vertexAttrs = va;
+    d.vertexAttrCount = 3;
+    d.topology = RHI_TOPO_TRIANGLE_LIST;
+    d.cullNone = true;
+    d.blend[0].writeMask = 0xF;
+    d.colorFormats[0] = RHI_FMT_RGBA8_UNORM;
+    d.colorCount = 1;
+    d.debugName = "area";
+    const RhiPipeline pipe = vs.id && ps.id ? rhi_create_pipeline(&d) : (RhiPipeline){0};
+
+    enum { AW = 16, AH = 16 };
+
+    RhiTexture tgt = rhi_create_texture(&(RhiTextureDesc){
+        AW, AH, 1, RHI_FMT_RGBA8_UNORM, RHI_TEX_RENDER_TARGET | RHI_TEX_COPY_SRC, "area", 0});
+    RhiBuffer vbuf = rhi_create_buffer(
+        &(RhiBufferDesc){6 * sizeof(PoolVtx), RHI_BUF_VERTEX, RHI_MEM_UPLOAD, "area verts"});
+    PoolVtx *v = vbuf.id ? rhi_map_buffer(vbuf) : NULL;
+    AREA_CHECK(pipe.id && tgt.id && v, "setup: pipeline %u, target %u, vertices %d\n", pipe.id,
+               tgt.id, v != NULL);
+    if (pipe.id && tgt.id && v) {
+        /* the whole target in red (two triangles over NDC -1..1) */
+        static const float qx[6] = {-1.0f, 1.0f, -1.0f, -1.0f, 1.0f, 1.0f};
+        static const float qy[6] = {1.0f, 1.0f, -1.0f, -1.0f, 1.0f, -1.0f};
+        for (int i = 0; i < 6; i++) {
+            v[i] = (PoolVtx){qx[i], qy[i], 0.0f, {255, 0, 0, 255}, 0.0f, 0.0f};
+        }
+        RhiCommandList cl = rhi_begin_commands();
+        RhiTextureBarrier pre = {tgt, RHI_STATE_UNDEFINED, RHI_STATE_RENDER_TARGET};
+        rhi_cmd_barrier(cl, &pre, 1);
+        RhiRenderPassDesc rp = {0};
+        rp.color[0].texture = tgt;
+        rp.color[0].load = RHI_LOAD_CLEAR;
+        rp.color[0].clear[2] = 1.0f; /* blue */
+        rp.color[0].clear[3] = 1.0f;
+        rp.colorCount = 1;
+        rp.width = AW;
+        rp.height = AH;
+        rhi_cmd_begin_render_pass(cl, &rp); /* the whole target blue */
+        rhi_cmd_end_render_pass(cl);
+        rp.color[0].load = RHI_LOAD_LOAD;
+        rp.area = (RhiRect){4, 6, 5, 3};
+        rhi_cmd_begin_render_pass(cl, &rp);
+        rhi_cmd_set_scissor(cl, &(RhiRect){0, 0, AW, AH}); /* cut to the area */
+        rhi_cmd_set_vertex_buffer(cl, 0, vbuf, 0);
+        rhi_cmd_set_pipeline(cl, pipe);
+        rhi_cmd_draw(cl, 6, 0, 1);
+        rhi_cmd_end_render_pass(cl);
+        rp.color[0].load = RHI_LOAD_CLEAR;
+        rp.color[0].clear[1] = 1.0f; /* green */
+        rp.color[0].clear[2] = 0.0f;
+        rp.area = (RhiRect){10, 0, 40, 2}; /* past the right edge: cut to 6 wide */
+        rhi_cmd_begin_render_pass(cl, &rp);
+        rhi_cmd_end_render_pass(cl);
+        RhiTextureBarrier post = {tgt, RHI_STATE_RENDER_TARGET, RHI_STATE_COPY_SRC};
+        rhi_cmd_barrier(cl, &post, 1);
+        rhi_end_commands(cl);
+        rhi_submit(cl);
+        static uint8_t img[AW * AH * 4];
+        uint32_t pitch = 0;
+        const bool read = rhi_readback_texture(tgt, RHI_ASPECT_COLOR, img, sizeof(img), &pitch);
+        AREA_CHECK(read && pitch == AW * 4, "readback %d, pitch %u\n", (int)read, pitch);
+        if (read && pitch == AW * 4) {
+            static const uint8_t red[4] = {255, 0, 0, 255}, blue[4] = {0, 0, 255, 255},
+                                 green[4] = {0, 255, 0, 255};
+            uint32_t bad = 0, nRed = 0, nGreen = 0, nBlue = 0;
+            for (uint32_t y = 0; y < AH; y++) {
+                for (uint32_t x = 0; x < AW; x++) {
+                    const bool inRed = x >= 4 && x < 9 && y >= 6 && y < 9;
+                    const bool inGreen = x >= 10 && y < 2;
+                    const uint8_t *want = inGreen ? green : inRed ? red : blue;
+                    const uint8_t *got = &img[y * pitch + x * 4];
+                    if (memcmp(got, want, 4) != 0) {
+                        if (bad++ < 4) {
+                            rhi_test_log("render area cell: texel (%u,%u) %u %u %u %u, want %u %u "
+                                         "%u %u\n",
+                                         x, y, got[0], got[1], got[2], got[3], want[0], want[1],
+                                         want[2], want[3]);
+                        }
+                    } else {
+                        nRed += inRed;
+                        nGreen += inGreen;
+                        nBlue += !inRed && !inGreen;
+                    }
+                }
+            }
+            rhi_test_log("render area cell: %u red (the area's draw), %u green (the area's clear), "
+                         "%u blue (outside both), %u wrong\n",
+                         nRed, nGreen, nBlue, bad);
+            AREA_CHECK(bad == 0 && nRed == 15 && nGreen == 12,
+                       "%u texels wrong; want 15 red inside the drawn area, 12 green inside the "
+                       "cleared one, the rest blue\n",
+                       bad);
+        }
+    }
+    rhi_wait_idle();
+    rhi_destroy_buffer(vbuf);
+    rhi_destroy_texture(tgt);
+    rhi_destroy_pipeline(pipe);
+    rhi_destroy_shader(vs);
+    rhi_destroy_shader(ps);
+#undef AREA_CHECK
+    rhi_shutdown();
+    return failures + (int)rhi_vk_validation_error_count();
+}
+
+/* The occlusion queries (rhi.h rhi_cmd_begin_occlusion, vk_cmd.c): on an
+ * 8x8 target with a depth cleared to 0 and a GEQUAL test with writes, a
+ * full quad at depth 0.5 (query 0), the same quad at 0.25 behind it (query
+ * 1) and at 0.75 in front (query 2): 64, 0 and 64 samples; an index not
+ * begun reads RHI_OCCLUSION_NONE, a begin outside a pass is dropped, and
+ * the read says 3 indices.  Twice: the first frame's pool is made and reset
+ * at the first begin (inside the pass, a one-time submit), the second
+ * frame's reset in the slot's first list.  Then again under
+ * ICO_VK_DEPTH_ALWAYS=1 (vk_cmd.c: every depth test passes, the
+ * measurement's run without the depth): 64, 64 and 64.  No validation
+ * message. */
+static void testSetEnv(const char *name, const char *value)
+{
+#ifdef _WIN32
+    _putenv_s(name, value ? value : "");
+#else
+    if (value) {
+        setenv(name, value, 1);
+    } else {
+        unsetenv(name);
+    }
+#endif
+}
+
+static int occlusionRun(bool always)
+{
+    RhiDeviceDesc dd = {NULL, false, true, "rhi_vk_test occlusion"};
+    if (!rhi_create_backend("vulkan") || !rhi_init(&dd)) {
+        rhi_test_log("FAIL occlusion cell: init\n");
+        return 1;
+    }
+    int failures = 0;
+#define OCC_CHECK(cond, ...)                                                                       \
+    do {                                                                                           \
+        if (!(cond)) {                                                                             \
+            rhi_test_log("FAIL occlusion cell: " __VA_ARGS__);                                     \
+            failures++;                                                                            \
+        }                                                                                          \
+    } while (0)
+    OCC_CHECK(rhi_occlusion_supported(), "not supported on Vulkan\n");
+    const RhiShader vs = rhi_create_shader(&(RhiShaderDesc){.stage = RHI_STAGE_VERTEX,
+                                                            .bytecode = spv_vs_main,
+                                                            .bytecodeSize = sizeof(spv_vs_main),
+                                                            .entryPoint = "vs_main",
+                                                            .debugName = "occ vs_main"});
+    const RhiShader ps = rhi_create_shader(&(RhiShaderDesc){.stage = RHI_STAGE_FRAGMENT,
+                                                            .bytecode = spv_ps_color,
+                                                            .bytecodeSize = sizeof(spv_ps_color),
+                                                            .entryPoint = "ps_color",
+                                                            .debugName = "occ ps_color"});
+    static const RhiVertexBinding vb = {0, sizeof(PoolVtx), false};
+    static const RhiVertexAttr va[3] = {
+        {0, 0, RHI_VTX_F32x3, offsetof(PoolVtx, x)},
+        {1, 0, RHI_VTX_U8x4_UNORM, offsetof(PoolVtx, rgba)},
+        {2, 0, RHI_VTX_F32x2, offsetof(PoolVtx, u)},
+    };
+    RhiPipelineDesc d;
+    memset(&d, 0, sizeof(d));
+    d.vertex = vs;
+    d.fragment = ps;
+    d.vertexBindings = &vb;
+    d.vertexBindingCount = 1;
+    d.vertexAttrs = va;
+    d.vertexAttrCount = 3;
+    d.topology = RHI_TOPO_TRIANGLE_LIST;
+    d.cullNone = true;
+    d.blend[0].writeMask = 0xF;
+    d.colorFormats[0] = RHI_FMT_RGBA8_UNORM;
+    d.colorCount = 1;
+    d.depthFormat = RHI_FMT_D32F_S8;
+    d.depthStencil.depthTest = true;
+    d.depthStencil.depthWrite = true;
+    d.depthStencil.depthCompare = RHI_CMP_GEQUAL;
+    d.debugName = "occlusion";
+    const RhiPipeline pipe = vs.id && ps.id ? rhi_create_pipeline(&d) : (RhiPipeline){0};
+    const RhiTexture col = rhi_create_texture(
+        &(RhiTextureDesc){8, 8, 1, RHI_FMT_RGBA8_UNORM, RHI_TEX_RENDER_TARGET, "occ colour", 0});
+    const RhiTexture dep = rhi_create_texture(
+        &(RhiTextureDesc){8, 8, 1, RHI_FMT_D32F_S8, RHI_TEX_DEPTH_STENCIL, "occ depth", 0});
+    const RhiBuffer vbuf = rhi_create_buffer(
+        &(RhiBufferDesc){18 * sizeof(PoolVtx), RHI_BUF_VERTEX, RHI_MEM_UPLOAD, "occ verts"});
+    PoolVtx *v = vbuf.id ? rhi_map_buffer(vbuf) : NULL;
+    OCC_CHECK(pipe.id && col.id && dep.id && v, "setup\n");
+    if (pipe.id && col.id && dep.id && v) {
+        /* three full quads at depth 0.5, 0.25 and 0.75 */
+        static const float qx[6] = {-1.0f, 1.0f, -1.0f, -1.0f, 1.0f, 1.0f};
+        static const float qy[6] = {1.0f, 1.0f, -1.0f, -1.0f, 1.0f, -1.0f};
+        static const float qz[3] = {0.5f, 0.25f, 0.75f};
+        for (int q = 0; q < 3; q++) {
+            for (int i = 0; i < 6; i++) {
+                v[q * 6 + i] = (PoolVtx){qx[i], qy[i], qz[q], {255, 255, 255, 255}, 0.0f, 0.0f};
+            }
+        }
+        RhiState colState = RHI_STATE_UNDEFINED, depState = RHI_STATE_UNDEFINED;
+        for (int round = 0; round < 2; round++) {
+            rhi_wait_frame();
+            const uint32_t slot = rhi_frame_slot();
+            RhiCommandList cl = rhi_begin_commands();
+            const RhiTextureBarrier pre[2] = {{col, colState, RHI_STATE_RENDER_TARGET},
+                                              {dep, depState, RHI_STATE_DEPTH_WRITE}};
+            rhi_cmd_barrier(cl, pre, 2);
+            colState = RHI_STATE_RENDER_TARGET;
+            depState = RHI_STATE_DEPTH_WRITE;
+            rhi_cmd_begin_occlusion(cl, 7); /* outside a pass: dropped */
+            rhi_cmd_end_occlusion(cl, 7);
+            RhiRenderPassDesc rp = {0};
+            rp.color[0].texture = col;
+            rp.color[0].load = RHI_LOAD_CLEAR;
+            rp.colorCount = 1;
+            rp.depth.texture = dep;
+            rp.depth.depthLoad = RHI_LOAD_CLEAR;
+            rp.depth.stencilLoad = RHI_LOAD_CLEAR;
+            rp.depth.clearDepth = 0.0f;
+            rp.width = rp.height = 8;
+            rhi_cmd_begin_render_pass(cl, &rp);
+            rhi_cmd_set_vertex_buffer(cl, 0, vbuf, 0);
+            rhi_cmd_set_pipeline(cl, pipe);
+            for (uint32_t q = 0; q < 3; q++) {
+                rhi_cmd_begin_occlusion(cl, q);
+                rhi_cmd_draw(cl, 6, q * 6u, 1);
+                rhi_cmd_end_occlusion(cl, q);
+            }
+            rhi_cmd_end_render_pass(cl);
+            rhi_end_commands(cl);
+            rhi_submit(cl);
+            /* the slot's counts once rhi_wait_frame recycles it */
+            for (uint32_t k = 0; k < RHI_FRAMES_IN_FLIGHT; k++) {
+                rhi_wait_frame();
+                if (rhi_frame_slot() == slot) {
+                    break;
+                }
+            }
+            uint64_t got[8];
+            for (int i = 0; i < 8; i++) {
+                got[i] = 12345u;
+            }
+            const uint32_t n = rhi_read_occlusion(got, 8);
+            const uint64_t behind = always ? 64u : 0u;
+            rhi_test_log("occlusion cell%s, frame %d: %u read: in front of nothing %llu, behind "
+                         "%llu, in front %llu\n",
+                         always ? " (ICO_VK_DEPTH_ALWAYS)" : "", round, n,
+                         (unsigned long long)got[0], (unsigned long long)got[1],
+                         (unsigned long long)got[2]);
+            OCC_CHECK(n == 3u && got[0] == 64u && got[1] == behind && got[2] == 64u,
+                      "frame %d%s: %u read, %llu %llu %llu (want 3 read, 64 %llu 64)\n", round,
+                      always ? " (ICO_VK_DEPTH_ALWAYS)" : "", n, (unsigned long long)got[0],
+                      (unsigned long long)got[1], (unsigned long long)got[2],
+                      (unsigned long long)behind);
+            OCC_CHECK(got[7] == 12345u, "frame %d: index 7 written past the count read\n", round);
+        }
+        /* a frame without queries reads none */
+        rhi_wait_frame();
+        RhiCommandList cl = rhi_begin_commands();
+        rhi_end_commands(cl);
+        rhi_submit(cl);
+        const uint32_t slot = rhi_frame_slot();
+        for (uint32_t k = 0; k < RHI_FRAMES_IN_FLIGHT; k++) {
+            rhi_wait_frame();
+            if (rhi_frame_slot() == slot) {
+                break;
+            }
+        }
+        uint64_t none[4];
+        OCC_CHECK(rhi_read_occlusion(none, 4) == 0u, "a frame without queries read some\n");
+    }
+    rhi_wait_idle();
+    rhi_destroy_buffer(vbuf);
+    rhi_destroy_texture(col);
+    rhi_destroy_texture(dep);
+    rhi_destroy_pipeline(pipe);
+    rhi_destroy_shader(vs);
+    rhi_destroy_shader(ps);
+#undef OCC_CHECK
+    rhi_shutdown();
+    return failures + (int)rhi_vk_validation_error_count();
+}
+
+static int occlusionCell(void)
+{
+    int failures = occlusionRun(false);
+    testSetEnv("ICO_VK_DEPTH_ALWAYS", "1");
+    failures += occlusionRun(true);
+    testSetEnv("ICO_VK_DEPTH_ALWAYS", NULL);
+    return failures;
+}
+
 /* The submission sync (vk_sync.c): the kind in use is the timeline
- * semaphore, or the fence ring under ICO_VK_FAKE_API=1.1 (ctest
- * rhi_vk_vk11); then three frames of 8 command lists each (24 submissions,
+ * semaphore, or the fence ring under ICO_VK_FAKE_API=1.1 and =1.0 (ctests
+ * rhi_vk_vk11, rhi_vk_vk10); then three frames of 8 command lists each (24 submissions,
  * three times around the ring of 8: slots taken again while their frame's
  * slot is still in flight, waits for numbers whose fence slot holds a
  * later one), each list clearing a 4x4 target to its own colour, and a
@@ -659,7 +1014,8 @@ static int poolCell(void)
 static int syncCell(void)
 {
     const char *api = getenv("ICO_VK_FAKE_API");
-    const bool fences = api && strcmp(api, "1.1") == 0;
+    const bool vk10 = api && (strcmp(api, "1.0") == 0 || strcmp(api, "1.0bare") == 0);
+    const bool fences = api && (strcmp(api, "1.1") == 0 || vk10);
     RhiDeviceDesc dd = {NULL, false, true, "rhi_vk_test sync"};
     if (!rhi_create_backend("vulkan") || !rhi_init(&dd)) {
         rhi_test_log("FAIL sync cell: init\n");
@@ -676,6 +1032,23 @@ static int syncCell(void)
     const char *kind = vkr_test_sync_kind();
     SYNC_CHECK(strcmp(kind, fences ? "fences" : "timeline") == 0, "sync %s (want %s)\n", kind,
                fences ? "fences" : "timeline");
+    /* ICO_VK_FAKE_API=1.0 (issue 158): the device used at Vulkan 1.0
+     * (VK_MAKE_API_VERSION(0, 1, 0, 0) = 1 << 22) on the VkRenderPass path,
+     * the UINT views with their usage structure (lavapipe offers
+     * VK_KHR_maintenance2); =1.1 at 1.1 */
+    if (vk10) {
+        const bool bare = strcmp(api, "1.0bare") == 0;
+        SYNC_CHECK(vkr_test_api_version() == (1u << 22), "Vulkan version 0x%x (want 1.0)\n",
+                   (unsigned)vkr_test_api_version());
+        SYNC_CHECK(vkr_test_legacy_passes(), "dynamic rendering on a Vulkan 1.0 device\n");
+        SYNC_CHECK(vkr_test_view_usage(), "no VK_KHR_maintenance2 on lavapipe\n");
+        /* =1.0bare: no extended queries, and the device still made */
+        SYNC_CHECK(vkr_test_props2() == !bare, "extended queries %d (want %d)\n",
+                   (int)vkr_test_props2(), (int)!bare);
+    } else if (api && strcmp(api, "1.1") == 0) {
+        SYNC_CHECK((vkr_test_api_version() >> 12) == (1u << 10 | 1u),
+                   "Vulkan version 0x%x (want 1.1)\n", (unsigned)vkr_test_api_version());
+    }
     RhiTexture tgt = rhi_create_texture(&(RhiTextureDesc){
         4, 4, 1, RHI_FMT_RGBA8_UNORM, RHI_TEX_RENDER_TARGET | RHI_TEX_COPY_SRC, "sync", 0});
     SYNC_CHECK(tgt.id != 0, "target\n");
@@ -740,6 +1113,99 @@ static int syncCell(void)
     return failures + (int)rhi_vk_validation_error_count();
 }
 
+/* ICO_VK_FAKE_NO_D32F_ATTACHMENT (ctest rhi_vk_vk10_nod32f): the device is
+ * still picked and RhiLimits.depth32Attachment is false; without the
+ * variable lavapipe (D32F is an attachment there) reports true. */
+static int d32fCell(void)
+{
+    const char *e = getenv("ICO_VK_FAKE_NO_D32F_ATTACHMENT");
+    const bool fake = e && e[0] && e[0] != '0';
+    RhiDeviceDesc dd = {NULL, false, true, "rhi_vk_test d32f"};
+    if (!rhi_create_backend("vulkan") || !rhi_init(&dd)) {
+        rhi_test_log("FAIL d32f cell: init\n");
+        return 1;
+    }
+    int failures = 0;
+    if ((rhi_limits()->depth32Attachment != 0) == fake) {
+        rhi_test_log("FAIL d32f cell: depth32Attachment %d under the fake %d\n",
+                     (int)rhi_limits()->depth32Attachment, (int)fake);
+        failures++;
+    }
+    rhi_wait_idle();
+    rhi_shutdown();
+    return failures + (int)rhi_vk_validation_error_count();
+}
+
+/* rhi_set_adapter_wanted (vk_device.c vkr_pick_device): a plain start's
+ * device and list; then a name no device has: the start still succeeds
+ * (the automatic pick, a log line), on the same device, the list the same
+ * length with exactly one entry current, the automatic one; then the
+ * plain start's own name: that device again; "" back to automatic.  Under
+ * ICO_VK_DEVICE the variable wins and the cell checks only the start. */
+static int adapterCell(void)
+{
+    RhiDeviceDesc dd = {NULL, false, true, "rhi_vk_test adapter"};
+    char plain[256];
+    RhiAdapterInfo list[RHI_MAX_ADAPTERS];
+    int failures = 0;
+#define ADAPTER_CHECK(cond, ...)                                                                   \
+    do {                                                                                           \
+        if (!(cond)) {                                                                             \
+            rhi_test_log("FAIL adapter cell: " __VA_ARGS__);                                       \
+            failures++;                                                                            \
+        }                                                                                          \
+    } while (0)
+    const char *env = getenv("ICO_VK_DEVICE");
+    const bool forced = env != NULL && env[0] != '\0';
+    rhi_set_adapter_wanted("");
+    if (!rhi_create_backend("vulkan") || !rhi_init(&dd)) {
+        rhi_test_log("FAIL adapter cell: init\n");
+        return 1;
+    }
+    snprintf(plain, sizeof(plain), "%s", rhi_adapter_name());
+    const uint32_t n = rhi_adapter_list(list, RHI_MAX_ADAPTERS);
+    ADAPTER_CHECK(n >= 1, "no device listed\n");
+    rhi_shutdown();
+
+    rhi_set_adapter_wanted("No Such Graphics Card 9000");
+    ADAPTER_CHECK(strcmp(rhi_adapter_wanted(), "No Such Graphics Card 9000") == 0,
+                  "the wanted name kept (%s)\n", rhi_adapter_wanted());
+    if (!rhi_create_backend("vulkan") || !rhi_init(&dd)) {
+        rhi_test_log("FAIL adapter cell: an unknown name did not start\n");
+        rhi_set_adapter_wanted("");
+        return 1;
+    }
+    ADAPTER_CHECK(strcmp(rhi_adapter_name(), plain) == 0, "an unknown name: %s, a plain start %s\n",
+                  rhi_adapter_name(), plain);
+    const uint32_t m = rhi_adapter_list(list, RHI_MAX_ADAPTERS);
+    ADAPTER_CHECK(m == n, "%u devices listed, %u before\n", m, n);
+    int current = 0, at = -1;
+    for (uint32_t i = 0; i < m && i < RHI_MAX_ADAPTERS; i++) {
+        if (list[i].current) {
+            current++;
+            at = (int)i;
+        }
+    }
+    ADAPTER_CHECK(current == 1, "%d devices current\n", current);
+    ADAPTER_CHECK(at >= 0 && strcmp(list[at].name, plain) == 0 && (forced || list[at].automatic),
+                  "the current entry is not the plain start's automatic one\n");
+    rhi_shutdown();
+
+    rhi_set_adapter_wanted(plain);
+    if (!rhi_create_backend("vulkan") || !rhi_init(&dd)) {
+        rhi_test_log("FAIL adapter cell: the plain start's own name did not start\n");
+        rhi_set_adapter_wanted("");
+        return 1;
+    }
+    ADAPTER_CHECK(strcmp(rhi_adapter_name(), plain) == 0, "by name: %s, want %s\n",
+                  rhi_adapter_name(), plain);
+    rhi_shutdown();
+    rhi_set_adapter_wanted(NULL);
+    ADAPTER_CHECK(rhi_adapter_wanted()[0] == '\0', "NULL is automatic\n");
+#undef ADAPTER_CHECK
+    return failures != 0;
+}
+
 int main(void)
 {
     const RhiTestConfig cfg = {"vulkan", "rhi_vk_test", true, NULL, rhi_vk_validation_error_count};
@@ -748,7 +1214,8 @@ int main(void)
         return rc;
     }
     return (hazardCell() || passAreaCell() || cacheCell() || cacheDropCell() || limitsCell() ||
-            poolCell() || syncCell())
+            poolCell() || renderAreaCell() || occlusionCell() || syncCell() || d32fCell() ||
+            adapterCell())
                ? 1
                : 0;
 }

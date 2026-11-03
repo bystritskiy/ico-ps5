@@ -100,6 +100,8 @@ struct tags are CamelCase (`IcoVfsEntry`, `RdFrame`); macros and enum constants 
 | `dx_`, `d3dp_` | the Direct3D 12 backend and its header-free plan (`port/rhi/d3d12/`) |
 | `ui_`, `ui__`, `lt_ext_`, `gallery_` | `port/ui`: the menus, the layout extension, the gallery |
 | `pace_` | the frame pacing policy (`port/platform/pace_policy.c`) |
+| `fm_` | the render thread's hand-over (`port/platform/frame_mailbox.c`) |
+| `cpu_place_` | which core a thread runs on, the cores' speeds, a thread's priority and allowed cores (`port/platform/cpu_place.c`) |
 
 Names the game defines keep their spelling, including the host hooks the game files define for
 `port/` (`gif_Host*`, `pac_Host*`, `mc_Host*`, `tex_HostTextureId`), and so do generated files and
@@ -158,6 +160,7 @@ colon; a test's own lines start with the test's name.
 | `video:` | `port/game/video_options.c` |
 | `boot:` | `port/platform/window_host.c` (the first presents) |
 | `fiber:`, `sched:`, `arena:`, `heap:`, `trace:` | `port/platform/fiber.c`, `sched.c`, `arena.c`, `trace_host.c` |
+| `state:` | save states: `port/game/state_host.c` (saved, loaded, refused, the picture, the [dev] keys), `port/platform/state_registry.c`, `state_port.c`, `state_reloc.c`; the [dev] hash and dump ([PLATFORM.md](PLATFORM.md#saving-and-loading)) |
 | `gpu driver:` | `port/platform/android/gpu_driver_android.c` |
 | `rd:` | `port/render` through `rd__log` and `rd__log_once` (`rd_core.c`), with a topic after it (`rd: blend:`, `rd: fog:`) |
 | `textures:`, `models:` | `port/render/texpack*.c`, `rd_tex.c`, `modelpack.c` |
@@ -169,8 +172,10 @@ colon; a test's own lines start with the test's name.
 | `input:` | `port/input/input_sdl.c`, `bindings.c`, `input_record.c` |
 | `config:`, `scf:` | `port/config/config.c`, `sysconf.c` |
 | `mc:` | `port/save/mc_host.c` |
-| `photo:`, `credits:`, `appearance:`, `achievements:`, `options:`, `model_viewer:` | `port/game` |
+| `photo:`, `credits:`, `appearance:`, `achievements:`, `options:`, `model_viewer:`, `stats:`, `camera:` | `port/game` (`stats:` from `gamestate.c`, `camera:` from `camera_wall_stage.c`) |
 | `ui:`, `settings:`, `gallery:`, `extras:` | `port/ui` |
+| `hotkeys:` | the F6 key's lines (`port/ui/settings.c` `ui_settings_states_key`) |
+| `backup:` | Options > Extras > Back up your data and Restore from a backup: `port/platform/backup_host.c`, and `main_host.c` at the start (`apply_restore`) |
 
 The player guides quote some of these lines (`textures:` and `models:` in
 [TEXTURE_PACKS.md](../TEXTURE_PACKS.md) and [MODEL_PACKS.md](../MODEL_PACKS.md)); change a quoted
@@ -232,7 +237,7 @@ to run them.
 | a new texture or model pack format | [PACKS.md](PACKS.md) |
 | a pacing change | [DISPLAY.md](DISPLAY.md#pacing); the decisions go in `port/platform/pace_policy.c` and only the timing and I/O in `window_host.c` ([PLATFORM.md](PLATFORM.md#pacing)) |
 | a host path in `ico2/` | [GAME_CODE.md](GAME_CODE.md#host-paths-in-the-game-sources) |
-| a new test | [Tests](#tests) above; [TESTING.md](TESTING.md) lists the programs by area |
+| a new test | [Tests](#tests) above; [TESTING_PROGRAMS.md](TESTING_PROGRAMS.md) lists the programs by area |
 
 ## Documents
 

@@ -5,8 +5,10 @@
  * frame dump and F11 the fast stats lines, a held key's repeats do
  * nothing, no other key is taken (Escape, Alt+Enter and the bindable keys
  * stay with window_host.c and the binding layer), the stats period and
- * F11's toggle, and F12's file names. window_host.c checks the key codes
- * against SDL3's SDLK_F11 and SDLK_F12 at compile time and dispatches on
+ * F11's toggle, and F12's file names; F5 and F9 are the save states' slot 1
+ * save and load and F6 the Save states page (once per press, no Shift
+ * variant), F6's code SDL3's. window_host.c checks the key codes against
+ * SDL3's SDLK_F5, F6, F9, F11 and F12 at compile time and dispatches on
  * ico_hotkey_for.
  */
 #include <stdio.h>
@@ -29,6 +31,8 @@ static int fails;
 #define K_RETURN 0x0du
 #define K_F1 0x4000003au
 #define K_F4 0x4000003du
+#define K_F6 0x4000003fu
+#define K_F8 0x40000041u
 #define K_F10 0x40000043u
 #define K_PRINTSCREEN 0x40000046u
 #define K_A 0x61u
@@ -62,6 +66,25 @@ int main(void)
                               sizeof(sweepZip)) == -1 &&
               prefix[0] == '\0' && sweepZip[0] == '\0');
     }
+    /* save states: F5 saves, F9 loads, once per press, Shift changes nothing */
+    CHECK(ico_hotkey_for(ICO_HOTKEY_KEY_F5, 0) == ICO_HOTKEY_STATE_SAVE);
+    CHECK(ico_hotkey_for(ICO_HOTKEY_KEY_F9, 0) == ICO_HOTKEY_STATE_LOAD);
+    CHECK(ico_hotkey_for(ICO_HOTKEY_KEY_F5, 1) == ICO_HOTKEY_NONE);
+    CHECK(ico_hotkey_for(ICO_HOTKEY_KEY_F9, 1) == ICO_HOTKEY_NONE);
+    CHECK(ico_hotkey_for_mod(ICO_HOTKEY_KEY_F5, 0, 1) == ICO_HOTKEY_STATE_SAVE);
+    CHECK(ico_hotkey_for_mod(ICO_HOTKEY_KEY_F9, 0, 1) == ICO_HOTKEY_STATE_LOAD);
+    CHECK(ico_hotkey_for_mod(ICO_HOTKEY_KEY_F9, 1, 1) == ICO_HOTKEY_NONE);
+    /* the Save states page: F6, once per press, Shift changes nothing */
+    CHECK(ICO_HOTKEY_KEY_F6 == K_F6);
+    CHECK(ICO_HOTKEY_KEY_F6 == (63u | (1u << 30)));
+    CHECK(ico_hotkey_for(K_F6, 0) == ICO_HOTKEY_STATES_PAGE);
+    CHECK(ico_hotkey_for(K_F6, 1) == ICO_HOTKEY_NONE);
+    CHECK(ico_hotkey_for_mod(K_F6, 0, 1) == ICO_HOTKEY_STATES_PAGE);
+    CHECK(ico_hotkey_for_mod(K_F6, 1, 1) == ICO_HOTKEY_NONE);
+    CHECK(ico_hotkey_for(K_F8, 0) == ICO_HOTKEY_NONE);
+    /* SDL3: SDLK_F5/F9 = scancode 62/66 | SDLK_SCANCODE_MASK */
+    CHECK(ICO_HOTKEY_KEY_F5 == (62u | (1u << 30)));
+    CHECK(ICO_HOTKEY_KEY_F9 == (66u | (1u << 30)));
     /* SDL3: SDLK_F11/F12 = scancode 68/69 | SDLK_SCANCODE_MASK (1 << 30) */
     CHECK(ICO_HOTKEY_KEY_F11 == (68u | (1u << 30)));
     CHECK(ICO_HOTKEY_KEY_F12 == (69u | (1u << 30)));

@@ -98,6 +98,25 @@
  *             draw, the top layer under the main one where they overlap;
  *             rd__overlay_ring_bytes counts both layers' batches, and a
  *             registration and the present forget them
+ *   overlay thread  both layers at 960 x 720 with interpolation, the
+ *             main one drawing "H" through the font in overlay mode,
+ *             presented by rd_present_post with and without the renderer's
+ *             own thread: the callbacks run on the test's thread (the
+ *             game's) before the post returns, never in a render-thread
+ *             job, once a layer a present; the test's own text in overlay
+ *             mode while the picture runs gives all its quads; the output
+ *             is the same byte for byte; rd_present_blank's layers are
+ *             collected on the test's thread too (skipped on OpenGL)
+ *   failed present  a host of the test's own runs each picture handed
+ *             over at the next drain: one that presents is not counted by
+ *             rd_thread_failed_presents, one that fails there (a movie
+ *             shown by then) is, once
+ *   wait split  a host of the test's own whose picture's end comes at the
+ *             next drain (a 5 ms wait): rd_present_post's waits for the
+ *             picture before are counted by whose (RdThreadBlock: a new
+ *             frame's present, a further present's), the drains of others
+ *             in neither; rd_frame_close_take counts the frames closed
+ *             since its last take and starts again
  *   capture   rd_capture_presented: the rich frame at 800 x
  *             600 with the overlay's rectangles registered, CRT off and
  *             Consumer TV: the PNG is 800 x 600 RGB and holds exactly the
@@ -105,6 +124,15 @@
  *             shown picture has the overlay inside it; the
  *             capture takes a filter pass without it); rd_capture_result
  *             reports it once
+ *   shot      rd_capture_shot at 800 x 450 (the 4:3 picture with bars),
+ *             CRT off and Consumer TV: armed in the open frame, that
+ *             frame's present hands fn the presentation box (the filter's
+ *             box under it) as RGBA, its pixels the present's in that box,
+ *             alpha 255; rd_present_box_size its size; armed before the
+ *             frame began, the present of the later frame drops it (fn
+ *             NULL); armed with rd_capture_presented, both from one copy; a
+ *             second arm tells the first NULL, cancel forgets it, the
+ *             shutdown drops an armed one
  *   aa off    without anti-aliasing, 4x into 640 x 480 (3.2 texels a pixel)
  *             is DISPLAY box-reduced byte for byte (cpuReduce), one pass
  *             more than at 1.28 a pixel; 1x into 320 x 240 keeps the plain
@@ -134,6 +162,7 @@
 #include <stdlib.h>
 #include <string.h>
 #include "rd_internal.h"
+#include "rd_submit.h"
 #include "rd_tex.h"
 #include "../../core/region.h" /* the Japanese disc's reduction crop */
 #include "shader_consts.h"
@@ -505,6 +534,18 @@ void staffRollMain(void) {}
    frames never open photo mode) */
 void ico_photo_view_veil(void) {}
 
+/* port/game/camera_wall_stage.c: the eye's path through the stage at each
+   flip (not linked here; these frames have no stage collision) */
+int ico_camera_wall_check(const float *eyeNow, int cutPending, int stage)
+{
+    (void)eyeNow;
+    (void)cutPending;
+    (void)stage;
+    return 0;
+}
+
+void ico_camera_wall_forget(void) {}
+
 void stage_SetLoopFlag(int g, int f)
 {
     (void)g;
@@ -650,9 +691,16 @@ static void drawScene(RdTex t)
 }
 
 /* rd_pixel_test.c recordRichFrame, the frame of its dump */
+/* recordRichFrame's hook between rd_begin_frame and the draws (the shot
+ * armed in the open frame), NULL for none */
+static void (*s_afterBegin)(void);
+
 static void recordRichFrame(RdTex t, int reduce)
 {
     rd_begin_frame();
+    if (s_afterBegin) {
+        s_afterBegin();
+    }
     drawScene(t);
     rd_select_list(2);
     static const uint8_t add[4] = {60, 30, 90, 0xFF};
@@ -4767,6 +4815,277 @@ static void checkOverlayTop(void)
     free(px);
 }
 
+/* the overlay with the renderer's own thread (rd_thread.h "the
+ * overlay"): the UI's layers of a picture handed over are collected on
+ * this thread, the game's, before rd_present_post returns, never inside a
+ * render-thread job; one call a layer a present; this thread's own text
+ * in the font's overlay mode while the picture runs loses no glyph; the
+ * output is the one without the thread byte for byte; rd_present_blank's
+ * layers too */
+typedef struct ThreadLayer {
+    LayerTest l;
+    int onRender; /* calls made inside a render-thread job */
+    int text;     /* "H" through port/ui's font in overlay mode */
+} ThreadLayer;
+
+static void threadLayer(const RdOverlayCtx *ctx, void *user)
+{
+    static const uint8_t white[4] = {0x80, 0x80, 0x80, 0x80};
+    ThreadLayer *t = user;
+    t->onRender += rd_thread_on_render();
+    layerRect(ctx, &t->l);
+    if (t->text) {
+        ui_begin_overlay(ctx);
+        ui_draw_text(320.0f, 300.0f, 40.0f, white, "H", UI_ALIGN_CENTER | UI_VALIGN_BASELINE);
+        ui_end_overlay();
+    }
+}
+
+static int s_threadQuads;
+
+static void threadSink(RdPrim type, const RdScreenVtx *v, uint32_t n, RdTex tex, RdBlend blend)
+{
+    (void)type;
+    (void)v;
+    (void)tex;
+    (void)blend;
+    s_threadQuads += (int)(n / 2); /* a sprite a glyph, two vertices each, a page a call */
+}
+
+/* one run: the rich frame twice, rd_present_post(1) and the output into
+ * px (w x h); th: with the renderer's own thread */
+static bool threadOverlayRun(int th, uint32_t w, uint32_t h, uint8_t *px, ThreadLayer *m,
+                             ThreadLayer *t)
+{
+    makeNoiseScene();
+    RdSettings s = originalSettings();
+    s.outputWidth = w;
+    s.outputHeight = h;
+    s.interpolate = 1; /* rd_end_frame leaves the replays to the presents */
+    if (!rd_init(512, 512, &s, NULL)) {
+        return false;
+    }
+    if (th && !rd_thread_local_start(RD_THREAD_ON)) {
+        CHECK(false, "overlay thread: the renderer's own thread");
+        rd_shutdown();
+        return false;
+    }
+    m->l.calls = t->l.calls = m->onRender = t->onRender = 0;
+    rd_set_present_overlay(threadLayer, m);
+    rd_set_present_overlay_top(threadLayer, t);
+    RdTex tex = rd_create_texture(512, 512, s_scene, RD_TEXA_80_80, "scene");
+    recordRichFrame(tex, 1);
+    recordRichFrame(tex, 1);
+    const bool posted = rd_present_post(1.0f);
+    /* the layers were collected before the post returned, here */
+    const int mainAt = m->l.calls, topAt = t->l.calls;
+    CHECK(posted && mainAt == 1 && topAt == 1 && m->onRender == 0 && t->onRender == 0,
+          "overlay thread %d: the layers collected on this thread before the hand-over (%d, %d "
+          "calls; %d, %d on the render thread)",
+          th, mainAt, topAt, m->onRender, t->onRender);
+    /* the game's own text while the picture may still run */
+    {
+        static const uint8_t grey[4] = {0x60, 0x60, 0x60, 0x80};
+        s_threadQuads = 0;
+        ui__set_overlay_sink(threadSink);
+        ui_begin_overlay(&m->l.ctx);
+        ui_draw_text(100.0f, 200.0f, 40.0f, grey, "HHHH", UI_ALIGN_LEFT | UI_VALIGN_BASELINE);
+        ui_end_overlay();
+        ui__set_overlay_sink(NULL);
+        CHECK(s_threadQuads == 4, "overlay thread %d: the game's own text gave %d quads, not 4", th,
+              s_threadQuads);
+    }
+    (void)rd_thread_drain();
+    uint32_t ow = 0, oh = 0;
+    const bool ok = rd_read_presented(px, &ow, &oh) && ow == w && oh == h;
+    CHECK(ok && m->l.calls == 1 && t->l.calls == 1,
+          "overlay thread %d: the presented output, one call a layer (%d, %d)", th, m->l.calls,
+          t->l.calls);
+    /* the blank present: its layers here as well */
+    CHECK(rd_present_blank() && m->l.calls == 2 && t->l.calls == 2 && m->onRender == 0 &&
+              t->onRender == 0,
+          "overlay thread %d: rd_present_blank's layers on this thread (%d, %d; %d, %d on the "
+          "render thread)",
+          th, m->l.calls, t->l.calls, m->onRender, t->onRender);
+    rd_set_present_overlay(NULL, NULL);
+    rd_set_present_overlay_top(NULL, NULL);
+    ui_font_shutdown();
+    rd_destroy_texture(tex);
+    if (th) {
+        rd_thread_local_stop();
+    }
+    CHECK(rhi_vk_validation_error_count() == 0, "overlay thread %d: %u validation errors", th,
+          rhi_vk_validation_error_count());
+    rd_shutdown();
+    return ok;
+}
+
+static void checkOverlayThread(void)
+{
+    const uint32_t w = 960, h = 720;
+    const size_t n = (size_t)w * h * 4;
+    uint8_t *off = malloc(n), *on = malloc(n);
+    ThreadLayer m = {.l = {.x0 = 100, .y0 = 50, .x1 = 140, .y1 = 71, .c = {255, 0, 0, 0x80}},
+                     .text = 1};
+    ThreadLayer t = {.l = {.x0 = 120, .y0 = 60, .x1 = 180, .y1 = 90, .c = {0, 0, 255, 0x80}}};
+    if (!off || !on) {
+        free(off);
+        free(on);
+        return;
+    }
+    const bool a = threadOverlayRun(0, w, h, off, &m, &t);
+    if (rhi_backend() == RHI_BACKEND_OPENGL) {
+        printf("  overlay thread: not with OpenGL (rd_thread.h): the thread's run skipped\n");
+    } else if (a && threadOverlayRun(1, w, h, on, &m, &t)) {
+        size_t diff = 0;
+        for (size_t i = 0; i < n; i++) {
+            diff += off[i] != on[i];
+        }
+        CHECK(diff == 0, "overlay thread: %zu bytes of the output differ from the one without it",
+              diff);
+    }
+    free(off);
+    free(on);
+}
+
+/* a present rd_present_post hands over that then fails is counted at the
+ * drain after it (rd_thread_failed_presents), one that presents is not: a
+ * host of the test's own that runs each job handed over at the next drain,
+ * on this thread */
+static struct {
+    void (*fn)(void *arg);
+    void *arg;
+} s_defer;
+
+static bool deferPost(void *u, void (*fn)(void *arg), void *arg, bool picture, bool wait)
+{
+    (void)u;
+    (void)picture;
+    if (wait) {
+        fn(arg);
+    } else {
+        s_defer.fn = fn;
+        s_defer.arg = arg;
+    }
+    return true;
+}
+
+static uint64_t deferDrain(void *u)
+{
+    (void)u;
+    void (*fn)(void *arg) = s_defer.fn;
+    s_defer.fn = NULL;
+    if (fn) {
+        fn(s_defer.arg);
+    }
+    return 0;
+}
+
+static void checkFailedPresent(void)
+{
+    static const RdThreadHost host = {NULL, deferPost, deferDrain, false, false, NULL};
+    makeNoiseScene();
+    RdSettings s = originalSettings();
+    s.interpolate = 1;
+    if (!rd_init(512, 512, &s, NULL)) {
+        return;
+    }
+    RdTex tex = rd_create_texture(512, 512, s_scene, RD_TEXA_80_80, "scene");
+    recordRichFrame(tex, 1);
+    recordRichFrame(tex, 1);
+    rd_set_thread_host(&host);
+    const uint32_t f0 = rd_thread_failed_presents();
+    const bool a = rd_present_post(1.0f) && rd_submit_async();
+    (void)rd_thread_drain();
+    const uint32_t f1 = rd_thread_failed_presents();
+    /* the next one fails where it runs: a movie shown by then */
+    const bool b = rd_present_post(1.0f) && rd_submit_async();
+    g_rd.videoShown = 1;
+    (void)rd_thread_drain();
+    g_rd.videoShown = 0;
+    const uint32_t f2 = rd_thread_failed_presents();
+    rd_set_thread_host(NULL);
+    CHECK(a && b && f1 == f0 && f2 == f0 + 1,
+          "failed present: both handed over (%d %d), the one that presented not counted (%u), the "
+          "one that failed counted (%u)",
+          a, b, f1 - f0, f2 - f0);
+    rd_destroy_texture(tex);
+    rd_shutdown();
+}
+
+/* rd_present_post's waits for the picture before, by whose (RdThreadBlock
+ * freshWaits, furtherWaits): a host of the test's own runs each job when it
+ * is posted, and a picture handed over without waiting is still "in its
+ * submit and present" until the next drain, which reports 5 ms */
+static bool s_tailOpen;
+
+static bool tailPost(void *u, void (*fn)(void *arg), void *arg, bool picture, bool wait)
+{
+    (void)u;
+    fn(arg);
+    s_tailOpen = picture && !wait;
+    return true;
+}
+
+static uint64_t tailDrain(void *u)
+{
+    (void)u;
+    const bool open = s_tailOpen;
+    s_tailOpen = false;
+    return open ? 5000000u : 0u;
+}
+
+static void checkWaitSplit(void)
+{
+    static const RdThreadHost host = {NULL, tailPost, tailDrain, false, false, NULL};
+    makeNoiseScene();
+    RdSettings s = originalSettings();
+    s.interpolate = 1;
+    if (!rd_init(512, 512, &s, NULL)) {
+        return;
+    }
+    RdTex tex = rd_create_texture(512, 512, s_scene, RD_TEXA_80_80, "scene");
+    unsigned closes;
+    double meanMs, maxMs;
+    rd_frame_close_take(&closes, &meanMs, &maxMs); /* the sums from here */
+    recordRichFrame(tex, 1);
+    recordRichFrame(tex, 1);
+    rd_frame_close_take(&closes, &meanMs, &maxMs);
+    const bool twoCloses = closes == 2 && meanMs >= 0.0 && maxMs >= meanMs;
+    rd_frame_close_take(&closes, &meanMs, &maxMs);
+    const bool restarted = closes == 0 && meanMs == 0.0 && maxMs == 0.0;
+    rd_set_thread_host(&host);
+    RdThreadBlock b;
+    rd_thread_block_take(&b);
+    /* frame 2's first present: nothing before it to wait for */
+    const bool a = rd_present_post(1.0f);
+    /* frame 2 again: a further present, waiting for the first one's end */
+    const bool c = rd_present_post(1.0f);
+    /* a drain of another kind (a load's, a settings change's): neither */
+    (void)rd_thread_drain();
+    recordRichFrame(tex, 1);
+    const bool d = rd_present_post(1.0f); /* frame 3: nothing open before it */
+    /* frame 3 again, then frame 4's first present: each waits for the one before */
+    const bool e = rd_present_post(1.0f);
+    recordRichFrame(tex, 1);
+    const bool f = rd_present_post(1.0f);
+    (void)rd_thread_drain();
+    rd_thread_block_take(&b);
+    rd_set_thread_host(NULL);
+    rd_frame_close_take(&closes, &meanMs, &maxMs);
+    CHECK(twoCloses && restarted && closes == 2,
+          "wait split: two frames' closes timed (%d), the sums started again (%d), two more (%u)",
+          twoCloses, restarted, closes);
+    CHECK(a && c && d && e && f, "wait split: every present made (%d %d %d %d %d)", a, c, d, e, f);
+    CHECK(b.freshWaits == 1 && b.furtherWaits == 2 && b.freshWaitMs > 4.9 && b.freshWaitMs < 5.1 &&
+              b.furtherWaitMs > 9.9 && b.furtherWaitMs < 10.1,
+          "wait split: a new frame's present waited %u times (%.1f ms), a further one's %u times "
+          "(%.1f ms); 1 (5 ms) and 2 (10 ms) expected",
+          b.freshWaits, b.freshWaitMs, b.furtherWaits, b.furtherWaitMs);
+    rd_destroy_texture(tex);
+    rd_shutdown();
+}
+
 /* --------------------------------------------------------------- capture */
 
 static uint32_t be32At(const uint8_t *p)
@@ -4900,6 +5219,192 @@ static void checkCapture(const char *dir)
 {
     checkCaptureAt(dir, 0);
     checkCaptureAt(dir, 1);
+}
+
+/* ------------------------------------------------------ the state picture */
+
+typedef struct ShotSeen {
+    int calls;
+    uint8_t *px;
+    uint32_t w, h;
+} ShotSeen;
+
+static ShotSeen s_shotA, s_shotB;
+
+static void shotFn(uint8_t *rgba, uint32_t w, uint32_t h, void *user)
+{
+    ShotSeen *seen = (ShotSeen *)user;
+    seen->calls++;
+    free(seen->px);
+    seen->px = rgba;
+    seen->w = w;
+    seen->h = h;
+}
+
+static void shotForget(ShotSeen *seen)
+{
+    free(seen->px);
+    memset(seen, 0, sizeof(*seen));
+}
+
+static void armShotA(void)
+{
+    CHECK(rd_capture_shot(shotFn, &s_shotA), "shot: armed in the open frame");
+}
+
+static void armDeferred(void)
+{
+    CHECK(rd_capture_shot_arm(), "shot: the deferred one armed in the open frame");
+}
+
+/* rd_capture_shot_arm and rd_capture_shot_take (the state host's pause
+ * picture): the present's answer kept for the game thread, here and with
+ * the renderer's own thread presenting (rd_thread.h; the frame's present
+ * through rd__on_host on that thread) */
+static void checkShotDeferred(RdTex t, const RhiRect *box, int crt)
+{
+    for (int th = 0; th < 2; th++) {
+        uint8_t *px = NULL;
+        uint32_t dw = 0, dh = 0;
+        if (th && rhi_backend() == RHI_BACKEND_OPENGL) {
+            break; /* the renderer's own thread: not with OpenGL (rd_thread.h) */
+        }
+        const bool started = th && rd_thread_local_start(RD_THREAD_ON);
+        if (th && !started) {
+            CHECK(false, "shot (crt %d): the renderer's own thread", crt);
+            break;
+        }
+        s_afterBegin = armDeferred;
+        recordRichFrame(t, 1);
+        s_afterBegin = NULL;
+        (void)rd_thread_drain();
+        const int took = rd_capture_shot_take(&px, &dw, &dh);
+        CHECK(took == 1 && px && dw == box->w && dh == box->h,
+              "shot (crt %d, thread %d): the deferred answer %d, %ux%u (the box %ux%u)", crt, th,
+              took, dw, dh, box->w, box->h);
+        free(px);
+        px = NULL;
+        CHECK(rd_capture_shot_take(&px, &dw, &dh) == 0, "shot (thread %d): taken once", th);
+        /* replaced before a present: no NULL answer for the new request */
+        CHECK(rd_capture_shot_arm() && rd_capture_shot_arm() &&
+                  rd_capture_shot_take(&px, &dw, &dh) == 0,
+              "shot (thread %d): a replaced request leaves no answer", th);
+        rd_capture_shot_cancel();
+        recordRichFrame(t, 1);
+        (void)rd_thread_drain();
+        CHECK(rd_capture_shot_take(&px, &dw, &dh) == 0, "shot (thread %d): cancelled, no answer",
+              th);
+        /* armed between frames: the later frame's present drops it, as NULL */
+        CHECK(rd_capture_shot_arm(), "shot (thread %d): armed between frames", th);
+        recordRichFrame(t, 1);
+        (void)rd_thread_drain();
+        CHECK(rd_capture_shot_take(&px, &dw, &dh) == 1 && px == NULL,
+              "shot (thread %d): a later frame's present drops it", th);
+        if (started) {
+            rd_thread_local_stop();
+        }
+    }
+}
+
+static void checkShotAt(const char *dir, int crt)
+{
+    const uint32_t w = 800, h = 450;
+    const size_t n = (size_t)w * h * 4;
+    uint8_t *shown = malloc(n);
+    char png[1100], done[1100];
+    snprintf(png, sizeof(png), "%s/rd_present_shot_%d.png", dir, crt);
+    makeNoiseScene();
+    RdSettings s = originalSettings();
+    s.outputWidth = w;
+    s.outputHeight = h;
+    if (crt) {
+        rd_crt_settings(&s, RD_CRT_CONSUMER, 1.0f);
+    }
+    if (!shown || !rd_init(512, 512, &s, NULL)) {
+        CHECK(false, "shot (crt %d): a device", crt);
+        free(shown);
+        return;
+    }
+    RdTex t = rd_create_texture(512, 512, s_scene, RD_TEXA_80_80, "scene");
+    shotForget(&s_shotA);
+    shotForget(&s_shotB);
+
+    /* armed in the open frame: its present hands the box */
+    s_afterBegin = armShotA;
+    recordRichFrame(t, 1);
+    s_afterBegin = NULL;
+    uint32_t ow = 0, oh = 0, bw = 0, bh = 0;
+    RhiRect box;
+    memset(&box, 0, sizeof(box));
+    const bool read = rd_read_presented(shown, &ow, &oh) && ow == w && oh == h;
+    if (crt) {
+        rd__crt_box(w, h, &box);
+    } else {
+        uint32_t pw, ph;
+        CHECK(rd__last_present_box(&pw, &ph, &box), "shot: the present's box");
+    }
+    CHECK(rd_present_box_size(&bw, &bh) && bh == h && bw < w,
+          "shot (crt %d): the box size %ux%u (the picture's own shape, no bars)", crt, bw, bh);
+    CHECK(read && s_shotA.calls == 1 && s_shotA.px && s_shotA.w == box.w && s_shotA.h == box.h,
+          "shot (crt %d): %d calls, %ux%u (the box %ux%u at %d,%d)", crt, s_shotA.calls, s_shotA.w,
+          s_shotA.h, box.w, box.h, box.x, box.y);
+    if (read && s_shotA.px && s_shotA.w == box.w && s_shotA.h == box.h) {
+        size_t diff = 0, alpha = 0;
+        for (uint32_t y = 0; y < box.h; y++) {
+            for (uint32_t x = 0; x < box.w; x++) {
+                const uint8_t *a = s_shotA.px + ((size_t)y * box.w + x) * 4;
+                const uint8_t *b = shown + ((size_t)(box.y + y) * w + (box.x + x)) * 4;
+                diff += memcmp(a, b, 3) != 0;
+                alpha += a[3] != 255;
+            }
+        }
+        CHECK(diff == 0 && alpha == 0,
+              "shot (crt %d): the present's pixels in the box (%zu differ, %zu not opaque)", crt,
+              diff, alpha);
+    }
+
+    /* armed before the frame began: the later frame's present drops it */
+    shotForget(&s_shotA);
+    CHECK(rd_capture_shot(shotFn, &s_shotA), "shot: armed between frames");
+    recordRichFrame(t, 1);
+    CHECK(s_shotA.calls == 1 && s_shotA.px == NULL,
+          "shot (crt %d): a later frame's present drops it (%d calls)", crt, s_shotA.calls);
+
+    /* with the photo capture at one present: both */
+    shotForget(&s_shotA);
+    remove(png);
+    CHECK(rd_capture_presented(png), "shot: the capture armed too");
+    s_afterBegin = armShotA;
+    recordRichFrame(t, 1);
+    s_afterBegin = NULL;
+    CHECK(rd_capture_result(done, sizeof(done)) == 1 && s_shotA.calls == 1 && s_shotA.px,
+          "shot (crt %d): the capture and the shot from one present", crt);
+
+    checkShotDeferred(t, &box, crt);
+
+    /* a second arm tells the first NULL; cancel forgets; shutdown drops */
+    shotForget(&s_shotA);
+    CHECK(rd_capture_shot(shotFn, &s_shotA) && rd_capture_shot(shotFn, &s_shotB) &&
+              s_shotA.calls == 1 && s_shotA.px == NULL && s_shotB.calls == 0,
+          "shot: replaced before a present");
+    rd_capture_shot_cancel();
+    recordRichFrame(t, 1);
+    CHECK(s_shotB.calls == 0, "shot: cancelled, never told");
+    CHECK(rd_capture_shot(shotFn, &s_shotB), "shot: armed at the end");
+    CHECK(rhi_vk_validation_error_count() == 0, "shot: %u validation errors",
+          rhi_vk_validation_error_count());
+    rd_destroy_texture(t);
+    rd_shutdown();
+    CHECK(s_shotB.calls == 1 && s_shotB.px == NULL, "shot: the shutdown drops an armed one");
+    shotForget(&s_shotA);
+    shotForget(&s_shotB);
+    free(shown);
+}
+
+static void checkShot(const char *dir)
+{
+    checkShotAt(dir, 0);
+    checkShotAt(dir, 1);
 }
 
 /* ------------------------------------------- the present's render passes */
@@ -5159,6 +5664,14 @@ static void checkEffectsDepth(void)
               off.scene == on.scene,
           "effects depth: the picture is the same with the pass on");
     CHECK(off.depthOk, "effects depth: none without the option");
+    /* ICO_VK_FAKE_NO_D32F_ATTACHMENT: the pass is forced and still not drawn
+     * (depthWanted is false), the picture the same; the keys are
+     * checkNoD32Keys's */
+    const char *noD32 = getenv("ICO_VK_FAKE_NO_D32F_ATTACHMENT");
+    if (noD32 && noD32[0] && noD32[0] != '0') {
+        CHECK(!on.depthOk, "effects depth: drawn although the device has no D32F attachment");
+        return;
+    }
     CHECK(on.depthOk, "effects depth: the output-size depth readback");
     CHECK(on.sw == 512 && on.sh == 512, "effects depth: SCENE's depth is %ux%u", on.sw, on.sh);
     if (!on.depthOk || on.sw != 512 || on.sh != 512) {
@@ -5228,6 +5741,52 @@ static void checkEffectsDepth(void)
     }
 }
 
+/* The effects depth's two start-up keys exist exactly where the device can
+ * draw to a D32F depth buffer (RhiLimits.depth32Attachment; false under
+ * ICO_VK_FAKE_NO_D32F_ATTACHMENT, which also gives the limit false). */
+static void checkNoD32Keys(void)
+{
+    const char *e = getenv("ICO_VK_FAKE_NO_D32F_ATTACHMENT");
+    const bool fake = e && e[0] && e[0] != '0';
+    RdSettings s = originalSettings();
+    if (!rd_init(512, 512, &s, NULL)) {
+        CHECK(0, "no D32F keys: rd_init");
+        return;
+    }
+    const bool can = rhi_limits()->depth32Attachment != 0;
+    CHECK(can == !fake, "no D32F keys: depth32Attachment %d under the fake %d", (int)can,
+          (int)fake);
+    for (int m = 0; m < 2; m++) {
+        for (int f = 0; f < 2; f++) {
+            const RdPipeKeyInt k =
+                rd__present_depth_key(f ? RHI_FMT_BGRA8_UNORM : RHI_FMT_RGBA8_UNORM);
+            CHECK(reachable(&k, m != 0) == can,
+                  "no D32F keys: the %s key is %sin the start-up set (depth32Attachment %d)",
+                  f ? "BGRA8" : "RGBA8", can ? "not " : "", (int)can);
+        }
+    }
+    rd_shutdown();
+}
+
+/* The present's box average (aa_reduce_ps, rd_present.c reduceInto: the
+ * supersampled, the scaled-above-the-box and the downsampled presents) is in
+ * the start-up set in both blend modes, so none of them makes a pipeline on
+ * first use; the key is the one reduceInto asks for (rd__post_key, RGBA8). */
+static void checkReduceKey(void)
+{
+    RdSettings s = originalSettings();
+    if (!rd_init(512, 512, &s, NULL)) {
+        CHECK(0, "reduce key: rd_init");
+        return;
+    }
+    const RdPipeKeyInt k = rd__post_key(RD_VS_BLIT, RD_FS_AA_REDUCE, RHI_FMT_RGBA8_UNORM);
+    for (int m = 0; m < 2; m++) {
+        CHECK(reachable(&k, m != 0), "reduce key: aa_reduce_ps is not in the start-up set%s",
+              m ? " (two-pass blend)" : "");
+    }
+    rd_shutdown();
+}
+
 /* ------------------------------------------------------------------ main */
 
 /* ------------------------------------------------------ the blank present */
@@ -5281,6 +5840,87 @@ static void checkRingGrowth(void)
     CHECK(rd__begin_own_frame(4 * c), "ring: growth with nothing refused");
     CHECK(g_rd.ringCap[slot] >= 4 * c, "ring: slot %u grew to %llu bytes", slot,
           (unsigned long long)g_rd.ringCap[slot]);
+    rhi_wait_idle();
+    rd_shutdown();
+}
+
+/* one frame on slot `slot` needing `need` bytes of ring: the frames before it
+   that bring the slot round need 1 MB (a quarter of the 4 MB start, so they
+   leave the other slots' counts alone, being not under it) */
+static bool ringFrameOn(uint32_t slot, uint64_t need)
+{
+    while (g_rd.replayCounter % RHI_FRAMES_IN_FLIGHT != slot) {
+        if (!rd__begin_own_frame(1u << 20)) {
+            return false;
+        }
+    }
+    return rd__begin_own_frame(need);
+}
+
+/* issue 126: the ring shrinks.  A slot whose need stays under a quarter of
+   its ring for RD_RING_SHRINK_REPLAYS replays in a row is remade at half;
+   a frame needing a quarter or more, or a growth, starts the count again;
+   16 MB is the floor */
+static void checkRingShrink(void)
+{
+    RdSettings s = originalSettings();
+    if (!rd_init(512, 512, &s, NULL)) {
+        CHECK(0, "shrink: rd_init");
+        return;
+    }
+    const uint64_t mb = 1ull << 20;
+    const uint32_t slot = 0;
+    const uint64_t small = 1u << 20;
+    CHECK(ringFrameOn(slot, 40 * mb), "shrink: a 40 MB frame");
+    const uint64_t big = g_rd.ringCap[slot];
+    CHECK(big >= 40 * mb && g_rd.ringSmall[slot] == 0, "shrink: grown to %llu MB, count %u",
+          (unsigned long long)(big >> 20), g_rd.ringSmall[slot]);
+    /* the count: one a small frame, the slot unchanged until the 300th */
+    for (uint32_t i = 1; i < RD_RING_SHRINK_REPLAYS; i++) {
+        CHECK(ringFrameOn(slot, small), "shrink: small frame %u", i);
+    }
+    CHECK(g_rd.ringCap[slot] == big && g_rd.ringSmall[slot] == RD_RING_SHRINK_REPLAYS - 1u,
+          "shrink: after %u small frames the ring is %llu MB (want %llu), count %u",
+          RD_RING_SHRINK_REPLAYS - 1u, (unsigned long long)(g_rd.ringCap[slot] >> 20),
+          (unsigned long long)(big >> 20), g_rd.ringSmall[slot]);
+    const RhiBuffer before = g_rd.ring[slot];
+    CHECK(ringFrameOn(slot, small), "shrink: the 300th small frame");
+    CHECK(g_rd.ringCap[slot] == big / 2 && g_rd.ring[slot].id != before.id &&
+              g_rd.ringMap[slot] != NULL && g_rd.ringSmall[slot] == 0,
+          "shrink: halved to %llu MB (want %llu), count %u",
+          (unsigned long long)(g_rd.ringCap[slot] >> 20), (unsigned long long)((big / 2) >> 20),
+          g_rd.ringSmall[slot]);
+    /* a frame needing a quarter of the ring or more starts the count again */
+    const uint64_t half = g_rd.ringCap[slot];
+    for (uint32_t i = 0; i < 100; i++) {
+        CHECK(ringFrameOn(slot, small), "shrink: small frame before the reset");
+    }
+    CHECK(g_rd.ringSmall[slot] == 100, "shrink: count %u (want 100)", g_rd.ringSmall[slot]);
+    CHECK(ringFrameOn(slot, half / 4), "shrink: a quarter-size frame");
+    CHECK(g_rd.ringSmall[slot] == 0 && g_rd.ringCap[slot] == half,
+          "shrink: a quarter-size frame left count %u, ring %llu MB", g_rd.ringSmall[slot],
+          (unsigned long long)(g_rd.ringCap[slot] >> 20));
+    /* a growth does too */
+    for (uint32_t i = 0; i < 50; i++) {
+        CHECK(ringFrameOn(slot, small), "shrink: small frame before the growth");
+    }
+    CHECK(ringFrameOn(slot, half + mb), "shrink: a growth");
+    CHECK(g_rd.ringCap[slot] > half && g_rd.ringSmall[slot] == 0,
+          "shrink: after a growth the ring is %llu MB, count %u",
+          (unsigned long long)(g_rd.ringCap[slot] >> 20), g_rd.ringSmall[slot]);
+    /* down to the floor and no further */
+    for (int round = 0; round < 6; round++) {
+        for (uint32_t i = 0; i < RD_RING_SHRINK_REPLAYS; i++) {
+            if (!ringFrameOn(slot, small)) {
+                CHECK(0, "shrink: small frame in round %d", round);
+                break;
+            }
+        }
+    }
+    CHECK(g_rd.ringCap[slot] == RD_RING_SHRINK_FLOOR,
+          "shrink: the ring settled at %llu MB (want the %llu MB floor)",
+          (unsigned long long)(g_rd.ringCap[slot] >> 20),
+          (unsigned long long)(RD_RING_SHRINK_FLOOR >> 20));
     rhi_wait_idle();
     rd_shutdown();
 }
@@ -5357,6 +5997,15 @@ static void checkBlank(void)
 
 int main(int argc, char **argv)
 {
+    /* the frames here hold golden bytes (or read SCENE back) with list
+       11's last sprites drawn into SCENE; the fades fold, how the game
+       draws them, is ctest rd_fades_fold's and rd_fades_fold_ab's
+       (rd_fades_fold.c): drawn here as before */
+#ifdef _WIN32
+    _putenv_s("ICO_RD_FADES_FOLD", "0");
+#else
+    setenv("ICO_RD_FADES_FOLD", "0", 1);
+#endif
     rd__set_not_implemented_fatal(true); /* a stub command replayed stops the test */
     const char *dir = argc > 1 ? argv[1] : ".";
     checkOptions(dir);
@@ -5413,11 +6062,18 @@ int main(int argc, char **argv)
     checkOverlay(s_presentOriginal);
     checkOverlayCrt();
     checkOverlayTop();
+    checkOverlayThread();
+    checkFailedPresent();
+    checkWaitSplit();
     checkCapture(dir);
+    checkShot(dir);
     checkPresentPasses(dir);
     checkEffectsDepth();
+    checkNoD32Keys();
+    checkReduceKey();
     checkBlank();
     checkRingGrowth();
+    checkRingShrink();
     if (failures) {
         printf("rd_present_test: %d failures\n", failures);
         return 1;

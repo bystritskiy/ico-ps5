@@ -17,6 +17,9 @@ commands and [replays](ARCHITECTURE.md#terms) them on the [RHI](ARCHITECTURE.md#
 | `port/render/rd_tex.h`, `rd_tex.c` | the texture cache: GS formats decoded into rd textures |
 | `port/render/rd_mesh.h`, `rd_mesh.c` | the VU mesh path (VU1_PROGRAMS.md) |
 | `port/render/rd_replay.c` | a frame onto the RHI: every command's replay |
+| `port/render/rd_submit.c`, `rd_submit.h` | a replay's end: the present's pass recorded, the list ended and submitted, the picture presented and the capture it copied written out |
+| `port/render/rd_thread.c`, `rd_thread.h` | the renderer on the window's render thread: the picture and the calls posted there, the hand-over of the renderer's state (texLock), the retire list, the stats split, the renderer's own thread for the tools |
+| `port/render/rd_submit_thread.c`, `rd_submit_thread.h`, `rd_submit_queue.c`, `rd_submit_queue.h` | the submit thread: a picture handed over has its list ended and submitted and its image presented there (Vulkan, Direct3D 12), the render thread free once its walk ends; its queue (pure) |
 | `port/render/rd_replay_vu.c`, `rd_replay.h` | the replay's VU draws and the vertex and triangle pre-passes; what they share with `rd_replay.c` (the replay's state, a draw's setup, its helpers) |
 | `port/render/rd_vuprepass_selftest.c` | the vertex and triangle pre-passes' start-up self-test |
 | `port/render/rd_upload.c` | the upload ring and what a replay uploads before its first pass |
@@ -26,10 +29,11 @@ commands and [replays](ARCHITECTURE.md#terms) them on the [RHI](ARCHITECTURE.md#
 | `port/render/rd_blur.c` | staticBlur.c's sprites and the reduction's, for `rd__blur_post_sprite`; the open border's strips |
 | `port/render/rd_blur_border.c` | the post sprites' replay (`rd__blur_post_sprite`): the fold, the reduction's open border and its outer columns, SCENE's outer columns repeated after the fog |
 | `port/render/rd_blur_smooth.c` | Motion blur: Smooth: the motion blur's accumulator, its two passes and the sprite drawn over it (`rd__blur_smooth_sprite`) |
-| `port/render/rd_crack_fill.c` | the crack filler above 1x: the pixels no draw covered (or a farther surface seen through a seam) between drawn ones filled before the fog, and their count ([Crack filling above 1x](#crack-filling-above-1x)) |
+| `port/render/rd_crack_fill.c` | the crack filler above 1x: the pixels no draw covered (or a farther surface seen through a seam) between drawn ones filled after lists 4-6, and their count ([Crack filling above 1x](RENDER_POST.md#crack-filling-above-1x)) |
 | `port/render/rd_shadow.c` | the shadow count on the stencil |
 | `port/render/rd_water.c` | render-to-texture blocks, target aliases, camera scopes, pool STs |
 | `port/render/rd_fog_path.c` | how the fog reads the scene depth; the fog probe and self-test |
+| `port/render/rd_fades_fold.c` | the fades fold: list 11's last full-frame lerp sprites applied by the reduction ([The fades fold](RENDER_POST.md#the-fades-fold)) |
 | `port/render/rd_content_hide.c` | the content table: stage faces the native frame must not show |
 | `port/render/rd_content_extend.c` | the content table's sheets: stage overlays continued to the frame's edges |
 | `port/render/rd_content_chain.c`, `rd_chain.h` | the chains drawn at their links' size |
@@ -37,12 +41,14 @@ commands and [replays](ARCHITECTURE.md#terms) them on the [RHI](ARCHITECTURE.md#
 | `port/render/rd_screen_planes.c` | the attribute planes of screen-prim triangles |
 | `port/render/rd_camera_blend.h` | the blended camera, shared with the game's cull |
 | `port/render/rd_perf.c` | the per-replay performance records |
+| `port/render/rd_occlusion.c` | every GPU draw of a replay (`rd__replay_draw`, `rd__replay_draw_indexed`: the pass window's take) and the hidden-draw measurement around them ([Culling](#culling)) |
 | `port/render/rd_passring.h`, `rd_passring.c` | the pass ring: the last passes recorded, for the device-loss report |
 | `port/render/rd_dump.c`, `rd_png.c` | frame dumps; a minimal PNG writer |
 | `port/render/tools/rd_replay_tool.c` | [the replay tool](ARCHITECTURE.md#terms) |
 | `port/render/vu1_ref/` | the VU1 programs' CPU references ([VU1_PROGRAMS.md](VU1_PROGRAMS.md#the-cpu-oracles)) |
-| `port/render/test/` | the renderer's tests ([TESTING.md](TESTING.md#portrendertest)) |
-| `port/render/rd_interp.c`, `rd_present.c`, `rd_crt.c`, `rd_video.c` | presentation ([DISPLAY.md](DISPLAY.md)) |
+| `port/render/test/` | the renderer's tests ([TESTING_PROGRAMS.md](TESTING_PROGRAMS.md#portrendertest)) |
+| `port/render/rd_interp.c`, `rd_present.c`, `rd_present_info.c`, `rd_crt.c`, `rd_video.c` | presentation ([DISPLAY.md](DISPLAY.md)); `rd_present_info.c` holds `rd_last_present_info`'s record |
+| `port/render/rd_interp_mesh.c` | the interpolation's reads of a mesh's stream kept while its serial holds: a skinned mesh's bone pivots, a rigid mesh's centroid, the same-shape answer of two streams ([Performance notes](#performance-notes)) |
 | `port/render/texpack*.c`, `modelpack.c`, `gltf.c`, `xxh3.c` | texture and model packs ([PACKS.md](PACKS.md)) |
 
 ## The model
@@ -67,7 +73,7 @@ one persistent state block. Within a list submission order is draw order; rd nev
 | 8, 9 | shine levels 2 and 3 |
 | 10 | the softening chain |
 | 11 | UI, subtitles, film noise, brightness, keep, fade, letterbox |
-| 12 | debug font; the reduction at its end |
+| 12 | debug font; the reduction at its end (it also applies list 11's last full-frame lerp sprites: [The fades fold](RENDER_POST.md#the-fades-fold)) |
 
 (`port/render/rd.h`, "Lists").
 
@@ -82,15 +88,95 @@ rd records them as they are; the replay converts them (`port/render/rd.h`, "Coor
 calls (`port/render/rd_core.c` (`recordDefaults`)). The values are in
 [GS.md](GS.md#the-gs-defaults-per-list).
 
-**Keep frames.** `rd_end_frame(1)` (`fbKeep`: pause and memory card screens) replays lists 11
-and 12 only, on top of the retained DISPLAY (`port/render/rd.h` (`rd_end_frame`)).
+**Keep frames.** `rd_end_frame(1)` replays lists 11 and 12 only, on top of the retained DISPLAY
+(`port/render/rd.h` (`rd_end_frame`)). The game sets `fbKeep` from a stage change's fade-out through
+the next stage's load (`ico2/common/src/StageManager.c`, the switch message) and on the boot's
+memory card and language screens (`ico2/common/src/kanbanBoot.c`); `ico2/seki/src/DisplayList.c`
+passes it to `rd_end_frame`. The pause menu is not a keep frame: a paused frame is recorded and
+drawn whole, the pause layout's backdrop and rows on top of the scene.
 
 **Threads.** Every `rd_*` call comes from the game fiber. The game's post passes are appended by the
 same code inside the [vsync](ARCHITECTURE.md#terms) before `rd_end_frame`, so there is one hand-off
 point. GPU work the game's calls cause (replay, pipeline creation, [present](ARCHITECTURE.md#terms))
 runs through `rd_set_host_call`, which the window sets to `ico_sched_call_on_host` so the driver
 runs on the host stack in the host FP mode (`port/render/rd.h` (`RdHostCall`);
-`port/render/rd_core.c` (`rd__on_host`)).
+`port/render/rd_core.c` (`rd__on_host`)). With the window's render thread on
+([PLATFORM.md](PLATFORM.md#the-render-thread)) every picture is made there
+(`port/render/rd_thread.c`): the window's present posts `rd_present` whole (`rd_present_post`),
+the interpolation included, and `rd__on_host`'s calls, `rd__replay_frame`, `rd_read_display` and
+`rd_resize_output` run there with the game thread waiting (`rd__render_call`); a display change's
+pipelines stay on the game thread with the render thread idle (`onGameHost`: their progress screen
+pumps the window's events). A picture handed
+over owns the renderer's state until its walk and present's pass end (`rd__reads_done` in
+`rd__submit_frame`); every game-thread call that changes the frames, textures, meshes, targets or
+settings waits for that first (`rd__texlock_wait`), so the render thread reads the state as it
+was when the picture was posted. The submit and the present then overlap the game's step and the
+next picture on the render thread: they run on the submit thread
+(`port/render/rd_submit_thread.h`). With Vulkan's frame slots apart (`RhiLimits.slotOverlap`, the
+timeline sync; [RHI.md](RHI.md#the-interface), "Frame slots and the submit thread") the next
+picture's fence wait waits only for the picture two before, whose slot it recycles
+(`rd__submit_drain` -> `rd_thread_submit_wait_slot`), and its interpolation, recycle, acquire, uploads
+and walk all run while the picture before is ended, submitted and presented: a picture holds the
+render thread for its reads alone. The acquire waits for the picture before's present only where the
+swapchain has no image to spare. Every call that is not a slot call (a texture or pipeline made or
+destroyed, a readback, a submit, a swapchain rebuild) still waits for the submit thread, so the
+queue receives every picture's list and present in order and the bytes are those of one thread. With
+Direct3D 12, Vulkan's fence ring or `ICO_RD_SUBMIT_OVERLAP=0` the next picture's first graphics call
+(its fence wait) waits for the submit thread's whole job, so what overlaps there is the
+interpolation. The lines: `rd: submit thread: the frame slots apart (...)` or `the frame slots one at
+a time (<why>: ...)` at the start, `rd: submit thread: the render thread's picture waited X ms for
+frame slot S's picture two before to be submitted and presented (N such waits so far)` (first 8,
+then every 100th), and the end's line counts the pictures begun while the one before was still
+being submitted and those slot waits (`RdSubmitBlock.overlapped` has the 10 s count). At a PowerVR
+phone's numbers (reads 9 ms, submit and present 7.7 ms, interpolation 3 ms) the render thread was
+held 9 + 7.7 - 3 = 13.7 ms a picture, two pictures and the 9 ms closing step 36 ms of a 33.3 ms
+frame; with the slots apart it is held for the reads, 9 x 2 + 9 = 27 ms (a model, not measured).
+The window makes a further picture of a frame already shown only when its reads would end before the
+next step and its end before that step's end, and, with vsync off or mailbox, not while a picture
+runs past its estimate or the presents wait for the display or the GPU (PLATFORM.md, the render
+thread's further presents; the present call's time of each picture: `rd__thread_note_present`).
+The overlay's two layers (UI code: port/ui's font state and caches are the game thread's) of a
+picture the game thread posts are collected there before the post (`port/render/rd_present.c`
+(`rd__overlay_hand_over`)), and the picture's replay copies their batches after its deferred text
+instead of calling the callbacks (`overlayCollect`). `rd_overlay_prims` keeps prims only inside
+a collect on the calling thread; others are dropped and logged (`rd: overlay: N prims given outside
+a present's overlay collect on this|the render thread were dropped (K times)`, the first 8, then
+every 100th).
+A GPU texture the game thread destroys goes to the retire list the render thread empties in its
+next job (`rd__retire_texture`): a call's job at its start, a picture's at its first graphics call
+(`rd__thread_retire_kept` from `rd__submit_drain`, after that call's wait for the submit thread).
+A destroy is a graphics call that is not a slot call, and on the render thread it waits for the
+submit thread, so destroying at a picture's start would make its interpolation wait behind the
+picture before's submit and present; destroyed at the first graphics call, the interpolation
+overlaps them on every picture, and the backend sees the same calls in the same order (the destroys
+after the submit thread's job, before `rhi_wait_frame`). With the slots apart a picture after a
+destroy therefore waits for the picture before's submit and present at its fence wait, as every
+picture did before; so does one while the background pipelines finish (their step's calls).
+
+What a picture holds the renderer for (the 10 s line's `a picture holds the renderer for R ms
+typically (its mean M ms and half its deviation of D ms; C ms of its own, I ms of it the
+interpolation; ...)`, each a typical time, `PaceRtTyp`: [DISPLAY.md](DISPLAY.md#further-presents-and-the-game-step)): from
+its job's start to `rd__reads_done`, which is the interpolation, then the first graphics call's waits
+(the submit thread's job on the picture before, or with the slots apart on the picture two before,
+the slot's fence, the acquire: `waitMs` and
+`acquireMs`), then the uploads and the walk. C is R less those waits; I is the interpolation
+(`rd_present`'s own timer around `rd__interp_frame`), not a wait. The submit thread's wait therefore
+counts in R only past the interpolation, and the line's `the render thread waited for it N times
+(T ms)` says how much. On a PowerVR phone R and C differ by 0.5-2.7 ms (4 ms a picture where the
+driver's present blocked behind the GPU), so a hand-over longer than the interpolation, uploads and
+walk measured without the submit thread comes from the render thread's own CPU time, not from the
+submit thread; the 10 s line's cores (PLATFORM.md, the render thread) say where each thread ran.
+No game code and no frame data change threads; the pictures are the same bytes.
+The hand-over, not the frame ring, is what the game thread waits on: `rd_begin_frame` and
+`rd_end_frame` wait for a picture's reads like every other call that changes the state, so three
+frame slots (`RD_FRAME_RING`: the two the interpolation blends and the one recorded) are never
+short and the render thread pins none. A new frame's present waits only for the end of the
+picture before it (its submit and present), and a present that did not wait would gain nothing:
+its own reads still come after that end, and the game's next step waits for them at its first
+call that changes a texture, a mesh or a frame. Taking the game thread off the GPU's backlog
+needs the state the walk reads in versions of its own (a frame ring of four with pins, the
+textures' and meshes' changes carried with the frame and applied by the render thread); the
+design is in PLATFORM.md's render thread section.
 
 ## Recording
 
@@ -99,7 +185,10 @@ four words, two floats); variable data (vertices, transforms, post parameters) l
 payload arena (rd's own buffer, not the EE [arena](ARCHITECTURE.md#terms)), addressed by byte
 offset. Every field has a fixed width and there are no pointers, so a frame can be written to a file
 as it is and a dump reads the same on 32-bit and 64-bit builds (`port/render/rd_internal.h`
-(`RdCmd`, `RdCmdType`)).
+(`RdCmd`, `RdCmdType`)). An append is aligned (8 bytes in `rd__frame_payload`, 16 in the blended
+frame's `outAppend` and `shadowOut`, rd_interp.c) and the gap before it is zeroed: a reused buffer
+or a fresh heap block holds whatever was there, and the payload is dumped and hashed whole, so
+the same frame gives the same bytes on either thread (the render thread has its own malloc arena).
 
 | kind | commands |
 | --- | --- |
@@ -210,7 +299,7 @@ covers on the PS2 at every aspect (`port/render/rd_core.c` (`namedTargetDesc`, `
 and the shadow levels keep their GS sizes, the PS2's, at every scale ([below](#the-glow-size);
 `port/render/rd_core.c` (`rd__target_scale_of`)). A temporary target of any other size is drawn
 at its GS size, except a render-to-texture block under Water reflections: Sharp
-([below](#water-and-render-to-texture-blocks)). Under
+([below](RENDER_POST.md#water-and-render-to-texture-blocks)). Under
 [Full pixel](ARCHITECTURE.md#terms) a frame-wide scene target holds the frame's exact visible width
 plus `RD_FULL_PIXEL_GUARD` texels each side, centred, so the window's pixels are its texels
 (`port/render/rd_core.c` (`rd__target_scale_of`)). [Scene scale](ARCHITECTURE.md#terms) and the
@@ -246,12 +335,12 @@ of field's four pastes WORK0 -> SCENE (`pasteToFB`) draw under TEX1 0x60, MMAG a
 LINEAR (written by `eyeBlur` and `pasteToFB`; the dump's `FILTER 1 1` at 7:341), and the eye
 blur's subtract into SCENE under 0x40, MMAG NEAREST, a single texel (`eyeBlur`). Above 1x each
 SCENE texel therefore takes the GS's U and V at its own GS position (12.4, the texel's centre:
-[Post passes](#post-passes)'s scaled-target rule in `fx_sprite_ps`) and the GS's 4-bit bilinear
+[Post passes](RENDER_POST.md#post-passes)'s scaled-target rule in `fx_sprite_ps`) and the GS's 4-bit bilinear
 between the same four work texels the PS2 blends there (`gs_bilerp`): the PS2's 256 x 128 glow
 magnified as the GS magnifies it, sampled more finely; at 1x it is the GS's picture byte for byte.
 The softening's AA0 and AA1 back over SCENE (`sprite_ps`) take the draw's own sampler, as at 1x
 (`rd__sprite_above1x`). The draws from SCENE, WORK2 or AURA_WORK into a work buffer keep the area box
-([Above 1x](#above-1x)). `rd_blur_test`'s `effects_scaled` and `above1x` cases compare every
+([Above 1x](RENDER_POST.md#above-1x)). `rd_blur_test`'s `effects_scaled` and `above1x` cases compare every
 target with a CPU model of that arithmetic at 2x and 4x to the bit, and `rd_shadow_test`'s 4x
 softening the composite with the bilinear between AA0's texels
 (`port/render/test/rd_blur_test.c` (`checkEffectsScaled`, `checkAbove1x`, `workBuffer`);
@@ -297,10 +386,77 @@ At 1x every target is equal before and after on the three dumps of that run.
 The other costs above 1x are the frame-sized draws (four, at the scene's scale) and the reduction
 WORK2 -> WORK0, a box of 4 x 8 texels at 2x (`blurAbove1xSteps`).
 
+### The glow's passes
+
+On a tile-based GPU each render pass costs its loads and stores (a 2364 x 1080 colour target is
+10.2 MB each way, about 1 ms per 10 MB on the PowerVR phone) and a fixed cost (about 0.24 ms for
+each small work-buffer pass there). The PowerVR phone's 10 s line in a glow room at Resolution Auto
+(2026-11-02): `glow 11.44` ms of a 31 ms picture, `glow WORK2 2366x1080 2.0 passes 1 draws 4.73 ms,
+glow SCENE 2366x1080 3.0 passes 3 draws 3.54 ms, glow WORK0 424x128 12.0 passes 12 draws 2.90 ms`,
+21 glow passes a replay. The chain at the phone's setting (`rd_replay_tool DUMP x --stats
+--pass-times --enhanced --resolution 2364x1080 --full-height --full-pixel --present 2364x1080` with
+`ICO_VK_FAKE_LIMITS=moltenvk ICO_RD_VU_PREPASS=0`, the godrays frame rd-01077; `--list --no-device`
+for the commands), the bytes at 2364 x 1080:
+
+| pass | target | draws | what (`ico2/sugipon/src/staticBlur.c`) | reads | loads, stores |
+| --- | --- | --- | --- | --- | --- |
+| fog | SCENE | the fog's | list 4 | SCENE's depth (local) | |
+| 1 | SCENE | 1 | `cleanUpFB`'s first sprite: SCENE's alpha 0 (the constant fold, Z ALWAYS) | | 10.2 MB, 10.2 MB |
+| 2 | SCENE | 1 | `cleanUpFB`'s second: alpha 192 under Z GEQUAL (needs the depth) | SCENE's depth | 10.2 MB + the depth, 10.2 MB |
+| 3 | WORK2_PAD | 0 | `fillWork2`'s band (a clear) | | 0, 0.1 MB |
+| 4 | WORK2 | 0 | `fillWork2`'s fill (a clear) | | 0, 10.2 MB |
+| 5 | WORK2 | 1 | `makeMaskPatternToWork2`: SCENE's alpha into WORK2 (fx plan, the alpha alone) | SCENE | 10.2 MB, 10.2 MB |
+| 6 | WORK0 | 1 | `reduceWork2ToWork0` (the box above 1x) | WORK2 | 0.1 MB each way |
+| 7 .. 15 | WORK0 | 1 each | nine `blur(n)` pairs folded (`fx_blur2_ps`) | WORK0's snapshot | 0.1 MB each way each |
+| 16, 17 | WORK1, WORK0 | 1, 1 | the last pair as two passes (and the edge strip on a wide frame) | | |
+| 18 | WORK3 | 1 | `eyeBlur` (with the sun: its ghosts, shrink into WORK1 and tint) | WORK0 | |
+| 19 | WORK0 | 1 | `pasteWork0ToFB`: WORK0's alpha (the constant fold) | | |
+| 20 | SCENE | 1 or 2 | `pasteFullScreenFlare`: WORK3 onto SCENE (the premultiplied add) | WORK3 | 10.2 MB, 10.2 MB |
+
+Where the sun is on screen its fans (`dispSun`) draw into WORK2 between passes 4 and 5 and take the
+fill as their pass's load op (6 of the 14 corpus glow frames); the issue 163 frames draw the lamps'
+meshes into WORK2 after the mask, a pass of their own (they test SCENE's depth).
+
+Two of the breaks moved bytes nothing needed, and are gone (the same bytes; `rd_glow_cheap_ab`):
+
+- **WORK2's fill in the mask's pass** (pass 4). The mask reads SCENE, and the end of the open pass
+  for that read (the mask's transition of its source in `fxDraw`, and SCENE's border repeat before
+  it where the border is open) recorded the pending fill as a pass of its own. Both now end the pass
+  through `rd__replay_end_pass_for` (`endPassFor`, the clear carry: on on the tile class), so the
+  mask's pass takes the fill as its CLEAR load ([WORK_BUFFERS.md](WORK_BUFFERS.md#passes-cut)):
+  one full-size store and load fewer (about 2 ms of the 4.73 by the arithmetic). Where the fans
+  drew first nothing changes.
+- **cleanUpFB in the fog's pass** (passes 1 and 2). The first sprite uses no depth, so the constant
+  fold drew it in a pass without the depth, which ended the fog's pass, and the second (GEQUAL) began
+  a third. `fxAttachDepth` (`port/render/rd_fx_plan.c`) draws a constant fold that uses no depth in
+  the open pass on its target when that pass has the state's depth, through its key with the depth
+  attached under Z ALWAYS without Z write (the test passes every fragment and writes nothing), so the
+  second sprite's own key lands in the same pass: two full-size SCENE passes fewer where the fog's
+  pass has the depth (the tile class's local fog; about 2.4 ms of the 3.54 by the measured share).
+  Where the crack fill is drawn (above 1x with a fog: every phone frame) it waits past the two
+  sprites (they write SCENE's alpha alone) and is drawn after them with RGB alone, the same bytes
+  ([the fill's place](RENDER_POST.md#the-fills-place-after-list-7)), so the sprites stay in the
+  fog's pass with the fill as well. Drawn at the start of list 7 (`ICO_RD_CRACK_PLACE=7`) the fill
+  ends the fog's pass there and the two sprites take a pass each again (v4251 at the phone's profile on lavapipe: 22
+  glow passes with the fill, 20 without).
+
+What is left: the mask's pass (SCENE read, WORK2 stored, then read by the reduction), the paste's
+SCENE pass (WORK3 is drawn after the fog's pass ends), and the twelve small WORK0 passes (the fixed
+cost). Not done, and why: the mask at half size (its alpha test makes a hard-edged mask, and the
+reduction's box over it moves by a whole texel at an edge: a difference no stored dump bounds
+yet); the mask folded into the reduction (exact, but `fx_sprite_ps`'s box would compute the mask's
+own bilinear and alpha test per texel it reads, a new shader form, and the fans and the lamps'
+meshes draw into WORK2 in 9 of the 14 frames); two blur pairs in one pass (exact needs pass 1's
+texels for pass 2's for pass 3's: 256 loads a texel or a window of intermediates per pixel; a blur
+of a blur in floats differs by the GS's truncation at each of the four steps, up to about 4 levels
+before the eye blur, and the twelve passes' fixed cost is about 2.9 ms). The glow pass count is the
+`--stats` `glow N passes` and the 10 s `passes per replay` line's `glow`.
+
 ## Textures
 
-The texture cache decodes the TIM2 bytes Texture.c keeps in memory into an rd texture the first
-time it is needed and keeps it until the content changes (`port/render/rd_tex.h`):
+The texture cache decodes the TIM2 bytes Texture.c keeps in memory into an rd texture when first
+needed and keeps it until the content changes (`port/render/rd_tex.h`; decoded on worker threads:
+[TEXTURES.md](TEXTURES.md)):
 
 - **key**: (texture id, content generation, TEXA mode); the mode is one of `RdTexA` (alpha baked)
   or `RDTEX_TEXA_REPLAY` (the source format's alpha kept and TEXA applied by the shader at replay,
@@ -308,9 +464,10 @@ time it is needed and keeps it until the content changes (`port/render/rd_tex.h`
 - **decode**: PSMCT32, 24, 16, 16S, PSMT8, PSMT4, PSMT8H, PSMT4HL, PSMT4HH and the PSMZ formats;
   CLUTs in CSM1 or index order. Output RGBA8 with the raw GS alpha (0x80 = 1.0) for 32-bit texels,
   the A bit for 16-bit ones and 0 for 24-bit ones (`rdtex_decode`).
-- **size**: padded with zero texels to 2^TW x 2^TH, so STQ and REPEAT wrap where the GS wraps.
+- **size**: padded with zero texels to 2^TW x 2^TH, so STQ and REPEAT wrap as on the GS.
 - **update**: a new generation of the same size and format re-expands into the same rd texture;
-  otherwise the old one is retired and destroyed two `rdtex_frame_tick` calls later.
+  otherwise the old one is retired and destroyed two `rdtex_frame_tick` calls later. A slot loaded
+  with another picture is dropped first ([GS.md](GS.md#textures)).
 - **levels**: a mipmapped TEX1 stores the TIM2's own levels when they are authored pictures
   (`rdtex_store_levels`, `RDTEX_AUTHORED_RATIO`), sampled at the GS's level; otherwise the
   replay builds the further levels by a 2x2 box, colour weighted by alpha, with alpha coverage
@@ -352,7 +509,9 @@ GS-level draws on the GS's grid` (`RdPerfRecord` `texaDraws`, `gridDraws`, per p
 
 `rd__replay_frame` records one RHI command list per replay. The lists are walked in order 0..12
 (11 and 12 for a keep frame) from the frame's start state; state commands update the state block
-and actions draw (`port/render/rd_replay.c`):
+and actions draw (`port/render/rd_replay.c`). The replay's end, the present's pass, the end of the
+list, the submit, the present and the capture's finish, is `rd__submit_frame`
+(`port/render/rd_submit.c`), where a picture's reads of the renderer's state end (above):
 
 | command | replay |
 | --- | --- |
@@ -387,6 +546,25 @@ own (D3D12 keeps a record only to fill in a transition from UNDEFINED,
 [RHI.md](RHI.md#direct3d-12)). A draw that samples its own render target samples a copy taken just
 before it, as the GS reads the live buffer (`port/render/rd_replay.c`, header comment).
 
+**The pass area.** On a tile-based GPU a render pass on SCENE whose draws are all 2D sprites and
+shapes with a known place (screen prims, the aura's paste) takes a render area of the 32 x 32 tiles
+they touch (`RhiRenderPassDesc.area`, [RHI.md](RHI.md#vulkan)), so only those tiles are loaded and
+stored; the pixels outside are untouched, which no draw of the pass reaches, so the picture is the
+same bytes. The scan before the walk (`rd__pass_area_scan_cmd` in the store plan's one walk of the
+lists, `rd__store_plan_scan`; [Performance notes](#performance-notes)) gives every command its box, `beginPass` asks for the union from its command on, and the walk ends such a pass
+before the first command past it (`rd__pass_area_due`) ([WORK_BUFFERS.md](WORK_BUFFERS.md#the-pass-area);
+`port/render/rd_pass_area.c`, header comment; `[dev] pass_area`).
+
+**Passes cut.** On a tile-based GPU three passes, or parts of them, that moved bytes nothing looks
+at are cut, the picture the same bytes: a pending clear stays pending past the end of a pass for a
+source's barrier and is taken as the next pass's load (the reduction draws DISPLAY in one pass, not
+a clear's pass and a draw's), a clear whose only reader in the replay is a sprite the constant read
+drew in its colour is not drawn (AURA_WORK's; drawn later where anything reads the target before
+clearing it again), and the pass that holds a depth's last touch does not store it when the walk is
+known to keep that pass open until the touch is done (the fog's pass on the phone)
+([WORK_BUFFERS.md](WORK_BUFFERS.md#passes-cut); `port/render/rd_pass_cut.c`, header comment;
+`[dev] clear_carry`, `clear_skip`, `last_store`).
+
 **The exact viewport.** While a frame's lists replay, every pass has one viewport size, the
 largest power of two the GPU takes, centred on the target, and FrameCB maps positions to it; the
 scissor, always inside the target, bounds the drawing. Every step is exact for a GS position at an
@@ -397,7 +575,7 @@ present and the camera probe keep the plain mapping.
 **Uploads.** Before the first pass the replay uploads pending textures and their levels through
 the frame's upload ring, and the static meshes the frame draws into the device arena (once, and
 again only after a morph rewrote them); the interpolation's scratch meshes stay on the ring
-(`port/render/rd_upload.c` (`rd__upload_dirty_textures`, `rd__upload_meshes`)). Every
+(`port/render/rd_upload.c` (`rd__upload_dirty_textures`, `rd__upload_meshes`)); the ring shrinks again ([WORK_BUFFERS.md](WORK_BUFFERS.md#the-upload-ring-shrinks)). Every
 `rd__ring_alloc` caller checks for `~0` (the ring is full) and skips its write and its draw or
 copy, the untextured draws' white texel included, which the next replay uploads
 (`port/render/rd_replay.c` (`rd__ring_alloc`); `port/render/rd_upload.c`
@@ -424,7 +602,7 @@ one draw, overlapping primitives see the snapshot (`port/render/rd_replay.c` (`d
 profile](#the-device-profile)), a DATE draw of a screen-prim or VU command into a scene-class RGBA8
 target with a depth of its size bound takes no snapshot: inside the draw's own pass (begun with the
 colour readable, `rd__pass_wants_readable`) bit 6 of the stencil (`RD_DATE_STENCIL_BIT`; the shadow
-count keeps bits 0-5, [Shadows](#shadows)) is made the destination alpha's MSB over the area the
+count keeps bits 0-5, [Shadows](RENDER_POST.md#shadows)) is made the destination alpha's MSB over the area the
 draw can touch: `date_clear_ps` writes 0 into the bit (`RD_STENCIL_DATE_CLEAR`), a by-region
 barrier makes the pass's colour writes visible (`rhi_cmd_local_read_barrier`, colour),
 `date_stencil_ps` reads the alpha as an input attachment and writes 1 into the bit where the MSB is
@@ -437,12 +615,33 @@ exactly where a snapshot would be retaken, and the open screen run is drawn befo
 Within one draw the alpha is the one before its first primitive: the snapshot's semantics, the
 same bytes (not PRIM.AA1: **DATE and AA1**). Not inside the MSAA epoch, under the exact blend's storage read, on another target or
 without a depth: the snapshot. The DATE self-test decides per device ([The fog path and its
-self-test](#the-fog-path-and-its-self-test)) (`port/render/rd_replay.c` (`dateStencilFor`,
+self-test](RENDER_POST.md#the-fog-path-and-its-self-test)) (`port/render/rd_replay.c` (`dateStencilFor`,
 `prepareDrawEx`, `bindDrawEx`); `port/render/rd_replay_tiler.c` (`rd__replay_date_take`);
 `port/render/rd_pipeline.c` (`shadowStencil`,
 `rd__date_setup_key`, `rd__enumerate_reachable_date`); `port/shaders/sprite.hlsl`
 (`date_clear_ps`, `date_stencil_ps`)). `--stats`: `DATE snapshots N, DATE stencil draws M (K
 setups)`.
+
+**DATE through the colour read.** Under GS state as shader data ([GS state as shader
+data](#gs-state-as-shader-data)) a DATE draw of a screen-prim or VU command into an RGBA8 target
+made for the attachment read, outside the MSAA epoch, takes neither the snapshot nor the stencil
+bit: its passes go through the `_dstatt` twins with `ICO_DF_DATE_DST`, and the shader tests DATE
+against the alpha it reads from the attachment (`port/shaders/common.hlsli` (`GS_DATE_SNAP`,
+`gs_dst_date_snap`); `port/render/rd_uber.c` (`rd__uber_date`); `port/render/rd_replay.c`
+(`prepareDrawEx`: `Replay.dateDstNow`, `RdPerfRecord.dateDstDraws`)). The read is in
+rasterization order, so each fragment sees what the draw's earlier primitives wrote: the GS's
+DATE, primitive by primitive, where the snapshot and the stencil bit hold the alpha from before the
+draw's first primitive (DIVERGENCES.md VD-17). A PRIM.AA1 draw under DATE needs no stencil pairs
+then (`doScreen`: `aa1Date` off); one that writes Z, two draws otherwise (its triangles' own
+pixels, then every fringe without Z write), is drawn triangle by triangle, each in its two draws,
+so a triangle's pixel still meets the alpha an earlier triangle's fringe wrote (`aa1Order`,
+`port/render/rd_replay_aa1.inc` (`aa1OrderPlan`, `aa1OrderDraw`); the first command logs
+`aa1: a DATE draw's triangles drawn one at a time through the colour read ...`; ctest
+`rd_pixel_uber` aa1 wedge). DATE's self-test checks it first ("colour read",
+its fifth sample a DATM 1 command whose second sprite fails over its first), then the stencil bit
+and the snapshot with it held off; a failure turns it off (`g_rd.uberDate`) and DATE draws as
+above. ctest `rd_pixel_uber` (`testDateStencil`: the overlap of two sprites of one DATE command
+takes the GS's colour), `rd_date_selftest_uber`.
 
 **DATE and AA1.** The GS tests DATE against the alpha as it writes each pixel (PCSX2
 `GSDrawScanline.cpp`), so in an AA1 strip under DATM 1 the edge pixel a triangle writes along a
@@ -465,7 +664,7 @@ table of the lists it draws into the LUT texture, outside any pass; `doFog` copi
 when its fog's is another (`port/render/rd_replay.c` (`rd__fog_lut_upload`, `fogLutCopy`)).
 
 **The fog's local read.** On the `local` fog path ([The fog path and its
-self-test](#the-fog-path-and-its-self-test)) every pass on a scene-class target with its own
+self-test](RENDER_POST.md#the-fog-path-and-its-self-test)) every pass on a scene-class target with its own
 depth, the depth made for it (`RD_DST_USAGE_LOCAL_DEPTH`), binds the depth readable
 (`RhiDepthAttachment.readable`, the texture in `RHI_STATE_RENDER_TARGET_READ`), and a fog whose
 depth is its colour target's own (SCENE's, at its size) draws in that pass: a by-region barrier
@@ -555,7 +754,7 @@ here and marks every triangle of a grid of two strips or more joined, as the dra
 index values: dense (marks in the stream)`.
 A mesh, grid or particle command the pre-passes recorded draws through `vu_main_vs` (or
 `vu_particle_main_vs`) and `vu_ps` over that record ([The vertex and triangle
-pre-passes](#the-vertex-and-triangle-pre-passes)).
+pre-passes](PIPELINES.md#the-vertex-and-triangle-pre-passes)).
 What the flags do is [VU1_PROGRAMS.md](VU1_PROGRAMS.md#the-region-rule). `ICO_RD_VU_OFFGRID=1`, a
 developer switch, lets the [VU1](ARCHITECTURE.md#terms) programs output X and Y off the GS's 1/16
 grid on a scaled target under the Enhanced preset; otherwise every preset keeps the GS's
@@ -666,7 +865,7 @@ when it is done ([PLATFORM.md](PLATFORM.md#diagnostics)) (`port/render/rd_dump.c
 `port/platform/diag_host.c` (`ico_diag_loss_bisect`)).
 
 The replay behind it is the pass window (`rd__replay_set_window`): every replay numbers its passes
-in the order they begin (the [vertex and triangle pre-passes](#the-vertex-and-triangle-pre-passes) first when they run, then
+in the order they begin (the [vertex and triangle pre-passes](PIPELINES.md#the-vertex-and-triangle-pre-passes) first when they run, then
 render passes, copies, snapshots and exact blends: the pass ring's entries other than the uploads
 and the present). With a window [first, last] the draws and the target and snapshot copies of the
 passes outside it are not recorded (the pre-pass's record copies go with its draws, so the slot's
@@ -753,7 +952,7 @@ The record stages read a triangle record for every kick from a draw's lowest to 
 kicks its list does not draw included: the audit reads those kicks' marks and vertices too, and
 the record's own texels are in range by construction (a command's slots are counted before the
 pre-passes draw: `rd_replay_vu.c` (`vuPrepassRun`); [The vertex and triangle
-pre-passes](#the-vertex-and-triangle-pre-passes)).
+pre-passes](PIPELINES.md#the-vertex-and-triangle-pre-passes)).
 The audit also reports, per frame, the index span (the lowest and highest value of every indexed VU
 draw, the widest, the draws past 2^24 - 1 by list, the values carrying the old mark bits), and fails
 a span past 2^24 - 1 (Vulkan's least `maxDrawIndexedIndexValue`) and a kick listed twice in a draw
@@ -776,757 +975,7 @@ header comment). On the 27 listed dumps present on the maintainer's machine and 
 
 ## Pipelines
 
-The shaders take the alpha test, the AFAIL split, the texture function, TCC, TEXA, FBA, PABE,
-DATE and the blend factor's source as uniforms, so the pipeline key is normalised: one
-representative blend per blend path, and the AFAIL split carried by Z write and colour mask
-(`port/render/rd_pipeline.c`, header comment). The blend paths on UNORM targets
-(`port/render/rd_pipeline.c`):
-
-| modes | path |
-| --- | --- |
-| 0, 1, 5, 6 (Cs*F + Cd, Cd - Cs*F) | `DF_PREMUL`: the shader writes `min((Cs*F) >> 7, 255)`, the blender adds or reverse-subtracts with ONE; exact for F up to 255 |
-| 2, 4, 7 (the LERPs) | dual-source factor F/128, F above 0x80 clamped |
-| 3 (Cd*FIX + Cs) | SRC1 as the destination factor, FIX clamped to 0x80 |
-| 8, 9, 10 (Ad) | DST_ALPHA, which reads Ad/255 |
-| 11 (Cd*As + Cd) | not representable: Cd unchanged, reported once |
-
-PABE writes Cs unblended for a pixel whose As MSB is clear, through the second output; the
-premultiplied and Ad forms cannot, and those pixels blend (reported once). On a device without
-dual-source blending the LERPs and mode 3 draw in two passes: colour with the factor in c0.a, then
-when the mask has A an alpha pass with blending off and no Z write under a Z test that admits the
-colour pass's fragments (`port/render/rd_pipeline.c` (`rd__expand_no_dual`)). `ICO_RD_NO_DUAL=1`
-forces the two-pass form on any device (`port/render/rd_core.c` (`rd_init`)). Where the destination
-read is available these paths give way to it (next section).
-
-**The AFAIL split.** An alpha-tested draw whose failing fragments write something other than its
-passing ones is two draws: the passing fragments with the draw's Z write and mask, then the failing
-ones under AFAIL (FB_ONLY: no Z; ZB_ONLY: no colour; RGB_ONLY: no Z, no alpha), the shader keeping
-one side each (`gs_alpha_discard`, `g_mode.z` bits 16..17). Where the failing fragments write
-exactly what the passing ones write the test decides nothing and the draw is one draw without it,
-every fragment in the GS's primitive order: Z write off (ZBUF.ZMSK 1, or no depth attachment) with
-AFAIL FB_ONLY, or with RGB_ONLY when the mask already leaves alpha out (`port/render/rd_pipeline.c`
-(`rd__plan_screen_draw_ex`)). The GS User's Manual's TEST register: FB_ONLY updates the frame buffer
-and not the Z buffer for a failing pixel, RGB_ONLY the frame buffer's RGB only, and with ZMSK 1 a
-passing pixel updates the frame buffer only too. PCSX2 does the same: its software renderer skips
-the test for FB_ONLY without Z write and for RGB_ONLY without Z write on a 24-bit frame
-(`GSDrawScanline.cpp` `TestAlpha`), its hardware renderer sets ATST ALWAYS for FB_ONLY without Z
-write and turns RGB_ONLY without alpha into FB_ONLY ("Failing alpha test is a NOP",
-`GSRendererHW.cpp`). The split had drawn every failing fragment after every passing one, so where a
-failing and a passing fragment of one draw met on a pixel the later one in the GS's order did not
-always win (issues 95 and 103). DATE, FBA, PABE and the blend ride on the one draw as
-on both. The merged draw's key is the passing draw's, which the failing draw
-shares wherever the merge applies, so the merge adds and removes no pipeline key: the dual,
-no-dual and exact-blend sets keep their counts. The scissor batches' two draws (code 36: the clipped fans with ABE forced on, then the
-strip's kicks) are another state and another set of triangles, not this condition, and stay two
-(`port/render/rd_replay_vu.c` (`doVuDraw`)). The split still orders the passing fragments first where
-it remains: Z write on (each draw writes other buffers), RGB_ONLY with alpha written, ZB_ONLY with
-colour written. In the dumps measured (2026-10-16) the merged draws are the Z-write-off alpha-tested
-ones: meshes `si_hair`, `bmd-tuno`, `cloud`, `cloud2`, `wf_ab03`, `fogs`, the particles, and two
-sprites of list 11 on the title frame; there 6 VU commands and 2 screen prims, of 172 VU commands
-whose other 166 alpha-tested ones write Z. The log says once that the rule is in effect: `rd: alpha test: a draw with Z write off
-whose failing pixels write what its passing pixels write (AFAIL FB_ONLY, RGB_ONLY without alpha) is
-one draw without the test, in the GS's order (reported once)`; `rd__set_alpha_merge(false)` plans the
-two draws (tests: ctest `rd_state` `testAlphaMerge`, the condition table, each merged key a key of the split plan, and the game's FB_ONLY state without Z write in the screen set; ctest `rd_pixel`
-`testAlphaOrder`, an overlap the split drew in the other order).
-
-**The alpha plan.** The planned passes above assume any source alpha; where the range of As a
-draw's pixels can take decides the test or the blend for every pixel, the alpha/blend planner
-draws only what that outcome needs, byte for byte what the planned passes write
-(`port/render/rd_alpha_plan.c` (`rd__alpha_range_of_draw`, `rd__plan_screen_draw_alpha`), called
-after the plan by `port/render/rd_replay_vu.c` (`vuDraw`, the range once a command in `doVuDraw`)
-and `port/render/rd_replay.c` (`doScreen`), before the exact blend's and the two-pass blend's
-expansions). The rules, each a fact of the GS's integer arithmetic and of the fixed-function path:
-
-| rule | condition over the range lo..hi | the plan | why the bytes are the same |
-| --- | --- | --- | --- |
-| every pixel passes | the test passes for every As (`gs_alpha_pass`) | the pass of the passing pixels without the test; the failing pixels' pass dropped | `gs_alpha_discard` keeps every pixel in the first and none in the second |
-| every pixel fails | the test fails for every As | the failing pixels' pass without the test; the passing pixels' pass (and AFAIL KEEP's one pass) dropped | the other way round |
-| factor one | a LERP with FIX 0x80 or As 0x80 over the range, or PABE with every As below 0x80 | blending off (the ABE-off pass) | `((Cs - Cd) * 0x80 >> 7) + Cd = Cs`, PABE writes Cs unblended (`gs_dst_channel`); the blender's `Cs * 1 + Cd * 0` is Cs; alpha is As whatever the equation |
-| factor zero | a LERP or a premultiplied add or subtract (modes 0, 1, 2, 4, 5, 6, 7) with factor 0 | R, G and B masked, blending off | `((A - B) * 0 >> 7) + Cd = Cd`, the shader's `(Cs * 0) >> 7` is 0; alpha As |
-
-The factor-zero rule applies only where the blend and the mask are dynamic state (`g_rd.dynBlend`), so the mask
-makes no pipeline the start-up set lacks; the other rules give keys the plan already has (the test is a
-uniform; the factor-one key is the state's with ABE off, which the VU and screen families enumerate). A pass
-left writing nothing (mask 0, no Z write) is dropped. Not planned: DATE, PRIM.AA1, the text
-shaders (their alpha is not As), and for the factor rules PABE over a range with and without the MSB,
-COLCLAMP 0, mode 3, the Ad forms, mode 11 and the exact blend (`g_rd.dstMode`, whose passes blend
-in the shader). One residual: a texel sampled at a coordinate that is not a number (a degenerate
-triangle whose Q interpolates to 0 under the anisotropic sampler) tested as alpha 0 on the unplanned
-path, where the plan trusts the range; two pixels of one 16:9 frame at the phone's scale, none at a
-whole scale.
-
-The range is the texture function of the texel's alpha and the vertex's: MODULATE `min((t * c) >>
-7, 255)` is monotonic in both, DECAL with TCC takes the texel's, TCC RGB the vertex's. The
-texel's is the least and the largest alpha over every texel of every level the device holds:
-`rd_upload.c` scans each upload of a game texture (level 0 whole with its zero padding, which
-REPEAT reaches, then each level `uploadMips` copies, after `rdtex_keep_alpha_coverage`, or the GS
-levels) and of a pack replacement's RGBA8 levels, and keeps the scan with the texture's slot,
-its id and its RHI texture (`port/render/rd_upload.c` (`texAlphaKeep`, `rd__tex_alpha_scan`));
-a texture that is dirty (a CLUT scroll's new generation, a coverage change, a new level count),
-refused, compressed, a render target or not uploaded in full is not known. The 24- and 16-bit
-sources expand under the TEXA in force, as the shaders do (`port/render/rd_tex.c`
-(`rdtex_alpha_range`): TA0, TA1 for a set A bit, 0 under AEM only where all three colour
-channels' least texel is 0, since a filtered channel is at least its least texel). Every filter
-the draws use weights texels with non-negative weights (bilinear, trilinear, anisotropic, the
-GS's 4-bit steps of `gs_bilerp`, the levels in 256ths), so its result lies within that range. The
-vertex's is the least and the largest alpha the vertex shader computes over the draw's vertices:
-`vu_rgba`'s low byte of `vu_ftoi` of quadword 2's w (prelit), 3's (lit, specular, reflection) and
-4's (skinned) after `min(w, 255)` where the program clamps, every vertex of the mesh's stream as
-the replay finds it (one scan a mesh a replay, so a stream that blends between ticks is scanned
-for each present), a grid's batch colours and a particle batch's alphas from the frame's payload,
-a screen prim's vertices as drawn; under the cluster's code 24 (`vu_skin_vertex` scales by
-`mem[2].w`, the product `precise`) both floats around an inexact product, the one a device's
-multiply gives among them; a NaN is not known. The interpolation, the GPU's or the planes' (`vu_pixel_attrs`), is a convex
-combination of the corners, and a vertex range whose ends differ is widened by one each way
-against its float rounding. Anything not known is [0, 255], which decides nothing.
-
-`[dev] alpha_plan = false` (`ICO_RD_ALPHA_PLAN=0`) turns the planner off (`RdProfile.alphaPlan`,
-on in every class). `rd_replay_tool --stats` and the window's 10 s line count the draws it drew in
-one pass where the plan had two and those it drew without the test and the blending (`pixel diet:
-alpha plan N one-pass, M opaque`; `RdPerfRecord.alphaOnePass`, `alphaOpaque`). Tests: ctest
-`rd_alpha_plan` (every ATST x AREF x range against `gs_alpha_pass`, the blend identities over every
-Cs and Cd, a model of the fixed-function path over the blend modes, the ranges), ctest `rd_pixel`
-`testAlphaPlan` (one frame replayed with the planner off and on, SCENE's colour and depth the same
-bytes) and `testRailing` (the lattice keeps its split).
-
-The cache holds `RD_PIPELINE_CACHE_MAX` keys (4096), the RHI's pipeline pool less the pool's
-headroom for the pipelines made outside the cache (`port/rhi/rhi_pipeline_pool.h`
-(`RHI_PIPELINE_POOL_CACHE`); [RHI.md](RHI.md#the-pipeline-pool)), so the pool never refuses a
-pipeline the cache keeps. `RD_PIPELINE_REACHABLE_MAX`, half the cache (2048), is the ceiling the
-tests hold every reachable set under (`rd__enumerate_reachable`), the other half left for the keys
-made on first use. A key past the cache or one whose creation failed is logged and drawn as
-nothing, never an abort, and a key that failed is never created again in the run ("The set against the pool" in
-[The start-up set](#the-start-up-set); `port/render/rd_state.h`; `port/render/rd_pipeline.c`
-(`rd__get_pipeline`)). `rd_precreate_pipelines` creates the whole
-reachable set at start so the first frames do not stall on the driver. It hands the keys to
-`rhi_create_pipelines` up to 32 at a time, so the driver compiles each batch on worker threads
-([RHI.md](RHI.md#the-interface)); a batch holds keys with a destination read or keys without, never
-both. The progress function runs while a batch compiles (about every 50 ms, with the count so far)
-and between batches, and a nonzero return stops the set after the batch in flight; the rest is
-created as the frames need it. The activity note names the batch: `creating pipelines 321-352 of
-702: <first key> to <last key>; vertex <module> <words> words, ...; largest fragment <module>
-<words> words` (a point key's words, the vertex pre-pass's and the record stages', end with
-` pre`), put back after any pipeline the progress screen's frame creates in the middle of it. The log line after the set adds the compiles, the threads and the longest compile:
-`pipelines: <made> of the reachable set's <n> created at start-up in <t> ms (<f> failed); <c>
-compiled on <k> threads, the longest <s> s`, and two lines say where the time went, from the
-workers' own times (`RhiPipelineBatch.ms`): `pipelines: the slowest: <s> s <key>; ...` (the ten
-slowest compiles) and `pipelines: compile time by vertex shader: <entry> <s> s, ...` (summed over
-the threads, the largest first) (`port/render/rd.h` (`rd_precreate_pipelines`,
-`RdPipelineProgressFn`, `rd_precreate_longest_ms`); `port/render/rd_pipeline.c` (`preTimesLog`)).
-At start the renderer logs the embedded modules' count and the largest, `shaders: <n> modules,
-largest <entry> <words> words`: a driver's compile time grows with a module's size, which
-`spirv_check` holds to a budget ([SHADERS.md](SHADERS.md#the-envelope); `port/render/rd_replay.c`).
-
-**Dynamic state.** Where the device has it the Z test, the Z write, the blend and the colour mask
-are set at each draw instead of being part of the pipeline ([RHI.md](RHI.md#dynamic-state);
-`RhiLimits.dynamicDepth`: Vulkan 1.3 or `VK_EXT_extended_dynamic_state`; `RhiLimits.dynamicBlend`:
-`VK_EXT_extended_dynamic_state3`; D3D12 neither). The cache then holds the keys with those fields
-normalised away (`port/render/rd_pipeline.c` (`rd__key_dynamic_normalise`)): a key with a depth
-attachment and no stencil mode takes `ztst` ALWAYS and `zwrite` OFF, a key with one colour target
-and no destination read takes `blend` `RD_BLEND_COUNT` and mask `0xF`; the shadow count's stencil
-keys keep their depth state, the point keys (the vertex pre-pass's and the record stages', three
-targets) every state, and `nodual` stays in the key (it picks the fragment module).
-`rd__get_pipeline` normalises the key it is given (`drawKey`), the start-up set is enumerated
-normalised (`rd__enumerate_reachable`, after the two-pass and destination-read expansions, so the
-set holds the keys the draws' pipelines are made from), and every draw binds through
-`rd__set_pipeline(cl, p, key)` with the key it planned, un-normalised: it binds and sets the depth
-state and the blend state from that key through `depthCompare` and `blendState`, the functions the
-static state is made with, so each draw gets the fixed-function tuple a pipeline of its own key
-would have had and the picture is the same byte for byte. `rd__pipe_key_equal` compares two keys
-modulo the normalisation (a key as a planner made it matches the set's). The draws that differed
-only in those fields (the AFAIL halves, the Z-write alternations, the blend paths of one shader)
-share one pipeline, so the set is smaller and fewer binds change the pipeline; `rd_replay_tool
---stats` prints `<n> dynamic state sets (dynamic depth on|off, blend on|off) (<a> for draws without
-blending, <b> ...)`, the commands recorded ([RHI.md](RHI.md#dynamic-state)). The log says which at `rd_init`, `rd: pipelines: dynamic state:
-depth and blend (the Z test, Z write, blend and colour mask set at each draw, out of the pipeline
-keys)` (or `depth (...)`, `blend (...)`, `none (every state in the pipeline keys)`), and the
-start-up set's line carries ` (dynamic depth, blend)` after `created at start-up`; the first-use
-line prints the normalised key. `ICO_VK_FAKE_NO_DYNAMIC=1` (`=blend`: the blend alone) turns it off
-on a device that has it, for an A/B of the same frames.
-
-### The start-up set
-
-The window builds the reachable set with `rd_precreate_pipelines` before the first frame, behind the
-start-up screen, unless one of the rules below skips it (`port/platform/window_host.c`
-(`ico_window_open`)). Without the set the window calls `rd_pipelines_lazy(why)` instead, which logs
-`rd: pipelines: no start-up set <why>: pipelines are made as the game needs them`; there is no
-start-up screen (the title comes at once), and each pipeline is made when a frame first needs it,
-on the thread that draws, the frame waiting for its compile (`rd__get_pipeline`). The summary line's
-renderer part ends with `pipelines the start-up set`, `pipelines the careful start-up set`,
-`pipelines the careful start-up set, stopped at its budget (the rest on first use)` or `pipelines
-on first use (no start-up set)` (`rd_summary_text`).
-
-The window's choice (`port/platform/window_host.c` (`ico_window_open`)), once the device is made:
-the careful set on a device of the table (`RhiLimits.carefulPipelines`), by `[dev] pipeline_set =
-"careful"`, or for one start after a full set's end ([PLATFORM.md](PLATFORM.md#diagnostics));
-no set for the rows of the table below; else the full set. For the careful set it calls
-`rd_set_pipeline_policy(rd_pipeline_policy_careful())` before `rd_precreate_pipelines` (the memory
-function, `rd_set_memory_fn(ico_diag_process_memory)`, is set before `rd_init`) and logs one line
-with the policy's values, `<why>` as in the table's lines:
-
-    window: pipelines: careful start-up set on this device (Adreno 740, issues 93 and 107): batches of 8 on 1 thread, the cache written after each, stopped past 128 MB of growth
-
-(`by the settings ([dev] pipeline_set = "careful")`, `(the previous start ended while preparing
-them; for this start only)`). `[dev] pipeline_set = "full"` does not override the table (`window:
-[dev] pipeline_set = "full" does not override the device table (<reason>): the careful set`). The
-start-up activity file then says `set: careful`, so an end inside the careful set makes the next
-start lazy rather than careful again. When the budget stops the set (`rd_pipelines_lazy_on`), the
-rest of the run is recorded as a lazy run's for that start only
-(`ico_diag_startup_activity_budget_stop`); when the system's low-memory signal stopped it, as a lazy
-run whose next start makes no set ([PLATFORM.md](PLATFORM.md#diagnostics)).
-
-With the set made, a pipeline a draw needs later is a key the set did not hold, made on the thread
-that draws while the replay waits; on a driver that takes seconds a pipeline (up to 3.4 s for a VU
-one on a PowerVR DXT-48-1536) that is a stall of the picture and of the game behind it. Each such
-key is logged once (the cache keeps it), the first 8 and then every 100th, with the draw list the
-replay was in, the whole key (the fields of the batch notes, then the Z test, the Z write, the
-colour mask, the target format, the topology, the stencil mode, PRIM.AA1 and the two-pass blend's
-flag) and the time it took (`port/render/rd_pipeline.c` (`firstUseLine`)):
-
-    rd: pipelines: made on first use in list 0: program 0 blend 4 vs 15 fs 5 fmt 1/8 msaa 0 dst 0 ext 1, ztst <z> zwrite <w> mask <m> target <t> prim <p> stencil <s> aa1 <a> nodual <n> (vu_tri_vs + vu_ps) in 769.8 ms (not in the start-up set; 2 so far)
-
-`no draw list (the present, a check)` stands for the list outside the replay's lists. The key is the
-one `rd__enumerate_reachable` would need to hold. The line and its count are the pipelines made; a
-creation that fails has its own line ("The set against the pool" in [The start-up set](#the-start-up-set)). On a PowerVR DXT-48-1536 a `vu_tri_vs`
-pipeline made so takes about 750 ms (770 and 745 ms for the two keys of a room change in a phone's
-log that named only the fields before the comma) and a program entry's up to 3.4 s, a visible
-stall each; a 2D key the driver has cached, under 1 ms. That log's keys matched enumerated
-keys in every field it printed, so they differed in one it did not: two `vu_tri_vs` keys (blend 4
-and 12, ABE off) in list 0, and a UI-space sprite (`program 9 blend 4`, `sprite_ui_vs +
-sprite_ps`, with the depth target) in list 11. For the two VU keys that field is the Z test or the
-colour mask, the only two unprinted fields a VU draw's state changes: the Z write is enumerated
-both ways, the target format follows `fmt 1`, the topology, stencil mode and PRIM.AA1 are fixed
-for a VU draw (`vuDraw` plans triangles without AA1), and the two-pass blend's flag cannot touch
-blend 12, which does not blend. The set now also holds the pre-pass's keys under
-TEST Z ALWAYS (the one Z test a VU draw is seen to get that the set lacked, below; not confirmed
-as those keys' state) and UI-space sprites under the TEST Z GEQUAL every list's head writes, with
-the depth target (`ico2/seki/src/GsBase.c` (`gsb_setNormalReg`): a 2D draw of list 11 before
-the list's own TEST write takes it); the whole key in the line names the state if one is still
-missing. The program entries' keys before the pre-pass lacked the same states: every one of them
-has its `vu_main_vs` or `vu_particle_main_vs` twin in the set (`rd_state_test`
-`testEnumerationPrepass`). A pipeline made in
-the vertex pre-pass is `in the vertex pre-pass (before list 0)` (`rd__vu_prepass_running`). A
-replay whose walk (the vertex pre-pass and the recording of its lists, the `walk` phase of the
-[slow replay line](DISPLAY.md#the-stats-lines)) takes over 500 ms gets one line, the first 8 and
-then every 100th, saying where that time went: the pipelines made at first use, the textures and
-buffers made (the RHI's `createNs`: their memory and objects; [RHI.md](RHI.md#the-interface)), each
-counted over the walk alone, from `RD_PERF_TS_PREPASS` to the present recorded
-(`rd__perf_walk_end`), and the rest. The lists' timestamps also give the list in the first-use line
-(`port/render/rd_perf.c` (`walkBreakdown`, `rd__replay_list`)):
-
-    rd: slow walk 2639.5 ms (replay 3402, frame 2431): pipelines made 2630.1 ms (1), textures and buffers made 3.2 ms (4 and 0), the rest 6.2 ms (1 so far)
-
-(the numbers in both lines show the fields, not a measurement). Texture decodes run in the game's
-step (the `slow step` line's `texture decodes`) and the replay's texture and mesh uploads in its
-`upload` phase, before the walk, so neither is in it.
-
-| the set is skipped | `<why>` in the line |
-| --- | --- |
-| the system reported low memory during the set, under any policy (below): the rest of the set | `(memory budget: the system reported low memory (running critical) after <i> of <n> keys; the rest is made as the game needs it)` |
-| the set under a policy with a memory budget (below) grew the process past it, or a batch took over 10 s: the rest of the set | `(memory budget: the process grew <g> MB, from <a> to <b> MB, past the policy's <m> MB, after <i> of <n> keys)` or `(memory budget: a batch of <k> took <t> s, past 10 s; ...)` |
-| `[dev] pipeline_set = "lazy"` (`ICO_PIPELINE_SET=lazy`, [CONFIG.md](CONFIG.md#ico-pcini)) | `by the settings ([dev] pipeline_set = "lazy")` |
-| the previous start, of any version, ended without a word in the foreground while a pipeline of its careful set was being made (its activity file says `set: careful`), the first such end in a row: this start only, nothing written (after a full set's end the next start is careful instead, above; [PLATFORM.md](PLATFORM.md#diagnostics)) | `(the previous start ended while preparing them in the careful set; for this start only)` |
-| such an end, whatever the set, the second in a row: the setting is written once the device is made ([PLATFORM.md](PLATFORM.md#diagnostics)) | `(the previous start ended while preparing them; [dev] pipeline_set = "lazy" from now on)` |
-| the last run, of the same version, ran without the set and ended, or exited from it | `(the last run made them that way)` |
-| the same, its set having stopped at the system's low-memory signal (its activity file's `set: stopped at the system's low-memory signal`) | `(the previous start's set stopped when the system ran low on memory)` |
-| the crash order's `lazy` step | `(a restart after a graphics driver crash)` |
-
-**The set against the pool.** The set's size depends on the device's profile and the scale: 446
-keys at Original 4:3 with the fixed-function blend and every state static (the pre-pass on); the
-tile-based profile ([The device profile](#the-device-profile)) adds the DATE, fog and fold keys, the
-fx plan's 30 (`rd_fx_plan.c` (`rd__fx_enumerate`): under six depth states the alpha-only key, three
-`fx_frame_ps` keys and, with local read, one `fx_local_ps` key) and,
-with the pre-pass off, the eleven program entries under every Z test, Z write and blend
-(`rd_mesh.c` (`enumerateVuDraws`)); without dynamic state those fields stay in every key; and at a
-fractional Enhanced scale every `vu_ps` key has its `vu_np_ps` twin (`rd_pixel_plan.c`
-(`rd__vu_pixel_fs_enum`)). All four together give the largest set a device meets, 1153 keys on an
-Adreno 710 at 2340x1080 (Custom, which maps to Enhanced: 2.8125 x 2.41071). Every set fits the
-cache and so the RHI's pool: `rd_state_test` `testTilerSet` counts the tile profile's sets
-(static, dynamic depth, dynamic depth and blend) and `testTilerFracSet` the tile class as
-`rd_profile.c` makes it with local read (the alpha plan, the fx plan and its local read on; module
-and layout stand-ins where the test has no device), the pre-pass off, at 2x (977 keys) and at
-2.8125 x 2.41071 (1153), each under `RD_PIPELINE_REACHABLE_MAX` and inside `RHI_PIPELINE_POOL_MAX`
-less `RHI_PIPELINE_POOL_HEADROOM`; `rd_pixel_test` `testPipelines` counts the same configuration on
-a device with both blends (1153, and 1260 with the two-pass fallback). The set's first line names it against the pool (`rd_precreate_pipelines`):
-
-    rd: pipelines: the start-up set's 1153 keys (pool 4160: the cache's 4096 and 64 for the pipelines made outside it; 0 already made)
-
-and the next line splits the set by family (`port/render/rd_pipeline.c` (`rd__pipe_key_family`), by what
-a key holds, not by the enumerator that listed it: a DATE twin of a VU or screen key counts as DATE,
-the water's states as 2D):
-
-    rd: pipelines: the start-up set by family: 2D <n>, VU <n>, VU point <n>, shadow <n>, fog <n>, CRT <n>, fx <n>, DATE <n>
-
-(a key is in one family, the first that holds of DATE, VU point, VU,
-shadow, fog, CRT, fx, 2D). `rd_state_test` `testTilerSet` asserts the families sum to the set's
-count and to the count without local read, and prints them for each mode.
-`rd_replay_tool --keys` compares the set with what a replay asks for: the keys the replay names
-(`rd__pipeline_gather`, rounds as the loss bisect's `bisectPipelines`), one line each with its
-family and `in set` or `MISSING`, and `exit 1` on a miss (ctest `rd_replay_tool_keys`, TESTING.md).
-A key the set lacks costs one first-use stall, logged by `firstUseLine`, never a wrong picture.
-
-The DATE twins of the VU keys stay for every VU entry. The TEST with the DATE bits that is a list's
-default is list 4's, `RD_TEST_DATE1_Z_GEQUAL` (0x5C000), which only
-`ico2/seki/src/GsBase.c` (`gsb_setSpecularReg`, called for list 4 in the list setup) writes; but
-list 4 hosts the specular and the reflection passes (the list table above) and the C source has no
-caller of `mc_SetMicroCode`, so the programs that draw there cannot be read from the game's code,
-and with the vertex pre-pass the drawing keys carry `vu_main_vs` and `RD_PROG_PRELIT` whatever the
-program (`port/render/rd_mesh.c` (`enumerateVuDraws`)), so a key cannot say "specular only". A
-fold to the specular entries could be made only with the pre-pass off. `rd_replay_tool --keys` lists the VU keys with a DATE state a dump asks for.
-The summary line's renderer part ends with ` (pool 4160, cache 4096)` after the set's words
-(`rd_summary_text`). A creation that fails, in the set or at first use, is logged with the key, when
-it was asked for and why, the first 8 and then every 100th with the count so far
-(`port/render/rd_pipeline.c` (`keepPipeline`, `failReason`)):
-
-    rd: pipeline creation failed on first use in list 0 (program 0 blend 4 vs 4 fs 5 fmt 1/8): the RHI's pipeline pool is full (4160 of 4160 alive); draws with this key are skipped (1 failed so far)
-
-`in the start-up set` or `in a replay's gathered keys` in place of `on first use in list 0`; the
-reason is the RHI's, read from `RhiStats` around the creation (`pipelinePoolFull`,
-`pipelineFailures`, `pipelineLastError`): `the RHI's pipeline pool is full (<live> of <size>
-alive)`, `the driver's error VkResult <n> (<name>)` (the signed value, named for the
-results a pipeline's creation can return, `rd_pipeline.c` (`vkResultName`)) or `the driver's error
-HRESULT 0x<8 hex digits>` (Direct3D 12), `the RHI refused its
-description (its line above)`, or, with no RHI call, `its description was not made (a shader
-module not loaded)`; a batch of the set shares one reason, and a batch that met both says `the
-batch met a full pipeline pool (<n> times) and the driver's error ...`. A key that failed is
-never created again in the run: it stays in the cache as an entry without a pipeline (`pipe.id`
-0, no slot of the RHI's pool), found by the same hash look-up as a made key, so its draws, the set
-and a replay's gathered keys find it in O(1) and skip it (`port/render/rd_pipeline.c`
-(`keepPipeline`, `keyFailed`)); failed entries take cache room, and `rd__pipeline_count` counts
-the made ones only. Past `RD_PIPELINE_FAIL_MAX` (1024, a quarter of the cache) failed entries,
-`rd: pipelines: <n> keys failed, more than the 1024 remembered: no pipeline is created until the
-cache is cleared (new keys are not drawn)` stops every creation until `rd__pipeline_cache_clear`,
-so no key is retried on its every draw. A key the driver refused (not the pool) is not retried
-after a scene change either, though a transient refusal (the driver out of memory while the
-system takes pages back) then loses that key's draws for the run: no scene change reaches
-`rd_pipeline.c` (the cut is the replayed frame's, `RdFrame.cut`, read by `rd_interp.c` and
-`rd_core.c`), so a retry needs a hook called from the replay (`rd_replay.c`) that turns the
-driver's failed entries back into misses once, which this file cannot add alone. The RHI's own lines and the
-10 s numbers are in [RHI.md](RHI.md#the-pipeline-pool).
-
-**The policy.** `rd_set_pipeline_policy(&p)` before `rd_precreate_pipelines` sets how the set is
-made (`port/render/rd.h` (`RdPipelineSetPolicy`); `port/render/rd_pipeline.c` (`createKeys`)); zero
-fields are the defaults. `batch`: keys a batch (`RD_PIPE_BATCH`, 32, and no more); `maxThreads`:
-`RhiPipelineBatch.maxThreads`, the workers a batch may use (0: the backend's count,
-[RHI.md](RHI.md#the-interface)); `cacheEachBatch`: the pipeline cache written after every batch, on
-any platform (`cacheKeptPerBatch`); `memoryBudgetMB`: the process's resident memory is read before
-and after every batch (`rd_set_memory_fn`), and once it has grown past the budget over its size
-when the set began, or a batch took over `RD_SET_SLOW_BATCH_MS` (10 s), the set stops after that
-batch and the rest goes the first-use way (`rd_pipelines_lazy` with the reason in the table
-above). `rd_pipeline_policy_careful()` is the careful set: batches of 8, one worker thread, a 128
-MB budget, the cache after each batch, the values for a device of `RhiLimits.carefulPipelines`.
-A policy other than the defaults is logged once before the set, `rd: pipelines: the start-up set's
-policy: batch 8, threads 1, budget 128 MB, cache each batch; with a budget the set stops past it or
-after a batch over 10 s, the rest made on first use`, and each batch's line ends with `; policy
-batch 8, threads 1, budget 128 MB, cache each batch`. Under any policy, with a low-memory function
-set (`rd_set_low_memory_fn`: the window's `ico_diag_low_memory_stop`, on Android only), the set asks
-it after every batch but the last and stops there on a yes, before the budget's rules (the growth
-rule cannot fire while the system takes the process's pages back), logged once before the set as
-`rd: pipelines: the start-up set stops at the system's low-memory signal (asked after each batch),
-the rest made on first use`. A batch in flight is not cut short: the careful batches are 8
-pipelines on one thread.
-
-The table's row (`port/rhi/vk/vk_device.c` `kVuPlainOnly`; the fallback rule of the next section
-stays on the same device):
-
-| device | match | reason |
-| --- | --- | --- |
-| Qualcomm Adreno 740 on Qualcomm's own driver (not Turnip) | vendor 0x5143, device 0x43050A01 (what both devices report; not Mesa's other 0x4305xxxx ids: 0x43050A00 the Adreno A32, 0x43050B00 the 740v3, 0x43051401 the Adreno 750) | issue 93 (AYN Odin 2 Portal) and issue 107 (AYN Thor), driver 512.676.53: both logs ended inside the set's 2D keys. The set was then ordered as enumerated: the 327 screen keys, the 176 VU keys, then the 24 shadow, fog, water, CRT and blur keys (527 at Original 4:3 with the fixed-function blend). The Odin 2 Portal stopped at 201 finished (the batch of keys 193 to 224 in flight), its memory falling from 194 MB to 47 MB over 22 s without progress until the system ended the app, with no crash report; the Thor froze the whole device at 307 or later (the batch of keys 289 to 320). No one module explains it (the font sheet's fragment shader, 70,444 words, and the movie decoder's, 47,609 words, were as large in a release that started on the Thor), so on this device the set is made under the careful policy (above) |
-
-**The pipeline cache.** Without the set the creations are counted into batches: a batch closes at
-the window's next pump once no pipeline was made for 0.5 s, or 2 s after its first
-(`rd_pipelines_lazy_tick`). The pipeline cache is then written to its file
-(`rhi_pipeline_cache_save`, `rhi_vk: pipeline cache: <n> bytes written to <path> in <t> ms`), so a
-start the system ends or a device that freezes keeps every batch before it and the next start
-compiles only the rest, and the batch's line goes to the log and to the activity file as a
-`compiled: ` line ([PLATFORM.md](PLATFORM.md#diagnostics)): `rd: pipelines: compiled lazy batch 3,
-pipelines 41-57 of this run (compiler E031.41.03.47): 17 pipelines 0.02-0.61 s, mean 0.14 s, over
-1.8 s; memory 210 MB (most 214 MB), pipeline cache 3104 KB; slowest 0.61 s <key> (<modules>)`. In
-such a run each first-use pipeline's note goes to the disc before its compile (fsync,
-`act_sync_note`), so a freeze inside one still names it. The cache's size at the start is logged
-twice: by the backend (`rhi_vk: pipeline cache: <n> bytes from <path>`, or `rhi_vk: pipeline
-cache: starting empty (<path> holds none for this device)`) and by `rd_pipelines_lazy` (`rd:
-pipelines: the pipeline cache holds <n> KB at the start; it is written after each batch of new
-pipelines ...`). On a phone or a tablet (Android, iOS) the start-up set also writes the cache after
-a batch that ends 5 s or more after the last write (`RD_SET_SAVE_MS`), and once more at the set's
-end by the window, so a phone's set that the system ends keeps most of its work and the next start
-compiles only the rest; its batches' lines carry the cache's size (`pipeline cache 3104 KB`), so a
-set the system ends shows how the cache grew batch by batch. On a desktop the start-up set writes
-the cache once, at its end (the window's write), and its batches' lines say `pipeline cache not
-measured`: the measure (`vkGetPipelineCacheData` over the whole cache) and the writes between
-batches are kept there to the lazy path and to a device of the table (`cacheKeptPerBatch`). On an
-RTX 3090 with a 21 MB cache, a measure after every batch and a write or compare every 5 s took a
-warm start from 1.9 s to 16.7 s and 31.2 s, every pipeline a cache hit. The cache file is written
-to `<path>.tmp`, flushed to the disk during a run, then moved over the old file in one step
-(`vkr_cache_write`), so a freeze mid-write leaves the old cache or the new one, never an empty or
-missing file; the exit's write is not flushed, and is skipped when the cache's size is unchanged
-([RHI.md](RHI.md#vulkan)).
-
-**The batches' lines.** Every batch of the set is logged as it completes, the 2D ones too: `rd:
-pipelines: compiled 2D batch 193-224 of 527 (compiler ...): 32 pipelines 0.02-0.21 s, mean 0.08 s,
-0.9 s on 8 threads; memory 185 MB (most 194 MB), pipeline cache not measured; slowest 0.21 s
-<key> (<modules>); each (s): ...`; the VU ones as in the next section. The memory is the process's
-resident memory and its peak (`rd_set_memory_fn`, `ico_diag_process_memory`; `memory unknown`
-where the system does not say), the cache's size `rhi_pipeline_cache_size` (Vulkan's data size, 0
-on Direct3D 12) on a phone or a tablet, on the lazy path and on a device of the table (`pipeline
-cache 3104 KB`), `not measured` in a desktop's set (the paragraph above). A start the system ended shows whether the memory grew with the batches, and the
-next start logs the last one again as `ico_pc: the previous run's last finished batch: <line>`.
-
-### The fallback entries
-
-Every device draws the VU programs through one module set, the record path's: `vu_main_vs` and
-`vu_particle_main_vs` with `vu_ps` / `vu_texa_ps`, the vertex pre-pass's ten `vu_X_pre_vs` and the
-record stages' four point entries ([The vertex pre-pass](#the-vertex-and-triangle-pre-passes)), each with the
-region rule's every step (the card test, the tick cameras); there is no per-draw variant and no key
-field for one. A draw the record path cannot take (a command past the record, a stage pipeline that
-could not be made, a failed self-test, the pre-pass off) draws the old way, through its program's
-own entry with the same pixel shaders (`vu_ps`, `vu_texa_ps`). Which module a
-program entry's key is made from is decided once a run, at `rd_init` (`port/render/rd_pipeline.c`
-(`rd__vu_policy_init`), `g_rd.vsFallback`):
-
-- the extended build `vu_X_vs` on every device but those of the table;
-- the plain build `vu_X_plain_vs` (`port/shaders/vu_common.hlsli`, `ICO_VU_PLAIN`: no card test, no
-  tick cameras) on a device of the table (`RhiLimits.vuFallbackPlain`, `kVuPlainOnly` in
-  `port/rhi/vk/vk_device.c`) or with `ICO_RD_VU_PLAIN=1` (`rd_set_vu_plain_only` is still
-  exported and no host code calls it); only the
-  ten mesh entries have it (the particles' `vu_particle_vs` is one build), and its modules are made
-  only then. `ICO_RD_VU_EXTENDED=1` gives the extended build whatever the others say.
-
-The program entries' keys are in the start-up set only with the pre-pass off (then every VU draw is
-the old way: the eleven entries with the legacy pixel shaders, 16 keys each, 176); with it they are
-made on first use, by the fallback alone. The set at Original 4:3 with the fixed-function blend and
-every state static is the 2D keys, `vu_main_vs`'s 32 and `vu_particle_main_vs`'s 32 (TEST Z
-GEQUAL and Z ALWAYS, Z write on and off, four blends, `vu_ps` and `vu_texa_ps`; the particles' keys
-carry `RD_PROG_PARTICLE`, the meshes' `RD_PROG_PRELIT`), the ten pre-pass keys and the five stage
-keys (`rd__vu_stage_key`: the rule, the tick test under colour mask R and under G, the colour planes,
-the particles' stage): the 2D part + 32 + 32 + 10 + 5, 446 with a 2D part of 367 (the VU part is
-79 whatever the 2D part; `rd_state_test` prints both); with dynamic depth ([Pipelines](#pipelines)) the two drawing shaders' keys fall to 8 each,
-with dynamic depth and blend to 2 each, the point keys staying 15 (`rd_state_test`
-`testEnumerationPrepass`, `testDynamicNormalise` print each set with its 2D part).
-
-The table:
-
-| device | match | reason |
-| --- | --- | --- |
-| Qualcomm Adreno 740 on Qualcomm's own driver (not Turnip) | vendor 0x5143, device 0x43050A01 (what both devices report; not Mesa's other 0x4305xxxx ids: 0x43050A00 the Adreno A32, 0x43050B00 the 740v3, 0x43051401 the Adreno 750) | issue 107 (AYN Thor) and issue 93 (AYN Odin 2 Portal), driver 512.676.53, compiler E031.41.03.47: the whole device froze, needing a reboot, while the driver compiled the first pipelines with a VU vertex shader of 46,470 words and up; a set of at most 32,709 words built ([SHADERS.md](SHADERS.md#the-envelope)) |
-
-The log at `rd_init`: `rd: device compiler: Compiler Version: E031.41.03.47` (the driver's own line,
-Vulkan; `the driver names none` without one), then `rd: VU shaders: the record path's modules on
-every device (largest <module> <words> words); the fallback's program entries extended (largest
-vu_lit_vs <words> words), in the start-up set only with the vertex pre-pass off`, or `... entries
-plain on this device (Adreno 740, issue 107): no wide-screen rule and no tick cameras on those
-draws (largest vu_lit_plain_vs 23305 words) ...`. While the set is created the heartbeat line ends
-with the batch in flight (`| creating pipelines 329-360 of 446: <first key> to <last key>; vertex
-vu_main_vs <words> words (<n> instructions); largest fragment vu_texa_ps <n> words; compiler
-E031.41.03.47`: each vertex shader's SPIR-V words and instructions, `rd__shader_instructions`, and
-on a VU batch the driver's compiler), and each batch with a VU vertex shader is logged as it starts
-(`rd: pipelines: compiling 329-360 of 446 (VU): ...`) and as it completes, with every pipeline's
-compile time as the worker measured it: `rd: pipelines: compiled VU batch 329-360 of 446 (compiler
-E031.41.03.47): 32 pipelines 0.41-2.10 s, mean 1.29 s, 12.3 s on 4 threads; memory 185 MB (most
-194 MB), pipeline cache 3104 KB; vu_main_vs <words> words <n> instructions: 16 x 1.10-2.10 s mean
-1.62 s; ...; each (s): 1.10 1.22 ...` (`batchTimes`; the 2D batches' lines: [The start-up
-set](#the-start-up-set)). The same line without the times goes to the start-up activity file as a
-`compiled: ` line ([PLATFORM.md](PLATFORM.md#diagnostics), `rd_set_batch_fn`), so the start after a
-freeze logs every batch the frozen one finished. After the set the ten slowest compiles carry their
-modules and the time by vertex shader each module's size; a log that stops inside the set names
-the module the driver was compiling. The set is ordered: every 2D key first, then the VU keys
-(`orderSet`).
-
-### The vertex and triangle pre-passes
-
-A mesh program's vertex shader draws the triangle `kick - 2, kick - 1, kick` at index value
-`kick * 4 + corner` ([The stream bounds audit](#the-stream-bounds-audit), `shader_consts.h`
-(`ICO_VU_INDEX`)), so no index repeats and the GPU reuses nothing: each of a triangle's three
-invocations of a program's own entry evaluates all three of its corners in full (the program's
-vertex function: two or three matrix products, the lighting, the divide, the conversions) and the
-whole triangle math (`vu_mesh_out`: the region rule with the cut, the two tick cameras' tests, the
-card test, the corner rule, the attribute planes, the plane distance, the later bias), and a VU
-command drawn twice (the AFAIL split, the two passes without dual-source blending) or as two draws
-a batch (the scissor batches' fans and kicks) does it again in each draw. The pre-passes do each
-vertex's work once and each triangle's once, before the lists, into a record; the main vertex
-shaders read a corner's and its triangle's record back and keep only what differs per corner
-(`port/render/rd_replay_vu.c` (`rd__vu_prepass`, `doVuDraw`); `port/shaders/vu_common.hlsli` (the
-record stages, `vu_pre_out`, `vu_rec_vertex`, `vu_rec_planes`); `port/shaders/vu_tri.hlsl`,
-`port/shaders/vu_particle.hlsl`). The meshes (`RDC_MESH`, `RDC_SKINNED`), the grids (`RDC_GRID`)
-and the particles (`RDC_PARTICLES`: a sprite's verdict and planes, six invocations a sprite) take
-it.
-
-**The vertex record.** Twelve 32-bit words a vertex, in three planes of `RGBA32_UINT` texels, one
-texel a vertex (`shader_consts.h` (`ICO_VU_REC_*`)):
-
-| plane | x | y | z | w |
-| --- | --- | --- | --- | --- |
-| 0 | `h.x` | `h.y` | `h.z` | `h.w` (the clip w) |
-| 1 | `p.x` | `p.y` | GS Z (`gz`) | RGBA, a byte each, R lowest |
-| 2 | S | T | Q | bit 0 the region test (`inside`), bit 1 `gsOk`, bits 2..7 the clip-space flags (`vu_clipw`) |
-
-The floats are their bits (`asuint`), so the record holds exactly what the vertex function
-computed. GS X and Y are not stored: the readers take them from `p` as `vu_divide` does,
-`vu_ftoi4(p.x)`, a multiply by 16 (exact) and a truncation. A vertex's texel is its plane's
-`base + v`, 1024 texels a row (`ICO_VU_REC_W`); `VuVtx` carries the clip-space flags (`clipf`)
-instead of the clip-space position, which only `vu_clipw` read.
-
-**The triangle record.** A record slot is one texel index in each of the three planes; a
-triangle of kick `k` owns slot A at `vu_tri.x + k` and slot B at `vu_tri.y + k`, and under the
-tick cameras (`ICO_VU_TICKS`) slot C at `vu_tri.z + k` (`IcoVuCB.tri`; `vu_tri.z` 0xFFFFFFFF
-without them); a sprite `i` of a particle command owns slot A at `vu_tri.x + i` and slot B at
-`vu_tri.y + i`. 24 words a triangle, 28 with slot C (`vu_common.hlsli` (`VU_TF_*`)):
-
-| slot, plane | x | y | z | w |
-| --- | --- | --- | --- | --- |
-| A, 0 | the flags | the anchor's RGBA, a byte each, R lowest | `r.x` | `r.y` (the anchor in texels from the target's centre) |
-| A, 1 | S across | T across | Q across | the plane distance across |
-| A, 2 | S down | T down | Q down | the plane distance down |
-| B, 0 | S at the anchor | T | Q | the plane distance at the anchor |
-| B, 1 | R across | G across | B across | A across |
-| B, 2 | R down | G down | B down | A down |
-| C, 0 | tick 0's verdict | tick 1's | | |
-
-The flags: bits 0..1 the region rule at the blended camera up to its tick cameras
-(`VU_RULE_EXACT`, `CLIP`, `DROP`, `STRIP`), bits 2..3 the scissor mode's corner code
-(`vu_triangle_out_pos`'s 0 culled, 1 the GS position, 2 the cut position) before the draw's
-`ICO_VU_CUT_ONLY` / `ICO_VU_KICK_ONLY`, bit 4 the planes hold (scissor and clip mode none), bit 5
-a corner has a clip flag (the scissor mode's cut triangles), bit 6 the card test's verdict
-(`vu_rule_card`'s drop), bit 7 the chain plane culls it (all three distances below 0), bit 8 the
-later bias applies (`vu_later_out`'s condition under the mark), bit 9 the content table hides it
-(`VU_TRI_HIDE`), bits 10..11 the anchor (`vu_plane_anchor`), bit 12 every corner has its GS
-position, bit 13 no corner's X or Y changed by clip mode none's 16-bit wrap, bit 14 a sprite the
-port draws. A tick's verdict is `vu_tick_shown`'s (0 not shown, 1 through the card test, 2
-drawn). The values a plane word holds are those `vu_attr_planes` and `vu_plane_out` (a sprite:
-`vu_attr_planes_at`) compute; the anchor's colour is a whole number 0..255 a channel, so its bytes
-carry it exactly. Each stage takes whole halves of the gradient basis (`vu_grad_basis`): a lane
-nothing reads would be left undefined (`OpUndef`, which the envelope refuses).
-
-**The passes.** After the uploads and the first clears, before list 0, `rd__vu_prepass` walks
-the replayed lists. It follows the state block as the walk does (`rd__apply_state` from the
-frame's start state, and after a TARGET command the field's half pixel the walk adds to a later
-SCENE target set with the screen offset: `port/render/rd_replay.c` (`sceneKeepsHalf`,
-`rd__replay_scene_keeps_half`)) and gives each VU command the FrameCB its draws will bind
-(`port/render/rd_replay.c` (`rd__replay_vu_frame`, frameRefresh's: the target, its GS size and
-offset, the depth's Z scale, the command's camera picture)), which the record stages read; it
-sets up what `doVuDraw` binds (the stream in the mesh arena or the ring, VuCB's VU memory, the
-bones and card bits in VuBoneCB: `vuSource`, shared by both, kept for the command's draws), finds
-a mesh or grid command's vertices (the lowest kick less 2 to the highest of its index list, from
-the CPU's list; a grid's every strip) and a particle command's sprites, and numbers the record's
-slots: pass V's rows first (each command's vertices, then two slots a sprite), pass T's after
-them (two slots a kick of the command's range, three under the tick cameras; a position of the
-range that is no kick, a strip start, has its slots and is never read), for the commands in order
-while both fit 1024 rows (the draws below batched:
-[VU1_PROGRAMS.md](VU1_PROGRAMS.md#the-pre-passs-batches)). Pass V (load don't care, store): a draw
-a mesh or grid command, `n`
-points through the program's pre-pass entry (`vu_X_pre_vs`, the program's own vertex function on
-vertex `first + SV_VertexID`, its outputs as flat `uint4` varyings at the point's texel,
-`PointSize` 1), and two draws a particle command through `vu_particle_pre_vs` (`vu_tri.w` 0 slot
-A, 1 slot B), all with `vu_pre_ps`, which writes the three targets; the textures go to `COPY_SRC`
-and pass V's rows of each plane are copied into the frame slot's record buffer, plane after plane
-(`rhi_cmd_copy_texture_to_buffer`, which makes the copy visible to the shaders that read the
-buffer: [RHI.md](RHI.md#the-interface)). Pass T (the same textures back to `RENDER_TARGET`, load
-don't care: pass V's rows are in the buffer already) reads the vertex records from the buffer and
-draws, a mesh or grid command, a point a kick through `vu_tri_rule_pre_vs` (slot A), under the
-tick cameras two through `vu_tri_tick_pre_vs` with the colour masks R and G (`vu_tri.w` 0 and 1:
-slot C's x and y, each written without reading the other), and `vu_tri_planes_pre_vs` (slot B);
-its rows are copied after pass V's. A frame slot has its own buffer, so a replay never rewrites
-what the GPU may still read for the previous one; the textures are shared, ordered by their
-barriers. Both grow by powers of two, from 16 rows (16,384 slots) to 1,024, every slot's buffer at
-once, logged as `rd: VU pre-pass: the
-record holds 32768 slots (32 rows, 1536 KB a frame slot)`; group 1 binds the record at t4 (to the
-vertex and the pixel side), and a 256-byte buffer before there is one (the slot's upload ring when
-even that could not be made, logged once: no shader reads t4 then). A record that cannot be made
-draws that replay the old way and is asked for once more at the next replay; a second failure in
-a row turns the pre-pass off for the run (`rd: VU pre-pass: off for the run: the record (R rows, K
-KB a frame slot) could not be made twice; ...`), so no replay asks for it again (`recEnsure`,
-`s_recFails`). A command past the record's rows (`rd: VU pre-pass: a frame past the record's 1024
-rows: N of its M VU commands are drawn the old way`), one of whose pipelines is missing (its
-pre-pass entry's or a record stage's: `... the pipeline of <entry> could not be made ...`), one
-whose target has no texture, one whose state at its draw (target, depth, GS size, offset, camera
-picture) is not the one the pre-pass's walk made its FrameCB from (`... a command's state at its
-draw is not the pre-pass's ...`: the stages and the draw would place its planes half a pixel
-apart), or a draw whose main shader's pipeline cannot be made (`... a
-pipeline of vu_main_vs could not be made ...`) is drawn the old way, each logged once and counted
-(`vuPreFallbacks`); while the loss bisect only names the keys a frame needs
-(`rd__pipeline_gathering`) a missing pipeline is not a fallback, so the pre-passes' and the main
-shaders' keys are the ones named. The pass ring holds the passes as `VU pre-pass, N vertices into
-the record (1024xR)` and `VU triangle pre-pass, N triangle slots into the record (1024xR)`
-(`RD_PASSK_VU_PRE`, `RD_PASSK_VU_TRI`), the loss bisect's window numbers them passes 1 and 2, and
-the per-pass timing has a pre-pass piece for each ([The pass ring](#the-pass-ring), [The per-pass
-timing](#the-per-pass-timing); `port/render/rd_replay_vu.c` (`vuPrepassRun`, `vuSource`,
-`vuPreRange`, `vuPreRecord`, `recEnsure`)).
-
-**The record stages.** `vu_tri_rule_pre_vs` reads the three corners (`vu_rec_vertex`) and the
-kick's marks and evaluates, by the program's clip mode (`vu_rec.w`), the region rule as
-`vu_region_rule` does up to its tick tail (the cut only for a triangle not wholly inside, under
-real branches), the card test's condition, the scissor mode's corner code, or clip mode none's
-wrap test; then `vu_plane_tri`, `vu_attr_planes` and, with the chain clip plane, `vu_plane_out`
-and the three distances. `vu_tri_tick_pre_vs` evaluates `vu_tick_shown` for one tick for a
-triangle of a region-mode draw under the tick cameras whose blended verdict can be
-`VU_RULE_DROP`, else writes 0 (the main shader reads slot C only where the verdict is
-`VU_RULE_DROP`). It cannot read slot A, which the rule stage writes in the same pass, so it tests
-the verdict's conditions without the cut: not wholly inside, not `ICO_VU_BEHIND_EYE`, and not under
-the card test (`ICO_VU_EXTENDED`, `vu_strip.y`) with every corner's `h.w > 0`, where
-`vu_region_rule_cut` gives `VU_RULE_CLIP` or `VU_RULE_STRIP` whatever the cut says (a NaN `h.w`
-fails the comparison and keeps the test). Under `ICO_VU_EXTENDED` (every setting but the Original
-preset at 4:3 and 1x: `port/render/rd_pipeline.c` (`rd__vu_extended`)) that leaves the tick tests to the triangles with a corner at or behind the eye: the triangles beside the
-4:3 picture in front of the eye, about half the visible ones on a wide frame, take none. The cut
-itself is not repeated there: it would put the stage over the plain budget
-([SHADERS.md](SHADERS.md#the-envelope)) and a second module's cut could round apart from the rule
-stage's.
-`vu_tri_planes_pre_vs` evaluates `vu_plane_tri`, `vu_attr_planes` and `vu_plane_out` again for
-slot B's words. `vu_particle_pre_vs` evaluates `vu_particle` and `vu_particle_vs`'s drop and
-planes. Every stage is a point draw of the pre-pass entries' shape (three `RGBA32_UINT` targets,
-48 bytes a pixel, no depth, no blend).
-
-**The main shaders.** `vu_main_vs` serves every mesh program at index value `kick * 4 + corner`:
-it reads its corner's vertex record (three loads), slot A's first texel (one: the flags) and,
-where the blended verdict is `VU_RULE_DROP` under the tick cameras, slot C (one); resolves the rule as
-`vu_region_rule`'s tail and `vu_rule_card` do (a tick that drew the triangle clips it, one that
-sent it to the card test sends it there, the card test's verdict decides `VU_RULE_STRIP`), applies
-the scissor draw's `ICO_VU_CUT_ONLY` / `ICO_VU_KICK_ONLY` to the stored corner code, chooses the
-position value by value as `vu_triangle_out_pos` does (`vu_corner_position`: the GS position, the
-cut position of `vu_corner_cut_position`, clip mode none's wrapped one), culls past the chain plane and takes its corner's
-distance (`vu_plane_distance`, one stream load), and adds the later bias from the three corners'
-records where the flag says (`vu_later_bias`). The program's choices come from VuCB as for the
-stages: `vu_rec.w` holds the clip mode the program uses (normal_c takes VuCB's, normal_l's code
-32/36 the scissor mode or the region test, codes 34 and 38, the cluster and the grids the region
-test), whether the chain clip plane and the later mark apply (normal_c and normal_l) and whether
-the content table's HIDE mark is tested (normal_c and normal_l); `vu_lo` and `vu_hi` hold the
-region test's bounds (the cluster's VU memory 0 and 1, the others 0 and (4094, 4094, 0,
-16777214)) (`vuTriRule`). Its output is the programs' entries' `VuVSOut`: the position, the
-colour, S, T, Q and the plane distance, interpolated in screen space, and, where the triangle's
-planes hold (`exact` and the exact viewport, as `vu_attr_planes` makes them), the planes as flat
-varyings: the five other plane texels of slots A and B read once a vertex (`vu_rec_planes`: slot
-A's anchor RGBA bytes and `r`, `x1`, `y1`, slot B's `a1`, `x0`, `y0`), the words the stages wrote,
-bit for bit. A flat varying stays in the tile on a tile-based GPU; a read by the triangle in every
-pixel (six buffer loads a fragment) would cost the fill-heavy scenes most. `vu_particle_main_vs`
-draws sprite `vid / 6` from `vu_particle` with slot A's verdict and the sprite's planes the same
-way. `vu_ps` and `vu_texa_ps` take `VuVSOut` from either the main shaders or the programs' own
-entries and evaluate the planes (`vu_pixel_attrs`); at a fractional scale `vu_np_ps` reads its
-first three locations alone (`VuPSIn`, [Screen planes](#screen-planes)). A main shader's pipeline does not depend on
-the program, so the key's program is normalised (`RD_PROG_PRELIT`) and the programs share their
-pipelines.
-
-**The keys.** With the pre-passes on, the VU keys are those of `vu_main_vs` and
-`vu_particle_main_vs` with `vu_ps` and `vu_texa_ps` under the VU states, the ten pre-pass keys
-(`rd__vu_pre_key`: the program's `vu_X_pre_vs` with `vu_pre_ps`, three `RGBA32_UINT` targets, no
-depth, points, no blend) and the five record stage keys (`rd__vu_stage_key`: the rule, the tick
-stage under the masks R and G, the planes and the sprite stage); the program entries' keys (with
-the same `vu_ps`, `vu_texa_ps`) are made only for a command drawn the old way.
-`[dev] vu_prepass = false` (`ICO_RD_VU_PREPASS=0`, [CONFIG.md](CONFIG.md#ico-pcini)) draws every
-VU command the old way, for an A/B on a device.
-
-**The devices.** Only what every device the port runs on has: render passes into colour targets,
-point lists, a colour write mask of one channel, vertex and pixel shaders reading a read-only
-storage buffer (as the stream already is), and buffer copies. No compute (the RHI has none), no
-storage writes from a vertex shader (`vertexPipelineStoresAndAtomics`, which the port never
-enables and phones' drivers do not all offer), no vertex texture fetch (`tools/check_spirv.py`'s
-vertex-shader opcode set holds no image instruction). `RGBA32_UINT` is a colour attachment and a
-sampled format on every Vulkan device (the specification's required format support) and a render
-target on Direct3D 12 at feature level 11_0; three targets are inside every device's colour
-attachments (at least 4 in Vulkan, 8 on Direct3D 12). The one bound the record meets is Metal's:
-a pixel's colour targets may take 32 bytes together on Apple A9 and A10 GPUs, 64 on A11 to A13 and
-128 from A14 and M1 (Metal Feature Set Tables, "Maximum implicit image block size, per pixel, per
-sample, when using multiple color render targets"); the record's 48 bytes do not fit the first,
-so under MoltenVK on an A9 or A10 the pre-pass is off (`RhiLimits.colorBytesPerPixel`;
-`port/rhi/rhi_driver_version.c` (`rhi_metal_color_bytes`), from the Metal device's name) and the
-log says so once. An Apple GPU name the table does not read is taken as unbounded (the families it
-names only grow), logged as `rd: VU pre-pass: the Apple GPU "<name>" is not one the colour-target
-table names: ...`; a pipeline Metal then refuses, or a wrong picture, is the start-up self-test's
-to catch (below). At start the renderer logs `rd: VU pre-pass: on: each mesh and grid vertex and
-triangle and each sprite evaluated once before the lists (two passes), 48 bytes a record slot in 3
-RGBA32_UINT targets, two slots a triangle (three under the tick cameras); [dev] vu_prepass = false
-draws the old way`, or `rd: VU pre-pass: off by the settings ([dev] vu_prepass = false,
-ICO_RD_VU_PREPASS=0): ...` or `off on this device (its colour targets hold 32 bytes a pixel
-together, the record 48: an Apple A9 or A10 GPU): ...` (`port/render/rd_replay_vu.c`
-(`rd__vu_prepass_init`)).
-
-**The self-test.** The pre-passes' pipelines are shapes no other draw of the port has (vertex
-shaders writing `PointSize` into a point list, flat `uint4` varyings into three `RGBA32_UINT`
-targets under a one-channel mask, texture-to-buffer copies the next pass's vertex shaders and the
-main shaders read in the same list, the record read in the pixel shader), so a driver that cannot
-make one would leave every VU pipeline to be made on first use (the start-up set holds the main
-shaders' keys, not the programs'), and one that miscompiles them would draw the scenery wrong with
-no error. `rd_vuprepass_selftest` checks it on the device at start, after the blend's self-test
-and before the start-up set (`port/platform/window_host.c`; in a run without the set, after
-`rd_pipelines_lazy`): a frame of its own, never recorded, on SCENE at its real size and scale
-without MSAA, draws three meshes made for it (`rd_create_vu_mesh`: a prelit strip through normal_c
-code 32, a lit one through normal_l code 32 and a skinned one through cluster code 20 with two
-bones, 12 vertices and 8 triangles each, overlapping at other depths, Z GEQUAL with Z write,
-untextured) with `vu1_test`'s scene in VU memory, the prelit mesh again through a camera blended
-between two ticks' (one vertex of each triangle behind the blended camera's eye, every triangle
-inside at tick 1's camera, so each is drawn clipped through the tick stage, in front of the
-others; left out where the fallback is the plain variant, which has no tick cameras) and four
-particles, once with the pre-passes off (the programs' entries, the
-reference) and once with them on, and reads the block back after each. Their pipelines are made
-first on the worker threads the start-up set uses, named by two replays that draw nothing
-(`rd__pipeline_gather`, `rd__pipeline_create_gathered`, as the loss bisect makes its own): the
-programs' entries are not in the start-up set with the pre-pass on, and on a cold driver cache a
-PowerVR DXT-48-1536 compiles an extended VU program entry in about 1.3 to 3.4 s (its start-up
-batches in a log), so in parallel the self-test costs about the slowest one, and next to nothing
-once the pipeline cache holds them. It passes when the replay with the pre-passes drew every
-command through them (`RdPerfRecord.vuPrePasses` 2, `vuPreDraws` 16, 11 without the tick copy,
-`vuPreSprites` 4, `vuPreFallbacks` 0) and the two blocks are equal byte for byte. A difference, a
-pipeline the pre-passes could not make or a device error turns the pre-pass off for the run, so
-the start-up set made next holds the programs' keys:
-
-```
-rd: VU pre-pass: on (self-test: prelit, lit, skin, the tick cameras and particles byte for byte, 48 vertices and 4 sprites in 16 pre-pass draws (2 passes, 90 triangle slots), <n> of <m> pixels drawn) on SCENE <w>x<h> at <tw>x<th> texels in <t> ms
-rd: VU pre-pass: off (self-test: the pictures differ: <n> of <m> bytes, the first at texel <x>,<y>: <r>,<g>,<b>,<a> want <r>,<g>,<b>,<a>) on SCENE ...
-rd: VU pre-pass: off (self-test: a pipeline could not be made (<p> passes, <d> of <w> pre-pass draws, <s> sprites, <f> draws the old way)) on SCENE ...
-rd: VU pre-pass: off (self-test: the device failed in the replay with the pre-pass) on SCENE ...
-```
-
-A start whose pre-pass is already off (the settings, the device, the host's
-`rd_set_vu_prepass_off`: a restart step or an end in its compile) runs nothing and logs `rd: VU
-pre-pass: off (self-test not run)`; a frame it could not build, or one in which neither replay
-drew the meshes, leaves the pre-pass on (`on (self-test not run: ...)`, `on (self-test
-inconclusive: ...)`). The summary line carries the verdict (`VU pre-pass on (self-test: ok)`, `VU
-pre-pass off (self-test: <reason>)`, [PLATFORM.md](PLATFORM.md#the-summary-line)). A crash in one
-of its pipelines is noted as the start-up set's would be and takes the crash order's `noprepass`
-step; a start that ended without a word in one of the pre-pass's pipelines or batches makes the
-next start draw without it, and the second such end in a row writes `[dev] vu_prepass = false`; a
-device loss in a run drawing with it takes the loss order's `lossnoprepass` step first
-([PLATFORM.md](PLATFORM.md#diagnostics)) (`port/render/rd_vuprepass_selftest.c`;
-`port/render/rd.h` (`rd_vuprepass_selftest`); `ICO_RD_VU_PREPASS_SABOTAGE=1` draws the first
-command's vertex records a texel off, `=tri` its triangles' slot A a slot off, `=ticks` the tick
-stage's tick 1 at tick 0's camera, [TESTING.md](TESTING.md#environment-switches)).
-
-**Why the picture is the same.** The pre-pass entry calls the program's vertex function, the same
-source with the same `precise` operations, so each recorded word is the value the old entry
-computed for that corner (the shaders keep the precise flags of `port/shaders/CMakeLists.txt`;
-`precise` forbids contraction and reassociation of each operation it marks). The record stages
-call the functions the program's entry calls (`vu_region_rule_cut`, `vu_cut_z` and `vu_cut_rows`
-as the same branchless chain, `vu_tick_shown`, `vu_strip_card`, `vu_plane_anchor`,
-`vu_grad_basis`, `vu_attr_planes`, `vu_plane_out`, `vu_plane_distance`), on the same record bits
-(`vu_rec_vertex`), under the same VuCB, VuBoneCB and FrameCB (the command's draws'); splitting the
-verdict across the stages computes some pure parts the entry skipped (tick 1 when tick 0 drew it,
-the planes of a triangle whose planes do not hold, the tick test for a verdict that is not
-`VU_RULE_DROP`), which nothing reads. The record carries the bits through integer targets and a
-buffer copy with no float conversion (the anchor's colour as bytes of whole numbers), and the
-readers take them back as `asfloat`: the main shader's corner values and the pixel shader's plane
-words are the words the entry's corner computed and its flat varyings carried. The one value
-recomputed from a record, GS X and Y from `p`, is `vu_divide`'s own operation on the same bits,
-for a finite `p`: a NaN `p` (only a garbage stream gives one) converts as each module's
-`OpConvertFToS` does, which SPIR-V leaves undefined (Direct3D makes it 0), so two modules may
-differ there. The cut's `lerp`s and divide carry no `precise`, so a driver may contract them in
-either module: the same exposure the program entries have against each other, which the tests
-pin. The ten mesh programs' entries and the pre-pass entries compile to the same SPIR-V with the
-record stages in the tree, and both ways draw with the one `vu_ps` (and `vu_texa_ps`) on the same
-flat varyings: the main shaders hand over the very words the programs' entries computed and
-carried. `vu1_test` draws every case both ways, probe and pictures, and compares them byte for
-byte ([TESTING.md](TESTING.md#portshaderstest)); `rd_vustage_ab` compares every target of the
-dump corpus both ways at Original 4:3 1x and Enhanced 4:3 2x.
-
-**The saving.** Each vertex function runs once a vertex a command instead of three times an index
-of each of the command's draws, and each triangle's verdict and planes once a triangle instead of
-three times a draw; a main shader's invocation keeps its corner's loads, the position forms and
-the chain plane: by the modules' size (`tools/check_spirv.py --sizes`, instructions) `vu_main_vs`
-is 1,408 instructions (5,890 words) against `vu_prelit_vs`'s 10,729 (50,230), the stages 3,600
-(rule, 16,515 words), 3,426 (tick, 16,485), 972 (planes, 4,269) and 2,071 (sprite, 8,801), every
-one under the plain budget ([SHADERS.md](SHADERS.md#the-variants)). The interpolated outputs drop
-from 36 floats to 8 and a flat word. The replay's record counts the pre-passes
-(`RdPerfRecord.vuPreVertices`, `vuPreSprites`, `vuTriSlots`, `vuPreDraws`, `vuPrePasses`,
-`vuPreFallbacks`, `gpuPrepassMs`); the window's 10 s lines and the replay tool's `--stats` print
-them, so a log shows the pre-passes' own GPU time next to the lists' ([Performance
-records](#performance-records)).
+The pipeline key, the blend paths, the start-up set, the fallback entries and the vertex and triangle pre-passes have their own page: [PIPELINES.md](PIPELINES.md).
 
 ## Destination reads and blend paths
 
@@ -1587,7 +1036,11 @@ writes the GS term `(Cs F) >> 7` and the blender adds two whole levels); the sub
 and 6) are one level above the GS wherever `Cs F` is not a multiple of 128, because the GS's term
 is `(0 - Cs) F >> 7`, an arithmetic shift that rounds the negative product down, while the blender
 subtracts the truncated `(Cs F) >> 7` (`port/shaders/common.hlsli` (`gs_dual_out`);
-`port/shaders/gs_math.hlsli` (`gs_blend_ch`)). The staticBlur sprites and `blend_int` keep their
+`port/shaders/gs_math.hlsli` (`gs_blend_ch`); ctest `rd_pixel_uber` asserts it:
+`testUberSubtractOracle` in `port/render/test/rd_pixel_uber_test.inc` holds every pixel of the
+subtracts through the colour read to `clamp(Cd + (((0 - Cs) F) >> 7), 0, 255)` and, on the
+blender, to the truncated form, one level above the GS exactly where `Cs F` is not a multiple of
+128). The staticBlur sprites and `blend_int` keep their
 own exact paths (`port/render/rd_dst_read.c`; `port/render/rd_replay.c` (`dstPassMode`,
 `rd__pass_wants_readable`)).
 
@@ -1621,14 +1074,16 @@ any device (`rd_blend_selftest_moltenvk_storage`).
 **The blend self-test.** A driver whose read or dual-source blend returns the wrong colour draws a
 wrong picture with no error anywhere, so `rd_blend_selftest` checks the blend in force on the
 device at start, on every device, as the fog's self-test checks its depth reads ([The fog path and
-its self-test](#the-fog-path-and-its-self-test)). A frame of its own (never recorded or
+its self-test](RENDER_POST.md#the-fog-path-and-its-self-test)). A frame of its own (never recorded or
 presented) is drawn on SCENE at its real size and scale, MSAA held off, in a 256 x 96 GS pixel
 block in its middle: eight cells of PCSX2's forest pixels under the forest's tint sprite
 (`rd_pixel_test.c` `kTint`), a textured LERP quad whose clear texel must leave the colour behind it
-(the leaf case), two overlapping LERP draws (the second must blend over the first's result) and a
-glyph through the text sheet's shader, then an opaque cell read at an even and an odd texel column
-(a dual-source equation kept with blending off, [RHI.md](RHI.md#dynamic-state)). 21 samples are
-read back (one readback; its pipelines are keys of the start-up set). The fixed-function
+(the leaf case), two overlapping LERP draws (the second must blend over the first's result), one
+LERP command of two overlapping sprites (the second must blend over the first's result inside the
+one draw: the read's rasterization order, which the draw merge and GS state as shader data rely
+on) and a glyph through the text sheet's shader, then an opaque cell read at an even and an odd
+texel column (a dual-source equation kept with blending off, [RHI.md](RHI.md#dynamic-state)). 22
+samples are read back (one readback; its pipelines are keys of the start-up set). The fixed-function
 blend runs first, the reference, within 2 levels of the GS arithmetic; if it fails, the two-pass
 fallback (`rd_set_no_dual`) is tried and kept when it passes. Then, only when `[dev] blend` opted
 into an exact mode the device has (`rd__dst_asked`), that mode runs, within 1 level of the GS
@@ -1650,6 +1105,28 @@ A failing entry's worst sample, and a passing one's when it is not exact, gets a
 tests; a run that took the two-pass fallback starts from the dual-source blend again at the next
 SCENE size, so each line is whole (`port/render/rd_blend_selftest.c`; `port/render/rd.h`
 (`rd_blend_selftest`); `port/platform/window_host.c`).
+
+### GS state as shader data
+
+Where the device orders the attachment read (Vulkan with `RhiLimits.rasterOrderAttachment`: Mali
+with the ARM extension, Adreno on Turnip, lavapipe; not PowerVR, not Qualcomm's own driver, not
+MoltenVK), `[dev] uber = auto` (the default, on a tile-based GPU; `on` anywhere the read is) asks
+for the attachment read itself and draws every pass it can through it: the blend, the write mask
+and DATE become shader data and leave the pipeline key, so the start-up set is several times
+smaller ([PIPELINES.md](PIPELINES.md#gs-state-as-data) has the fields, the set, the device rule,
+the log lines and the tests; `port/render/rd_uber.c`). The passes: every pass on an RGBA8 target
+made for the read begins readable and takes a pending clear as its load op, a COLOR local-read
+barrier after it (`beginPass`); the premultiplied forms and the passes without GS blending go
+through the read too (`RdDrawPass.csOnly`: the register `0x00`), DATE reads the attachment's alpha
+(**DATE through the colour read**, above), the VU draw merge and the fused scissor pair take the
+read's draws (`port/render/rd_replay_vu.c` (`vuMergeDst`, `vuFuseVerdict`)). The picture is the
+attachment read's, the GS's integers, with the premultiplied subtracts the GS's floor and DATE per
+primitive; the MSAA epoch, other formats and the presentation overlay keep the fixed-function
+blend, as under the exact blend. The blend line is `rd: blend: exact (attachment read) (GS state as
+shader data)` and the self-test's `...; GS state as shader data)`; under `auto` a failing
+attachment entry turns it off (`rd__uber_off`: `; GS state as shader data off: the colour read
+failed`, the fixed-function blend); `[dev] uber = on` keeps it as `[dev] blend` keeps an asked
+mode. The fades fold is off under it.
 
 ### The storage pass merge
 
@@ -1725,7 +1202,7 @@ flags are decisions: `fogLocal` offers the fog's `local` path, tried first by it
 `dateStencil` DATE through the stencil bit, decided by its self-test, `blurFold` the folded
 staticBlur pairs ([The replay](#the-replay)); `storePlan` [the store plan](WORK_BUFFERS.md#the-store-plan). `alphaPlan` offers the alpha/blend
 planner ([The alpha plan](#pipelines)), `fxPlan` the frame-size post sprites drawn without their snapshot
-([Post passes](#post-passes)), `fxDstLocal` the post sprites that read their destination by the local read
+([Post passes](RENDER_POST.md#post-passes)), `fxDstLocal` the post sprites that read their destination by the local read
 inside the open pass (it needs `fx_local_ps` and is decided
 by its self-test), and `vuPlanesFrac` the 3D pixel shaders without the attribute planes on a target at a
 fractional scale ([Screen planes](#screen-planes)). A target is made with
@@ -1770,739 +1247,12 @@ it); the `rhi_vk:` device line has it.
 
 ## Post passes
 
-`rd_post` records the post kinds that are plain GS sprites in the original as the register writes
-and sprites the original routine issues, through the same `rd_*` calls, in the original's order.
-They leak state into the rest of the list as the packets do (the fade leaves ALPHA 0x44 and PABE
-0, the keep pass TEXA 80/80 and DISPLAY bound). Registers the original does not write are left as
-they are; every pass that writes FRAME also records FBMSK 0 (`port/render/rd_post.c`, header
-comment). The fade and letterbox sprites carry a key so the presenter can blend them between ticks;
-the other post sprites snap (`port/render/rd_post.c` (`s_spriteKey`)).
-
-| kind | source | what it records |
-| --- | --- | --- |
-| REDUCTION | `gsb_Reduction` | DISPLAY cleared, SCENE drawn into it at half height, bilinear, tinted, inside the border-crop scissor (2 pixels left and right; 8 lines top and bottom on a 512-line scene, 2 on 448, none on the Japanese disc: `gsb_Reduction_jpn`, `rd__reduction_crop`); both sprites through the GS sprite model |
-| KEEP | `gsb_KeepFrameBuffer` | DISPLAY read as PSMCT24 drawn back over the scene at 112 grey |
-| FADE | `gsb_fade` | a full-scene sprite, ALPHA 0x44, PABE 0, the fade colour |
-| LETTERBOX | `gsb_scissorOnDemo` | two 58-line bars, ALPHA 0x64 with FIX the band level |
-| BRIGHTNESS | `gsb_controlBrightness` | a white sprite, alpha the step, `gif_SetAlpha(1, 7, 0)` |
-| AA_DOWNSAMPLE, AA_COMPOSITE | `gsb_antiAlias` (screen softening) | SCENE into AA0 (W/2 x 256), AA0 into AA1 (W/4 x 128); then AA1 and AA0 back into SCENE with LERP FIX |
-| FILM_NOISE | `gsb_filmNoise` | the grain sprite over the bound texture, ALPHA 0x44 |
-| FOG | `fog_DrawFog` | the fog sprite and its CLUT, drawn by `doFog` |
-| COMPOSITE_FIX | effects | a textured quad with ALPHA and FIX; with `exactInt` an `RDC_EXACT_BLEND` |
-| COPY | `gif_MoveImage` | a texture copy |
-| MOTION_BLUR .. EYE_BLUR | `staticBlur.c` | one GS sprite each, recorded by `rd_blur.c` |
-
-**The Japanese and Korean discs' reduction.** `gsb_Reduction_jpn` (`ico2/seki/src/GsBase.c`; the Korean build runs it too) builds the
-same packet with two differences. Its border-crop scissor keeps every line (rows 0 to H/2 - 1; the
-columns 2 to W - 3 as on the European disc), which the host follows: `rd__reduction_crop` returns
-0 when the running disc's `reduction_crops_rows` is 0 (`port/core/region.h`), so the reduction
-draws the whole height and the border mask, the deferred text's clip and the replay use no rows
-either. And it writes TEST and ZBUF after the black clear sprite, not before, so on the PS2 that
-sprite draws under the TEST and ZBUF the frame left; the host clears under TEST 0x30000 with the Z
-write off on every disc. The textured sprite covers every pixel but the two columns at each side, so
-only those columns could differ, and only if the leaked test failed the black sprite; not modelled.
-The European picture is unchanged: `reduction_crops_rows` is 1 there and `rd__reduction_crop` is
-the 2 or 8 it was (ctest `rd_present`'s border cases, which compute the expected rows from it).
-
-`RD_POST_SHADOW_RESOLVE`, `RD_POST_BLUR` and `RD_POST_PRESENT_BLIT` are reserved numbers no caller
-issues; `rd_post` records nothing for them (logged once) (`port/render/rd_post.c`).
-
-**The staticBlur sprites.** `staticBlur.c`'s host path records its register writes as rd state and
-each sprite as `rd_post` of its effect's kind: motion blur (DISPLAY read as RGB24, H/2 stretched to
-H, LERP FIX), depth of field (SCENE to WORK1 to WORK0, six blur passes, four planes), glow (flare in
-modes 0 and 1, bloom in mode 2 with HIGHLIGHT), aura (AURA_WORK, AURA_TAP, FEED128 feedback) and the
-sun's eye blur (WORK0 to WORK3) (`port/render/rd.h` (`RdPostKind`)). `rd_blur.c` records each as an
-`RdPostRec` with the corners, UVs, RGBAQ and Z as the GS gets them, the
-[TEX0](ARCHITECTURE.md#terms) size and TFX, and `rd__blur_post_sprite` (`port/render/rd_blur_border.c`) hands it to `doBlurSpriteDraw`, which draws it through `fx_rect_vs` /
-`fx_sprite_ps` in the GS integer arithmetic (`port/render/rd_blur.c`, header comment; the work
-buffers, the glow's left edge on a wide frame, the work clear, a cleared source: [WORK_BUFFERS.md](WORK_BUFFERS.md)):
-
-- coverage: pixels with `x0 <= X < x1` in 12.4, inside the scissor;
-- UV stepped in integers, 12.4 (the division without the GPU's integer divide,
-  [SHADERS.md](SHADERS.md#integer-forms)); nearest, or the GS bilinear on 4-bit fractions, each
-  texel wrapped by CLAMP on the TEX0 size, clamped to the backing target and expanded by TEXA
-  before filtering;
-- TFX MODULATE, DECAL, HIGHLIGHT, HIGHLIGHT2, clamped at 255;
-- the alpha test, DATE against the destination before the sprite, the Z test in hardware;
-- `((A - B) C >> 7) + D` on integers with PABE, COLCLAMP, FBA, written to UNORM8 as k / 255.
-
-The destination is read from a snapshot taken just before the sprite, so the result is the GS
-integer arithmetic of every pass, feedback or not (`port/render/rd_blur.c`). A sprite that stores
-every texel of its target (its coverage holds every GS pixel the target's texels stand for, the
-scissor is the whole target, no alpha test but FB_ONLY or RGB_ONLY, no DATE, no Z test but ALWAYS,
-every channel written) needs no copy: it draws into the snapshot texture, which becomes the
-target's colour, and reads the old colour, which becomes the snapshot, the picture before the
-sprite as a whole copy would hold it (issue 103). The snapshot texture is made with the target's
-own usage for that. The swap is no pass of the [pass ring](#the-pass-ring) (a copy is);
-`ICO_RD_SNAP_SWAP=0` keeps the copy, for the A/B (`rd_replay_tool_snap_swap`: the same bytes on
-every blend path at 1x and 2x) (`port/render/rd_replay.c` (`blurCoversTarget`, `blurSwapTarget`,
-`snapEnsure`)). With Full pixel (on,
-or off in the game on a cropped frame such as 16:9, where the presenter masks the border over the
-same picture: `RdSettings.borderMask`, `rd__frame_cropped`,
-[DISPLAY.md](DISPLAY.md#the-native-frame); at 4:3 and 48:9 off keeps the recorded scissor) the
-reduction's textured sprite is drawn with the whole target as scissor and both axes clamped, so the
-border shows the picture SCENE holds (`port/render/rd_replay.c` (`borderOpen`, exported as
-`rd__replay_border_open`), `port/render/rd_blur_border.c` (`rd__blur_post_sprite`)).
-
-**The open border's outer columns (issue 129).** The PS2 never shows GS columns 0, 1, W - 2 and
-W - 1: the reduction's scissor is 2 .. W - 3 (`port/render/rd_post.c` (`postReduction`)) and the
-TV's overscan hides more. The game does not always draw them: in one room (the hanging chain up to
-the window, before the cage room) it leaves the top of column 0 uncovered, the fog paints depth 0
-with its table's entry 0 (near white in a lit room), and the glow spreads it about twenty output
-pixels in, a bright band at the left edge of a 2340x1080 phone whose 832-column frame is its exact
-width. Where the frame is its exact width (`rd__frame_cropped` false: 4:3, 48:9, 2340x1080 and
-every aspect whose `384 * aspect` is whole) and the border is open, the reduction's sprite is
-drawn again over those columns as their neighbours: `rd__blur_border_strips`
-(`port/render/rd_blur.c`) makes two strips of the sprite's record, `{x0, y0, o + 32, y1}` (pixels 0
-and 1; `o` the 12.4 coordinate of pixel 0) and `{o + 16 (W - 2) - 4, y0, x1, y1}`, each with
-`u0 = u1` the U `fx_sprite_ps` computes at pixel 2 (or W - 3) from the recorded UVs (`U(X) = u0 +
-(X - x0) (u1 - u0) / (x1 - x0)`, truncated), so in the GS model each strip pixel reads the same two
-texels at the same weights as its neighbour column: the same bytes. The mirror's half texel
-(`rd__blur_uv_rect`) moves both ends of a strip's U as it moves the sprite's. The hardware sprite a
-scaled target draws (`rd__blur_screen_fallback`) gets the same from `rd__blur_border_verts`: each
-of its four vertices' S constant, the S the pair has at that pixel's coordinate, which
-`rd__blur_snap_verts` then moves as it moves the sprite's. The order is the scissor opened and
-CLAMP set, the sprite, the left strip, the right strip, the state put back
-(`port/render/rd_blur_border.c` (`rd__blur_post_sprite`, `drawStrips`), each strip through
-`rd__replay_blur_sprite_draw`, `doBlurSpriteDraw`'s export, in a payload of its own). A cropped
-frame (16:9) draws no strip; with Full pixel off the border stays closed. Measured on lavapipe
-(the 48:9 deja vu dump at 3840x720, 1.875 texels a GS pixel), the hardware strips cover DISPLAY
-texels 0 .. 3 and 3837 .. 3839 and are one value a row there; texel 3836 is the main sprite's. The top and bottom rows the reduction's scissor kept black are not repeated:
-they show what SCENE holds. One line the first time, `rd: display: the border is open
-at the frame's exact width (W GS pixels): its two outer columns a side repeat columns 2 and W-3
-(reported once)`. `rd__set_blur_border_repeat(false)` draws without them (tests: the present pins measured without
-the strips, `rd_present_test`'s open border cases); `rd__blur_border_strip_count` counts the
-strips drawn, which `rd_log_frame_state`'s line names.
-
-**SCENE's outer columns (issues 129 and 26).** The strips mend the reduction's own columns, but the
-glow reads SCENE before the reduction: list 7's flare and bloom reduce SCENE into the work
-buffers, so the fog-painted columns also spread about ten GS pixels into the picture, about twenty
-output pixels at 2x. That reaches the screen on a cropped frame too: issue 26's picture (4K,
-16:9, Full pixel off, the room with the hanging chain) shows the band at the left edge, rows 40 ..
-260 of 964, where the present already leaves the columns out. So the fog of a frame on SCENE arms
-a repeat (`rd__scene_border_arm`, the last line of `doFog`), done before the frame's first post
-sprite that samples SCENE (`sceneRepeatDue` in `rd__blur_post_sprite`: the glow's first
-reduction, the depth of field's, at the latest the reduction into DISPLAY), where SCENE's pass
-ends anyway, so the repeat adds no pass on a tiler's local fog read and an open MSAA epoch closes
-where it would have (`port/render/rd_blur_border.c` (`sceneRepeat`)). The repeat copies SCENE's
-texels of GS column 2 into those of columns 0 and 1, and of column W - 3 into W - 2 and W - 1,
-every row, the colour alone (the depth stays the game's, which the edge probe reads): the texels
-of GS column x start at `ceil(x sx - ox)` (texel t lies at GS `(t + ox) / sx`), the left fill is
-laid right to left from column 2 and the right fill left to right from W - 3, the outermost copy
-cut at the edge, so at a whole scale each column is column 2 (or W - 3) texel for texel. The RHI
-cannot copy a texture into itself, so the two source columns go through a small texture of their
-own first (`rd border columns`, the columns' widths by SCENE's height, freed with the scene's
-caches and at shutdown: `rd__scene_border_free`), and bumps `writeSerial` (DATE's snapshot). It
-applies in every place of the columns (`rd__scene_border_state`) but one: the border open at the
-exact width (`RD_BORDER_OPEN`), the frame cropped at present (`RD_BORDER_CROPPED`), Full pixel's
-window (`RD_BORDER_WINDOW`, `ox > 0`: its crop is 0 to 8 GS pixels a side, so a 2560 x 1080
-monitor's or a 2532 x 1170 phone's window holds texels of columns 0 and 1, which are copied; where
-`columnTexel(2) <= 0` nothing is), and the border closed on a frame wider than 512 GS pixels
-(`RD_BORDER_CLOSED` at 2340 x 1080 or 48:9 with Full pixel off: the reduction shows black there,
-the glow reads SCENE). Only the closed border of the 4:3 frame (512, the GS's own DISPLAY with its
-border) leaves SCENE as the game drew it, the PS2's picture, which the native-frame gate's 4:3
-hashes hold. The strips stay with it: the
-reduction's column 2 blends a quarter of column 3 (the PS2's +0.75), so DISPLAY's outer columns
-drawn from SCENE's repeat alone would be column 2 without that quarter, not DISPLAY's column 2.
-One line the first time, `rd: border: the frame's outer two columns a side repeat columns 2 and
-W-3 on SCENE after the fog (W GS pixels; <the place>; L and R texels a side; reported once)`, once
-for each place; `rd__scene_border_repeat_count` counts
-the repeats (`rd_log_frame_state`'s line), `rd__set_scene_border_repeat(false)` leaves SCENE as
-drawn (tests).
-
-**The frame-size sprites' plan.** Before its snapshot, `doBlurSpriteDraw` hands the sprite to
-`rd__fx_plan_draw` (`RdProfile.fxPlan`, on in every class; `[dev] fx_plan`, `ICO_RD_FX_PLAN=1|0`),
-which draws it inside the open pass, without the snapshot, where the same bytes come another way
-(`port/render/rd_fx_plan.c`, file comment):
-
-| sprite | condition | how it is drawn |
-| --- | --- | --- |
-| cleanUpFB's two sprites into SCENE, the glow's WORK0 fill | untextured, blending, no DATE, no AFAIL RGB_ONLY, and each colour channel's blend the destination for every Cd and Ad or one value for every Cd and Ad (`rd__fx_fold`, over the 256 values of each) | `fx_sprite_ps` without the blend and the destination read, the constant channels as RGBAQ, the destination channels masked (the colour mask A alone or whole), the depth state the sprite's |
-| the glow's paste WORK3 into SCENE | Cs * FIX + Cd, Cs * As + Cd, Cd - Cs * FIX or Cd - Cs * As, COLCLAMP 1, no PABE, no DATE, no AFAIL RGB_ONLY | `fx_frame_ps` writing the magnitude of `(A - B) C >> 7` (`FXF_OUT_PREMUL`) through the premultiplied add (ONE, ONE) or reverse subtract, alpha ONE, ZERO: the UNORM8 sum is the GS's clamped integer sum, the subtract's term the GS's `ceil(Cs C / 128)` |
-| the motion blur DISPLAY into SCENE, any other destination read | `RdProfile.fxDstLocal` and the target's passes readable (the scene class under `dateStencil`), not sampling its own target | `fx_local_ps`, the destination as the input attachment (`SubpassLoad`) inside the open pass after a by-region barrier (`RHI_LOCAL_READ_COLOR`; `RHI_LOCAL_READ_BACK` after it); `fx_rect_vs` draws one triangle, so the texel read is the one before the sprite |
-| the glow's mask SCENE into WORK2 | MODULATE with RGBAQ's RGB 0, no blend, no destination read | `fx_frame_ps` computing the alpha alone (`FXF_ALPHA_ONLY`): RGB is `(t * 0) >> 7`, 0 |
-
-A sprite that samples its own target keeps the snapshot; so does every sprite that reads its
-destination under an exact blend the player opted into or in a frame with the MSAA epoch, and one
-whose key the pipeline cache cannot give (looked up before anything is recorded). The four forms
-share `fx_sprite_ps`'s coverage, UV and tests (`port/shaders/fx_sprite.hlsl`). Their keys are in the
-start-up set (`rd__fx_enumerate`: the colour mask A of `fx_sprite_ps`, `fx_frame_ps` without blend
-and with the premultiplied add and subtract, `fx_local_ps` where the profile has it, each in
-`rd__enumerate_reachable_blur`'s depth states). `fxDstLocal` is on where the profile has
-local read (`[dev] fx_dst_local`, `ICO_RD_FX_DST_LOCAL=1|0`); its self-test runs after DATE's
-(`rd_fog_selftest`): a frame on SCENE of four cells under an untextured LERP FIX 0x20 sprite,
-replayed with the local read and through the snapshot, the cells' centres read back against the
-GS's arithmetic; a wrong pixel turns the flag off (`port/render/rd_fx_plan.c`
-(`rd__fx_local_selftest`)). The reduction's black sprite on a scaled DISPLAY (a hardware sprite,
-`rd__blur_screen_fallback`) is its clear where it covers every texel with nothing else in force
-(no texture, blend, test, FBA, depth, the colour mask and the scissor whole, no Full pixel crop),
-its corners on the exact viewport's texel centres counted with the top-left rule; the next pass on
-DISPLAY takes the clear as its load op (`port/render/rd_fx_plan.c` (`rd__fx_reduction_clears`),
-`port/render/rd_replay.c` (`doBlurSpriteDraw`)). Each replay's record counts the sprites drawn
-each way (`RdPerfRecord.fxConstant` with the black sprite's clear, `fxAdditive`, `fxLocal`;
-`rd_replay_tool --stats` `pixel diet:` line), and the log has one line a run per way:
-
-```
-rd: fx plan: a staticBlur sprite drawn by the constant fold (a masked draw in the open pass), without its snapshot (reported once)
-rd: fx plan: the reduction's black sprite on a scaled DISPLAY drawn as its clear (reported once)
-rd: fx local read: on (self-test: local ok 4, snapshot ok 4) on SCENE 512x512 at 1024x1024 texels
-```
-
-### The motion blur under Smooth
-
-Options > Effects > Motion blur: Smooth (`[video] effect_motion_blur_mode = "smooth"` with
-`effect_motion_blur` on, `RdSettings.motionBlurSmooth`; issue 112). The game's motion blur
-(`ico2/sugipon/src/staticBlur.c` (`MotionBlur`)) is one sprite in list 7, the previous DISPLAY
-(TBP 0, RGB24, H/2 lines stretched over H) over SCENE with ALPHA mode 2, `(Cs - Cd) FIX / 128 +
-Cd`, FIX the stage's `motionBlur` (typically 32). Original keeps it once a tick: every present of
-a tick reads the DISPLAY the tick started from (`DISPLAY_HELD`, `rd_interp.c` (`feedback`)), so
-between ticks the trail stands still while the picture moves. Under Smooth `rd__blur_post_sprite`
-hands the sprite to `rd__blur_smooth_sprite` (`port/render/rd_blur_smooth.c`, file comment),
-which per present i keeps
-
-    A_i = S_i + a' (A_i-1 - S_i),   a' = FIX' / 128,   FIX' = clamp(round(128 (FIX / 128)^(1 / k)), FIX, 127)
-
-with S_i SCENE just before the sprite, A an RGBA16F ping-pong pair at SCENE's texture size (its
-scale, its Full pixel crop; an 8-bit running blend would stall up to 7 levels short at k = 10,
-its floor step `(A - S) FIX' >> 7` being 0 below `128 / (128 - FIX')`), and k the presents a
-tick. Each present: the sprite's pass ends; SCENE goes to a shader read (an open MSAA epoch
-resolves into it there); `fx_acc_resolve_ps` rounds A_i-1 into RES, an RGBA8 scene-class
-temporary target (`rd__temp_target_alloc(gsW, gsH, 0, 1)`); `fx_acc_ps` writes A_i into the
-pair's other texture from A_i-1 and SCENE (both `blit_vs`, one triangle, each texel by Load);
-then the game's sprite is drawn as recorded through `rd__replay_blur_sprite_draw`, in a payload of
-its own, with its texture RES's RGB24 view (`RD_VIEW_RGB24_TA0`, so the alpha it writes is TA0 as
-before), its V over all H lines (`uv[3] = uv[1] + 2 (uv[3] - uv[1])`: the recorded 4 .. 4100
-becomes 4 .. 8196, one texel a row as U has one a column) and FIX' for FIX; the state's
-texture and FIX are put back after it. The sprite's 8-bit result is A_i rounded; A keeps the
-fraction. The two pipelines are a private cache (`RD_BLUR_SMOOTH_PIPES`, as the COLCLAMP 0 wrap's
-`RD_WRAP_PIPES`; the pipeline pool's headroom assert counts them), so the `rd__get_pipeline` set
-and `RD_PIPELINE_REACHABLE_MAX` do not change; the sprite's own key is the recorded one (FIX and
-the texture are not in it).
-
-k comes from the presenters (`rd__blur_smooth_arm`, before each replay that presents): on the timer
-path `rd_present_clock_alpha`'s tick over its step (kept in `rd_interp.c` statics), under the vsync
-lock the presents the tick before counted (`rd_present`), 1 for the first tick and for the
-presenter without interpolation (`rd_core.c` (`replayOnHost`)); clamped to 1..64
-(`RD_BLUR_SMOOTH_K_MAX`); FIX' is taken at each sprite from the tick's k. A replay nobody armed
-(a self-test, a dump's, the replay tool's `--time`) draws the sprite as Original and leaves A
-alone. `feedback` makes no DISPLAY / DISPLAY_HELD head copy while `rd__blur_smooth_active` (the
-sprite does not read DISPLAY; FEED128's copies are unchanged).
-
-The trail ends where an armed replay that is not a keep frame's drew no motion blur sprite (the
-game's alpha 0, the switch off: `rd__blur_smooth_replay_end`, from `rd__replay_frame`): the next
-sprite starts it again, `A = S` and FIX' 0, which leaves SCENE's colour as it is (no stale
-ghost). The same restart follows a new scene size, the targets made again (`createNamedTargets`
-frees the pair and RES before the pool's clear), and a change of the setting (`rd_begin_frame`
-frees them on the host). `rd__blur_smooth_shutdown` (`rd__gpu_shutdown`) destroys the pair and the
-pipelines. A texture or pipeline the GPU refuses leaves the run on Original (logged). The tiler's
-fold cannot apply (the motion blur is no blur pair); the frame-size plan's local read
-(`rd_fx_plan.c`) draws the sprite as it would draw the recorded one.
-
-Against Original (DISPLAY.md): the light the passes after the sprite add (the aura, the
-brightness step, the reduction's tint, a fade) is not recycled through the trail, since A
-holds scenes, not DISPLAYs (spread over k presents that loop would settle at another brightness,
-`rd_interp.c`'s header), and the PS2's vertical halving of the old frame is gone. A still picture
-is the same within a level. At one present a tick (Frame rate Original) FIX' is FIX and the two
-differ only in what the trail holds. Cost: two passes of one triangle over SCENE's texture a
-present and 20 bytes a texel (50 MB at 2340x1080, 166 MB at 3840x2160), made only while Smooth
-draws.
-
-The log (`rd: ` lines):
-
-```
-motion blur: smooth (the trail moved on at every present from an accumulator of the scenes, the game's FIX spread over the presents of a tick)      (rd_init, or with ", from the next present" on a change)
-motion blur: original (the game's own: the trail moved on once a tick), from the next present
-motion blur: smooth: accumulator WxH (RGBA16F x2 + RGBA8, N.N MB)
-motion blur: smooth: no memory for the accumulator WxH (RGBA16F x2 + RGBA8, N.N MB): the motion blur is drawn as Original for this run
-motion blur: smooth: its pipelines could not be made (accumulate made|missing, resolve made|missing): the motion blur is drawn as Original for this run
-motion blur: smooth: the scene is WxH texels now (the accumulator WxH): made again
-motion blur: smooth: the accumulator WxH freed (why)
-motion blur: smooth: the trail starts again at frame N (why): this present's scene is its first picture, no old frame in it      (the first 3 a block)
-motion blur: smooth at one present a tick (FIX F as recorded): ...      (once)
-motion blur: smooth: the sprite of frame N is drawn as Original: why (reported once)
-motion blur: smooth: P presents, K1 to K2 presents a tick, FIX F drawn as F' (the last); D sprites through the accumulator, R restarts (M not named above), O drawn as Original (no accumulator)      (with the interp summary, when it drew)
-```
-
-`RdPerfRecord.blurSmoothPasses` counts the passes a replay. The replay tool's `--motion-blur
-smooth` sets it (its replays armed; the `--prev` dumps feed the trail) and `--presents N` (with
-`--interp T PREV`) replays PREV, then N presents at alpha `T (k + 1) / N` to `<out>-p<k>.png`
-(TESTING.md).
-
-## Above 1x
-
-At scale 1 every pass samples as the GS does. On a scaled target a pass that steps over many
-texels a pixel (a decimation) or spreads one texel over many pixels (a magnification) would show
-the GS's few taps as a grid at the finer resolution, so those passes resample instead. The rule is
-one separable kernel per axis, chosen by the step (source texels per destination texel) and
-centred on the GS's own sample point, so the picture's columns land where they do at 1x and the
-4:3 columns are the same at every aspect (`port/shaders/common.hlsli`, the "Above 1x" block):
-
-| step | kernel | weights |
-| --- | --- | --- |
-| above 2 texels | area box of the step's width | each texel's overlap in 1/32 texel (`gs_box_w`), summing to the step |
-| below half a texel, bilinear | cubic B-spline (B = 1, C = 0: no overshoot on alpha masks), four taps | from the GS's 4-bit fraction in 1/24576 (`gs_bspline_w`) |
-| otherwise | the GS's own taps on that axis | bilinear 16 - f and f, or nearest |
-
-The kernels are integers throughout, and the block is valid C as well as HLSL, so a CPU model gives
-the GPU's bytes (`port/render/test/above1x_ref.c`, `port/shaders/test/shaders_pixel_test.c`
-(`checkAbove1xKernels`)). Two entry points:
-
-- Load-based: `gs_resample_axis` gives an axis's taps (`GsAxis`, with `gs_resample_weight` and
-  `gs_resample_div`); the caller fetches each tap with its own addressing and combines the rows
-  with four extra bits, `R' = (16 sum(wx t) + Dx / 2) / Dx`, then
-  `(sum(wy R') + 8 Dy) / (16 Dy)`, within 32 bits (`port/shaders/common.hlsli`).
-- Sampler-based: `gs_bspline_bilinear4` folds each axis's four B-spline weights into two hardware
-  bilinear taps, four taps in all, for a sampler that addresses as the draw does; the filter's own
-  weight precision makes it inexact (`port/shaders/common.hlsli` (`gs_bspline_bilinear4`)).
-
-`gs_bayer8` is the 8x8 ordered-dither threshold, computed in the shader from the texel's
-coordinates (`port/shaders/common.hlsli` (`gs_bayer8`)).
-
-**The staticBlur sprites.** `doBlurSpriteDraw` sets `RD_FXF_ABOVE1X` on a sprite that samples a
-target when the bound target or the source has a scale other than 1 (the predicate
-`rd__blur_screen_fallback` takes), the source is not a work buffer (a work buffer drawn onto the
-frame takes the GS's own filter: [The glow size](#the-glow-size)) and an axis leaves the GS's
-filter: its steps, computed on the
-CPU from the rectangle and UV extents and the two scales, rounded to 1/32 texel, go to the shader in
-`DrawCB.scale[3]` as `step32x * 4096 + step32y` (`port/render/rd_replay.c` (`blurAbove1xSteps`,
-`doBlurSpriteDraw`), `port/render/rd_internal.h` (`RD_FX_BOX_MIN32`, `RD_FX_BSPLINE_MAX32`)).
-`fx_sprite_ps` then resamples about the GS's U and V in the source's 12.4 texels, each tap fetched
-as `fx_texel` fetches (CLAMP or REPEAT on the TEX0 size, the backing texture's clamp, TEXA before
-filtering), and TFX, the tests and the blend follow in integers as before
-(`port/shaders/fx_sprite.hlsl` (`fx_sprite_ps`)). The pipelines are the same; only the per-draw
-constants differ. The gate is the scale, never the step: at scale 1 the chains' own 4:1 and 3.5:1
-steps stay the GS's point samples, so the out-of-the-box picture is the GS's arithmetic as before.
-Images are never resampled. A sprite that samples the target it draws into reads its snapshot,
-which holds the texels at its UVs widened by the kernel's reach on each axis that leaves the GS's
-filter (`port/render/rd_replay.c` (`blurSnapArea`, `blurKernelReach`)). `g_rd.above1xDraws` counts
-the flagged sprites since `rd_init`
-(`port/render/rd_internal.h` (`RdContext`)).
-
-At Enhanced 4x (NTSC: SCENE 4x, the work buffers at their GS sizes) the aura's chain takes the box
-for SCENE and AURA_WORK into FEED128 (16 texels across, 14 down) and AURA_WORK into WORK0 (8
-across, 16 down), and the GS's bilinear at each SCENE texel's GS position for the work buffers
-back over the frame (the GS's step divided by 4); `rd_blur_test`'s `above1x` case compares every target with a
-CPU model at scale to the bit, and every comparison at scale 1 finds no sprite flagged
-(`port/render/test/rd_blur_test.c` (`checkAbove1x`, `compareAll`)).
-
-**The sprite passes over targets.** `fillDrawCB` sets `DF_ABOVE1X` (`ICO_DF_ABOVE1X`, bit 25) on a
-pass of `sprite_ps`, `sprite_aa1_ps` or `sprite_stq_ps` whose texture is a colour view of a target,
-both filters linear, no GS levels, and the texture's scale is not the bound target's, with the
-draw's wrap in `DF_TEXA_CLAMP_S/T` (`port/render/rd_fx_plan.c` (`rd__sprite_above1x`), `rd_replay.c` (`fillDrawCB`)).
-These are the shadow composites (the levels at scale 1 into SCENE, 1/2s to 1/8s texel a pixel) with
-`[dev] shadow_bspline` only, the
-softening's SCENE into AA0 (a box), and the reduction's fallback sprite (SCENE
-into DISPLAY on a scaled target, `rd__blur_screen_fallback`) when an axis leaves the GS's filter at
-its steps as `blurAbove1xSteps` computes them; at full height and scale 1 DISPLAY has twice the GS's
-rows (sy 2) and the reduction steps one SCENE row a DISPLAY row, the GS's filter on both axes, so
-the flag stays off there (`Replay.a1xGs`; `port/render/rd_replay.c` (`doBlurSpriteDraw`)). The
-shader takes the step of each axis, in 1/32 texel, from `DrawCB.scale[3]` (`step32x * 4096 +
-step32y`): the sprite command's, which `doScreen` computes on the CPU from its expanded corners,
-the texture's normalisation and size and the bound target's scale, when the frame-size plan is on
-(`RdProfile.fxPlan`) and every sprite of the command has the same (`port/render/rd_fx_plan.c` (`rd__a1x_sprite_steps`),
-`DrawSetup.a1xSteps`, `fillDrawCB`); 0 for any other command, whose pixels take the step from
-their footprint (`ddx`/`ddy` of the texel coordinate, constant over a sprite)
-(`port/shaders/sprite.hlsl` (`sprite_above1x`)). The CPU's quotient is exact where the
-footprint's carries the interpolation's rounding, so the two differ only within that rounding of
-a half step:
-
-- both axes below half a texel: the B-spline as four bilinear taps of the draw's own sampler
-  (`sprite_bspline4`: `gs_bspline_bilinear4` with each 4-bit fraction's two weights and two tap
-  places from a 16-row table of the floats its divisions round to, `kSpriteBspline`), TEXA after,
-  as `sprite_ps` applies it; within 2 LSB of the integer kernel
-  ([DIVERGENCES.md](DIVERGENCES.md#video) VD-18);
-- an axis above two texels: the area box on that axis, every tap loaded with the wrap reproduced on
-  the texture's size and TEXA per texel (`gs_texa_load`), combined separably as `fx_sprite_ps`
-  combines them, exact;
-- otherwise the pass samples as before (`gs_sample`).
-
-By default the shadow composites take one bilinear tap, as at 1x; the B-spline (a softer
-penumbra) is the A/B ([WORK_BUFFERS.md](WORK_BUFFERS.md#the-shadow-edges-above-1x)). The GS
-levels' filter of the Original preset (`rd__gs_filter_int`: [Textures](#textures)) is for images
-only, so it never meets the flag (`port/render/rd_pipeline.c` (`rd__gs_filter_int`)). The flag is never set when the
-two scales are equal, nor on the reduction at the GS's filter, so never at scale 1;
-`rd_present_test`'s full height 1x case checks no draw is flagged there and that the frame is byte
-for byte the one with the reduction flagged (`rd__set_a1x_gs_keep` off), whose shader takes the GS's
-path at every pixel (`port/render/test/rd_present_test.c` (`checkFullHeight1x`)).
-`g_rd.above1xDraws` counts these passes too, and each replay's record their number
-(`RdPerfRecord.a1xDraws`, [Performance records](#performance-records)).
-
-**The fog.** `doFog` sets `DrawCB.param[3]` to 1 when SCENE or the depth target is scaled, with
-the bound target's centre texel (its texture size halved, rounded down: the native frame's centre,
-`rd__target_scale_of`) in `uvRect[0..1]` (`port/render/rd_replay.c` (`doFog`)). ZFog.c builds the
-table as a linear alpha ramp sampled at 256 depths with fewer alpha values than entries
-(`ico2/seki/src/ZFog.c` (`fog_MakeFogClut`)), so at 1x the fog bands by the 8-bit index. Above 1x
-`fog_lut_ps` reads the table between its entries: `n` the Z bits 16..23 (the GS's index) and `f`
-the next eight bits interpolate `LUT[n]`..`LUT[n + 1]`, MODULATE (or DECAL) applies in the same
-fixed point, and a one-unit 8x8 ordered dither carries the fraction the 8-bit alpha cannot hold,
-`floor(ramp * factor / 128 + (bayer + 0.5) / 64)`, at most 255 (`port/shaders/common.hlsli`
-(`gs_fog_channel`), `port/shaders/fog_lut.hlsl` (`fog_lut_ps`)). The dither is indexed from the
-target's centre texel, so the 4:3 columns of a wide frame carry the pattern of the 4:3 frame. At
-an entry (`f = 0`) with factor 128 the value is the entry's own. Every fog variant (the dual-source,
-`_nodual`, `_dstrov` and `_dstatt` entries, `FOG_BUFFER`, `FOG_MS`) shares the code before the
-output. At scale 1 `param[3]` is 0 and the entry is read as the GS reads it; so it is for the fog
-self-test's draws and the probe's frame at any scale (`port/render/rd_fog_path.c`
-(`rd__fog_exact`)).
-
-**The present.** Without anti-aliasing, a scaled scene with more texels than the box has pixels on
-both axes is box-averaged to the box first, as anti-aliasing does (the box blit's one bilinear tap
-skips texels), never at scale 1 (`port/render/rd_present.c` (`reduceRecord`)); downsampling:
-[DISPLAY.md](DISPLAY.md#downsampling).
-
-**Left as they are.** The work buffers' chains run at the PS2's sizes and their draws back onto the
-frame take the GS's filter ([The glow size](#the-glow-size)). The reduction SCENE to DISPLAY is never above 2:1 in texels
-(`port/render/rd_blur.c` (`rd__blur_screen_fallback`)), where the GS's bilinear is already the area
-average, so it keeps the GS's filter. The shadow levels stay at scale 1 (their resolution is the
-penumbra, `port/render/rd_core.c` (`shadowLevel`)), and the first level reads the count already
-box-averaged to its GS size (`port/render/rd_replay.c` (`shadowReduce`)), so the chain between them
-is the PS2's at every scale; only the composites back into SCENE resample.
-
-## Shadows
-
-The PS2 adds each shadow-volume face into a scene-sized buffer (FBP 0x142) with ALPHA 0x68 FIX
-0x80 and COLCLAMP 0, the face colour 0x04 or 0xFC by its facing, so a pixel ends at 4n mod 256 for
-n the net count of faces in front of the scene; `shadow_Draw` then reads it as PSMCT24 under TEXA
-0x80 AEM, blurs and composites it (`port/render/rd_shadow.c`, header comment).
-
-rd counts on the stencil of the bound depth target (SCENE) instead: INCR_WRAP for 0x04, DECR_WRAP
-for 0xFC, both faces, where the depth test passes, no colour or depth write, write mask 0x3F, so
-the stencil holds n mod 64 and 4n mod 256 = 4 (n mod 64). The resolve writes the colour the GS sum
-would have left: six passes with the stencil test EQUAL on bit k add 4 << k to RGB, a seventh
-writes A = 0x80 where the count is not 0, the TEXA expansion of the PSMCT24 read. The order of the
-faces does not matter on either side, so the triangles are drawn as two lists, increments then
-decrements (`port/render/rd_shadow.c`; `port/render/rd.h` (`rd_shadow_count_target`,
-`rd_shadow_tris`, `rd_shadow_resolve`); `port/render/rd_replay.c` (`doShadowStrip`,
-`doShadowResolve`)). One draw: [WORK_BUFFERS.md](WORK_BUFFERS.md#the-shadow-count-in-one-draw).
-
-The stencil's bits: 0-5 the count (`RD_SHADOW_STENCIL_MASK`, the only bits the count writes and
-the resolve reads), 6 DATE's (`RD_DATE_STENCIL_BIT`: its setup writes it alone and its draws read
-it alone, [The replay](#the-replay)), 7 unused. A count's INCR_WRAP or DECR_WRAP through the write
-mask 0x3F leaves bit 6 as it was and gives bits 0-5 the same value whatever bit 6 holds, so the
-two never meet; the shadow reset clears the whole stencil, which DATE's setup writes again in the
-pass that needs it (`port/render/rd_pipeline.c` (`shadowStencil`)).
-
-## Water and render-to-texture blocks
-
-`puddle.c`, `pool.c` and `queen_barrier_disp.c` draw into the VRAM block `tex_AllocVramAuto` hands
-out after `tex_ResetVramPri`, TBP 0x2800 in their lists, which the register decoder maps to AA0.
-`rd_water.c` supplies what the decoder cannot know (`port/render/rd_water.c`, header comment):
-
-- `rd_gs_named_block` and `rd_block_target`: a per-frame target of the block's own GS size, with
-  its own depth when asked, the same target for the same (TBP, size) for the rest of the frame,
-  marked as a block (`RdTargetRec.block`, `rd__block_temp_target`);
-- `rd_alias_target`: from here on in the current list, `rd_set_target`, `rd_clear_target` and
-  `rd_texture` of `from` record `to` (at most 4 aliases a list), so replay and dumps see an
-  ordinary target;
-- `rd_push_camera` / `rd_pop_camera`: the reflection camera of a mid-frame `gsb_SetVSMatrix`,
-  kept for the Enhanced projection and interpolation and not dumped; nesting depth 4, 8 scopes a
-  frame;
-- `rd_grid_screen_st`: the formula and scales of pool.c's screen-space STs for the next
-  `rd_draw_vu_grid`, written into its command so dumps carry it, so the interpolation can compute
-  the STs again through the blended camera (`port/render/rd.h` (`RdGridSt`)).
-
-The records live per frame slot and are cleared when the slot is reused
-(`port/render/rd_water.c` (`rd__water_frame_reset`)).
-
-**Water reflections** (`[video] effect_water_sharp`, `RdSettings.waterSharp`, issue 97). A block
-the game sizes as the native frame (the dark volume's, `gsFrame.w x ScreenHeight`) is scene-class
-and takes the scene's scale whatever the option. Every other block, the puddle's and the pool's
-reflection (`bw x 256`, `ico2/sugipon/src/puddle.c` (`puddleHostBlockBegin`), `pool.c`
-(`poolHostBlockBegin`)) and the queen barrier's copy of the frame (`gsFrame.w x 256`,
-`ico2/ito/src/queen_barrier_disp.c` (`barrierHostBlock`)), is drawn at its own GS size under
-Original, the PS2's texels and the default, so above 1x the reflection is softer than the scene
-around it. Under Sharp such a block takes the scene's scale, both ways as SCENE has it
-(`sceneSx`, `sceneSy`) (`port/render/rd_core.c` (`rd__target_scale_of`)). Its depth buffer
-is made at the same texture size, the clears and scissors are in GS pixels through the target's
-`sx`/`sy` as on any scaled target, and what samples it (the reflecting grid's GS-texel STs, pool.c's
-screen STs normalised by the screen size, the barrier mesh's UVs, the copy sprites) addresses it
-in GS texels, so only the texel count changes. The queen barrier's copy follows the same rule: it
-is the frame seen through the barrier, as soft as the reflections under Original for the same
-reason. A block at the scene's scale that does not fit comes down with the scene
-(`rd__note_target_pressure`). Off, `rd__target_scale_of` takes the branch it always did, so the
-picture is byte for byte the one before the option. A change applies to the blocks made from the
-next frame (they are per-frame temporaries) and logs `water reflections: sharp|original`; a
-Sharp start logs the line once at `rd_init`. Dumps carry the mark in the temporary target's keep
-word (bit 1); the replay tool's `--water-sharp` draws them at the scene's scale, and without it they
-replay at their GS size (`port/render/rd_dump.c`, header comment).
-
-**What the log says about the water** (issue 106). The puddles are four steps in list 4
-(`ico2/sugipon/src/puddle.c` (`PuddleDL`)): `baseSetup` clears SCENE's alpha with a full-frame
-sprite (ALPHA mode 5, colour 0) and draws the puddle surface, whose pixels set the alpha bit;
-`drawAreaSetup` and the reflection draw into the block; `leveldown` (LERP FIX 0x10), `drawRipples`
-(ADD FIX 0x60, the ripple a ring of eight segments, `t` to `t + 5` from where a foot landed, its STs
-the block's at the ring's projected place) and `copy` (ADD FIX 0x60, the block over the frame) test
-DATE with DATM 1, so they draw only where the surface set the bit; leveldown and copy with the alpha
-test NEVER and AFAIL RGB_ONLY. An F12 adds one line to the log after the box cull's,
-
-```
-rd: dump: frame N: water reflections original|sharp; scene SXxSY; block WxH GS with depth at TWxTH texels (SXxSY, the scene's scale|not the scene's scale): D draws into it, R read it (DATE off a, alpha 0 b, alpha 1 c, AFAIL rgb-only, blends 0, REPEAT r, k of them kept on REPEAT); DATE draws on SCENE: alpha 0 b, alpha 1 c, AFAIL rgb-only, blends 0 2; Full pixel on|off, border mask on|off: N render-target reads clamped, M block reads kept on REPEAT|border closed; blend exact (interlock|rov|attachment read)|fixed-function (rounds up), storage pass merge on|off; K draws sampled a texture-pack replacement (blank in the dump), P of them DATE draws; MSAA 8x (resolve: colour the mean of the samples, depth the smallest sample): the last replay's DATE snapshots of SCENE S, A of them read the resolved picture (C closed the epoch), of other targets O
-```
-
-(one line; a part with nothing to say is left out): each render-to-texture block a draw of the frame
-wrote or read, at which scale it was drawn, the draws into it and the DATE, AFAIL, blends and wrap
-of the draws that read it (`REPEAT r`: the reads on REPEAT on an axis; `k of them`: screen prims,
-which keep the wrap under an open border: the ripples, [DISPLAY.md](DISPLAY.md)), the DATE draws by
-target, the border (N, M: the open border's clamp) and the blend path in
-force (Full pixel, the border mask, the destination read and the storage pass merge), and how many draws sampled a texture pack's picture,
-which a dump carries blank, so a replay of that dump cannot show what they drew
-(`port/render/rd_water.c` (`rd__water_dump_line`); `port/render/rd_dump.c` (`rd_dump_on_demand`)).
-It walks the dumped frame once, on the key press, never per frame. The replay tool's `--list` ends
-with the same summary as `water: ...`, at the replay's options. The 10 s block adds `window: water: N
-draws per replay read a reflection block drawn at a scale other than the scene's (M in the block)`
-when any draw did: the other-size rule above in force (Water reflections Original with the scene
-above 1x), counted where the replay resolves a draw's texture (`port/render/rd_replay.c`
-(`resolveTexture`); `port/render/rd_water.c` (`rd__block_read`); `RdPerfRecord.blockOtherScaleReads`; `port/platform/window_host.c`). `rd_water_test`
-checks the line on the puddle's frame and the count at 2x under Original (the copy's read) and Sharp
-(none).
-
-The MSAA part (or `no MSAA: the last replay's DATE snapshots of SCENE S, of other targets O`)
-tests the first of issue 106's two candidates: with MSAA a DATE draw on SCENE reads the alpha bit
-through the snapshot of SCENE as the epoch resolved it, the colour the mean of the samples, so an
-edge pixel's bit can differ from what each sample drew (`rd_replay.c` `dateSnapshot`, `rd_core.c`
-`rd__date_msaa_last`). `P of them DATE draws` tests the second: a texture pack's picture sampled
-by the puddle's mask readers themselves.
-
-What it was (a dump from an RTX 3090 on the interlock path, Enhanced at 3840x2160, Full pixel on):
-neither of the two, nor the blend path. The bright, flat ring segments were the ripples sampling
-the block's corner texel: an open border clamped their read, whose STs run 1.05 to 1.95 on REPEAT. A
-lavapipe replay of the same dump with `--full-pixel` drew them so (the attachment read, so not the
-interlock path); with the read kept on REPEAT they are the faint reflection rings of the replay
-without the option ([DISPLAY.md](DISPLAY.md), `rd__repeat_kept`). `rd_water_test` draws a ripple
-and requires SCENE byte for byte the same with Full pixel on and off.
-
-**What the GS draws from the game's own data (issue 106, the shapes).** The ring and the puddle
-outline were checked against the disc and the byte-matched game code, not the port's decode. The
-ring is nine spokes 45 degrees apart (`ico2/sugipon/src/puddle.c` (`InitPuddleGeo`): `i * 8192` of
-a 65536 turn) drawn as two nine-point rings at `t` and `t + 5` interleaved into one strip of 18
-vertices (`drawRipple`, `gif_DrawStripFST(..., 0x12, 1)`; `ico2/seki/src/GifPacket.c`
-(`gif_DrawStripFST`): PRIM 0x94 | 1 << 6, a triangle strip with TME, ABE and AA1, FST 0 so ST with
-Q 1 from RGBAQ): eight flat quads, an octagon on any GS, whose outer ring is turned by
-`age * 10.24` so the sampled reflection twists. The mask is `object/sdf/st02a/model/../texture/
-puddle.tm2` (also st13a's): TIM2 PSMT4 128 x 128, one level, a 16-entry RGBA32 CLUT whose entry 0
-is `00000000` and entries 1 to 15 `00000080`, the image using indices 0 and 1 only, so every texel
-is alpha 0 or 0x80 on the disc. The game's `tex_setTexReg` writes TEX0 with TCC 1 and TFX 0 for every
-texture (`ico2/seki/src/Texture.c` (`tex_setTexReg`), bit 34 always set; the TIM2 header's own TEX0
-field, TCC 0, is not what it writes), so the alpha test GREATER 1 (`TEST 0x3F000` family, AREF 1
-from the record's TEST) runs on the bilinear blend of a 0 / 0x80 mask times the vertex alpha 127: a
-pixel passes wherever the four texels under it hold any 0x80, which is the texel grid dilated by
-one texel, stepped at the texel size (about 3 GS pixels at 1x on the drained room's floor, the mask
-repeating about six times across the puddle mesh's STs of -3.4 to 2.9). PCSX2's software renderer
-follows the same arithmetic (`GSDrawScanline.cpp` `TestAlpha`: `(ga >> 16) < aref` fails GREATER;
-the bilinear `lerp16` of the four texels; AA1 only as coverage on the edges, `GSRendererSW.cpp`
-`IsCoverageAlpha`), so at its native resolution it draws the same octagon and the same stepped
-outline, 3 pixels a step; its display scaling softens them. Sad Origami's PCSX2 pack carries a
-smooth 1024 x 1024 BC7 replacement of this very mask
-(`02 - World/04 - Particles/c2d383ac71c5d893-cd153d44d14cf0c9-00001dd4.dds`), and
-`texpack_disc_test` names puddle.tm2 exactly so, so with the pack installed and the option on the
-port's puddle outlines follow the replacement (the pack does not touch the ring). No run with the
-pack on has been dumped; the reporting run's log said `textures: no texture pack`.
-
-**The ring's edges (issue 106, the corners and the strength).** The ring is drawn with PRIM.AA1:
-in `frame-20261015-223424-v2585.rddump` it is list 4 command 147, `SCREEN tris n 240 aa1`, 80
-triangles (five ripples), ALPHA `Cs * FIX + Cd` with FIX 0x60, ATE 0, DATE DATM 1, Z write, the
-reflection block as its texture (TCC 1, modulate, bilinear) and vertex alpha 0x80. ALPHA mode 0
-ignores As, so each of its edge pixels adds the full `Cs * 0.75`, as an interior pixel does, and
-an edge two quads share gets both fringes: the ring's rim is as strong as its body, on the GS and
-in PCSX2's software renderer alike (`IsCoverageAlpha`: AA1 on a line or triangle, ABE aside). The
-spurs at the octagon's corners in the issue's port picture came from fringes run past their
-vertices; a fringe ends at the GS's wedge and box (the **AA1** paragraph of
-[The replay](#the-replay)).
-PCSX2's hardware renderer draws the edge pixels only on a device whose features have `aa1`
-(`GSRendererHW.cpp`: `draw_aa1 = !no_rt && PRIM->AA1 && features.aa1`, and `aa1` needs feedback
-loops); the devices' code is not in the tree, and the investigation of the issue found it off on
-Vulkan and Direct3D, where a ring looks thinner and fainter than the GS's. The renderer of the
-reporter's PCSX2 picture is not known. The port's doubled rows along the shared edges were DATE's
-order inside the strip (**DATE and AA1**, DIVERGENCES.md VD-17).
-
-## The fog path and its self-test
-
-The depth fog reads SCENE's depth: the GS copies the Z buffer, a PSMT4 view copies the third byte
-of every word into the fourth, and the fog sprite reads the top byte through the 256-entry CLUT,
-so the index is bits 16..23 of the 32-bit Z and only pixels with Z <= 0xFFFFFF are fogged
-(`port/shaders/fog_lut.hlsl`). The replay reads the depth one of four ways
-(`port/render/rd_fog_path.c` (`RdFogPath`)):
-
-| path | how |
-| --- | --- |
-| local | inside the scene pass, the pass's own depth as an input attachment (Vulkan local read; offered where the profile has `fogLocal`; [The replay](#the-replay)) |
-| inplace | the depth target sampled where it is |
-| copy | a whole copy into a second depth texture, sampled |
-| buffer | the depth aspect copied into a buffer and back into an R32_UINT texture (Vulkan only) |
-
-`rd_fog_selftest` replays a frame of its own (never recorded or presented) on SCENE at its real
-size and scale: a 16 x 16 grid of cells at known GS Z and the fog with a LUT whose every entry
-differs, read back and compared with the GS arithmetic, for each path in the platform's order
-(desktop: inplace, copy, buffer; tile-based or D24S8: copy, inplace, buffer; local first wherever
-it is offered, and left out of the line where not). The first that passes is the path from then
-on, and one log line `fog: depth path` names it with every result (`rd: fog: depth path local
-(self-test: local ok 0, copy not tried, inplace not tried, buffer not tried) on SCENE ...`; run
-again when the desktop's probe turns local off); a
-local read that fails turns `fogLocal` off (`(self-test)`), and the order is then the local one
-without it (desktop: inplace, copy, buffer; else copy, inplace, buffer). The local trial counts only where the fog drew through the
-local read (`g_rdPerf.fogLocalDraws`). Under MSAA it never does (`port/render/rd_replay.c`
-(`fogLocalFor`): the epoch), and the path draws its MSAA fallback there (the per-sample fog or the
-copy), which is what the trial measured: the line says `local not measured (MSAA: its fallback ok
-0)`, nothing it finds turns `fogLocal` off, and when the samples drop to 1 the self-test runs
-again and measures the local read itself (`port/render/rd_fog_path.c` (`rd__fog_aa_reconcile`)).
-Without MSAA a local trial that drew no local fog is `local not run`, a failure.
-`ICO_RD_FOG_SABOTAGE=local` makes the local read give 0 (`rd_fog_selftest_local_sabotage`). It runs
-after `rd_precreate_pipelines` and again whenever SCENE is made at a new size. `ICO_RD_FOG_PATH`
-or `ICO_RD_DEPTH_COPY` names a path to try first; `ICO_RD_FOG_PATH=test` tries every path
-(`port/render/rd_fog_path.c`; `port/render/rd.h` (`rd_fog_selftest`)). The probe logs five
-texels' Z, index and colour on the first fogged replay after start and after a new scene size
-(`fog: probe`), then the table's entry 0, the colour the fog gives Z 0, which a pixel no draw
-covered keeps from the clear (`...; pixels nothing drew take the fog's colour at Z 0, table entry 0
-= RRGGBBAA`): a line of that colour in a report's picture is a gap in the geometry
-([Camera blending](#camera-blending)) (`port/render/rd_fog_path.c` (`rd__fog_probe_record`)).
-At every aspect and with Full pixel either way, the edge probe copies the depth the
-fog read for the frame's first 8 and last 8 GS columns (`RD_FOG_EDGE_COLS`), every row, on every
-32nd fogged replay, into a readback buffer that a replay two frames on counts without a wait
-(`rd__fog_edge_due`, `rd__fog_edge_record`, called by `doFog` after its draw, the pass ended
-first). Each GS column is read at its first texel, `ceil(x * sx - ox)` clamped to 0 and kept only
-while it is under the next column's (`rd__fog_edge_texel`), so a depth target holding only Full
-pixel's window reports the columns it holds and `-` for the ones left out; the copies are two
-blocks, texels 0 up to the left's last read texel and the right's first read texel up to tw. The
-depth is the game's, as SCENE's repeat ([SCENE's outer columns](#post-passes)) copies the colour
-alone. A probe that finds rows at GS Z 0 logs, the first three in each 10 s, `rd: fog: probe: outer
-columns: depth 0 per column [n0 n1 ... n7] of M rows (rows a..b) | [n(W-8) ... n(W-1)]; frame W GS
-wide, crop C columns a side, border <where they go>, table entry 0 = RRGGBB`: each n is the rows
-of that GS column at Z 0, M the rows looked at, the run (left out when it has none) that of the
-first held column on the left, C the GS columns the present leaves out at each side, `(W - the
-exact width) / 2`, and where they go being, as `rd__scene_border_state` was at the copy, `open at
-the frame's exact width: they reach the screen, SCENE repeats columns 2 and W-3 over them before
-the glow`, `cropped by the present: the glow reads them, SCENE repeats columns 2 and W-3 over them
-before it`, `closed: the reduction shows black there but the glow reads them, SCENE keeps them (the
-PS2's picture)` (512), `closed (wider than the PS2's): ..., SCENE repeats columns 2 and W-3 over
-them before it` or `in Full pixel's window: SCENE repeats columns 2 and W-3 over the texels of them
-it holds before the glow`; so a 16:9 log carries the count too, and the eight counts a side say how
-wide an uncovered band is, not only that column 0 has one. The rest of those 10 s is one total at the
-next probe after them, `rd: fog: probe: outer columns: depth 0 there in N more probes in the last
-10 s (T in all)`. Nothing is copied in the self-test's replays, on the multisampled read, or on
-D3D12's depth (copied to a buffer only whole). Rows at Z 0 there mean the game left those columns
-uncovered (now repeated from their neighbours where the line says so); a band that survives with
-no such line is not the fog's (`port/render/rd_fog_path.c` (`rd__fog_edge_column`,
-`rd__fog_edge_line`); `rd_fog_test` (o)). Both draw the fog at the exact table entry of
-each index, not read between entries above 1x, since what they measure is the depth read; the
-probe's frame is one game frame drawn that way (`port/render/rd_fog_path.c` (`rd__fog_exact`),
-`port/render/rd_replay.c` (`doFog`)).
-
-Its first run runs DATE's self-test first, where the profile has `dateStencil`
-(`port/render/rd_date_selftest.c` (`rd_date_selftest`)): a frame of its own on SCENE clears it,
-draws a cell of alpha 0x80 on the left half and one of alpha 0 on the right, then a DATE sprite
-with DATM 1 over the top half and one with DATM 0 over the bottom, through the stencil bit and
-through the snapshot; the quadrants' centres are read back and compared with the GS's outcome,
-every channel exactly. Both replays run with MSAA held off (`g_rd.msaaBlocked`): the stencil bit
-is never taken inside the MSAA epoch (`port/render/rd_replay.c` (`dateStencilFor`)), so it is
-checked as it draws whatever the anti-aliasing setting, and the result holds when MSAA is turned
-off later. The stencil replay must have taken the bit (`g_rdPerf.dateStencilTakes` above 0), else
-it reports `stencil not run (no draw took the stencil bit)`, a failure. The stencil bit stays only
-with its four right, else `dateStencil` goes off (`rd: profile: DATE stencil off (self-test)`) and
-the snapshot draws DATE; `ICO_RD_DATE_PATH=stencil` keeps it whatever it finds. One line: `rd:
-DATE: stencil path (self-test: stencil ok 4, snapshot ok 4) on SCENE ...`, or `rd: DATE: snapshot
-path (self-test: stencil fail 2 at sample 1: 28C85000 for FAFA0A40, snapshot ok 4) ...`.
-`ICO_RD_DATE_SABOTAGE=1` makes the setup write 0 into the bit where the alpha's MSB is 1 (logged:
-`rd: DATE: ICO_RD_DATE_SABOTAGE: ...`; `port/render/rd_replay_tiler.c` (`rd__date_sabotaged`);
-`rd_date_selftest_sabotage`).
-
-## Crack filling above 1x
-
-The VU truncates every vertex to the GS's 1/16 pixel grid, each part of the world through its own
-node matrix, so two triangles that meet in the model can leave a crack of 1/16 GS pixel between
-them ([DIVERGENCES.md](DIVERGENCES.md#video) VD-20; at a scale that is not a whole number the GPU
-snaps the scaled position a second time, VD-19). A pixel whose centre falls into it keeps what
-lies behind the two parts: the clear's GS Z 0 where nothing does, which the fog's table takes as
-its entry 0, a dot of the full fog colour (the probe's `table entry 0`,
-[the fog path](#the-fog-path-and-its-self-test)), or a farther surface, a dot of that surface
-painted at its own, deeper fog level. At 1x those dots are the PS2's own. Above 1x a crack catches texel centres all along its length, and the dots run along
-the seams of walls and floors (issue 26: rows of them on a doorway's edge and a platform's top at
-4K).
-
-Under the Enhanced preset, with SCENE's scale above 1 on either axis, `doFog` calls
-`rd__crack_fill` for SCENE's own fog after the pass before it ends (the local read's scene pass
-too) and before the fog reads the depth
-(`port/render/rd_crack_fill.c`). It copies SCENE's colour into its snapshot texture
-(`rd__replay_take_snap`) and SCENE's depth into the fog's depth copy object
-(`rd__depth_copy_take`, the copy path's own texture, made on the other paths), and draws one
-triangle over SCENE with its depth attached: `crack_fill_ps` (`port/shaders/blit.hlsl`, behind
-`blit_vs`, key `rd__crack_fill_key(0)`: test ALWAYS with writes, no blend, the stencil loaded and
-stored untouched) gives a crack the colour and the depth (SV_Depth) of the nearer end of its run.
-A texel is a crack when a run of at most R texels along its row or its column, the texel among
-them, has at each end a texel in front of it (written, and nearer by more than 1/64 of its own
-depth, `RD_CRACK_BEHIND`, `crack_front`), and the texel is either at depth 0 (no draw covered it)
-or drawn behind both ends by a step in depth (`crack_behind`): the two ends within half the drop
-of each other (two parts of one surface, not a near and a far object), and the texel behind each
-end's surface carried on to it (the end and the texel beyond it, a straight line in depth: GS Z
-is linear across a triangle on the screen) by more than 1/64 of that depth, so the texels of a
-concave fold between two faces, each on one of the two planes, stay. Depths grow with GS Z and
-are linear in it on every format (`gs_z_to_depth`; the float form's top band, the UI's, only
-ever reads as nearer), so 1/64 of a depth is 1/64 of GS Z: in the rooms of the corpus the drawn
-cracks lie 4 to over 50 steps of the fog's index (Z bits 16..23) behind their ends, from about
-1.3 % of the ends' Z, while the texels of one surface differ by 0 to 2 steps from texel to texel. The
-shorter run of the two axes wins, the row on a tie, and within a run the end before it on a tie.
-Every other texel is discarded. R on an axis is
-ceil(scale / 2), at most 3, and 0 at a scale of 1 or less (`rd__crack_fill_reach`): 1 at 2x and
-1.154, 2 at 2.8125 and 4x, 3 from 6x. The crack is under a texel wide at every scale up to 16x,
-while a slit of a GS pixel or more (2 texels at 2x, 4 at 4x) is the game's and stays. The values
-are exact copies, nothing filtered; the depth goes with the colour, so the fog paints the
-neighbour's fog level there and the draws after the fog see a surface. The texels the first pass
-drew are not touched, so the picture differs from the one without the filler only at the cracks.
-
-What the cracks hold, measured on lavapipe with the replay tool and copies of the dumps (the
-clear's colour or the fog table's entries patched, every command after the fog NOPed): in the
-issue-91 4K dumps (scale 5.581 x 4.821) the sky is the clear, and 727 texels of the fog's entry
-0 against it are filled, most along the lattice tower at the top left (the runs of 1, 2 and 3
-such texels across a row fall from 97, 90 and 60 to 9, 7 and 7). The rooms of the corpus
-(lightning rd-00200 and rd-00300, queen rd-00200 and rd-00300, at 2x and 4x) have no texel of
-depth 0 after the world's draws: lightning's clear patched to magenta shows on no texel before
-the fog, and the table's entry 0 patched to magenta on none after it in any of them, so their
-texels of the clear's RGB 1,1,1 are the walls' dark mortar, not cracks. With a table that writes
-each texel's index (and the fog sprite's Z raised so it reaches every texel), 22 to 105 texels a
-frame at 2x (lightning rd-00200 22, rd-00300 105, queen rd-00200 49, at the index's precision) lie
-in one-texel runs behind both neighbours, a farther surface seen through a seam: the
-discontinuity form's share.
-
-Not drawn at scale 1 on both axes, under the Original preset, while the MSAA epoch is open at the
-fog (it draws after the resolve: [MSAA.md](MSAA.md#the-crack-filler-after-the-resolve)), in the fog's self-test (`rd__fog_exact` without the probe),
-for a fog of any target but SCENE, without a sampleable depth (`RhiLimits.depthSampled`), and with
-`[dev] crack_fill = false` (`ICO_RD_CRACK_FILL=0`; the replay tool's `--no-crack-fill`). On by
-default where the device profile has `crackFill`: every class, tile-based GPUs included. Its two
-keys join the fog's family in the start-up set (`rd__enumerate_reachable_fog`). Cost above 1x: a
-copy of SCENE's colour and of its depth (12 bytes a texel copied, 99 MB at 3840 x 2160) and one
-pass reading thirteen depth texels per texel (the runs' ends, both axes) and four more where a
-drawn texel lies behind both ends of a run (the texels beyond them); the depth copy texture (8 bytes a texel) is the copy path's own and is made on the other paths.
-
-On the local path the fill is drawn inside the scene pass the fog's local read keeps ([the fold](WORK_BUFFERS.md#the-crack-fill-inside-the-local-fogs-pass)).
-
-The count, only under `rd__crack_fill_count_all` (the tests, the replay tool's `--stats`; never in
-the game, and a missing count pipeline leaves the fill uncounted): `crack_count_ps` runs the
-same test over the depth copy, 16 x 16 texels a texel of a small RGBA8 target (n & 255 in R, n >> 8
-in G), which is copied into a readback buffer and summed once the GPU is past that replay
-(RHI_FRAMES_IN_FLIGHT replays later, as the fog's edge probe; `rd__crack_fill_wait` waits for it).
-`RdPerfRecord.crackFillPasses` and `crackCountPasses` count the passes of a replay. The lines:
-
-- `rd: crack fill: on above 1x (scale 2x2, reach 1x1 texels: a run of texels no draw covered, or
-  drawn over 1/64 of the depth behind both its ends, with a texel in front at each end takes the
-  nearer end); [dev] crack_fill = false turns it off` (with ` (drawn inside the scene pass with the
-  local fog)` after it once a fill was drawn so), or `... on above 1x, not drawn at scale 1x1 (the GS's own grid); ...`, `... on above 1x,
-  not drawn under the Original preset; ...`, `rd: crack fill: off ([dev] crack_fill = false,
-  ICO_RD_CRACK_FILL=0)`: at the start and whenever SCENE is made
-  again or the state changes (one line for each change);
-- `rd: crack fill: T replays filled (scale SXxSY; reach RXxRY texels; not counted in the game[; F inside the scene pass with the local fog])`
-  in the 10 s summary (`rd__crack_fill_block`, `rd_interp.c` `presentLog`), when it filled; when
-  counting, `rd: crack fill: N pixels filled over M replays counted of T filled (max K a replay;
-  scale SXxSY; reach RXxRY texels)`;
-- `rd: crack fill: not drawn on SCENE at scale SXxSY: <why> (reported once)`, once a run for each
-  reason (MSAA, no sampleable depth, its pipelines missing, no memory for the copies) and
-  `rd: crack fill: the pass after the copies was not begun with the depth readable: ...` (the fold
-  refused, once), and for the
-  last three `rd: crack fill: N fogged replays above 1x not filled (...)` in the 10 s summary;
-- `--stats`: `<dump>: stats: crack fill on|off: P passes, N pixels filled (M replays counted;
-  scale SXxSY, reach RXxRY texels; S fogged replays above 1x not filled)`.
-
-`rd_crack_test` (`rd_crack`, `rd_crack_4x`, `rd_crack_frac`, `rd_crack_backdrop`,
-`rd_crack_backdrop_4x`, `rd_crack_backdrop_frac`, `rd_crack_1x`, `rd_crack_original`,
-`rd_crack_msaa`, `rd_crack_off`, `rd_crack_depth_copy`, `rd_crack_buffer`, `rd_crack_d24s8`,
-`rd_crack_nodual`, `rd_crack_tiler`, `rd_crack_tiler_on`) and `rd_replay_tool_crack` check it ([TESTING.md](TESTING.md)).
+The passes over a replayed frame and the effects that read its targets are in
+[RENDER_POST.md](RENDER_POST.md): [Post passes](RENDER_POST.md#post-passes),
+[Above 1x](RENDER_POST.md#above-1x), [Shadows](RENDER_POST.md#shadows),
+[Water and render-to-texture blocks](RENDER_POST.md#water-and-render-to-texture-blocks),
+[The fog path and its self-test](RENDER_POST.md#the-fog-path-and-its-self-test) and
+[Crack filling above 1x](RENDER_POST.md#crack-filling-above-1x).
 
 ## Content tables
 
@@ -2634,6 +1384,32 @@ one implementation, included by `rd_interp.c` and `GsBase.c` in every build
 step past `RD_INTERP_CAMERA_TURN` (30 degrees) or `RD_INTERP_CAMERA_MOVE` (300 units) a tick is a
 cut, and `RD_CULL_MARGIN` is the cull's frustum margin (`port/render/rd_camera_blend.h`).
 
+**The eye never passes through the stage.** The game's cameras have no wall test of their own (their
+sets and paths are designed), so a camera that moves less than those limits in a tick but past a
+wall would put the blended eye behind the wall for the pictures in between, showing what is on the
+other side for an instant. At every flip, on the game thread before `dl_Swap` closes the frame,
+`gsbHostCullFlip` passes the eye (`+0x380`, the inverse view's translation) to
+`ico_camera_wall_check`, which tests the step from the eye at the flip before against the stage's
+collision: the walls and floors of the objects `MakeCollisionDependGObjList` gives the actors
+(active, a stage layout object, displayed, with collision data), read from the live object table in
+each node's frame through the block grids around the path, the walls `ClipWall`'s mode skips
+skipped. A crossing either way (the game's own `ClipPlane` counts front to behind only) at a point
+inside the element widened by `ICO_CAMERA_WALL_RADIUS` (4 units: the near plane's 2 and as much
+again) makes `rd_camera_cut_wall` mark the frame that flip closes: `RdCamera.cut` 2, the snap
+`RD_SNAP_WALL`, its pictures the tick's own as at the Original frame rate. The cut does not go
+through `ico_video_camera_cut`, whose serial the window passes on after the step, to the frame the
+next tick records. Not asked: a stage's first tick, a game cut pending since the flip before, photo
+mode, a still eye and a step past `RD_INTERP_CAMERA_MOVE` (`RD_SNAP_CAMERA` already). The check runs
+at every flip whatever the Frame rate and in the headless build, and only reads the game's memory
+(`port/game/camera_wall.h`; `port/game/camera_wall.c` (`ico_camera_wall_step`,
+`ico_camera_wall_cross_wall`, `ico_camera_wall_cross_floor`); `port/game/camera_wall_stage.c`
+(`ico_camera_wall_check`, `stageQuery`); `ico2/seki/src/GsBase.c` (`gsbHostCullFlip`,
+`gsbHostCullForget`); `port/render/rd_core.c` (`rd_camera_cut_wall`); `port/render/rd_interp.c`
+(`rd__interp_snap`)). The log: `camera: between-tick blend skipped at stage N: the eye moved M cm
+through a wall` (or `a floor`; rate-limited, with pictures blended) and `N where the camera's path
+crossed the stage` in the 10 s `interp:` line's snaps; a dump keeps the 2 in its camera, so
+`rd_replay_tool --interp` reports the snap as 9 (`RD_SNAP_WALL`).
+
 **What the fog paints in a gap.** A pixel no draw covers keeps the clear's Z of 0, and the fog
 sprite indexes its table by Z bits 16..23 (`port/shaders/fog_lut.hlsl`), so such a pixel takes
 entry 0, the stage's full fog colour: near white in the light rooms. Neighbouring parts of the world
@@ -2644,7 +1420,7 @@ two cells and leave a sliver of 1/16 GS pixel between them, which the fog paints
 game's own matrices decide: most pieces of a stage carry the same model rows to the bit (one node
 matrix), so their edges close, and pieces with other node matrices carry the rounding of their own
 products, as on the PS2 ([DIVERGENCES.md](DIVERGENCES.md)). The fog probe line names entry 0
-([The fog path and its self-test](#the-fog-path-and-its-self-test)).
+([The fog path and its self-test](RENDER_POST.md#the-fog-path-and-its-self-test)).
 
 **Still draws take the tick's block.** Between ticks a matched VU draw's block is both ticks'
 blocks re-based on the blended camera and blended, and a mesh's model matrices are then composed
@@ -2826,8 +1602,8 @@ without the colour attached; `dstSwitches`, the passes ended and begun again on 
 to change between a storage pass and one with the colour (`dstPassMode`; 0 on the attachment read
 and the fixed-function blend); `glowPasses`, the render passes begun while the glow (flare, bloom,
 the sun's eye blur) draws; `snapshots` and `snapSwaps`, target snapshots copied and the staticBlur
-sprites' swaps ([above](#post-passes)); `a1xDraws`, the draw passes that took the above-1x kernels
-(the box, the B-spline, the fog's table between its entries: [Above 1x](#above-1x); each planned
+sprites' swaps ([above](RENDER_POST.md#post-passes)); `a1xDraws`, the draw passes that took the above-1x kernels
+(the box, the B-spline, the fog's table between its entries: [Above 1x](RENDER_POST.md#above-1x); each planned
 pass of a draw counts, so a draw split in two by the AFAIL split or the two-pass blend counts
 twice, and the line's "draws resampled above 1x" are such passes), 0 at scale 1. The
 window's per-replay line carries them after the exact blends:
@@ -2845,7 +1621,7 @@ VU pre-pass on: 2 passes, V vertices in D draws; F mesh and grid draws the old w
 triangle slots; K VU draws with the ticks' cameras` (`vuPrePasses`, `vuPreVertices`, `vuPreDraws`,
 `vuPreFallbacks`, `vuPreSprites`, `vuTriSlots`, `vuTickDraws`: the draws a frame blended between
 two ticks draws under the ticks' cameras, `port/render/rd_replay_vu.c` (`doVuDraw`);
-[The vertex and triangle pre-passes](#the-vertex-and-triangle-pre-passes));
+[The vertex and triangle pre-passes](PIPELINES.md#the-vertex-and-triangle-pre-passes));
 the GPU line (`window: GPU ms per replay: ...`) ends with `; VU pre-pass <ms>`, as `--stats`'s
 `gpu:` line does
 (`port/render/rd.h` (`RdPerfRecord`); `port/platform/window_host.c` (`perf_log`)).
@@ -2853,7 +1629,7 @@ the GPU line (`window: GPU ms per replay: ...`) ends with `; VU pre-pass <ms>`, 
 The pixel diet's six counts are in the record too: `alphaOnePass` and `alphaOpaque` (draws the alpha plan
 drew in one pass where the plan had two, and without the test and the blending), `fxConstant`,
 `fxAdditive` and `fxLocal` (the post sprites drawn by the constant fold with the black sprite's clear, the
-premultiplied forms and the local read: [Post passes](#post-passes)) and `vuNoPlanes` (the VU passes drawn
+premultiplied forms and the local read: [Post passes](RENDER_POST.md#post-passes)) and `vuNoPlanes` (the VU passes drawn
 through the no-planes pixel shaders: [Screen planes](#screen-planes)). Each is 0 with its flag off or where
 its mechanism does not apply. `rd_replay_tool --stats` prints one line, `<dump>: stats: pixel diet: alpha plan
 N one-pass, M opaque; fx plan C constant, A additive, L local; vu no-planes D`, and the 10 s block prints
@@ -2885,7 +1661,9 @@ The per-pass timing measures each piece of GPU work between stamps written outsi
 pass. The replay names each piece as it begins it (`rd__perf_pass`, before the piece records
 anything): the uploads at the head (`uploads`), the VU vertex pre-pass and its copies
 (`VU pre-pass`), every render pass of the lists (`render pass`: `beginPass`, a clear's own pass,
-the COLCLAMP 0 wrap's, the shadow count's reduction above 1x), a target copied into another
+the COLCLAMP 0 wrap's, the shadow count's one draw and its reduction above 1x, both named
+`shadow count WxH` in the lists below, not the count target's `list 3 temporary`:
+`RD_PERF_ID_SHADOW_COUNT`, [WORK_BUFFERS.md](WORK_BUFFERS.md#the-shadow-count-in-one-draw)), a target copied into another
 (`copy`, `doCopy`), a target copied into its snapshot (`snapshot`, `takeSnap`), the DATE
 snapshot's pass (`DATE snapshot`, `dateSnapshot`), the fog's depth read made ready (`fog depth
 read`: the copy path's copy, the buffer path's transfers, the table's upload, before the fog's
@@ -2987,6 +1765,58 @@ one of them a float divide), no `OpSRem` on a power-of-two size, no float divide
 
 ### Performance notes
 
+**The render thread's reads.** On the PowerVR phone a picture's interpolation, upload and walk took
+10.8 ms (4.24, 0.99 and 5.53 in its 10 s line), more than the second picture a frame leaves them.
+Sampled on lavapipe (the replay tool's main thread, 300 replays of the phone's F12 dumps at its
+profile), five things a picture redid that its inputs had not
+changed are kept or made once, each giving the same bytes:
+
+- **One walk before the replay.** The store plan, the pass area and the passes cut each walked the
+  replayed lists with their state; `rd__store_plan_scan` now applies each command's state once and
+  hands the command to `rd__pass_area_scan_cmd` and `rd__pass_cut_scan_cmd` beside its own notes
+  (each begun by its `_begin`, false when off or in a pass window, and closed by its `_end`;
+  `rd__pass_area_scan` and `rd__pass_cut_scan` are the three parts over a frame, for the tests).
+  The fades fold still plans first: the others read its sprites. These walks are timed in the
+  record's `upload`, not its `walk` (`replayFrame`: the upload phase ends after
+  `rd__clear_new_targets`); together they were about 0.06 ms of lavapipe's 0.27 ms upload.
+- **A stream's serial.** Every write of a mesh's stream (its creation, `rd_update_vu_mesh`, the
+  interpolation's scratch copy and its blend) gives the mesh a new `RdMeshRec.streamSerial`
+  (`port/render/rd_mesh.c` (`rd__mesh_stream_written`)), and what is computed from the stream
+  alone is kept while the serial holds. The alpha plan's span of a mesh (`rd_alpha_plan.c`
+  `meshSpanMemo`, a cache line a vertex) was read at every replay: 0.28 ms of lavapipe's 1.8 ms
+  walk. A skinned mesh's bone pivots (`rd__interp_skin_pivots`) were made at every present: 0.12
+  ms. A record with no serial (a test's own) keeps the old rule.
+- **The same shape.** `morphDraw` compared a matched mesh's two stream buffers whole at every
+  present; the answer is kept by both meshes, serials and buffers (`rd__interp_streams_same`). The
+  replay tool loads each dump's meshes on their own, so its `--interp` compares two copies of the
+  same bytes for every matched mesh (0.28 ms a present on lavapipe); the game shares one mesh
+  between ticks where it did not change and compares only a morphing part's twins.
+- **The shadow volumes' pairs.** The part of `blendPrisms` that t does not change (the two ticks'
+  prisms by tag, their medians, the banded alignment, the world shift: `prismSet`) is kept with a
+  copy of its inputs, and a later present of the tick whose inputs are the same bytes copies the
+  pairs back (`prismSetKept`): 0.35 ms a present on lavapipe.
+- **The draw-merge count.** `vuMergeNote` (counting only) compares the last VU draw's DrawCB byte
+  for byte instead of a 64-bit FNV made one byte a step at every VU draw: 0.12 ms a replay.
+
+The interpolation's summary says how much of that work an earlier present's served
+(`port/render/rd_interp_mesh.c` (`rd__interp_keeps_log`), from `presentLog`; the spans counted
+since the line before). It is one of the `rd: interp:` lines that `presentLog` writes every 250
+interpolated game frames (`RD_INTERP_LOG_FRAMES`, after the `presents drew a mixed picture` line),
+not a part of the window's 10 s block, and it is written with zeros too; with interpolation off
+(Frame rate Original) there is no such summary and the spans' counts wait for the next one. A
+phone's log has it at each summary: `204 of 3000 comparisons of two ticks' mesh streams,
+2273 of 9244 skinned meshes' pivots, 67 of 979 shadow volumes' prism pairs; the replays' mesh
+alpha spans: 46190 of 54853 kept`:
+
+```
+interp: kept from an earlier present (the rest made again): A of B comparisons of two ticks' mesh streams, C of D skinned meshes' pivots, E of F shadow volumes' prism pairs; the replays' mesh alpha spans: G of H kept
+```
+
+The blends' per-vertex loops (`lerpFloats`) are vectorised by the Android build's clang at `-O2`
+(four lanes, `-Rpass=loop-vectorize`). What is left of the walk on lavapipe is mostly the driver's
+command recording (lavapipe's own code on the main thread); the phone's driver is another, so the
+phone's share of these cuts is not lavapipe's.
+
 **The UINT views of the RGBA8 targets.** `fx_sprite_ps` reads each texel as a float and turns
 it back into an integer (`floor(x * 255 + 0.5)` a channel, `fx_load`), which gives the stored byte
 for every byte. A target made with `RHI_TEX_UINT_VIEW` has an `RGBA8_UINT` view of the same image
@@ -3014,8 +1844,66 @@ reciprocals the CPU rounds once a draw (`gs_div_trunc_rcp`, [SHADERS.md](SHADERS
 and `fx_texel`'s wrap size as integers (`DrawCB.aux1`, `port/render/rd_replay.c` (`blurAux1`)), the
 same values the shader computed per pixel.
 
+**The heavy stage 6 room and the title menu on the PowerVR phone.** The phone's log of 2026-11-02
+(Resolution at the window's 2366 x 1080, the Enhanced preset) put the stage 6 room with Yorda at
+21 ms of GPU work a picture (top passes `list 3 SCENE 51 draws 6.20 ms`, `aura SCENE 2 draws 4.64`,
+`list 0 SCENE 280 draws 3.54`, `list 11 SCENE 2 draws 1.30`, `list 3 temporary 8 draws 1.18`) and
+the title menu at 10 ms (`list 3 SCENE 7 draws 2.00`, `glow WORK2 1 draw 1.23`, `list 11 SCENE 1
+draw 1.16`, `list 0 136 draws 1.06`, the present 0.97). The lists' and effects' times overlap (list
+8 is the aura; a pass's time carries the tile work of the draws before it), so the passes are the
+measure. Replayed on lavapipe at the phone's profile (its F12 dump of that room,
+`build-host/tmp/v098/evidence/gpuround/accounting-heavy.csv` on the maintainer's machine: each
+pass's draws, loads and stores), the room moves about 240 MB a picture through the tiles: list 0's
+pass stores SCENE's colour and depth (20 MB), the volumes' pass loaded and stored the depth again
+(23 MB), the pass after the shadow count loads and stores colour and depth (41 MB) and holds the
+three shadow composites, the fog, lists 4-6 and the stencil setups of DATE, the crack fill's copy
+of the colour (20 MB), the aura's paste pass (20 MB, with the fill's reads), the aura's feedback
+read of the whole picture (10 MB), list 11's pass (20 MB), the reduction (20 MB) and the present
+(20 MB). At about 16 MB a millisecond (list 11's two flat full-screen sprites, 20 MB in 1.30 ms)
+that is most of the 21 ms: the room is bandwidth-bound, and list 0's 280 draws are a small part of
+its 3.54 ms (the culling measurement below: not worth a culler). Two of those passes and a clear
+are cut: the shadow volumes are drawn in list 0's pass and the count target's new-target clear is
+left undrawn ([WORK_BUFFERS.md](WORK_BUFFERS.md#the-shadow-volumes-in-the-scenes-pass): the
+volumes' pass, about 1.2 ms, and 9.7 MB written, the same picture) and the brightness step is applied by the
+reduction above 1x too ([the fades fold](RENDER_POST.md#the-fades-fold): list 11's pass in every
+frame of play and on the menus, about 1.2-1.3 ms, within a level at the phone's resolution). What
+was looked at and left:
+
+- The aura's paste (`aura SCENE`): in that room AURA_WORK holds only its clear in every frame (the
+  constant read's count, 1.0 a replay), so the paste's alpha is 0 and it leaves the colour as it
+  is; it still writes SCENE's alpha (0), which the reduction carries into DISPLAY, and its pass
+  holds the crack fill, so dropping it saves only its shading (a texel of FEED128 a pixel), not a
+  pass. The feedback read after it feeds the next frame's paste.
+- The pass after the shadow count (`list 3 SCENE`) cannot join list 0's: the count reads the
+  stencil as a texture into a target of its own size, which ends the pass. Its composites are
+  full-frame sprites whose alpha test (A > 0) keeps them to the shadow; drawn over the shadow's
+  box only they would shade fewer pixels but move the same bytes.
+- The title menu's glow mask (`glow WORK2`, 10 MB written and SCENE read at full size): folding the
+  mask into the reduction that reads it is exact but needs a shader that takes the mask's own
+  bilinear and alpha test inside the box ([the glow's passes](#the-glows-passes)), not done here.
+
 Measured or worked out, not done:
 
+- **The depth as D24S8 on every device** (measured, not done). A D24S8 depth would take 4 bytes a
+  texel to load or store against D32F_S8's 5 to 8 (a full-size load or store at 2366 x 1080 from
+  12.8-20.4 MB to 10.2 MB). It is not the same picture: every ZBUF the game writes is PSMZ32
+  (`port/render/rd.h` (`RdZFormat`), `ico2/seki/src/GsBase.c` (`gsb_SetFrame`): the PSM nibble 0),
+  and the game's Z spans far more than 24 bits (its Z row, `port/shaders/vu_common.hlsli`'s note
+  on `gsb_SetVSMatrixSub`: GS Z the ftoi4 of zf / z + zn, zf about 1.07e9, so about 2^24 some 1000
+  units from the eye, 2^28 at 64 and saturating at 0x7FFFFFFF within about 8; the UI at 0xFFFFFF9B
+  and 0xFFFFFFFF). The float depth holds z
+  exactly below 2^24 and to 24 significant bits above (`gs_z_to_depth`, GS_ZSCALE_32F); a 24-bit
+  integer depth holds 2^24 steps over the whole range, so `rd__target_z_scale`'s 2^-32 on D24S8
+  steps 256 GS units everywhere (the layers the Queen's mist and hair needed apart, the comment of
+  `gs_z_to_depth`), and no linear scale both keeps 1 GS unit below 2^24 and reaches the near
+  geometry and the UI band (the homogeneous clip form needs it linear). Measured on lavapipe with
+  the existing fallback (`ICO_VK_FAKE_D24S8=1`, main's replay tool against the stored pass dumps
+  of the corpus, `build-host/tmp/v098/evidence/cheap/ab.sh d24`): at Original 4:3, 25 of 30 dumps
+  change, SCENE on 0.002 to 0.17 % of its pixels by up to 214 levels, DISPLAY up to 120 (objects
+  showing through what should hide them, the Z test's outcome turned); at the PowerVR phone's
+  Resolution Auto (its profile's fakes, the eight wide dumps) the present on 0.007 to 0.04 % of its
+  pixels by up to 107 levels, the shadow levels too (the volumes' Z test). The D24S8 fallback stays
+  for devices without D32F_S8 (`port/rhi/vk/vk_device.c`), with that picture.
 - **One pass for a constant-alpha lerp without dual-source blending.** On such a device a LERP
   is two passes (`rd__expand_no_dual`). Where As is the same over the draw (untextured;
   textured with TCC RGB; a mesh whose vertex alphas are all equal) the blend factors could be
@@ -3032,6 +1920,28 @@ Measured or worked out, not done:
   alone), so the columns of one source pixel are one run whose ends can be solved for; a scan
   from one before the run to one after it would visit the same hits in about half the steps.
   Not done: the ends' float rounding needs its own proof that no hit falls outside them.
+- **The crack fill's pass break on a tile-based GPU** (measured, then changed: the fill is drawn
+  after lists 4-6, [Crack filling above 1x](RENDER_POST.md#crack-filling-above-1x)). Before the change, on the
+  fog's local path the fill ended the scene's pass for its two copies and began it again with
+  SCENE's colour and depth loaded. The PowerVR phone's perf CSV (`[dev] perf_passes`), Resolution
+  Auto, SCENE 2366 x 1080, 2079 replays with the fill
+  (`build-host/tmp/v098/evidence/perf/crack-pass-summary.py`): list 3's last SCENE pass 2.08 ms
+  median, the copies (`snapshot`) 1.10 ms, the pass begun again (labelled `fog`: the fill, the fog
+  and lists 4-6, 32 draws median) 4.10 ms; the break added the store of colour and depth at list
+  3's end (10.2 + 20.4 MB at 8 bytes a depth texel), the copies (61 MB read and written) and the
+  load of both again (30.7 MB). The move is not the same bytes: the fog above 1x dithers by the
+  pixel's own position (`port/shaders/fog_lut.hlsl`, the `gs_bayer8` index from `i.pos`) and lists
+  4-6 Z-test and blend against the filled texel; the difference is measured (the section above,
+  [DIVERGENCES.md](DIVERGENCES.md) VD-20). Not done, by reading: conservative rasterisation
+  instead of the fill (`VK_EXT_conservative_rasterization`: overestimation grows every edge,
+  silhouettes included, extrapolates UVs and depth there and blends a shared edge twice) and the
+  fill's copy from the reduced SCENE copy (the half-texel offset found when it was tried). The
+  colour swap (SCENE's colour swapped with its snapshot as `blurSwapTarget` does, the fill
+  writing every texel) would save the colour copy too, but every texel would make an RGBA8 round
+  trip through a float output, which the Vulkan specification lets round to either neighbour,
+  and the UINT view that would make it exact is off on tilers.
+  `build-host/tmp/v098/evidence/perf/crack-pass.sh` measures the pass structure with and without
+  the fill on lavapipe under the PowerVR and the Qualcomm-driver profiles.
 - **The fog's cost per frame.** On lavapipe the fog of the Mac frame costs several times the
   title frame's at under three times the pixels; the fog pass count (`rd__fog_plan`) and its
   depth source (`rd__fog_source`) are where to look before its shader, which is about 60
@@ -3047,19 +1957,89 @@ about 1.8 MB), after `endPass` closes the scene's pass (`port/render/rd_replay.c
 line, and it swings with the scene, not the fog: 8.8-9.3 ms, then 70-172 ms, then 0.00 when the
 scene has no fog, while lists 3 and 11 and the glow climb to 150-330 ms in the same lines: the
 pass break moved, and the scene's tiles are paid at the next one. The fog's own work is a
-full-screen sprite and the copy, a few MB of traffic. Every path breaks the pass there (inplace
-must end the pass to sample the depth too; the copy adds only the transfer), so no cheaper path
-draws the same picture with the passes as they are; one that keeps the depth on the tile would read
-it in the scene's pass (a subpass input attachment, or dynamic rendering local read) and store
-neither the depth nor a copy, a change to the RHI's passes, not done. On a tiler, compare the
-sum of the lists, not one list or effect.
+full-screen sprite and the copy, a few MB of traffic. The copy and in-place paths break the pass
+there (in place must end the pass to sample the depth too; the copy adds only the transfer). The
+local path keeps the depth on the tile: the fog draws in the scene's pass and reads the depth as an
+input attachment (dynamic rendering local read), with no pass break and no copy ([the fog's local
+read](#the-replay)). The profile takes it wherever the device has local read: every tile-based
+class and desktop Vulkan after its probe (`port/render/rd_profile.c` (`rd__profile_init`:
+`fogLocal`)); the PowerVR phone's log says `fog: depth path local (self-test: local ok 1,
+...)`. A device whose driver offers no local read takes the copy: Qualcomm's own driver (issue
+177's Adreno: `local read no`, `fog local off`, `fog: depth path copy`), and D3D12, D3D11 and
+OpenGL, which have none. Above 1x under Enhanced the crack filler is drawn after lists 4-6: its
+neighbourhood reads need a copy of SCENE's colour, made where the scene pass ends anyway, and its
+own pass holds SCENE's colour alone, or it is the first draw of the aura's paste pass
+([Crack filling above 1x](RENDER_POST.md#the-fills-place-after-list-7)). On a
+tiler, compare the sum of the
+lists, not one list or effect (the log's GPU top passes and GPU ms per replay lines now say so).
+
+### Culling
+
+**What the game culls.** Each object's box, then each part's box, goes through `gsb_ClipBox` against
+the camera's frustum (`ico2/seki/src/RegistPacket.c` (the object at :606, every part at :1165),
+`ico2/seki/src/GsBase.c` (`gsb_ClipBox`, :3107-3156)): the eight corners through the current matrix,
+and a box is dropped only when every corner is outside one plane by the drop margin
+(`gsbHostDropFlags`, :2892). The planes tested are +x, -x, +y, -y and the near side (`all & 0x2F`,
+:3143: bit 4, the far side, is not in the mask), so nothing is dropped for its distance. A packet's
+own box picks its clip program but never drops it: a packet wholly outside the view is drawn through
+the clipping program and the GPU clips it away (`reg_clipPacketBoundingBox`, `RegistPacket.c`
+:422-477). There is no occlusion test, no room, portal or visibility set, and one stage is resident.
+
+**What the measurement finds.** `rd_replay_tool --occlusion` (below; `port/render/rd_occlusion.c`)
+puts every GPU draw of list 0 inside an occlusion query of its own ([RHI.md](RHI.md#the-interface),
+"Occlusion queries") during the picture's replay and maps each query to the command that drew it:
+`g_rdStoreOrd`, the command the walk replays (its index in list 0, which the walk takes first), or
+for a screen-prim run's draw, which `flushScreenRun` records after its command, the command that
+opened the run (`ScreenRun.ord`, `g_rdDrawOwner`). The measurement runs under `ICO_RD_VU_MERGE=0`,
+`ICO_RD_BLEND=fixed` and the screen-prim runs off (`rd__set_screen_merge`), so each draw command
+makes its own GPU draws. A draw command (screen prims, mesh, skinned, grid, particles) whose draws
+all passed 0 samples was hidden when it drew: left out of the replay (`--nop`) it changes no pixel,
+the saving a culler that tests against the depth drawn so far could make. Hidden includes what draws
+nothing for another reason: a packet outside the view (above), off the scissor, or with every
+fragment discarded. The same measurement under `ICO_VK_DEPTH_ALWAYS=1` (every depth test passes,
+[RHI.md](RHI.md#vulkan)) hides only those, so the commands hidden as drawn and not under the switch
+are the ones the depth hid, the share an occlusion culler can take; `tools/occlusion_corpus.py`
+separates the two from the tool's `--occlusion-csv` tables. Draws of other commands in list 0 (a
+clear drawn as a quad, a fill) are counted apart and are not candidates. Only list 0 is measured:
+the passes after it (the fog, glow, aura, fades, shadows and the present) draw the whole frame and
+no test against the scene's depth leaves them out.
+
+**The gate and the numbers.** `tools/occlusion_corpus.py` runs the dumps of
+`tools/occlusion_corpus.txt` at Original 4:3 1x and Enhanced 4:3 2x: the measurement as drawn and
+without the depth, then the plain replay and the replays with the hidden commands left out (`--nop`
+`@FILE`) under `--pass-dump` (every target byte for byte) and `--stats --gpu-repeat K` (list 0's GPU
+median of K warm replays on lavapipe). A culler of list 0 is built only when the median share the
+depth hid is at least 15 % of the list-0 draws and 10 % of the list-0 triangles over the gameplay
+dumps and leaving those commands out takes at least 10 % off list 0's GPU time, with every compared
+pass dump identical. The report, a row a dump and setting with the medians and the verdict, is
+written beside the run's logs (`--out`, by default under
+`build-host/tmp/<release>/evidence/perf/occlusion.md` on the maintainer's machine).
+
+**What it found, and why there is no culler.** The corpus run (33 dumps of the list, each
+at both settings: 66 rows, every one timed and every compared pass dump identical) failed the gate
+by far. The median share of list 0's draw commands the depth hid was 1.6 % (1.9 % at Original, 1.5 %
+at Enhanced 2x) and of its triangles 0.7 %; leaving those commands out took a median 1.3 % off list
+0's GPU time (0.5 % and 3.4 %), inside lavapipe's noise (the 8-draw title dumps, which hide nothing,
+move from -20 % to +25 % between replays). On the gameplay dumps of 368 to 1802 draws (the phone's
+three, issues 164, 163, 173, 102, 91 and 146, the sandstorm sheets') the depth hid 0 to 4.9 % of the
+draw commands and 0 to 18.8 % of the triangles (the 18.8 % is five commands of one dump, issue 163's,
+9600 triangles); the godrays sequence's dumps 0 to 12.7 % and 0 to 9.7 %. Most of what draws nothing is hidden for another
+reason: a median 54.2 % of the commands and 41.9 % of the triangles draw nothing under every depth
+test too (outside the view, since the game drops only whole objects and parts and lets the GPU clip
+the rest, above; off the scissor; or every fragment discarded), which a test against the depth
+cannot save and which costs the GPU little. Judged on that share instead the gate would fail as
+well (no measured GPU gain). So occlusion culling is not built: the scene draws its far side little,
+the game's own frustum test already removes most of what lies outside the view, and an occlusion
+query or a depth pre-test per command would cost more than the 1-2 % it could take. The
+measurement (`--occlusion`, `tools/occlusion_corpus.py`) stays for a later corpus.
 
 ## Dumps and the replay tool
 
 A [.rddump](ARCHITECTURE.md#terms) is the in-memory frame, little-endian, versioned by
-`RD_DUMP_VERSION` (12): the frame's native size and aspect, the disc it was drawn on (its region
+`RD_DUMP_VERSION` (14): the frame's native size and aspect, the disc it was drawn on (its region
 slug (`pal`, `jpn` or `kor`), version 12; an older dump is the European disc's), its camera, start and end states, the
-13 lists, the payload, the textures and temporary targets it references, and its VU meshes. Target
+13 lists, the payload, the textures and temporary targets it references, its VU meshes and tick
+cameras. Target
 contents are not written: a frame that reads a retained target replays from what the loading
 context holds. Loading creates the textures and targets anew and rewrites every id, and gives the VU
 draws recorded without card verdicts theirs ([VU1_PROGRAMS.md](VU1_PROGRAMS.md#the-card-test)), so
@@ -3088,8 +2068,12 @@ replayed N more times; with `--interp` the presenter's frame is built again befo
 time charged to the replay as `rd_present` charges it). The tool prints one line from the N
 records, each CPU phase's mean and least: `<dump>: time: N replays, CPU mean (min) ms: total,
 interp, wait, acquire, upload, walk, bind, submit, present; per replay: ring KB,
-uniform KB, interp KB, draws, pipeline binds, bind group binds`, then `<dump>: time: the first
-replay: interp X ms, total T`. With `--interp` it compares DISPLAY after the
+uniform KB, interp KB, draws, pipeline binds, bind group binds`, then `<dump>: time: bind cache: X
+pipeline, Y bind group and Z state repeats skipped a replay` (the binds the RHI found in force and
+recorded nothing for, [RHI.md](RHI.md#the-bind-cache); `--stats` prints the replay's own as
+`<dump>: stats: bind cache: ...`), then `<dump>: time: the first replay: interp X ms, total T`.
+The walk column is what the bind cache moves: `build-host/tmp/v098/evidence/perf/bindcache.sh`
+runs `--time 5` on three corpus dumps with two builds. With `--interp` it compares DISPLAY after the
 first and the last of the N replays byte for byte and prints `pictures identical`, or the bytes
 that differ and exits 1: a present later in a tick must draw the tick's first present's picture
 (`timeReplays`). The lavapipe numbers are for comparing two builds on one host, not a device's
@@ -3105,9 +2089,12 @@ The options:
 | `--present WxH` | renders the presenter into a W x H output |
 | `--backend vulkan\|d3d12` | picks the RHI backend, to compare backends |
 | `--enhanced`, `--aspect`, `--resolution`, `--full-height`, `--full-pixel`, `--border-mask` (Full pixel off as the game has it), `--water-sharp` (Water reflections: Sharp), `--filter`, `--mirror`, `--crt` | the display options a dump does not carry; the PS2 picture by default |
-| `--list` | every command of the replayed lists, with textures, prims, boxes and state, then the water summary (`water: ...`, [above](#water-and-render-to-texture-blocks)) |
+| `--list` | every command of the replayed lists, with textures, prims, boxes and state, then the water summary (`water: ...`, [above](RENDER_POST.md#water-and-render-to-texture-blocks)) |
 | `--no-device` | loads into a record-only renderer for `--list`, `--mesh`, `--dump-textures` |
-| `--nop L:A[-B]` | turns commands into NOPs, to find the draw behind a pixel |
+| `--nop SPEC` | turns commands into NOPs, to find the draw behind a pixel; SPEC is `L:A[-B]`, several separated by commas (`0:12-14,0:40`), or `@FILE` for a spec in a file; the state commands in a range stay |
+| `--occlusion` | the hidden-draw measurement of list 0 ([Culling](#culling)): `<dump>: occlusion: hidden N of M list-0 draws, T of U triangles (index count / 3); hidden commands: SPEC` (SPEC a `--nop` spec, `none` when empty), then `<dump>: occlusion: H of K draw commands hidden; P % of the draws, Q % of the triangles; Q queries, X without a count, Y draws past the 8192 queries; Z draws of other commands not counted; measured under ...`; it sets `ICO_RD_VU_MERGE=0` and `ICO_RD_BLEND=fixed` and turns the screen-prim runs off (the `note:` line says so); Vulkan only (exit 77 elsewhere); not with `--presents`, `--loss-bisect`, `--keys` or `--no-device` |
+| `--occlusion-out FILE`, `--occlusion-csv FILE` | with `--occlusion`: the spec written to FILE (for `--nop @FILE`); a line a command of list 0 that made a GPU draw, `cmd,type,draws,counted,triangles,samples` |
+| `--gpu-repeat K` | with `--stats`: RHI_FRAMES_IN_FLIGHT + 1 + K replays after the picture and, after the `gpu:` line, `<dump>: gpu median of R replays: total X ms, list 0 Y ms, VU pre-pass Z ms` over the warm records that came back (the first replay after the picture left out) |
 | `--mesh NAME` | a VU mesh vertex by vertex, with the kick, overlap and joined marks |
 | `--dump-textures DIR` | every image texture as decoded |
 | `--stats` | the replay's performance record, with GPU times |
@@ -3115,7 +2102,7 @@ The options:
 | `--time N` | after the picture, the frame replayed N more times and the mean and least of each CPU phase of their records printed (below) |
 | `--prev DUMP` | replays earlier dumps first so retained targets hold the run's pictures |
 | `--no-half`, `--no-aa1` | the frame without the field's half pixel or without PRIM.AA1 |
-| `--no-crack-fill` | the frame without the crack filler above 1x ([Crack filling above 1x](#crack-filling-above-1x)): its A/B; `--stats` prints the filler's passes and the pixels it filled |
+| `--no-crack-fill` | the frame without the crack filler above 1x ([Crack filling above 1x](RENDER_POST.md#crack-filling-above-1x)): its A/B; `--stats` prints the filler's passes and the pixels it filled |
 | `--interp T PREV` | the frame the presenter builds between PREV and the dump at alpha T (PREV an F12 or loss zip: its second `.rddump`, the tick before) |
 | `--interp-any`, `--no-reproject` | with `--interp`: PREV taken as the tick before whatever its frame number; the CPU-projected draws blended in screen space |
 | `--interp-nop-prev L:A[-B]` | with `--interp`, repeatable: turns commands A..B of list L of PREV into NOPs before the blend, as `--nop` does to the dump, so their draws in the dump are the tick's alone (unmatched): chosen parts of the world made the tick's in a blended picture, the [mixed picture](#camera-blending)'s case |
@@ -3124,7 +2111,7 @@ The options:
 | `--overlay-test` | (with `--present`) a test pattern and a popup drawn as a presentation overlay |
 | `--vu-ref L:I` | the CPU mirror's vertices of prelit draw I of list L |
 | `--loss-bisect` | the [loss bisect](#the-loss-bisect) on the dump: the frame one pass longer each time, waiting for the GPU after each |
-| `--keys` | the pipelines the replay asks for against the start-up set, one line a key (`in set` or `MISSING`), exit 1 on a miss ([The start-up set](#the-start-up-set)); needs a device, `<out.png>` unused (give `-`) |
+| `--keys` | the pipelines the replay asks for against the start-up set, one line a key (`in set` or `MISSING`), exit 1 on a miss ([The start-up set](PIPELINES.md#the-start-up-set)); needs a device, `<out.png>` unused (give `-`) |
 | `--passes A[-B]` | replays passes A..B only (the [pass window](#the-loss-bisect)); A alone is pass A alone |
 
 ## Shader families
@@ -3135,7 +2122,7 @@ The families and what each entry draws are [SHADERS.md](SHADERS.md#the-families)
 ## Tests
 
 The renderer's tests are `port/render/test/`, listed with their ctest names in
-[TESTING.md](TESTING.md#portrendertest); the pixel gates on dumps are
+[TESTING_PROGRAMS.md](TESTING_PROGRAMS.md#portrendertest); the pixel gates on dumps are
 [TESTING.md](TESTING.md#render-gates). The variants run the same program under `ICO_RD_NO_DUAL=1`
 (`_nodual`), `ICO_VK_FAKE_LIMITS=min` (`_minlimits`) or `mali` (`_mali`), `ICO_RD_BLEND=fixed`
 (`_fixed`) or `storage` (`_storage`) and `ICO_VK_FAKE_D24S8=1` (`_d24s8`)

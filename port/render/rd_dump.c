@@ -76,6 +76,10 @@
  *   did; the version is unchanged)
  *   (RdCamera.freeCamera, photo mode's free camera: the byte was padding,
  *   0 in the dumps from before it; the version is unchanged)
+ *   (RdCamera.cut RD_CAMERA_CUT_WALL, a frame not blended because the eye's
+ *   path crossed the stage, rd_camera_cut_wall: the dumps from before it
+ *   hold 0 or 1, and a reader that takes the byte as a flag still snaps;
+ *   the version is unchanged)
  *   (RDC_GRID's b[5], f[0] and f[1], rd.h rd_grid_screen_st: 0 in the dumps
  *   from before them, whose pool grids blend their STs as they always did;
  *   the version is unchanged)
@@ -96,6 +100,10 @@
  *            qwPerVertex, indexCount, batchCount, char[24] name, then the
  *            stream (vertexCount * qwPerVertex * 16 bytes), the index list
  *            (u32 each) and the batch records (RdVuBatchRec, raw)
+ *   (version 14: u32 hasTickCams, f32[2][16] tickCams: the ticks' cameras
+ *            of a blended present's frame (rd_interp.c, the draws marked
+ *            RD_VU_TICK_CAMERAS; rd.h rd_dump_blended_arm), 0 and zeros
+ *            for a tick's frame.  A version 3 to 13 dump has none)
  *
  * Only the textures and temporary targets the frame references are written.
  * Target contents are not: a frame that reads a retained target (keep,
@@ -113,6 +121,7 @@
 #include "../core/region.h" /* the disc a dump was drawn on (version 12) */
 #include "rd_mesh.h"
 #include "rd_passring.h"
+#include "rd_tex.h"
 #include "shader_consts.h"
 
 #define MAX_REFS 4096
@@ -275,6 +284,10 @@ bool rd__dump_frame(const RdFrame *f, const char *path)
     if (!f || !path) {
         return false;
     }
+    /* the frames, textures and meshes as no present of the render thread
+     * reads or changes them (rd_thread.h): the game thread's dump waits */
+    (void)rd_thread_drain();
+    rdtex_settle(); /* the texels the decode pool still owes (rd_tex_decode.h) */
     static IdSet texs, temps, meshes;
     texs.n = temps.n = meshes.n = 0;
     collectRefs(f, &texs, &temps, &meshes);
@@ -383,6 +396,13 @@ bool rd__dump_frame(const RdFrame *f, const char *path)
             ok = wraw(fp, &b, sizeof(b));
         } else if (ok) {
             ok = wraw(fp, m->batches, (size_t)m->batchCount * sizeof(RdVuBatchRec));
+        }
+    }
+    /* version 14: the ticks' cameras (a blended present's frame) */
+    ok = ok && w32(fp, f->hasTickCams ? 1u : 0u);
+    for (int k = 0; ok && k < 2; k++) {
+        for (int j = 0; ok && j < 16; j++) {
+            ok = wf32(fp, f->hasTickCams ? f->tickCams[k][j] : 0.0f);
         }
     }
     ok = fclose(fp) == 0 && ok;
@@ -820,6 +840,17 @@ bool rd__load_frame(const char *path, RdFrame *out)
         free(st);
         free(ix);
         free(br);
+    }
+    if (ok && ver >= 14u) {
+        /* the ticks' cameras of a blended present's frame */
+        uint32_t has = 0;
+        ok = r32(fp, &has) && has <= 1u;
+        for (int k = 0; ok && k < 2; k++) {
+            for (int j = 0; ok && j < 16; j++) {
+                ok = rf32(fp, &out->tickCams[k][j]);
+            }
+        }
+        out->hasTickCams = ok && has;
     }
     fclose(fp);
     for (uint32_t i = 0; ok && i < nViews; i++) {

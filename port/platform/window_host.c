@@ -25,7 +25,6 @@
 #include "host_loop.h"
 #include "hotkeys.h"
 #include "ico_credits.h"
-#include "ico_build_commit.h" /* ICO_BUILD_COMMIT, generated (port/platform/CMakeLists.txt) */
 #include "ico_version.h" /* ICO_VERSION_LABEL, generated (CMakeLists.txt; "" in a development build) */
 #include "input.h"
 #include "input_record.h"
@@ -58,10 +57,20 @@
 #include "ui_mouse.h"
 #include "video_options.h"
 #include "window_host.h"
+#include "window_lines.h"
+#include "window_pipeline_skip.h"
+#include "window_pipe_finish.h"
+#include "window_present.h"
+#include "render_thread.h"
+#include "window_present_fallback.h"
+#include "window_disc.h"
+#include "window_blended.h"
+#include "window_sweep.h"
 #include "window_lifecycle.h"
 #include "window_pump_win.h"
 #include "window_switch.h"
 #include "window_video.h"
+#include "state.h" /* save states: F5/F9 and the picture */
 #ifdef __ANDROID__
 #include "android/gpu_driver_android.h"
 #include "android/host_android.h"
@@ -84,8 +93,6 @@
 #define WINDOW_W 960
 #define WINDOW_H 720
 #endif
-/* A host this far behind the vsync deadlines stops trying to catch up. */
-#define RESYNC_NS 100000000ull
 /* Slow-step lines a stats block logs at most (the rest are
    counted in its first line) */
 #define SLOW_STEP_LINES 5
@@ -96,6 +103,9 @@
 _Static_assert(SDLK_F11 == ICO_HOTKEY_KEY_F11, "hotkeys.h: SDL3's SDLK_F11");
 
 _Static_assert(SDLK_F12 == ICO_HOTKEY_KEY_F12, "hotkeys.h: SDL3's SDLK_F12");
+_Static_assert(SDLK_F5 == ICO_HOTKEY_KEY_F5, "hotkeys.h: SDL3's SDLK_F5");
+_Static_assert(SDLK_F6 == ICO_HOTKEY_KEY_F6, "hotkeys.h: SDL3's SDLK_F6");
+_Static_assert(SDLK_F9 == ICO_HOTKEY_KEY_F9, "hotkeys.h: SDL3's SDLK_F9");
 
 _Static_assert(SDL_EVENT_TERMINATING == ICO_SDL_EVENT_TERMINATING &&
                    SDL_EVENT_LOW_MEMORY == ICO_SDL_EVENT_LOW_MEMORY &&
@@ -121,8 +131,6 @@ extern int mpegPlay;
 static SDL_Window *s_window;
 
 static int s_captured; /* ICO_CAPTURE_* (mouse_look.h) */
-
-static Uint64 s_deadline;
 
 static int s_open;
 /* a quit or close request that came in while a start-up screen could not
@@ -153,144 +161,14 @@ static int s_lastFullMode = ICO_WINDOW_FULLSCREEN;
    after the startup line) */
 static IcoVideoOptions s_videoLast;
 
-/* the presentation loop (ico_window_pace) */
-static int s_pollRestarted; /* the poll's restart at the first game frame, once */
-
-static struct {
-    int framerate;           /* ico_video_framerate() as last applied */
-    unsigned cutSerial;      /* ico_video_cut_serial() last passed on */
-    uint32_t frame;          /* rd_frame_number() last seen */
-    uint32_t presentedFrame; /* the frame of the last present */
-    Uint64 tickAt, tickPrev; /* the pace deadlines (simulated time) the last two frames closed at */
-    Uint64 lastPresent;      /* the last present's start (the alpha clock's) */
-    Uint64 nextPresent;      /* when the next present is due (0: now); pace_next_present keeps */
-    Uint64 cost;             /* how long the last rd_present took */
-    PaceHist paceHist;       /* the last presents' costs (pace_policy.h) */
-    bool paceSlow;           /* pace_slow_present after the last present */
-    /* a frame pace left unpresented since the last present (pace_late_skip)
-       and its number */
-    bool skipOpen;
-    uint32_t skipFrame;
-    /* the rate log */
-    Uint64 statAt;
-    unsigned statPresents, statFrames;
-    unsigned statSkipLate, statSkipSlow; /* the block's skipped presents by reason */
-    /* simulated vsyncs paced, and the lag the pacer dropped (each time
-       it was more than RESYNC_NS behind: the simulation ran slower than
-       real time by that much) */
-    unsigned statVsyncs, statResyncs;
-    Uint64 statDropped;
-    uint32_t statFrameNo; /* rd_frame_number() at the block's start */
-    /* rd_video_presents at the block's start; a movie presents on
-       its own, outside the replays the line counts */
-    uint32_t statMovie, statMovieFail;
-    /* the simulation step's real time (from the end of one pace to the
-       start of the next), for the 10 s line */
-    Uint64 paceEnd;
-    double stepSumMs, stepMaxMs;
-    unsigned stepCount;
-    /* rd_vu_card_counts at the block's start: the card verdicts the
-       steps decided (rd_mesh.c), for the 10 s line */
-    uint64_t cardStrips, cardTris;
-    double cardMs;
-    /* the same at the last step's end, for the slow step's line */
-    uint64_t stepCardStrips, stepCardTris;
-    double stepCardMs;
-    int mailbox; /* rhi_prefer_mailbox as last applied: vsync on and presenting between ticks */
-    int vsync;   /* vsync on and presenting between ticks */
-    /* vsync on and the cap equals the display's refresh but no vsync lock
-       (144 on 59.94: no whole multiple of the game's rate): FIFO, a
-       present a vblank, the game's own timer */
-    int fifoLock;
-    /* the vsync lock (pace_policy.h PaceLock): vsync on, the cap equal to
-       the refresh and a whole multiple n of the simulation's rate, n
-       refreshes within 1 % of its period: the simulation on a grid of the
-       wall clock, n presents a step (mailbox with the display's timing of
-       presents, rhi_present_timing; else FIFO) */
-    int gridLock;
-    int paceHz;           /* the simulation's rate the last pace had (50 or 60; 0: none yet) */
-    int clockGone;        /* the display's timing stopped or was not believed: FIFO */
-    int vblankGone;       /* the vblank clock stopped or was not believed (the grid on the
-                             report until the display or the settings change) */
-    Uint64 lockWaitNs;    /* the last locked present's wait (lock_io_present) */
-    int presentModeApply; /* the lock wants another present mode: ico_window_pace applies it */
-    int timingUse;        /* rhi_present_timing_use as last set (presents carry ids) */
-    PaceLock lock;
-    unsigned lockN;       /* n the lock was started with (0: not locked at the last vsync) */
-    Uint64 lockRefresh;   /* the refresh it was started with */
-    int lockMailbox;      /* the swapchain was in mailbox mode when it started */
-    int lockClock;        /* PaceLock.clock last logged */
-    int offScreen;        /* the window minimised, hidden, occluded or 0x0 (window_off_screen) */
-    uint32_t heldFrame;   /* a new frame pace_fifo_hold held back (+1; 0: none) */
-    unsigned lockResyncs; /* lock.resyncs already counted in statResyncs */
-    Uint64 lockDroppedNs; /* lock.droppedNs already counted in statDropped */
-    /* a host pause to take out of the pacing (pace_paused): the time a
-       swapchain rebuild took (video_apply, a size event, fullscreen),
-       applied before the next pace, and under the lock the first present
-       on the new chain's excess over a refresh (present_once), applied
-       after it */
-    Uint64 pausePendingNs;
-    /* RhiStats.swapchains at the last present accounted: a present on a
-       newer swapchain is the first on it (pace_first_present_pause) */
-    Uint64 swapchains;
-    /* the lock's counts at the 10 s block's start */
-    double lockNudgeAt;
-    unsigned lockSeenAt, lockLateAt, lockEarlyAt, lockWaitedAt, lockSkippedAt;
-    unsigned lockSkippedLateAt; /* the lock's late skips counted into statSkipLate */
-    double audioRatio;          /* the audio's rate ratio last set (ico_audio_set_rate_ratio) */
-    Uint64 lastReturn;          /* when the last present returned (0: none yet) */
-    Uint64 lateMaxNs;           /* the block's latest step against when it was due */
-    /* the slow-step lines ([dev] slow_step_ms, 0 off): the threshold,
-       the block's count and lines, ico_window_pump's time, the renderer's
-       texture decodes and pipeline creations at the last pace's end */
-    double slowMs, pumpMs;
-    /* the pump's parts: the event queue (and its events), video_apply,
-       ico_input_sdl_update */
-    double pumpEventsMs, pumpSettingsMs, pumpInputMs;
-    unsigned pumpEvents;
-    /* the block's longest pump, for the 10 s line (issue 105) */
-    double pumpMaxMs;
-    unsigned slowSteps, slowLogged;
-    uint32_t decodes, pipeCreates;
-    /* the present clock alpha is taken from (rd.h RdPresentClock) */
-    RdPresentClock clock;
-    int legacyAlpha; /* ICO_RD_S2_LEGACY=1 (read in video_settings) */
-    /* F11, the stats line every second until this time (0: off) */
-    Uint64 fastUntil;
-    /* F12's presented-picture PNG while its capture is pending ("": none) */
-    char presentPng[ICO_PATH_MAX];
-    /* the present that took it: the record of the first present_once after
-       the capture was armed (presentInfoPending until then; presentInfoHave
-       once noted), the frame the dump holds and whether the zip holds the
-       tick before (the -prev.rddump --interp rebuilds the present from) */
-    int presentInfoPending, presentInfoHave;
-    RdPresentInfo presentInfo;
-    uint32_t presentDumpFrame;
-    int presentDumpPrev;
-    /* the present allowance on the timer path (pace_policy.h PaceBudget;
-       under the lock lock.budget): the GPU time a timed replay (the
-       median of the last 8, perf_drain; 0: no timestamps yet), the last
-       present's waits for the display (the acquire and the present) and for
-       the GPU (the fence waits), the simulation step's time (ico_window_pace) */
-    PaceBudget budget;
-    PaceHist gpuHist;
-    Uint64 gpuNs, displayWaitNs, fenceWaitNs, stepNs;
-    bool fenceHoldsDisplay; /* RhiStats.fenceWaitsHoldDisplay (OpenGL), vsync on */
-    /* a numeric cap above the refresh in mailbox mode held to one present
-       a refresh (pace_cap_above_refresh): the refresh at this pace (0: not
-       held), and its line written since the last settings change */
-    Uint64 capAboveNs;
-    int capAboveLogged, mailboxOffLogged;
-    /* the 10 s line's allowance counts at the block's start, and the
-       allowance they are of (the timer path's or the lock's) */
-    const PaceBudget *budgetAtOf;
-    unsigned budgetRefusedAt, budgetDropsAt, budgetClimbsAt, budgetClimbRefusalsAt;
-} s_pres;
+/* the presentation loop's state, window_present.c's (window_present.h) */
+#define s_pres g_windowPres
+#define s_deadline g_windowDeadline
 
 /* The timer path's present allowance starts again, unbound until a drop (a
    frame rate change, off the lock, the pace reset), its counts for the 10 s
    line with it */
-static void timer_budget_reset(void)
+void window_timer_budget_reset(void)
 {
     pace_budget_reset_paced(&s_pres.budget, PACE_ALLOW_MAX);
     if (s_pres.budgetAtOf == &s_pres.budget) {
@@ -346,6 +224,7 @@ static struct {
     double gpuPost[RD_PERF_POST_COUNT]; /* per picture effect (rd.h RD_PERF_POST_*) */
     unsigned gpuPostPartial;            /* replays whose effects were not all timed apart */
     uint64_t draws, passes, pipeBinds, groupBinds, groups, barriers, copies, bytes, meshBytes;
+    uint64_t pipeSkips, groupSkips, stateSkips; /* the bind cache's (RhiStats *Skipped) */
     uint64_t texUploads, meshUploads, dateSnaps, exact, pipeCreates;
     /* the exact blend's draws and passes, the glow's passes, the target
        snapshots copied and swapped (rd.h RdPerfRecord, issue 103) */
@@ -360,9 +239,14 @@ static struct {
        opaque draws, the frame-size plan's constant, additive and local-read
        sprites, the VU passes without the planes (rd.h RdPerfRecord) */
     uint64_t alphaOnePass, alphaOpaque, fxConstant, fxAdditive, fxLocal, vuNoPlanes;
+    uint64_t fxLocalDate; /* those of fxLocal under DATE */
     /* the sprites drawn in a cleared source's colour and the target reads
        kept (rd.h RdPerfRecord.constReads, constKept) */
-    uint64_t constReads, constKept;
+    uint64_t constReads, constKept, fadesFolded;
+    /* the passes with a render area, their tiles, their targets' tiles and
+       those ended early (rd.h RdPerfRecord.passAreas ..., rd_pass_area.c) */
+    uint64_t passAreas, passAreaTiles, passAreaTargetTiles, passAreaEnds;
+    uint64_t passAreaWhy[RD_AREA_WHY_COUNT]; /* the passes kept whole, by why */
     /* draws that read a water block at a scale other than the scene's
        (rd.h RdPerfRecord.blockOtherScaleReads, issue 106) */
     uint64_t blockOtherScale;
@@ -373,6 +257,7 @@ static struct {
     /* present calls over 50 ms and the longest (present_blocked) */
     unsigned presentBlocked;
     double presentBlockedMaxMs;
+    PaceGpuGap gpuGap; /* the GPU's time between replays (rd.h RdPerfRecord.gpuGapNs) */
 } s_perf;
 
 /* The display under the vsync lock, for the 10 s display line
@@ -393,15 +278,19 @@ static struct {
     int statsSeen; /* the swapchain's counts were read in the block */
 } s_disp;
 
-static void disp_clock_stop(void);
 static void disp_clock_start(void);
 static void pump_describe(char *out, size_t size);
 
 /* The renderer's settings from the display options and the window's pixel
    size. */
+SDL_Window *window_sdl(void)
+{
+    return s_window;
+}
+
 /* The display's refresh period in ns (0 unknown); fallback is returned when
    the display reports none */
-static Uint64 display_refresh_ns(Uint64 fallback)
+Uint64 window_refresh_ns(Uint64 fallback)
 {
     const SDL_DisplayMode *dm =
         s_window != NULL ? SDL_GetCurrentDisplayMode(SDL_GetDisplayForWindow(s_window)) : NULL;
@@ -419,7 +308,7 @@ static void video_settings(RdSettings *rs, int w, int h)
     memset(rs, 0, sizeof(*rs));
     /* the renderer's flag: Original only when the four rows are the PS2's */
     rs->preset =
-        ico_video_preset(&o) == ICO_VIDEO_ORIGINAL ? RD_PRESET_ORIGINAL : RD_PRESET_ENHANCED;
+        ico_video_preset_rows(&o) == ICO_VIDEO_ORIGINAL ? RD_PRESET_ORIGINAL : RD_PRESET_ENHANCED;
     rs->outputWidth = (uint32_t)(w > 0 ? w : WINDOW_W);
     rs->outputHeight = (uint32_t)(h > 0 ? h : WINDOW_H);
     rs->aspect = ico_video_aspect();
@@ -434,6 +323,10 @@ static void video_settings(RdSettings *rs, int w, int h)
     /* Motion blur: Smooth, in either preset; Off and Original are the
        game's (staticBlur.c reads the switch) */
     rs->motionBlurSmooth = (uint8_t)(o.effectMotionBlur != 0 && o.effectMotionBlurSmooth != 0);
+    rs->motionBlurStrength = (uint8_t)o.effectMotionBlurStrength; /* 10..100, both ways */
+    /* Glow between frames: Smooth, in either preset; Original and Off hold
+       the tick's first present's glow (rd_glow_hold.c) */
+    rs->glowSmooth = (uint8_t)(o.effectGlow != 0 && o.effectGlowSmooth != 0);
     /* off under the Original preset (ico_video_anti_alias); the renderer
        draws an MSAA count the device lacks as off (rd_aa_supported_mask) */
     rs->antiAlias = (uint8_t)ico_video_anti_alias();
@@ -485,7 +378,7 @@ static void video_settings(RdSettings *rs, int w, int h)
     if (s_pres.framerate != ico_video_framerate()) {
         /* a new limit starts a new grid and a new present allowance */
         s_pres.nextPresent = 0;
-        timer_budget_reset();
+        window_timer_budget_reset();
     }
     s_pres.framerate = ico_video_framerate();
     rs->interpolate = (uint8_t)(s_pres.framerate != ICO_FRAMERATE_ORIGINAL);
@@ -505,7 +398,7 @@ static void video_settings(RdSettings *rs, int w, int h)
        D3D12 has no mailbox mode: its presents with vsync are always FIFO
        (d3d12_device.c rhi_prefer_mailbox). */
     {
-        const Uint64 refresh = display_refresh_ns(0);
+        const Uint64 refresh = window_refresh_ns(0);
         const Uint64 simPeriod = s_pres.paceHz == 50 ? 20000000ull : 16683333ull;
         const int capEq = s_pres.vsync && pace_cap_equals_refresh(s_pres.framerate, refresh);
         const unsigned n = capEq ? pace_lock_presents(s_pres.framerate, simPeriod) : 0;
@@ -528,9 +421,10 @@ static void video_settings(RdSettings *rs, int w, int h)
         }
         s_pres.gridLock = grid;
         s_pres.fifoLock = fifo && !grid; /* the timer path's FIFO (no lock) */
-        s_pres.mailbox = s_pres.vsync && !fifo;
+        s_pres.mailbox = (s_pres.vsync && !fifo) || (rs->vsync && !rs->interpolate);
     }
     rhi_prefer_mailbox(s_pres.mailbox != 0);
+    window_fifo_set();
 }
 
 /* The window is fullscreen now (SDL's flag, which follows the window
@@ -640,7 +534,7 @@ static void video_log_changes(const IcoVideoOptions *o)
                 "window: display changed: %s; the present allowance (%s) and GPU times "
                 "start again\n",
                 line, held);
-        timer_budget_reset();
+        window_timer_budget_reset();
         s_pres.lockN = 0;
         s_pres.gpuNs = 0;
         memset(&s_pres.gpuHist, 0, sizeof(s_pres.gpuHist));
@@ -747,7 +641,7 @@ static void video_apply(int force)
 /* A pause of the host (a swapchain rebuild): the deadline, the frame's
    times and the present grid move by it, so the simulation neither drops
    that time (a resync: a jump) nor runs it off in a burst of steps */
-static void pace_paused(Uint64 ns)
+void window_pace_paused(Uint64 ns)
 {
     if (ns == 0 || s_deadline == 0) {
         return; /* nothing, or the pacer not started (a size event at open) */
@@ -1091,7 +985,7 @@ static void lc_pace_reset(void *u)
     s_pres.cost = 0;
     s_pres.lockN = 0; /* the lock starts again from now */
     s_pres.lastReturn = 0;
-    timer_budget_reset();
+    window_timer_budget_reset();
 }
 
 static int lc_config_dirty(void *u)
@@ -1130,6 +1024,18 @@ static void lc_log_flush(void *u)
     ico_host_log_flush_all();
 }
 
+/* the render thread held while the surface goes and comes back
+   (render_thread.h) */
+static void lc_render_park(void *u, int parked)
+{
+    (void)u;
+    if (parked) {
+        ico_render_thread_park();
+    } else {
+        ico_render_thread_unpark();
+    }
+}
+
 static const IcoLifecycleOps k_lifecycle_ops = {
     NULL,
     lc_gpu_wait_idle,
@@ -1144,6 +1050,7 @@ static const IcoLifecycleOps k_lifecycle_ops = {
     lc_texture_low_memory,
     lc_log,
     lc_log_flush,
+    lc_render_park,
 };
 
 /* SDL's event watch: the four lifecycle events as they arrive (the queue
@@ -1568,6 +1475,7 @@ static const char *summary_joystick_scan(void)
 
 static void log_summary(const IcoVideoOptions *o, const char *res, const char *fr)
 {
+    char drives[64];
     char rd[2048], pads[160]; /* rd: the blend, then the device profile's words, ... */
     int n = 0;
     SDL_JoystickID *ids = SDL_GetGamepads(&n);
@@ -1592,21 +1500,23 @@ static void log_summary(const IcoVideoOptions *o, const char *res, const char *f
     rd_summary_text(rd, sizeof(rd));
     /* the audio's clock (audio_host.h ico_audio_mode_text): this runs
        before the audio starts, so the one the configuration asks for */
+    ico_host_drive_summary(drives, sizeof drives); /* issue 126: where the data and saves sit */
     ico_diag_set_summary(
-        "version %s; %s; GPU %s (%s); %s; %s preset, resolution %s, aspect %s, framerate %s; "
-        "window mode %s; %s; index values up to %u; robust access %s; controller %s%s; disc %s; %s; %s",
+        "version %s; %s; GPU %s (%s); %s; %s preset, resolution %s, aspect %s, framerate %s%s; "
+        "window mode %s; %s; index values up to %u; robust access %s; controller %s%s; disc %s; %s; "
+        "%s; %s",
         ico_diag_version(), summary_platform(), rhi_adapter_name(),
         l->driverText != NULL ? l->driverText : "driver unknown",
         rhi_backend_kind_name(rhi_backend()), video_preset_label(o), res,
-        ico_video_aspect_name(o->aspect), fr, ico_video_window_mode_name(o->windowMode), rd,
-        (unsigned)l->maxDrawIndexedIndexValue,
+        ico_video_aspect_name(o->aspect), fr, window_fifo_words(),
+        ico_video_window_mode_name(o->windowMode), rd, (unsigned)l->maxDrawIndexedIndexValue,
         l->robustText != NULL                ? l->robustText
         : rhi_backend() == RHI_BACKEND_D3D12 ? "D3D12's own"
         : rhi_backend() == RHI_BACKEND_D3D11 ? "D3D11's own"
                                              : "off",
         pads[0] != '\0' ? pads : "none yet", summary_joystick_scan(),
         disc != NULL ? disc : ICO_DIAG_DISC_UNKNOWN,
-        ico_host_pref_is_portable() ? "portable" : "user profile", ico_audio_mode_text());
+        ico_host_pref_is_portable() ? "portable" : "user profile", ico_audio_mode_text(), drives);
 }
 
 /* SDL's log output (SDL_SetLogOutputFunction, any thread): every line
@@ -1746,6 +1656,12 @@ static SDL_Window *window_create(int mode, int w, int h, int x, int y)
     return win;
 }
 
+/* Original's replay gate (window_lines.h) */
+static bool orig_gate(int keep)
+{
+    return window_orig_gate(keep, SDL_GetTicksNS(), s_deadline, s_pres.paceHz);
+}
+
 /* What hangs on a new window in mode, at the start and when the renderer
    is switched: the exclusive request, the screensaver, the message hook,
    the host call, the pipeline cache's file (the backend's own), the mode */
@@ -1784,13 +1700,14 @@ static void window_attach(int mode)
     /* the replay, the present and the FMV picture run on the host stack in
        the host FP mode, not on the game's 256 KB fiber stacks */
     rd_set_host_call(ico_sched_call_on_host);
-    /* the Vulkan pipeline cache in the per-user folder: a later start of
-       the same build creates the renderer's pipelines from it
-       (rhi_set_pipeline_cache_path;
-       D3D12 ignores it). Android: the app's cache folder, which the system
-       may empty when space runs low (android_paths.h) */
+    rd_set_replay_gate(orig_gate);
+    /* the Vulkan pipeline cache in the per-user folder: a later start of a
+       build with the same shaders creates the renderer's pipelines from it
+       (rhi_set_pipeline_cache_path; D3D12 ignores it). Android: the app's
+       cache folder, which the system may empty when space runs low
+       (android_paths.h) */
     {
-        char pref[ICO_PATH_MAX], cache[ICO_PATH_MAX + 96];
+        char pref[ICO_PATH_MAX], cache[ICO_PATH_MAX + 96], name[40];
 
 #ifdef __ANDROID__
         if (ico_android_cache_dir(pref, sizeof(pref)) != 0) {
@@ -1799,28 +1716,12 @@ static void window_attach(int mode)
 #else
         ico_host_pref_dir(pref, sizeof(pref));
 #endif
-        /* the file is this build's: another build's shader set does not
-           match a cache the driver wrote for it, so the renderer drops the
-           other pipelines*.vkcache files of the folder (vk_pipeline.c
-           vkr_cache_drop_others). The build is the commit
-           (ICO_BUILD_COMMIT, "git describe": the tag, the commits since and
-           the short hash; "unknown" without git, where every such build
-           shares a file), with every character a file name does not take
-           made "_" */
-        {
-            char build[64];
-            size_t i;
-
-            snprintf(build, sizeof(build), "%s", ICO_BUILD_COMMIT);
-            for (i = 0; build[i] != '\0'; i++) {
-                const char c = build[i];
-                if (!((c >= '0' && c <= '9') || (c >= 'a' && c <= 'z') || (c >= 'A' && c <= 'Z') ||
-                      c == '.' || c == '-')) {
-                    build[i] = '_';
-                }
-            }
-            snprintf(cache, sizeof(cache), "%s/pipelines-%s.vkcache", pref, build);
-        }
+        /* the name is the shader set's and the pipeline format's, not the
+           build's (rd_cache_name.h): another set's file is dropped
+           (vk_pipeline.c vkr_cache_drop_others), the header's device and
+           driver are checked (vkr_cache_load) */
+        (void)rd_pipeline_cache_file(name, sizeof(name));
+        snprintf(cache, sizeof(cache), "%s/%s", pref, name);
         rhi_set_pipeline_cache_path(cache);
         ico_diag_set_pipeline_cache(0, cache);
     }
@@ -1847,6 +1748,8 @@ int ico_window_open(unsigned int gsW, unsigned int gsH)
     RdSettings rs;
     int w = 0, h = 0;
 
+    ico_cdvd_host_set_windowed(1);
+
     /* [video] backend (config.toml) or backend= (ico-pc.ini), also the
        Options > Graphics > Graphics API row: "", the default, is Vulkan first,
        OpenGL when Vulkan does not start (below, after rd_init) and Direct3D
@@ -1856,6 +1759,7 @@ int ico_window_open(unsigned int gsW, unsigned int gsH)
     const char *chosen = ico_config_get_string("video.backend", NULL);
     const bool backendExplicit = chosen != NULL && chosen[0] != '\0';
     const char *backend = backendExplicit ? chosen : "vulkan";
+    rhi_set_adapter_wanted(ico_config_get_string("video.adapter", "")); /* [video] adapter */
     /* the blending the player chose: [dev] blend / blend=, or ICO_RD_BLEND
        from the environment the game was started with (a loss step's or
        the fixedblend step's run has its own ICO_RD_BLEND=fixed,
@@ -1951,6 +1855,30 @@ int ico_window_open(unsigned int gsW, unsigned int gsH)
     const char *pipeSetting = getenv("ICO_PIPELINE_SET");
     const int pipePolicy =
         ico_diag_startup_pipeline_set(retry != STARTUP_RETRY_NONE, lazyStart, pipeSetting, cfgName);
+#ifdef __ANDROID__
+    /* issue 158: below Android 9 there is no driver package to fall back
+       to after a start that ended while the phone's driver compiled the
+       pipelines (either count above): this start also takes the VU
+       programs' plain entries, the smaller vertex shaders (rd.h
+       rd_set_vu_plain_only; the "VU shaders:" line names the reason). On
+       any Android a run of this version ended by the creation limit
+       (diag_host.h ico_diag_startup_stall_end) takes them every start */
+    if (ico_diag_startup_stall_end()) {
+        rd_set_vu_plain_only("for this version: a run ended when the driver did not return from "
+                             "creating a pipeline (the creation limit)");
+        fprintf(stderr, "window: a run of this version ended when the graphics driver did not "
+                        "return from creating a pipeline: this start draws with the plain 3D "
+                        "vertex shaders\n");
+    } else if (!ico_gpu_driver_android_supported() &&
+               (ico_diag_startup_end_count(ICO_DIAG_END_PIPELINES) > 0 ||
+                ico_diag_startup_end_count(ICO_DIAG_END_VU_PRE) > 0)) {
+        rd_set_vu_plain_only("for this start: the last start ended while the driver compiled the "
+                             "pipelines, and Android 8 has no driver packages");
+        fprintf(stderr, "window: the last start ended while the graphics driver compiled the "
+                        "pipelines and driver packages need Android 9: this start draws with "
+                        "the plain 3D vertex shaders\n");
+    }
+#endif
     if (!rhi_create_backend(backend)) {
         fprintf(stderr, "window: renderer backend \"%s\" is not in this build; using vulkan\n",
                 backend);
@@ -2152,7 +2080,12 @@ open_window:
                 backend);
 #ifdef __ANDROID__
         ico_gpu_driver_android_no_device_note();
-        choose_driver();
+        if (ico_gpu_driver_android_supported()) {
+            choose_driver();
+        } else {
+            /* Android 8 (issue 158): no package to choose, the box says so */
+            ico_android_message_box(ico_gpu_driver_android_box_text(), 1);
+        }
 #endif
     }
     if (!up && (retry == STARTUP_RETRY_D3D12 || retry == STARTUP_RETRY_LOSS_BACKEND) &&
@@ -2207,6 +2140,7 @@ open_window:
        is off by the device's default, not by gpu_robust (startup_retry.h
        StartupRetryRun.robustOffDefault; Direct3D 12: NULL, its own rules) */
     ico_diag_set_robust_off_default(rhi_limits() != NULL && rhi_limits()->robustDefaultOff);
+    window_pipe_floor_driver(); /* the free-memory floor's rule (memory_floor.h) */
     {
         /* the watchdog's GPU hang counts as a device loss where the
            backend tracks its submissions (rhi_gpu_progress), said once */
@@ -2248,12 +2182,12 @@ open_window:
        settings or after a full set's end (pipePolicy) the set is made under
        the careful policy (rd_pipeline_policy_careful: small batches on one
        thread, the cache written after each, stopped at its memory budget,
-       the rest then made on first use). Not after a driver crash in it
-       (the lazy step), not by the settings or after a careful set's end or
-       a second end in a row (pipePolicy): each pipeline is then built when
-       a frame first needs it, the title comes at once, and the pipeline
-       cache is written after each batch of them (rd_pipelines_lazy) */
+       the rest then made on first use). Else (a driver crash in it, the
+       settings, a careful set's end, a second end: pipePolicy) each is
+       built when a frame first needs it, the cache written after each
+       batch (rd_pipelines_lazy) */
     const char *devCareful = rhi_limits() != NULL ? rhi_limits()->carefulPipelines : NULL;
+    window_pipeline_skip(s_window, cfgName);
     /* an end while preparing the graphics, by kind: the first's line, the
        second's setting for good (diag_host.h ico_diag_startup_end_persist;
        no table rule holds for either kind: the device table's careful set
@@ -2373,12 +2307,15 @@ open_window:
         } else {
             ico_diag_startup_activity_record(0);
         }
+        /* a stop at the free-memory floor: the rest in the background */
+        window_pipe_finish_start();
         /* the set in the pipeline cache file now, not only at a clean exit:
            a phone's system ends the app without one, and a lost device
            skips it, so the next start would compile the set cold again
-           ("This happens once after an update"); one read of the cache's
-           data and one file write, its size and time logged, nothing when
-           the file already holds it. Not when the set was stopped */
+           (the screen's "This happens once after an update that changes
+           the graphics"); one read of the cache's data and one file write,
+           its size and time logged, nothing when the file already holds
+           it. Not when the set was stopped */
         if (!s_quitLatched && !rhi_device_lost()) {
             (void)rhi_pipeline_cache_save();
         }
@@ -2410,11 +2347,12 @@ open_window:
                 o.dumpTextures && ico_opt_developer_mode() ? "on" : "off",
                 o.modelPack ? "on" : "off", o.dumpModels && ico_opt_developer_mode() ? "on" : "off",
                 rhi_limits()->depthStencilFormatName, ico_video_motion_blur_name(&o));
-        fprintf(stderr, "window: present mode %s%s\n", rhi_present_mode_name(),
+        fprintf(stderr, "window: present mode %s%s%s\n", rhi_present_mode_name(),
                 s_pres.gridLock         ? " (the cap equals the refresh: the vsync lock)"
                 : s_pres.fifoLock       ? " (the cap equals the refresh)"
                 : rhi_present_mailbox() ? " (vsync without waiting on the display)"
-                                        : "");
+                                        : "",
+                window_fifo_words());
         /* everything a report needs on the first screenful, once */
         log_summary(&o, res, fr);
         /* a program hooking the graphics API, once */
@@ -2434,6 +2372,9 @@ open_window:
     s_pres.cutSerial = ico_video_cut_serial();
     /* [dev] slow_step_ms (default 8; 0 off) */
     s_pres.slowMs = ico_config_get_float("dev.slow_step_ms", 8.0);
+    /* the submits and presents on the render thread from here
+       (render_thread.h): the start-up set and its screens ran on this one */
+    (void)ico_render_thread_start();
     s_deadline = SDL_GetTicksNS();
     s_open = 1;
     /* the port's runtime text and popups (port/ui) */
@@ -2499,6 +2440,7 @@ open_window:
         ui_settings_set_touch_edit_host(&host);
     }
     ui_touch_set_source(ico_input_sdl_touch_overlay);
+    ui_touch_set_layout_source(ico_input_sdl_touch_safe_layout);
     return 0;
 }
 
@@ -2534,9 +2476,10 @@ int ico_window_reopen(const char *backend, bool backendExplicit)
             s_re.mode == ICO_WINDOW_WINDOWED && SDL_GetWindowPosition(s_window, &s_re.x, &s_re.y);
         s_re.clock = s_disp.clock == 1;
         s_re.disp = SDL_GetDisplayForWindow(s_window);
+        ico_render_thread_stop(); /* the renderer on this thread alone (render_thread.h) */
         rd_suspend();
         if (s_disp.clock != 0) {
-            disp_clock_stop();
+            window_disp_clock_stop();
         }
         SDL_DestroyWindow(s_window);
         s_window = NULL;
@@ -2566,6 +2509,7 @@ int ico_window_reopen(const char *backend, bool backendExplicit)
     }
     ico_diag_set_pipeline_cache(rhi_pipeline_cache_loaded(), NULL);
     ico_diag_set_robust_off_default(rhi_limits() != NULL && rhi_limits()->robustDefaultOff);
+    window_pipe_floor_driver(); /* the free-memory floor's rule (memory_floor.h) */
     ico_diag_set_startup_retry((int)s_retry, window_have_d3d12(), backendExplicit, s_blendExplicit,
                                backend);
     rd_blend_selftest();
@@ -2599,6 +2543,7 @@ int ico_window_reopen(const char *backend, bool backendExplicit)
     window_size_recheck("after the renderer was switched");
     fprintf(stderr, "window: %dx%d pixels, %s on %s, present mode %s\n", w, h,
             rhi_backend_kind_name(rhi_backend()), rhi_adapter_name(), rhi_present_mode_name());
+    (void)ico_render_thread_start(); /* the new backend's (render_thread.h) */
     s_pres.pausePendingNs += SDL_GetTicksNS() - t0;
     return 1;
 }
@@ -2811,6 +2756,8 @@ static int window_gpu_progress(IcoDiagGpu *out)
     out->submitted_ago_s = (double)p.submittedAgoNs / 1e9;
     out->replay = p.replay;
     out->frame = p.frame;
+    out->bg_pipes_done = p.bgPipesDone;
+    out->bg_pipes_left = p.bgPipesLeft;
     return 1;
 }
 
@@ -2859,6 +2806,9 @@ static int device_lost_quit(void)
     if (!rhi_device_lost()) {
         return 0;
     }
+    /* the render thread's picture in hand finishes first: the pass ring and
+       the frames below are read with nothing else running */
+    (void)ico_render_thread_drain();
     /* the start-up screens and the pump all ask: one line and one box */
     if (!s_shown) {
         s_shown = 1;
@@ -2907,7 +2857,6 @@ static int device_lost_quit(void)
                      "github.com/nathanialf/ico-pc/issues and attach the newest file in logs "
                      "that starts with report- (this time: %s): it shows what was being drawn.",
                      report);
-            SDL_ShowSimpleMessageBox(SDL_MESSAGEBOX_ERROR, "ICO PC", text, s_window);
         } else if (dumpName[0] != '\0') {
             snprintf(also, sizeof(also), " and the file %s beside it", dumpName);
         } else {
@@ -2922,8 +2871,14 @@ static int device_lost_quit(void)
                      "drawn.",
                      logs[0] != '\0' ? " (" : "", logs, logs[0] != '\0' ? "/ico-pc.log)" : "", also,
                      dumpName[0] != '\0' ? "together they show" : "it says");
-            SDL_ShowSimpleMessageBox(SDL_MESSAGEBOX_ERROR, "ICO PC", text, s_window);
         }
+#ifdef __ANDROID__
+        const char *note = ico_gpu_driver_android_hang_note(); /* issue 123 */
+        if (note != NULL) {
+            snprintf(text + strlen(text), sizeof(text) - strlen(text), "\n\n%s", note);
+        }
+#endif
+        SDL_ShowSimpleMessageBox(SDL_MESSAGEBOX_ERROR, "ICO PC", text, s_window);
 #else
         char text[1024];
         char also[256];
@@ -2962,6 +2917,11 @@ static int device_lost_quit(void)
     return 1;
 }
 
+/* picture limit for the bug-report capture: the presented picture goes in
+   the zip at most this wide (rd_capture_presented_max box-downscales it): a
+   1920 x 1080 PNG is ~6.2 MB stored, less in the zip */
+#define REPORT_PICTURE_MAX_W 1920u
+
 /* F12, the frame on the screen for a bug report, in <pref>/dumps: a PNG
    and a zip of the rd dump, the tick before's (rd_dump_prev_frame: with it
    rd_replay_tool --interp rebuilds the pictures between the two, where the
@@ -2971,7 +2931,9 @@ static int device_lost_quit(void)
    loose .rddump deleted by ico_frame_dump_zip once the zip is written; when the zip fails the
    .rddump is kept. The log is logs/ico-pc.log, a file on Android too; with
    --console there is none and the zip holds the dump alone. */
-static void frame_dump(void)
+/* forReport: Settings' bug-report capture (the presented picture goes into
+   the zip too); F12 leaves the PNG loose as ever */
+static void frame_dump(int forReport)
 {
     char pref[ICO_PATH_MAX], dir[ICO_PATH_MAX], dump[ICO_PATH_MAX], png[ICO_PATH_MAX],
         zip[ICO_PATH_MAX], prev[ICO_PATH_MAX + 8], why[160];
@@ -3002,8 +2964,10 @@ static void frame_dump(void)
        present (the .png above is the whole DISPLAY frame, which at 16:9 is
        wider than the window's picture; tools/native_frame_check.py reads
        that one) */
+    s_pres.reportZip[0] = '\0';
     if (ico_frame_present_path(dir, stamp, s_pres.presentPng, sizeof(s_pres.presentPng)) == 0 &&
-        !rd_capture_presented(s_pres.presentPng)) {
+        !(forReport ? rd_capture_presented_max(s_pres.presentPng, REPORT_PICTURE_MAX_W)
+                    : rd_capture_presented(s_pres.presentPng))) {
         fprintf(stderr, "window: F12: the presented picture could not be armed\n");
         s_pres.presentPng[0] = '\0';
     }
@@ -3024,16 +2988,30 @@ static void frame_dump(void)
                                 sizeof(why));
     }
     s_pres.presentDumpPrev = havePrev && zr >= 0;
+    if (forReport && zr >= 0 && s_pres.presentPng[0] != '\0') {
+        snprintf(s_pres.reportZip, sizeof(s_pres.reportZip), "%s", zip);
+    }
     if (zr < 0) {
         fprintf(stderr, "window: dump: zip not written: %s%s\n", why,
                 ok ? "; the .rddump is kept" : "");
     }
-    fprintf(stderr, "window: F12 at vsync %u, Main tick %u, frame %u: %s %s%s%s (%s)\n",
+    /* the next present's own frame when drawn between the ticks (issue
+       163), the zip's third .rddump (rd_replay_tool takes the first two) */
+    const int blended = window_blended_arm(dump, zr >= 0 && s_pres.presentDumpPrev ? zip : NULL);
+    fprintf(stderr, "window: F12 at vsync %u, Main tick %u, frame %u: %s %s%s%s (%s%s)\n",
             ico_host_vsync_count(), ico_host_main_ticks(), (unsigned)rd_frame_number(),
             ok ? "wrote" : "could not write all of", png, zr >= 0 ? " and " : "",
             zr >= 0 ? zip : "",
             havePrev ? "with the tick before: rd_replay_tool --interp rebuilds the pictures between"
-                     : "without the tick before");
+                     : "without the tick before",
+            blended ? "; the next present's frame if between the ticks" : "");
+    if (forReport) {
+        fprintf(stderr, "window: bug report: %s\n",
+                s_pres.reportZip[0] != '\0'
+                    ? "the presented picture goes into the zip when it is written (at most 1920 "
+                      "px wide)"
+                    : "the zip or the picture was not made, the zip has no picture");
+    }
 }
 
 /* Settings > Save a picture for a bug report (the Main page; settings.h
@@ -3054,7 +3032,7 @@ static void report_picture_pump(void)
     }
     s_reportDumpAt = 0;
     fprintf(stderr, "window: the picture for a bug report (Settings, 3 s after the press):\n");
-    frame_dump();
+    frame_dump(1);
 }
 
 #if ICO_RC_TOOLS && defined(__ANDROID__)
@@ -3110,155 +3088,6 @@ static void share_report_pump(void)
 }
 #endif
 
-/* Shift+F12 in photo mode, the aspect sweep: the paused frame captured at
-   4:3, 16:9, 32:9, 48:9 and 60:9 into <pref>/dumps/sweep-<time>.zip, each
-   aspect's <aspect>.rddump and <aspect>.png (dump_zip.h ico_sweep_zip), for
-   tools/native_frame_check.py.
-
-   The game builds its frame at the width gsFrame holds, latched at each
-   flip from ico_video_frame (GsBase.c gsbHostFrameLatch), so the sweep forces
-   the aspect there (ico_video_frame_force_aspect) and waits.  At the next
-   flip the latch makes the new width and remakes rd's scene-sized targets
-   (rd_reset_scene, the 50/60 Hz switch's path), and the paused tick that
-   follows draws from the photo camera (photo_view.c ico_photo_view_tick) and
-   rebuilds the game's matrices at that width, +0x280 the cull's included,
-   each tick: no game state is touched.  Once the last closed frame is a frame
-   at the width and SWEEP_SETTLE closed frames have followed it (the feedback
-   passes and the blended picture settle), the normal F12 path takes it
-   (rd_dump_on_demand: the .rddump and the DISPLAY .png at the native width).
-   After the last aspect, or on leaving photo mode or a timeout, the forcing
-   is cleared: the next flip latches the live width back with its
-   rd_reset_scene.  The window shows the sweep's frames meanwhile (a second
-   or two); the presentation's aspect stays the live one. */
-#define SWEEP_SETTLE 4
-#define SWEEP_TIMEOUT_PUMPS 900
-
-static struct {
-    int active, idx, captured, seen, waited;
-    unsigned lastNumber;
-    char prefix[ICO_PATH_MAX], zip[ICO_PATH_MAX];
-} s_sweep;
-
-static void sweep_finish(const char *reason)
-{
-    char why[160];
-
-    ico_video_frame_force_aspect(0.0f);
-    s_sweep.active = 0;
-    why[0] = '\0';
-    if (reason != NULL) {
-        fprintf(stderr, "window: aspect sweep: %s\n", reason);
-    }
-    if (s_sweep.captured > 0) {
-        ico_host_log_flush();
-        const int n = ico_sweep_zip(s_sweep.zip, s_sweep.prefix, why, sizeof(why));
-
-        if (n >= 0) {
-            fprintf(stderr, "window: aspect sweep: %d of %d aspects in %s\n", n, ICO_SWEEP_COUNT,
-                    s_sweep.zip);
-        } else {
-            fprintf(stderr, "window: aspect sweep: zip not written: %s; the loose files are kept\n",
-                    why);
-        }
-    } else {
-        fprintf(stderr, "window: aspect sweep: nothing captured\n");
-    }
-}
-
-static void sweep_start(void)
-{
-    char pref[ICO_PATH_MAX], dir[ICO_PATH_MAX], stamp[32];
-    const time_t now = time(NULL);
-    const struct tm *tm = localtime(&now);
-
-    if (s_sweep.active) {
-        return;
-    }
-    if (!ico_photo_active()) {
-        fprintf(stderr, "window: aspect sweep: Shift+F12 works in photo mode only\n");
-        return;
-    }
-    if (tm == NULL || strftime(stamp, sizeof(stamp), "%Y%m%d-%H%M%S", tm) == 0) {
-        snprintf(stamp, sizeof(stamp), "unknown");
-    }
-    ico_host_pref_dir(pref, sizeof(pref));
-    if (ico_path_join(dir, sizeof(dir), pref, "dumps") != 0 || ico_make_dir(dir) != 0 ||
-        ico_sweep_paths(dir, stamp, s_sweep.prefix, sizeof(s_sweep.prefix), s_sweep.zip,
-                        sizeof(s_sweep.zip)) != 0) {
-        fprintf(stderr, "window: aspect sweep: no usable dumps folder under %s\n", pref);
-        return;
-    }
-    s_sweep.active = 1;
-    s_sweep.idx = 0;
-    s_sweep.captured = 0;
-    s_sweep.seen = 0;
-    s_sweep.waited = 0;
-    s_sweep.lastNumber = 0;
-    fprintf(stderr, "window: aspect sweep: starts, %d aspects\n", ICO_SWEEP_COUNT);
-    ico_video_frame_force_aspect(ico_sweep_aspect_value(0));
-}
-
-/* one pump of the sweep: capture the aspect in force once its frame has
-   settled, then ask for the next */
-static void sweep_pump(void)
-{
-    IcoFrame want;
-    uint32_t number = 0, w = 0;
-    float aspect = 0.0f;
-    char dump[ICO_PATH_MAX], png[ICO_PATH_MAX];
-
-    if (!s_sweep.active) {
-        return;
-    }
-    if (!ico_photo_active()) {
-        sweep_finish("left photo mode");
-        return;
-    }
-    if (++s_sweep.waited > SWEEP_TIMEOUT_PUMPS) {
-        fprintf(stderr, "window: aspect sweep: no frame at %s after %d vsyncs\n",
-                ico_sweep_aspect_name(s_sweep.idx), SWEEP_TIMEOUT_PUMPS);
-        sweep_finish("gave up");
-        return;
-    }
-    ico_frame_make(&want, ico_sweep_aspect_value(s_sweep.idx), 448);
-    if (!rd_last_frame_native(&number, &aspect, &w) || (int)w != want.w ||
-        aspect < want.aspect - 1e-3f || aspect > want.aspect + 1e-3f) {
-        s_sweep.seen = 0;
-        return;
-    }
-    if (number != s_sweep.lastNumber) {
-        s_sweep.lastNumber = number;
-        s_sweep.seen++;
-    }
-    if (s_sweep.seen < SWEEP_SETTLE) {
-        return;
-    }
-    if (snprintf(dump, sizeof(dump), "%s%s.rddump", s_sweep.prefix,
-                 ico_sweep_aspect_name(s_sweep.idx)) >= (int)sizeof(dump) ||
-        snprintf(png, sizeof(png), "%s%s.png", s_sweep.prefix,
-                 ico_sweep_aspect_name(s_sweep.idx)) >= (int)sizeof(png)) {
-        sweep_finish("the capture path is too long");
-        return;
-    }
-    if (rd_dump_on_demand(dump, png)) {
-        s_sweep.captured++;
-        fprintf(stderr, "window: aspect sweep: %s at frame %u, GS width %u\n",
-                ico_sweep_aspect_name(s_sweep.idx), (unsigned)number, (unsigned)w);
-    } else {
-        fprintf(stderr, "window: aspect sweep: %s could not be written\n",
-                ico_sweep_aspect_name(s_sweep.idx));
-    }
-    s_sweep.idx++;
-    s_sweep.seen = 0;
-    s_sweep.waited = 0;
-    s_sweep.lastNumber = 0;
-    if (s_sweep.idx >= ICO_SWEEP_COUNT) {
-        sweep_finish(NULL);
-    } else {
-        ico_video_frame_force_aspect(ico_sweep_aspect_value(s_sweep.idx));
-    }
-}
-
 /* Cross in photo mode: the picture shown at the next present into
    <pref>/<[photo] png_dir>/ico-<time>.png (rd_capture_presented); the
    result comes back at a later pump (photo_pump) */
@@ -3308,6 +3137,7 @@ static void photo_pump(void)
             photo_capture();
         }
     }
+    window_blended_pump(); /* F12's blended present's frame into its zip */
     {
         char path[ICO_PATH_MAX];
         const int r = rd_capture_result(path, sizeof(path));
@@ -3356,6 +3186,27 @@ static void photo_pump(void)
                 }
                 fprintf(stderr, "window: F12: %s %s%s\n", r > 0 ? "wrote" : "could not write", path,
                         what);
+                if (s_pres.reportZip[0] != '\0') {
+                    char why[160], entry[ICO_PATH_MAX];
+                    size_t bytes = 0;
+                    const char *b = strrchr(path, '/');
+#ifdef _WIN32
+                    const char *b2 = strrchr(path, '\\');
+
+                    b = b2 != NULL && (b == NULL || b2 > b) ? b2 : b;
+#endif
+                    snprintf(entry, sizeof(entry), "%s", b != NULL ? b + 1 : path);
+                    why[0] = '\0';
+                    if (r > 0 && ico_zip_add_file(s_pres.reportZip, path, entry, why, sizeof(why),
+                                                  &bytes) == 0) {
+                        fprintf(stderr, "window: bug report: %s (%zu bytes) added to %s\n", entry,
+                                bytes, s_pres.reportZip);
+                    } else {
+                        fprintf(stderr, "window: bug report: the picture is not in %s: %s\n",
+                                s_pres.reportZip, r > 0 ? why : "it could not be written");
+                    }
+                    s_pres.reportZip[0] = '\0';
+                }
                 s_pres.presentPng[0] = '\0';
                 s_pres.presentInfoPending = s_pres.presentInfoHave = 0;
             } else {
@@ -3363,6 +3214,22 @@ static void photo_pump(void)
             }
         }
     }
+}
+
+/* a save state's picture: the frame shown after the save (state.h) */
+static void state_thumb_pump(void)
+{
+    uint32_t w = 0, h = 0;
+    uint8_t *px;
+
+    if (!ico_state_wants_thumbnail() || !rd_read_display(NULL, &w, &h) ||
+        (px = malloc((size_t)w * h * 4)) == NULL) {
+        return;
+    }
+    if (rd_read_display(px, &w, &h)) {
+        ico_state_thumbnail(px, (int)w, (int)h);
+    }
+    free(px);
 }
 
 /* F11, the stats lines every second for 30 s */
@@ -3793,11 +3660,24 @@ int ico_window_pump(void)
         case SDL_EVENT_KEY_DOWN:
             hotkey = ico_hotkey_for_mod(e.key.key, e.key.repeat, (e.key.mod & SDL_KMOD_SHIFT) != 0);
             if (hotkey == ICO_HOTKEY_FRAME_DUMP) {
-                frame_dump();
+                frame_dump(0);
             } else if (hotkey == ICO_HOTKEY_ASPECT_SWEEP) {
-                sweep_start();
+                window_sweep_start();
             } else if (hotkey == ICO_HOTKEY_STATS_FAST) {
                 stats_fast_toggle();
+            } else if (hotkey == ICO_HOTKEY_STATE_SAVE || hotkey == ICO_HOTKEY_STATE_LOAD) {
+                /* save states' slot 1 (state.h; performed at the next poll) */
+                (hotkey == ICO_HOTKEY_STATE_SAVE ? ico_state_request_save
+                                                 : ico_state_request_load)(1);
+            } else if (hotkey == ICO_HOTKEY_STATES_PAGE) {
+                /* the Save states page (settings.h); in play Start first */
+                IcoCaptureState c;
+
+                capture_state(&c);
+                if (ui_settings_states_key(ico_start_opens_pause(&c))) {
+                    ico_input_escape(1, &c);
+                    ico_input_escape(0, NULL);
+                }
             } else if (e.key.key == SDLK_F11 || e.key.key == SDLK_F12) {
                 /* a held key's repeats: nothing */
             } else if (escape_key(e.key.key)) {
@@ -3839,7 +3719,7 @@ int ico_window_pump(void)
             if (s_disp.clock != 0) {
                 /* the display clock on the new display's output, and the
                    lock started again on it (pace_locked) */
-                disp_clock_stop();
+                window_disp_clock_stop();
                 disp_clock_start();
                 s_pres.lockN = 0;
             }
@@ -3952,7 +3832,8 @@ int ico_window_pump(void)
         const Uint64 t1 = SDL_GetTicksNS();
 
         photo_pump();                /* photo mode's captures */
-        sweep_pump();                /* Shift+F12's aspect sweep */
+        state_thumb_pump();          /* a save state's picture */
+        window_sweep_pump();         /* Shift+F12's aspect sweep */
         set_capture(capture_mode()); /* play and photo mode */
         pointer_visibility();        /* the pointer in the menus */
         pump_slow("captures and the pointer", t1);
@@ -3970,6 +3851,8 @@ int ico_window_pump(void)
     ui_popup_set_vsync_hz(ico_host_vsync_hz());
     ui_host_vsync(ico_host_main_ticks());
     s_pres.pumpMs = (double)(SDL_GetTicksNS() - t0) / 1e6;
+    s_pres.pumpSumMs += s_pres.pumpMs;
+    s_pres.pumpCount++;
     if (s_pres.pumpMs > s_pres.pumpMaxMs) {
         s_pres.pumpMaxMs = s_pres.pumpMs;
     }
@@ -4259,8 +4142,9 @@ static int pipeline_progress(void *ctx, uint32_t done, uint32_t total)
              (unsigned)total);
     estimate = pipe_estimate(left, sizeof(left), elapsedMs / 1000.0, done, total);
 #ifdef __ANDROID__
-    /* the driver keeps what it prepared: the next starts take seconds */
-    once = "This happens once after an update";
+    /* the driver keeps what it prepared, under a name an update keeps
+       while the shaders are the same (rd_cache_name.h) */
+    once = "This happens once after an update that changes the graphics";
 #endif
     p->drawn = 1;
     /* 1 from a screen that cannot stop: the device was lost */
@@ -4466,26 +4350,6 @@ static void auto_res_sample(const RdPerfRecord *r)
    first line counts them all), and the block's longest at its end when the
    cap kept it out (slow_replay_longest).  The records arrive two replays
    late (rd_perf.c), so the vsync is the one the record was drained at. */
-static void slow_replay_line(const RdPerfRecord *r, unsigned vsync, const char *note)
-{
-    char gpu[32] = "no GPU timestamps";
-
-    if (r->gpuValid) {
-        snprintf(gpu, sizeof(gpu), "GPU %.1f ms", r->gpuMs);
-    }
-    fprintf(stderr,
-            "window: slow replay %.1f ms (replay %u, frame %u, alpha %.2f, about vsync %u): interp "
-            "%.1f, wait %.1f (fence %.1f), acquire %.1f, upload %.1f, walk %.1f, bind %.1f, "
-            "submit %.1f, present %.1f; %u textures and %u meshes (%u KB) uploaded (%u KB in "
-            "all), %u pipelines created, %u allocations, %u buffers and %u textures created, %u "
-            "DATE snapshots; %s%s\n",
-            r->totalMs, r->replay, r->frame, (double)r->alpha, vsync, r->interpMs, r->waitMs,
-            r->fenceWaitMs, r->acquireMs, r->uploadMs, r->walkMs, r->bindMs, r->submitMs,
-            r->presentMs, r->textureUploads, r->meshUploads, (unsigned)(r->meshUploadBytes / 1024u),
-            (unsigned)(r->uploadBytes / 1024u), r->pipelineCreates, r->memoryAllocs,
-            r->buffersCreated, r->texturesCreated, r->dateSnapshots, gpu, note);
-}
-
 static void slow_replay(const RdPerfRecord *r)
 {
     const int longest = r->totalMs > s_perf.longest.totalMs;
@@ -4502,7 +4366,7 @@ static void slow_replay(const RdPerfRecord *r)
     if (longest) {
         s_perf.longestShown = 1;
     }
-    slow_replay_line(r, ico_host_vsync_count(), "");
+    window_slow_replay_line(r, ico_host_vsync_count(), "");
 }
 
 /* At the block's end: its longest replay over a refresh, when the cap of
@@ -4513,32 +4377,23 @@ static void slow_replay_longest(void)
         char note[64];
 
         snprintf(note, sizeof(note), "; the block's longest, past its %d lines", SLOW_REPLAY_LINES);
-        slow_replay_line(&s_perf.longest, s_perf.longestVsync, note);
+        window_slow_replay_line(&s_perf.longest, s_perf.longestVsync, note);
         s_perf.longestShown = 1;
     }
 }
 
-/* A replay whose present phase (RdPerfRecord.presentMs: the driver's
-   present call) took over 50 ms: the 10 s count, and over 250 ms a line
-   naming the driver (issue 123: 363-583 ms in Qualcomm's
-   vkQueuePresentKHR) */
+/* A present over 50 ms in the driver's present call (RdPerfRecord.presentMs):
+   the 10 s count; the line and the FIFO fallback's count in
+   window_present_fallback.c */
 static void present_blocked(const RdPerfRecord *r)
 {
-    const RhiLimits *l = rhi_limits();
     char fr[16];
 
     s_perf.presentBlocked++;
     s_perf.presentBlockedMaxMs =
         r->presentMs > s_perf.presentBlockedMaxMs ? r->presentMs : s_perf.presentBlockedMaxMs;
-    if (r->presentMs > 250.0) {
-        ico_log_limited("window: present blocked",
-                        "window: a present blocked %.0f ms in the driver's present call (replay "
-                        "%u; %s on %s, %s; present %s, framerate %s)",
-                        r->presentMs, r->replay, rhi_backend_kind_name(rhi_backend()),
-                        rhi_adapter_name(), l && l->driverText ? l->driverText : "driver unknown",
-                        rhi_present_mode_name(),
-                        ico_video_framerate_name(s_pres.framerate, fr, sizeof(fr)));
-    }
+    window_fifo_note(r->presentMs, r->replay,
+                     ico_video_framerate_name(s_pres.framerate, fr, sizeof(fr)));
 }
 
 /* The finished records into the block's sums and the CSV */
@@ -4547,12 +4402,13 @@ static void perf_drain(void)
     RdPerfRecord r;
     double refreshMs = -1.0; /* the slow-replay threshold, read at the first record */
 
+    window_video_memory_watch();
     while (rd_perf_pop(&r)) {
         auto_res_sample(&r);
         if (r.presented && r.gpuValid) {
             /* the present allowance's GPU gate and budget: a timed
-               replay's GPU time (two replays late), the median of the
-               last 8 (not the replays line's block mean) */
+               replay's GPU span (two replays late; gpuIsSpan true), the
+               median of the last 8 (not the replays line's block mean) */
             s_pres.gpuNs = pace_hist_add(&s_pres.gpuHist, (Uint64)(r.gpuMs * 1e6));
         }
         if (r.presented && r.presentMs > 50.0) {
@@ -4592,7 +4448,7 @@ static void perf_drain(void)
                 [PERF_PH_READBACK] = r.readbackMs, [PERF_PH_FENCE] = r.fenceWaitMs};
 
             if (refreshMs < 0.0) {
-                refreshMs = (double)display_refresh_ns(0) / 1e6; /* 0: none, never over */
+                refreshMs = (double)window_refresh_ns(0) / 1e6; /* 0: none, never over */
             }
             if (perf_block_add(&s_perf.ph, ph, r.totalMs, refreshMs)) {
                 slow_replay(&r);
@@ -4612,11 +4468,17 @@ static void perf_drain(void)
                 s_perf.gpuPost[p] += r.gpuPostMs[p];
             }
             s_perf.gpuPostPartial += r.gpuPostPartial;
+            if (r.gpuGapValid) {
+                pace_gpu_gap_add(&s_perf.gpuGap, (uint64_t)(r.gpuMs * 1e6), r.gpuGapNs);
+            }
         }
         s_perf.draws += r.draws;
         s_perf.passes += r.renderPasses;
         s_perf.pipeBinds += r.pipelineBinds;
         s_perf.groupBinds += r.bindGroupBinds;
+        s_perf.pipeSkips += r.pipelineBindsSkipped;
+        s_perf.groupSkips += r.bindGroupBindsSkipped;
+        s_perf.stateSkips += r.stateSetsSkipped;
         s_perf.groups += r.bindGroups;
         s_perf.barriers += r.barriers;
         s_perf.copies += r.copies;
@@ -4642,9 +4504,19 @@ static void perf_drain(void)
         s_perf.fxConstant += r.fxConstant;
         s_perf.fxAdditive += r.fxAdditive;
         s_perf.fxLocal += r.fxLocal;
+        s_perf.fxLocalDate += r.fxLocalDate;
         s_perf.vuNoPlanes += r.vuNoPlanes;
+        window_pipeline_skip_count(r.spriteNoPlanes);
         s_perf.constReads += r.constReads;
         s_perf.constKept += r.constKept;
+        s_perf.fadesFolded += r.fadesFolded;
+        s_perf.passAreas += r.passAreas;
+        s_perf.passAreaTiles += r.passAreaTiles;
+        s_perf.passAreaTargetTiles += r.passAreaTargetTiles;
+        s_perf.passAreaEnds += r.passAreaEnds;
+        for (int k = 0; k < RD_AREA_WHY_COUNT; k++) {
+            s_perf.passAreaWhy[k] += r.passAreaWhy[k];
+        }
         s_perf.pipeCreates += r.pipelineCreates;
         s_perf.msaaResolves += r.msaaResolves;
         if (r.msaaSamples > s_perf.msaaSamples) {
@@ -4735,9 +4607,9 @@ static void perf_log(void)
 
         fprintf(stderr,
                 "window: present blocked %u times over 50 ms, longest %.0f ms (mode %s, "
-                "framerate %s)\n",
+                "framerate %s)%s\n",
                 s_perf.presentBlocked, s_perf.presentBlockedMaxMs, rhi_present_mode_name(),
-                ico_video_framerate_name(s_pres.framerate, fr, sizeof(fr)));
+                ico_video_framerate_name(s_pres.framerate, fr, sizeof(fr)), window_fifo_block());
     }
     if (s_perf.gpuN) {
         /* the GPU time per replay by list and by picture effect (each
@@ -4761,16 +4633,25 @@ static void perf_log(void)
         }
         fprintf(stderr,
                 "window: GPU ms per replay: lists 0-12 %s; effects: %s%s; present %.2f; VU "
-                "pre-pass %.2f\n",
-                lists, posts, partial, s_perf.gpuPresent / g, s_perf.gpuPrepass / g);
+                "pre-pass %.2f%s\n",
+                lists, posts, partial, s_perf.gpuPresent / g, s_perf.gpuPrepass / g,
+                window_tiler_words());
+    }
+    if (s_perf.gpuGap.n) {
+        /* whether the spans overlap (the step rule's GPU time a picture
+           over the GPU's own) or the GPU waited between replays */
+        char gap[384];
+
+        pace_gpu_gap_text(&s_perf.gpuGap, gap, sizeof(gap));
+        fprintf(stderr, "window: GPU between replays: %s\n", gap);
     }
     if (s_perf.passAgg.replays) {
         /* the timed replays' most expensive passes, each timed between
-           stamps outside the render passes (rd_perf.c, the passes) */
+           stamps outside the render passes (rd_perf.c) */
         char top[1024];
 
         rd_perf_pass_agg_text(&s_perf.passAgg, 5, top, sizeof(top));
-        fprintf(stderr, "window: GPU top passes: %s\n", top);
+        fprintf(stderr, "window: GPU top passes: %s%s\n", top, window_tiler_words());
     }
     {
         /* what a replay begins (the passes' count, for the tilers' fixed
@@ -4796,36 +4677,50 @@ static void perf_log(void)
                 s_perf.streamBytes / n / 1024.0, (other > 0.0 ? other : 0.0) / n / 1024.0,
                 rd_perf_backend_text());
     }
-    fprintf(stderr,
-            "window: per replay %.0f draws, %.0f passes, %.0f pipeline and %.0f bind group binds, "
-            "%.0f bind groups, %.0f barriers, %.0f copies, %.0f KB uploaded (%.0f KB meshes), "
-            "%.1f textures and %.1f meshes uploaded, %.1f DATE snapshots, %.1f exact blends, "
-            "%.0f destination-read draws, %.0f storage passes, %.0f pass switches for the exact "
-            "blend, glow %.0f passes, %.1f snapshots copied and %.1f swapped, %.1f draws "
-            "resampled above 1x, VU pre-pass %.0f vertices in %.0f draws (%.1f draws the old "
-            "way); in the block %llu buffers and %llu textures created, %llu and %llu "
-            "destroyed, %llu memory allocations, %llu pipelines created, %llu fence waits, "
-            "%llu wait-idles, %llu readbacks\n",
-            s_perf.draws / n, s_perf.passes / n, s_perf.pipeBinds / n, s_perf.groupBinds / n,
-            s_perf.groups / n, s_perf.barriers / n, s_perf.copies / n, s_perf.bytes / n / 1024.0,
-            s_perf.meshBytes / n / 1024.0, s_perf.texUploads / n, s_perf.meshUploads / n,
-            s_perf.dateSnaps / n, s_perf.exact / n, s_perf.dstDraws / n, s_perf.storagePasses / n,
-            s_perf.dstSwitches / n, s_perf.glowPasses / n, s_perf.snapshots / n,
-            s_perf.snapSwaps / n, s_perf.a1xDraws / n, s_perf.vuPreVerts / n, s_perf.vuPreDraws / n,
-            s_perf.vuPreFallbacks / n, (unsigned long long)s_perf.bufCreated,
-            (unsigned long long)s_perf.texCreated, (unsigned long long)s_perf.bufDestroyed,
-            (unsigned long long)s_perf.texDestroyed, (unsigned long long)s_perf.allocs,
-            (unsigned long long)s_perf.pipeCreates, (unsigned long long)s_perf.fenceWaits,
-            (unsigned long long)s_perf.waitIdles, (unsigned long long)s_perf.readbacks);
+    char areaWhy[512]; /* "; 2.0 passes kept whole a replay (...)" (rd_perf_why_text) */
+    rd_perf_why_text(areaWhy + 2, sizeof(areaWhy) - 2, 0, s_perf.passAreaWhy, n);
+    areaWhy[0] = areaWhy[2] ? ';' : '\0';
+    areaWhy[1] = ' ';
+    fprintf(
+        stderr,
+        "window: per replay %.0f draws, %.0f passes, %.0f pipeline and %.0f bind group binds "
+        "(repeats skipped: %.0f pipeline, %.0f bind group, %.0f state), %.0f bind groups, %.0f barriers, %.0f copies, %.0f KB uploaded (%.0f KB meshes), "
+        "%.1f textures and %.1f meshes uploaded, %.1f DATE snapshots, %.1f exact blends, "
+        "%.0f destination-read draws, %.0f storage passes, %.0f pass switches for the exact "
+        "blend, glow %.0f passes, %.1f snapshots copied and %.1f swapped, %.1f draws "
+        "resampled above 1x, VU pre-pass %.0f vertices in %.0f draws (%.1f draws the old "
+        "way); in the block %llu buffers and %llu textures created, %llu and %llu "
+        "destroyed, %llu memory allocations, %llu pipelines created, %llu fence waits, "
+        "%llu wait-idles, %llu readbacks; %.1f passes with an area (%.0f %% of the picture's "
+        "tiles loaded, %.1f ended early)%s\n",
+        s_perf.draws / n, s_perf.passes / n, s_perf.pipeBinds / n, s_perf.groupBinds / n,
+        s_perf.pipeSkips / n, s_perf.groupSkips / n, s_perf.stateSkips / n, s_perf.groups / n,
+        s_perf.barriers / n, s_perf.copies / n, s_perf.bytes / n / 1024.0,
+        s_perf.meshBytes / n / 1024.0, s_perf.texUploads / n, s_perf.meshUploads / n,
+        s_perf.dateSnaps / n, s_perf.exact / n, s_perf.dstDraws / n, s_perf.storagePasses / n,
+        s_perf.dstSwitches / n, s_perf.glowPasses / n, s_perf.snapshots / n, s_perf.snapSwaps / n,
+        s_perf.a1xDraws / n, s_perf.vuPreVerts / n, s_perf.vuPreDraws / n,
+        s_perf.vuPreFallbacks / n, (unsigned long long)s_perf.bufCreated,
+        (unsigned long long)s_perf.texCreated, (unsigned long long)s_perf.bufDestroyed,
+        (unsigned long long)s_perf.texDestroyed, (unsigned long long)s_perf.allocs,
+        (unsigned long long)s_perf.pipeCreates, (unsigned long long)s_perf.fenceWaits,
+        (unsigned long long)s_perf.waitIdles, (unsigned long long)s_perf.readbacks,
+        s_perf.passAreas / n,
+        s_perf.passAreaTargetTiles
+            ? 100.0 * (double)s_perf.passAreaTiles / (double)s_perf.passAreaTargetTiles
+            : 100.0,
+        s_perf.passAreaEnds / n, areaWhy);
     /* the pixel diet (rd_alpha_plan.c, rd_fx_plan.c, rd_pixel_plan.c; the
        flags are the rd: profile line's) */
     fprintf(stderr,
             "window: pixel diet per replay: alpha plan %.1f one-pass, %.1f opaque; fx plan %.1f "
-            "constant, %.1f additive, %.1f local; vu no-planes %.1f; constant reads %.1f "
-            "(%.1f target reads kept)\n",
+            "constant, %.1f additive, %.1f local (%.1f post sprites' DATE by local read); vu "
+            "no-planes %.1f; constant reads %.1f (%.1f target reads kept); fades fold %.1f\n",
             s_perf.alphaOnePass / n, s_perf.alphaOpaque / n, s_perf.fxConstant / n,
-            s_perf.fxAdditive / n, s_perf.fxLocal / n, s_perf.vuNoPlanes / n, s_perf.constReads / n,
-            s_perf.constKept / n);
+            s_perf.fxAdditive / n, s_perf.fxLocal / n, s_perf.fxLocalDate / n,
+            s_perf.vuNoPlanes / n, s_perf.constReads / n, s_perf.constKept / n,
+            s_perf.fadesFolded / n);
+    window_pipeline_skip_line();
     if (s_perf.msaaSamples) {
         /* the anti-aliasing's cost: its resolves' GPU time is the effects'
            "MSAA resolve" above (one a replay at most); where the last
@@ -4848,60 +4743,22 @@ static void perf_log(void)
                 "other than the scene's (%llu in the block)\n",
                 (double)s_perf.blockOtherScale / n, (unsigned long long)s_perf.blockOtherScale);
     }
-    {
-        /* the graphics allocations against the device's limit (a
-           phone GPU allows 4096) and the process's memory (a phone ends a
-           process that holds too much without a word) */
-        RhiStats st;
-        long rss = -1, peak = -1, avail = -1, total = -1;
-
-        char gfx[160] = "graphics allocations not counted";
-        char dev[96] = "; device memory unknown";
-
-        rhi_get_stats(&st);
-        ico_diag_process_memory(&rss, &peak);
-        /* and the device's (issue 128: what the system has left decides
-           when it ends the app, not the app's own size) */
-        if (ico_diag_device_memory(&avail, &total) == 0) {
-            snprintf(dev, sizeof(dev), "; device %ld MB available of %ld MB", avail / 1024,
-                     total / 1024);
-        }
-        if (st.memoryLimit != 0) { /* Vulkan counts them */
-            snprintf(gfx, sizeof(gfx),
-                     "%llu graphics allocations alive (most %llu; the device allows %llu), "
-                     "%.0f MB (most %.0f MB)",
-                     (unsigned long long)st.memoryLive, (unsigned long long)st.memoryPeak,
-                     (unsigned long long)st.memoryLimit, (double)st.memoryLiveBytes / 1048576.0,
-                     (double)st.memoryPeakBytes / 1048576.0);
-        }
-        /* the RHI's pipeline pool (both backends): the most alive at once
-           against its size, and the creations that failed (a full pool's
-           and the driver's), so a log shows a pool that ran out */
-        char pipes[160];
-        snprintf(pipes, sizeof(pipes),
-                 "; pipelines %llu alive (most %llu of the pool's %llu), %llu creations failed "
-                 "(%llu for a full pool)",
-                 (unsigned long long)st.pipelinesLive, (unsigned long long)st.pipelinesPeak,
-                 (unsigned long long)st.pipelinePoolSize,
-                 (unsigned long long)(st.pipelineFailures + st.pipelinePoolFull),
-                 (unsigned long long)st.pipelinePoolFull);
-        if (rss >= 0) {
-            fprintf(stderr, "window: memory: %s; the process holds %ld MB (most %ld MB)%s%s\n", gfx,
-                    rss / 1024, (peak >= 0 ? peak : rss) / 1024, dev, pipes);
-        } else {
-            fprintf(stderr, "window: memory: %s%s\n", gfx, pipes);
-        }
-    }
+    window_memory_line();
     perf_reset();
 }
 
 /* The display clock stopped (the lock left, the window closing) */
-static void disp_clock_stop(void)
+void window_disp_clock_stop(void)
 {
     if (s_disp.clock != 0) {
         ico_display_clock_stop();
         s_disp.clock = 0;
     }
+}
+
+int window_disp_clock(void)
+{
+    return s_disp.clock;
 }
 
 /* The display clock started on the window's output (nothing when it
@@ -4923,7 +4780,7 @@ static void disp_clock_start(void)
 }
 
 /* A new lock: the display's counts start again, the clock started */
-static void disp_lock_start(void)
+void window_disp_lock_start(void)
 {
     const int clock = s_disp.clock;
 
@@ -4935,7 +4792,7 @@ static void disp_lock_start(void)
 /* The clock's next vblank, counted for the display line: 1 taken (*ns),
    0 none yet, -1 the clock is not running (it stopped itself: stopped
    here, logged) */
-static int disp_take(Uint64 refresh, uint64_t *ns)
+int window_disp_take(Uint64 refresh, uint64_t *ns)
 {
     int r;
 
@@ -4961,19 +4818,19 @@ static int disp_take(Uint64 refresh, uint64_t *ns)
 
 /* Every locked vsync: the clock's vblanks taken for the display line when
    the lock does not take them (lock_io_vblank: one taker) */
-static void disp_vsync(Uint64 refresh)
+void window_disp_vsync(Uint64 refresh)
 {
     uint64_t ns;
 
     if (s_pres.lock.clockKind == PACE_CLOCK_KIND_VBLANK && s_pres.lock.clock == PACE_CLOCK_ON) {
         return;
     }
-    while (disp_take(refresh, &ns) == 1) {}
+    while (window_disp_take(refresh, &ns) == 1) {}
 }
 
 /* A present the lock made that returned at s_pres.lastReturn and waited
    s_pres.lockWaitNs (the lock's own rule: a quarter of a refresh) */
-static void disp_present(Uint64 refresh)
+void window_disp_present(Uint64 refresh)
 {
     uint64_t count, refreshes, syncRefresh, syncNs;
 
@@ -5042,7 +4899,7 @@ static void disp_block_reset(void)
    is the vsyncs against the block's real time, and any lag the pacer had
    to drop (resyncs) says the step plus the presents took longer than real
    time; the longest replay names the frame that did. */
-static void pace_log(Uint64 now)
+void window_pace_log(Uint64 now)
 {
     ui_fps_tick(now);
     if (s_pres.statAt == 0) {
@@ -5155,23 +5012,26 @@ static void pace_log(Uint64 now)
             s_pres.budgetRefusedAt = s_pres.budgetDropsAt = s_pres.budgetClimbsAt = 0;
             s_pres.budgetClimbRefusalsAt = 0;
         }
-        pace_budget_block_text(b, s_pres.budgetRefusedAt, s_pres.budgetDropsAt,
-                               s_pres.budgetClimbsAt, s_pres.budgetClimbRefusalsAt, s_pres.gpuNs,
-                               rhi_timestamps_supported() ? "GPU not timed yet"
-                                                          : "no GPU timestamps",
-                               budget, sizeof(budget));
+        pace_budget_block_text(
+            b, s_pres.budgetRefusedAt, s_pres.budgetDropsAt, s_pres.budgetClimbsAt,
+            s_pres.budgetClimbRefusalsAt, s_pres.gpuNs, true,
+            rhi_timestamps_supported() ? "GPU not timed yet" : "no GPU timestamps", budget,
+            sizeof(budget));
         s_pres.budgetRefusedAt = b->refused;
         s_pres.budgetDropsAt = b->drops;
         s_pres.budgetClimbsAt = b->climbs;
         s_pres.budgetClimbRefusalsAt = b->climbRefusals;
         pace_budget_block(b); /* a new block: its lowest from now */
+        window_disc_block(b);
     }
+    const char *ow = window_orig_words(!rd_interpolation_active());
+
     fprintf(
         stderr,
         "window: %u presents, %u movie presents%s and %u game frames (%u frame numbers) in "
         "%.1f s: %.1f "
         "presented fps, %.1f game fps; %u vsyncs (%.1f Hz simulated), %u resyncs dropping "
-        "%.0f ms; skipped %u presents (late %u, slow %u)%s; longest replay %.1f ms of %u, %u "
+        "%.0f ms; skipped %u presents (late %u, slow %u)%s%s; longest replay %.1f ms of %u, %u "
         "over a refresh; %u steps over %.0f ms; "
         "framerate %s%s, present "
         "%s, display %.2f Hz (%.3f presents a refresh), window %dx%d%s; step late max %.1f "
@@ -5180,12 +5040,18 @@ static void pace_log(Uint64 now)
         fn - s_pres.statFrameNo, sec, s_pres.statPresents / sec, s_pres.statFrames / sec,
         s_pres.statVsyncs, s_pres.statVsyncs / sec, s_pres.statResyncs,
         (double)s_pres.statDropped / 1e6, s_pres.statSkipLate + s_pres.statSkipSlow,
-        s_pres.statSkipLate, s_pres.statSkipSlow, budget, maxMs, replays, s_perf.ph.over,
+        s_pres.statSkipLate, s_pres.statSkipSlow, ow, budget, maxMs, replays, s_perf.ph.over,
         s_pres.slowSteps, s_pres.slowMs, ico_video_framerate_name(s_pres.framerate, fr, sizeof(fr)),
         held, rhi_present_mode_name(), dm != NULL ? (double)dm->refresh_rate : 0.0,
         dm != NULL && dm->refresh_rate > 1.0f ? s_pres.statPresents / sec / dm->refresh_rate : 0.0,
         pw, ph, window_fullscreen() ? " fullscreen" : "", (double)s_pres.lateMaxNs / 1e6,
         s_pres.pumpMaxMs, lock);
+    window_hold_block(s_pres.stepSumMs, s_pres.stepCount, s_pres.stepMaxMs, s_pres.paceHz,
+                      s_perf.ph.total, s_perf.ph.n, !rd_interpolation_active(), fr);
+    /* the game thread's parts and the render thread's (render_thread.h) */
+    ico_render_thread_block_line(s_pres.stepCount ? s_pres.stepSumMs / s_pres.stepCount : 0.0,
+                                 s_perf.ph.n ? s_perf.ph.total / s_perf.ph.n : 0.0,
+                                 s_pres.pumpCount ? s_pres.pumpSumMs / s_pres.pumpCount : 0.0);
     /* the audio's 10 s line (out_sdl.c; the pull path's only) */
     ico_audio_sdl_log_summary();
     if (s_pres.lockN > 0) {
@@ -5202,7 +5068,8 @@ static void pace_log(Uint64 now)
     s_pres.statMovieFail = movieFail;
     s_pres.slowSteps = s_pres.slowLogged = 0;
     s_pres.lateMaxNs = 0;
-    s_pres.pumpMaxMs = 0.0;
+    s_pres.pumpMaxMs = s_pres.pumpSumMs = 0.0;
+    s_pres.pumpCount = 0;
 }
 
 /* The start-up's presents, one log line each: the boot shows black (keep
@@ -5224,7 +5091,7 @@ static struct {
     int done;
 } s_bootLog;
 
-static void boot_log(float alpha)
+void window_boot_log(float alpha)
 {
     RdPresentInfo pi;
 
@@ -5248,16 +5115,6 @@ static void boot_log(float alpha)
             pi.snap, (double)alpha, pi.firstOfTick ? " first" : "");
 }
 
-/* The pacer more than RESYNC_NS behind: the lag is dropped (counted) */
-static void resync(Uint64 now)
-{
-    s_pres.statResyncs++;
-    s_pres.statDropped += now - s_deadline;
-    s_deadline = now;
-}
-
-static void pace(int hz);
-
 /* A step (ico_host_step to this pace) over [dev] slow_step_ms: what ran
    in it.  "other" is the host loop's work between the step and the pump:
    the trace line, the pad recording and the log flush. */
@@ -5279,21 +5136,21 @@ static void slow_step(double ms)
     uint64_t cardStrips, cardTris;
     double cardMs;
     rd_vu_card_counts(&cardStrips, &cardTris, &cardMs);
-    fprintf(stderr,
-            "window: slow step %.1f ms at vsync %u (Main tick %u, stage %d%s): step %.1f "
-            "(vsync callbacks %.1f, audio %.1f, game threads %.1f in %lu switches, strip verdicts "
-            "%llu strips, %llu triangles, %.2f ms, achievements "
-            "%.1f), pump %.1f (events %.1f in %u, settings %.1f, input %.1f), other %.1f; %u "
-            "disc reads (%u sectors), %u texture decodes, %u pipelines created, memory card %s\n",
-            ms, ico_host_vsync_count(), ico_host_main_ticks(), p.stage,
-            p.loading ? ", loading" : "", p.totalMs, p.hooksMs, p.audioMs, p.threadsMs, p.switches,
-            (unsigned long long)(cardStrips - s_pres.stepCardStrips),
-            (unsigned long long)(cardTris - s_pres.stepCardTris), cardMs - s_pres.stepCardMs,
-            p.achMs, s_pres.pumpMs, s_pres.pumpEventsMs, s_pres.pumpEvents, s_pres.pumpSettingsMs,
-            s_pres.pumpInputMs, other > 0.0 ? other : 0.0, p.cdReads, p.cdSectors,
-            tc != NULL ? tc->decodes - s_pres.decodes : 0u,
-            rs != NULL ? rs->pipelineCreates - s_pres.pipeCreates : 0u,
-            p.mcPending ? "busy" : "idle");
+    fprintf(
+        stderr,
+        "window: slow step %.1f ms at vsync %u (Main tick %u, stage %d%s): step %.1f "
+        "(vsync callbacks %.1f, audio %.1f, game threads %.1f in %lu switches, strip verdicts "
+        "%llu strips, %llu triangles, %.2f ms, achievements "
+        "%.1f), pump %.1f (events %.1f in %u, settings %.1f, input %.1f), other %.1f; %u "
+        "disc reads (%u sectors), disc wait %.1f ms, %u texture decodes, %u pipelines created, memory card %s\n",
+        ms, ico_host_vsync_count(), ico_host_main_ticks(), p.stage, p.loading ? ", loading" : "",
+        p.totalMs, p.hooksMs, p.audioMs, p.threadsMs, p.switches,
+        (unsigned long long)(cardStrips - s_pres.stepCardStrips),
+        (unsigned long long)(cardTris - s_pres.stepCardTris), cardMs - s_pres.stepCardMs, p.achMs,
+        s_pres.pumpMs, s_pres.pumpEventsMs, s_pres.pumpEvents, s_pres.pumpSettingsMs,
+        s_pres.pumpInputMs, other > 0.0 ? other : 0.0, p.cdReads, p.cdSectors, p.cdWaitMs,
+        tc != NULL ? tc->decodes - s_pres.decodes : 0u,
+        rs != NULL ? rs->pipelineCreates - s_pres.pipeCreates : 0u, p.mcPending ? "busy" : "idle");
 }
 
 /* Every 2 s of samples, resolution "auto"'s step (one down at
@@ -5331,20 +5188,25 @@ void ico_window_pace(int hz)
         s_pres.stepSumMs += ms;
         s_pres.stepMaxMs = ms > s_pres.stepMaxMs ? ms : s_pres.stepMaxMs;
         s_pres.stepCount++;
+        ico_render_thread_note_game_core(); /* the 10 s line's cores */
         if (s_pres.slowMs > 0.0 && ms > s_pres.slowMs) {
             slow_step(ms);
         }
+        /* a late step the audio held sound back in: what it was doing */
+        window_hold_line(ms - 1000.0 / (hz > 0 ? hz : 60), ico_audio_sdl_held_ms(), s_pres.decodes,
+                         s_pres.pipeCreates);
     }
+    window_disc_step();
     rd_vu_card_counts(&s_pres.stepCardStrips, &s_pres.stepCardTris, &s_pres.stepCardMs);
     if (s_pres.pausePendingNs) {
         /* a swapchain rebuilt in the pump (video_apply): paused out */
-        pace_paused(s_pres.pausePendingNs);
+        window_pace_paused(s_pres.pausePendingNs);
         s_pres.pausePendingNs = 0;
     }
-    pace(hz);
+    window_present_pace(hz);
     if (s_pres.pausePendingNs) {
         /* the first present after a rebuild (present_once) */
-        pace_paused(s_pres.pausePendingNs);
+        window_pace_paused(s_pres.pausePendingNs);
         s_pres.pausePendingNs = 0;
     }
     if (s_pres.presentModeApply) {
@@ -5354,6 +5216,7 @@ void ico_window_pace(int hz)
         s_pres.presentModeApply = 0;
         video_apply(1);
     }
+    s_pres.pausePendingNs += window_fifo_apply();
     perf_drain(); /* every vsync, so the record queue never overflows */
     if (s_autoRes.tickBudget) {
         /* two fields a tick: 40 ms PAL, 33.4 ms NTSC (pace's periods) */
@@ -5375,725 +5238,13 @@ void ico_window_pace(int hz)
     }
 }
 
-/* A game frame closed in the step before this pace: its time is closeAt
-   (when that step was due) */
-static int frame_seen(Uint64 closeAt)
-{
-    const uint32_t fn = rd_frame_number();
-
-    if (fn == s_pres.frame) {
-        return 0;
-    }
-    s_pres.frame = fn;
-    s_pres.tickPrev = s_pres.tickAt;
-    s_pres.tickAt = closeAt;
-    if (!s_pollRestarted) {
-        /* the first game frame (the opening scene follows it)
-           restarts the surface-size poll's every-present spell */
-        s_pollRestarted = 1;
-        rhi_surface_poll_restart();
-    }
-    s_pres.statFrames++;
-    return 1;
-}
-
-/* One rd_present at alpha a, timed (s_pres.cost) and counted; false when
-   nothing was presented.  Its waits from the backend's counts: the
-   display's (s_pres.displayWaitNs), the GPU's (fenceWaitNs) and both for
-   the lock (lockWaitNs) */
-static int present_once(float a, Uint64 refresh, Uint64 period)
-{
-    RhiStats before, st;
-
-    rhi_get_stats(&before);
-    Uint64 t0 = SDL_GetTicksNS();
-    ico_diag_present_enter();
-    const int ok = rd_present(a);
-    ico_diag_present_leave();
-    const Uint64 now = SDL_GetTicksNS();
-
-    s_pres.cost = now - t0;
-    {
-        /* the first present on a swapchain made since the last one (a
-           frame rate change's rebuild in video_apply, a size event,
-           fullscreen, a rebuild this present found necessary): what it
-           took past a refresh (the first acquire, the compositor taking
-           the new chain: ~140 ms on NVIDIA's Windows driver) is the
-           rebuild's, a pause of the host.  Under the lock it is paused out
-           after this pace (pace_lock_vsync keeps its own due time); on
-           the timer path now, before the deadline is judged (applied after
-           the pace, the lag would be judged first and dropped: a resync, a
-           black screen, at most frame rate changes) */
-        rhi_get_stats(&st);
-        const Uint64 pause =
-            pace_first_present_pause(st.swapchains, &s_pres.swapchains, s_pres.cost, refresh);
-
-        if (pause != 0 && s_pres.lockN != 0) {
-            s_pres.pausePendingNs += pause;
-        } else if (pause != 0) {
-            pace_paused(pause);
-            t0 += pause; /* the present as if it started a refresh before its return */
-        }
-        s_pres.cost -= pause; /* the present's own time, a refresh: what the history and the
-                                 loop's judgement of the next present see */
-    }
-    if (!ok) {
-        return 0;
-    }
-    /* how long it waited: the backend's own blocked time in it (Vulkan:
-       the acquire, the present and the fence waits; D3D12: the frame
-       latency wait, Present and the fence waits), which leaves out the
-       replay's own CPU time; the whole present where the backend times
-       nothing (then all of it the display's).  Never more than the present
-       (a rebuild's first present is paused out above).  The acquire and the
-       present are the display's (FIFO's full queue), the fence waits the
-       GPU's: the present allowance excuses the first only, or the whole
-       wait where the fence waits hold the display's (pace_display_wait:
-       OpenGL with vsync on, issue 126) */
-    s_pres.fenceHoldsDisplay = st.fenceWaitsHoldDisplay && s_pres.vsync;
-    if (st.presents != before.presents && st.acquireNs + st.presentNs + st.fenceWaitNs != 0) {
-        const Uint64 disp = (st.acquireNs - before.acquireNs) + (st.presentNs - before.presentNs);
-        const Uint64 fence = st.fenceWaitNs - before.fenceWaitNs;
-
-        s_pres.lockWaitNs = disp + fence < s_pres.cost ? disp + fence : s_pres.cost;
-        s_pres.displayWaitNs =
-            pace_display_wait(disp, fence, s_pres.cost, s_pres.fenceHoldsDisplay);
-        s_pres.fenceWaitNs = fence < s_pres.cost ? fence : s_pres.cost;
-    } else {
-        s_pres.lockWaitNs = s_pres.cost;
-        s_pres.displayWaitNs = s_pres.cost;
-        s_pres.fenceWaitNs = 0;
-    }
-    if (s_pres.presentInfoPending) {
-        /* the present that took F12's armed capture (photo_pump names it) */
-        s_pres.presentInfoHave = rd_last_present_info(&s_pres.presentInfo);
-        s_pres.presentInfoPending = 0;
-    }
-    /* the cost smoothed over the last presents, with hysteresis;
-       a present is slower with an effects program loaded */
-    s_pres.paceSlow = pace_slow_present(&s_pres.paceHist, s_pres.cost, refresh, period,
-                                        rhi_injector_name() != NULL);
-    /* the start-up log line, after the cost */
-    boot_log(a);
-    s_pres.lastPresent = t0;
-    s_pres.lastReturn = now;
-    s_pres.presentedFrame = s_pres.frame;
-    s_pres.statPresents++;
-    ui_fps_present();
-#ifdef __ANDROID__
-    ico_gpu_driver_android_presented(); /* the driver's trial */
-#endif
-    return 1;
-}
-
-/* the vsync lock's window side (pace_policy.h PaceLockIo) */
-typedef struct LockIoCtx {
-    Uint64 refresh, period;
-} LockIoCtx;
-
-static uint64_t lock_io_now(void *u)
-{
-    (void)u;
-    return SDL_GetTicksNS();
-}
-
-static bool lock_io_present(void *u, float a)
-{
-    const LockIoCtx *c = u;
-
-    /* its waits: present_once (lockWaitNs, displayWaitNs) */
-    if (!present_once(a, c->refresh, c->period)) {
-        return false;
-    }
-    /* the timer path's late skip closes with any present (pace_late_skip):
-       back on it after the lock, its next frame may be skipped again */
-    s_pres.skipOpen = false;
-    disp_present(c->refresh); /* the display line's counts */
-    return true;
-}
-
-/* the lock's rule for a present that waited for the display: the wait
-   lock_io_present measured */
-static uint64_t lock_io_waited(void *u, uint64_t costNs)
-{
-    (void)u;
-    (void)costNs;
-    return s_pres.lockWaitNs;
-}
-
-/* the present allowance's excuse: the last present's wait for the display
-   alone (present_once) */
-static uint64_t lock_io_display_waited(void *u, uint64_t costNs)
-{
-    (void)u;
-    (void)costNs;
-    return s_pres.displayWaitNs;
-}
-
-/* The present allowance's events after a pace_budget_step (its counts
-   before given): the drop, climb, refused-climb and GPU budget lines
-   (pace_budget_event_text), the first 8 then every 100th */
-static void budget_lines(const PaceBudget *b, unsigned drops, unsigned climbs, unsigned refusals,
-                         unsigned paced, Uint64 period)
-{
-    const PaceBudgetWaits w = {
-        s_pres.cost, s_pres.fenceWaitNs,      s_pres.displayWaitNs, s_pres.gpuNs, s_pres.stepNs,
-        period,      s_pres.fenceHoldsDisplay};
-    char t[400];
-
-    if (b->drops != drops) {
-        pace_budget_event_text(b, PACE_BUDGET_TEXT_DROP, &w, t, sizeof(t));
-        ico_log_limited("window: presents held", "window: %s", t);
-    }
-    if (b->climbs != climbs) {
-        pace_budget_event_text(b, PACE_BUDGET_TEXT_CLIMB, &w, t, sizeof(t));
-        ico_log_limited("window: presents back", "window: %s", t);
-    }
-    if (b->climbRefusals != refusals) {
-        pace_budget_event_text(b, PACE_BUDGET_TEXT_STAY, &w, t, sizeof(t));
-        ico_log_limited("window: presents stay", "window: %s", t);
-    }
-    if (b->pacedChanges != paced) {
-        pace_budget_event_text(b, PACE_BUDGET_TEXT_PACED, &w, t, sizeof(t));
-        ico_log_limited("window: presents paced", "window: %s", t);
-    }
-}
-
-/* the window on the screen: off it, nothing is presented */
-static bool lock_io_visible(void *u)
-{
-    (void)u;
-    return !s_pres.offScreen;
-}
-
-static void lock_io_sleep(void *u, uint64_t ns)
-{
-    const Uint64 now = SDL_GetTicksNS();
-
-    (void)u;
-    if (now < ns) {
-        SDL_DelayPrecise(ns - now);
-    }
-}
-
-/* the display's timing of presents (rhi_present_timing) */
-static uint64_t lock_io_present_id(void *u)
-{
-    (void)u;
-    return rhi_present_last_id();
-}
-
-static int lock_io_shown(void *u, uint64_t *id, uint64_t *ns)
-{
-    (void)u;
-    return rhi_present_timing_next(id, ns);
-}
-
-/* the vblank clock (display_clock.h): the next vblank noted */
-static int lock_io_vblank(void *u, uint64_t *ns)
-{
-    const LockIoCtx *c = u;
-
-    return disp_take(c->refresh, ns);
-}
-
-/* Words for the lock's display clock (PaceLock.clockKind and .clock), for
-   the lock's first line and its changes */
-static const char *lock_clock_words(const PaceLock *L, char *buf, size_t len)
-{
-    char name[64];
-
-    if (L->clockKind == PACE_CLOCK_KIND_SHOWN) {
-        switch (L->clock) {
-        case PACE_CLOCK_ON:
-            return "display timing in use";
-        case PACE_CLOCK_LEFT_ERROR:
-            return "display timing stopped (a wait on a present failed); presenting fifo until "
-                   "the display settings change";
-        default:
-            return "display timing left (it gave a refresh more than 1 % off the one the "
-                   "display reports); presenting fifo until the display settings change";
-        }
-    }
-    if (L->clockKind == PACE_CLOCK_KIND_VBLANK) {
-        switch (L->clock) {
-        case PACE_CLOCK_ON:
-            snprintf(buf, len, "display clock vblank (output %s)",
-                     ico_display_clock_name(name, sizeof(name)));
-            return buf;
-        case PACE_CLOCK_LEFT_ERROR:
-            return "display clock stopped (a wait for a vblank failed); the grid on the "
-                   "reported refresh until the display or the settings change";
-        default:
-            snprintf(buf, len,
-                     "display clock left (its interval was off the report: %.4f ms against "
-                     "%.4f); the grid on the reported refresh until the display or the "
-                     "settings change",
-                     L->measuredNs / 1e6, (double)L->refreshNs / 1e6);
-            return buf;
-        }
-    }
-    return s_pres.clockGone ? "display clock off (display timing left earlier: fifo until the "
-                              "display settings change)"
-                            : "display clock off";
-}
-
-/* presents carry ids for the display's timing only under the lock with the
-   timing in use (rhi_present_timing_use) */
-static void timing_use(int on)
-{
-    if (on != s_pres.timingUse) {
-        s_pres.timingUse = on;
-        rhi_present_timing_use(on != 0);
-    }
-}
-
-/* One simulated vsync under the vsync lock (pace_policy.h): n presents in
-   the step's slots, then the next step's due time on the grid.  s_deadline
-   is when the step was due. */
-static void pace_locked(unsigned n, Uint64 period)
-{
-    LockIoCtx ctx;
-    const int clock = rhi_present_timing();
-    const PaceLockIo io = {&ctx,
-                           lock_io_now,
-                           lock_io_present,
-                           lock_io_sleep,
-                           lock_io_visible,
-                           clock ? lock_io_present_id : NULL,
-                           clock ? lock_io_shown : NULL,
-                           lock_io_vblank,
-                           lock_io_waited,
-                           lock_io_display_waited};
-    char words[256];
-
-    ctx.refresh = display_refresh_ns(period);
-    ctx.period = period;
-    s_pres.statVsyncs++;
-    if (s_pres.lockN != n || s_pres.lockRefresh != ctx.refresh ||
-        s_pres.lockMailbox != (int)rhi_present_mailbox()) {
-        /* the display's counts for the log, and its vblank clock (Windows) */
-        disp_lock_start();
-        /* a new lock: from the last step's due time, on the present-wait
-           clock (mailbox) when the backend times presents, else on the
-           vblank clock when it runs (FIFO either way: video_settings),
-           else on the reported refresh alone */
-        const int kind = clock && !s_pres.clockGone                ? PACE_CLOCK_KIND_SHOWN
-                         : s_disp.clock == 1 && !s_pres.vblankGone ? PACE_CLOCK_KIND_VBLANK
-                                                                   : PACE_CLOCK_KIND_NONE;
-
-        pace_lock_reset(&s_pres.lock, n, ctx.refresh, period, s_deadline, rhi_present_mailbox(),
-                        kind);
-        s_pres.lockN = n;
-        s_pres.lockRefresh = ctx.refresh;
-        s_pres.lockMailbox = rhi_present_mailbox();
-        s_pres.lockClock = s_pres.lock.clock;
-        s_pres.lockResyncs = 0;
-        s_pres.lockDroppedNs = 0;
-        s_pres.lockNudgeAt = 0.0;
-        s_pres.lockSeenAt = s_pres.lockLateAt = s_pres.lockEarlyAt = 0;
-        s_pres.lockWaitedAt = s_pres.lockSkippedAt = 0;
-        s_pres.lockSkippedLateAt = 0;
-        if (s_pres.budgetAtOf == &s_pres.lock.budget) {
-            /* the lock's allowance started again (pace_lock_reset) */
-            s_pres.budgetRefusedAt = s_pres.budgetDropsAt = s_pres.budgetClimbsAt = 0;
-            s_pres.budgetClimbRefusalsAt = 0;
-        }
-        s_pres.lockWaitNs = 0;
-        s_pres.nextPresent = 0;
-        {
-            static unsigned s_lines;
-            double dwmHz;
-            uint64_t dwmNs;
-
-            if (s_lines++ < 8) {
-                fprintf(stderr,
-                        "window: vsync lock: the game steps every %.4f ms (%u refresh%s of "
-                        "%.4f ms), %u present%s a step, present mode %s, %s\n",
-                        (double)(n * ctx.refresh) / 1e6, n, n == 1 ? "" : "es",
-                        (double)ctx.refresh / 1e6, n, n == 1 ? "" : "s", rhi_present_mode_name(),
-                        lock_clock_words(&s_pres.lock, words, sizeof(words)));
-                /* the compositor's refresh against SDL's (Windows; the
-                   primary display's: a cross-check, not a clock) */
-                if (ico_display_dwm_refresh(&dwmHz, &dwmNs)) {
-                    fprintf(stderr,
-                            "window: vsync lock: DWM reports %.3f Hz (%.4f ms); SDL reports "
-                            "%.3f Hz (%.4f ms)\n",
-                            dwmHz, (double)dwmNs / 1e6, 1e9 / (double)ctx.refresh,
-                            (double)ctx.refresh / 1e6);
-                }
-            }
-        }
-        /* the audio at the display's nominal rate until the first
-           measured block (the 10 s line) */
-        s_pres.audioRatio = pace_lock_nominal_ratio(&s_pres.lock);
-        ico_audio_set_rate_ratio(s_pres.audioRatio);
-    }
-    /* the present mode the lock wants: mailbox with the display's timing,
-       FIFO without (video_settings) */
-    if ((clock && !s_pres.clockGone) != s_pres.mailbox) {
-        s_pres.presentModeApply = 1;
-    }
-    timing_use(s_pres.lock.clockKind == PACE_CLOCK_KIND_SHOWN &&
-               s_pres.lock.clock == PACE_CLOCK_ON);
-    /* the frame closed in the step that was due at s_deadline */
-    const int newFrame = frame_seen(s_deadline);
-
-    disp_vsync(ctx.refresh); /* the display clock's vblanks since the last vsync */
-    /* the present allowance's GPU gate (pace_policy.h PaceBudget) */
-    s_pres.lock.gpuNs = s_pres.gpuNs;
-    s_pres.lock.stepNs = s_pres.stepNs;
-    const unsigned drops = s_pres.lock.budget.drops, climbs = s_pres.lock.budget.climbs;
-    const unsigned refusals = s_pres.lock.budget.climbRefusals;
-
-    s_deadline = pace_lock_vsync(&s_pres.lock, &io, newFrame != 0);
-    /* the gate's period: the lock's step (pace_lock_vsync) */
-    budget_lines(&s_pres.lock.budget, drops, climbs, refusals, s_pres.lock.budget.pacedChanges,
-                 (Uint64)(s_pres.lock.slotNs * (double)s_pres.lock.n));
-    /* the lag the lock dropped, as the resync lines count it */
-    s_pres.statResyncs += s_pres.lock.resyncs - s_pres.lockResyncs;
-    s_pres.statDropped += s_pres.lock.droppedNs - s_pres.lockDroppedNs;
-    s_pres.lockResyncs = s_pres.lock.resyncs;
-    s_pres.lockDroppedNs = s_pres.lock.droppedNs;
-    if (s_pres.lock.clock != s_pres.lockClock) {
-        /* the display clock stopped or was not believed: the present-wait
-           clock's mailbox goes to FIFO until the next settings change; the
-           vblank clock's grid stays on the report (already FIFO) until the
-           display or the settings change */
-        static unsigned s_lines;
-
-        s_pres.lockClock = s_pres.lock.clock;
-        if (s_lines++ < 16) {
-            fprintf(stderr, "window: vsync lock: %s\n",
-                    lock_clock_words(&s_pres.lock, words, sizeof(words)));
-        }
-        if (s_pres.lock.clock != PACE_CLOCK_ON && s_pres.lock.clockKind == PACE_CLOCK_KIND_SHOWN) {
-            s_pres.clockGone = 1;
-            s_pres.presentModeApply = 1;
-        } else if (s_pres.lock.clock != PACE_CLOCK_ON) {
-            s_pres.vblankGone = 1;
-        }
-    }
-    /* the first presents of each lock (a few locks a session), for the
-       log: diagnostics only */
-    if (!s_pres.lock.traceLogged && s_pres.lock.traceCount >= PACE_LOCK_TRACE_FIRST &&
-        s_pres.lock.steps >= PACE_LOCK_TRACE_FIRST + 30) {
-        static unsigned s_traces;
-
-        s_pres.lock.traceLogged = true;
-        if (s_traces++ < 8) {
-            char t[PACE_LOCK_TRACE_FIRST * 20];
-            const unsigned k = pace_lock_trace_text(&s_pres.lock, t, sizeof t);
-
-            fprintf(stderr,
-                    "window: vsync lock, the first %u presents (ms since the one before; in "
-                    "brackets ms from the time it was due to the refresh that showed it, where "
-                    "the display said): %s\n",
-                    k, t);
-        }
-    }
-    pace_log(SDL_GetTicksNS());
-}
-
-/* The window is off the screen: minimised, hidden, occluded, or 0x0
-   pixels (a Vulkan swapchain cannot be made); its presents do not wait for
-   the display */
-static int window_off_screen(void)
-{
-    int w = 0, h = 0;
-
-    if (s_window == NULL) {
-        return 0;
-    }
-    if (SDL_GetWindowFlags(s_window) &
-        (SDL_WINDOW_MINIMIZED | SDL_WINDOW_HIDDEN | SDL_WINDOW_OCCLUDED)) {
-        return 1;
-    }
-    SDL_GetWindowSizeInPixels(s_window, &w, &h);
-    return w <= 0 || h <= 0;
-}
-
-static void pace(int hz)
-{
-    /* PAL 50 Hz: 20 ms; NTSC 59.94 Hz: 16.683 ms (host_loop.c's simulated
-       periods) */
-    const Uint64 period = hz == 50 ? 20000000ull : 16683333ull;
-    Uint64 now;
-
-    s_pres.capAboveNs = 0; /* the timer path below sets it while the clamp holds */
-    /* off the screen: the lock does not judge the presents (they return at
-       once); back on it, the lock starts again from an empty queue */
-    {
-        const int off = window_off_screen();
-
-        if (off != s_pres.offScreen) {
-            static unsigned s_lines; /* a window that flickers: the first few */
-
-            if (s_lines++ < 20) {
-                fprintf(stderr, "window: %s the screen\n", off ? "off" : "back on");
-            }
-            if (!off) {
-                s_pres.lockN = 0; /* pace_locked resets the lock */
-            }
-            s_pres.offScreen = off;
-        }
-    }
-
-    /* the vsync lock: the cap equals the refresh and is a whole multiple
-       of the simulation's rate (60 or 120 on 59.94), n refreshes within 1 %
-       of its period (video_settings decided it for the rate the last pace
-       had: a new rate decides again) */
-    if (hz != s_pres.paceHz) {
-        /* video_settings took NTSC before the first pace */
-        if ((hz == 50) != (s_pres.paceHz == 50)) {
-            s_pres.presentModeApply = 1;
-        }
-        s_pres.paceHz = hz;
-    }
-    {
-        const unsigned n = s_pres.gridLock && rd_interpolation_active()
-                               ? pace_lock_presents(s_pres.framerate, period)
-                               : 0;
-        if (n > 0 && pace_grid_period_ok(n, display_refresh_ns(period), period)) {
-            pace_locked(n, period);
-            return;
-        }
-        if (s_pres.lockN != 0 || s_pres.budget.max == 0) {
-            /* off the lock (or the first pace): the timer path's allowance
-               starts again */
-            timer_budget_reset();
-        }
-        s_pres.lockN = 0;
-        timing_use(0); /* the presents below as without the timing */
-        disp_clock_stop();
-    }
-    s_pres.budget.presents = 0; /* the step's presents (pace_budget_step) */
-    s_pres.budget.optional = 0;
-    /* paced by the GPU's time: vsync off or mailbox in use (pace_policy.h) */
-    s_pres.budget.paced = pace_budget_paced_mode(s_pres.vsync, rhi_present_mailbox());
-    s_deadline += period;
-    s_pres.statVsyncs++;
-    const int newFrame = frame_seen(s_deadline - period);
-    if (!rd_interpolation_active()) {
-        /* framerate "original": rd_end_frame presented the frame once; the
-           picture is held until the next.  That present's start-up log line
-           (the frame whole: t 1) */
-        if (newFrame) {
-            boot_log(1.0f);
-            /* that present ran inside the step (rd_end_frame's replay):
-               the first on a swapchain made since the last one is the
-               rebuild's past a refresh (as present_once), paused out
-               before the deadline is judged */
-            RhiStats st;
-
-            rhi_get_stats(&st);
-            pace_paused(pace_first_present_pause(st.swapchains, &s_pres.swapchains,
-                                                 (Uint64)(rd_last_replay_ms() * 1e6),
-                                                 display_refresh_ns(period)));
-        }
-        now = SDL_GetTicksNS();
-        if (now < s_deadline) {
-            SDL_DelayPrecise(s_deadline - now);
-        } else if (now - s_deadline > RESYNC_NS) {
-            resync(now);
-        }
-        pace_log(SDL_GetTicksNS());
-        return;
-    }
-    /* the simulation keeps its vsync cadence in simulated time; until
-       this vsync's deadline the window presents as often as vsync (and the
-       framerate cap) allow, each present at alpha = the real time since the
-       last frame closed over the tick, between the last two frames (one
-       tick of latency). A frame closes inside the step before this call:
-       its time is the start of this vsync period. */
-    /* a present with vsync on blocks up to one display refresh; that wait is
-       not the renderer being slow. A 60 Hz display under the 59.94 Hz
-       simulation (refresh 16.67 ms against the 16.68 ms period) sits on
-       that edge and would fall back to one present per game frame. Slow:
-       a present costing over a refresh plus half a period (pace_policy.h:
-       smoothed, with hysteresis, higher with an effects program). */
-    Uint64 gap;
-    const Uint64 refresh = display_refresh_ns(period);
-    {
-        /* "uncapped" under a mailbox swapchain (vsync on, or off with no
-           immediate mode: Android's compositor blocks a present once its
-           queue is full): one a refresh.  Immediate: back to back
-           (pace_present_gap) */
-        const int uncappedMailbox =
-            s_pres.framerate == ICO_FRAMERATE_UNCAPPED && rhi_present_mailbox();
-        gap = s_pres.fifoLock ? 0
-                              : pace_present_gap(s_pres.framerate, uncappedMailbox != 0,
-                                                 rhi_present_mailbox(), refresh);
-        if (!gap) {
-            s_pres.nextPresent = 0;
-        }
-        if (uncappedMailbox && !s_pres.vsync && !s_pres.mailboxOffLogged) {
-            s_pres.mailboxOffLogged = 1;
-            fprintf(stderr, "window: vsync off: the display offers no immediate mode; uncapped "
-                            "presents once a refresh (mailbox)\n");
-        }
-        /* a cap above the refresh in mailbox mode presents once a refresh
-           as "uncapped" does (pace_policy.h pace_cap_above_refresh): the
-           display shows no more, and the rest took the shown ones' GPU time */
-        if (!s_pres.fifoLock &&
-            pace_cap_above_refresh(s_pres.framerate, rhi_present_mailbox(), refresh)) {
-            static unsigned s_lines;
-
-            s_pres.capAboveNs = refresh;
-            if (!s_pres.capAboveLogged && s_lines < 16) {
-                s_lines++;
-                fprintf(stderr,
-                        "window: frame rate %d is above the display's %.2f Hz: presenting once a "
-                        "refresh (mailbox)\n",
-                        s_pres.framerate, 1e9 / (double)refresh);
-            }
-            s_pres.capAboveLogged = 1;
-        }
-    }
-    Uint64 tick = s_pres.tickPrev ? s_pres.tickAt - s_pres.tickPrev : 2 * period;
-    tick = tick < period ? period : (tick > 4 * period ? 4 * period : tick);
-    for (;;) {
-        now = SDL_GetTicksNS();
-        /* the late-present skip (pace_policy.h pace_late_skip): a new frame
-           behind the deadline is left unpresented (the next step at once;
-           the next present shows the newer frame) when the next step is
-           already a whole period late (the step debt: now against its due
-           time, s_deadline, as "step late" measures it) or presents are
-           slow; never two frames in a row (pace_skipped_last), the same
-           frame again while it holds; with or without sound.  The vsync
-           lock has the late arm too (pace_lock_vsync).  No step or audio is
-           dropped, only presents */
-        {
-            const PaceSkip why =
-                pace_late_skip(s_pres.presentedFrame != s_pres.frame,
-                               pace_skipped_last(s_pres.skipOpen, s_pres.skipFrame, s_pres.frame),
-                               s_pres.paceSlow, now, s_deadline, period);
-
-            if (why != PACE_SKIP_NONE) {
-                s_pres.skipOpen = true;
-                s_pres.skipFrame = s_pres.frame;
-                if (why == PACE_SKIP_LATE) {
-                    s_pres.statSkipLate++;
-                } else {
-                    s_pres.statSkipSlow++;
-                }
-                break;
-            }
-        }
-        /* behind the deadline, or on a renderer slower than a vsync period
-           per present (a software driver): one present per new frame, none
-           more, so the presents never slow the simulation below the
-           original's one replay per frame */
-        /* under FIFO with a cap that is not a whole multiple of the
-           simulation's rate (144 on 59.94, 60 on PAL's 50) and a refresh
-           shorter than the period: no present that would return on a
-           vblank past the deadline.  A FIFO present returns on the
-           first vblank after it is made, so on the last return's grid of
-           refreshes; starting one just before the deadline blocked a whole
-           refresh and ran the step late.  A new frame is held
-           back (to the next vsync) at most once and never once the deadline
-           has passed, so a game behind still shows each frame
-           (pace_policy.h pace_fifo_hold) */
-        if (s_pres.fifoLock && refresh < period &&
-            pace_fifo_hold(now, s_pres.lastReturn, refresh, s_deadline,
-                           s_pres.presentedFrame == s_pres.frame,
-                           s_pres.heldFrame == s_pres.frame + 1u)) {
-            if (s_pres.presentedFrame != s_pres.frame) {
-                s_pres.heldFrame = s_pres.frame + 1u;
-            }
-            if (now < s_deadline) {
-                SDL_DelayPrecise(s_deadline - now);
-            }
-            break;
-        }
-        /* nor a further present of a frame already shown that would
-           end past the deadline (its cost the last present's): the next
-           simulation step is never late for one */
-        /* off the screen: no present again */
-        /* nor one past the present allowance (pace_policy.h PaceBudget):
-           after a step that ended half a period late, the in-betweens a
-           step are held below what that step made; paced, one more only
-           while the GPU has the time for it (pace_policy.h) */
-        if (s_pres.presentedFrame == s_pres.frame) {
-            const int guard = now >= s_deadline || s_pres.paceSlow || s_pres.offScreen ||
-                              (!s_pres.fifoLock && now + s_pres.cost > s_deadline);
-
-            if (guard || !pace_budget_allows_paced(&s_pres.budget, false, s_pres.gpuNs, period)) {
-                if (!guard) {
-                    s_pres.budget.refused++;
-                }
-                if (now < s_deadline) {
-                    SDL_DelayPrecise(s_deadline - now);
-                }
-                break;
-            }
-        }
-        if (gap && s_pres.nextPresent && now < s_pres.nextPresent) {
-            const Uint64 wake = s_pres.nextPresent;
-
-            if (wake >= s_deadline) {
-                if (now < s_deadline) {
-                    SDL_DelayPrecise(s_deadline - now);
-                }
-                break;
-            }
-            SDL_DelayPrecise(wake - now);
-            continue;
-        }
-        /* alpha from the present clock (the measured time smoothed
-           to the presents' steady cadence) against the simulated time the
-           frame closed; the raw measured time jittered with the step and
-           the sleeps before the present */
-        float a = rd_present_clock_alpha(&s_pres.clock, (double)now / 1e6,
-                                         (double)s_pres.tickAt / 1e6, (double)tick / 1e6,
-                                         (double)(s_pres.fifoLock ? refresh : gap) / 1e6);
-
-        if (s_pres.legacyAlpha) {
-            /* ICO_RD_S2_LEGACY=1: the raw measured time, without the clock */
-            const double r =
-                now > s_pres.tickAt ? (double)(now - s_pres.tickAt) / (double)tick : 0.0;
-            a = (float)(r > 0.999 ? 0.999 : r);
-        }
-        const bool fresh = s_pres.presentedFrame != s_pres.frame;
-        const int ok = present_once(a, refresh, period);
-        now = SDL_GetTicksNS();
-        if (ok) {
-            s_pres.skipOpen = false;
-            pace_budget_present(&s_pres.budget, fresh);
-        }
-        if (!ok) {
-            /* a movie on the output, or nothing closed yet */
-            if (now < s_deadline) {
-                SDL_DelayPrecise(s_deadline - now);
-            }
-            break;
-        }
-        s_pres.nextPresent =
-            gap ? pace_next_present(s_pres.nextPresent, s_pres.lastPresent, gap) : 0;
-    }
-    now = SDL_GetTicksNS();
-    {
-        /* the present allowance: the step ends now (a resync keeps it) */
-        const unsigned drops = s_pres.budget.drops, climbs = s_pres.budget.climbs;
-        const unsigned refusals = s_pres.budget.climbRefusals;
-        const unsigned paced = s_pres.budget.pacedChanges;
-
-        (void)pace_budget_step(&s_pres.budget, now > s_deadline ? now - s_deadline : 0, period,
-                               refresh, s_pres.displayWaitNs, s_pres.gpuNs, s_pres.stepNs);
-        budget_lines(&s_pres.budget, drops, climbs, refusals, paced, period);
-    }
-    pace_log(now);
-    if (now > s_deadline && now - s_deadline > RESYNC_NS) {
-        resync(now);
-    }
-}
-
 void ico_window_close(void)
 {
     if (!s_open) {
         return;
     }
     s_open = 0;
+    ico_render_thread_stop(); /* every picture handed over finished, the thread ended */
     /* a clean exit: a lazy run keeps the start-up activity file, so the
        next start of this version is lazy too; any other deletes it
        (diag_host.h) */
@@ -6129,9 +5280,11 @@ void ico_window_close(void)
     ui_settings_set_quit_is_game(NULL);
 #endif
     ui_touch_set_source(NULL);
+    ui_touch_set_layout_source(NULL);
     ui_host_shutdown();
-    disp_clock_stop();
+    window_disp_clock_stop();
     rd_set_host_call(NULL);
+    rd_set_replay_gate(NULL);
     rd_shutdown();
     if (s_window != NULL) {
         SDL_DestroyWindow(s_window);

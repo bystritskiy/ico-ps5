@@ -144,8 +144,8 @@ the packages below with `sdkmanager`; `SKIP_SDK_INSTALL=1` only checks them.
 | `tools/toolchain/android.env` | the paths and versions above, read by the CMake toolchain file and `android/app/build.gradle` |
 | `android/local.properties` | `sdk.dir` and `cmake.dir` for this checkout (gitignored); every checkout runs the script once |
 
-The Gradle project is `android/` (arm64-v8a only, `minSdk` 29, `targetSdk`
-35). `cd android && ./gradlew --no-daemon assembleDebug [-PicoLabel=<label>]`
+The Gradle project is `android/` (arm64-v8a only, `minSdk` 26, `targetSdk`
+35: Android 8, issue 158; the native code is built for `android-26`). `cd android && ./gradlew --no-daemon assembleDebug [-PicoLabel=<label>]`
 builds the debug APK into `android/app/build/outputs/apk/debug/`;
 `assembleRelease` builds `app-release-unsigned.apk`. `-PicoLabel` sets the
 version name (default: `git describe`); `icoNativeJobs` sets the native build
@@ -325,6 +325,7 @@ and macOS).
 | `ICO_SHADERS_DXIL` | `ON` | also compiles the shaders to DXIL for the Direct3D 12 backend; the arm64 and Apple presets turn it off |
 | `ICO_SHADERS_GLSL` | `ON` with `ICO_RHI_OPENGL` when `tools/fetch_deps.sh` fetched SPIRV-Cross, else `OFF` | also translates the shaders to GLSL 4.30 with SPIRV-Cross for the OpenGL backend (`ICO_SPIRV_CROSS` names another executable; `SKIP_SPIRV_CROSS=1` skips the fetch). With `ICO_RHI_OPENGL` on and this off, the configure step warns: the OpenGL backend is built but has no shaders and cannot draw |
 | `ICO_VERSION_LABEL` | empty | with `ICO_LINK_EXE`: the package label (`vX.Y.Z` or `vX.Y.Z-rcN`). Its numbers go into the Windows version information and the Apple bundles' Info.plist; the label itself, written to `generated/ico_version.h`, is shown in the log header and on the Settings menu's Main page, and is empty (nothing shown) when it does not parse as a version (`CMakeLists.txt`, `ICO_VERSION_LABEL_C`). The package scripts and `android/app/build.gradle` pass it; a build without it has an all-zero version |
+| `ICO_STATE_FIXED_IMAGE` | `ON` in `linux-x64`, `linux-x64-clang`, `win-x64`, `win-x64-clang` (and `asan`, `fptrap`, which inherit `linux-x64`); `OFF` otherwise | links the programs at a fixed image address ([Fixed image](#fixed-image)); `ICO_STATE_FIXED_IMAGE=1` in every source |
 | `ICO_RC_TOOLS` | `OFF` | the release candidates' own tooling, for rc packages alone ([Release candidate tools](#release-candidate-tools)); `ON` defines `ICO_RC_TOOLS=1` for every source, and a non-empty `ICO_VERSION_LABEL` that does not end in `-rcN` is refused |
 | `ICO_BASE_ELF` | `baserom/pal/baseelf.elf` | the base ELF the data loader's reference tests read; without it they are not built |
 | `ICO_BASE_ELF_JPN` | `baserom/jpn/baseelf.elf` | the Japanese disc's base ELF (SCPS-11003), for the same tests on that disc |
@@ -333,7 +334,43 @@ and macOS).
 | `ICO_DXC`, `ICO_DEPS_DIR` | the fetched copies | the shader compiler and the dependency tree |
 | `ICO_MOLTENVK_ROOT`, `ICO_LIBCHDR_DIR` | the fetched copies | MoltenVK's extracted release and the libchdr source tree (`cmake/IcoMoltenVK.cmake`, `port/data/CMakeLists.txt`) |
 
-At run time, the environment variable `ICO_TTY` (any value) turns on the
+### Fixed image
+
+Save states put the game's memory back byte for byte, and that memory holds the program's own
+addresses: return addresses on the game threads' stacks, function pointers in the game's tables.
+With `ICO_STATE_FIXED_IMAGE` the Linux and Windows programs always load at the address they were
+linked at, so those addresses mean the same thing in the next run and a load needs no
+relocation of code pointers. On Linux the code is compiled `-fno-pie` (targets that ask for
+position-independent code keep it) and the programs link `-no-pie`; on Windows both mingw linkers
+(GNU ld and lld) take `-Wl,--disable-dynamicbase`, which clears the PE header's `DYNAMIC_BASE`
+flag (`CMakeLists.txt`, `ICO_STATE_FIXED_IMAGE`). It costs no speed. What it gives up is address
+space layout randomisation for the program image itself (the libraries, the stacks and the
+heap stay randomised), which is a hardening measure against memory-corruption exploits and
+matters little for an offline game; `-DICO_STATE_FIXED_IMAGE=OFF` turns it back on, and save
+states then move the code pointers as Android and the Apple builds always do
+([port/PLATFORM.md](port/PLATFORM.md#fibers)). The same reason pins the game's memory arena and
+the game threads' stacks at fixed addresses when the system has them free.
+
+### Game data sections
+
+Save states also copy the game's own globals, so every build puts the game library's writable
+data in sections of its own ([port/PLATFORM.md](port/PLATFORM.md#game-data-ranges);
+`cmake/IcoStateSections.cmake`). With GCC (`linux-x64`, `linux-arm64`, `win-x64` and the presets
+inheriting them) the archive `libico_game.a` is rewritten by the toolchain's `objcopy` as the last
+step of making it: the system's binutils on Linux (installed with gcc), and
+`x86_64-w64-mingw32-objcopy` from `tools/toolchain/mingw-gcc` for Windows (CMake finds both as
+`CMAKE_OBJCOPY`; configuring stops when there is none). The clang presets (`linux-x64-clang`,
+`win-x64-clang`, Android, macOS, iOS) need no tool: a pragma in a header forced into every game
+source names the sections (`port/platform/game_data_sections.h`), since llvm-objcopy cannot rename
+PE sections and Apple's toolchain has no objcopy. The Windows programs carry the game's
+zero-filled data in the `.exe` (about 5.5 MB more), because neither Windows linker keeps a
+renamed zero-filled section between the markers that bound the range. A build where the sections
+did not come out right turns save states off at start-up with a line in the log, and the
+`game_data_range` and `game_data_ranges_binary` tests fail.
+
+### Run-time switches
+
+The environment variable `ICO_TTY` (any value) turns on the
 game's `scePrintf` output on stdout, which the retail game sent to the
 development kit's TTY; it is off otherwise (`port/platform/kernel_host.c`,
 `scePrintf`). Release programs have no console, so use it with `--console` on a program started
@@ -445,6 +482,7 @@ variable:
 | --- | --- | --- | --- |
 | `*_nodual` (`rd_pixel`, `rd_present`, `rd_fog`, `rd_shadow`, `rd_water`, ..., `shaders_pixel`) | `ICO_RD_NO_DUAL=1` | `port/render/rd_core.c` | blending in two passes, for GPUs without dual-source blending |
 | `rhi_vk_nodual` | `ICO_VK_FAKE_NO_DUAL=1` | `port/rhi/vk/vk_device.c` | the dual-source feature cleared at device creation |
+| `rhi_vk_vk10_nod32f`, `rd_pixel_vk10_nod32f`, `rd_present_vk10_nod32f`, `rd_interp_vk10_nod32f` | `ICO_VK_FAKE_NO_D32F_ATTACHMENT=1` (with `ICO_VK_FAKE_API=1.0`) | `port/rhi/vk/vk_device.c` | the D32F depth-attachment bit hidden: the device is picked, the effects depth and its two start-up keys are off |
 | `rhi_vk_d24s8` | `ICO_VK_FAKE_D24S8=1` | `port/rhi/vk/vk_device.c` | the D24S8 depth fallback when D32F_S8 is missing |
 | `*_mali` (`rd_layout`, `rd_tex`, `rd_gsbase`, `rd_shadow`, `rd_fog`, `rd_water`, `rd_raw`, `rd_interp`, `rd_mirror`, `rd_perf`, `rd_pixel`, `rd_debug`, `rd_present`, `rd_crt`, `rd_mesh` sharded, `shaders_pixel`, `vu1`, `rd_video`, `rhi_vk`; `port/render/CMakeLists.txt`, `_ico_mali_tests`) | `ICO_VK_FAKE_LIMITS=mali` | `port/rhi/vk/vk_device.c` | a Mali-G68's limits (four descriptor sets, 16 sampled images a stage, 256-byte storage offsets, 4096 memory allocations); `rhi_vk_mali` checks that what goes past them is refused by the limit's name, and `rd_perf_mali` creates the whole reachable pipeline set |
 | `*_minlimits` (`rd_pixel`, `rd_present`, `rd_mesh`, `rd_interp`) | `ICO_VK_FAKE_LIMITS=min` | `port/rhi/vk/vk_device.c` | the limits every Vulkan device must meet |
@@ -458,7 +496,8 @@ in `port/render/rd_dst_read.c`).
 
 How the VU programs treat a triangle outside the GS region is in
 [port/VU1_PROGRAMS.md](port/VU1_PROGRAMS.md). The frame-dump checks, the coverage corpus, F12
-captures and `rd_replay_tool` are in [port/TESTING.md](port/TESTING.md).
+captures and `rd_replay_tool` are in [port/TESTING.md](port/TESTING.md), every test program in
+[port/TESTING_PROGRAMS.md](port/TESTING_PROGRAMS.md).
 
 ## Continuous integration
 
@@ -541,7 +580,7 @@ structure; the game is not run:
 | `tools/check_no_rom.sh` | the IP scan |
 | `./gradlew --no-daemon assembleDebug -PicoLabel=ci` | the debug APK |
 | `tools/check_android_flags.sh` | the game's semantics options reach the NDK clang for every `ico2/` and `port/` source; no game unit writes an object it declares const (`tools/check_const_writes.py`: clang deletes such stores where gcc keeps them; the `const_write_audit` test runs it on native clang builds); no game or `port/math` object holds a fused multiply-add; no object stores onto its stack protector's guard (`tools/check_stack_guard.py`: only the Android build has `-fstack-protector-strong`, so a write past a local array ends the run on a phone alone) |
-| APK checks | `lib/arm64-v8a/libmain.so`, `libSDL3.so`, `assets/VERSION.txt` and `assets/NOTICES.txt` are in the APK; `libSDL3.so` and exactly three libadrenotools hook libraries (`libmain_hook.so`, `libhook_impl.so`, `libfile_redirect_hook.so`) are there; every `LOAD` segment of every library has alignment `0x4000` (`llvm-readelf -lW`); `zipalign -c -P 16 -v 4`; `aapt2 dump badging` shows `minSdkVersion:'29'` and `targetSdkVersion:'35'`; the manifest (`aapt2 dump xmltree`) has `resizeableActivity` true, a theme, `extractNativeLibs` true and a `configChanges` list that includes `density`; `libmain.so` exports `SDL_main` (`llvm-nm -D`); `strings libmain.so` finds no `DXBC` |
+| APK checks | `lib/arm64-v8a/libmain.so`, `libSDL3.so`, `assets/VERSION.txt` and `assets/NOTICES.txt` are in the APK; `libSDL3.so` and exactly three libadrenotools hook libraries (`libmain_hook.so`, `libhook_impl.so`, `libfile_redirect_hook.so`) are there; every `LOAD` segment of every library has alignment `0x4000` (`llvm-readelf -lW`); `zipalign -c -P 16 -v 4`; `aapt2 dump badging` shows `minSdkVersion:'26'` and `targetSdkVersion:'35'`; the manifest (`aapt2 dump xmltree`) has `resizeableActivity` true, a theme, `extractNativeLibs` true and a `configChanges` list that includes `density`; `libmain.so` exports `SDL_main` (`llvm-nm -D`); `strings libmain.so` finds no `DXBC` |
 | artifact `ico-pc-android-debug` | the APK, the unstripped `libmain.so` and `ico_pc.map`, kept 14 days |
 
 Run the same steps locally before pushing.

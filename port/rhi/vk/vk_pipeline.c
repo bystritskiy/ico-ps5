@@ -38,10 +38,13 @@ void rhi_set_pipeline_cache_path(const char *path)
     }
 }
 
-/* ------------------------------------------------ the other builds' caches
- * The window names the file pipelines-<build>.vkcache, so a cache written by
- * another build (its shader set differs; the driver would be handed the stale
- * blob and every new pipeline) is never read.  This removes them. */
+/* ------------------------------------------------ the other shader sets' caches
+ * The window names the file pipelines-<key>.vkcache, the key a hash of the
+ * embedded SPIR-V modules and the pipeline format (port/render/rd_cache_name.h),
+ * so a build with the same shaders reads the cache the last one wrote and a
+ * cache written for another shader set (the driver would be handed its stale
+ * pipelines with every new one) is never read.  This removes those, and the
+ * per-build names pipelines-<commit>.vkcache of the builds before the key. */
 static const char *vkr_base_name(const char *path)
 {
     const char *b = path;
@@ -74,7 +77,7 @@ uint32_t vkr_cache_drop_others(const char *path, char *log, size_t logCap)
     if (log && logCap) {
         log[0] = '\0';
     }
-    /* only the pipelines-<build>.vkcache the window names: any other file
+    /* only the pipelines-<key>.vkcache the window names: any other file
        name (a test's) is left alone along with its neighbours */
     if (!path || strncmp(cur, "pipelines", 9) != 0 || !vkr_ends_with(cur, ".vkcache") ||
         (size_t)(cur - path) >= sizeof(dir)) {
@@ -134,8 +137,7 @@ uint32_t vkr_cache_drop_others(const char *path, char *log, size_t logCap)
         memcpy(full, path, plen);
         strcpy(full + plen, names[i]);
         if (remove(full) == 0) {
-            VKR_LOG("pipeline cache: dropped %s (another version of the game); this start "
-                    "prepares the graphics from nothing",
+            VKR_LOG("pipeline cache: dropped %s (made for other shaders, or named after a build)",
                     names[i]);
             if (log && logCap > strlen(log) + strlen(names[i]) + 2) {
                 strcat(log, names[i]);
@@ -199,11 +201,38 @@ bool rhi_pipeline_cache_loaded(void)
     return s_cacheLoaded;
 }
 
+/* the window's name, pipelines- + 16 hex digits + .vkcache (rd_cache_name.h) */
+static bool vkr_is_keyed_name(const char *name)
+{
+    if (strlen(name) != 34 || strncmp(name, "pipelines-", 10) != 0 ||
+        strcmp(name + 26, ".vkcache") != 0) {
+        return false;
+    }
+    for (int i = 10; i < 26; i++) {
+        const char c = name[i];
+        if (!((c >= '0' && c <= '9') || (c >= 'a' && c <= 'f'))) {
+            return false;
+        }
+    }
+    return true;
+}
+
 void vkr_pipeline_cache_init(void)
 {
     size_t size = 0;
     s_cacheLoaded = false;
     s_cacheFileSize = 0;
+    if (s_cachePath[0] && vkr_is_keyed_name(vkr_base_name(s_cachePath))) {
+        /* once a run: the key's source, so a log says why an update did or
+           did not start warm */
+        static bool told;
+        if (!told) {
+            told = true;
+            VKR_LOG("pipeline cache %s (keyed by the shader set and the pipeline format, not the "
+                    "build: a build with the same shaders starts warm)",
+                    vkr_base_name(s_cachePath));
+        }
+    }
     vkr_cache_drop_others(s_cachePath, NULL, 0);
     void *blob = vkr_cache_load(&size);
     VkPipelineCacheCreateInfo ci = {
@@ -987,6 +1016,7 @@ static bool vkr_pipe_prepare(const RhiPipelineDesc *d, VkrPipeJob *j)
             return false;
         }
         sets[i] = l->layout;
+        p->setLayoutIds[i] = d->layouts[i].id;
     }
     VkPipelineLayoutCreateInfo lci = {
         .sType = VK_STRUCTURE_TYPE_PIPELINE_LAYOUT_CREATE_INFO,
@@ -1075,7 +1105,8 @@ static bool vkr_pipe_prepare(const RhiPipelineDesc *d, VkrPipeJob *j)
         .sType = VK_STRUCTURE_TYPE_PIPELINE_DEPTH_STENCIL_STATE_CREATE_INFO,
         .depthTestEnable = dss->depthTest ? VK_TRUE : VK_FALSE,
         .depthWriteEnable = (dss->depthTest && dss->depthWrite) ? VK_TRUE : VK_FALSE,
-        .depthCompareOp = vkr_compareMap[dss->depthCompare].vk,
+        .depthCompareOp =
+            g_vkr.depthAlways ? VK_COMPARE_OP_ALWAYS : vkr_compareMap[dss->depthCompare].vk,
         .stencilTestEnable = dss->stencilTest ? VK_TRUE : VK_FALSE,
         .front = vkr_stencil(&dss->front, dss),
         .back = vkr_stencil(&dss->back, dss),
@@ -1224,6 +1255,9 @@ RhiPipeline rhi_create_pipeline(const RhiPipelineDesc *d)
 typedef struct VkrPipeWork {
     VkrPipeJob *jobs;
     uint32_t n;
+    RhiPipelineBatch *batch; /* its begin and end hooks (rhi.h), or NULL */
+    bool lowPriority;        /* each worker at SDL_THREAD_PRIORITY_LOW (the background set) */
+    bool background;         /* rhi_create_pipelines_begin's: counted in s_bgDone/s_bgLeft */
 #ifdef ICO_RHI_HAVE_SDL
     SDL_AtomicInt next, finished;
     SDL_Semaphore *wake;
@@ -1235,16 +1269,47 @@ typedef struct VkrPipeWork {
  * Windows and Android) */
 #define VKR_PIPE_STACK_BYTES (8u * 1024u * 1024u)
 
+/* the background sets' compiles (rhi.h RhiGpuProgress bgPipesDone,
+ * bgPipesLeft): returned since the start, begun and not returned; any
+ * thread reads them (vkr_pipe_background_progress, the watchdog's) */
+static uint32_t s_bgDone, s_bgLeft;
+
+void vkr_pipe_background_progress(uint32_t *done, uint32_t *left)
+{
+    *done = __atomic_load_n(&s_bgDone, __ATOMIC_ACQUIRE);
+    *left = __atomic_load_n(&s_bgLeft, __ATOMIC_ACQUIRE);
+}
+
+/* job i's compile between the batch's begin and end hooks (rhi.h) */
+static void vkr_pipe_compile_hooked(VkrPipeWork *w, uint32_t i)
+{
+    RhiPipelineBatch *b = w->batch;
+    if (b && b->begin) {
+        b->begin(b->ctx, i);
+    }
+    vkr_pipe_compile(&w->jobs[i]);
+    if (b && b->end) {
+        b->end(b->ctx, i);
+    }
+    if (w->background) {
+        __atomic_sub_fetch(&s_bgLeft, 1u, __ATOMIC_RELEASE);
+        __atomic_add_fetch(&s_bgDone, 1u, __ATOMIC_RELEASE);
+    }
+}
+
 #ifdef ICO_RHI_HAVE_SDL
 static int SDLCALL vkr_pipe_worker(void *arg)
 {
     VkrPipeWork *w = arg;
+    if (w->lowPriority) {
+        (void)SDL_SetCurrentThreadPriority(SDL_THREAD_PRIORITY_LOW);
+    }
     for (;;) {
         const int i = SDL_AddAtomicInt(&w->next, 1);
         if (i < 0 || (uint32_t)i >= w->n) {
             break;
         }
-        vkr_pipe_compile(&w->jobs[i]);
+        vkr_pipe_compile_hooked(w, (uint32_t)i);
         SDL_AddAtomicInt(&w->finished, 1);
         SDL_SignalSemaphore(w->wake);
     }
@@ -1259,6 +1324,33 @@ static uint32_t vkr_pipe_threads_for(uint32_t jobs)
         t = RHI_PIPELINE_THREADS_MAX;
     }
     return t < jobs ? t : (jobs > 0 ? jobs : 1u);
+}
+
+/* up to want workers on w (its counters set, its semaphore made here):
+ * how many started; 0 with w->wake NULL when the semaphore could not be
+ * made, 0 with it when no thread could (the caller compiles) */
+static uint32_t vkr_pipe_start_workers(VkrPipeWork *w, SDL_Thread **th, uint32_t want)
+{
+    uint32_t started = 0;
+    SDL_SetAtomicInt(&w->next, 0);
+    SDL_SetAtomicInt(&w->finished, 0);
+    w->wake = SDL_CreateSemaphore(0);
+    SDL_PropertiesID props = w->wake ? SDL_CreateProperties() : 0;
+    if (props) {
+        SDL_SetPointerProperty(props, SDL_PROP_THREAD_CREATE_ENTRY_FUNCTION_POINTER,
+                               (void *)vkr_pipe_worker);
+        SDL_SetStringProperty(props, SDL_PROP_THREAD_CREATE_NAME_STRING, "rhi-pipelines");
+        SDL_SetNumberProperty(props, SDL_PROP_THREAD_CREATE_STACKSIZE_NUMBER, VKR_PIPE_STACK_BYTES);
+        SDL_SetPointerProperty(props, SDL_PROP_THREAD_CREATE_USERDATA_POINTER, w);
+        for (; started < want; started++) {
+            th[started] = SDL_CreateThreadWithProperties(props);
+            if (!th[started]) {
+                break;
+            }
+        }
+        SDL_DestroyProperties(props);
+    }
+    return started;
 }
 #endif
 
@@ -1276,6 +1368,7 @@ uint32_t rhi_create_pipelines(const RhiPipelineDesc *descs, uint32_t n, RhiPipel
     memset(&w, 0, sizeof(w));
     w.jobs = calloc(n, sizeof(VkrPipeJob));
     w.n = n;
+    w.batch = batch;
     if (!w.jobs) {
         /* no room for the jobs: one at a time */
         for (uint32_t i = 0; i < n; i++) {
@@ -1300,25 +1393,7 @@ uint32_t rhi_create_pipelines(const RhiPipelineDesc *descs, uint32_t n, RhiPipel
         if (batch && batch->maxThreads > 0 && want > batch->maxThreads) {
             want = batch->maxThreads; /* the careful set: one compile at a time */
         }
-        SDL_SetAtomicInt(&w.next, 0);
-        SDL_SetAtomicInt(&w.finished, 0);
-        w.wake = SDL_CreateSemaphore(0);
-        SDL_PropertiesID props = w.wake ? SDL_CreateProperties() : 0;
-        if (props) {
-            SDL_SetPointerProperty(props, SDL_PROP_THREAD_CREATE_ENTRY_FUNCTION_POINTER,
-                                   (void *)vkr_pipe_worker);
-            SDL_SetStringProperty(props, SDL_PROP_THREAD_CREATE_NAME_STRING, "rhi-pipelines");
-            SDL_SetNumberProperty(props, SDL_PROP_THREAD_CREATE_STACKSIZE_NUMBER,
-                                  VKR_PIPE_STACK_BYTES);
-            SDL_SetPointerProperty(props, SDL_PROP_THREAD_CREATE_USERDATA_POINTER, &w);
-            for (; started < want; started++) {
-                th[started] = SDL_CreateThreadWithProperties(props);
-                if (!th[started]) {
-                    break;
-                }
-            }
-            SDL_DestroyProperties(props);
-        }
+        started = vkr_pipe_start_workers(&w, th, want);
         if (started > 0) {
             uint64_t last = vkr_now_ns();
             while ((uint32_t)SDL_GetAtomicInt(&w.finished) < n) {
@@ -1347,7 +1422,7 @@ uint32_t rhi_create_pipelines(const RhiPipelineDesc *descs, uint32_t n, RhiPipel
     if (!done) {
         /* the calling thread compiles them, the wait function between two */
         for (uint32_t i = 0; i < n; i++) {
-            vkr_pipe_compile(&w.jobs[i]);
+            vkr_pipe_compile_hooked(&w, i);
             if (batch && batch->wait && i + 1 < n) {
                 batch->wait(batch->ctx, i + 1);
             }
@@ -1365,6 +1440,119 @@ uint32_t rhi_create_pipelines(const RhiPipelineDesc *descs, uint32_t n, RhiPipel
     }
     free(w.jobs);
     return made;
+}
+
+/* ------------------------------------- compiled while the caller goes on
+ * (rhi.h rhi_create_pipelines_begin): the same jobs and workers as
+ * rhi_create_pipelines, the wait and the finish moved to
+ * rhi_create_pipelines_end on the thread that began */
+struct RhiPipelineJobs {
+    VkrPipeWork w;
+    RhiPipelineDesc *descs; /* copies (the finish names each by its debugName) */
+    uint32_t started;       /* the workers (0: compiled on the calling thread at begin) */
+    bool done;              /* compiled at begin (no worker) */
+#ifdef ICO_RHI_HAVE_SDL
+    SDL_Thread *th[RHI_PIPELINE_THREADS_MAX];
+#endif
+};
+
+RhiPipelineJobs *rhi_create_pipelines_begin(const RhiPipelineDesc *descs, uint32_t n,
+                                            uint32_t maxThreads, bool lowPriority)
+{
+    if (!descs || n == 0) {
+        return NULL;
+    }
+    RhiPipelineJobs *j = calloc(1, sizeof(*j));
+    if (!j) {
+        return NULL;
+    }
+    j->w.jobs = calloc(n, sizeof(VkrPipeJob));
+    j->descs = calloc(n, sizeof(RhiPipelineDesc));
+    if (!j->w.jobs || !j->descs) {
+        free(j->w.jobs);
+        free(j->descs);
+        free(j);
+        return NULL;
+    }
+    j->w.n = n;
+    j->w.lowPriority = lowPriority;
+    j->w.background = true;
+    __atomic_add_fetch(&s_bgLeft, n, __ATOMIC_RELEASE);
+    memcpy(j->descs, descs, (size_t)n * sizeof(RhiPipelineDesc));
+    for (uint32_t i = 0; i < n; i++) {
+        vkr_pipe_prepare(&descs[i], &j->w.jobs[i]);
+    }
+#ifdef ICO_RHI_HAVE_SDL
+    uint32_t want = vkr_pipe_threads_for(n);
+    if (maxThreads > 0 && want > maxThreads) {
+        want = maxThreads;
+    }
+    j->started = vkr_pipe_start_workers(&j->w, j->th, want);
+    if (j->started == 0 && j->w.wake) {
+        SDL_DestroySemaphore(j->w.wake);
+        j->w.wake = NULL;
+    }
+    if (j->started == 0) {
+        VKR_LOG("pipelines: no worker thread for the background set (%s); creating them on this "
+                "thread",
+                SDL_GetError());
+    }
+#else
+    (void)maxThreads;
+#endif
+    if (j->started == 0) {
+        /* no worker: compiled here, now (the caller's end finds them done) */
+        for (uint32_t i = 0; i < n; i++) {
+            vkr_pipe_compile_hooked(&j->w, i);
+        }
+        j->done = true;
+    }
+    return j;
+}
+
+bool rhi_create_pipelines_end(RhiPipelineJobs *j, bool wait, RhiPipeline *out, float *ms,
+                              uint32_t *threads)
+{
+    if (!j) {
+        return false;
+    }
+    const uint32_t n = j->w.n;
+#ifdef ICO_RHI_HAVE_SDL
+    if (!j->done) {
+        if (!wait && (uint32_t)SDL_GetAtomicInt(&j->w.finished) < n) {
+            return false;
+        }
+        while ((uint32_t)SDL_GetAtomicInt(&j->w.finished) < n) {
+            SDL_WaitSemaphoreTimeout(j->w.wake, (Sint32)RHI_PIPELINE_WAIT_MS);
+        }
+        for (uint32_t i = 0; i < j->started; i++) {
+            SDL_WaitThread(j->th[i], NULL);
+        }
+        if (j->w.wake) {
+            SDL_DestroySemaphore(j->w.wake);
+        }
+    }
+#else
+    (void)wait;
+#endif
+    for (uint32_t i = 0; i < n; i++) {
+        const RhiPipeline p = vkr_pipe_finish(&j->descs[i], &j->w.jobs[i]);
+        if (out) {
+            out[i] = p;
+        } else if (p.id) {
+            rhi_destroy_pipeline(p);
+        }
+        if (ms) {
+            ms[i] = j->w.jobs[i].ms;
+        }
+    }
+    if (threads) {
+        *threads = j->started > 0 ? j->started : 1u;
+    }
+    free(j->w.jobs);
+    free(j->descs);
+    free(j);
+    return true;
 }
 
 void rhi_destroy_pipeline(RhiPipeline h)

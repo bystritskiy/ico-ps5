@@ -177,7 +177,8 @@ inline int ACTGame_CheckHandMotion(GObj *boy, GObj *girl)
 static inline int ACTGame_CheckItemMotion_ntscaug6jun26(GObj *self)
 {
     const MotionRec *rec = &motionKind[GOBJ_SUB(self)->ctrl.motion];
-    return rec->modeBits.h.hi & 7;
+    /* PC port: the host holds the item mode at the European bits 19-21 */
+    return (rec->modeBits.w >> 19) & 7;
 }
 
 inline int ACTGame_CheckItemMotion(GObj *self)
@@ -2007,6 +2008,11 @@ static __inline__ void speedRatioDebugOverride(float *ratio) /* derived name */
 #endif
 }
 
+/* PC port: port/game/options.c: [gameplay] shadow_speed, the factor 0.75 to 1.5, and
+   whether a motion is one of this disc's shadow locomotion motions */
+extern float ico_opt_shadow_speed_factor(void);
+extern int ico_opt_shadow_speed_motion(int motion);
+
 inline void ACTGame_SetMotionPlaySpeedRatio_Exec(GObj *self)
 {
     float ratio;
@@ -2026,6 +2032,17 @@ inline void ACTGame_SetMotionPlaySpeedRatio_Exec(GObj *self)
     }
     if (keep) {
         ratio = 1.0f;
+    }
+    /* PC port: [gameplay] shadow_speed (port/game/options.c) scales a shadow's walking,
+       running and flying; the ratio multiplies the motion's play speed, and the ground speed
+       is the motion's root motion, so both scale in step.  Only this disc's locomotion
+       motions (ico_opt_shadow_speed_motion): attacks, grabs, hits, the dissolve and the pit
+       dive ([gameplay] pit_time owns it) keep their play speed, in step with the AI's
+       tick-counted waits.  Left alone too: a frozen shadow (the 0.0001 freeze). */
+    if (((struct GObj *)self)->kind == 4 && ratio > 0.001f &&
+        ico_opt_shadow_speed_factor() != 1.0f &&
+        ico_opt_shadow_speed_motion(GOBJ_SUB(self)->ctrl.motion)) {
+        ratio *= ico_opt_shadow_speed_factor();
     }
     speedRatioDebugOverride(&ratio);
     SetMotionPlaySpeedRatio(self, ratio);
@@ -6527,6 +6544,11 @@ inline void ACTGame_SendSoundMail(GObj *self, int mail, GObj *from, int mot, int
     }
 }
 
+/* PC port: port/platform/diag_host.h (rate-limited log lines: an item
+   taken, and the North American twin's mode-2 null read skipped) */
+void ico_host_item_held(int kind, int motion, int girl);
+void ico_host_item_watch_null(int motion, float frame, float anim_frame);
+
 static void ItemHold(Act *sub, GObj *self) /* derived name */
 {
     if (sub->heldItem.i != 0) {
@@ -6536,6 +6558,8 @@ static void ItemHold(Act *sub, GObj *self) /* derived name */
         return;
     }
     HoldItem(sub->heldItem.p, self);
+    /* PC port: a line per item taken (rate-limited), so a log shows pickups happen */
+    ico_host_item_held(GetItemKind(sub->heldItem.p), GOBJ_SUB(self)->ctrl.motion, self == girlGObj);
 }
 
 static void ItemRelease(Act *sub) /* derived name */
@@ -6573,8 +6597,12 @@ static void ACTItemThrow(Act *sub, GObj *self)
 static void ACTItemWatchMotion_ntscaug6jun26(GObj *self)
 {
     Act *sub = GOBJ_ACT(self);
-    int mode;
-    int frame;
+    /* PC port: the disc's own build reads the item mode at motion bits 16-18; the host loader
+       holds it at the European bits 19-21 (config/motion_bits.ntsc.txt, modeBits), like the
+       European arm below */
+    MotionRec *rec = &motionKind[GOBJ_SUB(self)->ctrl.motion];
+    int mode = rec->modeBits.w >> 19;
+    int frame = rec->modeBits.b;
 
     mode &= 7;
 
@@ -6582,11 +6610,18 @@ static void ACTItemWatchMotion_ntscaug6jun26(GObj *self)
     case 2:
         if ((float)frame < GOBJ_SUB(self)->ctrl.animFrame) {
             ItemHold(sub, self);
-        } else {
+        } else if (sub->heldItem.i != 0) {
+            /* PC port: the 2001 builds read a null item here (the EE reads
+               its low RAM, the host faults); the later builds' guard, as
+               the European arm below */
             float pos[4];
             GetRootPosition(pos, sub->heldItem.p);
             SetDirectRootPositionNoFittingWithNodePoint(self, 0x16, pos, 0.2f);
             debug_StdPrintfDummy("!!\n");
+        } else {
+            /* PC port: the null read skipped, logged (rate-limited) */
+            ico_host_item_watch_null(GOBJ_SUB(self)->ctrl.motion, (float)frame,
+                                     GOBJ_SUB(self)->ctrl.animFrame);
         }
         break;
 

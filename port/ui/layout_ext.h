@@ -32,6 +32,8 @@
 #ifndef PORT_UI_LAYOUT_EXT_H
 #define PORT_UI_LAYOUT_EXT_H
 
+#include <stdint.h>
+
 #include "layout_texture.h" /* LtProp, LtProperty, texLayout, texProperty */
 
 #ifdef __cplusplus
@@ -49,8 +51,10 @@ extern "C" {
 int lt_ext_game_layout_count(void);
 int lt_ext_game_property_count(void);
 #define LT_EXT_MAX_LAYOUTS 32
-#define LT_EXT_MAX_PROPERTIES                                                                      \
-    768 /* room for every page's rows, the mouse rows and the Android driver page among them */
+/* room for every page's rows, the mouse rows, the Android driver page and
+   the model viewer's rows among them, with 64 spare (settings_test); 706
+   used in v0.10.0 */
+#define LT_EXT_MAX_PROPERTIES 1024
 
 /* The label of a port row. */
 typedef struct LtExtText {
@@ -229,6 +233,31 @@ int lt_ext_has_circle_back(void);
 void lt_ext_set_circle_back(int on);
 int lt_ext_circle_back(void);
 
+/* An image row (the save-state slots' pictures): the box (x, y, w, h) as
+   lt_ext_add_rect takes it, drawn with the texture `tex` (an RdTex id) over
+   its texels (0, 0)..(texW, texH) at the texture's own shape inside the box
+   (lt_ext_image_fit), modulated by the row's colour (its fade),
+   where a label would be (no glow); -1 when full.  lt_ext_set_image changes
+   the texture (0, or a zero size: nothing is drawn, an empty slot or the
+   headless build); -1 for an index that is not an image row.  The texture is
+   the PAGE's, not the row's: the page creates it with rd_create_texture and
+   destroys it with rd_destroy_texture (port/render/rd.h, the entry
+   ui/font.c and ui/menu_font.c release their atlas pages with), after
+   setting the row's texture to 0 or before the next draw of the row; the
+   row never frees it.  lt_ext_reset drops every row.  lt_ext_row_image reads
+   the texture and size back (tests; 0 for a row that is not an image). */
+int lt_ext_add_image(int x, int y, int w, int h);
+int lt_ext_set_image(int index, uint32_t tex, int texW, int texH);
+uint32_t lt_ext_row_image(int index, int *texW, int *texH);
+/* Where an image row draws its texture inside the row's box: in = the box
+   (x0, y0, x1, y1 in the text grid, font.h: x in 640ths of the 4:3
+   picture, y in half field lines, a y unit UI_X_PER_Y of an x unit on
+   screen), out = the largest rectangle with the texture's own shape (texW
+   over texH, square texels) centred in it, so a 16:9 picture keeps its
+   shape in a 4:3 box (bands above and below stay empty) and nothing is
+   stretched.  out = in for a zero size. */
+void lt_ext_image_fit(const float in[4], int texW, int texH, float out[4]);
+
 /* A rect row's colour changed after it was added (Settings >
    Extras > Characters' swatches): rgba as lt_ext_add_rect takes it (GS,
    0x80 = 1.0, times the row's colour when drawn).  0, or -1 for an index
@@ -246,7 +275,10 @@ int lt_ext_rect_color(int index, unsigned char rgba[4]);
    the small arrows are easy to hit).  STEP: a stepped value, a click is
    Right on the owner item (Cross does nothing on a stepped row).  UP / DOWN: a scroll
    mark, a click is Up / Down on the page's cursor, which does not move (the
-   hit's item is -1).  Cleared by lt_ext_reset; -1 for an index that is not a port row. */
+   hit's item is -1).  SQUARE: a button prompt (the Continue screen's Save
+   states line), a click is Square and the cursor does not move (item -1); hit
+   in a layout with no cursor of its own whatever the current layout has.
+   Cleared by lt_ext_reset; -1 for an index that is not a port row. */
 enum {
     LT_POINTER_AUTO = 0,
     LT_POINTER_NONE,
@@ -254,7 +286,8 @@ enum {
     LT_POINTER_RIGHT,
     LT_POINTER_STEP,
     LT_POINTER_UP,
-    LT_POINTER_DOWN
+    LT_POINTER_DOWN,
+    LT_POINTER_SQUARE
 };
 
 int lt_ext_set_pointer_role(int index, int role);

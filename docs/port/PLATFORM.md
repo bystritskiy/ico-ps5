@@ -13,24 +13,41 @@ run explain itself. [ARCHITECTURE.md](ARCHITECTURE.md) places this layer among t
 | `port/platform/main_host.c` | the program's `main` (desktop) or `ico_host_main` (Android, iOS): log, ini, game data, tables, window, the vsync loop |
 | `port/platform/host_loop.c`, `host_loop.h` | `ico_host_init`, `ico_host_step`, the step profile |
 | `port/platform/vsync_hooks.c` | the on-vsync callback list |
-| `port/platform/fiber.c`, `fiber.h` | the context switch over minicoro (`port/third_party/minicoro`), guarded stacks |
-| `port/platform/sched.c`, `sched.h` | the EE thread and semaphore model; `ico_sched_call_on_host` |
+| `port/platform/fiber.c`, `fiber.h` | the context switch over minicoro (`port/third_party/minicoro`), the slot pool with guarded stacks, a suspended fiber's save state image |
+| `port/platform/sched.c`, `sched.h` | the EE thread and semaphore model; `ico_sched_call_on_host`; the scheduler's save state image |
+| `port/platform/vm_reserve.c`, `vm_reserve.h` | address space reserved at a chosen address, committed and decommitted (the pinned arena, the fiber pool) |
+| `port/platform/state_reloc.c`, `state_reloc.h` | a save state's address ranges and their deltas; the relocation word functions and the scan ([Save states](#save-states)) |
+| `port/platform/state_check.c` | the program's image range and a load's typed self-checks (the game heap's walk, the threads, the interrupt handlers) |
+| `port/platform/state_file.c`, `state_file.h` | the save state file: the header, the build id, the validity, the writer thread, the reader |
+| `port/platform/state_hash.c`, `state_hash.h` | the hash of the game's state a round trip compares, the host's words left out ([Save states](#saving-and-loading), the hash rule) |
+| `port/platform/state_registry.c`, `state_registry.h` | the registry of the port's globals a save state carries |
+| `port/platform/state_port.c`, `state_port.h` | which port globals are registered, by owner (linked into `ico_pc` only) |
+| `port/platform/sim_keys.c`, `sim_keys.h` | the config keys that change the simulation (the pad recording's header, the save state's settings hash; compiled into `ico_config`) |
+| `port/platform/state.h` | the save states' interface (`state_host.c` implements it) |
+| `port/platform/game_data_range.c`, `game_data_range.h` | where the game's `.data` and `.bss` lie in the running program, and the check that they hold the game's globals and none of the port's ([Game data ranges](#game-data-ranges)) |
+| `port/platform/game_data_verify.c` | the program's own check of those ranges against named game and port globals (linked into `ico_pc` only) |
+| `port/platform/game_data_sections.h` | the section names clang gives the game's writable globals (forced into every game source by `cmake/IcoStateSections.cmake`) |
 | `port/platform/kernel_host.c`, `kernel_host.h` | the EE kernel calls of `port/compat/eekernel.h`; the INTC table |
 | `port/platform/arena.c`, `arena.h` | the EE RAM arena and the heap statistics |
 | `port/platform/hwregs.c` | the EE I/O and GS privileged register pages as plain memory |
 | `port/platform/fpenv.c`, `fpenv.h` | the simulation's FP mode and the host's |
 | `port/platform/clock.c`, `clock.h` | the wall clock behind `sceCdReadClock`; the EE timers T0 to T3 |
 | `port/platform/host_config.c`, `host_config.h` | the executable's folder, the user folder, portable mode, `ico-pc.ini`, the TOML reader and writer, SHA-1, message boxes, the log redirect |
-| `port/platform/host_fs.c`, `host_fs.h` | file calls on UTF-8 paths (wide calls on Windows) |
+| `port/platform/host_fs.c`, `host_fs.h` | file calls on UTF-8 paths (wide calls on Windows), the folder walk and listing, a folder's removal with everything below it |
 | `port/platform/diag_host.c`, `diag_host.h` | crash handlers, heartbeat, watchdog, milestones, float faults, the summary line, `ico_log_limited` |
 | `port/platform/symmap.c`, `symmap.h` | the crash and watchdog reports' symbolizer: a GNU ld link map or an nm table (plain or gzip), no allocation |
 | `port/platform/report.c`, `report.h` | the report file of an abnormal end, `logs/report-<date>-<time>.zip`, no allocation |
 | `port/platform/trace_host.c`, `trace_host.h` | the Main tick count, the heartbeat's state line, the trace file |
 | `port/platform/assert_host.c` | newlib's `__assert` as the game calls it |
 | `port/platform/window_host.c`, `window_host.h` | the SDL3 window, the renderer device, the real-time pacing, the stats lines (window build) |
+| `port/platform/window_present.c`, `window_present.h` | the presentation loop: the pace after each step under the vsync lock or on the timer path, the one present it makes at a time, the state it shares with `window_host.c` (window build) |
+| `port/platform/render_thread.c`, `render_thread.h` | the render thread: the submit and the present of the pictures the game thread records, park and unpark, the drain, the heartbeat, `[dev] render_thread` ([The render thread](#the-render-thread); window build) |
+| `port/platform/frame_mailbox.c`, `frame_mailbox.h` | what the game thread and the render thread hand each other, free of SDL and locks (the latest frame, the lock grid, the last present, slot pins, the job queue and its handshake, park and quit, the heartbeat, the mode); `frame_mailbox_test` |
 | `port/platform/window_video.c`, `window_video.h` | window mode requests and their readback |
-| `port/platform/window_switch.c`, `window_switch.h` | Options > Graphics > Apply: the renderer switched to another backend in the process, the Graphics page's host |
+| `port/platform/window_switch.c`, `window_switch.h` | Options > Graphics > Apply: the renderer switched to another backend or graphics card in the process, the Graphics page's host and its card names |
 | `port/platform/window_lifecycle.c`, `window_lifecycle.h` | the steps run when a mobile system moves the app |
+| `port/platform/ico_thread.c`, `ico_thread.h` | one OS thread, mutex and condition wrapper (pthreads, Win32) for code that must not need SDL; the achievements file writer, the texture decode pool, the VFS's per-mount mutex and the disc reader thread ([DATA.md](DATA.md#the-disc-reader-thread)) use it (`ico_thread_test.c`) |
+| `port/platform/cpu_place.c`, `cpu_place.h` | which core a thread runs on (one sample a step, a picture or a submit job, for the 10 s line's cores), the cores' top speeds (Linux and Android), the calling thread's priority and allowed cores, keeping a thread to some cores (Android's render and submit threads, `[dev] big_cores`); in `ico_thread`'s library, which the renderer links ([The render thread](#the-render-thread); `cpu_place_test.c`) |
 | `port/platform/pump_watch.c`, `pump_watch.h` | the event pump's recent window messages and SDL events, the controllers that came and went (name, GUID, SDL driver), SDL's own log ring, and the names of the messages (pure C, tested everywhere) |
 | `port/platform/window_pump_win.c`, `window_pump_win.h` | Windows: the window's messages recorded for the slow-pump lines, the display and the computer kept awake |
 | `port/platform/pace_policy.c`, `pace_policy.h` | the pacing decisions, free of SDL: the vsync lock, slow presents, the gap between presents |
@@ -38,6 +55,8 @@ run explain itself. [ARCHITECTURE.md](ARCHITECTURE.md) places this layer among t
 | `port/platform/startup_retry.c`, `startup_retry.h` | the steps the relaunch takes after a graphics driver crash or a lost graphics device |
 | `port/platform/hotkeys.c`, `hotkeys.h` | F11 and F12 |
 | `port/platform/dump_zip.c`, `dump_zip.h` | F12's zip and the aspect sweep's zip |
+| `port/platform/backup.c`, `backup.h` | Options > Extras > Back up your data and Restore from a backup: the zip of the user folder's data, its manifest and checks, the unpacking and the start's swap ([Backups](#backups); pure C, tested everywhere) |
+| `port/platform/backup_host.c`, `backup_host.h` | the two rows' host in the window build: the file dialogs, the work on its own thread, the end of the run after a restore (not on iOS) |
 | `port/platform/steam_shortcut.c`, `steam_shortcut.h` | Settings > Extras > Add to Steam (Windows and Linux; not offered on macOS) |
 | `port/platform/gpu_driver.c`, `gpu_driver.h` | Android graphics driver packages (pure C, tested everywhere) |
 | `port/platform/android/` | `main_android.c`, `host_android.c`, `android_paths.c`, `iso_import.c`, `gpu_driver_android.c` |
@@ -84,10 +103,63 @@ costs rendering and speed on MoltenVK there (`port/platform/ios/main_ios.c` (`ma
 Each [fiber](ARCHITECTURE.md#terms) is an asymmetric coroutine over minicoro: `ico_fiber_resume`
 runs it on its own stack until it calls `ico_fiber_yield` (`port/platform/fiber.h`). The scheduler
 is the only resumer, so every switch between two game threads goes fiber, scheduler, fiber. Stacks
-are 256 KB (`ICO_FIBER_STACK_SIZE`). With minicoro's assembly backend (x86-64 Linux and Windows,
-arm64) the stack has a no-access guard page below it, so an overflow faults instead of corrupting
-the fiber's control block (`port/platform/fiber.c` (the stack allocation section);
-`ico_fiber_has_guard_page`).
+are 256 KB (`ICO_FIBER_STACK_SIZE`). Every preset uses minicoro's assembly backend (x86-64 Linux
+and Windows, arm64), and the stack has a no-access guard page below it, so an overflow faults
+instead of corrupting the fiber's control block (`ico_fiber_has_guard_page`; the `fiber_guard`
+test).
+
+### The pool
+
+Every fiber lives in one of 256 slots (`ICO_FIBER_POOL_SLOTS`) of one address space reservation
+(`port/platform/fiber.c` (the pool section)). A slot is a header page (the `IcoFiber` record, then
+minicoro's `mco_coro` and switch context, placed where minicoro's `_mco_create_context` puts them
+in its one-block layout), the guard page (minicoro's storage area, one page long), the stack and
+minicoro's 16 spare bytes, rounded up to 64 KB, the Windows reservation granularity (320 KB with
+4 KB pages, about 80 MB of address space for the pool). A slot is committed when a fiber is
+created in it and decommitted when the fiber is destroyed (a fresh no-access mapping over it on
+POSIX, `MEM_DECOMMIT` on Windows), so a long session keeps only the live fibers' pages
+(`port/platform/vm_reserve.c`). `ico_fiber_create_in_slot(slot, fn, arg)` takes a given slot and
+refuses a used one; `ico_fiber_create` takes the highest free slot, for the tests and tools, so it
+stays clear of the scheduler's slots, which count up from 1.
+
+The pool is reserved at `ICO_FIBER_POOL_BASE` (0x3C10000000, 256 MB above the arena's pinned base)
+when that address is free: `mmap` with `MAP_FIXED_NOREPLACE` on Linux and Android (an older
+kernel takes the flag as a hint, so the address is checked and a miss unmapped), `mmap` with the
+address as a hint on Apple (checked), `VirtualAlloc` at the address on Windows. When it is taken
+the pool goes anywhere, with one line: `fiber: pool reserved at <address> (the pinned base was
+taken)`. `ico_fiber_pool_pinned` says which; `ico_fiber_pool_init_at` moves an empty pool (the
+tests' second pool at another address).
+
+### Save state images
+
+A save state (`port/platform/state.h`) holds each game thread's fiber as its slot's header
+page and its stack from the deepest word the stack ever held to its top, and at least from the
+saved stack pointer minus 128 bytes (the System V red zone) (`ico_fiber_slot_save`, which points
+into the live slot and copies nothing). A slot's stack is committed zeroed and a restore commits
+it zeroed again, so the bytes below the first nonzero word need no saving and the restored stack
+is the saved one byte for byte, the dead frames under the stack pointer included: the game's code
+reads them when it reads a local it never set, and a save that dropped them would give the
+loaded run other values there than the saved run had. `ico_fiber_slot_restore` commits the same slot of the current pool and copies both back
+at the same offsets, then moves the addresses they hold (`port/platform/state_reloc.h`):
+
+- typed: the saved return address (`rip`; `lr` and `x30` on arm64) by the module delta; the stack
+  pointer (`rsp`; `sp`) and, on Windows, the TEB stack words minicoro's switch swaps
+  (`stack_base`, `stack_limit`, `dealloc_stack`) by the pool delta, each checked to land in the
+  slot's stack; minicoro's own pointers (`context`, `stack_base`, `storage`, `user_data`,
+  `allocator_data`, `func`, `dealloc_cb`) and the record's `co` set for the slot, each checked
+  against its old value plus its delta; the record's `fn` by the module delta;
+- the conservative scan (`ico_state_reloc_word`): the other callee-saved registers (`rbx`, `rbp`,
+  `r12` to `r15`, and `rdi`, `rsi` on Windows; `x19` to `x29` on arm64; `rbp` and `x29` are
+  scanned, not typed, since code built without frame pointers keeps anything in them), the
+  record's `arg`, and every 8-byte word of the restored stack; the same step rewrites the saving
+  process's thread pointer and stack guard to this process's ([Relocation](#relocation)), which a
+  protected frame keeps in a callee-saved register and in its stack slot;
+- never: the vector registers (`xmm6` to `xmm15`, `d8` to `d15`); `back_ctx` is cleared (the next
+  resume writes it).
+
+A check that fails frees the slot again and the restore returns -1. `ico_fiber_slot_discard`
+drops a slot without running its fiber (a load replaces every live thread). The calls work on
+the host context only, with the assembly backend on x86-64 and arm64.
 
 The game's own thread stacks (`mainThreadStack`, the stacks `iosThreadCreate` is handed) are
 still allocated and stamped with `<THREAD_SP>` marks by the game, so its memory use is the PS2's
@@ -138,6 +210,17 @@ run, higher ones woken by an interrupt do, and `ico_sched_run` returns to the ho
 thread is the highest ready one, until the next vsync (`port/platform/sched.h` (Busy waits);
 `port/platform/kernel_host.c` (`VSync`); `port/null/gfx_null.c` (`sceGsSyncV`);
 `ico2/common/src/main.c` (`idle`)).
+
+Thread id N runs in pool slot N (`ico_sched_start_thread` calls `ico_fiber_create_in_slot`), so a
+loaded state's threads get their stacks back at the same offsets. `ico_sched_state_save` and
+`ico_sched_state_restore` (`port/platform/sched.h`) work at the host loop's quiescent point only
+(no thread on the CPU, the dispatcher idle, no interrupt open, no host call pending): the
+scheduler's simulation state is one block (the thread and semaphore tables, the ready queues, the
+current and last thread, the vsync and switch counts) plus every started thread's fiber image.
+The restore checks the image against itself before it changes anything, discards every live
+fiber, copies the block, moves its host pointers (`entry`, `note`, `note_caller` typed by the
+module delta; `arg`, `stack`, `gp` by the scan) and restores each saved fiber into its slot; a
+failure after the discard leaves the scheduler empty for the caller to put its backup back.
 
 Host work too deep for a 256 KB fiber stack (the GPU driver's replay, pipeline creation, present)
 goes through `ico_sched_call_on_host`: from a fiber the thread yields, the dispatcher runs the
@@ -217,24 +300,450 @@ paces (`port/platform/main_host.c` (`host_main`)).
 In the window build `ico_window_pace(hz)` runs after every simulated vsync. Outside the
 [vsync lock](ARCHITECTURE.md#terms) it presents until the vsync's deadline in real time (20 ms PAL,
 16.683 ms NTSC), as often as the frame rate option and vsync allow, then sleeps to it; more than
-100 ms behind, the lag is dropped instead of run off fast (`port/platform/window_host.c` (`pace`,
-`RESYNC_NS`, `resync`)). Under the vsync lock (vsync on, and a frame rate cap equal to the
+100 ms behind, the lag is dropped instead of run off fast (`port/platform/window_present.h` (`RESYNC_NS`); `port/platform/window_present.c` (`pace`, `resync`)). Under the vsync lock (vsync on, and a frame rate cap equal to the
 display's refresh and a whole multiple of the game's rate) the step is due on a grid of n display
 refreshes and is followed by n presents; more than `PACE_LOCK_DEBT_VSYNCS` (6) periods behind, the
-lag is dropped and the grid starts again (`port/platform/window_host.c` (`pace_locked`);
+lag is dropped and the grid starts again (`port/platform/window_present.c` (`pace_locked`);
 `port/platform/pace_policy.h` (`pace_lock_vsync`, `PACE_LOCK_DEBT_VSYNCS`)). Every decision free
 of SDL (the vsync lock and its display clocks, slow presents, the gap between presents, the FIFO
 hold, the first present on a new swapchain, the automatic resolution step) is in
-`port/platform/pace_policy.c`, tested by ctest `pace_policy` and `pace_loop`; `window_host.c` only
+`port/platform/pace_policy.c`, tested by ctest `pace_policy` and `pace_loop`; `window_present.c` only
 times and calls them. The [headless build](ARCHITECTURE.md#terms) has no pacing and runs vsyncs as
 fast as it can. [DISPLAY.md](DISPLAY.md#pacing) describes the paths and the vsync lock.
+
+## The render thread
+
+The window build has two threads that draw. The game thread runs the host loop (the step, the
+event pump, `ico_window_pace`), records the frames and keeps the pacing; the render thread
+(`port/platform/render_thread.c`) makes every picture: the present whole, the interpolation
+between the two retained frames included, the fence wait, the acquire, the uploads, the walk with
+its binds and lazy pipelines, the submit, the present and the capture's finish
+(`port/render/rd_thread.h` (`rd_present_post`); `port/platform/window_present.c`
+(`present_once`)). It runs with every backend: with OpenGL the context is the render thread's for
+its jobs, and with Direct3D 11 its immediate context is used by one thread at a time. With Vulkan
+and Direct3D 12 a third thread, the submit thread, takes the end of a picture handed over: the
+list's end, its submit and the present (`port/render/rd_submit_thread.h`; the rule below). The
+texture decode workers, the disc reader, the present-wait thread and the watchdog stay as they
+are.
+
+The rules (`port/render/rd_thread.h` and `port/platform/render_thread.h`, header comments):
+
+- The hand-over (texLock). A picture handed over without waiting owns the renderer's state (the
+  retained frames, the textures, the meshes, the targets, the settings) until its reads end with
+  the walk and the present's pass (`rd__reads_done`, from `port/render/rd_submit.c`
+  (`rd__submit_frame`)). Until then every game-thread call that changes that state waits first
+  (`rd__texlock_wait`: the texture, mesh and temporary-target calls, `rd_begin_frame`,
+  `rd_end_frame`, the texture cache's stores, ticks and `rdtex_settle`). So the render thread reads
+  exactly the state the game thread had when it posted, and the pictures are the bytes they were
+  with the thread off; what overlaps the game's step is the submit, the present and the GPU's and
+  the display's time after the walk. The game records its next frame across the steps between its
+  ticks, so a step that changes a texture or a mesh while a picture is being walked waits for that
+  walk (the 10 s line's read waits). Nearly every step changes that state (`rdtex_find` for each
+  textured draw, `rd_draw_vu_mesh`, `rdtex_frame_tick`, `rd_begin_frame`), so a step that starts
+  inside a picture's reads waits for them at its first such call, whichever it is; the later calls
+  find them ended (one wait a picture at most). The ownership is handed over on the game thread
+  itself as it posts (`handOver` in `rd_present_post` / `rd__replay_frame_async`, the render thread
+  drained first), and only the game thread's calls wait for it, so a call that waited for one
+  picture has run before the next picture's reads can begin: a wait is one picture's reads, never
+  two (`rd_tex_test`'s `threadFair`).
+- The window and the slot ahead. A present's job runs the interpolation (reads the retained
+  frames), its wait for its frame slot (`rd__wait_frame`: the submit thread's jobs of that slot and
+  the GPU's fence of the picture two before; reads nothing the game thread changes), the ring, the
+  acquire (reads nothing the game changes: the settings change only with the render thread
+  drained), the uploads and the walk (read the textures, meshes and targets), then the present's
+  pass and `rd__reads_done`. The fence wait was inside the hand-over: a PowerVR phone at its native size had
+  `read waits 76 (1285.7 ms, longest 33.0 ms)` with 7.6-10 ms of reads a picture, the slow replays
+  `wait 23.4 (fence 22.9)`. Now a picture handed over ends its job by waiting for the next
+  picture's slot (`port/render/rd_thread.c` (`slotAhead`): after `rd__reads_done` and the list's
+  post to the submit thread, the slot's submit-thread jobs, `rhi_wait_frame`, the bind groups'
+  epoch); the next `rd__wait_frame` takes that slot without waiting (`rd__slot_ahead_take`, true
+  once while the current slot is that one; on any other thread after the render thread's drain).
+  So the hand-over spans the interpolation, the acquire, the uploads and the walk only, and the
+  fence wait overlaps the game's step. The game thread sees nothing new between the reads' end and
+  the next picture's: the slot ahead touches only the frame slot (the retained frames are
+  immutable once closed, the destroys are deferred to the retire list and `rdtex_frame_tick`'s
+  "two frames later"), and a game-thread graphics call waits for that job through the call guard
+  as for any job. The same calls are made on the render thread, the slot's wait earlier, so the
+  pictures' bytes are unchanged. Not done: with the submit thread on and the frame slots one at a
+  time (the wait would be the submit thread's whole job on this picture), for the pictures that
+  wait (the vsync lock's, sync, captures), and under `ICO_RD_SLOT_AHEAD=0`; there the picture waits
+  inside its reads as before. The acquire stays inside (0.0-0.1 ms in that phone's slow replays; an image
+  acquired ahead would be held across the step and across a swapchain change). Where a post finds
+  the render thread still in its slot ahead, the post's drain waits for the rest of it (a slot wait,
+  the present's cost, which the further-present rules see through the heartbeat: the slot ahead is
+  part of the picture's job and of `takes`), not the step's first call. The line at each start:
+  `rd: render thread: the next picture's frame slot is waited for at the end of the picture before,
+  outside the hand-over (...)` (with `ICO_RD_SLOT_AHEAD=0`: `the next picture waits for its frame
+  slot inside its reads (...)`).
+- Further presents held only when a step would miss its period (the step-deadline rule;
+  [DISPLAY.md](DISPLAY.md#further-presents-and-the-game-step) has it in words). On the timer path
+  a further present of a frame already shown is held when it would make a game step miss its own
+  period, not whenever its reads would touch the next step (`port/platform/window_present.c`
+  (`rt_further_hold`); `port/platform/pace_policy.h` (`pace_rt_further_ask`,
+  `pace_rt_step_miss`)). Posted once the picture in progress is done, its reads may end past the
+  next step's due time by the step's slack, `period - (step + 2 ms)`: that step's first renderer
+  call waits for them and it still ends inside its period. The step after it, behind the next new
+  frame's own picture (never held), must also start within its slack, unless it would start as
+  late without the further picture. The step is its own time (the window's step less its read
+  waits, `rd_thread_read_wait_ns`), estimated by its kind's typical time (`PaceStepTyp`: a decaying
+  mean and half its deviation, as the render thread's times are, `PaceRtTyp`), and a step that ended past its
+  deadline because of the pictures makes it the whole period for 120 steps (so the reads must end
+  by the due time, the rule before), 240 at the next such miss and so on to 1920, halved by 1920
+  steps without one. A miss is the pictures' (`pace_step_by_pictures`) when the presents' run past
+  the step's start (`pace_step_start_late`: past the later of its due time and the step before's
+  end, less 0.5 ms for the pacer's wake and the pump, `PACE_STEP_WAKE_NS`) plus its waits for a
+  picture's reads is at least its lateness: without them it would have ended inside its period.
+  Every other miss is the game's own (a long step, a load, a pipeline compile, a bug report's
+  capture, the disc, or the lateness a long step carries into the next start) and arms nothing,
+  since the further presents' plan cannot help it, and arming on every miss kept a phone's
+  whole session on the rule before (515-600 steps of every 10 s block planned at the period). The 2
+  ms margin (`PACE_RT_STEP_MARGIN_NS`) is what the step's own time does not see: the pump between
+  steps, the pacer's wake, the audio callback and other threads taking the game thread's core,
+  the present's post (0.1-0.5 ms each in a PowerVR phone's log). The reads are predicted
+  from the presents handed over (`PaceRtPipe`): the interpolation (no graphics call), then the
+  submit thread's job on the picture before, then the slot fence on the picture two before it
+  (`RHI_FRAMES_IN_FLIGHT` 2; the picture before when the presents wait for the GPU, the
+  driver's back-pressure), the GPU finishing a picture every GPU span (the window's median), then
+  the render thread's own reads (its reads less the fence, submit-thread and acquire waits,
+  `rd_thread_take_reads_parts`), and never less than the reads as measured with their waits; the
+  estimates are the render thread's (`port/platform/render_thread.c` (`ico_render_thread_plan`):
+  after each picture handed over, the reads, the whole job, the present call's wait, the reads of
+  its own, the interpolation, `rd_thread_submit_take_job_ns`, each by `pace_rt_estimate`). With
+  no GPU time (no timestamps) no fence is predicted and the back-off is what bounds a wrong
+  estimate. A new frame's present is never held: every frame is shown. Not under the vsync lock,
+  not in `sync` or `off` (the present's cost is the whole picture there), not before the first
+  picture handed over. No step and no frame's bytes change: only which in-between pictures are
+  made. The rule before (`pace_rt_further_late`: the reads by the next step's due
+  time) refused the phone's second picture a frame by about 1 ms (reads 11.5-12.5 ms, a 4.5 ms
+  step, 30 presented fps); `pace_loop_test` (`testStepRule`) gives 52-60 there.
+- Further presents held while the presents wait. With vsync on and mailbox, or a frame rate cap
+  with vsync off (the presents paced by the GPU's time, `pace_budget_paced_mode`), a further
+  present is also held, before the rule above, while the render thread's picture in progress has
+  run as long as its estimate or longer (`PACE_RT_OVERRUN`: when it ends is not known, so neither
+  is the drain of a present posted now: a present blocked, a pipeline compiled in the walk) and
+  while the present call's own wait, estimated as the other times (`rd_thread_take_present_ns`:
+  rd_submit.c's present time and the submit thread's, the backend's present call and a capture's
+  finish), is half a refresh or more (`PACE_RT_BEHIND`, `PACE_RT_BEHIND_DIV`: the display or the
+  GPU is behind; one more picture only deepens the GPU's backlog, its present waits as long, and
+  the next new frame's present waits for it). A phone's log at a stage change shows why: a
+  PowerVR driver's mailbox present blocked 17-34 ms behind 21-35 ms GPU pictures (its fence waits
+  0.0 ms: the present call waits for the GPU's earlier pictures), and 511 pictures for 300 frames
+  left `slot waits 88 (1003.2 ms), read waits 51 (533.3 ms, longest 16.6 ms)`. Under FIFO a
+  present waits for the display by design, so only the step rule holds there. `PACE_RT_BEHIND`
+  holds only with the submit thread off (`PaceRtAsk.submitNs` 0 and `submitOn` false, as
+  `pace_rt_pipe_behind` reads them): with it on the present's wait blocks the submit thread, not
+  the render thread, and the next picture's first graphics call already waits for that job (or,
+  with the frame slots apart, for its own slot's fence), which the step rule's pipe predicts.
+  Before, the hold read the submit thread's present wait as the render thread's: Android's
+  defaults on a 120 Hz screen (vertical sync on, frame rate 60: no vsync lock, a mailbox, the
+  paced path) held every further present on the PowerVR phone, whose presents wait half a refresh
+  or more in most asks, so it showed about 30 pictures a second for 30 game frames
+  ([DISPLAY.md](DISPLAY.md#further-presents-and-the-game-step), `pace_loop_test`
+  `testDefaults`).
+- Pictures as made with vsync off and the frame rate uncapped (`pace_rt_as_made`: the timer path,
+  no FIFO lock, the render thread on). The player expects pictures as fast as they are made, as on
+  a PC with vsync off, so neither the [present allowance](DISPLAY.md#the-present-allowance) (kept
+  as a measurement: its 10 s part reads `vsync off, uncapped: pictures as made (2 in flight at
+  most, the GPU's time would pace them to N.N a step)`) nor `PACE_RT_BEHIND` holds a further
+  present there. With the submit thread a blocking present costs the render thread nothing, and
+  the GPU's own back-pressure is the limit: the render thread's next picture waits at the slot
+  fence (`rd__wait_frame`, at most `RHI_FRAMES_IN_FLIGHT` 2 pictures in flight) or for the submit
+  thread inside its reads, which the step rule sees in its prediction. `PACE_RT_OVERRUN` stays:
+  the post's drain would hold the game thread for a render-thread job whose end is not known (a
+  pipeline compiled in its walk, a present blocked on the render thread with OpenGL or Direct3D
+  11), which the fences do not bound. On the PowerVR phone, whose vsync off is a mailbox whose
+  present blocks behind the GPU at a door, the block lands on the submit thread and the render
+  thread waits for it: the player sees about the GPU's rate (`testStepRule`: 26 ms GPU pictures,
+  32 a second of the GPU's 38, the rest held by the step rule), the GPU, not a rule. The
+  mailbox's one present a refresh (`pace_present_gap`) stays: the display shows no more. With
+  vsync on (the lock, the grid, FIFO, mailbox) and at Frame rate Original nothing changes. The
+  window logs the mode's start and end (`window: vsync off, uncapped: pictures between frames as
+  the render thread and the GPU make them (2 in flight at most); ...`).
+- One picture at a time. A picture waits for the one before it to finish (its wait counted as the
+  present's display wait, `rd_submit_waited_ns`). A picture whose capture or blended dump is armed
+  (F12, a save state's picture) and every picture while the vsync lock uses the display's timing
+  (`rd_submit_hold`) wait for their end. A new frame's present can only wait for the end of the
+  picture before it, never for its reads: the frame's close (`rd_end_frame`) already waited for
+  those. So that wait is the picture's submit and present call, and on a driver whose present
+  blocks behind the GPU's earlier pictures, the GPU's backlog.
+- The submit thread (`port/render/rd_submit_thread.h`, `rd_submit_thread.c`, its queue
+  `rd_submit_queue.h`). A picture handed over without waiting keeps its list open at the walk's
+  end (`rd__submit_defer`, from `rd__submit_frame` before the reads end), and the render thread's
+  job posts it at its end (`rd__submit_post_pending`, from `port/render/rd_thread.c`
+  (`runTramp`)): the submit thread ends it, submits it and presents the image. The render thread
+  is then free for the next picture as soon as its walk ends, and the game thread's next present
+  waits for that much only (`rd_present_post`'s drain is the render thread's alone). With
+  Vulkan's frame slots apart (`RhiLimits.slotOverlap`: the timeline sync; RHI.md, "Frame slots and
+  the submit thread") each job carries its list's slot and the submit thread installs the slot
+  guard (`rhi_set_slot_guard`): the render thread's next picture waits only for the jobs of the
+  slot its fence wait recycles, the picture two before (`rd__submit_drain` ->
+  `rd_thread_submit_wait_slot`), and its recycle, acquire, uploads and walk run while the picture
+  before is ended, submitted and presented, every slot call (`rhi_wait_frame`,
+  `rhi_begin_commands`, `rhi_create_bind_group`, the buffer maps, the timestamp and occlusion
+  reads, `rhi_acquire_backbuffer`) passing the call guard when no job of its slot is queued or
+  running. The acquire may come before the present of the picture before when the swapchain has
+  an image to spare (one over the surface's minimum, as made: always outside the FIFO fallback),
+  else it waits; a present on the submit thread that finds the swapchain out of date, another size
+  or the surface lost leaves the rebuild to the next acquire. Every other call that changes the
+  device's state (a texture or a pipeline made or destroyed, a readback, a submit, a rebuild)
+  waits for the submit thread as below, so the queue's submits and presents keep their order.
+  With Direct3D 12, Vulkan's fence ring or `ICO_RD_SUBMIT_OVERLAP=0` the backend runs on one
+  thread at a time: the render thread's next call that changes the device's state (its next
+  picture's fence wait, `rd__wait_frame`, comes first) waits for the submit thread (the call
+  guard's busy on the render thread is `rd_thread_submit_busy`, its wait
+  `rd_thread_submit_drain`), and every other thread's call waits for both; what overlaps the
+  submit and the present there is the next picture's interpolation (no graphics call) and the
+  game's step (Direct3D 12 keys the frame slot, the acquired image and the submit's counters on one
+  frame index, `port/rhi/d3d12/d3d12_cmd.c`). In both modes a slot's command pool is reset only
+  after its list was submitted and its fence passed. A list kept open when a call of the render thread's own needs the backend
+  before the job ends (a readback, a pipeline) is ended, submitted and presented there first, after
+  what the submit thread had (counted as `submitted on the render thread`); the background
+  pipelines' step after a picture (`rd__pipe_finish_tick`) waits for the next picture's fence wait
+  instead (`rd__submit_pipe_tick`), one picture late. Only a picture handed over without waiting
+  and with no capture to finish goes there: the pictures that wait for their end (`sync`,
+  `rd_submit_hold`, a capture, the blended dump, `rd__replay_frame`) and the pictures made on the
+  game thread (parked, no host) end, submit and present where they are made, as before, so a
+  picture's bytes do not change. The queue holds at most two (`RD_SUBMIT_DEPTH`; with the rule
+  above one) pictures submitted and not presented, so the GPU's backlog stays the present
+  allowance's. A job's submit and present times go into its replay's record when a thread that
+  waited for it takes them (`rd__perf_submit_times`): the replays line keeps its columns, one
+  picture late. The thread runs at SDL's high priority (`RdThreadHost.submitBegin`). OpenGL and
+  Direct3D 11 have none (`RhiLimits.singleThreadCommands`); `ICO_RD_SUBMIT_THREAD=0` turns it off
+  for the tests' other arm; `[dev] render_thread = off` or `sync` has none either. Park waits for
+  it after the render thread parks (the surface goes after the last present), the stop ends it
+  with the host, and the heartbeat counts its job as the last picture's when the render thread has
+  none in progress (a present that hangs there ends the run through the GPU hang's path).
+- The overlay. The UI's layers of a picture the game thread posts (the popups, photo mode's HUD,
+  the touch controls, the frame rate counter: `port/ui/ui_host.c` (`hostOverlay`,
+  `hostOverlayTop`)) are collected on the game thread before the post (`port/render/rd_present.c`
+  (`rd__overlay_hand_over`)), because their callbacks share port/ui's font state and its glyph
+  and strip caches with the game's own text (`port/ui/font.c` (`ui_begin_overlay`)); the
+  picture's present draws the batches collected after its deferred text. The callbacks run on
+  the render thread only inside a call the game thread waits for (the replay with the
+  interpolation off, a movie's present).
+- Calls between pictures. `rd__on_host`'s calls (the targets made again, the fog's probe, a
+  movie's present, the replay with the interpolation off) run on the render thread with the game
+  thread waiting (`rd__render_call`), as do `rd_read_display` (a save's picture, F11's PNG),
+  `rd_resize_output` and every replay through `rd__replay_frame`. Every GPU call the game's fiber
+  causes therefore moves with no change where it is made. A display change's pipelines are the
+  exception: they are made on the game thread, on its host stack, with the render thread idle
+  (`port/render/rd_core.c` (`onGameHost`)), because their "Preparing graphics" screen
+  (`rd_set_display_progress`; `port/platform/window_host.c` (`display_progress`)) pumps the
+  window's events, which SDL allows on the main thread only, and a background event it takes parks
+  the render thread; the screen's pictures are posted to the render thread as any of the game
+  thread's, and the pipeline calls wait for it through the call guard (inside a batch, after its
+  wait function, `rhi_call_guard_settle`: with OpenGL the context comes back to the game thread
+  before the batch's next pipeline).
+- The retire list. A GPU texture destroyed on the game thread (`rd_destroy_texture`, a temporary
+  target's textures, a depth copy) is destroyed by the render thread at its next job, after the
+  submit of the list that may still use it (`rd__retire_texture`).
+- One thread in the backend at a time. Any RHI call another thread makes that changes the device's
+  state first waits for the render thread (`port/rhi/rhi.h` (`rhi_set_call_guard`);
+  `port/rhi/rhi_backend.c` (`RHI_GUARD`)); `rhi_get_stats` then gives the counters as they were
+  at the hand-over (`rhi_call_guard_snapshot`). With OpenGL such a call also takes the context
+  over (`gl_take`: the render thread lets it go, the calling thread makes it current) and the
+  render thread's next job takes it back; the render thread lets it go while parked.
+- The counts. `rd_get_stats` gives the record's counts live and the replays' as the render thread
+  left them at its last reads' end (`rd__stats_here`, `rd__thread_stats`); `rd_perf`'s records
+  and pass tables are taken under a lock; `rd_last_present_info` is behind a sequence lock
+  (`port/render/rd_present_info.c`).
+- Save states. The pause picture is a deferred answer the state host takes on the game thread
+  (`rd_capture_shot_arm`, `rd_capture_shot_take`; `port/game/state_host.c` (`shot_poll`)); a
+  load waits for the render thread before the renderer's textures and meshes go.
+- Device loss: `rhi_device_lost` is atomic; `device_lost_quit` waits for the render thread before
+  it reads the pass ring and the frames (`port/platform/window_host.c` (`device_lost_quit`)).
+- The swapchain's acquire, present and rebuilds hold a lock of their own in each backend
+  (`port/rhi/vk/vk_swapchain.c` (`vkr_swap_lock`), `port/rhi/d3d12/d3d12_swapchain.c`
+  (`dx_swap_lock`); recursive: a present that rebuilds resizes inside it).
+- Start and stop. `ico_window_open` starts the thread after the start-up set, the self-tests and
+  their screens; Options > Graphics > Apply stops it before `rd_suspend` and starts it again after
+  `rd_resume` (`ico_window_reopen`); `ico_window_close` stops it first. The thread has an 8 MB
+  stack (the walk's) and runs at SDL's high priority (`SDL_SetCurrentThreadPriority`), against a
+  phone's scheduler moving it to a little core.
+- Park. The lifecycle table parks the thread before the GPU idles and the surface goes, and lets it
+  go on after the surface is made again on the game thread ([Window lifecycle](#window-lifecycle));
+  while parked the pictures are made on the game thread as without it.
+- The heartbeat. The watchdog's thread reads the picture in progress without a lock
+  (`ico_diag_set_render_heartbeat`) and counts one picture that does not finish as it counts a
+  wait for the GPU: at the GPU hang limit the run ends through the GPU hang's path
+  ([Diagnostics](#diagnostics)); not while an effects program is loaded, not for a call between
+  pictures, and started again by every pipeline the driver begins or ends.
+
+`[dev] render_thread` (config.toml, or `render_thread` in `ico-pc.ini`) picks it: `auto` (the
+default) and `on` run it, `off` makes every picture on the game thread as before, `sync` runs it
+with the game thread waiting for each picture (the A/B: the same pictures in the same order as
+`off`) (`port/platform/frame_mailbox.c` (`fm_mode_choose`)). In `sync` no picture is handed over:
+each is posted as one that waits (`RdThreadHost.sync`), so `rd_submit_async` stays false and the
+window paces it by the present's own blocked time, as with the thread off. The start says which:
+
+```
+window: render thread: on (interpolation, walk, submit and present off the game thread; [dev] render_thread = off keeps them on it; Vulkan, [dev] render_thread = auto)
+window: render thread: on (...; OpenGL, [dev] render_thread = auto; every graphics call on the render thread)
+window: render thread: sync (interpolation, walk, submit and present on the render thread, [dev] render_thread = sync: the game thread waits for each picture)
+window: render thread: off ([dev] render_thread = off)
+rd: submit thread: on (the pictures handed to the render thread are submitted and presented on a thread of their own, Vulkan; ICO_RD_SUBMIT_THREAD=0 keeps them on the render thread)
+rd: submit thread: off (this graphics API takes every call on one thread: the render thread submits and presents its pictures)
+rd: submit thread: the frame slots apart (the render thread's next picture records while the one before is submitted and presented, and waits only for its own slot's picture two before; ICO_RD_SUBMIT_OVERLAP=0 keeps the submit thread's work and the render thread's graphics calls one at a time)
+rd: submit thread: the frame slots one at a time (this graphics API keys its frame slot on one index: the render thread's next picture's first graphics call waits for the submit thread)
+```
+
+the line `rd: submit thread: the render thread's picture waited X ms for frame slot S's picture two
+before to be submitted and presented (N such waits so far)` (the first 8, then every 100th), and
+its end `rd: submit thread: ended (N pictures ended, submitted and presented there in all; P
+pictures of the render thread began while the one before was still being submitted, W waited for
+their own slot's picture two before, T ms in all)`. How to read a phone's log with the slots apart:
+`the render thread waited for it N times` small (those are the slot waits and the calls that are
+not slot calls), `takes` about the reads, and the end's `began while the one before was still
+being submitted` near the pictures' count.
+
+Every 10 s block adds the two threads' line: the game thread's mean step and, inside it, its own
+cost of closing a frame (`rd_end_frame` after its wait for a picture's reads: the frame's walk for
+its end state; `port/render/rd.h` (`rd_frame_close_take`)), its mean pump, its waits for the
+render thread (the slot waits: whole pictures, with their time, split by whose: a new frame's
+present, a further present's, the rest (a graphics call's, a settings change's, a load's); the
+read waits: a change of the renderer's state that waited for a picture's reads, with their time and
+the longest, then split by what the render thread was doing as each began: `; the render thread as
+each began: the hand-over (the picture not yet begun there) N (X ms), the interpolation N (X ms),
+its frame slot's fence N (X ms), the acquire N (X ms), the ring and the uploads N (X ms), the walk
+N (X ms)` (`rd_thread_read_waits_text`; the phase set at the hand-over and by `rd__thread_phase`
+in `rd__wait_frame`, `rd__present_acquire` and at the walk's start), and the slot ahead's `; the
+next picture's frame slot waited for at the end of the one before N times (X ms in all, longest Y
+ms), P pictures waited for their slot inside their reads`), then the render thread's CPU time a picture (the replays line's), its share of the
+block with no picture to do, its longest wait for one, its longest picture (the heartbeat's
+longest gap), and per picture its interpolation, its uploads and walk, its submit and present and
+the GPU's and the display's waits inside them, the textures it destroyed for the game thread, and
+the further presents the rules above held back, by why (they would have made the step miss its
+period, a picture ran past its estimate, the presents waited for the display or the GPU), with the
+estimates as the block ends (the reads, of them its own and the interpolation, the rest being its
+waits for the GPU and the submit thread (RENDER.md, the render thread), the whole job, the present's wait, the submit thread's part, the step planned), the steps
+whose first renderer call waited for a picture's reads (`steps started late by the pictures`, the
+longest) and the steps that missed their period (how many the pictures' and how many the game's own,
+the latest, and the steps the back-off planned at the whole period after the pictures'), then the
+submit thread's clause: its submit and present a picture
+(the pictures it finished, the longest), the most pictures queued and running at once, the render
+thread's waits for it (its next picture's first graphics call) and the other threads' (a drain),
+and the lists the render thread submitted itself (`; submit thread: off` without it). With the
+submit thread the render thread's `submit` is that thread's time, and `takes` (the whole picture)
+is the render thread's job, which ends with the walk. The line ends with the cores each thread
+ran on most (`on cores G:4 (78 %) R:7 (64 %) S:5 (90 %)`: one sample a step on the game thread,
+a picture on the render thread, a job on the submit thread, `port/platform/cpu_place.h`) and,
+where the cores differ in speed, each thread's share on the slowest ones (`, on the slowest cores
+(0-3) G 0 % R 12 % S 3 %`), so a render thread kept on a phone's little cores shows:
+
+```
+window: game thread: step 3.1 ms (closing a frame 0.4 ms of it, longest 1.2 ms, 300 frames), pump 0.4 ms, slot waits 12 (8.2 ms; 9 (7.9 ms) by a new frame's present, 2 (0.3 ms) by a further present's, 1 other), read waits 290 (610.4 ms, longest 6.9 ms); render thread: CPU 9.3 ms a picture, idle 21 %, waited for a frame 14.2 ms, heartbeat max 13.9 ms (590 pictures); interp 3.8 ms, walk 3.9 ms, submit 2.6 ms, GPU and display waits 1.2 ms a picture; 40 textures destroyed for the game thread; 12 further presents held back (12 would have made the step miss its period, 0 while a picture ran past its estimate, 0 while the presents waited for the display or the GPU; a picture holds the renderer for 4.1 ms (3.6 ms of its own, 3.0 ms of it the interpolation; the rest its waits for the GPU and the submit thread), takes 4.2 ms, its present waits 0.3 ms, the submit thread's part 3.4 ms; the steps planned at 3.9 ms closing a frame and 3.9 ms between frames (their typical time, 0.0 ms of it the margin widened after a miss; 0 long steps of the game's own left out)); steps started late by the pictures: 290 (longest 6.9 ms); steps that missed their period: 0 (0 the pictures', 0 the game's own; latest 0.0 ms past it; 0 steps planned at the whole period after the pictures'); submit thread: 3.4 ms a picture (submit 2.7, present 0.7; 590 pictures, longest 12.6 ms), queue depth max 1, the render thread waited for it 41 times (22.3 ms), the others 3 times (0.4 ms, longest 2.1 ms), 0 submitted on the render thread; on cores G:4 (97 %) R:6 (88 %) S:5 (91 %), on the slowest cores (0-3) G 0 % R 2 % S 1 %
+```
+
+The slot waits are the game thread's waits for the render thread to finish everything posted
+(`ico_render_thread_drain`): a present's wait for the picture before it (`rd__thread_picture_begin`,
+counted as the present's display wait) and a game-thread RHI call's (the call guard's); there is no
+ring of frame slots behind them (`RD_FRAME_RING` is 3 and the render thread pins none: it reads the
+frames only inside a hand-over the game thread's frame calls wait for). The line splits the
+present's share by whose (a new frame's or a further one's) and leaves the rest as `other`. A phone's log at a
+stage change (`slot waits 102 (1193.8 ms), read waits 63 (562.3 ms, longest 17.2 ms)` over 596
+presents for 300 frames, 9.3 ms of render-thread time a picture) is the pattern the plan removes:
+a further present posted late in a step, whose reads ran into the next step and whose end the next
+frame's present waited for. A later log's (`slot waits 88 (1003.2 ms)`, `411 further presents
+held back`) is the presents waiting for the GPU, which the holds above remove. At a stage change
+the slow replay lines name the rest: the one picture that makes the new stage's textures (`upload
+13.3`, `71 textures uploaded (7819 KB)`, `71 allocations`; up to 31.1 ms for 80) holds the
+renderer that long, once, and a pipeline compiled in the walk the first time a build draws a room
+(`rd: slow walk 2213.1 ms (...): pipelines made 2206.5 ms (3)`, read waits `longest 2216.8 ms`)
+holds it for the compile: the walk reads the state the step changes, so the step waits for both.
+
+A PowerVR phone's log at a door into a new stage shows what is left once the further presents are held:
+`slot waits 119 (1642.7 ms), read waits 75 (741.0 ms, longest 23.6 ms)` for 377 pictures and 300
+frames, 356 further presents held, the render thread idle 37 %, its CPU 16.8 ms a picture of which
+the present call 7.8 (the replays line's `present 7.82`, `longest present 40.1`) and GPU pictures
+of 20-42 ms (`GPU span 22.8 ms`). In play the same phone has 0 and 0: one picture a frame, the
+GPU's 26 ms inside the frame's 33 ms, the present 0.7 ms. At the door some GPU pictures take
+longer than a frame of the game, the driver's present blocks behind them, and the next new
+frame's present waits for that picture's end (a slot wait); the frame's picture then starts late,
+and its reads cross the next step's first call that changes the state (a read wait). Neither is
+the frame ring: `RD_FRAME_RING` 3 is enough because the frame calls wait for the reads, and a
+present that did not wait for the picture before would only move the wait into the next step
+(its picture's reads still follow that picture's end): a model of the timer path with the step's
+calls a few ms into it gave the same latest step and the same sum of waits either way
+(`build-host/tmp/v098/evidence/doorwait/dw_sim.py`). What would take these waits off the game
+thread is state the walk reads in versions of its own, so the step never waits for a picture's
+reads:
+
+- the frames: `RD_FRAME_RING` 4 with a pin a slot (the render thread pins the two frames of its
+  picture from the post to its reads' end; `rd_begin_frame` waits only on a pinned slot, counted
+  as a slot wait): the two being blended, the one just closed whose picture is queued, the one
+  recorded; a picture not started when a newer frame closes is replaced by the newer one's (the
+  mailbox's latest-wins), so four stay enough;
+- the textures: two tables. The game thread's (ids and generations, the CPU pixels, the texture
+  cache) is never read by the render thread; each create, update, level change and destroy is
+  added to the recording frame's change list (the pixels by reference, copied on the next write
+  while a change still holds them); the render thread's table (the GPU objects, their upload
+  state, the dirty count, the alpha scan's flags) is its own and takes a frame's list before that
+  frame's first picture. The ids stay the game thread's (`texAlloc`'s first free slot), so they
+  are the same with the thread off, where the list is taken at once on the game thread;
+  `texDirtyCount` is the render thread's alone, which answers the lost-create objection of the
+  first try. A GPU object is destroyed once no pinned frame is older than the destroy;
+- the VU meshes: the same, a stream version a frame (the interpolation already pairs streams by
+  version);
+- the decode workers' results and `rdtex_settle` feed the game thread's table only.
+
+That work spans rd_core.c's texture calls, rd_upload.c, rd_tex.c, rd_mesh.c and the walk's
+texture reads in rd_replay.c and rd_interp.c (both at their size caps), and is not built yet. The
+split slot waits say on the next log how many of a door's waits are a new frame's (the GPU's
+backlog) and how many a further present's (the pacing).
+
+`window: render thread: parked (...)` and `window: render thread: goes on` mark a park (the first
+16 of each); `window: render thread: a picture handed over was not presented (N so far): taken out
+of the block's present count` says a picture `rd_present_post` handed over failed on the render
+thread, known at the next present's drain (`rd_thread_failed_presents`; the first 8, then every
+100th: the frame rate counter and the vsync lock's slot keep it as presented); at the start `window: cores: 0-3 1.8 GHz, 4-6 2.6 GHz, 7 3.1 GHz; the game thread at nice 0 (not
+changed), may run on cores 0-7` gives the cores' top speeds (`cpufreq/cpuinfo_max_freq`, Linux and
+Android; `not known` elsewhere), and one line for each of the render and the submit thread says the
+high priority it asked for (`SDL_SetCurrentThreadPriority(HIGH)`) and what the kernel then has
+(`window: render thread: the high priority granted, nice -10; kept to the faster cores 4-7 ([dev]
+big_cores = false leaves the placement to the system); may run on cores 4-7`, or `refused (...)`,
+or `placed by the system (only on Android)`). Both threads ask for it: the render thread's next
+picture waits on the submit thread; the texture decode workers keep their priority as made and the
+background pipeline workers ask for the low one. On Android the two threads keep themselves to the
+cores faster than the slowest (`sched_setaffinity`), since a priority alone does not move a thread
+off a little core there. Where the fastest speed is one core's alone and other cores are faster
+than the slowest (a phone with `0-1 2.2 GHz, 2-6 3.1 GHz, 7 3.8 GHz`, whose log had core 7 used by no thread),
+the render thread keeps to that core alone and the submit thread to the other faster ones
+(`cpu_place_split`): the render thread's 14-20 ms of CPU a picture is the ceiling the step rule
+plans by, and the prime core's clock is 20 % above the next. With two fastest cores or more, or the
+fastest the only one above the slowest, both keep to the faster cores as before; the game thread
+is left to the system. The cores line then ends `; the render thread to the fastest core 7 alone,
+the submit thread to the next faster cores 2-6, the game thread left to the system`, and the
+threads' lines say `kept to the fastest core 7 alone` and `kept to the next faster cores 2-6`.
+A pin is judged by the cores read back after it (`cpu_place_pin_checked`, `CpuPinResult`), not by
+the call's answer: that phone's kernel said yes to core 7 alone and kept the render thread to 2-7
+(its line ended `may run on cores 2-7`, and every 10 s block had it on core 4 or 6), the cause on
+the kernel's side not known from a log (the Android common kernel lets a vendor's scheduler module
+hook `sched_setaffinity`, the likely one). When the fastest core alone is not kept the render
+thread keeps to the faster cores instead and says so: `could not be kept to the fastest core 7
+alone: the system said yes and keeps it to cores 2-7; kept to the faster cores 2-7 instead`; a
+refused call names its errno (`could not be kept to ... (errno 22: Invalid argument)`). Core 7 is
+not pursued further: an app cannot overrule the kernel's placement, and the gain would be the
+prime core's 20 % clock on 14-20 ms of CPU a picture, about 3 ms.
+`[dev] big_cores = false` leaves them where the system puts them. It is a
+diagnostic escape, not a performance switch; `window: render thread: the game thread took the OpenGL context for its own calls (N
+times; ...)` (the first 8, then every 100th) counts OpenGL's take-overs, and `... could not be
+made current on the render|game thread (...)` a failed one.
+
+The replay tool runs the same jobs on a thread of the renderer's own, without SDL
+(`rd_replay_tool --render-thread off|sync|on`; `rd_thread_local_start`), for the `rd_thread_ab`
+test.
 
 ## Arena, partitions and host extras
 
 `ico_arena_init` allocates one block of `ICO_ARENA_EE_SIZE` (32 MB) plus `ICO_ARENA_HEADROOM`
 (8 MB), zero filled (`VirtualAlloc` on Windows, `mmap` elsewhere), with its base 1 MB aligned so
 every address keeps the EE's residue modulo any alignment up to 1 MB
-(`port/platform/arena.h`; `port/platform/arena.c` (`ico_arena_init`)). `ico_arena_ee_addr(ee)`
+(`port/platform/arena.h`; `port/platform/arena.c` (`ico_arena_init`)). It is pinned at
+`ICO_ARENA_PIN_BASE` (0x3C00000000, inside the 39-bit address space of the smallest arm64 Android
+kernels) when that address is free, by the same calls as the fiber pool ([The pool](#the-pool)), so
+a save state's pointers into it stay valid in the next run; when the address is taken it goes
+anywhere with the line `arena: pinned base unavailable, save states will relocate`
+(`ico_arena_pinned`). `ico_arena_ee_addr(ee)`
 is the host address of EE physical address `ee`. `ico_host_init` logs the base, which turns the
 object pointers in the renderer's draw keys back into EE addresses
 (`port/platform/host_loop.c` (`ico_host_init`)).
@@ -253,6 +762,552 @@ packet banks' host pad, `ico2/seki/src/DmaPacket.c`, `DPK_HOST_PAD`), the static
 Built with `ICO_HEAP_STATS`, the game's allocator reports each allocation and free, and the arena
 keeps the bytes in use and the high-water mark per partition, logging every new mark that grows
 by 64 KB (`port/platform/arena.h` (`ico_heap_stats_alloc`); `ico2/fumi/ios/memory.c`).
+
+## Game data ranges
+
+A save state holds the game's own globals: every writable object the game library `ico_game`
+defines (the `ico2/` sources and the data tables of `port/data`, the tables' loader `tables.c`
+among them), and nothing of the port's, which the registry lists one block at a time
+(`port/platform/state.h`). The build gathers the game's objects into sections of their own and
+the program reads their bounds as two ranges, the initialised data and the zero-filled data
+(`ico_game_data_ranges`, `port/platform/game_data_range.h`). How depends on the compiler and the
+object format (`cmake/IcoStateSections.cmake`):
+
+| build | how the game's sections are named | how the program finds them |
+| --- | --- | --- |
+| GCC, ELF (`linux-x64`, `asan`, `fptrap`, Linux arm64) | after `libico_game.a` is made, `objcopy` renames each member's `.data`, `.data.rel`, `.data.rel.local` to `ico_gdata` and `.bss` to `ico_gbss`; the game compiles `-fno-data-sections` so each object has just those | GNU ld's `__start_ico_gdata`, `__stop_ico_gdata`, `__start_ico_gbss`, `__stop_ico_gbss`, declared weak and hidden |
+| clang, ELF (`linux-x64-clang`, Android) | `#pragma clang section data="ico_gdata" bss="ico_gbss"`, forced into every game source (`port/platform/game_data_sections.h`) | the same symbols, from lld |
+| GCC, PE (`win-x64`) | `objcopy` renames `.data` to `.data$ico_m` and `.bss` to `.data$ico_p` with contents | one-byte brackets in `.data$ico_a`, `.data$ico_n` and `.data$ico_z` (`game_data_range.c`): GNU ld sorts `.data$*` by the suffix inside `.data`; data is `[a, n)`, the zero-filled data `[n, z)` |
+| clang, PE (`win-x64-clang`) | the pragma puts all of it in `.data$ico_m`, with `-fno-zero-initialized-in-bss` | the same brackets; lld-link sorts `$` groups the same way. The zero-filled range is the `n` bracket alone |
+| clang, Mach-O (macOS, iOS) | the pragma: `__DATA,__ico_gdata` and `__DATA,__ico_gbss` (zerofill) | ld64's `section$start$__DATA$__ico_gdata` and `section$end$` symbols |
+
+Read-only data keeps the compiler's sections: a constant table of addresses (`.data.rel.ro`,
+writable only while the loader relocates a position-independent program) stays out of both
+ranges. On PE the game's zero-filled data is stored in the `.exe` (about 5.5 MB of zeros): GNU ld's
+PE script has no `.bss$*` rule, so a renamed `.bss$` section is placed as an orphan away from the
+brackets, and lld moves any uninitialised `$` section into an output section of its own; both
+were seen in test links of a few objects with the fetched toolchains. Whether the image is fixed
+(`--disable-dynamicbase`, [BUILDING.md](../BUILDING.md#fixed-image)) does not matter: the bounds
+are symbols the program reads where it runs.
+
+`ico_game_data_ranges` gives -1 when the program has no such sections (a toolchain that left the
+names alone, a program without the game) or they are inconsistent (an empty data range, an end
+below a start, the two overlapping). `ico_game_data_ranges_verify` (`game_data_verify.c`, in the
+program only) then checks that ten of the game's globals (`systemStatus`, `stage_no`,
+`frame_count`, `stagePreLoadBuff`, `gameSysMemoryFuncList`, `gameSysMainSaveBuff`,
+`gFlagGameClear`, the tables `gameParam` and `seKind`, `ico_scratchpad`) lie wholly inside and
+five of the port's (the scheduler's tables, `ico_iop_ram`, `ico_mv_active`, and a data and a bss
+variable of the program's own) wholly outside; the text names the first offender. The save
+states' start-up runs it once and, on a failure, logs it and turns save states off. Each range's
+size goes into the save state's build id. `tools/check_game_data_ranges.py` checks the same on the
+linked program's symbol table at test time, the game's file statics (`texTable`,
+`cdvdThreadStack`) included ([TESTING_PROGRAMS.md](TESTING_PROGRAMS.md#portplatformtest)).
+
+## Save states
+
+A save state is a snapshot of the whole running game taken at the host loop's quiescent point,
+written to a file and put back later (`port/platform/state.h`). This section is the file, the
+registry of the port's globals and the relocation, then the save and load sequences
+(`port/game/state_host.c`, [Saving and loading](#saving-and-loading)). The pieces it relies on are
+described where they live: the fibers' images ([Save state images](#save-state-images)), the
+scheduler's tables ([Scheduler](#scheduler)), the pinned arena ([Arena](#arena-partitions-and-host-extras)), the game's
+globals ([Game data ranges](#game-data-ranges)) and the fixed image
+([BUILDING.md](../BUILDING.md#fixed-image)); the page is [UI.md](UI.md#save-states).
+
+### The file
+
+`<pref>/states/<disc slug>/slot<n>.ics` is a raw container, little-endian
+(`port/platform/state_file.h`):
+
+| part | bytes | holds |
+| --- | --- | --- |
+| header | 512, uncompressed | the magic `ICOSTATE`, the format version (`ICO_STATE_FORMAT_VERSION`), the build id (16 bytes), the commit text, the platform tag, the disc slug, the simulation keys' hash, the save's time, play time, stage, Main tick and vsync, the section count, the keys text's length, the file's length, a CRC-32 over the header, the table and the keys text |
+| section table | 64 per section | name (15 characters), offset, packed and raw sizes, the address the bytes lived at in the saving process, the CRC-32 of the raw bytes, the caller's flags |
+| keys text | as long as it is | `key=value\n` for every simulation key ([below](#validity)) |
+| sections | packed | each section's bytes, raw deflate (miniz `tdefl`, level 1) |
+
+The format version is 2: a state carries the `syms` section ([Across versions](#across-versions)).
+Format 1 had none; its header still reads (`ICO_STATE_FORMAT_OLDEST` 1), and the header check
+refuses it as another build.
+
+`ico_state_file_write` copies the header and the section list and starts a writer thread
+(`ico_thread.h`; the headless build has it too). The thread deflates each section straight from
+the caller's bytes, which must stay unchanged until the write is collected, writes
+`<path>.tmp`, rewrites the header and table with the final sizes, syncs it (`ico_fsync`) and
+renames it over the slot (`ico_rename_replace`); a failure removes the `.tmp`. One write is in
+flight at a time: a second gets `ICO_STATE_BUSY` until `ico_state_file_poll` (never waits) or
+`ico_state_file_flush` (joins) collects the result, which carries each section's raw and packed
+size, the file's length and the time the thread took.
+
+`ico_state_file_read_header` reads the header, the table and the keys text and refuses a file
+that is not one (`ICO_STATE_BAD_FILE`: a wrong magic, a version outside 1..2, a CRC that does not match, a
+table that does not fit, a file shorter or longer than its header says, which is how truncation
+shows); a missing file is `ICO_STATE_EMPTY`. `ico_state_file_read` then asks a callback for a
+buffer per section (NULL skips it) and inflates into it; a section that does not inflate to
+exactly its raw size and CRC is `ICO_STATE_BAD_FILE`.
+
+### Validity
+
+The **build id** is two XXH3-64 hashes (`port/render/xxh3.c`; the second over the same text behind
+a fixed prefix) of a text naming the commit (`ICO_BUILD_COMMIT`, passed in by the program), the
+compiler (`__VERSION__`), the platform tag, the format version, the scheduler's table size, the
+fiber stack size, the arena size, the two game data ranges' sizes ([above](#game-data-ranges))
+and every registered block's name, size and flags in order (`ico_state_build_id`; the same text
+can go to a developer's log). Any change of layout between two programs therefore changes it.
+
+The **platform tag** is `windows-x64`, `linux-x64`, `linux-arm64`, `android-arm64`,
+`android-x64`, `macos-arm64`, `macos-x64` or `ios-arm64` (`ico_state_platform_tag`).
+
+The **simulation keys** are the config keys that change what the game computes
+(`port/platform/sim_keys.h`, `ICO_SIM_KEYS`, compiled into `ico_config`): the same list the pad
+recording's header writes ([CONFIG.md](CONFIG.md#adding-a-key)). `ico_sim_keys_hash` is XXH3-64
+over `key=value\n` for each, in order, the value as `ico_config_get_string` gives it (`""` when
+unset); the text is stored in the file. `ico_sim_keys_first_diff` names the first key whose saved
+value differs from the current one. Each key has its default beside it (`kDefaults` in
+`sim_keys.c`: the config text the game takes when the key is unset, such as `false` or
+`original`; none where unset is the disc's or the device's own choice, `video.video_mode`,
+`dev.start_stage`, `variants.barrier_hits`). A key absent from the saved text is one a later
+version added: the state was made at its default, so it is equal while the key is unset or at
+that default now (`ico_sim_key_is_default`).
+
+`ico_state_header_check` compares a saved header with this run's, in this order: the platform
+(`ICO_STATE_OTHER_PLATFORM`, a Windows state on Linux), the format version and the build id
+(`ICO_STATE_OTHER_BUILD`, the detail is the other build's commit), the disc slug
+(`ICO_STATE_OTHER_DISC`), the keys text and then the hash (`ICO_STATE_OTHER_SETTINGS`, the detail
+`key=saved (now cur)`). A key this run lists that the saved text lacks is equal when the
+key-default function says this run's value is the default (`ico_state_set_key_default`, set by
+`state_host.c` to `ico_sim_key_is_default`, since the platform layer does not see the config);
+the two hashes then differ by those lines, so the saved text must instead be the whole of what
+its own hash covered (`xxh3_64` of the saved text equal to the saved hash), else `the settings
+differ`. Without the function (the tests, the tools) such a key differs, as `key=(absent) (now
+cur)`.
+
+The rule has two levels. The same build (build id equal) loads a state as it always did: one delta
+per range, nothing else consulted. Another build of the same platform and format goes on to
+`ico_state_header_check_other_build` (the same checks without the build id: the disc and the
+simulation keys must still match) and then to its `syms` section, which loads it only when
+everything the state points into is unchanged in this build ([Across versions](#across-versions)).
+A format 1 state is refused there with the words of [UI.md](UI.md#save-states): nothing in it can
+be translated.
+
+### The registry
+
+The port's own simulation globals are not in the game's data ranges, so each owner registers its
+blocks by name (`ico_state_register(name, p, n, flags)`, `port/platform/state_registry.h`, at most
+`ICO_STATE_MAX_ENTRIES` 96). `ico_state_register_port` (`port/platform/state_port.c`, in the
+program only) calls the owners' functions once from `ico_host_init`, before the game's first
+thread, in a fixed order, so the table is the same in every run of a build (`state_port.h` says
+what each owner registers and why):
+
+| owner | blocks | flags |
+| --- | --- | --- |
+| `kernel_host.c` | `kernel.intc_handlers`, `kernel.dmac_handlers` (the game's function pointers), `kernel.intc_mask`, `kernel.dmac_mask`, `kernel.next_handler_id`, `kernel.vsync_flag`, `kernel.vsync_csr` (`SetVSyncFlag`'s pointers), `kernel.gs_imr` | SCAN on the handlers and the two pointers |
+| `clock.c` | `clock.vsync_num`, `clock.vsync_den`, `clock.hblank_hz`, `clock.carry` | |
+| `hwregs.c` | `hw.eeio` (64 KB), `hw.gs` (8 KB) | |
+| `port/math` | `rand.next`, `vu0.r`, `vu0.current_matrix`, `vu0.matrix_stack`, `vu0.matrix_stack_top`, `vu0.rot_trans_prev`, `vu0.save`, `vu0.save_top` | |
+| `cdvd_host.c` | `cdvd.drive` (busy, the sync semaphore's id and waiters, the counters, the last sector, the error) and `cdvd.stream`: two spans of the drive's record, leaving out its host objects (the mounted disc, the identification of the disc, the clock callback) | |
+| `iop_ram.c` | `iop.ram` (2 MB), `iop.heap_blocks`, `iop.heap_count` | |
+| `sif_host.c` | `sif.last_sid`, `sif.last_rpc`, `sif.rpc_count`, `sif.module_id`, `sif.dma_id` | |
+| `trace_host.c` | `trace.main_ticks` | CLOCK |
+| `pad_script.c` | `pad_script.tick` | CLOCK |
+| `door_grace.c` | `door_grace.armed`, `.arm_from`, `.arm_to`, `.arm_holding`, `.left`, `.from` | |
+| `yorda_trip.c` | `yorda_trip.run_ticks`, `yorda_trip.last_tick` (the run count and its tick stamp) | FRESH |
+| `gfx_null.c` | `dma.channels` | |
+| `host_loop.c` | `host_loop.vsyncs`, `host_loop.field` | |
+| `port/audio/audio_host.c` (`ico_audio_state_register`) | `spu2.state` (the SPU2: RAM, cores, register shadow, time, event queue, DMA channels and their callbacks, the IRQ callback, the reverb presets; not the render's scratch or the statistics), `spu2_sd.time`, `spu2_sd.effect_attr`, `mix_gain.tag`, `mix_gain.cache`, `mix_gain.ready` (the gains themselves are the player's settings), `sndn2.host` (the driver's pages, counters, reply and pitch table), `sndn2.carry`, `sndn2.staging`, `sndn2.adpcm`, `sndn2.queue`, `sndn2.q_write`, `sndn2.q_read`, `sndn2.pending`, `sndn2.pcm`, `audio.vsync_index` (which vsyncs render 801 frames at 59.94 Hz) | AUDIO; SCAN on `spu2.state` and `sndn2.host` |
+| `sce/libsndn2/sound.c` (`ico_sound_state_register`) | the EE sequencer's .bss: `sound.vab`, `sound.slot`, `sound.seq`, `sound.com`, `sound.packet`, `sound.iop2ee`, `sound.iop2ee_p`, `sound.se`, `sound.head`, `sound.client`, `sound.vab_hd`, `sound.seq_body`, `sound.hd_rel` (compiled into the sound library, so outside the game's data ranges) | AUDIO; SCAN on the pointer blocks |
+
+72 blocks, over 4 MB, most of it IOP RAM and the SPU2's RAM (2 MB each). SCAN marks a block that may hold host addresses (the
+relocation scans it); AUDIO one copied under the audio lock; CLOCK a counter a load rewinds with
+the game (the Main tick count, and with it the pad script's position); FRESH
+(`ICO_STATE_FRESH`) one that starts from its initial value: a state saved before the block existed
+still loads ([Across versions](#across-versions)) and the block keeps this run's bytes.
+FRESH is for a block without host pointers (a FRESH block with SCAN is still refused when
+absent) whose value the game can start over from, such as a count and its stamp. A version that
+adds a block gives it FRESH when that holds, else every older state is refused naming it. Not registered: the
+scheduler's tables (`ico_sched_state_save` and `_restore` move their pointers themselves; a
+second scan would move them twice), the vsync callback list and `clock.c`'s flag that mirrors
+it, the SIF server table (host callbacks registered at start-up), files and the trace file's
+position. A block that cannot be registered (a repeated name, the table full) is logged
+(`state: ...`) and `ico_state_register_port` returns -1, so save states stay off.
+
+### Relocation
+
+A state's bytes hold host addresses; when the memory they point into sits elsewhere in the
+loading process, they are moved (`port/platform/state_reloc.h`). There are four ranges, each the
+saving process's `[lo, hi)` and a delta: the program's image (MODULE; 0 on a fixed image build,
+[BUILDING.md](../BUILDING.md#fixed-image)), the arena (0 while pinned), the fiber pool (0 while
+pinned) and `pobjImageTables`' host block (POBJ). A word matches a range when `lo <= word <= hi`
+(one-past-the-end pointers included).
+
+- `ico_state_reloc_scan(r, region, n, &count)` is the conservative scan: every 8-byte-aligned word
+  inside the region that matches a moved range is moved by its delta, and the count is added.
+  It runs over the arena, the game's data ranges, the SCAN blocks, the fibers' stacks and
+  callee-saved registers. An EE int of 60 above a small int reads as an arena address
+  (0x3C_xxxxxxxx), which is why the arena is pinned: with a zero delta nothing moves. With
+  developer mode on (`ico_state_reloc_set_log`) each moved word is logged
+  (`state: moved the word at <addr>: <old> -> <new>`). Where the image moves (Android, macOS:
+  a non-zero MODULE delta) any aligned 64-bit value that falls in the old image's range is
+  rewritten, so a pair of adjacent ints whose high word is 0x7f and low word lands in that window
+  would be changed too, and the typed self-checks cannot see a corrupted integer: that developer
+  mode line, which lists every rewritten word, is the one diagnosis (review finding 8; the plan's
+  accepted risk).
+- The saving process's own values. Two words a suspended fiber holds are no address in any
+  range: the game thread's thread pointer and the stack guard. The Android build compiles with
+  the stack protector (the NDK's flags; [GAME_CODE.md](GAME_CODE.md)), and clang keeps the thread
+  pointer (`TPIDR_EL0`) in a callee-saved register across the switch to read the guard through
+  it when the frame returns (`ico_fiber_yield`: `mrs x20, TPIDR_EL0`, `ldr x8, [x20, #0x28]`
+  before `_mco_switch` and again after it); every protected frame also holds the guard's value
+  (bionic's thread slot at `TPIDR_EL0 + 0x28`; on Apple the global `__stack_chk_guard`, random
+  per process). Within one process both are the same at the save and the load; in a later
+  process they differ, and the first resumed fiber reads through the old thread pointer (a
+  fault) or finds a guard that is not this process's (`stack corruption detected`). The ranges
+  section records both from the game thread at the save (`ico_state_proc_read`: arm64 Linux
+  and Android the thread pointer, Android the guard word beside it, Apple the guard, 0
+  otherwise), and the load sets them as two exact-match rewrites, old word to new word
+  (`ico_state_reloc_set_values`): `ico_state_reloc_word` checks them before the ranges, so they
+  apply to the fibers' callee-saved registers and stack words, the scheduler's table and every
+  scanned region, each rewrite counted per value. A value is off when its old or new word is 0
+  or the two are equal. Exact 64-bit matches only: a thread pointer or a random guard is not a
+  game word by accident. `ico_state_proc_check` refuses a state whose record lacks a value its
+  platform needs (`android-arm64` both, `linux-arm64` the thread pointer, `macos-*` and `ios-*`
+  the guard) before anything changes (`ICO_STATE_OTHER_BUILD`, detail `no thread-pointer
+  record`). x86-64 reads the guard from `%fs:0x28` at each use and the desktop builds have no
+  protector, so both values are 0 there.
+- `ico_state_image_range` finds the image in this process: on Windows the module's headers and
+  sections, up to the end of the last section that is not discardable (the DWARF sections and
+  `.reloc`, which `SizeOfImage` maps and nothing points into, are left out; the read-only ranges
+  likewise), on Linux and Android `dl_iterate_phdr`'s loadable
+  segments of the object holding this code, on Apple its segments through `_dyld`
+  (`port/platform/state_check.c`).
+- `ico_state_reloc_check` are the typed self-checks after a load's restore and relocation, all
+  against the ranges as they are now: the game heap's walk (`ico_state_heap_walk` from
+  `ios_partition_root`: every partition record and block header inside the arena, every link 0
+  or inside it, the block chain only forward, partition marks `<PARTITION>____`, block marks
+  `<ALLOC>________`, `<FREE AREA>____` or ` free memory   `, every block on a free list marked
+  free, each child's parent its parent), every scheduler thread's entry and last kernel call's
+  caller in the image's code and that call's name in the image, every INTC and DMAC handler in
+  the image's code (`ico_kernel_state_handlers`). A failure names the first offender; the load
+  then puts its backup back (`ICO_STATE_SELF_CHECK`).
+
+### Across versions
+
+A later build has its functions and variables elsewhere, so the one MODULE delta does not apply. A
+save therefore records, in its `syms` section (`port/platform/state_xbuild.h`), what every word
+that points into the program points into, and a later build loads the state when each of those
+things is unchanged here, translating word by word (`IcoStateXlate` in `state_reloc.h`:
+`ico_state_reloc_word` and `ico_state_reloc_typed` take a MODULE word to its translation instead of
+moving it by the delta, so the fibers' registers and stacks, the scheduler's table and every
+scanned region need no other change).
+
+**The symbol table** (`port/platform/state_syms.h`): the symbol file the program ships for its
+crash reports (`ico_pc.map` beside the Linux program, `ico_pc_x64.map` beside the Windows one,
+Android's `assets/libmain.syms.gz`, which `tools/package_android.sh` now writes with the data
+symbols and their sizes in four columns the crash reader passes over; macOS and iOS ship none),
+read whole once, at the first save, load or listing that needs it, through `diag_host.c`
+(`ico_diag_symbols_info`, `ico_diag_symbols_read`, a positional read that leaves the crash
+report's position alone), placed by `ico_diag_init` and checked by `ico_diag_log` (a file of
+another build is not used). It sorts the code into units (a function symbol up to the next
+symbol, its input section's end or its own size; an input section's start without a symbol starts
+a unit named `<object>:<section>`, so a static function a GNU ld map does not name is part of the
+unit before it), the named data outside the game's ranges, and the game's data layout: the
+symbols and input sections inside the two game data ranges as (range, offset, size, kind, name),
+whose XXH3-64 is the layout hash. Logged once: `state: symbols: N functions, M data symbols, K
+game data items (layout <hash>) from <file> in T ms, S KB`, or `state: symbols: none (<file>:
+<why>); ...`.
+
+**The code hash** (`port/platform/code_hash.h`): XXH3-64 of a unit's code with every field that
+depends on where the code and its data were linked set to zero: on x86-64 a branch displacement
+leaving the unit, every RIP-relative displacement, and a 32-bit displacement or immediate whose
+value lies in the image (the instruction lengths from a decoder of the legacy, REX, VEX and EVEX
+forms); on arm64 the offsets of B/BL, B.cond, CBZ, TBZ, LDR literal and ADR that leave the unit,
+every ADRP's page, and the low 12 bits of an ADD or a load/store whose base register an ADRP set
+(never x29 or sp, so frame offsets stay in). Trailing padding is left out. A suspended frame
+needs the same instructions at the same offsets with the same frame; a changed address constant
+changes none of that, every other byte does. A prototype of these rules run over the shipped
+binaries of two consecutive releases (with real changes between them) found, of the 10,709
+functions both Android libraries name, 1,640 with the same raw bytes and 9,896 with the same masked
+hash; of the Linux program's 10,239, 1,904 and 9,884 (the game's own functions: 4,967 of 4,971).
+
+**The record.** At a save `build_syms` (`state_host.c`) walks the copy it is about to write: every
+8-byte-aligned word of the arena, the game's data and bss, the SCAN blocks, the pobj block, the
+scheduler's tables and each fiber's control block and stack whose value lies in the image. A word
+below a fiber's saved stack pointer less 128 bytes (a dead frame) is soft: translated when it can
+be, left otherwise. Each distinct word is classed:
+
+| the word points | recorded as | a later build needs |
+| --- | --- | --- |
+| inside a code unit, past its start (a return address) | the unit: name, ordinal, old start and size, code hash; POSITION | the unit by name and ordinal, with the same code hash |
+| at a unit's start (a function pointer) | the unit; START | the unit; the same hash too when its name is not unique |
+| into the game's data or bss range (the end included) | nothing: the range moves whole | the same layout hash |
+| into a registered block | the block (every block is recorded: name, size, flags, old address, offset in its packed section) | the block by name, with the same size and flags; every block of either build in the other |
+| into a named variable of a unique name | the variable: name, ordinal, old start, size (exact when the file gave one); without a size (a GNU ld map names globals only, so its span runs to the next item and may hold the object's statics) also its input section's size and its offset in it | the variable, still unique, of the same exact size; without one, in an input section of the same size at the same offset (`the data around the variable <name> changed`) |
+| at a value the game's data held at start-up (an initialised table's pointer, or one the game copied from it) | a point: the value's offset in the data range | its own start-up value at that offset, in its image |
+| at a C string in read-only data (printable, ending within 24 bytes) | a point: the bytes | the same bytes in its read-only data (the first place) |
+
+The start-up values are a copy of the game data range taken by a constructor in `state_host.c`,
+after the loader relocated the initialised pointers and before any game code. The section holds a
+64-byte header (magic `SYMS`, its version 2, flags, the hash rules' version, the architecture,
+the counts, the layout hash, the first word nothing names and their count), then the units (48
+bytes each), variables (48; 40 without the input section in a version 1 record, which is read
+too), points (48) and blocks (40) and the names; the save's line gives its size.
+
+**Words nothing names.** Only a word the record confirms is translated: a word in a unit (the
+hash rule above), in a game range, a block or a unique variable, or at a start-up value or a
+constant text. A word that lies in the image's range and that nothing in the table names (a code
+address outside every unit, a word into writable data that is no block and no unique variable, a
+word into the image's headers) is counted by the save (`ICO_XB_UNNAMED`, the count and the first
+such word in the header), and what it means depends on the saving image's upper half (the
+`ranges` record's image start; `ico_xb_check`):
+
+- 0 or 1 (Windows' fixed base 0x140000000, `--disable-dynamicbase` in `CMakeLists.txt`): such
+  words are data more often than addresses, since any float from 2.0 to about 572 followed by the
+  integer 1 lies in the image (2.0 then 1 is 0x140000000 itself); a headless PAL state laid
+  against the Windows program's sections held 203 such words, 140 of them in the DWARF sections
+  the range leaves out, none a pointer. They are kept as the numbers they are: the load has no
+  span or point for them, so each is left and counted with the words without a translation.
+- Above 1 (Android's library at a randomised 64-bit base): no float next to a small integer
+  reaches the image, so such a word is an address the table does not name, and the state is
+  refused, pinned to its build (`it holds a program address no symbol names (0x.., N such words):
+  the version that saved it left them unnamed`; the save's line already says it loads only into
+  its build).
+
+What the first case leaves: a number that happens to land on named code or data is still read as
+an address (translated when that function or variable moved, or a refusal when the function a
+word lands in changed).
+
+**Pinned states.** A state loads only into its own build when its record says so, and the save's
+line names why: no symbol table where it was made (`ICO_XB_TABLE` unset: macOS, iOS, a build
+without a map); its image below 4 GB (`ICO_XB_LOW_IMAGE`: the Linux program is linked at
+0x400000 with `ICO_STATE_FIXED_IMAGE`, and there a PS2 address or a size the game keeps, such as
+0x2000000, falls inside the program's named code and data as well, so translating every word that
+looks like an address would change numbers; the Windows program sits at 0x140000000 and Android's
+library at a 64-bit address, where the game's own 32-bit numbers never reach); or more than the
+bounds (`ICO_XB_OVERFLOW`: 16,384 units, 4,096 variables, 4,096 points, 128 blocks, 196,608
+distinct words); or, from an image above an upper half of 1, a word nothing names (above).
+
+**A load of another build** (`other_build`, `xb_probe` in `state_host.c`): the header passes
+`ico_state_header_check_other_build`; the `syms` and `ranges` sections are read alone and
+`ico_xb_check` compares them with this build in this order, the first failure naming the blocker:
+the blocks both ways (`the block <name> is missing here`, `exists only here`, `changed size`; a
+FRESH block the state lacks is not refused: its offset is `ICO_XB_BLOCK_ABSENT`, the unpack leaves
+it as it is and the sections check counts the saved reg and audio sections without it), the
+record's flags (pinned, above), this build's table (`this build has no symbol file`), the hash
+rules, the layout hash (`the game's data layout changed`), each unit (`the function <name> is
+missing here`, `the function <name> changed`), each variable, each point (`the game's start-up
+data changed`, `the text "<text>" is missing here`). Passed, it builds
+the spans (old `[lo, hi]` to new start: a unit `[start, start + size - 1]`, a variable, a block and
+the two game ranges with their end included, an overlap cut so the later start wins) and the
+points (exact words), and the load runs as for the same build with `rel.xlate` set: the reg and
+audio sections unpacked by the blocks' saved offsets, the conservative scan always on. A MODULE
+word without a translation is left as it was and counted (a dead frame's word into a unit this
+build lacks, a word nothing names). A size the sections check then refuses (the scheduler's table, a fiber slot) is
+another build's change, not damage: refused as `ICO_STATE_OTHER_BUILD`. The self-checks still run
+and the backup still comes back on a failure. The listing makes the same check for every slot of
+another build, so a slot that would translate shows as loadable.
+
+**What this cannot see.** The check is of the code a frame sits in and the layout of the game's
+globals; it is not a proof that the later build means the same by the state:
+
+- A version that changes a function a suspended thread sits in (an actor's loop, a loader, the
+  scheduler's own wait, `ico_fiber_yield`) refuses that state. A callee is checked only when a
+  frame sits in it: a return address into it is what makes it referenced. A function only
+  pointed at is checked for presence, so the later build calls its own version of it.
+- A data layout is compared by the symbols and sections the file names: a GNU ld map names global
+  variables only, so two static variables of one object that swap places with equal sizes are
+  not seen, nor is a variable whose type changes at the same size. The registered blocks are
+  compared by name, size and flags: a block whose fields are reordered at the same size is not
+  seen. The scheduler's table and the fiber slots are compared by size. Structures in the arena
+  are the game's, whose layout the PS2's fixes (`tools/offset_audit.py`).
+- A pointer into unnamed writable data is no block, no variable and no point: such a state is
+  pinned. A C string found again by its bytes may be another literal with the same text (the same
+  bytes, so the game sees the same text).
+- A simulation key the later build adds is read as its default in an older state: the state loads
+  while the key is at its default and is refused as `ICO_STATE_OTHER_SETTINGS` (`key=(absent)
+  (now cur)`) once the player changed it. A block the later build adds loads only when its owner
+  registered it FRESH ([The registry](#the-registry)); the block then keeps this run's value,
+  which is right only for a value the game can start over from.
+- Host addresses that are rebuilt rather than saved are untouched by any of this: the vsync hook
+  list, the SIF server table and the other host callbacks set up at start-up, files, the
+  renderer's handles (the [registry](#the-registry) lists them).
+
+### Saving and loading
+
+`port/game/state_host.c` (the program, both builds; `port/game/state_rules.c` holds the
+decisions without the game, unit-tested by `state_host`) implements `state.h`. Requests
+(`ico_state_request_save/load/delete`, from the Save states page's host in `main_host.c`, F5 and
+F9 in `window_host.c`) are latched and performed by `ico_state_host_poll`, which `main_host.c`
+calls right after `ico_host_step`: every game fiber waits in a kernel call, the scheduler is not
+dispatching, no interrupt or host call is open. The first call checks the build once: not a
+sanitizer build, the fibers on minicoro's assembly backend, `ico_state_register_port` complete,
+`ico_game_data_ranges_verify` passed, the image found, the arena and the pool there, a folder
+under the pref dir (`<pref>/states/<slug>`, the files folder on Android); else save states are off
+for the run (`ico_state_available` 0, the reason in `ico_state_off_reason` and the log).
+
+**The conditions** (`ico_state_conditions`, in this order): save states on; for a save, the
+pause menu or a port page over it (`systemStatus[5]` set, past the title stage, the current
+layout the disc's pause layout or a port layout); no stage switch (`systemStatus[6]` 0); no memory
+card command (`ico_mc_host_pending`); the drive idle (`ico_cdvd_host_idle`: no command waiting
+for a vsync, no thread in `sceCdSync(0)`, no stream); no movie (`ico_movie_open`); not photo mode,
+the Extras credits or the music gallery. A load needs no pause: it runs from the title's Extras
+page too.
+
+**A save** copies, at the poll: the audio blocks under `ico_audio_lock`, then the arena, the two
+game data ranges, the other registered blocks, the scheduler's tables and each live fiber
+(`ico_sched_state_save`: its control block page and its stack from the deepest word the stack
+ever held, and at least from the saved stack pointer minus 128 bytes, to the top: [Save state
+images](#save-state-images)), `pobjImageTables`' block when a model is being loaded, and the
+ranges (the image, the arena, the pool and its slot size, the game data, the pobj block, whether
+each was pinned or fixed, the renderer's highest mesh generation, the game thread's thread
+pointer and stack guard). The header gets the identity, the disc,
+the simulation keys, the time, the play time, the stage, the Main tick and the vsync count.
+`ico_state_file_write` packs and writes on its thread; the next polls collect the result (the
+popup and the `saved` line come then). The copy is about 55 MB at most and is freed when the
+write is collected. In the window build the slot's picture is the pause picture, copied to
+`slot<n>.png` on a thread (`ico_state_copy_file`, through `slot<n>.png.tmp` and a rename), or, when
+there is none, the next frame presented after the save.
+
+**The pause picture** (`port/game/state_host.c` `shot_poll`, the decisions in `state_rules.h`
+`ico_state_shot_step`): the game as it was the moment before the pause menu came up, without the
+menu. The pause layout (PAL 57) draws its backdrop, a full-frame black sprite at its `colA` 0.6
+(alpha 76 of 128), from its first frame on and unfaded (`ico2/common/src/layout_texture.c`
+`display_primary_texture_layout` draws it before `texture_fading`); its procs, the port's
+`entryProc` among them, first run in its second tick (`fadeState` 1), when the rows are at 1/L of
+their alpha. So no frame of the menu itself is clean, and the picture is taken one tick earlier:
+the poll after the tick in which `la_game_loop` switched play to the pause menu (the layout was
+`layout_play` at the poll before and is `layout_pause` now) asks the renderer for the next present
+of a frame begun by then (`rd_capture_shot`, [DISPLAY.md](DISPLAY.md#presentation)), which is that tick's frame
+(Frame rate Original: its own present at the next flip) or the one before it blended (the presents
+between ticks run one tick behind). A present of the next frame, the first with the backdrop,
+drops the request instead (a minimized window, a late skip). The renderer hands the presentation
+box's pixels (the picture without the bars, at its own shape and the output's size, the CRT
+filter's picture under the filter, never the port's popups); a thread box-filters them to at most
+960 x 960 (`ico_state_thumb_size`, `ICO_STATE_THUMB_W`/`_H`; 960 x 540 at 16:9, at most 2.8 MB as
+a stored PNG, inside the page's 8 MB read) and writes `<states>/<disc>/pause.png`. The picture is
+the game's until the game is back on the play layout (`shot_forget`) or a state is loaded, so a
+save from the pause menu, Options or Extras over it, or the Save states page, by F5 or the page,
+gets it; every save in that pause gets the same one. A load (`shot_from_slot`) drops the picture
+of the game before it (one still being written is waited for and dropped) and copies the loaded
+slot's own picture to `pause.png` on the same writer thread (`ico_state_picture_to_pause`, its
+size read from the PNG header for the log), so a save made after the load in the same pause gets
+the game as loaded.
+
+Without a pause picture (none taken yet, the request dropped, the loaded slot without one, the
+write or the copy failed or still running) the slot's picture is the frame presented after the
+save, as before:
+`window_host.c` reads the DISPLAY target (`rd_read_display`) once `ico_state_wants_thumbnail` says
+so and hands it to `ico_state_thumbnail`, which box-filters it to the presentation box's shape
+(`rd_present_box_size`: DISPLAY has half the lines it is shown with) at most 960 wide and writes
+`slot<n>.png` on a thread of its own (the pause menu is in it). No picture within about two
+seconds (a minimized window): none, logged. Until the picture is written (or copied) a second save
+is refused as busy (`the last save's picture is still being taken`), so the first slot keeps its
+picture, and a delete of that slot drops the picture still to come first (`state: slot N's picture
+still to come dropped (the slot is deleted)`; review finding 11).
+
+**A load** first collects a write in flight, checks the conditions, reads the header and checks
+it against this run's (`ico_state_header_check`), inflates every section into new buffers and
+checks their sizes against this build's and the ranges' thread pointer and stack guard against
+what the platform needs (`ico_state_proc_check`), then, under `ico_audio_lock`:
+
+1. the textures' live serial counter read (`tex_HostNextSerial`, the window build), the packet
+   scratch block freed (`pac_HostStateFixup(1)`), the live `pobjImageTables` block kept aside;
+2. the backup: copies of the arena, the game data, the registered blocks and the scheduler with
+   its fibers;
+3. the game data, the arena and the registered blocks copied in; the scheduler and its fibers
+   put back with the relocation (`ico_sched_state_restore`, which discards the live fibers);
+4. when any range moved or the thread pointer or the stack guard differs, the conservative scan
+   over the arena, the game data, every SCAN block
+   and the copy of the pobj block; then the scratch pointer the game data brought back forgotten
+   (`pac_HostStateFixup(0)`) and the pobj copy installed (`PObj_SetImageTables`);
+5. the self-checks (`ico_state_reloc_check`, heap root `ios_partition_root`); a failure, or a
+   scheduler that would not restore, puts the backup back (the scheduler restored from its copy
+   with nothing moved), frees the pobj copy and refuses with `ICO_STATE_SELF_CHECK`: the game goes
+   on as before;
+6. committed: the old pobj block freed, every loaded texture given a new serial above both runs'
+   (`tex_HostReserialAll`), every VU mesh retired and the mesh generations put above the saving
+   run's (`rd_drop_vu_meshes`, so no packet's old mesh id names a mesh made after the load), the
+   scene latch cleared so the next frame remakes the scene targets (`gsb_HostSceneRelatch`).
+
+Then, unlocked: the audio output's queue dropped (`ico_audio_host_flush`,
+[AUDIO.md](AUDIO.md)), the cached voice volumes issued again under the gains now; a camera cut at
+the load and again at the next poll, so the presenter does not blend the old picture into the
+restored one ([WORK_BUFFERS.md](WORK_BUFFERS.md)); the game-state view's baseline taken again
+(`ico_gs_rebaseline`, the run's and the session's counters kept: [DIVERGENCES.md](DIVERGENCES.md));
+the achievements' per-tick poll told the Main tick went back (`ico_ach_host_state_loaded`); the pad
+recording's line `# state loaded slot N (Main tick T)`; the menu told
+(`ui_settings_sync_after_state_load`); the simulation's FP mode set again. The Main tick and the
+pad script's position are CLOCK blocks: a load rewinds them with the game. The memory peak of a
+load is the staging and the backup, about 110 MB.
+
+**Delete** removes `slot<n>.ics` and `slot<n>.png`. **The listing** (`ico_state_list`) reads the
+four headers and checks each against this run (`loadable`, `why_not`; a slot of another build of
+this format is checked through its `syms` section, [Across versions](#across-versions)), cached
+until a save, a load, a delete or a change of the simulation keys.
+
+**The [dev] keys** (`main_host.c` reads them, `ico_state_dev_set`): `state_save_at = "<tick>:<slot>"`
+and `state_load_at = "<tick>:<slot>"` save and load once when the Main tick reaches the value
+(the save under the same conditions as any other, so the game must be paused);
+`state_hash_at = "<tick>"` logs `state: hash <xxh3-64> of arena+gdata+gbss at tick N` each time the
+tick reaches it (again after a load brought the tick back), and `state_dump_at = "<tick>"` writes
+the three regions raw at the same moments to `<states folder>/dump-<tick>-<k>/` (`arena.bin`,
+`gdata.bin`, `gbss.bin`; `regions.txt` with each region's address, size and hash and the
+addresses of `systemStatus` and `stage_no` for the link map; `masked.txt` with every range the
+hash left out). `tools/state_region_diff.py <a> <b> <ico_pc.map> [--elf <program>]` compares two
+dumps outside the masked ranges and names the differing bytes of the game's data and bss by
+symbol (the link map's globals; with `--elf`, `nm`'s statics and sizes too) and the arena's by
+offset (the EE address). The headless round trip uses them.
+
+**The hash rule.** The round trip compares the game's state, not the host's: the hash
+(`port/platform/state_hash.c`) is XXH3-64 over a copy of each region in which the words that hold
+the host's values are zero, so two runs of the same play hash alike although the host gave them
+other addresses and handles. Typed first: the model tables block's pointer (`PObj.c`
+`PObj_HostStateWord`) and, in the window build, the packet scratch stream's words (`Packet.c`
+`pac_HostStateWords`: its pointer, capacity, last batches and declined pack hash), the textures'
+host record (`Texture.c` `tex_HostStateBlock`: serials, cache bindings, the CLUT snapshot, the
+pack state) and every packet's mesh id field (`rd_mesh.h` `rd_vu_mesh_note_field`, the latest id
+written per field, reported while the field still holds it). Then the catch-all: every aligned
+8-byte word whose value lies in a host block noted this run (each model tables block seen at a
+poll or a load: the part records in the arena point into it). The image, arena and pool pointers
+stay in the hash: they are the game's own, the same in both runs of one process (and across
+processes on a fixed image with a pinned arena and pool). `state: hash masked N pointer words, M host ids at tick T (...)` follows each
+hash with the counts and the three regions' hashes. With nothing to leave out the hash is the
+plain XXH3-64 of the regions' XXH3-64s. What it cannot mask is the game storing garbage, a
+local it never set copied into its memory: the restored fiber stacks hold the saved run's dead
+frames byte for byte ([Save state images](#save-state-images)), but host code that runs on a
+game thread's stack (a log line's formatting) leaves other bytes there in another run. A dump's
+diff names such a symbol; the cure is in the game's code. `gcc -O2 -Wmaybe-uninitialized` over
+the game lists the reads of unset locals the compiler sees (`camera-ico2.c`'s monitor camera,
+`matrixDrive.c`, `way_sys.c`, `BgAnimation.c`, `cdvd.c`, `fieldCollision.c`).
+
+**Log lines** (prefix `state:`):
+
+| line | when |
+| --- | --- |
+| `state: save states on: <n> blocks (<bytes> bytes, <bytes> of them audio), build id <16 hex>, <fixed image\|relocatable image>, arena <pinned\|not pinned>, fiber pool <pinned\|not pinned>, <thread pointer recorded[, stack guard recorded]\|stack guard recorded\|no thread pointer needed>, folder <dir>` | once, the first poll |
+| `state: save states are off: <reason>` | once, instead of the line above |
+| `state: the game's data ranges are not bracketed on this build (<why>): save states are off` | once, the verify failed |
+| `state: saved slot N (<path>): arena <raw> -> <packed>, gdata ..., gbss ..., reg ..., audio ..., sched ..., fibers ..., pobj ..., ranges ..., syms ...; <k> fibers; copy <ms> ms, write <ms> ms, file <bytes> bytes` | a save written |
+| `state: slot N can carry over to a later version that keeps U functions (P with a thread inside), D data symbols, K start-up values and texts, B blocks and the game's data layout (W program words, X of them naming nothing and kept as numbers, first 0x..; record <bytes> bytes in <ms> ms)`, or `state: slot N loads only into this build: <why> (W program words, B blocks; X naming nothing, first 0x..)` | after each `saved` line: the `syms` record ([Across versions](#across-versions)) |
+| `state: symbols: N functions, M data symbols, K game data items (layout <hash>) from <file> in T ms, S KB`, or `state: symbols: none (<file>: <why>); a state saved here loads only into this build, and no other build's state loads here` | once, at the first save, load or listing that needs the table |
+| `state: slot N was saved by version <v>, this is <v>: everything it points into is unchanged here, so it is translated (U functions, D data symbols, K start-up values and texts, S spans, P points; L dead-frame words without one; X words naming nothing kept as numbers, first 0x..)` and, after the `loaded` line, `state: slot N from version <commit>: M program words had no translation and were left as they were (first 0x..)` | a load of another build's state |
+| `state: slot N (saved by <commit>) loads here`, or `... cannot be loaded here: <v> -> <v>: <blocker>` | each listing, per slot of another build |
+| `state: loaded slot N (saved at Main tick T, stage S): deltas module +0x0 (fixed image), arena +0x0 (pinned), pool +0x0 (pinned), pobj ... ; words rewritten [(nothing moved)] arena .., gdata .., gbss .., registry .., pobj ..; thread pointer 0x<old>->0x<new>[ unchanged\| not recorded\| not needed] (K words), stack guard[ unchanged\| not recorded\| not needed] (M words); checks P partitions, B blocks, T threads, H handlers; K fibers; apply <ms> ms` | a load done |
+| `state: refused <save\|load\|delete> slot N: <reason>[: <detail>]` | every refusal: save states off, not on the pause menu, a stage switch, the card, the disc, a movie, another mode (photo mode, the credits, the music gallery), the slot empty, a damaged file, another build (its commit; `no thread-pointer record` for a state without the saving process's thread pointer or stack guard where the platform needs them; for a state this build cannot translate `<saved commit> -> <commit here>: <blocker>`, the blocker as [Across versions](#across-versions) words it, or `made before save states could carry over to later versions (format 1)`), another disc, another platform, settings differ (`key=saved (now cur)`), the self-checks (the failing check; the backup restored), the file not written (why), busy |
+| `state: deleted slot N` | a delete |
+| `state: slot N's picture written (<path>, WxH, the pause picture\|the frame after the save)`, `... could not be written`, `state: slot N has no picture (no frame was presented)` | the picture |
+| `state: slot N's picture: the frame after the save (no pause picture: <why>)` | a save without a pause picture: none taken since the program started, the frame before the pause menu still to come or not presented, still being written, could not be written, the game went back to play, a state was loaded, no renderer |
+| `state: the pause picture: the game before the pause menu, WxH from the WxH picture, written in <ms> ms (<path>; picture N)` (the first 8, then every 100th), `state: the pause picture could not be written (<path>)` | the pause menu opened from play |
+| `state: the pause picture: slot N's own, the game as loaded, WxH, copied in <ms> ms (<path>)`, `state: the pause picture: slot N's picture could not be copied (none, or unreadable): a save before going back to play takes the frame after it` | a load (the loaded slot's picture becomes the pause picture) |
+| `state: slot N was saved before the setting(s) <keys> existed: read as its (their) default, which it has (they have) now` | a load of a state saved before a simulation key existed ([Validity](#validity)) |
+| `state: slot N was saved before K of the blocks registered here existed (<names>): they start from this run's values` | a load of another build's state without FRESH blocks this build registers ([The registry](#the-registry)) |
+| `rd: state picture: WxH from the WxH output (the box at X,Y), read back in <ms> ms`, `rd: state picture: not taken: the first present after the request showed frame F, later than frame G it asked for` or `...: no copy of the WxH output` (the first 8, then every 100th) | the renderer's side of the pause picture |
+| `state: [dev] save at Main tick ..., load at ..., hash at ...` and `state: hash ...` | the [dev] keys |
+| `state: hash masked N pointer words, M host ids at tick T (H host blocks, region hashes arena .. gdata .. gbss ..)` | after each `state: hash` line: what the hash left out (the hash rule) |
+| `state: [dev] dump of arena+gdata+gbss at Main tick T`, `state: dumped arena+gdata+gbss at tick T to <dir> (hash .., masked N pointer words, M host ids)[: a file could not be written]` | `[dev] state_dump_at` |
+| `audio: the output's queue dropped after a save state's load` | a load in the window build |
+| `stats: the baseline taken again after a save state's load (stage S); the run's counters kept` | a load |
+
+With developer mode on, the scan logs each moved word (`state: moved the word at ...`).
 
 ## Register pages
 
@@ -307,8 +1362,8 @@ Three places matter (`port/platform/host_config.h`):
 
 - the executable's folder (`ico_host_exe_dir`): `ico-pc.ini` and `logs/` beside the program on
   Windows and Linux;
-- the [user folder](ARCHITECTURE.md#terms) (`ico_host_pref_dir`): `config.toml`, the memory cards
-  (`memcard/`), the extracted `ico.o2r`, `ico-jpn.o2r` and `ico-kor.o2r`, `dumps/`, the developer `dev/` folder. In the window build
+- the [user folder](ARCHITECTURE.md#terms) (`ico_host_pref_dir`): `config.toml`, `achievements.toml`, the memory cards
+  (`memcard/`, `memcard-preview/`), the save states (`states/<disc slug>/`, [above](#the-file)), the extracted `ico.o2r`, `ico-jpn.o2r` and `ico-kor.o2r`, `dumps/`, the developer `dev/` folder; a restore waiting for the next start (`backup-restore/`, [Backups](#backups)). In the window build
   it is SDL's `SDL_GetPrefPath("ico-pc", "ico-pc")`; in the headless build and the tests, which have
   no SDL, the executable's folder (`port/platform/host_config.c` (`ico_host_pref_dir`);
   `port/config/CMakeLists.txt` (`ICO_HOST_SDL_PREFPATH`));
@@ -364,6 +1419,124 @@ write to), the logs go to `<user folder>/logs` with the line `ico_pc: the logs f
 be made (<error>); the logs are in <dir>`, and every later `ico_host_logs_dir` names that folder
 (`port/platform/host_config.h` (`ico_host_set_logs_dir`); `port/platform/main_host.c` (`host_main`)).
 Only when that fails too does the log go to the console.
+
+### Backups
+
+Options > Extras > Back up your data and Restore from a backup move the player's own data in one
+zip (`port/platform/backup.h`, header comment). A backup holds, from the user folder: every
+folder named `memcard` or `memcard` followed by letters, digits, `-` or `_` (`memcard`,
+`memcard-preview`), `states/` without a slot's developer dumps (`states/<slug>/dump-*`),
+`config.toml` and `achievements.toml`; never a file still being written (`*.tmp`, `*.part`), the
+logs, `ico-pc.ini` (this device's disc image and folders), the pipeline caches, `dumps/`, the
+texture and model packs or the extracted game data (`backup.c` (`top_visit`, `collect_add`)). A
+card folder that `saves=` or `[paths] saves` puts outside the user folder is not in it; the start
+of the window build logs `backup: the memory card folder <dir> is outside the user folder <dir>:
+a backup does not hold it` (`backup_host.c` (`ico_backup_host_install`)).
+
+**The zip.** miniz through `host_fs.h`'s streams: save states and pictures stored (already
+packed), the rest deflated at the fastest level, each entry with its file's time; then
+`backup.txt`, the manifest, last, with the figures of what went in:
+
+```
+ICO PC backup 1
+version <label>         (the version label; "development" for a development build)
+commit <commit>
+platform windows-x64    (state_file.h ico_state_platform_tag)
+disc pal                (the disc played when it was made)
+discs pal jpn           (that disc and each states/<slug> folder)
+time <seconds since 1970>
+files <entries but the manifest>
+bytes <their size, uncompressed>
+```
+
+The zip is written as `<name>.part`, synced and renamed over `<name>` (`ico_backup_write`). The size
+of each file is the open file's, so a file replaced while the backup runs (the achievements'
+writer renames a new one in) goes in whole. A busy memory card (`ico_mc_host_pending`) or a save
+state write in flight (`ico_state_file_busy`) refuses it before anything is read.
+
+**The checks** (`ico_backup_inspect`, and again when a restore unpacks): the file is a zip with a
+`backup.txt` whose first line is `ICO PC backup <n>` (else `NOT_BACKUP`), `n` at most
+`ICO_BACKUP_FORMAT` (else `NEWER`); every entry's name is one a backup may hold
+(`ico_backup_name_ok`: relative, `/` between parts, no empty part, no `.` or `..`, no `\`, `:`,
+control character or Windows-reserved character, at most 8 parts and 240 bytes, under one of the
+places above; else `UNSAFE`); at most `ICO_BACKUP_MAX_FILES` (8192) entries, none over
+`ICO_BACKUP_MAX_FILE_BYTES` (512 MB) and `ICO_BACKUP_MAX_BYTES` (3 GB) in all (else `TOO_BIG`); the
+count and the total size agree with the manifest, and no entry is encrypted or packed with a method
+miniz cannot read (else `DAMAGED`). A backup made while another disc was played is accepted and
+said (`other_disc`): every disc shares the card folder, and `states/` keeps a folder per disc.
+
+**A restore is two steps.** `ico_backup_restore`, on the backup's worker after the player's third
+press: the gates (the card, a save state write, the disc: `ico_cdvd_host_idle`), the checks, then
+every entry unpacked under `<user folder>/backup-restore.part/` (each entry's data held to its size
+and checked against its CRC, each file synced), the manifest kept there with a `from <file name>`
+line, and the folder renamed to `backup-restore/`; nothing the game uses changes, and a failure
+deletes what was unpacked. The next start puts it in place (`main_host.c` (`apply_restore`), right
+after the user folder's line, before `config.toml`, the memory card or `achievements.toml` is read;
+`ico_backup_apply_pending`): for each thing in `backup-restore/`, the one in the user folder is
+renamed to `<name>.old-<seconds>` and the backup's is moved in (`ico_rename_replace`, a rename on
+one volume); once every move worked the old copies are deleted (`ico_remove_tree`, hidden files
+too, a link deleted, never followed) and then the staging folder. A move that fails undoes every
+earlier one, newest first, and deletes the staging folder (so the next start does not try again):
+the data is as it was, logged, and a box says so. Each move back is checked: a thing whose move
+back fails too (the backup's copy still in place, or the player's copy moved aside and not back)
+keeps its old copy and is named with it (`IcoBackupReport.left`: `memcard (yours is in
+memcard.old-<seconds>)`), in the log line and in the box. What the backup does not hold stays as it
+is. A `backup-restore.part/` found at the start (a run that ended while unpacking) is deleted, and
+every start names the old copies already beside the user data (`IcoBackupReport.stale`: a run that
+ended between the two moves of one thing, or an undo that failed). The moves
+wait for the start because the run that unpacks still writes on its way out: the settings on quit
+(`ui_settings_save_on_quit`), the achievements' writer, the iOS background save; done at once,
+those would land over the restored files.
+
+**The run's end** (`backup_host.c` (`host_pump`)): 5 s after the restore's popup the host posts
+`SDL_EVENT_QUIT`, as the title's Quit does. On Windows, Linux and macOS it first asks for a restart
+at exit (`diag_host.h` (`ico_diag_restart_at_exit`)): the device loss's relaunch at exit with an
+empty `ICO_STARTUP_RETRY`, so the new run takes no restart step and writes its log on after this
+run's lines; on Android (and wherever the relaunch was not prepared) the app closes and the
+player's next start puts the backup in place. The popup says which (`UiBackupStatus.restarts`,
+`ico_diag_can_restart`).
+
+**The dialogs.** On the desktop, SDL's `SDL_ShowSaveFileDialog` (the suggested file
+`ico-pc-backup-<date>.zip` in the documents folder, `ico_backup_default_name`) and
+`SDL_ShowOpenFileDialog`, both with a `*.zip` filter and the game's window as parent, opened from the
+pump (the main thread, outside the game's fibers); the answer may come on another thread and
+carries the dialog's number, so a late one is dropped. On Android the app's own document screens
+([The file picker](#the-file-picker)): a backup asks `IcoActivity.createFile`
+(`ACTION_CREATE_DOCUMENT`, type `application/zip`, the name suggested, request code `0x1C0E`;
+`host_android.h` (`ico_android_create_file`), answered through the same pending pick and
+`nativePickDone`); the zip is written in the cache folder (`backup-out.zip`) and copied, start to
+end, through the descriptor `IcoActivity.openFd` gives for the URI (`ico_android_open_fd`, mode
+`wt`, else `w`; a provider may hand a pipe, which takes no seek and no `fsync`). A restore picks with
+`ico_android_pick_file` and copies the file into the cache folder (`backup-in.zip`, through
+`SDL_IOFromFile` and `iso_import.h` `ico_iso_copy`, after a free-space check), since the zip reader
+seeks; the unpacking needs the backup's size free in the files folder. The file's name shown and
+logged is the provider's (`IcoActivity.displayName`, `ico_android_display_name`). A screen that
+closed without an answer ends as closed once the app is back in front for 2 s, or after 300 s
+(`pick_watch`, as the graphics driver page's).
+
+**Across versions.** A backup restores into any version that reads its format: the card folders
+and the settings are the game's and the program's own files. Save states keep their own rule
+([Across versions](#across-versions)): a state the newer version made may be refused by the older
+one.
+
+Log lines (`backup:`): `backup: <row>: opening the save dialog|file dialog (dialog N)`, `backup:
+the dialog answered (dialog N): a file|closed without a file, T ms after it opened`, `backup: the
+file dialog failed (dialog N): <error>`, `backup: the file screen (dialog N) gave no answer: <why>
+(T ms)`, `backup: a late answer for dialog N (now M) ignored`, `backup: wrote <name> (N files, M
+KB) in T ms`, `backup: read <name>: version V (commit C), <platform>, disc D, discs ..., made at T,
+N files, M KB, holding <items>[; made while another disc was played]`, `backup: restored from
+<name> (version V, discs ...): N files ready; the game restarts to put them in place|the game
+closes, and its next start puts them in place`, `backup: ending the run so that the next start puts
+the backup in place[; the game starts again by itself]`, `backup: the restore of <name> was not
+confirmed; nothing changed`, `backup: refused: <row>: <what> (<detail>)`, `backup: <row>: could
+not read|write <name>: <detail>`; at the start `backup: restored from <name> (version V, discs
+...): N files replaced (<items>)`, `backup: the backup from <name> could not be put in place:
+<what> (<detail>); the data is as it was` or `...: <what> (<detail>); not moved back: <name> (yours
+is in <name>.old-<seconds>)[, ...]`, `backup: a restore the last run did not finish unpacking was
+deleted; nothing changed`, `backup: old copies an earlier restore left beside your data: <names>
+(each holds your data from before that restore; nothing reads them)`; the menu's `extras: back up your data|restore from a
+backup: started|ended: state S, D of T files, reason R`. The relaunch logs `ico_pc: starting the
+game again, as asked`.
 
 ### The disc a start plays
 
@@ -465,7 +1638,7 @@ path that draws from it: a ` pre` key, a `_pre_vs` module (the pre-pass's entrie
 stages' `vu_tri_*_pre_vs` and `vu_particle_pre_vs`), a `_main_vs` module (`vu_main_vs`,
 `vu_particle_main_vs`, made only with the pre-pass) or the old triangle stage's `vu_tri_vs` or
 `vu_tri_plain_vs`, `startup_retry_note_has_vu_pre`; the same backend without the pre-pass, `ICO_RD_VU_PREPASS=0`
-from `ico_ini_export`, which makes none of them, [RENDER.md](RENDER.md#the-vertex-and-triangle-pre-passes)),
+from `ico_ini_export`, which makes none of them, [RENDER.md](PIPELINES.md#the-vertex-and-triangle-pre-passes)),
 `fixedblend` (the note names a pipeline whose `dst` field is nonzero, an exact-blend
 pass with a fragment shader interlock or rasterizer-ordered view entry: the same backend with the
 fixed-function blend, `ICO_RD_BLEND=fixed` from `ico_ini_export` as for the loss steps, which builds
@@ -560,13 +1733,14 @@ process is started): the step and its value (`blend:vulkan`, then `backend:d3d12
 relaunch fails (`port/platform/test/diag_test.c` (`loss_child`)).
 
 A start of another version than the activity file's (its version line) logs that a Vulkan renderer
-drops the other version's pipeline cache file (Direct3D 12 keeps none) and the graphics are prepared
-from nothing, with or without an ended run in the note; a file with no note is one only a loss line
+keeps the other version's pipeline cache file when both have the same shaders and otherwise drops
+it and prepares the graphics from nothing (Direct3D 12 keeps none; the file is named by the shader
+set, [RHI.md](RHI.md#vulkan)), with or without an ended run in the note; a file with no note is one only a loss line
 kept, as a clean end deletes it (`port/platform/diag_host.c` (`ico_diag_startup_activity_begin`); the drop itself is `vkr_cache_drop_others`,
 [RHI.md](RHI.md#vulkan)). An end without a crash report (the system or the driver ends the
 process) is caught by the start-up activity file, `logs/startup-activity.txt`: the version's line, then the activity note. While the
 start-up pipeline set is created (`ICO_DIAG_ACTIVITY_STARTUP`) each batch's note (its range of the
-set and its first and last key, [RENDER.md](RENDER.md#pipelines)) replaces the text (a careful
+set and its first and last key, [RENDER.md](PIPELINES.md)) replaces the text (a careful
 set's file adds `set: careful` after it), and the file is deleted when the set is done; a lazy run (`ICO_DIAG_ACTIVITY_LAZY`) records
 every first-use pipeline and a line between them for the whole run. The file is opened once when
 the recording starts and closed when it ends; each note is one write at the file's start, padded
@@ -649,7 +1823,7 @@ further end is due again. With `[dev] pipeline_set = "lazy"` already set the pip
 cleared and no line about it follows. It is the crash order's `lazy` step made to last, for the
 ends a crash handler never sees (the system ending the app, a device that freezes); a crash with a
 report keeps its own order above. The setting outlives the version; deleting the line makes the
-next start try the set again ([RENDER.md](RENDER.md#the-start-up-set)).
+next start try the set again ([RENDER.md](PIPELINES.md#the-start-up-set)).
 
 A careful set that its memory budget stopped (`rd_precreate_pipelines` called `rd_pipelines_lazy`,
 `rd_pipelines_lazy_on`) is a set that ended as it should: the window calls
@@ -668,7 +1842,7 @@ the system making room for it); 5 and a signal without a level never stop it. Th
 before `rd_init` on Android only; desktops never get the signal), so the batch in flight finishes
 (the careful policy's batches are 8 pipelines on one thread, so nothing cuts a batch short), the
 pipeline cache is written, and the rest of the set is made on first use
-([RENDER.md](RENDER.md#the-start-up-set)). The window's `ico_diag_startup_activity_budget_stop` then
+([RENDER.md](PIPELINES.md#the-start-up-set)). The window's `ico_diag_startup_activity_budget_stop` then
 logs `ico_pc: the start-up set stopped at the system's low-memory signal (running critical); the
 next start makes the pipelines as the game needs them, with no start-up set` and records the rest of
 the run as a lazy run that is not for this start only, with the line `set: stopped at the system's
@@ -765,7 +1939,7 @@ times' minimum, maximum and mean, the batch's wall time and threads, the process
 pipeline cache's size after it, the policy under a careful set (`; policy batch 8, threads 1,
 budget 128 MB, cache each batch`), then a VU batch's times by vertex shader with its words and
 instructions or a 2D batch's slowest pipeline with its modules; a run without the set adds its lazy
-batches' lines the same way ([RENDER.md](RENDER.md#the-start-up-set); `rd.h` `rd_set_batch_fn`,
+batches' lines the same way ([RENDER.md](PIPELINES.md#the-start-up-set); `rd.h` `rd_set_batch_fn`,
 `diag_host.h` `ico_diag_startup_activity_batch`). The next start logs each as `ico_pc: the previous
 run (version V) compiled: VU batch 297-328 of 702 (plain, compiler ...): 32 pipelines 0.20-0.90 s,
 mean 0.41 s, ...` before the note it ended in, then the last one again as `ico_pc: the previous
@@ -904,6 +2078,22 @@ ticks and the current thread (`ico_diag_milestone`), and game threads are named 
 `iosThreadCreate` runs (`ico_host_thread_func`). `ico_diag_float_fault` logs a NaN that reaches game
 code the PS2 never fed one (`port/platform/diag_host.h` (`ico_diag_float_fault`)).
 
+**Loads, stage switches and story flags (issue 160).** A save's load logs one milestone after it
+restores the flags it keeps across `gflagInit` (`ico2/common/src/layout_action.c`
+`la_host_load_log`): `load: slot 0, stage 41; kept flags (id=in the save/kept) 355=0/0 351=0/0
+350=0/0 352=0/0 349=1/0; new game flag 349`, each disc's own five ids (the fifth is its new-game
+flag; the twenty words the walk reads per disc are checked by ctest `keep_flags` and its six disc
+runs). Every stage-switch request (`ico2/common/src/StageManager.c` `stgmgrForceSwitch`,
+`stgmgrForceSwitchWithFadeColor`, through `ico_host_stage_switch`) logs `stage switch request:
+stage S, fade in F out G, cmd C, by thread #N name` with the milestone prefix (the first 200, then
+every 10th), and a request made while the stage manager's queue still holds an untaken one adds `a
+second stage switch request while one is queued (stage A then B, N queued)`: the retail game can
+ask twice in one Main tick (a Continue's load and the title's new-game wait did, and the stage
+loaded twice). `gflagChk`, `gflagOn` and `gflagOff` (`ico2/script/src/gflag.c`) log an id at or
+past the disc's flag count (`ico_region_gflag_count`, the region table's `gflag_count`) as `gflag:
+flag ID read|set|cleared past the disc's COUNT flags (from CALLER)`, rate-limited; the game's
+access goes ahead unchanged.
+
 **A GPU hang.** When the watchdog fires (either limit; not the pump's bound) while the main thread
 is blocked in a wait for the GPU and the work it waits for has not finished
 ([RHI.md](RHI.md#device-loss), `rhi_gpu_progress`: the wait's value above the newest seen finished),
@@ -955,6 +2145,52 @@ Direct3D 12 (`port/platform/diag_host.h` (`ico_diag_set_gpu_hang`, `IcoDiagGpu`)
 backend's progress (`hang`, `hangnodump`, `hangnot` in `port/platform/test/diag_test.c`): the
 lines, the dump before the report, the report's line, the box, the activity file's loss and the next
 start's count, the loss without a dump, and the freeze with no wait in progress.
+
+**The GPU hang limit** (issue 123: a minute of black screen before the box on an Adreno
+740). The same end comes as soon as one wait for the GPU has lasted the limit, half the watchdog
+(`watchdog = 30`: 15 s; at least 2 s; `watchdog = 0` turns both off), not after the later limit's
+2 x `watchdog` without a Main tick. The watchdog's thread polls the backend's progress four times a
+second and counts one wait for one unfinished submission the way it counts its limits (not while
+paused in the background, not across a suspend; only while a limit is in force), and at the limit
+runs `watchdog_fire` with the reason `the GPU: submission V not finished after W s (limit L s); the
+newest is S, the newest seen finished D`; the lines, the dump, the loss line, the report and the
+box are the GPU hang's above. Both ends run on the watchdog's thread and `watchdog_fire` runs once,
+so the first wins. The waits themselves are unchanged: the main thread blocked in the driver is not
+the one that ends the run, so no backend wait was bounded for it. Only a backend that tracks its
+submissions (`rhi_gpu_progress`: Vulkan) has the limit; Direct3D 12, Direct3D 11 and OpenGL track
+none (on Windows the system resets a GPU that stops for 2 s and the backend sees the device
+removed). The host sets it before the window opens (`port/platform/main_host.c`
+(`set_gpu_hang_limit`): `ico_pc: GPU hang limit 15.0 s (half the watchdog's 30 s, at least 2 s; 0 =
+off): ...`, and `ICO_GPU_HANG_LIMIT` for the Vulkan backend's loss diagnostics line, `...; hang
+limit 15 s`); the diagnostics' start line names it (`GPU hang limit 15.0 s for one wait for the GPU
+(0 = off)`). The arithmetic and the watch are `port/platform/gpu_hang.h` (ctest `gpu_hang`); ctest
+`diag`'s `hanglimit` ends a faked wait at a 2 s limit before a 60 s later limit. On Android, when the
+start runs on the device's own Qualcomm driver (no driver package), the hang's box and the device
+loss's end with one more sentence in the menu's language, the Options > Graphics driver > Add a
+driver route to a Turnip package (`UI_STR_GPU_HANG_TURNIP`;
+`port/platform/android/gpu_driver_android.c` (`ico_gpu_driver_android_hang_note`), registered with
+`ico_diag_set_gpu_hang_note`).
+
+With the [render thread](#the-render-thread) presenting, a picture the driver never finishes
+leaves the render thread inside the driver's present and the main thread waiting for the render
+thread, not for the GPU, so the backend's progress names no wait. The render thread's heartbeat
+covers it: the watchdog's thread reads the picture in progress without a lock
+(`port/platform/diag_host.h` (`ico_diag_set_render_heartbeat`); `port/platform/render_thread.c`
+(`rt_heartbeat`)) and counts it through `IcoRenderHangWatch`, the same limit and the same
+counting rules (not with an effects program loaded, whose first presents prepare its effects).
+Only pictures are counted (a call between pictures, such as the targets made again, runs under the
+watchdog's own limit, as it did on the main thread), and the driver's pipeline creations are
+progress: the count starts again whenever one begins or ends and stays at 0 while one is in
+progress (`port/platform/gpu_hang.h` (`ico_render_hang_step`), fed the activity note's counter),
+so a picture that makes many pipelines on first use (about 250 ms each on a phone) is not a hang,
+and one creation that does not return is left to the pipeline limit and the watchdog; at
+the limit the WATCHDOG line is `the render thread: picture P has not finished its submit and
+present after W s (limit L s); the last finished D`, its second line `the graphics driver did not
+finish the picture (the render thread has been inside picture P's submit and present for W s; the
+main thread waits for it); this end counts as a device loss (...)`, and the rest (the dump, the loss
+line, the report's `the graphics driver stopped responding (the render thread's picture P has not
+finished after a W s wait)`, the box) is the GPU hang's (`port/platform/diag_host.c`
+(`watchdog_loop`, `watchdog_fire`, `render_hang`)).
 
 The window build logs a stats block every 10 s. A host step longer than `[dev] slow_step_ms`
 (default 8, 0 off) logs a slow-step line ([DISPLAY.md](DISPLAY.md#pacing);
@@ -1170,18 +2406,23 @@ with local read the probe's verdict last ([RENDER.md](RENDER.md#the-device-profi
 [WORK_BUFFERS.md](WORK_BUFFERS.md#the-desktops-local-read-and-its-probe)). The controller
 is what SDL has connected then ("none yet" when the pad arrives later; its own `input: gamepad`
 line follows), on Windows with whether SDL's DirectInput scan is on (`[dev] joystick_directinput`);
-the VU shaders are `one set, fallback plain (issue 107)` on a device whose fallback takes the
-plain program entries (`RhiLimits.vuFallbackPlain`), and the pipelines `the careful start-up set`
+the VU shaders are `one set, fallback plain (<reason>)` on a device whose fallback takes the
+plain program entries (`(Adreno 740, issue 107)` for the device table's row,
+`RhiLimits.vuFallbackPlain`; `(Turnip driver, issue 163)` under Turnip; [RENDER.md](PIPELINES.md#the-fallback-entries)), and the pipelines `the careful start-up set`
 under the careful policy, `the careful start-up set, stopped at its budget (the rest on first use)`
 when its budget stopped it, and `on first use (no start-up set)` where the set is skipped
-(`port/render/rd_core.c` (`rd_summary_text`); [RENDER.md](RENDER.md#the-start-up-set)); the disc is the one `select_disc` named (`ico_diag_set_disc`); on
+(`port/render/rd_core.c` (`rd_summary_text`); [RENDER.md](PIPELINES.md#the-start-up-set)); the disc is the one `select_disc` named (`ico_diag_set_disc`); on
 Android the disc is identified after the window opens, so the line first says `disc not mounted
 yet` and is logged again with the disc in its place once it is known, which the report file's copy
 keeps.
 
 
 `ico_diag_set_summary` flushes the C library's held lines first, so on Windows the line follows the
-device and window lines in the file, and keeps the text for the report file. The 10 s block's
+device and window lines in the file, and keeps the text for the report file. The line is longer
+than a log line: up to 2048 bytes (`SUMMARY_MAX_BYTES`), written whole to the file and the report
+file (whose log reader takes lines of 2080 bytes, `port/platform/report.c` (`LINE_BYTES`)) and on
+Android to logcat in pieces of 1023 bytes (`port/platform/diag_host.c` (`summary_log`,
+`raw_write`)). The 10 s block's
 `window: memory:` line has the graphics memory in use and its peak where the backend counts it
 (Vulkan), the process's, and at its end the RHI's pipeline pool on both backends: `; pipelines
 <live> alive (most <peak> of the pool's <size>), <f> creations failed (<p> for a full pool)`
@@ -1223,11 +2464,34 @@ The window build's diagnostic keys are free of SDL so a unit test checks them
   [replay tool](ARCHITECTURE.md#terms) takes the zip directly (`ico_dump_zip_extract`), and as
   `--interp`'s PREV it takes the zip's second `.rddump` (`ico_dump_zip_extract_nth`), so
   `rd_replay_tool frame.zip out.png --interp 0.5 frame.zip` rebuilds a picture between the two
-  ticks, where the presenter blends. The presented PNG stays a loose file beside the zip; the log
-  line says whether the tick before is in (`window: F12 at vsync ...: wrote ... (with the tick
-  before: ...)`).
+  ticks, where the presenter blends. With the tick before in, the next present's own frame, when it
+  is drawn between the ticks, goes in as the third `.rddump` (`-blended.rddump`,
+  `port/render/rd.h` (`rd_dump_blended_arm`), `ico_zip_move_file`), which the tool replays as drawn
+  ([DISPLAY.md](DISPLAY.md#hotkeys-for-pictures)). The presented PNG stays a loose file beside the
+  zip; the log line says whether the tick before is in (`window: F12 at vsync ...: wrote ... (with
+  the tick before: ...)`).
 - **Shift+F12** in photo mode: the aspect sweep, the paused frame rendered at 4:3, 16:9, 32:9,
   48:9 and 60:9 into `sweep-<time>.zip` (`ico_sweep_zip`).
+- **F5** and **F9**: save slot 1 and load slot 1 of the save states (`ICO_HOTKEY_STATE_SAVE`, `ICO_HOTKEY_STATE_LOAD`; no Shift variant, repeats do nothing); the request is latched and done at the next quiescent point ([Saving and loading](#saving-and-loading)).
+- **F6**: the Save states page, from the keyboard only (`ICO_HOTKEY_STATES_PAGE`; no Shift
+  variant, repeats do nothing, not bindable: `keys.def` has F1 to F4). `window_host.c` asks
+  `ico_start_opens_pause` (`port/input/mouse_look.h`: play on the play layout itself, not a scene's,
+  where Start skips the scene) and hands the answer to `ui_settings_states_key`
+  (`port/ui/settings.c`), which latches the press as the flip it came at (`frame_count`) and, in
+  play, has the window tap Start through the Escape latch (`ico_input_escape` down and up: Start for
+  `ICO_ESCAPE_TAP_STEPS` steps), so the pause menu opens as from the pad. The pause menu's
+  `entryProc` takes the latch once its fade-in is done and opens the page as its row does (the
+  confirm sound, `lt_switch_layout`; Back there returns to the row); on the page `statesProc` takes
+  it and closes the page into the game as the pause menu's Back does (`la_host_resume_play`, the
+  region's play layout). A latch not taken within 60 frames is dropped. Ignored without the page's
+  host, in photo mode, on the title (Square on the Continue screen is the way there), where the game
+  cannot pause (`enable_game_pause` 0), on any other screen, and on Android. The lines (`hotkeys:`;
+  the ignored ones and the others each the first 8, then every 100th): `hotkeys: F6 in play: Start
+  pressed, the pause menu first`, `hotkeys: F6 opened the Save states page`, `hotkeys: F6 closed the
+  Save states page (back to the game)`, `hotkeys: F6 ignored: <save states are off|photo mode is
+  open|on the title (...)|the game cannot be paused here|only in play, on the pause menu or on the
+  Save states page|the keyboard's F6 is not used on Android>` and `hotkeys: F6 ignored: the pause
+  menu did not come up within 60 frames`.
 - **F11**: stats lines every second for 30 s instead of every 10 s; again turns it off
   (`ico_stats_fast_toggle`).
 - **Settings > Save a picture for a bug report** (Main, directly above Developer mode, always shown): F12's
@@ -1276,10 +2540,12 @@ When a mobile system moves the app, the window build runs one table of steps per
 operations it supplies, so `port/platform/test/lifecycle_test.c` checks the order with fakes
 (`port/platform/window_lifecycle.h` (`ico_lifecycle_on`)):
 
-- will enter background: a line, the GPU idle, the surface released (the device kept), the
-  watchdog paused, the sound paused, the log flushed;
-- did enter foreground: the surface and swapchain made again, the watchdog running, the sound
-  resumed with its queue emptied, the pacer's deadline reset to now, a line;
+- will enter background: a line, the [render thread](#the-render-thread) parked (what it has
+  finishes first), the GPU idle, the surface released (the device kept), the watchdog paused, the
+  sound paused, the log flushed;
+- did enter foreground: the surface and swapchain made again (on the game thread, the render
+  thread still parked), the render thread going on, the watchdog running, the sound resumed with
+  its queue emptied, the pacer's deadline reset to now, a line;
 - terminating: a line, the settings saved when changed, the pad recording closed, the log flushed;
 - low memory: the texture pack's read-ahead held, a line, the log flushed.
 
@@ -1299,9 +2565,10 @@ shows in the log as a size that changed with it.
 
 ## The renderer switched from the menu
 
-Options > Graphics > Apply switches the backend without ending the run ([UI.md](UI.md) has the
-page; the player's side is [OPTIONS.md](../OPTIONS.md#graphics)). The page asks through
-`UiGraphicsHost` (`port/platform/window_switch.c` (`hostBegin`)), which queues the name; the
+Options > Graphics > Apply switches the backend, or the graphics card it runs on, without ending
+the run ([UI.md](UI.md) has the page; the player's side is [OPTIONS.md](../OPTIONS.md#graphics)).
+The page asks through `UiGraphicsHost` (`port/platform/window_switch.c` (`hostBegin`)), which
+queues the name and the card (`""` automatic); the
 event pump runs it on the next pump, after `video_apply`, between two steps of the game and never
 inside a present (`ico_window_switch_pump`). A frame is always open at pump time: `dl_Swap` closes
 the tick's frame and its `dl_Clear` opens the next one at once (`ico2/seki/src/DisplayList.c`), and
@@ -1313,10 +2580,14 @@ discards it, `RdContext.discardOpen`), since its start went with the old rendere
 of the switch has no picture: the new window shows nothing until the tick after it presents. The
 watchdog is paused around the switch (`ico_diag_watchdog_pause`, as the device-lost box does): the
 device's start and a cold pipeline set can take longer than its later limit. The switch
-(`ico_window_switch_backend(name, trial)`; `trial` is Apply's, a switch back is not):
+(`ico_window_switch_backend(name, adapter, trial)`; `trial` is Apply's, a switch back is not):
 
-1. Refused, `-2`, nothing touched: a build with one renderer, a name it does not link, a movie
-   playing (`mpegPlay`), photo mode, the model viewer, the touch layout editor.
+1. Refused, `-2`, nothing touched: a build with one renderer (unless name is the backend running:
+   a switch of the card alone), a name it does not link, a movie playing (`mpegPlay`), photo mode,
+   the model viewer, the touch layout editor. Nothing either, `0`, when name runs already on the
+   card asked for (`adapterRunning`: `""` counts as the card `rhi_adapter_list` marks
+   `automatic`). Otherwise the card goes to the backend first, `rhi_set_adapter_wanted(adapter)`,
+   the value the start set from `[video] adapter` kept for step 4.
 2. The texture ids kept outside the renderer forgotten: the font pages (re-uploaded from their CPU
    atlases, `ui_font_forget_textures`) and the GS shim's placeholders (`gif_HostForgetTextures`).
 3. `ico_window_reopen` (window_host.c): the window's mode, size, place and display noted
@@ -1345,11 +2616,14 @@ device's start and a cold pipeline set can take longer than its later limit. The
    `window_size_recheck`. The time goes into `pausePendingNs`, a pause of the host as a
    swapchain rebuild's is.
 4. The new backend did not start (no window, or `rd_resume` failed): `ico_window_reopen` on the
-   backend that ran, `-1`. That failing too ends the run, `-3`: the pump returns 0 and
+   backend that ran with the card asked for before (`rhi_set_adapter_wanted` back to it), `-1`. That failing too ends the run, `-3`: the pump returns 0 and
    `main_host.c` shows a box naming both renderers (`ico_window_switch_end_text`), writes a
    report, logs the exit reason "no renderer started after Options > Graphics > Apply" and saves
    nothing (`ui_settings_save_on_quit` is not called).
-5. On success (or after the `-1` restore) `rd_resume_frame`.
+5. On success (or after the `-1` restore) `rd_resume_frame`, and the page's card names installed
+   again from the renderer now running (`installAdapters`: `rhi_adapter_list`'s suitable entries,
+   `rhi_adapter_name`, the `automatic` entry, into `ui_settings_set_adapter_names`;
+   `ico_window_switch_install` does the same at the start).
 
 The crash and loss steps (startup_retry.h) after a switch: `ico_window_open` hands its choice to
 `ico_window_switch_started` once the renderer is up (the player's, or Automatic's with its
@@ -1365,8 +2639,8 @@ the Apply renderer running again, on trial.
 The audio is not touched. The game's state is the CPU's: its textures are decoded again from its
 memory on the next cache miss, its meshes built again from the packets, and the glow and the
 motion blur trail start again as after a resume. Nothing is written by the window. The page keeps
-the choice outside the config from Apply until Keep (`s_gfx.trial`; the config holds the value
-the page found), so every save in between (the close button's `ui_settings_save_on_quit`, any
+the choice outside the config from Apply until Keep (`s_gfx.trial` and `s_gfx.trialAdapter`,
+`port/ui/settings_graphics.c`; the config holds the values the page found), so every save in between (the close button's `ui_settings_save_on_quit`, any
 `ico_config_save`) writes the value the page found; Keep puts the choice into the config, and a
 FAILED Apply leaves the value the page found there, as Revert does. Automatic on the row counts as
 the host's `automatic()` (the backend Automatic started this run), so a run that fell back from
@@ -1378,6 +2652,11 @@ Log lines (stderr, one per event):
 - `window: Graphics API <new> did not start (the lines above say why); back on <old>`
 - `window: Graphics API <old> restored (reverted|not kept in 10 s), <s> s`
 - `window: Graphics API <name> kept`
+- a switch of the card (the same lines, one per thing that changed: the Graphics API line alone
+  when only the backend changed): `window: Graphics card <new> applied from the menu (was <old>),
+  <s> s`, `window: Graphics card <name> restored (reverted|not kept in 10 s), <s> s`,
+  `window: Graphics card <name> kept`, and `window: Graphics card <name|automatic> did not start
+  (the lines above say why); back on <name|automatic>`
 - `window: Graphics API <name> not switched to: <reason>`
 - `window: Graphics API <old> did not start again either; the game ends`, then the exit reason
   `no renderer started after Options > Graphics > Apply`
@@ -1392,9 +2671,11 @@ Log lines (stderr, one per event):
   `window: <w>x<h> pixels, <backend> on <adapter>, present mode <mode>`
 - the page's own: `settings: Graphics API back to <value|automatic> (reverted|not kept in 10 s)`
   and, after a FAILED Apply, `settings: Graphics API back to <value|automatic> (<name> did not
-  start)`
+  start)`; for the card `settings: Graphics card back to <name|automatic> (...)` in the same two
+  forms
 
-Not verified: no switch has run anywhere (the game is not run in the container); the swap was
+Not verified: no switch has run anywhere (the game is not run in the container; a switch of the
+card alone has not run on a computer with two cards either); the swap was
 syntax-checked only, and `rd_suspend`/`rd_resume`/`rd_resume_frame` are tested on lavapipe
 (`rd_msaa_test`). Open points for the first runs: the window's place on a desktop that
 places new windows itself (Wayland ignores window positions), the exclusive fullscreen
@@ -1498,6 +2779,19 @@ and `ico_pc: the file picker failed: <why>`. One limit: Android gives every answ
 request code, so if an earlier picker that the game gave up on answers after a new pick started,
 that answer is taken as the new pick's (the game only gives up on a picker that did not appear).
 
+Options > Extras > Back up your data uses the same pending pick for the system's "save as" screen:
+`ico_android_create_file(gen, name, mime, fn, user, &noApp, why, n)` calls the static
+`IcoActivity.createFile(int gen, String name, String mime)`, which starts `ACTION_CREATE_DOCUMENT`
+(`CATEGORY_OPENABLE`, the type, `EXTRA_TITLE` the name) with request code `0x1C0E`;
+`onActivityResult` takes both codes and answers through `nativePickDone` (its log line says
+`create N:` for this one). `IcoActivity.openFd(String uri, String mode)` opens a URI either screen
+answered through the content resolver and hands the detached descriptor to the native side
+(`ico_android_open_fd`; a failure logs `ico_pc: file picker: open <mode> failed: <exception
+kind>`, never the exception's text, which can name the player's file), and
+`IcoActivity.displayName(String uri)` gives the name the system shows for it
+(`ico_android_display_name`). The manifest's `<queries>` names `CREATE_DOCUMENT` too
+([Backups](#backups)).
+
 ## Steam shortcut
 
 Settings > Extras > Add to Steam writes a non-Steam shortcut for the program into the most recent
@@ -1540,5 +2834,5 @@ on it.
 ## Tests
 
 `ctest -L platform` runs this layer's tests, together with those of `port/input`, `port/config` and
-the top level (`cmake/IcoTests.cmake` (`_ico_test_area`)); [TESTING.md](TESTING.md#portplatformtest)
-lists each program.
+the top level (`cmake/IcoTests.cmake` (`_ico_test_area`));
+[TESTING_PROGRAMS.md](TESTING_PROGRAMS.md#portplatformtest) lists each program.

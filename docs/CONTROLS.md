@@ -62,11 +62,17 @@ A few more keys on a computer:
 - **Shift+F12**, in photo mode, saves the paused moment at five picture
   shapes, from 4:3 to the widest, into one zip file beside the F12 files,
   for problem reports about wide screens.
+- **F5** saves a state to slot 1, and **F9** loads it. The **Save states**
+  page in the pause menu has four slots.
+- **F6** opens the **Save states** page. During play it pauses the game
+  first; in the pause menu it opens the page; on the page it takes you back
+  to the game. It does nothing on the title screen (use **Continue** there)
+  or in photo mode. It is a keyboard key only.
 - **F11** makes the game write its speed numbers into the log every second
   for 30 seconds, instead of every 10 seconds. Press it again to stop
   early. It is for problem reports about slow play.
 
-Escape, Alt+Enter, F11, F12 and Shift+F12 cannot be changed. Everything else can be, in
+Escape, Alt+Enter, F5, F6, F9, F11, F12 and Shift+F12 cannot be changed. Everything else can be, in
 **Options > Controls > Remap controls**. When you give a button or key to
 another action, the two actions swap. If the action you changed had no
 button on that device, the other action is left without one.
@@ -197,6 +203,19 @@ rows, and each colour you pick shows on the model at once.
 From the title screen, going back returns you to the title screen with
 Options open on Extras. In the pause menu, the game behind the menu
 changes colour as you choose. [All the rows](OPTIONS.md#character-customization).
+
+## Save states
+
+The pause menu has a **Save states** row under **Photo mode**. It opens four
+slots; press Up or Down to pick one, Left or Right to choose **Save**, **Load**
+or **Delete**, and the confirm button to do it. Saving over a state and deleting
+ask you to press again within two seconds. Triangle (or Circle) goes back. From
+the title screen, choose **Continue**: the screen with your memory card saves
+shows **Square Save states** under them. Press **Square** (or click or tap it)
+to open the same page, where it loads and deletes; Back returns to your saves.
+On a keyboard, **F6** opens the page from play or the pause menu, and F6 again
+returns to the game. Each slot shows a picture of the game as it was when you
+paused, without the menu. [All the details](OPTIONS.md#save-states).
 
 ## Take a photo
 
@@ -383,7 +402,9 @@ So that you never lock yourself out of the menus or the game:
 - If you switch off the D-pad, Cross or Circle, you can tap the menus
   directly instead: the Back gesture or button opens the pause menu during
   play, and a tap on a line picks it. So **Options > Controls > Touch
-  screen > Reset layout** stays reachable.
+  screen > Reset layout** stays reachable. A tap on a line wins over a
+  button that is hidden (you cannot see it); a button you can see still
+  takes the tap.
 - A button cannot be dropped onto the middle of another one; it jumps
   back and a note says why. Buttons that overlap at the edges are drawn
   in amber, and the one drawn first gets the touch.

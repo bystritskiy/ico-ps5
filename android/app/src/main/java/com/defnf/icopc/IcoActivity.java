@@ -9,14 +9,18 @@ import android.content.ComponentName;
 import android.content.Context;
 import android.content.Intent;
 import android.content.res.Configuration;
+import android.database.Cursor;
 import android.graphics.Rect;
 import android.net.Uri;
 import android.os.Build;
 import android.os.Bundle;
+import android.os.ParcelFileDescriptor;
+import android.provider.OpenableColumns;
 import android.os.VibrationEffect;
 import android.os.Vibrator;
 import android.view.WindowManager;
 
+import androidx.core.content.ContextCompat;
 import androidx.core.content.FileProvider;
 import androidx.core.util.Consumer;
 import androidx.window.java.layout.WindowInfoTrackerCallbackAdapter;
@@ -41,16 +45,20 @@ public class IcoActivity extends SDLActivity {
     }
 
     // The picture reaches into the display cutout (the notch). The theme says
-    // so too (res/values*/styles.xml); this sets it on the window before
-    // SDL's onCreate (the window exists by then). SDL itself only sets it on
-    // Android 11 and later, and by editing the same attributes.
+    // so too (res/values-v28 and values-v30/styles.xml); this sets it on the
+    // window before SDL's onCreate (the window exists by then). SDL itself
+    // only sets it on Android 11 and later, and by editing the same
+    // attributes. Android 8 (API 26 and 27, issue 158) has no cutout mode:
+    // the field is API 28, and reading it there would end onCreate.
     @Override
     protected void onCreate(Bundle savedInstanceState) {
-        WindowManager.LayoutParams lp = getWindow().getAttributes();
-        lp.layoutInDisplayCutoutMode = Build.VERSION.SDK_INT >= 30
-                ? WindowManager.LayoutParams.LAYOUT_IN_DISPLAY_CUTOUT_MODE_ALWAYS
-                : WindowManager.LayoutParams.LAYOUT_IN_DISPLAY_CUTOUT_MODE_SHORT_EDGES;
-        getWindow().setAttributes(lp);
+        if (Build.VERSION.SDK_INT >= 28) {
+            WindowManager.LayoutParams lp = getWindow().getAttributes();
+            lp.layoutInDisplayCutoutMode = Build.VERSION.SDK_INT >= 30
+                    ? WindowManager.LayoutParams.LAYOUT_IN_DISPLAY_CUTOUT_MODE_ALWAYS
+                    : WindowManager.LayoutParams.LAYOUT_IN_DISPLAY_CUTOUT_MODE_SHORT_EDGES;
+            getWindow().setAttributes(lp);
+        }
         sInstance = this;
         super.onCreate(savedInstanceState);
     }
@@ -85,9 +93,13 @@ public class IcoActivity extends SDLActivity {
                 mLayoutTracker = new WindowInfoTrackerCallbackAdapter(
                         WindowInfoTracker.getOrCreate(this));
             }
-            mLayoutTracker.addWindowLayoutInfoListener(this, getMainExecutor(), mLayoutListener);
-        } catch (RuntimeException e) {
-            // no fold reports: the layout treats the screen as flat
+            // ContextCompat's executor: Context.getMainExecutor is API 28
+            // (issue 158, Android 8)
+            mLayoutTracker.addWindowLayoutInfoListener(this,
+                    ContextCompat.getMainExecutor(this), mLayoutListener);
+        } catch (RuntimeException | LinkageError e) {
+            // no fold reports: the layout treats the screen as flat (a
+            // missing method or class is a LinkageError, not an exception)
             mLayoutTracker = null;
         }
         sendScreen();
@@ -333,6 +345,81 @@ public class IcoActivity extends SDLActivity {
         }
     }
 
+    // Options > Extras > Back up your data (host_android.c
+    // ico_android_create_file, on the game's thread, as pickFile): the
+    // system's "save as" screen, ACTION_CREATE_DOCUMENT, with the name it
+    // suggests and the file's type. Its answer, the new document's URI,
+    // comes to onActivityResult like a pick's and goes to nativePickDone
+    // with the same gen. null when the screen was started, else the reason
+    // (starting "no app" when no app takes the intent).
+    private static final int CREATE_REQUEST = 0x1C0E;
+
+    public static String createFile(int gen, String name, String mime) {
+        IcoActivity a = sInstance;
+        if (a == null) {
+            return "no activity";
+        }
+        try {
+            Intent create = new Intent(Intent.ACTION_CREATE_DOCUMENT);
+            create.addCategory(Intent.CATEGORY_OPENABLE);
+            create.setType(mime);
+            create.putExtra(Intent.EXTRA_TITLE, name);
+            pickNote("create " + gen + ": CREATE_DOCUMENT goes to " + resolved(a, create));
+            sPickGen = gen;
+            a.startActivityForResult(create, CREATE_REQUEST);
+            return null;
+        } catch (ActivityNotFoundException e) {
+            return "no app for CREATE_DOCUMENT (" + e.toString() + ")";
+        } catch (RuntimeException e) {
+            return e.toString();
+        }
+    }
+
+    // A descriptor for a URI a picker or the "save as" screen answered
+    // (host_android.c ico_android_open_fd): the content resolver's, mode
+    // "r", "w" or "wt", detached so the native side owns and closes it. -1
+    // when it cannot be opened; the log line names the exception's kind
+    // only (its text can name the player's file).
+    public static int openFd(String uri, String mode) {
+        IcoActivity a = sInstance;
+        if (a == null) {
+            pickNote("open " + mode + " failed: no activity");
+            return -1;
+        }
+        try {
+            ParcelFileDescriptor pfd = a.getContentResolver().openFileDescriptor(Uri.parse(uri),
+                    mode);
+            if (pfd == null) {
+                pickNote("open " + mode + " failed: no descriptor");
+                return -1;
+            }
+            return pfd.detachFd();
+        } catch (Exception e) {
+            // FileNotFoundException, SecurityException, a mode the
+            // provider does not take (IllegalArgumentException)
+            pickNote("open " + mode + " failed: " + e.getClass().getSimpleName());
+            return -1;
+        }
+    }
+
+    // The name the system shows for a URI (host_android.c
+    // ico_android_display_name), or null.
+    public static String displayName(String uri) {
+        IcoActivity a = sInstance;
+        if (a == null) {
+            return null;
+        }
+        try (Cursor c = a.getContentResolver().query(Uri.parse(uri),
+                new String[] {OpenableColumns.DISPLAY_NAME}, null, null, null)) {
+            if (c != null && c.moveToFirst()) {
+                return c.getString(0);
+            }
+        } catch (Exception e) {
+            // no name: the native side says "the chosen file"
+        }
+        return null;
+    }
+
     // the app an intent would start, for the log (the manifest's <queries>
     // makes it visible on Android 11 and later)
     private static String resolved(IcoActivity a, Intent intent) {
@@ -364,7 +451,7 @@ public class IcoActivity extends SDLActivity {
 
     @Override
     protected void onActivityResult(int requestCode, int resultCode, Intent data) {
-        if (requestCode != PICK_REQUEST) {
+        if (requestCode != PICK_REQUEST && requestCode != CREATE_REQUEST) {
             super.onActivityResult(requestCode, resultCode, data);
             return;
         }
@@ -388,7 +475,8 @@ public class IcoActivity extends SDLActivity {
         if (SDLActivity.mBrokenLibraries) {
             return;
         }
-        pickNote("pick " + sPickGen + ": onActivityResult resultCode " + resultCode
+        pickNote((requestCode == CREATE_REQUEST ? "create " : "pick ") + sPickGen
+                + ": onActivityResult resultCode " + resultCode
                 + (resultCode == RESULT_OK ? " (OK)" : resultCode == RESULT_CANCELED
                         ? " (CANCELED)" : "")
                 + ", data " + (data == null ? "null" : "present")

@@ -8,13 +8,23 @@
 
 ## What you need
 
-- **A 64-bit Android phone or tablet with Android 10 or later.** Its
-  graphics must support Vulkan 1.1 or later (the way the game talks to the
-  graphics). If you are not sure, install the game and start it: if your
-  phone cannot run it, the game tells you when it starts and offers to use
-  a graphics driver package instead, which only helps on a phone with an
+- **A 64-bit Android phone or tablet with Android 8 or later.** Its
+  graphics must support Vulkan 1.0 or later (the way the game talks to the
+  graphics); most phones and tablets from 2017 on do. Graphics drivers that
+  cannot draw depth with a 32-bit depth buffer alone can still start the game. If you are not sure,
+  install the game and start it: if your phone cannot run it, the game
+  tells you when it starts. On Android 9 or later it also offers to use a
+  graphics driver package instead, which only helps on a phone with an
   Adreno chip (most phones with a Qualcomm Snapdragon processor; see
   [Using a different graphics driver](#using-a-different-graphics-driver)).
+  Graphics driver packages need Android 9 or later.
+- **Android 11 devices such as the Logitech G Cloud (Adreno 618)** ship an
+  older graphics driver (Vulkan 1.1). The game is built to run on it, but no
+  one has confirmed it on a real device yet. If you try it, look in
+  `logs/ico-pc.log` for a line like
+  `<name of the graphics chip> (Vulkan 1.1.x) ...; render passes legacy; sync fences`
+  (it means the Vulkan 1.1 route is in use), and tell us how it went with that
+  log.
 - **Your own disc image of ICO**: the European release (SCES-50760), the
   Japanese release (SCPS-11003), the Korean release (SCPS-56001), the North
   American release (SCUS-97113), the Asian release (SCPS-55001), the August
@@ -43,6 +53,10 @@
 
 To update, install the new version over the old one in the same way. Your
 saves stay.
+Close other apps first: the game prepares its graphics in full once after
+every update. If the phone froze and you had to restart it during an update
+and the game then shows "bad ELF magic", see
+[the fix](TROUBLESHOOTING.md#the-first-start-takes-a-long-time).
 
 A test build someone gave you (not from the releases page) may block
 installing a release over it; then you must uninstall the test build
@@ -56,10 +70,11 @@ first ([where it is](#where-your-files-are)).
    graphics**, with a count and a bar. On some phones this takes a few
    minutes. After a few seconds the screen also says about how much time
    is left (a rough guess from how fast the count has gone so far) and
-   that this happens once after an update. Leave the game open until the
-   count is done. After an update the game starts this from nothing:
-   what was prepared before the update is thrown away. Later starts skip it or
-   show it only for a moment. If you
+   that this happens once after an update that changes the graphics. Leave
+   the game open until the count is done. After such an update the game
+   starts this from nothing: what was prepared for the old graphics is
+   thrown away; an update that leaves the graphics as they were keeps it.
+   Later starts skip it or show it only for a moment. If you
    close the game during it, the next start shows it again.
 2. The game asks you to choose your ICO disc image (any of the seven discs
    above), and opens your
@@ -133,6 +148,15 @@ Android/data/com.defnf.icopc/files
 You can reach it with a USB cable from a computer: open the phone's
 storage, then `Android`, `data`, `com.defnf.icopc`, `files`.
 
+On Android 13 and later the phone's own file apps cannot open that folder.
+To keep a copy of your saves, or to move them to another phone or a computer,
+use **Options > Extras > Back up your data** on the title screen: it saves
+your memory card, save states, settings and achievements in one `.zip` file
+wherever you choose (Downloads, a memory card, a cloud folder).
+**Restore from a backup** puts such a file back; the game then closes, and
+puts the backup in place when you start it again
+([the details](OPTIONS.md#extras)).
+
 In that folder:
 
 - `memcard` holds your saves: the European disc's in `BESCES-50760ico`,
@@ -140,6 +164,11 @@ In that folder:
   `BISCPS-56001ico`, the Asian disc's in `BISCPS-55001ico`, the North American
   disc's in `BASCUS-97113ico` and the June 2001 magazine demo's in
   `BISCUS-97113ico`.
+- `states` holds your save states, one folder for each disc. Saving and
+  loading them is on the pause menu's **Save states** row (and on the title
+  screen: choose **Continue** and tap **Save states** under your saves);
+  there are no key shortcuts on a phone. Copy it along with `memcard` when
+  you back up.
 - `memcard-preview` holds the August 2001 preview disc's saves (in its own
   `BASCUS-97113ico`): they are not the North American disc's kind of save,
   so they are kept apart. Copy it along with `memcard` when you back up.
@@ -183,8 +212,9 @@ it uses a private folder instead, which a computer or the Files app cannot
 open.
 
 > [!WARNING]
-> Uninstalling the game deletes this whole folder, saves included. Copy
-> the `memcard` folder to a computer or another safe place first.
+> Uninstalling the game deletes this whole folder, saves included. Make a
+> backup first (Options > Extras > Back up your data), or copy the
+> `memcard` folder to a computer or another safe place.
 
 If your phone backs up its apps, the backup keeps your saves, your
 settings and your achievements. It leaves out the game data, the disc
@@ -250,8 +280,8 @@ If it still stutters and you changed **Preset** to Enhanced or raised
 is the lightest. **Auto** does this for you: it starts at the size of your
 screen and steps down (3x, then 2x, then 1x) when the phone cannot draw the
 pictures in time. It never steps back up while the game runs; the row shows
-where it ended up, for example **Auto (2x)**. The Enhanced preset uses Auto
-on Android.
+where it ended up, for example **Auto (2x)**. The Enhanced preset uses the
+size of your screen; Auto is a choice you make in the Resolution row.
 
 ## Send a problem report
 
@@ -286,6 +316,12 @@ getting its graphics ready, the next start's log says where it stopped,
 and that start gets its graphics ready as you play. If it stops there
 two starts in a row, the game does that from then on and writes it into
 `config.toml` ([how to undo that](TROUBLESHOOTING.md#the-first-start-takes-a-long-time)).
+If the graphics driver stops answering while the game prepares a piece of
+graphics, the game closes itself after about 10 seconds with a message,
+so the phone neither freezes nor needs a restart. When that piece is one
+of the shapes the game can draw another way, the next start says so in a
+message and the game draws those shapes that way on this phone from then
+on ([how to undo that](TROUBLESHOOTING.md#the-first-start-takes-a-long-time)).
 A stop while the game was in the background does not count. Send `logs/ico-pc.log` from the start where it
 happened. The same goes for a message that the graphics driver stopped
 responding while the game was drawing: the log says what was being drawn.
@@ -311,8 +347,10 @@ that stays on the screen). Save a picture of it for the report:
 2. Leave the menu right away. 3 seconds after you chose the row, the game
    saves what is on the screen in the `dumps` folder of the game's folder:
    a `.zip` file whose name starts with `frame-` and the date and time, and
-   pictures with the same name. Send the `.zip` (it holds the log too) and
-   the picture ending in `-present.png`.
+   pictures with the same name. The `.zip` holds the saved frame, the log
+   and a picture of what the screen showed (the file ending in
+   `-present.png`, at most 1920 pixels wide), so the `.zip` alone is
+   enough to send.
 
 If you cannot get to the menu while it shows, the game can save
 recordings of its frames by itself instead. Add this line to the text file
@@ -374,8 +412,8 @@ Options > Display > Aspect ratio decides how the picture fits:
 ## Using a different graphics driver
 
 This is optional, and it only works on phones with an Adreno graphics chip
-(most Qualcomm Snapdragon phones); on other phones the Graphics driver
-page is not shown at all. If the game looks wrong or runs badly on
+(most Qualcomm Snapdragon phones) and Android 9 or later; on other phones
+the Graphics driver page is not shown at all. If the game looks wrong or runs badly on
 your phone, a newer graphics driver from the community can sometimes fix
 it. If you do not have a problem, you can skip this.
 
@@ -434,6 +472,10 @@ these buttons:
   where the phone's driver does not.
 - **Quit**: closes the game.
 
+On Android 8 there is no driver package to choose (they need Android 9 or
+later): the box says the game could not start the graphics on this device
+and asks you to send the log file, and the game closes.
+
 If the file is not a driver package, the game says so and the box comes
 back, so you can try another one. If the picker cannot open, or closes
 without a file (some phones' pickers do), and there is a driver zip in the
@@ -445,10 +487,18 @@ Graphics driver**.
 
 ## Known limits
 
-- The game needs a graphics chip that supports Vulkan 1.1 or later (Vulkan is how the game talks to the
-  graphics). Older or cheaper devices may not have it, and a system update does not always add it.
-  On a phone with an Adreno chip, a graphics driver package can help; see
+- The game needs Android 8 or later and a graphics chip that supports Vulkan 1.0 or later (Vulkan
+  is how the game talks to the graphics). Older or cheaper devices may not have it, and a system
+  update does not always add it. On a phone with an Adreno chip and Android 9 or later, a graphics
+  driver package can help; see
   [When the game cannot start with the phone's driver](#when-the-game-cannot-start-with-the-phones-driver).
+  Graphics driver packages need Android 9 or later: on Android 8 the game always uses the phone's
+  own driver.
+- Phones from the Vulkan 1.0 years (most Android 8 phones) have older graphics drivers. The first
+  start can spend several minutes preparing the game's graphics, and some of these phones may not
+  manage it. If the game closes during that first start, start it again: the next start prepares
+  less at once. If it still does not start, please send the log
+  ([Send a problem report](#send-a-problem-report)).
 - The file picker cannot hide files that are not disc images. If you pick
   the wrong file, the game says so and asks again at the next start.
 - The game runs slower than on a PC, especially at a high Resolution in

@@ -134,6 +134,14 @@
  *      its ghost after a tick within 2 of Original's, the restart after a
  *      tick without the motion blur holding no ghost; then (s2) at Enhanced
  *      2x with the full-height scene the accumulator at SCENE's size.
+ *   t  Motion blur strength (rd_blur_strength_test.inc says what): FIX_eff
+ *      = round(FIX x strength / 100) on the CPU; on the device (s b)'s bar
+ *      under Original and Smooth, 100 % the game's own bytes, 50 % of FIX
+ *      32 the bytes of FIX 16, the ghost after a tick the GS formula's.
+ *   z  the aura's read of SCENE into FEED128 in two passes (rd_aura_box.c;
+ *      rd_blur_aura_box_test.inc says what): x's frames at Enhanced 2x, the
+ *      phone's 2364 x 1080 and 1.5x, with the two-pass form off and on:
+ *      FEED128 the same bytes every frame, SCENE and DISPLAY too.
  * Tolerance 0 everywhere (but q's scaled runs and s).  Every pipeline created is enumerated; no
  * validation errors; no stubbed command replayed. */
 #include <math.h>
@@ -3231,6 +3239,7 @@ static void checkMotionBlurPresentsScaled(void)
 }
 
 #include "rd_blur_smooth_test.inc"
+#include "rd_blur_strength_test.inc"
 
 /* ================== (w) the aura's feedback chain on a wide frame
  *
@@ -3894,8 +3903,9 @@ static void checkBlurFold(void)
 
 /* ============================================== (l) the fx plan */
 
-/* post modes 1..7 and 40 motion blur frames, the plan's counters summed */
-static void fxPlanFrames(const char *what, uint32_t sum[3], int *worst)
+/* post modes 1..7 and 40 motion blur frames, the plan's counters summed
+ * (sum[3]: the local reads under DATE) */
+static void fxPlanFrames(const char *what, uint32_t sum[4], int *worst)
 {
     InitStaticBlur(0, (float[4]){0.3f, -0.2f, -1.0f, 0.0f});
     for (int post = 1; post <= 7; post++) {
@@ -3904,6 +3914,7 @@ static void fxPlanFrames(const char *what, uint32_t sum[3], int *worst)
         sum[0] += g_rdPerf.fxConstant; /* the frame's replay (runFrame) */
         sum[1] += g_rdPerf.fxAdditive;
         sum[2] += g_rdPerf.fxLocal;
+        sum[3] += g_rdPerf.fxLocalDate;
     }
     InitializeStaticBlur(); /* sun off */
     setStage(0, 0, 0);
@@ -3926,6 +3937,7 @@ static void fxPlanFrames(const char *what, uint32_t sum[3], int *worst)
         sum[0] += g_rdPerf.fxConstant;
         sum[1] += g_rdPerf.fxAdditive;
         sum[2] += g_rdPerf.fxLocal;
+        sum[3] += g_rdPerf.fxLocalDate;
     }
 }
 
@@ -3934,11 +3946,12 @@ static void checkFxPlan(void)
     const RdProfile was = g_rd.profile;
     g_rd.profile.fxPlan = true;
     g_rd.profile.fxDstLocal = false;
-    uint32_t sum[3] = {0, 0, 0};
+    uint32_t sum[4] = {0, 0, 0, 0};
     int worst = 0;
     fxPlanFrames("(l)", sum, &worst);
-    CHECK(sum[0] > 0 && sum[1] > 0 && sum[2] == 0,
-          "(l) the plan drew %u constant, %u additive, %u local", sum[0], sum[1], sum[2]);
+    CHECK(sum[0] > 0 && sum[1] > 0 && sum[2] == 0 && sum[3] == 0,
+          "(l) the plan drew %u constant, %u additive, %u local (%u under DATE)", sum[0], sum[1],
+          sum[2], sum[3]);
     printf("  (l) the fx plan: %u constant, %u additive sprites, max difference %d\n", sum[0],
            sum[1], worst);
     checkPipelines();
@@ -3951,13 +3964,19 @@ static void checkFxPlan(void)
         g_rd.profile.dateStencil = true;
         g_rd.profile.fxDstLocal = true;
         rd_reset_scene(W, H);
-        uint32_t sl[3] = {0, 0, 0};
+        uint32_t sl[4] = {0, 0, 0, 0};
         int wl = 0;
         fxPlanFrames("(l) local", sl, &wl);
         CHECK(sl[2] > 0, "(l) no sprite took the local read");
-        printf("  (l) the local read: %u sprites by local read (%u constant, %u additive), max "
-               "difference %d\n",
-               sl[2], sl[0], sl[1], wl);
+        /* post mode 7's backlight subtract into SCENE under DATE (DATM 0,
+           the recording check above): DATE tested in fx_local_ps against
+           the alpha it read, the model's bytes (fxPlanFrames' frames are
+           checked exactly), no snapshot and no stencil bit */
+        CHECK(sl[3] >= 1 && sl[3] <= sl[2], "(l) %u of %u local reads under DATE (1 or more)",
+              sl[3], sl[2]);
+        printf("  (l) the local read: %u sprites by local read (%u under DATE; %u constant, %u "
+               "additive), max difference %d\n",
+               sl[2], sl[3], sl[0], sl[1], wl);
         checkPipelines(); /* fx_local_ps's keys enumerated while the profile has them */
         CHECK(rd__fx_local_selftest() && g_rd.profile.fxDstLocal, "(l) the local read's self-test");
     }
@@ -3989,6 +4008,8 @@ static void checkPipelines(void)
     printf("  pipelines: %u created (%d fx), %u reachable\n", rd__pipeline_count(), fx, n);
 }
 
+#include "rd_blur_aura_box_test.inc"
+
 /* the weights are each case's seconds in a whole run (255 s at -j2 on 4 cores); the
    aura case (600 frames, each fed by the one before) is the shortest a shard can be */
 static const IcoShardCase k_cases[] = {
@@ -4001,6 +4022,7 @@ static const IcoShardCase k_cases[] = {
     {"motion_blur_presents", 40},
     {"fix128_skip", 1},
     {"motion_blur_smooth", 6},
+    {"motion_blur_strength", 4},
     {"uint_view", 2},
     {"blur_fold", 2},
     {"fx_plan", 8},
@@ -4015,6 +4037,7 @@ static const IcoShardCase k_cases[] = {
     {"above1x", 38},
     {"effects_scaled", 4},
     {"motion_blur_smooth_scaled", 2},
+    {"aura_box", 30},
 };
 
 int main(int argc, char **argv)
@@ -4078,6 +4101,7 @@ int main(int argc, char **argv)
     checkRecordingMotionBlurOff();
     checkRecordingWide();
     checkBorderStrips();
+    checkStrengthFix(); /* Motion blur strength's FIX (rd_blur_strength_test.inc) */
     rd_shutdown();
     printf("  (r) recording checks: %s\n", failures ? "FAILED" : "ok");
     if (failures) {
@@ -4128,6 +4152,9 @@ int main(int argc, char **argv)
     if (ico_shard_take("motion_blur_smooth")) {
         checkMotionBlurSmooth(); /* Motion blur: Smooth (rd_blur_smooth_test.inc) */
     }
+    if (ico_shard_take("motion_blur_strength")) {
+        checkMotionBlurStrength(); /* Motion blur strength (rd_blur_strength_test.inc) */
+    }
 
     /* the pipelines the cases above created (this shard's) are all in the
        reachable set; every shard runs these two */
@@ -4176,6 +4203,9 @@ int main(int argc, char **argv)
     }
     if (ico_shard_take("motion_blur_smooth_scaled")) {
         checkMotionBlurSmoothScaled(); /* re-initialises rd (Enhanced 2x, full height) */
+    }
+    if (ico_shard_take("aura_box")) {
+        checkAuraBox(); /* re-initialises rd (Enhanced 2x, 2364x1080, 1.5x; rd_blur_aura_box_test.inc) */
     }
     if (ico_shard_finish() != 0) {
         return 1;

@@ -781,6 +781,95 @@ static void do_save(int fileNo, void *buf)
     do_save_on(0, fileNo, buf);
 }
 
+/* main_host.c's listener of Options > Gameplay > Second memory card */
+static void second_card_listener(int on)
+{
+    ico_host_set_second_card(on);
+    ico_mc_host_second_card_changed();
+}
+
+/* this disc's files in a card folder (not the folder: the other discs' runs
+   share <user folder>/memcard2, each in its own directory) */
+static void rm_own(const char *card)
+{
+    static const char *const files[] = {"icon.sys", "boy_blk.ico", "game.000", "game.001",
+                                        "game.002", "game.003",    "game.004"};
+    char path[ICO_PATH_MAX + 64];
+    size_t i;
+
+    for (i = 0; i < sizeof(files) / sizeof(files[0]); i++) {
+        snprintf(path, sizeof(path), "%s/%s/%s", card, PRODUCT, files[i]);
+        remove(path);
+    }
+    snprintf(path, sizeof(path), "%s/%s/%s", card, PRODUCT, PRODUCT);
+    remove(path);
+    snprintf(path, sizeof(path), "%s/%s", card, PRODUCT);
+    RMDIR(path);
+}
+
+/* The second card from the option, with no saves2 (host_config.h
+   ico_host_saves2_dir, mc_host.h ico_mc_host_second_card_changed): On puts
+   <user folder>/memcard2 (memcard2-preview on the August 2001 preview) in
+   port 1 at once, the game's boot check finds it formatted with no save, a
+   save lands there; a second On changes nothing; Off empties port 1 (the
+   game's "no card") and keeps its files; On again finds the save */
+static void second_card_by_option(unsigned char *buf, unsigned char *back)
+{
+    char pref[ICO_PATH_MAX], want[ICO_PATH_MAX], path[ICO_PATH_MAX + 64];
+    const char *sfx = ico_region_cur()->mc_card_suffix;
+
+    CHECK(ico_mc_host_port_root(1)[0] == '\0');
+    ico_opt_set_second_memory_card_listener(second_card_listener);
+    CHECK(ico_opt_second_memory_card() == 0 && ico_mc_host_port_root(1)[0] == '\0');
+    CHECK(ico_host_pref_dir(pref, sizeof(pref)) == 0 &&
+          ico_path_join(want, sizeof(want), pref, "memcard2") == 0 &&
+          (sfx == NULL || ico_host_card_dir_beside(want, sizeof(want), sfx) == 0));
+    rm_own(want);
+    ico_opt_set_second_memory_card(1);
+    CHECK(strcmp(ico_mc_host_port_root(1), want) == 0);
+    CHECK(ico_mc_host_second_card_changed() == 0); /* the same folder */
+    req.port = 1;
+    req.flags.ll &= ~2;
+    iosMcChdirProduct(&req);
+    wait_request();
+    CHECK(req.result == -14 && req.type == 2 && req.format == 1 && req.free >= 360);
+    memset(buf, 0, (size_t)game_block_bytes());
+    buf[0] = 0x5A;
+    do_save_on(1, 2, buf);
+    snprintf(path, sizeof(path), "%s/%s/game.002", want, PRODUCT);
+    CHECK(file_size(path) == game_file_bytes());
+    /* Off: port 1 empty, the files stay */
+    ico_opt_set_second_memory_card(0);
+    CHECK(ico_mc_host_port_root(1)[0] == '\0');
+    req.port = 1;
+    iosMcChdirProduct(&req);
+    wait_request();
+    CHECK(req.result == -9 && req.type == 0);
+    CHECK(file_size(path) == game_file_bytes());
+    /* On again: the card is back with its save */
+    ico_opt_set_second_memory_card(1);
+    req.port = 1;
+    iosMcChdirProduct(&req);
+    wait_request();
+    CHECK(req.result == 0 && req.type == 2);
+    req.port = 1;
+    strcpy(req.path, "game.");
+    iosMcGetBlockSaveInfo(&req);
+    wait_request();
+    CHECK(req.result == 1 && req.dirCount == 1 && req.mask == (1 << 2));
+    req.port = 1;
+    req.fileNo = 2;
+    iosMcLoadGameBlock(&req, back);
+    wait_request();
+    CHECK(req.result == 0 && memcmp(back, buf, (size_t)game_block_bytes()) == 0);
+    ico_opt_set_second_memory_card(0);
+    ico_opt_set_second_memory_card_listener(NULL);
+    ico_host_set_second_card(-1);
+    CHECK(ico_mc_host_port_root(1)[0] == '\0');
+    rm_own(want);
+    printf("part B: Second memory card: port 1 is %s while on, empty while off\n", want);
+}
+
 static void driver(void *arg)
 {
     static unsigned char buf[25600];
@@ -956,15 +1045,13 @@ static void driver(void *arg)
         /* the disc's own record: 16-byte previews, then the three options and
            the pad bytes at 0x140 (no controlType, fileNo, serial, cameraMove,
            palMode) */
+        /* the host record's first four preview words, word for word: the
+           game copies IosMcPreviewInfo (stage, play time, sofa, an unread
+           word on these discs) whole into it (issue 160) */
         le32(want + 0x00, 7);
-        if (ICO_AUG6JUN26) {
-            le32(want + 0x04, 1); /* cleared */
-            le32(want + 0x08, 1234);
-            le32(want + 0x0C, 5);
-        } else {
-            le32(want + 0x04, 1234); /* the USA disc has no cleared word */
-            le32(want + 0x08, 5);
-        }
+        le32(want + 0x04, 1);
+        le32(want + 0x08, 1234);
+        le32(want + 0x0C, 5);
         le32(want + 19 * 16, 0xFFFFFFFFu);
         le32(want + 0x140, 2);
         le32(want + 0x144, 1);
@@ -1031,11 +1118,12 @@ static void driver(void *arg)
     CHECK(req.result == 0);
     CHECK(IosMcProductFile[0].file[0].stage == 7 && IosMcProductFile[0].file[0].playTime == 1234);
     if (ICO_NTSCAUG6JUN26) {
-        /* the 2001 record holds the previews and the options only: the USA
-           disc's has no cleared word, the others' no unread word; the record's
-           fileNo, serial, controlType, cameraMove and palMode stay as cleared */
+        /* the 2001 record holds the previews (four words each, back in the
+           host record's first four) and the options only; the fifth word and
+           the record's fileNo, serial, controlType, cameraMove and palMode
+           stay as cleared */
         CHECK(IosMcProductFile[0].file[0].sofa == 5);
-        CHECK(IosMcProductFile[0].file[0].cleared == (ICO_AUG6JUN26 ? 1 : 0));
+        CHECK(IosMcProductFile[0].file[0].cleared == 1);
         CHECK(IosMcProductFile[0].file[0].word10 == 0);
         CHECK(IosMcProductFile[0].file[19].stage == 0xFFFFFFFFu);
         CHECK(IosMcProductFile[0].soundMode == 2 && IosMcProductFile[0].outputMode == 1);
@@ -1299,6 +1387,7 @@ static void driver(void *arg)
         remove(path);
     }
     rm_card(CARD_C);
+    second_card_by_option(buf, back);
     req.port = 0;
 
     rm_card(CARD_B);

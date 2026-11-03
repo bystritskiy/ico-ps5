@@ -75,8 +75,10 @@
  */
 #include <stdlib.h>
 #include <string.h>
+#include "rd_cache_name.h"
 #include "rd_internal.h"
 #include "rd_passring.h"
+#include "rd_pipe_finish.h"
 #include "shader_consts.h"
 #include "shaders_gen.h"
 
@@ -270,14 +272,19 @@ int rd__plan_screen_draw_ex(const RdStateBlock *s, uint8_t prim, int aa1, uint8_
     k->colorFmt = (uint8_t)colorFmt;
     k->depthFmt = (uint8_t)depthFmt;
     /* an R8 coverage texture (rd_create_texture_r8) is drawn by font_ps and a
-     * sheet texture (rd_create_texture_sheet) by font_sheet_ps; the fragment
-     * shader is part of the key */
+     * sheet texture (rd_create_texture_sheet) by font_sheet_ps, a 1x one by
+     * font_sheet_baked_ps from its baked texels (rd__sheet_baked): the layout
+     * of the RHI texture that exists (sheetBaked, so an upload that failed
+     * to remake it after a layout change still draws it with its own
+     * shader), the wanted one before the first upload; the fragment shader
+     * is part of the key */
     if (d->texEnabled) {
         const RdTexRec *tr = rd__tex_rec(s->tex);
         if (tr && tr->kind == RD_TEXKIND_IMAGE && tr->format == RD_TEXEL_R8) {
             k->fs = RD_FS_FONT;
         } else if (tr && tr->kind == RD_TEXKIND_IMAGE && tr->format == RD_TEXEL_SHEET) {
-            k->fs = RD_FS_FONT_SHEET;
+            const int baked = tr->rhi.id ? tr->sheetBaked : rd__sheet_baked(tr);
+            k->fs = baked ? RD_FS_FONT_SHEET_BAKED : RD_FS_FONT_SHEET;
         }
     }
     /* PRIM.AA1 (not for an R8 texture: no AA1 draw samples one) */
@@ -521,6 +528,7 @@ bool rd__fs_has_no_dual(uint8_t fs)
     case RD_FS_SPRITE_STQ:
     case RD_FS_FONT:
     case RD_FS_FONT_SHEET:
+    case RD_FS_FONT_SHEET_BAKED:
     case RD_FS_FOG:
     case RD_FS_FOG_BUFFER:
     case RD_FS_FOG_MS:
@@ -675,7 +683,8 @@ static RhiCompare depthCompare(uint8_t ztst)
  * Volumes: both faces INCR_WRAP or DECR_WRAP where the depth test passes,
  * written through RD_SHADOW_STENCIL_MASK, so the stencil holds n mod 64 as
  * 4 n mod 256 wraps.  Resolve bit k: EQUAL to the reference 1 << k under
- * read mask 1 << k; resolve A: NOTEQUAL 0 under the count's mask.  The
+ * read mask 1 << k; resolve A: NOTEQUAL 0 under the count's mask (the step
+ * 8's: under its five bits, RD_STENCIL_TEST_NONZERO5).  The
  * resolve passes write no stencil.
  * DATE's stencil bit (RD_DATE_STENCIL_BIT, the reference
  * RD_DATE_STENCIL_BIT for every one of them, rd_replay.c): CLEAR replaces
@@ -701,8 +710,10 @@ static void shadowStencil(uint8_t mode, RhiDepthStencilState *ds)
         ds->stencilWriteMask = RD_SHADOW_STENCIL_MASK;
         break;
     case RD_STENCIL_TEST_NONZERO:
+    case RD_STENCIL_TEST_NONZERO5:
         f.compare = RHI_CMP_NOTEQUAL;
-        ds->stencilReadMask = RD_SHADOW_STENCIL_MASK;
+        ds->stencilReadMask =
+            mode == RD_STENCIL_TEST_NONZERO5 ? RD_SHADOW_STEP8_MASK : RD_SHADOW_STENCIL_MASK;
         ds->stencilWriteMask = 0;
         break;
     case RD_STENCIL_DATE_CLEAR:
@@ -935,6 +946,11 @@ static RdActivityFn s_activityFn;
 static char s_batchNote
     [768]; /* a 96-byte range, 320 of modules and the compiler's 96 fit (gcc 14's -Wformat-truncation at -O2 counts them); ico_diag_set_activity keeps its own bound */
 
+/* the activity note is an in-flight key's (noteKey), not another's: a note
+ * of another kind (activityCreating, activityDone) clears it, so the next
+ * wait writes the key's again */
+static bool s_inflightNoted;
+
 void rd_set_activity_fn(RdActivityFn fn)
 {
     s_activityFn = fn;
@@ -971,7 +987,7 @@ void rd_set_low_memory_fn(RdLowMemoryFn fn)
  * threads, no memory bound, the cache written as cacheKeptPerBatch says).
  * The careful values (rd_pipeline_policy_careful) are what the window
  * passes on a device of the table's careful column
- * (RhiLimits.carefulPipelines; docs/port/RENDER.md "The start-up set"):
+ * (RhiLimits.carefulPipelines; docs/port/PIPELINES.md "The start-up set"):
  * batches of 8 on one worker thread, the cache written after each, the
  * set stopped once the process grew 128 MB past its size at the set's
  * start or a batch took over RD_SET_SLOW_BATCH_MS. */
@@ -1182,6 +1198,7 @@ static void activityCreating(const RdPipeKeyInt *k)
     keyModules(k, mods, sizeof(mods));
     snprintf(note, sizeof(note), "creating pipeline %s (%s)", words, mods);
     s_activityFn(note);
+    s_inflightNoted = false;
 }
 
 /* the note after a creation: back to the batch's, or none */
@@ -1191,6 +1208,7 @@ static void activityDone(void)
         return;
     }
     s_activityFn(s_batchNote[0] != '\0' ? s_batchNote : NULL);
+    s_inflightNoted = false;
 }
 
 void rd__pipeline_note_begin(const char *what)
@@ -1275,15 +1293,18 @@ void rd__key_dynamic_normalise(RdPipeKeyInt *k)
 }
 
 /* drawKeyTurned's key with the dynamic state's fields normalised away
- * (rd__key_dynamic_normalise): the key the cache holds.  k itself, or tmp. */
+ * (rd__key_dynamic_normalise) and, under GS state as shader data, the
+ * attachment read's mask (rd__uber_normalise): the key the cache holds.  k
+ * itself, or tmp. */
 static const RdPipeKeyInt *drawKey(const RdPipeKeyInt *k, RdPipeKeyInt *tmp)
 {
     k = drawKeyTurned(k, tmp);
-    if (rd__key_dynamic_bits(k) != 0u) {
+    if (rd__key_dynamic_bits(k) != 0u || rd__uber_normal(k)) {
         if (k != tmp) {
             *tmp = *k;
         }
         rd__key_dynamic_normalise(tmp);
+        rd__uber_normalise(tmp);
         k = tmp;
     }
     return k;
@@ -1417,16 +1438,64 @@ static void useWhere(char *out, size_t size)
  * or into the failed keys: the line names the key, when it was asked for
  * (when: "in the start-up set", "on first use in list 3") and why it
  * failed (failReason), the first 8 then every 100th */
-static void keepPipeline(const RdPipeKeyInt *k, RhiPipeline p, uint32_t at, const char *when,
-                         const char *why)
+/* ICO_RD_FAKE_MERGE_FAIL=1: the first pipeline made with a draw merge's
+ * build is destroyed and kept as failed, as a build the driver refused
+ * (the fallback's test: rd_vumerge_fallback, tools/ci_d3d11_warp.sh) */
+static bool fakeMergeFail(void)
 {
+    static int s_fake = -1;
+    if (s_fake < 0) {
+        const char *e = getenv("ICO_RD_FAKE_MERGE_FAIL");
+        s_fake = e && strcmp(e, "1") == 0;
+    }
+    return s_fake == 1;
+}
+
+/* the result to use: p, or none where the fake failure took it */
+static RhiPipeline keepPipeline(const RdPipeKeyInt *k, RhiPipeline p, uint32_t at, const char *when,
+                                const char *why)
+{
+    const bool viaMerge = g_rd.vuMerge && g_rd.vsMerge[k->vs].id;
+    if (p.id && viaMerge && fakeMergeFail()) {
+        static bool s_faked; /* once a run */
+        if (!s_faked) {
+            s_faked = true;
+            rhi_destroy_pipeline(p);
+            p = (RhiPipeline){0};
+            why = "faked (ICO_RD_FAKE_MERGE_FAIL=1)";
+        }
+    }
     if (!p.id) {
         s_failLines++;
+        /* PC port: a key through the draw merge's build names it (on
+           Direct3D 11 the build compiles here, at its first pipeline, so a
+           module FXC refuses surfaces as this line) */
+        char vsName[64] = "";
+        if (viaMerge) {
+            keyVsName(k, vsName, sizeof(vsName));
+        }
         if (s_failLines <= 8u || s_failLines % 100u == 0u) {
+            char merge[160] = "";
+            if (viaMerge) {
+                snprintf(merge, sizeof(merge),
+                         "; vertex shader %s, the draw merge's build ([dev] vu_merge = false "
+                         "avoids it)",
+                         vsName);
+            }
             rd__log("pipeline creation failed %s (program %u blend %u vs %u fs %u fmt %u/%u): %s; "
-                    "draws with this key are skipped (%u failed so far%s)",
+                    "draws with this key are skipped (%u failed so far%s)%s",
                     when, k->gs.program, k->gs.blend, k->vs, k->fs, k->colorFmt, k->depthFmt, why,
-                    s_failLines, s_failLines == 8u ? "; from here every 100th is written" : "");
+                    s_failLines, s_failLines == 8u ? "; from here every 100th is written" : "",
+                    merge);
+        }
+        /* PC port: a merge build the driver refused (Direct3D 11 compiles
+           it here; any backend under the fake) turns the merge off from the
+           next replay, so the plain builds draw what this key would have
+           (rd_replay_vu.c rd__vu_merge_fallback); a full pool is not the
+           build's fault */
+        if (viaMerge && strstr(why, "pipeline pool") == NULL &&
+            (rhi_backend() == RHI_BACKEND_D3D11 || fakeMergeFail())) {
+            rd__vu_merge_build_failed(vsName);
         }
         /* a failed entry where there is room (its own probe: a caller's
            slot may be stale, or the key made meanwhile) */
@@ -1446,15 +1515,16 @@ static void keepPipeline(const RdPipeKeyInt *k, RhiPipeline p, uint32_t at, cons
                     "created until the cache is cleared (new keys are not drawn)",
                     s_failLines, RD_PIPELINE_FAIL_MAX);
         }
-        return;
+        return p;
     }
     s_cache[s_used].key = *k;
     s_cache[s_used].pipe = p;
     s_used++;
     s_count++;
     s_hash[at] = (uint16_t)s_used;
-    g_rd.stats.pipelineCreates++;
+    rd__stats_here()->pipelineCreates++;
     rd__passring_pipeline(p.id, k->vs, k->fs, k->dst);
+    return p;
 }
 
 /* rd__pipeline_gather: the keys a replay asked for and found no pipeline
@@ -1622,6 +1692,20 @@ RhiPipeline rd__get_pipeline(const RdPipeKeyInt *k)
     if (!g_rd.hasDevice || s_createStopped || cacheFull(k)) {
         return (RhiPipeline){0};
     }
+    if (g_rd.spritePlanesOff && rd__key_is_sprite_planes(k)) {
+        /* issue 161: never created on this device (rd__plane_pass hands
+           out none; a key that still comes is drawn as nothing, said once) */
+        static bool said;
+        if (!said) {
+            char w[96];
+            said = true;
+            keyWords(k, w, sizeof(w));
+            rd__log("pipelines: %s asked for with the sprite planes builds off (%s): not created, "
+                    "its draw skipped",
+                    w, g_rd.spritePlanesWhy);
+        }
+        return (RhiPipeline){0};
+    }
     activityCreating(k);
     RhiStats st0, st1;
     rhiPipeCounts(&st0);
@@ -1643,12 +1727,15 @@ RhiPipeline rd__get_pipeline(const RdPipeKeyInt *k)
         rhiPipeCounts(&st1);
         failReason(&st0, &st1, why, sizeof(why));
     }
-    keepPipeline(k, p, at, when, why);
+    p = keepPipeline(k, p, at, when, why);
     return p;
 }
 
+static void finClear(void);
+
 void rd__pipeline_cache_clear(void)
 {
+    finClear(); /* the background set's batch in flight, and the set itself */
     if (g_rd.hasDevice) {
         for (uint32_t i = 0; i < s_used; i++) {
             if (s_cache[i].pipe.id) {
@@ -1707,7 +1794,72 @@ typedef struct PreBatch {
     uint32_t total; /* the set's size */
     uint32_t last;  /* the last count the progress function was given */
     int stop;       /* the progress function asked to stop */
+    /* the in-flight key (issue 161): the keys of the rhi_create_pipelines
+     * call in progress and their places in the set, the batch's range
+     * (1-based), which of them are inside the driver now (bit i: keys[i];
+     * the RHI's begin and end hooks, any thread) and the one the note names
+     * (-1 none) */
+    const RdPipeKeyInt *keys;
+    const uint32_t *place;
+    uint32_t first, lastKey;
+    uint32_t inflight;
+    int noted;
 } PreBatch;
+
+/* "creating pipeline 217 of 587 (in batch 212-219): <key> (<vs> N words +
+ * <fs> M words)": the key inside the driver now, as a lazy run's creation
+ * is named, so the next start reads it the same way (diag_host.c,
+ * port/platform/pipeline_skip.h); written before the driver's call on the
+ * careful set's path, within RHI_PIPELINE_WAIT_MS on the others */
+static void noteKey(PreBatch *b, uint32_t i)
+{
+    char note[sizeof(s_batchNote)];
+    char w[96], mods[160];
+    if (s_activityFn == NULL || b->keys == NULL) {
+        return;
+    }
+    keyWords(&b->keys[i], w, sizeof(w));
+    keyModules(&b->keys[i], mods, sizeof(mods));
+    int n = snprintf(note, sizeof(note), "creating pipeline %u of %u (in batch %u-%u): %s (%s)",
+                     b->place[i] + 1, b->total, b->first, b->lastKey, w, mods);
+    (void)n;
+    s_activityFn(note);
+    b->noted = (int)i;
+    s_inflightNoted = true;
+}
+
+/* the RHI's hooks around one driver call (rhi.h RhiPipelineBatch.begin,
+ * end): only the bit, on the compiling thread */
+static void preBegin(void *ctx, uint32_t index)
+{
+    PreBatch *b = ctx;
+    if (index < 32u) {
+        __atomic_fetch_or(&b->inflight, 1u << index, __ATOMIC_RELEASE);
+    }
+}
+
+static void preEnd(void *ctx, uint32_t index)
+{
+    PreBatch *b = ctx;
+    if (index < 32u) {
+        __atomic_fetch_and(&b->inflight, ~(1u << index), __ATOMIC_RELEASE);
+    }
+}
+
+/* on the calling thread: one key inside the driver, not named yet, named;
+ * several (a batch on threads), or none, keep the batch's note */
+static void noteInflight(PreBatch *b)
+{
+    const uint32_t mask = __atomic_load_n(&b->inflight, __ATOMIC_ACQUIRE);
+    if (b->keys == NULL || mask == 0u || (mask & (mask - 1u)) != 0u) {
+        return;
+    }
+    const uint32_t i = (uint32_t)__builtin_ctz(mask);
+    if ((int)i == b->noted && s_inflightNoted) {
+        return;
+    }
+    noteKey(b, i);
+}
 
 static int preProgress(PreBatch *b, uint32_t done)
 {
@@ -1739,13 +1891,19 @@ static void noteBetween(uint32_t i, uint32_t m)
     }
 }
 
-/* rhi_create_pipelines' wait function */
+/* rhi_create_pipelines' wait function, inside the backend's call: a
+ * display change's progress screen may post its picture to the render
+ * thread (rd_core.c onGameHost), so the backend is this thread's again
+ * before the batch goes on (rhi_call_guard_settle: OpenGL's context back
+ * here) */
 static void preWait(void *ctx, uint32_t finished)
 {
     PreBatch *b = ctx;
     if (!b->stop) {
         b->stop = preProgress(b, b->base + finished);
+        rhi_call_guard_settle();
     }
+    noteInflight(b); /* issue 161: after the frame's own notes */
 }
 
 /* The start-up set's slowest compiles and its compile time by vertex
@@ -1830,6 +1988,31 @@ static bool policySet(void)
            s_setPolicy.cacheEachBatch;
 }
 
+/* the careful policy in force: one thread, the cache written after each
+ * batch (rd_pipeline_policy_careful, or a policy like it) */
+static bool carefulSet(void)
+{
+    return s_setPolicy.cacheEachBatch && s_setPolicy.maxThreads == 1u;
+}
+
+/* The careful set's order (issue 161): the sprite planes builds after
+ * every other key, in their own order, so a driver that stops in one has
+ * made and cached the rest of the set first; the count moved */
+static uint32_t planesLast(RdPipeKeyInt *keys, uint32_t m)
+{
+    static RdPipeKeyInt tail[RD_PIPELINE_CACHE_MAX];
+    uint32_t w = 0, t = 0;
+    for (uint32_t i = 0; i < m; i++) {
+        if (rd__key_is_sprite_planes(&keys[i])) {
+            tail[t++] = keys[i];
+        } else {
+            keys[w++] = keys[i];
+        }
+    }
+    memcpy(keys + w, tail, (size_t)t * sizeof(keys[0]));
+    return t;
+}
+
 /* "batch 8, threads 1, budget 128 MB, cache each batch": the policy's
  * values (0 threads: the backend's; 0 MB: no budget) */
 static void policyText(char *out, size_t size)
@@ -1862,7 +2045,8 @@ static void policyText(char *out, size_t size)
  * 93 and 107's v0.7.7 logs for the 2D ones, both ending inside the 2D
  * half of the set) */
 static void batchTimes(const RdPipeKeyInt *keys, const float *ms, uint32_t n, uint32_t first,
-                       uint32_t last, uint32_t total, double wallMs, uint32_t threads)
+                       uint32_t last, uint32_t total, double wallMs, uint32_t threads,
+                       const char *what)
 {
     char line[600], mem[96];
     size_t at = 0;
@@ -1888,10 +2072,10 @@ static void batchTimes(const RdPipeKeyInt *keys, const float *ms, uint32_t n, ui
         at = k_ > 0 ? (at + (size_t)k_ < sizeof(line) ? at + (size_t)k_ : sizeof(line) - 1) : at;  \
     } while (0)
     if (vu) {
-        BT_PUT("VU batch %u-%u of %u (compiler %s)", first, last, total,
+        BT_PUT("%sVU batch %u-%u of %u (compiler %s)", what, first, last, total,
                s_compiler[0] ? s_compiler : "unnamed by the driver");
     } else {
-        BT_PUT("2D batch %u-%u of %u (compiler %s)", first, last, total,
+        BT_PUT("%s2D batch %u-%u of %u (compiler %s)", what, first, last, total,
                s_compiler[0] ? s_compiler : "unnamed by the driver");
     }
     BT_PUT(": %u pipelines %.2f-%.2f s, mean %.2f s, %.1f s on %u threads; %s", n, lo / 1000.0,
@@ -1959,7 +2143,7 @@ typedef struct PreCounts {
     int stop;
     /* why the policy's budget stopped the set ("" if it did not): the rest
      * is made on first use (rd_pipelines_lazy) */
-    char budget[192];
+    char budget[256];
 } PreCounts;
 
 /* the process's resident memory in KB (rd_set_memory_fn), -1 unknown */
@@ -1977,9 +2161,15 @@ static long residentKb(void)
  * progress function running while a batch compiles and between two.
  * resolved: the keys are as rd__get_pipeline's drawKey made them (a
  * replay's, rd__pipeline_gather), not adjusted again. */
+static void finJoin(void);
+
 static void createKeys(const RdPipeKeyInt *keys, uint32_t m, bool resolved, PreTimes *times,
                        PreCounts *c)
 {
+    /* a background batch in flight (rd_pipelines_background_start) taken
+       first: its pipeline ids are out of the pool's headroom this batch
+       needs */
+    finJoin();
     /* the policy (rd_set_pipeline_policy): the batch's size, its threads,
      * the memory bound of the start-up set (times: not a replay's keys) */
     const uint32_t batchMax = s_setPolicy.batch > 0u && s_setPolicy.batch < RD_PIPE_BATCH
@@ -1992,9 +2182,23 @@ static void createKeys(const RdPipeKeyInt *keys, uint32_t m, bool resolved, PreT
     static RhiBindGroupLayout bl[RD_PIPE_BATCH][4];
     static RhiPipeline bp[RD_PIPE_BATCH];
     static float bms[RD_PIPE_BATCH];
+    static uint32_t bIdx[RD_PIPE_BATCH]; /* each batch key's place in keys */
+    /* the careful policy (one thread, the cache written after each batch):
+     * the low-memory signal is asked before each pipeline, not only after
+     * the batch (issue 161: a batch in flight under "running critical" took
+     * 3.3 s while the whole device froze).  Other policies keep the check
+     * after the batch: their batches run on threads at once. */
+    const bool perPipe = times != NULL && s_lowMemoryFn != NULL && s_setPolicy.cacheEachBatch &&
+                         s_setPolicy.maxThreads == 1u;
+    /* the careful start-up set makes each sprite planes build a batch of
+     * its own (issue 161, rd_precreate_pipelines puts them last): its note
+     * names that one pipeline, so an end inside it is the family's for the
+     * next start (port/platform/pipeline_skip.h), and the cache is written
+     * before it */
+    const bool planesAlone = times != NULL && carefulSet();
     /* a failed key's line: when it was asked for */
     const char *when = times != NULL ? "in the start-up set" : "in a replay's gathered keys";
-    PreBatch pb = {0, m, 0, 0};
+    PreBatch pb = {0, m, 0, 0, NULL, NULL, 0, 0, 0, -1};
     memset(c, 0, sizeof(*c));
     c->threads = 1;
     if (s_progressFn != NULL) {
@@ -2018,6 +2222,14 @@ static void createKeys(const RdPipeKeyInt *keys, uint32_t m, bool resolved, PreT
             const int kind = k->dst != RHI_DST_READ_NONE;
             if (dstKind >= 0 && kind != dstKind) {
                 break;
+            }
+            const bool planes = rd__key_is_sprite_planes(k);
+            if (planes && g_rd.spritePlanesOff) {
+                continue; /* issue 161: off for the run, never created */
+            }
+            const bool alone = planesAlone && planes;
+            if (alone && nb > 0) {
+                break; /* the next batch is this key alone */
             }
             const uint32_t at = probeKey(k, &found);
             if (found) {
@@ -2046,8 +2258,13 @@ static void createKeys(const RdPipeKeyInt *keys, uint32_t m, bool resolved, PreT
                 continue;
             }
             bk[nb] = *k;
+            bIdx[nb] = i;
             dstKind = kind;
             nb++;
+            if (alone) {
+                i++;
+                break;
+            }
         }
         if (nb > 0) {
             char note[sizeof(s_batchNote)];
@@ -2088,34 +2305,90 @@ static void createKeys(const RdPipeKeyInt *keys, uint32_t m, bool resolved, PreT
             if (s_activityFn != NULL) {
                 s_activityFn(s_batchNote);
             }
-            RhiPipelineBatch batch = {preWait, &pb, bms, 1, s_setPolicy.maxThreads};
+            RhiPipelineBatch batch = {preWait,  &pb,   bms, 1, s_setPolicy.maxThreads,
+                                      preBegin, preEnd};
             pb.base = first;
+            pb.keys = bk;
+            pb.place = bIdx;
+            pb.first = first + 1;
+            pb.lastKey = i;
+            pb.inflight = 0;
+            pb.noted = -1;
             c->batches++;
+            uint32_t made = nb;
+            char lowMem[48];
+            lowMem[0] = '\0';
+            bool lowMidBatch = false;
             const long beforeKb = budgeted ? residentKb() : -1;
             RhiStats st0, st1;
             rhiPipeCounts(&st0);
             const double bt0 = rd__now_ms();
-            rhi_create_pipelines(bd, nb, bp, &batch);
+            if (perPipe) {
+                made = 0;
+                for (uint32_t j = 0; j < nb; j++) {
+                    if (s_lowMemoryFn(lowMem, sizeof(lowMem)) != 0) {
+                        lowMidBatch = true;
+                        break;
+                    }
+                    RhiPipelineBatch one = {preWait,  &pb,   bms + j, 1, s_setPolicy.maxThreads,
+                                            preBegin, preEnd};
+                    pb.base = bIdx[j];
+                    pb.keys = &bk[j];
+                    pb.place = &bIdx[j];
+                    pb.inflight = 0;
+                    /* issue 161: the key's note before the driver's call */
+                    noteKey(&pb, 0);
+                    rhi_create_pipelines(&bd[j], 1, &bp[j], &one);
+                    made = j + 1;
+                    if (one.threads > batch.threads) {
+                        batch.threads = one.threads;
+                    }
+                    if (pb.stop) {
+                        break;
+                    }
+                }
+                if (made < nb) {
+                    /* the keys not made stay for first use */
+                    i = bIdx[made];
+                }
+            } else {
+                rhi_create_pipelines(bd, nb, bp, &batch);
+            }
+            pb.keys = NULL;
             const double batchMs = rd__now_ms() - bt0;
             rhiPipeCounts(&st1);
             /* the batch's failures share one reason (failReason says when
                the batch had two) */
             char why[224];
             failReason(&st0, &st1, why, sizeof(why));
-            batchTimes(bk, bms, nb, first + 1, i, m, batchMs, batch.threads);
-            if (times != NULL && i < m &&
+            if (made > 0) {
+                batchTimes(bk, bms, made, first + 1, i, m, batchMs, batch.threads, "");
+            }
+            if (times != NULL && i < m && made > 0 &&
                 (s_setPolicy.cacheEachBatch || rd__now_ms() - s_setSavedMs >= RD_SET_SAVE_MS) &&
                 cacheKeptPerBatch()) {
                 /* the start-up set (times: not a replay's gathered keys) on
                  * a phone or a tablet, or after every batch under a policy
                  * that asks: a desktop's set writes once, at its end (the
-                 * window's write) */
+                 * window's write); not when the low-memory signal came
+                 * before the batch's first pipeline (nothing new to write,
+                 * and the system is short of memory) */
                 (void)rhi_pipeline_cache_save();
                 s_setSavedMs = rd__now_ms();
             }
-            char lowMem[48];
-            if (times != NULL && i < m && s_lowMemoryFn != NULL &&
-                s_lowMemoryFn(lowMem, sizeof(lowMem)) != 0) {
+            if (lowMidBatch) {
+                /* the signal came inside the batch: pipelines `made` of the
+                 * batch's `nb` are done, the set stops before the next */
+                snprintf(c->budget, sizeof(c->budget),
+                         "(memory budget: the system reported low memory (%s) at pipeline %u of "
+                         "%u (in the batch, %u of its %u made); the rest is made as the game "
+                         "needs it)",
+                         lowMem, i + 1, m, made, nb);
+                rd__log("pipelines: the start-up set stopped at pipeline %u of %u, inside a batch "
+                        "of %u (%u made), at the system's low-memory signal (%s)",
+                        i + 1, m, nb, made, lowMem);
+            } else if (!perPipe && times != NULL && i < m && s_lowMemoryFn != NULL &&
+                       s_lowMemoryFn(lowMem, sizeof(lowMem)) != 0) {
                 /* the system reported low memory (issue 128: the Adreno
                  * 740 handheld's system took the process's pages back and
                  * ended it while its set went on): the set stops here,
@@ -2150,7 +2423,7 @@ static void createKeys(const RdPipeKeyInt *keys, uint32_t m, bool resolved, PreT
             if (batch.threads > c->threads) {
                 c->threads = batch.threads;
             }
-            for (uint32_t j = 0; j < nb; j++) {
+            for (uint32_t j = 0; j < made; j++) {
                 bool found;
                 const uint32_t at = probeKey(&bk[j], &found);
                 if (bms[j] > s_preLongestMs) {
@@ -2192,6 +2465,395 @@ static void createKeys(const RdPipeKeyInt *keys, uint32_t m, bool resolved, PreT
     }
     if (s_activityFn != NULL) {
         s_activityFn(NULL);
+    }
+}
+
+/* ------------------------------------------------- the background finisher
+ * (rd.h rd_pipelines_background_start, rd_pipe_finish.h).  The start-up set
+ * stopped at its policy's bound (finOffer: the keys and where it stopped);
+ * the window starts the finisher when the bound was the free-memory floor
+ * on a driver whose floor is the set's own need.  Each batch is begun and
+ * taken after a picture (rd__pipe_finish_tick: the end of a presenting
+ * replay, on the thread that draws), its compiles on low-priority workers
+ * meanwhile (rhi_create_pipelines_begin); the game thread touches the
+ * finisher only with the render thread idle (the display change, the
+ * shutdown) or through the hold (an atomic) and the cache write
+ * (finSaveTake). */
+static struct {
+    bool offered;       /* the set stopped at its policy's bound */
+    bool on;            /* started, not ended */
+    uint32_t m, cursor; /* the keys (s_finKeys) and the next one */
+    RdBackgroundMemoryFn memory;
+    RhiPipelineJobs *jobs;    /* the batch in flight */
+    uint32_t nb, first, last; /* its keys and their places in the set (1-based) */
+    RdPipeKeyInt bk[RD_FINISH_BATCH];
+    RhiPipelineDesc bd[RD_FINISH_BATCH];
+    RhiBindGroupLayout bl[RD_FINISH_BATCH][4];
+    RhiStats st0; /* the RHI's counts at its begin (failReason) */
+    double t0, floorMs, savedMs, startMs;
+    uint32_t batches, made, failed, waitsFloor;
+    uint32_t holds0;     /* s_finHolds at the start */
+    uint32_t pollsQuiet; /* pictures a batch was still compiling, read without the backend */
+    double busyMs;       /* the batches' wall time */
+} s_fin;
+
+static RdPipeKeyInt s_finKeys[RD_PIPELINE_CACHE_MAX];
+/* the hold's end in microseconds of rd__now_ms, and the holds begun (a
+ * hold asked while one is in force extends it, not counted) (any thread) */
+static uint64_t s_finHoldUs;
+static uint32_t s_finHolds;
+/* a cache write is due (the game thread's rd_pipelines_lazy_tick) */
+static bool s_finSave;
+
+/* rd__finish_pick's key: -1 made (on first use meanwhile, or by an earlier
+ * batch), failed or never made; else its destination-read kind */
+static int finKeyKind(void *user, uint32_t i)
+{
+    RdPipeKeyInt tmp;
+    bool found;
+    (void)user;
+    const RdPipeKeyInt *k = drawKey(&s_finKeys[i], &tmp);
+    if (g_rd.spritePlanesOff && rd__key_is_sprite_planes(k)) {
+        return -1; /* issue 161: off for the run, never created */
+    }
+    (void)probeKey(k, &found);
+    return found ? -1 : k->dst != RHI_DST_READ_NONE;
+}
+
+static uint32_t finLeft(void)
+{
+    uint32_t left = 0;
+    for (uint32_t i = s_fin.cursor; i < s_fin.m; i++) {
+        left += finKeyKind(NULL, i) >= 0;
+    }
+    return left;
+}
+
+static void finOffer(const RdPipeKeyInt *keys, uint32_t m, uint32_t stoppedAt)
+{
+    memcpy(s_finKeys, keys, (size_t)m * sizeof(keys[0]));
+    s_fin.m = m;
+    s_fin.cursor = stoppedAt < m ? stoppedAt : m;
+    s_fin.offered = true;
+}
+
+/* the batch in flight taken (wait: until its compiles end; else only when
+ * they have): its pipelines kept as the start-up set keeps a batch's,
+ * its line logged with "background" in it.  False when it goes on. */
+static bool finEnd(bool wait)
+{
+    RhiPipeline bp[RD_FINISH_BATCH];
+    float bms[RD_FINISH_BATCH];
+    uint32_t threads = 1;
+    if (s_fin.jobs == NULL) {
+        return true;
+    }
+    if (!rhi_create_pipelines_end(s_fin.jobs, wait, bp, bms, &threads)) {
+        return false;
+    }
+    s_fin.jobs = NULL;
+    const double wallMs = rd__now_ms() - s_fin.t0;
+    s_fin.busyMs += wallMs;
+    s_fin.batches++;
+    RhiStats st1;
+    char why[224];
+    rhiPipeCounts(&st1);
+    failReason(&s_fin.st0, &st1, why, sizeof(why));
+    batchTimes(s_fin.bk, bms, s_fin.nb, s_fin.first, s_fin.last, s_fin.m, wallMs, threads,
+               "background ");
+    for (uint32_t j = 0; j < s_fin.nb; j++) {
+        bool found;
+        const uint32_t at = probeKey(&s_fin.bk[j], &found);
+        if (!bp[j].id) {
+            if (!found) {
+                keepPipeline(&s_fin.bk[j], bp[j], at, "in the background set", why);
+            }
+            s_fin.failed++;
+            continue;
+        }
+        /* made on first use meanwhile (a draw that could not wait), or the
+           cache filled */
+        if (found || s_used >= RD_PIPELINE_CACHE_MAX) {
+            rhi_destroy_pipeline(bp[j]);
+            continue;
+        }
+        keepPipeline(&s_fin.bk[j], bp[j], at, "in the background set", "");
+        s_fin.made++;
+    }
+    s_fin.nb = 0;
+    s_batchNote[0] = '\0';
+    activityDone();
+    if (rd__now_ms() - s_fin.savedMs >= RD_FINISH_SAVE_MS) {
+        s_fin.savedMs = rd__now_ms();
+        __atomic_store_n(&s_finSave, true, __ATOMIC_RELEASE);
+    }
+    return true;
+}
+
+static void finJoin(void)
+{
+    if (s_fin.jobs != NULL) {
+        (void)finEnd(true);
+    }
+}
+
+/* the finisher ends: its line (made, failed, the batches' time, the
+ * waits) and the cache's write */
+static void finStop(const char *why)
+{
+    finJoin();
+    s_fin.on = false;
+    s_fin.offered = false;
+    __atomic_store_n(&s_finSave, true, __ATOMIC_RELEASE);
+    rd__log("pipelines: the background set %s: %u pipelines made in %u batches, %u failed, %.1f s "
+            "compiling over %.1f s since it resumed (%u waits for a late step or a slow picture, "
+            "%u for the free memory; %u pictures found a batch still compiling without waiting "
+            "for the submit thread); %u keys left to first use",
+            why, s_fin.made, s_fin.batches, s_fin.failed, s_fin.busyMs / 1000.0,
+            (rd__now_ms() - s_fin.startMs) / 1000.0,
+            __atomic_load_n(&s_finHolds, __ATOMIC_RELAXED) - s_fin.holds0, s_fin.waitsFloor,
+            s_fin.pollsQuiet, finLeft());
+}
+
+static void finClear(void)
+{
+    if (s_fin.jobs != NULL && g_rd.hasDevice) {
+        /* the pipelines of the batch in flight destroyed with the cache */
+        (void)rhi_create_pipelines_end(s_fin.jobs, true, NULL, NULL, NULL);
+        s_fin.jobs = NULL;
+        s_fin.nb = 0;
+        s_batchNote[0] = '\0';
+    }
+    if (s_fin.on) {
+        s_fin.on = false;
+        rd__log("pipelines: the background set ends: the pipeline cache was cleared (%u made in "
+                "%u batches)",
+                s_fin.made, s_fin.batches);
+    }
+    s_fin.offered = false;
+    s_fin.m = s_fin.cursor = 0;
+}
+
+/* a display change on a lazy run (rd__display_pipelines; the game thread,
+ * the render thread idle): the finisher goes on with the new state's
+ * reachable keys from their start (the old state's left are not made: a
+ * draw of the new state does not ask for them).  False when it is not
+ * running. */
+static bool finRestart(void)
+{
+    if (!s_fin.on) {
+        return false;
+    }
+    finJoin();
+    const uint32_t n = rd__enumerate_reachable(s_finKeys, RD_PIPELINE_CACHE_MAX);
+    s_fin.m = n < RD_PIPELINE_CACHE_MAX ? n : RD_PIPELINE_CACHE_MAX;
+    s_fin.cursor = 0;
+    rd__log("display change: the background set goes on with the new state's keys (%u of its %u "
+            "not made yet)",
+            finLeft(), n);
+    return true;
+}
+
+static bool finSaveTake(void)
+{
+    return __atomic_exchange_n(&s_finSave, false, __ATOMIC_ACQ_REL);
+}
+
+/* the next batch begun: the set's next keys not made yet (rd__finish_pick),
+ * their descriptions made here, their compiles handed to the workers */
+static void finBegin(void)
+{
+    uint32_t idx[RD_FINISH_BATCH];
+    const uint32_t n =
+        rd__finish_pick(s_fin.m, &s_fin.cursor, RD_FINISH_BATCH, finKeyKind, NULL, idx);
+    uint32_t nb = 0;
+    for (uint32_t j = 0; j < n; j++) {
+        RdPipeKeyInt tmp;
+        bool dup = false;
+        const RdPipeKeyInt *k = drawKey(&s_finKeys[idx[j]], &tmp);
+        for (uint32_t q = 0; q < nb && !dup; q++) {
+            dup = keyEqual(&s_fin.bk[q], k);
+        }
+        if (dup) {
+            continue;
+        }
+        /* room for the batch and for one of the start-up set's own
+           (createKeys: the pool's headroom holds one batch outside the
+           cache) */
+        if (s_createStopped || cacheFull(k) ||
+            s_used + nb + RD_PIPE_BATCH >= RD_PIPELINE_CACHE_MAX) {
+            s_fin.failed++;
+            continue;
+        }
+        if (!pipelineDesc(k, &s_fin.bd[nb], s_fin.bl[nb])) {
+            bool found;
+            const uint32_t at = probeKey(k, &found);
+            keepPipeline(k, (RhiPipeline){0}, at, "in the background set",
+                         "its description was not made (a shader module not loaded)");
+            s_fin.failed++;
+            continue;
+        }
+        if (nb == 0) {
+            s_fin.first = idx[j] + 1;
+        }
+        s_fin.last = idx[j] + 1;
+        s_fin.bk[nb++] = *k;
+    }
+    if (nb == 0) {
+        return; /* the next picture takes the next keys, or ends it */
+    }
+    {
+        char a[96], z[96], mods[320];
+        keyWords(&s_fin.bk[0], a, sizeof(a));
+        keyWords(&s_fin.bk[nb - 1], z, sizeof(z));
+        batchModules(s_fin.bk, nb, mods, sizeof(mods));
+        /* the crash report's note while the batch compiles (a lazy run's
+           creation puts it back after its own, activityDone; the
+           watchdog's pipeline limit tells it by " in the background: ",
+           port/platform/gpu_hang.c ico_pipe_note_creating); the result
+           is read so gcc 14's -Wformat-truncation at -O2 sees the cut is
+           meant */
+        int w = snprintf(s_batchNote, sizeof(s_batchNote),
+                         "creating pipelines %u-%u of %u in the background: %s to %s; %s",
+                         s_fin.first, s_fin.last, s_fin.m, a, z, mods);
+        (void)w;
+        if (s_activityFn != NULL) {
+            s_activityFn(s_batchNote);
+        }
+    }
+    rhiPipeCounts(&s_fin.st0);
+    s_fin.nb = nb;
+    s_fin.t0 = rd__now_ms();
+    s_fin.jobs = rhi_create_pipelines_begin(s_fin.bd, nb, RD_FINISH_THREADS, true);
+    if (s_fin.jobs == NULL) {
+        s_fin.nb = 0;
+        s_batchNote[0] = '\0';
+        activityDone();
+        finStop("ends: the graphics backend has no background creation");
+    }
+}
+
+uint32_t rd_pipelines_background_start(RdBackgroundMemoryFn memory)
+{
+    if (!g_rd.hasDevice || !s_fin.offered || s_fin.on) {
+        return 0;
+    }
+    if (rhi_backend() != RHI_BACKEND_VULKAN) {
+        rd__log("pipelines: the stopped set is not resumed in the background (the graphics API "
+                "has no background creation): the rest made on first use");
+        s_fin.offered = false;
+        return 0;
+    }
+    const uint32_t left = finLeft();
+    if (left == 0) {
+        s_fin.offered = false;
+        return 0;
+    }
+    s_fin.on = true;
+    s_fin.memory = memory;
+    s_fin.startMs = s_fin.savedMs = rd__now_ms();
+    s_fin.floorMs = 0.0;
+    s_fin.batches = s_fin.made = s_fin.failed = s_fin.waitsFloor = s_fin.pollsQuiet = 0;
+    s_fin.holds0 = __atomic_load_n(&s_finHolds, __ATOMIC_RELAXED);
+    s_fin.busyMs = 0.0;
+    rd__log("pipelines: the stopped set resumes in the background (%u left, keys %u-%u of %u): "
+            "batches of up to %u on %u threads at low priority, one at a time between pictures; "
+            "the free memory and the system's low-memory signal asked before each, none begun "
+            "for %.1f s after a late game step or a picture over %.0f ms; a draw that needs a key "
+            "not made yet still makes it at once",
+            left, s_fin.cursor + 1, s_fin.m, RD_FINISH_BATCH, RD_FINISH_THREADS,
+            RD_FINISH_HOLD_MS / 1000.0, RD_FINISH_SLOW_MS);
+    return left;
+}
+
+void rd_pipelines_background_hold(void)
+{
+    const double now = rd__now_ms();
+    const uint64_t until = (uint64_t)((now + RD_FINISH_HOLD_MS) * 1000.0);
+    const uint64_t was = __atomic_exchange_n(&s_finHoldUs, until, __ATOMIC_ACQ_REL);
+    if ((double)was / 1000.0 < now) {
+        __atomic_add_fetch(&s_finHolds, 1u, __ATOMIC_RELAXED);
+    }
+}
+
+bool rd_pipelines_background_on(void)
+{
+    return s_fin.on;
+}
+
+/* rate-limited: the first 8 waits of a kind, then every 100th */
+static bool finWaitLine(uint32_t n)
+{
+    return n <= 8u || n % 100u == 0u;
+}
+
+void rd__pipe_finish_tick(double pictureMs)
+{
+    if (!s_fin.on || !g_rd.hasDevice || s_gatherOn) {
+        return;
+    }
+    const double now = rd__now_ms();
+    if (pictureMs > RD_FINISH_SLOW_MS) {
+        rd_pipelines_background_hold(); /* the render thread's own slow picture */
+    }
+    RdFinishIn in;
+    memset(&in, 0, sizeof(in));
+    in.on = true;
+    in.inflight = s_fin.jobs != NULL;
+    in.finished = false;
+    in.left = s_fin.cursor < s_fin.m ? s_fin.m - s_fin.cursor : 0;
+    in.nowMs = now;
+    in.holdMs = (double)__atomic_load_n(&s_finHoldUs, __ATOMIC_ACQUIRE) / 1000.0;
+    in.floorMs = s_fin.floorMs;
+    in.memory = -1;
+    if (in.inflight) {
+        /* taken now when its compiles have ended (end without waiting);
+           one action a picture.  While some have not returned the
+           backend's count says so without a call that waits for the
+           submit thread's job (rhi.h RhiGpuProgress.bgPipesLeft: the one
+           background set in flight is this one's; rhi_create_pipelines_end
+           waits behind the call guard even to answer "not yet") */
+        RhiGpuProgress gp;
+
+        if (rhi_gpu_progress(&gp) && gp.bgPipesLeft > 0) {
+            s_fin.pollsQuiet++;
+            return;
+        }
+        (void)finEnd(false);
+        return;
+    }
+    RdFinishStep step = rd__finish_step(&in);
+    char why[128] = "";
+    if (step == RD_FINISH_CHECK) {
+        in.memory = s_fin.memory != NULL ? s_fin.memory(why, sizeof(why)) : 0;
+        step = rd__finish_step(&in);
+    }
+    switch (step) {
+    case RD_FINISH_STOP_SIGNAL: {
+        char words[192];
+        snprintf(words, sizeof(words), "ends at %s", why);
+        finStop(words);
+        break;
+    }
+    case RD_FINISH_DONE:
+        finStop("is done");
+        break;
+    case RD_FINISH_WAIT_FLOOR:
+        if (in.memory == 1) {
+            s_fin.floorMs = now + RD_FINISH_FLOOR_MS;
+            s_fin.waitsFloor++;
+            if (finWaitLine(s_fin.waitsFloor)) {
+                rd__log("pipelines: the background set waits (%s): asked again in %.0f s (%u "
+                        "such waits)",
+                        why, RD_FINISH_FLOOR_MS / 1000.0, s_fin.waitsFloor);
+            }
+        }
+        break;
+    case RD_FINISH_BEGIN:
+        finBegin();
+        break;
+    default:
+        break;
     }
 }
 
@@ -2240,6 +2902,7 @@ uint32_t rd_precreate_pipelines(void)
         }
         rd__log("pipelines: the start-up set by family: %s", w);
     }
+    rd__uber_set_line(n); /* GS state as shader data: the set it replaces */
     if (n > m) {
         rd__log("pipelines: the reachable set has %u keys, more than the %u the cache holds: "
                 "the first %u are created",
@@ -2261,6 +2924,17 @@ uint32_t rd_precreate_pipelines(void)
         rd__log("pipelines: the start-up set stops at the system's low-memory signal (asked after "
                 "each batch), the rest made on first use");
     }
+    if (carefulSet()) {
+        /* issue 161: the sprite planes builds last, each a batch of its
+           own (createKeys), the cache written before each */
+        const uint32_t moved = planesLast(keys, m);
+        if (moved) {
+            rd__log("pipelines: the careful set makes its %u sprite planes builds last, one a "
+                    "batch (the cache written before each; a start that ends inside one leaves "
+                    "the family out from then on)",
+                    moved);
+        }
+    }
     createKeys(keys, m, false, &times, &c);
     if (c.stop) {
         rd__log("pipelines: the start-up set stopped at %u of %u (the game is closing)",
@@ -2276,6 +2950,9 @@ uint32_t rd_precreate_pipelines(void)
         /* the careful policy's bound: the rest as the frames first need
            them, each batch of them written to the cache */
         rd_pipelines_lazy(c.budget);
+        /* the window may finish the rest in the background (a stop at the
+           free-memory floor: rd_pipelines_background_start) */
+        finOffer(keys, m, c.stoppedAt);
     }
     if (c.compiled) {
         preTimesLog(&times);
@@ -2352,6 +3029,9 @@ void rd__display_pipelines(bool logAlways)
     static RdPipeKeyInt keys[RD_PIPELINE_CACHE_MAX];
     static RdPipeKeyInt miss[RD_PIPELINE_CACHE_MAX];
     if (!g_rd.hasDevice || !s_startupSet || s_lazy.on) {
+        if (g_rd.hasDevice && s_lazy.on && finRestart()) {
+            return; /* the background set goes on with the new state's keys */
+        }
         if (logAlways && g_rd.hasDevice && s_lazy.on) {
             rd__log("display change: pipelines made on first use (no start-up set on this run)");
         }
@@ -2455,8 +3135,16 @@ static void lazyBatchEnd(double now)
     rd__log("pipelines: compiled %s", line);
 }
 
+static bool finSaveTake(void);
+
 void rd_pipelines_lazy_tick(void)
 {
+    if (g_rd.hasDevice && finSaveTake()) {
+        /* the background set's pipelines in the file (every
+           RD_FINISH_SAVE_MS and at its end), on this thread as a lazy
+           batch's */
+        (void)rhi_pipeline_cache_save();
+    }
     if (!s_lazy.on || s_lazy.n == 0 || !g_rd.hasDevice) {
         return;
     }
@@ -2486,7 +3174,7 @@ const RdPipeKeyInt *rd__pipeline_key_at(uint32_t i)
 }
 
 /* ------------------------------------------------ the VU modules
- * docs/port/RENDER.md, "The fallback entries": every device draws the VU
+ * docs/port/PIPELINES.md, "The fallback entries": every device draws the VU
  * programs through one module set, the record path's (vu_main_vs,
  * vu_particle_main_vs, the pre-pass's and the stages' point entries), with
  * the region rule's every step.  A draw the record path cannot take (past
@@ -2494,9 +3182,12 @@ const RdPipeKeyInt *rd__pipeline_key_at(uint32_t i)
  * the pre-pass off) draws the old way, through its program's own entry
  * with vu_ps: vu_X_vs (the extended build), or on a
  * device of the table (RhiLimits.vuFallbackPlain, vk_device.c kVuPlainOnly)
+ * and under Mesa's Turnip driver (rd__driver_is_turnip, issue 163)
  * vu_X_plain_vs (ICO_VU_PLAIN: no card test, no tick cameras), as
- * ICO_RD_VU_PLAIN=1 or the host (rd_set_vu_plain_only) ask anywhere;
- * ICO_RD_VU_EXTENDED=1 gives the extended ones whatever the others say.
+ * [dev] vu_set = plain (ICO_RD_VU_SET=plain), ICO_RD_VU_PLAIN=1 or the
+ * host (rd_set_vu_plain_only) ask anywhere (rd__vu_set_choose);
+ * [dev] vu_set = extended (ICO_RD_VU_SET=extended) or ICO_RD_VU_EXTENDED=1
+ * gives the extended ones whatever the others say.
  * One choice a run (g_rd.vsFallback), no key field: the program entries'
  * keys are in the start-up set only when the pre-pass is off. */
 /* Whether the picture is not the PS2's out of the box, the Original preset
@@ -2554,6 +3245,23 @@ static uint32_t vuLargest(const uint8_t *ids, uint32_t n, char *name, size_t siz
     return best;
 }
 
+int rd_pipeline_cache_file(char *out, size_t cap)
+{
+    static uint64_t key;
+    static bool made;
+    if (!made) {
+        RdCacheKey k;
+        rd_cache_key_begin(&k, RD_PIPELINE_CACHE_FORMAT);
+        for (unsigned i = 0; i < g_icoShaderCount; i++) {
+            rd_cache_key_module(&k, g_icoShaders[i].name, g_icoShaders[i].stage,
+                                g_icoShaders[i].spirv, g_icoShaders[i].spirv_len);
+        }
+        key = rd_cache_key_end(&k);
+        made = true;
+    }
+    return rd_cache_file_name(out, cap, key);
+}
+
 uint32_t rd__shader_words(const char *name)
 {
     const IcoShaderBlob *b = name ? ico_find_shader(name) : NULL;
@@ -2580,6 +3288,51 @@ uint32_t rd__shader_instructions(const char *name)
         at += len;
     }
     return n;
+}
+
+void rd__vu_set_choose(const RhiLimits *lim, bool envPlain, bool envExtended, const char *hostWhy,
+                       RdVuSetChoice *out)
+{
+    memset(out, 0, sizeof(*out));
+    out->kind = "extended set (no device-table row, no Turnip driver, no lost start, no [dev] "
+                "setting asks for the plain one)";
+    out->brief = "";
+    if (lim && lim->vuFallbackPlain) {
+        snprintf(out->why, sizeof(out->why), "on this device (%s)", lim->vuFallbackPlain);
+        out->kind = "plain set by the device table";
+        out->brief = lim->vuFallbackPlain;
+    } else if (rd__driver_is_turnip(lim)) {
+        /* Mesa's Turnip on an Adreno: a skinned draw's vertex thrown far off
+         * Ico showed as a sliver through the extended set's clipped
+         * triangles between ticks (issue 163).  The plain set drops a
+         * triangle that fails the region test and reaches into the picture
+         * (VU_RULE_DROP) where the extended one draws it clipped
+         * (VU_RULE_STRIP), so it hides such a vertex as the stock driver's
+         * row does; it does not remove its cause.  Turnip loses the card
+         * test and the tick cameras' re-test on the fallback's draws. */
+        snprintf(out->why, sizeof(out->why),
+                 "(Turnip driver: the extended set's clipped triangles showed a stray vertex "
+                 "there, issue 163; [dev] vu_set = extended asks for the extended one)");
+        out->kind = "plain set";
+        out->brief = "Turnip driver, issue 163";
+    } else if (envPlain) {
+        snprintf(out->why, sizeof(out->why),
+                 "(vu_set = plain: ICO_RD_VU_SET=plain or ICO_RD_VU_PLAIN=1)");
+        out->kind = "plain set by [dev]";
+        out->brief = "[dev] vu_set = plain";
+    } else if (hostWhy && hostWhy[0]) {
+        snprintf(out->why, sizeof(out->why), "(%s)", hostWhy);
+        out->kind = "plain set after a lost start";
+        out->brief = "after a lost start";
+    }
+    out->plain = out->why[0] != '\0';
+    if (out->plain && envExtended) {
+        out->plain = false;
+        out->overridden = true;
+        out->kind = "extended set by [dev] (vu_set = extended, ICO_RD_VU_SET=extended or "
+                    "ICO_RD_VU_EXTENDED=1)";
+        out->brief = "";
+    }
 }
 
 bool rd__vu_policy_init(const RhiLimits *lim)
@@ -2613,20 +3366,28 @@ bool rd__vu_policy_init(const RhiLimits *lim)
     /* the fallback's program entries */
     g_rd.vuFallbackPlain = false;
     g_rd.vuPlainWhy[0] = '\0';
-    if (lim && lim->vuFallbackPlain) {
-        snprintf(g_rd.vuPlainWhy, sizeof(g_rd.vuPlainWhy), "on this device (%s)",
-                 lim->vuFallbackPlain);
-    } else if (envOn("ICO_RD_VU_PLAIN")) {
-        snprintf(g_rd.vuPlainWhy, sizeof(g_rd.vuPlainWhy), "by ICO_RD_VU_PLAIN=1");
-    } else if (s_vuHostWhy[0]) {
-        snprintf(g_rd.vuPlainWhy, sizeof(g_rd.vuPlainWhy), "(%s)", s_vuHostWhy);
+    g_rd.vuPlainBrief = NULL;
+    /* PC port: the reason's kind, for the start-up line (issues 163/164: a
+     * report shows which set drew and why on its first VU line) */
+    /* [dev] vu_set (ICO_RD_VU_SET): auto (unset), plain or extended, the
+     * user's A/B of the two sets on a device the table leaves alone; the
+     * older variables ask the same */
+    const char *vuSet = getenv("ICO_RD_VU_SET");
+    const bool setPlain = vuSet && strcmp(vuSet, "plain") == 0;
+    const bool setExtended = vuSet && strcmp(vuSet, "extended") == 0;
+    if (vuSet && vuSet[0] && !setPlain && !setExtended && strcmp(vuSet, "auto") != 0) {
+        rd__log("VU shaders: ICO_RD_VU_SET=%s is not auto, plain or extended: auto", vuSet);
     }
-    bool plain = g_rd.vuPlainWhy[0] != '\0';
-    if (plain && envOn("ICO_RD_VU_EXTENDED")) {
-        rd__log("VU shaders: the fallback's plain program entries %s, but ICO_RD_VU_EXTENDED=1: "
-                "the extended ones are used",
+    RdVuSetChoice choice;
+    rd__vu_set_choose(lim, setPlain || envOn("ICO_RD_VU_PLAIN"),
+                      setExtended || envOn("ICO_RD_VU_EXTENDED"), s_vuHostWhy, &choice);
+    const char *kind = choice.kind;
+    snprintf(g_rd.vuPlainWhy, sizeof(g_rd.vuPlainWhy), "%s", choice.why);
+    bool plain = choice.plain;
+    if (choice.overridden) {
+        rd__log("VU shaders: the fallback's plain program entries %s, but [dev] vu_set = extended "
+                "(or ICO_RD_VU_EXTENDED=1): the extended ones are used",
                 g_rd.vuPlainWhy);
-        plain = false;
         g_rd.vuPlainWhy[0] = '\0';
     }
     /* the ten mesh entries' plain modules (vu_X_vs's is vu_X_plain_vs;
@@ -2648,9 +3409,11 @@ bool rd__vu_policy_init(const RhiLimits *lim)
             }
             plain = false;
             g_rd.vuPlainWhy[0] = '\0';
+            kind = "extended set (a plain module missing from this build)";
         }
     }
     g_rd.vuFallbackPlain = plain;
+    g_rd.vuPlainBrief = plain ? choice.brief : NULL;
     for (uint8_t v = RD_VS_VU_PRELIT; v <= RD_VS_VU_PARTICLE; v++) {
         g_rd.vsFallback[v] = plain && g_rd.vsPlain[v].id ? g_rd.vsPlain[v] : g_rd.vs[v];
     }
@@ -2664,11 +3427,13 @@ bool rd__vu_policy_init(const RhiLimits *lim)
     char mn[64], fn[64];
     const uint32_t mw = vuLargest(kMain, (uint32_t)sizeof(kMain), mn, sizeof(mn));
     const uint32_t fw = vuLargest(entries, (uint32_t)sizeof(entries), fn, sizeof(fn));
-    rd__log("VU shaders: the record path's modules on every device (largest %s %u words); the "
-            "fallback's program entries %s%s%s (largest %s %u words), in the start-up set only "
-            "with the vertex pre-pass off",
-            mn, mw, plain ? "plain " : "extended", plain ? g_rd.vuPlainWhy : "",
-            plain ? ": no wide-screen rule and no tick cameras on those draws" : "", fn, fw);
+    /* PC port: which set the program entries (and the draw merge's builds,
+     * rd_replay_vu.c vuMergeInit) take and why, first (issues 163/164) */
+    rd__log("VU shaders: %s%s%s: the program entries (largest %s %u words) and the mesh and grid "
+            "draws' merge builds of the same set%s; the record path's modules on every device "
+            "(largest %s %u words), in the start-up set only with the vertex pre-pass off",
+            kind, plain ? " " : "", plain ? g_rd.vuPlainWhy : "", fn, fw,
+            plain ? " (no wide-screen rule and no tick cameras on those draws)" : "", mn, mw);
     return true;
 }
 
@@ -2756,12 +3521,14 @@ RdKeyFamily rd__pipe_key_family(const RdPipeKeyInt *k)
     case RD_FS_FX_BLUR2:
     case RD_FS_FX_FRAME:
     case RD_FS_FX_LOCAL:
+    case RD_FS_FX_AURA_ROWS:
+    case RD_FS_FX_AURA_SUM:
         return RD_KF_FX;
     default:
         break;
     }
     if (k->gs.stencil == RD_STENCIL_INCR || k->gs.stencil == RD_STENCIL_DECR ||
-        k->gs.stencil == RD_STENCIL_TEST_NONZERO) {
+        k->gs.stencil == RD_STENCIL_TEST_NONZERO || k->gs.stencil == RD_STENCIL_TEST_NONZERO5) {
         return RD_KF_SHADOW;
     }
     return RD_KF_2D;
@@ -2863,7 +3630,10 @@ static uint32_t enumerateAll(RdPipeKeyInt *out, uint32_t max)
  * families among them).  With the exact blend (rd_dst_read.c) the
  * destination-read images of the blended keys join them (the plain keys
  * stay: the MSAA epoch, other formats and the storage path's Z-writing
- * discarding draws keep the fixed-function blend). */
+ * discarding draws keep the fixed-function blend).  Under GS state as
+ * shader data (rd_uber.c) a key the attachment read draws is its image
+ * alone and DATE's stencil keys are gone (rd_dst_read.c
+ * rd__enumerate_uber). */
 uint32_t rd__enumerate_reachable(RdPipeKeyInt *out, uint32_t max)
 {
     const bool dyn = g_rd.dynDepth || g_rd.dynBlend;
@@ -2881,7 +3651,9 @@ uint32_t rd__enumerate_reachable(RdPipeKeyInt *out, uint32_t max)
     RdPipeKeyInt *dst = dyn ? planned : out;
     const uint32_t dmax = dyn ? RD_PIPELINE_CACHE_MAX : max;
     uint32_t n = 0;
-    if (!g_rd.noDual && g_rd.dstMode == RD_BLEND_EXACT_OFF) {
+    if (rd__uber_on()) {
+        n = rd__enumerate_uber(raw, nk, dst, dmax, n);
+    } else if (!g_rd.noDual && g_rd.dstMode == RD_BLEND_EXACT_OFF) {
         for (uint32_t i = 0; i < nk; i++) {
             n = rd__add_pipe_key(dst, dmax, n, &raw[i]);
         }
@@ -2973,11 +3745,16 @@ uint32_t rd__enumerate_reachable_fog(RdPipeKeyInt *out, uint32_t max, uint32_t n
     }
     /* the crack filler before the fog above 1x (rd_crack_fill.c) */
     if (g_rd.fs[RD_FS_CRACK_FILL].id && g_rd.fs[RD_FS_CRACK_COUNT].id) {
-        for (int c = 0; c < 3; c++) {
-            if (c == 2 && !g_rd.fs[RD_FS_CRACK_FILL1].id) {
+        /* the fills, the count, and each fill's RGB alone (after the
+         * glow's alpha) */
+        static const int kKinds[5] = {RD_CRACK_KEY_FILL, RD_CRACK_KEY_COUNT, RD_CRACK_KEY_FILL1,
+                                      RD_CRACK_KEY_FILL | RD_CRACK_KEY_RGB,
+                                      RD_CRACK_KEY_FILL1 | RD_CRACK_KEY_RGB};
+        for (int c = 0; c < 5; c++) {
+            if ((kKinds[c] & 3) == RD_CRACK_KEY_FILL1 && !g_rd.fs[RD_FS_CRACK_FILL1].id) {
                 continue;
             }
-            const RdPipeKeyInt k = rd__crack_fill_key(c);
+            const RdPipeKeyInt k = rd__crack_fill_key(kKinds[c]);
             n = rd__add_pipe_key(out, max, n, &k);
         }
     }
@@ -3002,19 +3779,21 @@ RdPipeKeyInt rd__msaa_resolve_key(int depthOnly)
     return k;
 }
 
-RdPipeKeyInt rd__crack_fill_key(int count)
+RdPipeKeyInt rd__crack_fill_key(int kind)
 {
-    RdPipeKeyInt k = rd__post_key(RD_VS_BLIT,
-                                  count == 1 ? RD_FS_CRACK_COUNT
-                                  : count    ? RD_FS_CRACK_FILL1
-                                             : RD_FS_CRACK_FILL,
-                                  RHI_FMT_RGBA8_UNORM);
-    if (count != 1) {
-        k.depthFmt = RHI_FMT_D32F_S8;
-        k.gs.ztst = RD_ZTST_ALWAYS;
-        k.gs.zwrite = RD_ZWRITE_ON;
+    /* colour alone: the fill is drawn after lists 4-6 in a pass of SCENE's
+     * colour, its depth sampled (rd_crack_fill.c fillWork); after the
+     * glow's sprites of SCENE's alpha its RGB alone (RD_CRACK_KEY_RGB) */
+    const int k = kind & 3;
+    RdPipeKeyInt key = rd__post_key(RD_VS_BLIT,
+                                    k == RD_CRACK_KEY_COUNT   ? RD_FS_CRACK_COUNT
+                                    : k == RD_CRACK_KEY_FILL1 ? RD_FS_CRACK_FILL1
+                                                              : RD_FS_CRACK_FILL,
+                                    RHI_FMT_RGBA8_UNORM);
+    if ((kind & RD_CRACK_KEY_RGB) && k != RD_CRACK_KEY_COUNT) {
+        key.gs.colorMask = 7u;
     }
-    return k;
+    return key;
 }
 
 /* --------------------------------------------------------------- DATE */
@@ -3055,7 +3834,8 @@ bool rd__date_stencil_pass(RdDrawPass *p)
  * lines, Z write on and off, every blend the families list, the scene
  * depth, sprite_ps and its TEXA twin); the VU draws' twins of the
  * enumerated VU keys under Z GEQUAL with the scene depth (the list 4
- * default: DATM 1); the PRIM.AA1 strips' DATM 1 pairs (TEST1 and
+ * default: DATM 1; not the keys of a material TEST's RGB_ONLY half, whose
+ * TEST has no DATE); the PRIM.AA1 strips' DATM 1 pairs (TEST1 and
  * TEST1_CLR); and the two setup keys (RGBA8: the scene class).
  * Keys missing here are made on first use. */
 uint32_t rd__enumerate_reachable_date(RdPipeKeyInt *out, uint32_t max, uint32_t n)
@@ -3109,8 +3889,10 @@ uint32_t rd__enumerate_reachable_date(RdPipeKeyInt *out, uint32_t max, uint32_t 
         const RdPipeKeyInt *k = &out[i];
         const int vu =
             (k->vs >= RD_VS_VU_FIRST && k->vs <= RD_VS_VU_LAST) || rd__vs_is_vu_main(k->vs);
+        /* not the RGB_ONLY halves (mask 7: rd_mesh.c enumerateVuDraws): a
+         * material's own TEST takes the list 4 default's place, DATE with it */
         if (vu && k->depthFmt != RHI_FMT_UNKNOWN && k->gs.stencil == RD_STENCIL_OFF &&
-            k->gs.ztst == RD_ZTST_GEQUAL && k->dst == RHI_DST_READ_NONE) {
+            k->gs.ztst == RD_ZTST_GEQUAL && k->dst == RHI_DST_READ_NONE && k->gs.colorMask == 0xF) {
             RdPipeKeyInt t = *k;
             t.gs.stencil = RD_STENCIL_DATE_TEST1;
             n = rd__add_pipe_key(out, max, n, &t);
@@ -3186,18 +3968,20 @@ RdPipeKeyInt rd__shadow_count_key(void)
     return rd__post_key(RD_VS_BLIT, RD_FS_SHADOW_COUNT, RHI_FMT_RGBA8_UNORM);
 }
 
-RdPipeKeyInt rd__shadow_resolve_key(int pass)
+RdPipeKeyInt rd__shadow_resolve_key(int pass, uint32_t step)
 {
     RdPipeKeyInt k = rd__post_key(RD_VS_BLIT, RD_FS_BLIT, RHI_FMT_RGBA8_UNORM);
     k.depthFmt = RHI_FMT_D32F_S8;
     if (pass < 6) {
-        /* additive (ONE, ONE): the six bits' 4 << k sum to 4 n, at most 252 */
+        /* additive (ONE, ONE): the six bits' 4 << k sum to 4 n, at most
+         * 252, the step 8's five bits' 8 << k to 8 n, at most 248 (the
+         * colour is the DrawCB's: the bit keys are the same for both) */
         k.gs.blend = RD_BLEND_CS_AS_ADD_CD;
         k.gs.colorMask = 0x7;
         k.gs.stencil = (uint8_t)(RD_STENCIL_RESOLVE_BIT0 + pass);
     } else {
         k.gs.colorMask = 0x8;
-        k.gs.stencil = RD_STENCIL_TEST_NONZERO;
+        k.gs.stencil = step == 8 ? RD_STENCIL_TEST_NONZERO5 : RD_STENCIL_TEST_NONZERO;
     }
     return k;
 }
@@ -3212,8 +3996,14 @@ uint32_t rd__enumerate_reachable_shadow(RdPipeKeyInt *out, uint32_t max, uint32_
         n = rd__add_pipe_key(out, max, n, &k);
     }
     for (int p = 0; p < RD_SHADOW_RESOLVE_PASSES; p++) {
-        const RdPipeKeyInt k = rd__shadow_resolve_key(p);
+        const RdPipeKeyInt k = rd__shadow_resolve_key(p, 4);
         n = rd__add_pipe_key(out, max, n, &k);
+    }
+    /* the step 8's A pass where the running disc counts by 8 (its bit
+     * passes are the step 4's keys); the European set keeps its count */
+    if (rd__shadow_disc_step() == 8) {
+        const RdPipeKeyInt k8 = rd__shadow_resolve_key(RD_SHADOW_RESOLVE_PASSES - 1, 8);
+        n = rd__add_pipe_key(out, max, n, &k8);
     }
     const RdPipeKeyInt kr = rd__shadow_reduce_key(); /* box reduction to the GS size */
     n = rd__add_pipe_key(out, max, n, &kr);
@@ -3223,6 +4013,17 @@ uint32_t rd__enumerate_reachable_shadow(RdPipeKeyInt *out, uint32_t max, uint32_
     if (g_rd.profile.shadowOne && g_rd.fs[RD_FS_SHADOW_COUNT].id) {
         const RdPipeKeyInt k1 = rd__shadow_count_key();
         n = rd__add_pipe_key(out, max, n, &k1);
+        /* the self-test's volumes (rd_shadow_selftest.c SB_TEST: TEST
+         * 0x30000, every face counts), into SCENE's RGBA8 colour: the
+         * phone's two first-use lines in list 3 at start (ztst 1, stencil 1
+         * and 2) */
+        RdStateBlock sa;
+        rd__reset_state_block(&sa);
+        sa.ds.test = rd_test_from_gs(RD_TEST_Z_ALWAYS);
+        for (int decr = 0; decr < 2; decr++) {
+            const RdPipeKeyInt kt = rd__shadow_volume_key(&sa, RHI_FMT_RGBA8_UNORM, decr);
+            n = rd__add_pipe_key(out, max, n, &kt);
+        }
     }
     return n;
 }
@@ -3380,29 +4181,8 @@ uint32_t rd__enumerate_reachable_screen(RdPipeKeyInt *out, uint32_t max)
         const RdPipeKeyInt clear = rd__date_setup_key(RD_STENCIL_DATE_CLEAR, RHI_FMT_RGBA8_UNORM);
         n = rd__add_pipe_key(out, max, n, &clear);
     }
-    /* the presentation overlay on the headless output and the
-     * swapchain (sprites and triangles; the popups' blend and the glow's) */
+    n = rd__enumerate_reachable_overlay(out, max, n);
     static const uint8_t kOverlayBlends[] = {RD_BLEND_LERP_AS, RD_BLEND_CS_AS_ADD_CD};
-    static const RhiFormat kOutFormats[] = {RHI_FMT_RGBA8_UNORM, RHI_FMT_BGRA8_UNORM};
-    for (size_t f = 0; f < 2; f++) {
-        for (size_t b = 0; b < 2; b++) {
-            RdStateBlock s;
-            rd__overlay_state(&s, kOverlayBlends[b]);
-            RdDrawPass dp[2];
-            const int np = rd__plan_screen_draw(&s, RD_PRIM_TRIANGLES, RD_SPACE_UI, kOutFormats[f],
-                                                RHI_FMT_UNKNOWN, dp);
-            for (int i = 0; i < np; i++) {
-                n = rd__add_pipe_key(out, max, n, &dp[i].key);
-                /* the font atlas on the overlay (font_ps) */
-                dp[i].key.fs = RD_FS_FONT;
-                n = rd__add_pipe_key(out, max, n, &dp[i].key);
-                /* the popups' and the photo panel's sheet text
-                 * (font_sheet_ps) */
-                dp[i].key.fs = RD_FS_FONT_SHEET;
-                n = rd__add_pipe_key(out, max, n, &dp[i].key);
-            }
-        }
-    }
     /* the port's text in the frame (port/ui/font.c setState:
      * TEST 0x30000, no Z write, ALPHA 0x44 or 0x48; UI_KEEP_STATE keeps the
      * layout packet's, which differs only in the alpha test, a uniform)
@@ -3419,10 +4199,12 @@ uint32_t rd__enumerate_reachable_screen(RdPipeKeyInt *out, uint32_t max)
             const int np = rd__plan_screen_draw(&s, RD_PRIM_TRIANGLES, RD_SPACE_UI,
                                                 RHI_FMT_RGBA8_UNORM, kDepth[dz], dp);
             for (int i = 0; i < np; i++) {
-                /* the menus' sheet text (font_sheet_ps) in the same
-                 * states */
-                for (int sh = 0; sh < 2; sh++) {
-                    dp[i].key.fs = sh ? RD_FS_FONT_SHEET : RD_FS_FONT;
+                /* the menus' sheet text (font_sheet_ps, and
+                 * font_sheet_baked_ps at 1x) in the same states */
+                for (int sh = 0; sh < 3; sh++) {
+                    dp[i].key.fs = sh == 2   ? RD_FS_FONT_SHEET_BAKED
+                                   : sh == 1 ? RD_FS_FONT_SHEET
+                                             : RD_FS_FONT;
                     dp[i].key.gs.colorMask = 0xF;
                     n = rd__add_pipe_key(out, max, n, &dp[i].key);
                     dp[i].key.gs.colorMask = 0x7; /* under the dark volume's FBMSK, as above */
@@ -3438,12 +4220,51 @@ uint32_t rd__enumerate_reachable_screen(RdPipeKeyInt *out, uint32_t max)
     n = rd__add_pipe_key(out, max, n, &dateSnap);
     n = rd__add_pipe_key(out, max, n, &blitA);
     n = rd__add_pipe_key(out, max, n, &blitB);
-    /* the box blit with the effects depth, on both outputs */
-    const RdPipeKeyInt depthA = rd__present_depth_key(RHI_FMT_RGBA8_UNORM);
-    const RdPipeKeyInt depthB = rd__present_depth_key(RHI_FMT_BGRA8_UNORM);
-    n = rd__add_pipe_key(out, max, n, &depthA);
-    n = rd__add_pipe_key(out, max, n, &depthB);
+    /* the present's box average of DISPLAY into an RGBA8 texture of the box's
+     * (or the game's own) size (rd_present.c reduceInto: supersampling, a
+     * scaled scene with more texels than the box has pixels, Downsampling) */
+    const RdPipeKeyInt reduce = rd__post_key(RD_VS_BLIT, RD_FS_AA_REDUCE, RHI_FMT_RGBA8_UNORM);
+    n = rd__add_pipe_key(out, max, n, &reduce);
+    /* the box blit with the effects depth, on both outputs (not where the
+     * device cannot draw to a D32F depth buffer: a render pass with that
+     * attachment is invalid there) */
+    if (!g_rd.hasDevice || rhi_limits()->depth32Attachment) {
+        const RdPipeKeyInt depthA = rd__present_depth_key(RHI_FMT_RGBA8_UNORM);
+        const RdPipeKeyInt depthB = rd__present_depth_key(RHI_FMT_BGRA8_UNORM);
+        n = rd__add_pipe_key(out, max, n, &depthA);
+        n = rd__add_pipe_key(out, max, n, &depthB);
+    }
     n = rd__add_pipe_key(out, max, n, &exact);
+    return n;
+}
+
+/* the presentation overlay on the headless output and the swapchain
+ * (sprites and triangles; the popups' blend and the glow's) */
+uint32_t rd__enumerate_reachable_overlay(RdPipeKeyInt *out, uint32_t max, uint32_t n)
+{
+    static const uint8_t kOverlayBlends[] = {RD_BLEND_LERP_AS, RD_BLEND_CS_AS_ADD_CD};
+    static const RhiFormat kOutFormats[] = {RHI_FMT_RGBA8_UNORM, RHI_FMT_BGRA8_UNORM};
+    for (size_t f = 0; f < 2; f++) {
+        for (size_t b = 0; b < 2; b++) {
+            RdStateBlock s;
+            rd__overlay_state(&s, kOverlayBlends[b]);
+            RdDrawPass dp[2];
+            const int np = rd__plan_screen_draw(&s, RD_PRIM_TRIANGLES, RD_SPACE_UI, kOutFormats[f],
+                                                RHI_FMT_UNKNOWN, dp);
+            for (int i = 0; i < np; i++) {
+                n = rd__add_pipe_key(out, max, n, &dp[i].key);
+                /* the font atlas on the overlay (font_ps) */
+                dp[i].key.fs = RD_FS_FONT;
+                n = rd__add_pipe_key(out, max, n, &dp[i].key);
+                /* the popups' and the photo panel's sheet text
+                 * (font_sheet_ps; font_sheet_baked_ps at 1x) */
+                dp[i].key.fs = RD_FS_FONT_SHEET;
+                n = rd__add_pipe_key(out, max, n, &dp[i].key);
+                dp[i].key.fs = RD_FS_FONT_SHEET_BAKED;
+                n = rd__add_pipe_key(out, max, n, &dp[i].key);
+            }
+        }
+    }
     return n;
 }
 
@@ -3508,6 +4329,7 @@ uint32_t rd__enumerate_reachable_blur(RdPipeKeyInt *out, uint32_t max, uint32_t 
         const RdPipeKeyInt k = rd__blur_fold_key(&s, RHI_FMT_RGBA8_UNORM);
         n = rd__add_pipe_key(out, max, n, &k);
     }
+    n = rd__aura_box_keys(out, max, n);   /* the aura's read in two passes (rd_aura_box.c) */
     return rd__fx_enumerate(out, max, n); /* the frame-size post sprites (rd_fx_plan.c) */
 }
 

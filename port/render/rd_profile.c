@@ -38,6 +38,24 @@
  *                 (fx_local_ps, rd_fx_plan.c)
  *   vuPlanesFrac  on on every class: the VU pixel side without the planes
  *                 at a fractional scale (rd_pixel_plan.c)
+ *   auraBox       on on the tile-based classes (Adreno, Mali, PowerVR,
+ *                 Apple, another tiler), off on desktop Vulkan, D3D12,
+ *                 D3D11 and OpenGL: the aura's read of SCENE into FEED128
+ *                 above 1x in two passes, the same bytes (rd_aura_box.c;
+ *                 [dev] aura_box = auto|on|off, read there; the start line
+ *                 ends "; aura box: two passes" or "; aura box: one pass")
+ *   passArea      on on the tile-based classes, off on desktop Vulkan,
+ *                 D3D12, D3D11 and OpenGL: a pass on a target with a depth
+ *                 whose draws are all 2D and known before it begins gets a
+ *                 render area of the tiles they touch (rd_pass_area.c;
+ *                 [dev] pass_area = auto|on|off, read there; the start
+ *                 line ends "; pass area: on" or "; pass area: off")
+ *   passCut       on on the tile-based classes, off on the others: a
+ *                 pending clear carried into the next pass, a clear
+ *                 nothing reads not drawn, the depth store of the pass
+ *                 holding its last touch dropped (rd_pass_cut.c; [dev]
+ *                 clear_carry, clear_skip, last_store = auto|on|off, read
+ *                 there, each with its start line)
  *   crackFill     on on every class (the crack filler above 1x,
  *                 rd_crack_fill.c: on the local read's path it draws in
  *                 the pass the fog then keeps, so a tile-based GPU pays
@@ -71,8 +89,9 @@
  * vendor (neither backend reports a tiler: gl_device.c, d3d11_device.c);
  * what differs from desktop Vulkan comes from their limits, not the class:
  * no UINT view on D3D11 (uintView false: both uint views off), the VU
- * vertex pre-pass off on D3D11 (colorBytesPerPixel 32, rd_replay_vu.c
- * rd__vu_prepass_init) and on on OpenGL (0), no local read on either
+ * vertex pre-pass on on both (colorBytesPerPixel 0, rd_replay_vu.c
+ * rd__vu_prepass_init; on D3D11 its record copies are a compute shader,
+ * d3d11_cmd.c, since v0.10.0), no local read on either
  * (docs/port/BACKENDS.md), so none of the local reads.
  *
  * The Mali row keeps the blur fold off: the G52 is bound by its ALU, which
@@ -199,6 +218,11 @@ static bool hasWord(const char *s, const char *word)
     return false;
 }
 
+bool rd__driver_is_turnip(const RhiLimits *lim)
+{
+    return lim != NULL && hasWord(lim->driverText, "turnip");
+}
+
 static ProfileClass classOf(const RhiLimits *lim)
 {
     switch (rhi_backend()) {
@@ -220,7 +244,7 @@ static ProfileClass classOf(const RhiLimits *lim)
          * the driver text (VkPhysicalDeviceDriverProperties.driverName
          * "turnip Mesa driver", RhiLimits.driverText); Qualcomm's own
          * driver does not */
-        return hasWord(lim->driverText, "turnip") ? PC_ADRENO_TURNIP : PC_ADRENO_QUALCOMM;
+        return rd__driver_is_turnip(lim) ? PC_ADRENO_TURNIP : PC_ADRENO_QUALCOMM;
     case VENDOR_ARM:
         return PC_MALI;
     case VENDOR_IMAGINATION:
@@ -342,6 +366,22 @@ void rd__profile_init(void)
     const bool stencilView = lim->stencilView && lim->depthSampled;
     p->shadowOne = stencilView;
     p->shadowBspline = false; /* one bilinear tap above 1x (rd__sprite_above1x) */
+    /* the aura's read in two passes on the tile-based classes, where its
+     * one long loop a texel was measured (rd_aura_box.c reads
+     * ICO_RD_AURA_BOX over it) */
+    p->auraBox = tile;
+    /* the pass area on the tile-based classes, where a pass loads and
+     * stores its target's tiles (rd_pass_area.c reads ICO_RD_PASS_AREA
+     * over it) */
+    p->passArea = tile;
+    /* the passes cut on the tile-based classes, where a pass's loads and
+     * stores cost most (rd_pass_cut.c reads ICO_RD_CLEAR_CARRY,
+     * ICO_RD_CLEAR_SKIP and ICO_RD_LAST_STORE over it) */
+    p->passCut = tile;
+    /* the shadow volumes in the scene's open pass on the tile-based
+     * classes, where their own pass loaded and stored the scene's depth
+     * (rd_shadow_merge.c reads ICO_RD_SHADOW_MERGE over it, the tests') */
+    p->shadowMerge = tile;
 
     /* the [dev] keys, through the host's environment */
     const char *notHere = NULL; /* a [dev] key asked for what the device lacks */
@@ -461,11 +501,14 @@ void rd__profile_init(void)
     const int asked = rd__dst_asked_env();
     const bool exact = (asked == RD_BLEND_EXACT_ATTACHMENT && lim->rasterOrderAttachment) ||
                        (asked == RD_BLEND_EXACT_STORAGE && (lim->fragmentInterlock || lim->rov));
+    /* the ask is [dev] blend's, or GS state as shader data's (rd_uber.c) */
+    const char *blendAsk = getenv("ICO_RD_BLEND");
+    const char *exactMark = blendAsk && blendAsk[0] ? " ([dev])" : " (GS state as shader data)";
     rd__log("profile: %s: blend %s%s; fog local %s%s; DATE %s%s; depth stores %s%s; blur fold "
             "%s%s; robust access %s; local read %s; uint views %s%s; alpha plan %s%s; fx plan "
             "%s%s; fx local read %s%s; VU planes %s%s; shadow count %s%s; shadow edges: %s%s; "
-            "pipelines the start-up set%s%s%s",
-            p->cls, exact ? rd__blend_exact_name(asked) : "fixed-function", exact ? " ([dev])" : "",
+            "pipelines the start-up set%s%s%s; %s; %s; %s",
+            p->cls, exact ? rd__blend_exact_name(asked) : "fixed-function", exact ? exactMark : "",
             p->fogLocal ? "on" : "off", mark(p, RD_PROFILE_FOG_LOCAL),
             p->dateStencil ? "stencil" : "snapshot", mark(p, RD_PROFILE_DATE_STENCIL),
             storeWords(p), mark(p, RD_PROFILE_STORE_PLAN), p->blurFold ? "on" : "off",
@@ -482,7 +525,8 @@ void rd__profile_init(void)
             p->fxDstLocal ? "on" : "off", mark(p, RD_PROFILE_FX_DST_LOCAL), planesWords(p),
             mark(p, RD_PROFILE_VU_PLANES), shadowWords(p), mark(p, RD_PROFILE_SHADOW_ONE),
             edgeWords(p), mark(p, RD_PROFILE_SHADOW_BSPLINE), p->carefulSet ? " (careful)" : "",
-            p->localWords[0] ? "; desktop local read " : "", p->localWords);
+            p->localWords[0] ? "; desktop local read " : "", p->localWords,
+            rd__uber_profile_words(), rd__aura_box_profile_words(), rd__pass_area_profile_words());
     if (notHere) {
         rd__log("profile: %s: not on this device, the flag stays off", notHere);
     }

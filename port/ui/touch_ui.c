@@ -15,6 +15,7 @@
 #include <string.h>
 
 #include "touch.h"
+#include "touch_gap.h"
 #include "touch_edit.h" /* the editor's keys (ICO_TOUCH_ED_*) */
 
 #ifdef ICO_RD
@@ -37,6 +38,13 @@ static int (*s_source)(struct IcoTouchOverlay *out);
 void ui_touch_set_source(int (*fn)(struct IcoTouchOverlay *out))
 {
     s_source = fn;
+}
+
+static int (*s_layoutSource)(struct IcoTouchLayout *out);
+
+void ui_touch_set_layout_source(int (*fn)(struct IcoTouchLayout *out))
+{
+    s_layoutSource = fn;
 }
 
 #ifdef ICO_RD
@@ -1105,7 +1113,8 @@ void ui_touch_draw_overlay(const struct RdOverlayCtx *ctx)
     }
 }
 
-int ui_touch_top_gap(const struct RdOverlayCtx *ctx, float *x0, float *x1, float *y0)
+int ui_touch_top_gap(const struct RdOverlayCtx *ctx, float margin, float bandH, float natW,
+                     float minW, float *x0, float *x1, float *y0)
 {
     IcoTouchOverlay o;
 
@@ -1115,15 +1124,34 @@ int ui_touch_top_gap(const struct RdOverlayCtx *ctx, float *x0, float *x1, float
     }
     const float kx = (float)ctx->outW / (float)o.layout.outW;
     const float ky = (float)ctx->outH / (float)o.layout.outH;
-    const float q = o.layout.unit;
-    const IcoTouchRect *sel = &o.layout.button[ICO_TOUCH_B_SELECT].rect;
+    float lx0, lx1, ly0;
 
-    /* the default layout (touch.c): the D-pad's Up key ends at L+33 q, Select
-       starts at the middle less 13 q; L2 sits in the corner before them and
-       the keys' row is T+3 q.  Two q of air on each side. */
-    *x0 = (o.layout.region.x + 35.0f * q) * kx;
-    *x1 = (sel->w > 0.0f ? sel->x - 2.0f * q : o.layout.region.x + o.layout.region.w) * kx;
-    *y0 = (o.layout.region.y + 3.0f * q) * ky;
+    /* the player's actual layout (edits applied): touch_gap.c */
+    if (!ico_touch_fps_place(&o.layout, margin / kx, margin / ky, bandH / ky, natW / kx, minW / kx,
+                             &lx0, &lx1, &ly0)) {
+        return 0;
+    }
+    *x0 = lx0 * kx;
+    *x1 = lx1 * kx;
+    *y0 = ly0 * ky;
+    return 1;
+}
+
+int ui_touch_safe_corner(const struct RdOverlayCtx *ctx, float margin, float *x, float *y)
+{
+    IcoTouchLayout l;
+
+    if (!ctx || !s_layoutSource || !s_layoutSource(&l) || l.outW == 0 || l.outH == 0 ||
+        ctx->outW == 0 || ctx->outH == 0) {
+        return 0;
+    }
+    const float kx = (float)ctx->outW / (float)l.outW;
+    const float ky = (float)ctx->outH / (float)l.outH;
+    float lx, ly;
+
+    ico_touch_fps_corner(&l, margin / kx, margin / ky, &lx, &ly);
+    *x = lx * kx;
+    *y = ly * ky;
     return 1;
 }
 
@@ -1134,12 +1162,26 @@ void ui_touch_draw_overlay(const struct RdOverlayCtx *ctx)
     (void)ctx;
 }
 
-int ui_touch_top_gap(const struct RdOverlayCtx *ctx, float *x0, float *x1, float *y0)
+int ui_touch_top_gap(const struct RdOverlayCtx *ctx, float margin, float bandH, float natW,
+                     float minW, float *x0, float *x1, float *y0)
 {
     (void)ctx;
+    (void)margin;
+    (void)bandH;
+    (void)natW;
+    (void)minW;
     (void)x0;
     (void)x1;
     (void)y0;
+    return 0;
+}
+
+int ui_touch_safe_corner(const struct RdOverlayCtx *ctx, float margin, float *x, float *y)
+{
+    (void)ctx;
+    (void)margin;
+    (void)x;
+    (void)y;
     return 0;
 }
 

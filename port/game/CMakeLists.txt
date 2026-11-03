@@ -16,8 +16,11 @@
 # the debug switches and debug-menu opener the game binds, the hint rule and the
 # enemy row reader (variants.h); it names no game symbol (the game library is
 # linked before this one)
+# yorda_trip.c: Yorda trips' rule, its random numbers and their save state
+# blocks ([gameplay] yorda_trips, yorda_trip.h); the game's side is
+# yorda_trip_live.c below
 add_library(ico_options STATIC options.c video_options.c photo_mode.c appearance.c door_grace.c
-            variants.c)
+            variants.c yorda_trip.c)
 target_include_directories(ico_options PUBLIC "${CMAKE_CURRENT_SOURCE_DIR}"
                            "${CMAKE_SOURCE_DIR}/port/render")
 target_compile_options(ico_options PRIVATE ${ICO_SEMANTIC_OPTIONS} ${ICO_PORT_WARNINGS})
@@ -29,13 +32,22 @@ endif()
 
 # Defaults are the original behaviour, the config and run-time setters, and
 # eBrainGetTarget (ico2/omori/src/ebrain.c, compiled into the test) under the
-# yorda_safe hook, and pit_time's ratio and its four hooks in enemy_act.c (a text scan).
+# yorda_safe hook, and pit_time's ratio and its four hooks in enemy_act.c (a text scan),
+# and shadow_speed's hook in act-game.c, its three pushes in commonact.c and its record key in
+# main_host.c (text scans), and yorda_trips' four hooks in girl_act.c (this disc's mail
+# among them), its two in icoMisc.c and its simulation key (text scans).
 add_executable(options_test test/options_test.c ../platform/host_config.c)
 ico_include_dirs(omori _ico_options_incs)
 target_include_directories(options_test PRIVATE ${_ico_options_incs}
     "${CMAKE_SOURCE_DIR}/port/platform")
 target_compile_definitions(options_test PRIVATE ${ICO_GAME_DEFINITIONS}
-    ICO_ENEMY_ACT_SRC="${CMAKE_SOURCE_DIR}/ico2/fumi/src/enemy_act.c")
+    ICO_ENEMY_ACT_SRC="${CMAKE_SOURCE_DIR}/ico2/fumi/src/enemy_act.c"
+    ICO_ACT_GAME_SRC="${CMAKE_SOURCE_DIR}/ico2/fumi/src/act-game.c"
+    ICO_COMMONACT_SRC="${CMAKE_SOURCE_DIR}/ico2/fumi/src/commonact.c"
+    ICO_MAIN_HOST_SRC="${CMAKE_SOURCE_DIR}/port/platform/main_host.c"
+    ICO_SIM_KEYS_SRC="${CMAKE_SOURCE_DIR}/port/platform/sim_keys.c"
+    ICO_GIRL_ACT_SRC="${CMAKE_SOURCE_DIR}/ico2/fumi/src/girl_act.c"
+    ICO_ICOMISC_SRC="${CMAKE_SOURCE_DIR}/ico2/common/src/icoMisc.c")
 target_compile_options(options_test PRIVATE ${ICO_SEMANTIC_OPTIONS} ${ICO_GAME_LAYOUT_OPTIONS}
                        ${ICO_GAME_WARNINGS} -Wno-unused-parameter -Wno-unused-variable
                        -Wno-unused-function)
@@ -57,6 +69,86 @@ if(ICO_RUN_TESTS)
     endforeach()
 endif()
 
+# The twenty words a load keeps across gflagInit on each disc
+# (ico2/common/src/layout_action.c, compiled into the test whole, the rest of
+# the game it names stubbed by keep_flags_stubs.c): the disc's own five
+# game-flag ids and the words after them in its .data, the fifth the disc's
+# new-game flag, all below its flag count (issue 160).  CPU only.
+add_executable(keep_flags_test test/keep_flags_test.c test/keep_flags_stubs.c
+    "${CMAKE_SOURCE_DIR}/ico2/common/src/layout_action.c")
+ico_include_dirs(common _ico_keep_flags_incs)
+target_include_directories(keep_flags_test PRIVATE ${_ico_keep_flags_incs}
+    "${CMAKE_SOURCE_DIR}/port/include" "${CMAKE_SOURCE_DIR}/port/ui")
+target_compile_definitions(keep_flags_test PRIVATE ${ICO_GAME_DEFINITIONS})
+target_compile_options(keep_flags_test PRIVATE ${ICO_SEMANTIC_OPTIONS} ${ICO_GAME_LAYOUT_OPTIONS}
+                       ${ICO_GAME_WARNINGS})
+target_link_libraries(keep_flags_test PRIVATE ico_region)
+if(ICO_RUN_TESTS)
+    add_test(NAME keep_flags COMMAND keep_flags_test pal)
+    foreach(_slug jpn kor cn ntsc aug6 jun26)
+        add_test(NAME keep_flags_${_slug} COMMAND keep_flags_test ${_slug})
+    endforeach()
+endif()
+
+# The record every torch starts from on each disc (ico2/sugipon/src/torch.c,
+# compiled into the test whole, what it names from the rest of the game stubbed
+# in the test): a torch lit at its layout stays lit (life 65536) and puts out
+# only its own flame effects; the 2001 discs' record once landed with life 0
+# and every effect slot 0 (issue 160, the candles that never burned).  CPU only.
+add_executable(torch_work_test test/torch_work_test.c
+    "${CMAKE_SOURCE_DIR}/ico2/sugipon/src/torch.c")
+ico_include_dirs(sugipon _ico_torch_work_incs)
+target_include_directories(torch_work_test PRIVATE ${_ico_torch_work_incs}
+    "${CMAKE_SOURCE_DIR}/port/include")
+target_compile_definitions(torch_work_test PRIVATE ${ICO_GAME_DEFINITIONS})
+target_compile_options(torch_work_test PRIVATE ${ICO_SEMANTIC_OPTIONS} ${ICO_GAME_LAYOUT_OPTIONS}
+                       ${ICO_GAME_WARNINGS})
+target_link_libraries(torch_work_test PRIVATE ico_region)
+if(ICO_RUN_TESTS)
+    add_test(NAME torch_work COMMAND torch_work_test pal)
+    foreach(_slug jpn kor cn ntsc aug6 jun26)
+        add_test(NAME torch_work_${_slug} COMMAND torch_work_test ${_slug})
+    endforeach()
+endif()
+
+# The shadows' eye trails rebuilt from their world points
+# (port/game/eye_trail.c) against the strip the game's own UpdatePointBlur
+# writes (ico2/sugipon/src/enemyParts.c, compiled into the test whole, what
+# it names from the rest of the game stubbed in the test), on each disc
+# (the trail's reset rule differs by disc): the same matrices give the
+# game's strip byte for byte, a moved camera a direct recomputation, and
+# DispEnemyEye draws the rebuilt strip only while photo mode's camera has
+# moved.  CPU only.
+add_executable(eye_trail_test test/eye_trail_test.c eye_trail.c
+    "${CMAKE_SOURCE_DIR}/ico2/sugipon/src/enemyParts.c"
+    "${CMAKE_SOURCE_DIR}/ico2/sugipon/src/tableSin.c")
+ico_include_dirs(sugipon _ico_eye_trail_incs)
+target_include_directories(eye_trail_test PRIVATE ${_ico_eye_trail_incs}
+    "${CMAKE_SOURCE_DIR}/port/include" "${CMAKE_CURRENT_SOURCE_DIR}")
+if(NOT ICO_HEADLESS)
+    target_include_directories(eye_trail_test PRIVATE "${CMAKE_SOURCE_DIR}/port/render")
+endif()
+target_compile_definitions(eye_trail_test PRIVATE ${ICO_GAME_DEFINITIONS})
+target_compile_options(eye_trail_test PRIVATE ${ICO_SEMANTIC_OPTIONS} ${ICO_GAME_LAYOUT_OPTIONS}
+                       ${ICO_GAME_WARNINGS})
+target_link_libraries(eye_trail_test PRIVATE ico_region ico_math)
+if(ICO_RUN_TESTS)
+    add_test(NAME eye_trail COMMAND eye_trail_test pal)
+    foreach(_slug jpn kor cn ntsc aug6 jun26)
+        add_test(NAME eye_trail_${_slug} COMMAND eye_trail_test ${_slug})
+    endforeach()
+endif()
+
+# Where each disc's ACTGetEnvironment reads the two-bit wall-reach field of a
+# motion record (ico2/fumi/src/act-env.c, a text scan + synthetic words): the
+# host holds it at bits 24-25 on every disc (config/motion_bits.*.txt), so
+# every twin shifts by 6; the June 2001 demo's once read the item mode.  CPU only.
+add_executable(env_bits_test test/env_bits_test.c)
+target_compile_options(env_bits_test PRIVATE ${ICO_SEMANTIC_OPTIONS} ${ICO_GAME_WARNINGS})
+if(ICO_RUN_TESTS)
+    add_test(NAME env_bits COMMAND env_bits_test "${CMAKE_SOURCE_DIR}")
+endif()
+
 # IsPointIsInScreen's x bound (ico2/omori/src/poly-flat.c, compiled into the
 # test) at gsFrame.w = 512 and wider: the PS2's 4:3 window at every width
 # (its callers are camera decisions, and the camera is the original's).  Stubs for the
@@ -69,6 +161,107 @@ target_compile_options(poly_flat_test PRIVATE ${ICO_SEMANTIC_OPTIONS} ${ICO_GAME
                        -Wno-unused-function)
 if(ICO_RUN_TESTS)
     add_test(NAME poly_flat COMMAND poly_flat_test)
+endif()
+
+# The blended camera's wall rule (port/game/camera_wall.c): a segment
+# against one wall (through it either way, past its ends and over its top
+# within the radius, a sloped bottom) and one floor (down and up through it,
+# its rim, a triangle), and the rule at each flip (no eye before, a crossing,
+# a free path, the reverse crossing, a pending cut and photo mode not asked,
+# a still eye and a step past the presenter's limit not asked, forgetting).
+# CPU only, no game sources.
+add_executable(camera_wall_test test/camera_wall_test.c camera_wall.c)
+target_include_directories(camera_wall_test PRIVATE "${CMAKE_CURRENT_SOURCE_DIR}"
+                           "${CMAKE_SOURCE_DIR}/port/render")
+target_compile_options(camera_wall_test PRIVATE ${ICO_SEMANTIC_OPTIONS} ${ICO_PORT_WARNINGS})
+if(NOT WIN32)
+    target_link_libraries(camera_wall_test PRIVATE m)
+endif()
+if(ICO_RUN_TESTS)
+    add_test(NAME camera_wall COMMAND camera_wall_test)
+endif()
+
+# The live wall check (port/game/camera_wall_stage.c) over a synthetic stage
+# in a stand-in arena, with the game's records (GObj, Sub15C, the collision
+# set's head, walls, floors, block grids as EE words) and the object table's
+# walk stubbed in the test: a wall placed by its node's translation, a floor
+# under a turned node, the second node of a per-node set, the collision list's
+# filter and the skipped wall attributes, records outside the arena not read,
+# the arena and the object table unchanged after every check, the log line
+# and its Frame rate gate, a pending cut, photo mode, forgetting. CPU only.
+add_executable(camera_wall_stage_test test/camera_wall_stage_test.c camera_wall.c
+               camera_wall_stage.c)
+ico_include_dirs(fumi _ico_cw_test_incs)
+target_include_directories(camera_wall_stage_test PRIVATE "${CMAKE_CURRENT_SOURCE_DIR}"
+                           "${CMAKE_SOURCE_DIR}/port/render" "${CMAKE_SOURCE_DIR}/port/platform"
+                           ${_ico_cw_test_incs})
+target_compile_definitions(camera_wall_stage_test PRIVATE ${ICO_GAME_DEFINITIONS})
+target_compile_options(camera_wall_stage_test PRIVATE ${ICO_SEMANTIC_OPTIONS}
+                       ${ICO_GAME_LAYOUT_OPTIONS} ${ICO_PORT_WARNINGS} -Wno-strict-prototypes)
+target_link_libraries(camera_wall_stage_test PRIVATE ico_math)
+if(NOT WIN32)
+    target_link_libraries(camera_wall_stage_test PRIVATE m)
+endif()
+if(ICO_RUN_TESTS)
+    add_test(NAME camera_wall_stage COMMAND camera_wall_stage_test)
+endif()
+
+# Yorda trips (port/game/yorda_trip.h): the rule (yorda_trip.c, through
+# ico_options), the game's side (yorda_trip_live.c) and the motion reader
+# (yorda_trip_source.c) compiled in, the game, the disc and its pack index
+# stubbed in the test: the disc's motions by name, the run count and its gap
+# reset, the main gate scene's 3 s rule at 25 and 30 ticks a second (the trip
+# on the tick after 3 s, the count again from 0, a gap or a boundary with a
+# guard failing starting the 3 s again), every guard (this disc's HETARI
+# bit), the mail, the two registered blocks put back mid-count, and the
+# stage load's motion copies.  CPU only;
+# one run per disc (the motion numbers, the bit and the mail are the disc's).
+add_executable(yorda_trip_test test/yorda_trip_test.c yorda_trip_live.c yorda_trip_source.c
+    ../platform/host_config.c "${CMAKE_SOURCE_DIR}/ico2/sugipon/src/tableSin.c")
+ico_include_dirs(fumi _ico_yorda_trip_incs)
+target_include_directories(yorda_trip_test PRIVATE "${CMAKE_CURRENT_SOURCE_DIR}"
+    "${CMAKE_SOURCE_DIR}/port/platform" "${CMAKE_SOURCE_DIR}/port/data"
+    "${CMAKE_SOURCE_DIR}/port/include" "${CMAKE_SOURCE_DIR}/port/render" ${_ico_yorda_trip_incs})
+target_compile_definitions(yorda_trip_test PRIVATE ${ICO_GAME_DEFINITIONS})
+target_compile_options(yorda_trip_test PRIVATE ${ICO_SEMANTIC_OPTIONS} ${ICO_GAME_LAYOUT_OPTIONS}
+                       ${ICO_GAME_WARNINGS})
+# ico_math: the maths typedef.h's headers name
+target_link_libraries(yorda_trip_test PRIVATE ico_options ico_region ico_math)
+if(NOT WIN32)
+    target_link_libraries(yorda_trip_test PRIVATE m)
+endif()
+if(ICO_RUN_TESTS)
+    add_test(NAME yorda_trip COMMAND yorda_trip_test pal)
+    foreach(_slug jpn kor cn ntsc aug6 jun26)
+        add_test(NAME yorda_trip_${_slug} COMMAND yorda_trip_test ${_slug})
+    endforeach()
+endif()
+# yorda_trip_disc: the same motions on the disc image (ICO_DISC_IMAGE): the
+# disc's tables loaded from its ELF (port/data/tables.c), the run loop and the
+# fall named, the main gate stages' packs and their HETARI members with their
+# sizes, and the copies the game's side reads.  No game start; skipped (77)
+# without the disc, as in a worktree.
+set(_yt_data "${CMAKE_SOURCE_DIR}/port/data")
+ico_include_dirs(fumi _ico_yorda_trip_disc_incs)
+add_executable(yorda_trip_disc_test test/yorda_trip_disc_test.c yorda_trip_source.c
+               "${_yt_data}/tables.c" ${ICO_TABLE_SOURCES})
+target_include_directories(yorda_trip_disc_test PRIVATE "${CMAKE_CURRENT_SOURCE_DIR}" "${_yt_data}"
+    "${CMAKE_SOURCE_DIR}" ${_ico_yorda_trip_disc_incs})
+set(_yt_defs ${ICO_GAME_DEFINITIONS})
+list(REMOVE_ITEM _yt_defs ICO_RD=1)
+target_compile_definitions(yorda_trip_disc_test PRIVATE ${_yt_defs} ICO_HOST=1)
+set_source_files_properties(${ICO_TABLE_EE_SYMBOLS} TARGET_DIRECTORY yorda_trip_disc_test
+                            PROPERTIES COMPILE_DEFINITIONS ICO_EE_SYMBOLS_STUBS=1)
+target_compile_options(yorda_trip_disc_test PRIVATE ${ICO_SEMANTIC_OPTIONS}
+                       ${ICO_GAME_LAYOUT_OPTIONS} ${ICO_GAME_WARNINGS})
+# ico_math: the maths typedef.h's headers name (as model_viewer_effects links it)
+target_link_libraries(yorda_trip_disc_test PRIVATE ico_port_data ico_region ico_math)
+if(NOT WIN32)
+    target_link_libraries(yorda_trip_disc_test PRIVATE m)
+endif()
+if(ICO_RUN_TESTS)
+    add_test(NAME yorda_trip_disc COMMAND yorda_trip_disc_test "${ICO_DISC_IMAGE}")
+    set_tests_properties(yorda_trip_disc PROPERTIES SKIP_RETURN_CODE 77)
 endif()
 
 # The doorway fix: the arm and the grace with the option off and
@@ -190,6 +383,23 @@ if(ICO_RUN_TESTS)
     add_test(NAME kanban_boot_jun26 COMMAND kanban_boot_test "${CMAKE_CURRENT_BINARY_DIR}" jun26)
 endif()
 
+# jimakuDisp's community-translation hook (ico2/fumi/src/jimaku.c, compiled
+# into the test whole, the rest of the game and the hook's two port calls
+# stubbed): a disc language draws the record's two strips as before, a
+# community translation the words in display_texture's packet and colour with
+# no strip, the timing and the semaphores alike, nothing in photo mode or with
+# subtitles off; the discs with their own arms never ask.  CPU only.
+add_executable(jimaku_text_test test/jimaku_text_test.c)
+ico_include_dirs(fumi _ico_jimaku_text_incs)
+target_include_directories(jimaku_text_test PRIVATE ${_ico_jimaku_text_incs})
+target_compile_definitions(jimaku_text_test PRIVATE ${ICO_GAME_DEFINITIONS})
+target_compile_options(jimaku_text_test PRIVATE ${ICO_SEMANTIC_OPTIONS} ${ICO_GAME_LAYOUT_OPTIONS}
+                       ${ICO_GAME_WARNINGS})
+target_link_libraries(jimaku_text_test PRIVATE ico_region)
+if(ICO_RUN_TESTS)
+    add_test(NAME jimaku_text COMMAND jimaku_text_test)
+endif()
+
 # The hand records Ico and Yorda hold hands with
 # (ico2/sugipon/src/handManager.c, compiled into the test) and the arc-cosine
 # table's NaN guard (tableSin.c, quaternion.c and matrixDrive.c as the game
@@ -285,12 +495,35 @@ if(TARGET ico_pc)
     target_link_libraries(ico_pc PRIVATE ico_achievements)
 endif()
 
+# Save states (port/platform/state.h): state_host.c takes and puts back a
+# state at the host loop's quiescent point (main_host.c polls it), with the
+# slots' files, the picture and the [dev] keys; state_rules.c holds the
+# decisions that need no game (state_rules.h).  Both in the program, either
+# build (the renderer's part of a load under ICO_RD's twin, !ICO_HEADLESS).
+if(TARGET ico_pc)
+    target_sources(ico_pc PRIVATE state_host.c state_rules.c)
+endif()
+
+# state_host: the conditions (each refusal reachable), the result texts, the
+# slots' paths, the [dev] keys' values, the slot listing over a missing, an
+# empty and a filled folder (each validity field changed, a damaged file, a
+# picture) and the thumbnail's size and box filter.  CPU only; the full
+# round trip is state_roundtrip_headless's.
+add_executable(state_host_test test/state_host_test.c state_rules.c)
+target_include_directories(state_host_test PRIVATE "${CMAKE_CURRENT_SOURCE_DIR}")
+target_compile_options(state_host_test PRIVATE ${ICO_SEMANTIC_OPTIONS} ${ICO_PORT_WARNINGS})
+target_link_libraries(state_host_test PRIVATE ico_platform)
+if(ICO_RUN_TESTS)
+    add_test(NAME state_host COMMAND state_host_test "${CMAKE_CURRENT_BINARY_DIR}")
+endif()
+
 # The view over a synthetic state, the signals, every achievement's condition
 # through crafted transitions (once, suspended, yorda_safe counting, a version 1 file), the file round
 # trip and the popup rate limit. CPU only.
 add_executable(achievements_test test/achievements_test.c gamestate.c
     ../ui/strings.c ../ui/strings_en.c ../ui/strings_fr.c ../ui/strings_de.c
     ../ui/strings_it.c ../ui/strings_es.c ../ui/strings_ja.c ../ui/strings_ko.c ../ui/strings_zh.c
+    ../ui/strings_ru_bobttz.c ../ui/strings_ru_cobra838.c ../ui/strings_pt_br.c
     ../platform/host_config.c)
 target_include_directories(achievements_test PRIVATE "${CMAKE_SOURCE_DIR}/port/platform")
 target_compile_options(achievements_test PRIVATE ${ICO_SEMANTIC_OPTIONS} ${ICO_PORT_WARNINGS}
@@ -341,12 +574,14 @@ if(TARGET ico_pc)
     target_sources(ico_pc PRIVATE $<TARGET_OBJECTS:ico_model_viewer_live>)
 endif()
 # photo_view.c: photo mode's camera in the game's matrices, called
-# by main.c each tick; built as the model viewer is (the game's include path
-# and record layout), in the headless build too.  photo_mode.h names rd.h's
+# by main.c each tick; eye_trail.c: the shadows' eye trails in the world,
+# which enemyParts.c pushes to and draws from photo mode's camera; built as
+# the model viewer is (the game's include path and record layout), in the
+# headless build too.  photo_mode.h names rd.h's
 # RdCamera (the struct only), so port/render is on its include path in both
 # builds, as it is for ico_options.
 if(TARGET ico_pc)
-    add_library(ico_photo_view_live OBJECT photo_view.c)
+    add_library(ico_photo_view_live OBJECT photo_view.c eye_trail.c)
     ico_include_dirs(seki _ico_pv_game_incs)
     target_include_directories(ico_photo_view_live PRIVATE "${CMAKE_CURRENT_SOURCE_DIR}"
                                "${CMAKE_SOURCE_DIR}/port/render" ${_ico_pv_game_incs})
@@ -354,6 +589,38 @@ if(TARGET ico_pc)
     target_compile_options(ico_photo_view_live PRIVATE ${ICO_SEMANTIC_OPTIONS}
                            ${ICO_GAME_LAYOUT_OPTIONS} ${ICO_PORT_WARNINGS} -Wno-strict-prototypes)
     target_sources(ico_pc PRIVATE $<TARGET_OBJECTS:ico_photo_view_live>)
+endif()
+# camera_wall.c, camera_wall_stage.c: the blended camera's path through the
+# stage's collision, which GsBase.c's flip asks at every tick
+# (camera_wall.h); built as photo_view.c is (the game's include path and record
+# layout), in the headless build too; port/platform for the log helper
+if(TARGET ico_pc)
+    add_library(ico_camera_wall_live OBJECT camera_wall.c camera_wall_stage.c)
+    ico_include_dirs(fumi _ico_cw_game_incs)
+    target_include_directories(ico_camera_wall_live PRIVATE "${CMAKE_CURRENT_SOURCE_DIR}"
+                               "${CMAKE_SOURCE_DIR}/port/render" "${CMAKE_SOURCE_DIR}/port/platform"
+                               ${_ico_cw_game_incs})
+    target_compile_definitions(ico_camera_wall_live PRIVATE ${ICO_GAME_DEFINITIONS})
+    target_compile_options(ico_camera_wall_live PRIVATE ${ICO_SEMANTIC_OPTIONS}
+                           ${ICO_GAME_LAYOUT_OPTIONS} ${ICO_PORT_WARNINGS} -Wno-strict-prototypes)
+    target_sources(ico_pc PRIVATE $<TARGET_OBJECTS:ico_camera_wall_live>)
+endif()
+# yorda_trip_live.c, yorda_trip_source.c: Yorda trips' game side (the stage
+# load's motion copies, InitIcoMisc's hook; the run-pulled tick, actGirlHand's)
+# and the pack reader; built as photo_view.c is (the game's include path and
+# record layout), in the headless build too; port/data for df_pack.h and
+# vfs.h, port/platform for diag_host.h
+if(TARGET ico_pc)
+    add_library(ico_yorda_trip_live OBJECT yorda_trip_live.c yorda_trip_source.c)
+    ico_include_dirs(fumi _ico_yt_game_incs)
+    target_include_directories(ico_yorda_trip_live PRIVATE "${CMAKE_CURRENT_SOURCE_DIR}"
+                               "${CMAKE_SOURCE_DIR}/port/render" "${CMAKE_SOURCE_DIR}/port/platform"
+                               $<TARGET_PROPERTY:ico_port_data,INTERFACE_INCLUDE_DIRECTORIES>
+                               ${_ico_yt_game_incs})
+    target_compile_definitions(ico_yorda_trip_live PRIVATE ${ICO_GAME_DEFINITIONS})
+    target_compile_options(ico_yorda_trip_live PRIVATE ${ICO_SEMANTIC_OPTIONS}
+                           ${ICO_GAME_LAYOUT_OPTIONS} ${ICO_PORT_WARNINGS} -Wno-strict-prototypes)
+    target_sources(ico_pc PRIVATE $<TARGET_OBJECTS:ico_yorda_trip_live>)
 endif()
 # demo_host.c: the June 2001 demo's sceDemoStart (the magazine menu's settings,
 # here the port's), which common/src/main.c calls on that disc; port code, in
@@ -391,6 +658,34 @@ if(TARGET ico_pc AND ICO_HEADLESS AND ICO_RUN_TESTS)
                      -P "${CMAKE_CURRENT_SOURCE_DIR}/test/model_viewer_headless.cmake")
     set_tests_properties(model_viewer_headless PROPERTIES RUN_SERIAL TRUE TIMEOUT 300
                          SKIP_REGULAR_EXPRESSION "model_viewer_headless: skipped")
+endif()
+
+# state_roundtrip_headless: save states in the headless program in stage
+# 22, driven by test/state_roundtrip_pad.txt (test/state_roundtrip_headless.cmake):
+# a save on the pause menu, play, a hash, the load, the same play again and
+# the hash equal (on a difference, tools/state_region_diff.py names the
+# first differing symbols from the two dumps of the hash's tick). state_roundtrip_headless_settings: a state saved by one
+# run is refused by a second with a simulation key changed, which names the
+# key and goes on. The disc image is needed; save states are off on a
+# sanitizer build; both skipped then (cmake -P cannot exit 77 at CMake 3.25,
+# so the skip is the message). Game runs, so alone.
+if(TARGET ico_pc AND ICO_HEADLESS AND ICO_RUN_TESTS)
+    foreach(_mode roundtrip settings)
+        set(_test state_roundtrip_headless)
+        if(_mode STREQUAL "settings")
+            set(_test state_roundtrip_headless_settings)
+        endif()
+        add_test(NAME ${_test}
+                 COMMAND "${CMAKE_COMMAND}" "-DICO_PC=$<TARGET_FILE:ico_pc>" "-DISO=${ICO_DISC_IMAGE}"
+                         "-DPAD=${CMAKE_CURRENT_SOURCE_DIR}/test/state_roundtrip_pad.txt"
+                         "-DDIR=${CMAKE_CURRENT_BINARY_DIR}/${_test}_run" "-DMODE=${_mode}"
+                         "-DSANITIZE=${ICO_SANITIZE}" "-DPYTHON=${Python3_EXECUTABLE}"
+                         "-DTOOL=${CMAKE_SOURCE_DIR}/tools/state_region_diff.py"
+                         "-DMAP=$<TARGET_FILE_DIR:ico_pc>/ico_pc.map"
+                         -P "${CMAKE_CURRENT_SOURCE_DIR}/test/state_roundtrip_headless.cmake")
+        set_tests_properties(${_test} PROPERTIES RUN_SERIAL TRUE TIMEOUT 300
+                             SKIP_REGULAR_EXPRESSION "${_test}: skipped")
+    endforeach()
 endif()
 
 # credits_test: the game's staffroll.c over a short table in the disc's forms,

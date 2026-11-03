@@ -57,7 +57,10 @@ The window, the picture's size and shape, and the speed.
   the full-height picture. Once you change one of those four rows yourself,
   it says **Custom**. Two of those four rows, Full-height picture and
   Texture filtering, are on the Picture page. The shortcut also sets Full
-  pixel (Picture page): Enhanced turns it on, Original turns it off.
+  pixel (Picture page): Enhanced turns it on, Original turns it off. It
+  also sets Glow between frames (Effects page): Enhanced makes it Smooth,
+  Original makes it Original, and changing that row yourself makes the
+  Preset say **Custom**.
 - **Resolution** is how sharp the picture is: 1x is the PS2's, up to 16x,
   or the size of your window. Very high values need a lot of graphics
   memory; when your graphics card cannot hold the picture, the game lowers
@@ -65,7 +68,7 @@ The window, the picture's size and shape, and the speed.
   starts at the size of your window and steps down (3x, then 2x, then 1x)
   when your computer or phone cannot draw the pictures in time. It never
   steps back up while the game runs; the row then reads, for example,
-  **Auto (2x)**. On phones and tablets, the Enhanced preset uses Auto. It
+  **Auto (2x)**. The Enhanced preset uses the window's size on every device; Auto is a choice you make here, never the preset's. It
   stays at 1x while the CRT filter is on: the filter draws the PS2's own
   picture dots with dark lines between them, and over a sharper picture it
   would look like a fine mesh.
@@ -118,7 +121,8 @@ The window, the picture's size and shape, and the speed.
   sixty times a second, Vulkan usually still draws sixty a second (it
   depends on your graphics driver); Direct3D 12 always draws one picture for
   each refresh. With Vertical sync off, Uncapped draws as fast as your
-  computer can. A limit equal to your screen's refresh rate (60 on a 60 Hz
+  computer can (a picture between the game's own frames is left out only
+  when it would make the game itself run late). A limit equal to your screen's refresh rate (60 on a 60 Hz
   screen, 120 on a 120 Hz screen) follows the screen, so motion stays
   smooth. On a 144 Hz or 240 Hz screen the 144 or 240 limit counts as equal
   to it, even when the system reports 143 or 239. On phones and tablets it
@@ -126,13 +130,17 @@ The window, the picture's size and shape, and the speed.
   your screen's refresh rate (see your system's display settings). If a
   faint trailing image stays while you move, try another limit, or on
   Windows the Direct3D 12 renderer ([Choosing the renderer](#choosing-the-renderer)).
+  Original: the disc's own rate; when the graphics card cannot draw a
+  picture in time, pictures are dropped and the game keeps its pace.
 - **Frame rate counter** is Off or On, and starts Off. On shows how many
   pictures the game is putting on the screen each second, as a small
-  number such as "60 fps" in the top-left corner of the screen. It is
+  number such as "60 fps" in the top-left corner of the screen (inside a phone's rounded corner or notch). It is
   drawn over the picture at your screen's own sharpness, so the CRT filter
-  does not touch it. With the touch controls showing, the number stands on
-  the top edge between the D-pad and Select, where no control sits, so
-  nothing covers it. It updates once a second and shows nothing until the
+  does not touch it. With the touch controls showing, the number moves to
+  the first place along the top edge that none of your visible controls
+  covers (with the normal layout, between the D-pad and Select), so
+  nothing covers it; controls you set to Hidden or Off do not count, and
+  when the controls fade away the number goes back to the corner. It updates once a second and shows nothing until the
   first second has passed.
 - **Video mode** is PAL 50 Hz or 60 Hz. The normal choice is 60 Hz. This
   row is only on the title screen's Options, and only with the European
@@ -223,14 +231,23 @@ This page is in the Options menu, right under Picture.
 The game's own picture effects.
 
 The game's own effects are each On or Off (Motion blur is Off, Original
-or Smooth, and Water reflections is Original or Sharp). All On, with Motion
-blur and Water reflections at Original, is the picture the PS2 gives you,
-and that is how the game starts.
+or Smooth, Water reflections is Original or Sharp, and Glow between frames
+is Original or Smooth). All On, with Motion blur, Water reflections and
+Glow between frames at Original, is the picture the PS2 gives you, and that
+is how the game starts, with Motion blur strength at 100 %. The Preset does
+not change these rows, except Glow between frames.
 
 - **Glow:** the soft glow around bright light, and the flare of the sun.
   It is drawn at the PlayStation 2's size at every Resolution and spread
   over the picture the way the console spreads it: as soft as on the PS2,
   and light on the graphics card.
+- **Glow between frames:** matters when Frame rate is above Original, with
+  Glow on; otherwise the row is greyed out. The game makes its glow once
+  for each of its own frames. **Original** keeps that glow for the frames
+  shown between them, which costs the graphics card nothing. **Smooth**
+  makes the glow again for every frame shown, so it follows a fast camera
+  turn; it costs more of the graphics card's time. The Enhanced Preset
+  sets it to Smooth.
 - **Depth of field:** the blur on things far away.
 - **Screen softening:** a slight blur over the whole picture that smooths
   jagged edges.
@@ -243,6 +260,12 @@ and that is how the game starts.
   Original's. Smooth costs a little more of the graphics card's time and
   memory, which you may notice on a phone. At Frame rate Original the two
   look nearly the same. Original is how the game starts.
+- **Motion blur strength:** shown while Motion blur is Original or Smooth,
+  from 10 % to 100 % in steps of 10. Lower values make the trail fade
+  faster, so a moving camera leaves a shorter, fainter trail; 100 % is the
+  PS2's own trail, and how the game starts. It changes only how long the
+  trail lasts, not how far it spreads, and works the same with Original and
+  Smooth.
 - **Fog:** the haze that hides the distance.
 - **Water reflections:** Original or Sharp. Original is the PS2's
   reflection in puddles, pools and the water at the mill, which looks soft
@@ -259,16 +282,24 @@ Changes you make here show in photo mode at once.
 ## Graphics
 
 This page is in the Options menu, under Effects. It only shows when your copy of the game can
-draw in more than one way; if yours can only draw one way, there is nothing to pick and the page
-is not shown.
+draw in more than one way, or your computer has more than one graphics card the game can use; if
+there is nothing to pick, the page is not shown.
 
 - **Graphics API** picks what the game draws with: Automatic, Vulkan, OpenGL, Direct3D 12 or
   Direct3D 11, the ones your download has. Without Apply the choice is used from the next
   start. What each one is, what Automatic does and how to undo a choice that does not start:
-  [Choosing the renderer](#choosing-the-renderer).
-- **Apply** shows under it when the choice is not what the game draws with now. Automatic
-  counts as what it picked this time: Vulkan, or the one the game moved on to when Vulkan did
-  not start, so Apply is not offered for Automatic then. It switches at once, without leaving
+  [Choosing the renderer](#choosing-the-renderer). The row only shows when your download can
+  draw in more than one way.
+- **Graphics card** picks which graphics card draws the game: Automatic, or the name of one of
+  your cards. It only shows when the computer has two or more cards the game can use, as many
+  laptops do (a fast card and a power-saving one built into the processor). Automatic always
+  picks the same card: the fast one when there is one. Without Apply the choice is used from the
+  next start. More, and why the Windows graphics setting for each app does not change it:
+  [Choosing the graphics card](#choosing-the-graphics-card).
+- **Apply** shows under them when a choice is not what the game draws with now. Automatic
+  counts as what it picked this time: for Graphics API, Vulkan, or the one the game moved on to
+  when Vulkan did not start, and for Graphics card, the card Automatic picks; Apply is not
+  offered for Automatic then. It switches at once, without leaving
   the game or losing your place, and the window stays on the same screen. The picture stops for
   a moment, and longer the first time a choice is used while the graphics are prepared. The glow
   and the motion blur trail start again, as after the game comes back from the background.
@@ -279,8 +310,8 @@ is not shown.
   Keep the choice is not saved by anything else either: closing the game during the count keeps
   the old one for the next start, and if the graphics stop working during the count, the game
   does not start itself again on the new choice; your next start uses the old one.
-- If the choice does not start, the game goes back at once to what it drew with and a message
-  says so. The row goes back as it was, as with Revert, so the next start uses one that works;
+- If the choice does not start, the game goes back at once to what it drew with (the same
+  renderer on the same graphics card) and a message says so. The row goes back as it was, as with Revert, so the next start uses one that works;
   you can pick another one and try again.
 - In the rare case that neither the choice nor the one before it starts again, a message says
   so and the game closes without saving; the next start uses the one before.
@@ -403,6 +434,13 @@ The first five are off unless you turn them on, on a phone too.
   and Ico taking her hand still ends it, so a longer
   time gives you more of a chance to get to her. The row above, Shadows never
   take Yorda, stops it altogether.
+- **Shadow speed** sets how fast shadows walk, run and fly: **Slower** (three
+  quarters of the original speed), **Original**, **Faster** (a quarter faster)
+  or **Fastest** (half as fast again). Only their walking, running and flying
+  change: their attacks, grabs, flinches and fading away play at the original
+  speed. It does not change how often they attack, how long they wait before
+  they do, or how long a shadow takes to pull Yorda into a pit (Time to rescue
+  Yorda sets that).
 - **Analogue stick fix** lets Ico run in any direction you push the stick,
   not only the eight the original game knows. It is also on the Controls
   page, and it is the same switch.
@@ -412,6 +450,12 @@ The first five are off unless you turn them on, on a phone too.
   of the ladder in the East Reflector. For a few seconds after you come
   through a door holding her hand, that door does not take you back.
   [Why this is needed](FAQ.md#ico-and-yorda-come-straight-back-out-of-a-doorway).
+- **Yorda trips** makes Yorda trip and fall the way she does in the original
+  game after the main gate opens: when Ico has run pulling her by the hand
+  for three seconds, she falls, and again after every three more seconds of
+  it. She gets up again when Ico moves on. It takes effect from
+  the next room you go into, or the next time you continue from a save. The
+  June 2001 demo does not have her fall, so on that disc it does nothing.
 - **Natural chains** changes how two chains look as they come down for Ico:
   the one at the Stone Pillar and one underground. In the original game the
   links look squashed until the chain is all the way down. With this on, the
@@ -423,6 +467,14 @@ The first five are off unless you turn them on, on a phone too.
   The memory card check still runs, and its warning still shows if the card
   is missing or full. It takes effect the next time you start the game.
   Without it, Start still skips the opening scene once the sign has gone.
+- **Second memory card** puts a second memory card in the second slot, as
+  on a PS2 with two cards: ten more saves. The game's own save and load
+  screens then ask which card to use. It takes effect at once, the next
+  time a save or load screen opens. Off, the game has one card, as the
+  original. Turning it off does not delete the second card's saves: they
+  come back when you turn it on again. The second card is the folder
+  `memcard2` beside `memcard` in your user folder
+  ([where that is](PORTABLE_MODE.md#a-second-memory-card)).
 
 Two more rows are the game's own, and only show up in the pause menu's
 Options once you have finished the game:
@@ -454,14 +506,47 @@ other discs.
   PS2; the North American disc, the August 2001 preview and the June 2001
   magazine demo are in English, and the Asian disc's menus are in Chinese.
   None of them has a language choice of its own.
+
+  After the five comes **Русский (bob-ttz)**: Russian, translated by
+  bob-ttz, a player of the game. It is not on the disc: the game plays its
+  English version, and the port shows the words in Russian with its own
+  lettering, in the same look as the menus. The game's menus (the title, the
+  memory card screens, the pause menu), the menus this port adds and the
+  subtitles change at once. The saves are the English game's, so they work
+  with every language and on a PS2. Some things stay in English, because
+  they are pictures on the disc rather than words: the "Presents" sign and
+  the copyright line at the start, the language and TV headings, the words
+  that come with the title and ending logos, and the staff roll. Yorda's words are shown
+  in Russian on a second playthrough only, as the game shows her own script
+  the first time. A few long notes on the Options pages are in English
+  until they are translated again.
+
+  After it comes **Русский (cobra838)**: a second Russian translation, by
+  cobra838, another player of the game. It works the same way, with his own
+  words for the menus and the subtitles; the rows he has not translated yet
+  (the newest ones, such as the backups and the second memory card) are in
+  English.
+
+  After that comes **Português (Brasil) (ichagas7)**: Brazilian Portuguese,
+  translated by Igor Chagas (ichagas7), another player of the game, with
+  corrections by cobra838. It works the same way as the Russian ones. The
+  rows not translated yet (the newest ones, such as the backups, and a few
+  left empty, such as the names of the disc versions) and a few notes that are too long
+  for their space are in English. More languages translated by players can
+  join this list; [Translating the game](TRANSLATING.md) says how.
 - **Menu language** is the language of the menus this port adds (Options,
   the extras, photo mode's help, the messages): English, French, German,
-  Italian, Spanish, Japanese (日本語), Korean (한국어) or Chinese (繁體中文,
-  Traditional Chinese). It starts on Auto: Japanese with the Japanese disc,
-  Korean with the Korean disc, Chinese with the Asian disc, and with the
-  European disc the game's language. The North American disc, the August 2001
-  preview and the June 2001 magazine demo start on English. It does not
-  change the game's own text, which is always the disc's.
+  Italian, Spanish, Japanese (日本語), Korean (한국어), Chinese (繁體中文,
+  Traditional Chinese), Russian (Русский (bob-ttz) or Русский (cobra838)) or
+  Brazilian Portuguese (Português (Brasil) (ichagas7)).
+  It starts on Auto: Japanese with the Japanese disc, Korean with the Korean
+  disc, Chinese with the Asian disc, and with the European disc the game's
+  language (Russian or Brazilian Portuguese when Language is one of the
+  translations by players).
+  The North American disc, the August 2001 preview and the June 2001
+  magazine demo start on English. It does not
+  change the game's own text, which is always the disc's or the Language
+  row's translation.
 - **Disc** shows only when more than one disc is set up. It is the disc the
   game plays: Europe (SCES-50760), Japan (SCPS-11003), Korea (SCPS-56001), USA
   (SCUS-97113), Preview 2001-08 (the August 2001 preview), Demo 2001-06
@@ -486,8 +571,10 @@ page, and it is the same setting in both places.
 
 On the title screen's Options this page has Music, Models, Credits,
 Character Customization, Game variants, Add to Steam (on Windows and Linux),
-Export textures and Achievement pop-ups. In the pause menu's Options it has only
-Character Customization, Game variants and Achievement pop-ups.
+Export textures, Back up your data, Restore from a backup and Achievement
+pop-ups. In the pause menu's Options it has only Character Customization,
+Game variants and Achievement pop-ups.
+[Save states](#save-states) are on the pause menu and the Continue screen.
 
 - **Music:** listen to the game's music and sound effects.
 - **Models:** the model viewer. Look closely at the characters and some
@@ -529,6 +616,33 @@ Character Customization, Game variants and Achievement pop-ups.
   game draws while it runs, such as fog and glow; those need **Dump
   textures**). A [spreadsheet per disc](https://github.com/nathanialf/ico-pc/blob/main/docs/textures/README.md)
   lists every file a pack can hold and which pictures share one name.
+- **Back up your data** (on the title screen's Extras page only; Windows,
+  Linux, the Steam Deck, Mac and Android): saves your memory card, your save
+  states, your settings and your achievements in one `.zip` file. The system's
+  "save as" window opens so you can choose where it goes (on Android, the
+  phone's file screen, so the file can go to Downloads, a memory card or a
+  cloud folder, even though the game's own folder is hidden on Android 13 and
+  later). The suggested name is `ico-pc-backup-` and the date. The line under
+  the row counts the files as they are saved, and a message says how many were
+  saved and where. The game's files copied from your disc, the logs, the
+  texture and model packs and `ico-pc.ini` are not in it: a backup holds your
+  progress and your choices, not the game. Use it to keep a copy, to move to
+  another computer or phone, or to go back to an earlier point.
+- **Restore from a backup** (on the title screen's Extras page only): puts a
+  backup back. The first press says what it replaces (the memory card, the
+  save states, the settings and the achievements here) and that the game
+  restarts; press again to choose the file. The game reads it and says which
+  version made it, when, and for which discs (and whether it was made while
+  another disc was played: it is restored all the same, since every disc
+  shares the memory card). Press a third time to restore it; moving off the
+  row, or waiting a minute, keeps your data as it is. The game then restarts
+  by itself on a computer, or closes on a phone (start it again), and puts the
+  backup in place as it starts. What the backup does not hold stays as it is.
+  If anything goes wrong while it is put in place, your data stays exactly as
+  it was and a message says so. A backup from another computer or phone works
+  the same; a backup made by a newer version works in an older one for the
+  memory card and the settings, but its save states only load in the version
+  that can resume them ([save states and versions](#save-states)).
 
 ### Game variants
 
@@ -617,11 +731,52 @@ colours. While a texture pack is on, the page reminds you of this.
 
 Your choices are saved when you leave the page.
 
+## Save states
+
+A save state keeps the game exactly as it is, anywhere, in one of four slots
+for each disc. Each slot shows a picture, the area, the play time and the
+date. The picture is the game as it was the moment you paused, without the
+menu, in its own shape (a wide picture keeps its width). A state saved after
+loading another one, before you go back to the game, gets the loaded state's
+picture. One that could not get a picture shows the screen as it was when
+you saved.
+
+- **During play:** press Start and choose **Save states**, under Photo mode.
+  On a keyboard, **F6** does both: it pauses the game and opens the page.
+  In the pause menu F6 opens the page, and on the page F6 takes you back to
+  the game. F6 does nothing on the title screen or in photo mode.
+- **On the title screen:** choose **Continue**. Under the list of your memory
+  card saves the screen shows **Square Save states**: press Square (or click
+  it, or tap it). Continue is there once the memory card has a save of the
+  game. Back on that page returns to the list of saves.
+
+Choose a slot and press Left or Right to pick **Save**, **Load** or
+**Delete**, then press the confirm button. Saving over a slot that is in
+use, and deleting, ask you to press again within two seconds. Saving is
+only possible from the pause menu, so from the title screen the page only
+loads and deletes. A slot that cannot be loaded (it was saved on another
+disc, with different gameplay settings, or by another version of the game
+that it cannot carry over to) is greyed, and the line under the cards says
+why. After a load the game is back on the pause menu, on **Save states**. On
+a computer, F5 saves to slot 1 and F9 loads it. On Windows and Android a
+state carries over to a later version of the game when the part of the game
+it was saved in has not changed; states made before the game could carry
+them over do not.
+On Linux, the Steam Deck and Mac a state loads only in the version that
+saved it, so after you update the game those states are greyed. A gameplay
+setting that a later version adds does not stop an older state from loading
+while you leave that setting as it starts. Your
+achievements keep counting as before and are not taken back by a load. The
+states are kept in the `states` folder of your
+[user folder](PORTABLE_MODE.md#where-your-saves-are), apart from your memory
+card saves.
+
 ## Photo mode
 
 Photo mode is a row in the pause menu during play. The game stays paused
 while you move a camera around and save pictures, and the picture is
-drawn from the camera with every effect the game has.
+drawn from the camera with every effect the game has. The glowing trails
+behind the shadow creatures' eyes stay with the eyes as the camera moves.
 [The photo mode controls](CONTROLS.md#take-a-photo).
 
 ## Save a picture for a bug report
@@ -720,12 +875,15 @@ Under `[video]`:
 | --- | --- |
 | `window_mode = "windowed"` | The Window mode row: `"windowed"`, `"borderless"` or `"fullscreen"`. If the file has no `window_mode` line, the game reads its `fullscreen =` line instead: `true` is Fullscreen, `false` is Windowed. |
 | `effect_glow = true` and the five other `effect_` lines | The six switches of the Effects page. |
+| `effect_glow_mode = "original"` | How the glow is made for the frames shown between the game's own: `"original"` or `"smooth"`. It only matters above Frame rate Original, with `effect_glow = true`. The Enhanced Preset writes `"smooth"`. A file without this line gets `"smooth"` when its Display rows are the Enhanced Preset's, and `"original"` otherwise. |
 | `effect_motion_blur_mode = "original"` | How Motion blur moves while it is on: `"original"` or `"smooth"`. `effect_motion_blur = false` is Off whatever this says. |
+| `effect_motion_blur_strength = 100` | The Motion blur strength row: `10` to `100` in steps of 10. Lower values make the trail fade faster; `100` is the PS2's. A number between the steps is rounded to the nearest step. |
 | `effect_water_sharp = false` | Water reflections on the Effects page: `false` is Original, `true` is Sharp. |
 | `crt = false`, `crt_mode = "consumer"`, `crt_strength = 1.0` | The CRT filter and CRT strength rows. `crt_mode` is `"scanlines"`, `"consumer"`, `"trinitron"`, `"pvm"` or `"shadow"`. `crt_strength` goes from `0.0` to `1.0`. |
 | `crt_scanlines`, `crt_mask`, `crt_halation`, `crt_bloom` | Fine tuning of the CRT filter, each from `0.0` to `1.0`: how strong the dark lines are, how strong the fine pattern of dots or stripes is, how much glow surrounds bright spots and how much bright areas spread softly. A line that is missing, or a negative number, keeps the chosen style's own value. |
 | `crt_curvature` | How much the screen bulges, from `0.0` to `0.25`. Missing keeps the style's own value. |
 | `backend = ""` | The Graphics API row of the Graphics page: empty is Automatic, or `"vulkan"`, `"opengl"`, `"d3d12"` or `"d3d11"` where your download has it. Used from the next start. [Choosing the renderer](#choosing-the-renderer). |
+| `adapter = ""` | The Graphics card row of the Graphics page: empty is Automatic, or a graphics card's name exactly as the row shows it. Used from the next start. [Choosing the graphics card](#choosing-the-graphics-card). |
 | `gpu_driver = ""` | Android only. The Driver row of the Graphics driver page: empty is the phone's own driver. The game also writes a `gpu_driver_failed` line when a driver did not start. [About Android](ANDROID.md#using-a-different-graphics-driver). |
 | `show_fps = false` | The Frame rate counter row on the Display page. `true` shows the frames per second in the top-left corner of the screen. |
 | `downsample = "off"` | The Downsampling row on the Picture page: `"off"` or `"box"` (To original size). |
@@ -805,3 +963,28 @@ says whether you chose it or the game did. A switch with Apply adds a line
 choice does not start, pick Automatic in the row, or delete the `backend` line, to go back to
 Vulkan. If the name you wrote is not in your
 download, the game says so in the same file and uses Vulkan.
+
+## Choosing the graphics card
+
+Many laptops, and some desktop computers, have two graphics cards: a fast one, and a slower one
+built into the processor that saves power. The game picks one by itself and always the same one:
+the fast card when there is one. The first lines of `logs/ico-pc.log` name every card the game
+found and the one it uses (a line with `devices:`).
+
+To pick another card, use the **Graphics card** row on the [Graphics page](#graphics) of the
+Options menu. It shows Automatic or the name of the card you picked; Apply switches at once, or
+the choice is used from the next start. The row only shows when there are two or more cards the
+game can use.
+
+On Windows, the graphics setting for each app (Settings > System > Display > Graphics, or the
+NVIDIA and AMD control panels) does not change the card the game uses: the game chooses for
+itself, so the Graphics card row is the way to choose. A card that draws in software only (such
+as the Microsoft Basic Render Driver) is never offered; the game only uses it when nothing else
+works.
+
+In the file, the same choice is `adapter = "..."` under `[video]` in `config.toml`
+([where that file is](#settings-you-can-only-change-in-a-file)), with the card's name exactly as
+the row shows it, or `adapter=...` in `ico-pc.ini`. An empty name is Automatic. If the name is
+not one of your cards (after a new graphics card, or when the name belongs to another Graphics
+API), the game says so in the log and uses Automatic. With OpenGL the system picks the card, so
+the row is not shown while the game draws with OpenGL.

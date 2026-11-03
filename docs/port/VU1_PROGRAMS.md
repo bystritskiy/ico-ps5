@@ -148,7 +148,7 @@ vertices of its triangle, so the per-triangle decisions (region test, scissor) a
 three (`port/render/rd_mesh.h` (`rd_create_vu_mesh`); `port/shaders/vu_common.hlsli`, header
 comment): the vertex pre-pass evaluates each vertex once into a record the triangle stage reads
 its three corners from, or without it the program's entry evaluates all three
-([RENDER.md](RENDER.md#the-vertex-and-triangle-pre-passes)). The morph path rewrites a mesh's stream each [tick](ARCHITECTURE.md#terms)
+([RENDER.md](PIPELINES.md#the-vertex-and-triangle-pre-passes)). The morph path rewrites a mesh's stream each [tick](ARCHITECTURE.md#terms)
 (`rd_update_vu_mesh`), and a mesh no frame drew for a while may be evicted, which tells the seki
 side to build it again (`rd_vu_mesh_valid`) (`port/render/rd_mesh.h`).
 
@@ -249,6 +249,9 @@ since the projection does not change with the width. What the port then draws of
 A `VU_MARK_HIDE` triangle never reaches the rule (`vu_content_hidden`). A drawn triangle with a
 vertex outside takes code 36's corner rule (`vu_corner_cut_position`; in a state other than out of
 the box a corner whose GS Z alone saturated keeps its GS position, as the exact neighbour has it).
+A coordinate that is not a number converts to `0x80000000` (`vu_ftoi`, an ordered compare picks the
+saturated value: [SHADERS.md](SHADERS.md#float-to-integer)), so its corner has no GS position on
+every driver.
 A grid's strips share rows with their neighbours, so the replay marks every triangle of a grid of
 two strips or more joined, as the draw's own mark (`vu_mark.y`; `port/render/rd_replay_vu.c`
 (`doVuDraw`)).
@@ -276,7 +279,7 @@ clips a triangle the blended camera drops, a tick that sent it to the card test 
 card verdict decides `VU_RULE_STRIP`). A sprite's drop is evaluated once by `vu_particle_pre_vs`
 and read by `vu_particle_main_vs`. A command drawn the old way evaluates the rule in every corner's
 invocation of the program's entry (`vu_mesh_out`, `vu_particle_vs`). Both give the same verdict
-from the same functions on the same values ([RENDER.md](RENDER.md#the-vertex-and-triangle-pre-passes);
+from the same functions on the same values ([RENDER.md](PIPELINES.md#the-vertex-and-triangle-pre-passes);
 `port/shaders/vu_tri.hlsl`, `port/shaders/vu_particle.hlsl`).
 
 **Particles.** A sprite the VU skips for its x/y window is, out of the box, not drawn when its quad
@@ -301,11 +304,12 @@ picture) are hidden by the content table ([RENDER.md](RENDER.md#content-tables))
 the extended variant) and without the two steps out of the box never takes, the card test and the
 tick cameras (`vu_X_plain_vs`, `ICO_VU_PLAIN`). A draw with neither `VU_F_EXTENDED` nor
 `VU_F_TICKS` takes the plain one and gets the same picture. A device the renderer keeps to the
-plain ones (the Adreno 740, whose driver froze the whole device compiling the extended ones, or
-`[dev] vu_plain_only`) draws every state with the plain variant: there a triangle that reaches into
+plain ones (the Adreno 740 on Qualcomm's driver, whose driver froze the whole device compiling the
+extended ones; Mesa's Turnip driver, where the extended ones drew a stray vertex as a sliver; or
+`[dev] vu_set = plain`) draws every state with the plain variant: there a triangle that reaches into
 the picture and fails the region test is not drawn in any state (no card test: the wide picture's
 edge at the old 4:3 border may open), and the pictures between two ticks take the blended camera's
-rule alone ([RENDER.md](RENDER.md#the-fallback-entries)).
+rule alone ([RENDER.md](PIPELINES.md#the-fallback-entries)).
 
 ## The card test
 
@@ -324,7 +328,7 @@ grid's batch is one strip, and only a grid of one strip can be a card (`port/ren
 
 **The verdicts.** `rd_draw_vu_mesh` and `rd_draw_vu_grid`, in any state but out of the box
 (`rd__vu_extended`, the state `VU_F_EXTENDED` stands for) and not where every VU draw takes the plain
-shaders, which have no card test (`g_rd.vuPlainOnly`, [RENDER.md](RENDER.md#the-fallback-entries)),
+shaders, which have no card test (`g_rd.vuPlainOnly`, [RENDER.md](PIPELINES.md#the-fallback-entries)),
 test each free-standing strip of the
 draw's batches at the draw's camera (its `RdVuBlock`, and a skinned draw's bones) with the vertex
 shaders' region test (`vu1ref_region_inside`: single precision rounded to nearest as on the GPU, the
@@ -370,7 +374,7 @@ triangles, T ms a step`), and a slow step's line the step's own, inside the game
 
 ## The pre-pass's batches
 
-The vertex and triangle pre-passes ([RENDER.md](RENDER.md#the-vertex-and-triangle-pre-passes)) make
+The vertex and triangle pre-passes ([RENDER.md](PIPELINES.md#the-vertex-and-triangle-pre-passes)) make
 one point draw for each command and stage they record: a mesh or grid command's vertex draw, a
 particle command's two sprite draws (slots A and B), and in the triangle pass the rule, the two tick
 and the planes draws of each mesh or grid command, about a thousand point draws a frame. Each draw
@@ -386,17 +390,21 @@ vertex base are unchanged), and the items of a pass are ordered by stage key, Fr
 up to 64 items with the same three is one point draw through the stage's batch build,
 `vu_X_batch_pre_vs` (the ten `vu_X_pre_vs` entries and the four record stages compiled with
 `ICO_VU_PRE_BATCH`). The batch's table, one `uint4` an item (x the item's first `SV_VertexID` in the
-draw, y its VuCB's float4 index in the ring, z its VuBoneCB's, w 0), is copied into the ring, and
-the batch's DrawCB (slot b1, which no record stage reads otherwise) carries the table's float4 index
+draw, y its VuCB's qword index in the ring, z its VuBoneCB's, w 0), is copied into the ring, and
+the batch's DrawCB (slot b1, which no record stage reads otherwise) carries the table's qword index
 in `aux0.x` and its length in `aux0.y`. Group 1 binds the ring once more at t5, from the replay's VU
 base (`s_ringBase`: the ring's offset, 256-aligned, when `rd__vu_prepass` begins, after the texture
 and mesh uploads, so a frame whose texture uploads grow the ring past the device's largest storage
 range still reaches every block the VU draws put after them) to that range (`ringRange`), as a
-`StructuredBuffer<float4>` (`port/shaders/vu_common.hlsli` (`vu_ring`)); every index into it counts
-from the base. Direct3D 11 never makes a batch module (no
-pre-pass there) and has the draw merge off, so its VU groups leave t5 unbound (the layout keeps the slot): a bound storage
-range is written to the GPU up to the ring's written mark at every submit there, and the ring would
-otherwise be written for every list with a VU draw, even when no draw streams from it.
+`StructuredBuffer<uint4>` (`port/shaders/vu_common.hlsli` (`vu_ring`): the tables and VuCB's
+`uint4` vectors read as integers, the float vectors through `asfloat`;
+[SHADERS.md](SHADERS.md#integer-lanes-never-through-a-float-load)); every index into it counts
+from the base. On Direct3D 11 (issue 126) a bound storage range is written to the GPU up to the
+ring's written mark at every submit, so with neither reader of t5 (the pre-pass or its batches
+off: `[dev] vu_prepass = false`, `vu_prepass_batch = false`, a failed self-test; and the merge off:
+`[dev] vu_merge = false`, or a merge module missing) its VU groups leave t5 unbound (the layout
+keeps the slot) and a submit writes only the bytes its draws stream; with either on, the bytes t5
+adds are the ones the batch and merge builds read ([BACKENDS.md](BACKENDS.md#what-direct3d-11-costs-the-cpu-a-picture)).
 
 A batch build begins with `vu_pre_batch_entry`: a binary search over the table's x of six fixed
 steps (no loop: [SHADERS.md](SHADERS.md#the-envelope)) finds the vertex's item, its VuCB's vectors
@@ -407,7 +415,7 @@ modules unchanged word for word). The vertex is then the item's own (`SV_VertexI
 x), and every function runs as in the item's own draw on the same bytes, so each item writes the
 words it wrote alone, at the same texels. The items of a pass write disjoint texels, so their new
 order does not change the record. Skinned (cluster) items batch like the others: their bones are
-read from their VuBoneCB in the ring. The batch builds are 2,350 to 17,244 words, within the
+read from their VuBoneCB in the ring. The batch builds are 2,338 to 17,220 words, within the
 pre-pass entries' plain budget.
 
 An item whose VuCB or VuBoneCB lies past the range t5 binds, or a batch whose table or DrawCB does
@@ -426,7 +434,7 @@ batch); the start-up self-test checks the draws one an entry and stage would mak
 ## The draw merge
 
 Every VU command is at least one GPU draw, whatever the game's culling said of it
-([RENDER.md](RENDER.md#the-vertex-and-triangle-pre-passes)), and its cost on the GPU is per draw,
+([RENDER.md](PIPELINES.md#the-vertex-and-triangle-pre-passes)), and its cost on the GPU is per draw,
 not per triangle: a PowerVR phone spent about 11 us a draw, 9.4 to 11.9 ms a picture on list 0's
 ~900 draws at 2x (a reporter's log). Consecutive draws very often share every state but their
 VuCB: the same pipeline, the same stream buffer (one mesh arena chunk holds many meshes), the same
@@ -435,8 +443,10 @@ runs` counts them: about half of the VU draws of a gameplay frame could join the
 
 With the merge (`g_rd.vuMerge`, the default; `port/render/rd_replay_vu.c` (`vuDraw`, `vuRunTake`,
 `rd__replay_vu_flush`)) such a draw is held in an open run instead of drawn. A draw joins the run
-when it has one planned pass, an index list, a merge build (below), no DATE through the stencil bit,
-no destination read, is outside the loss bisect's window and the pass split, and has the same pipeline key, group 1 (the stream buffer, the record, the ring),
+when it has one planned pass (or, without dual-source blending, a colour pass and its alpha pass:
+[below](#the-draw-merge-without-dual-source-blending)), an index list, a merge build (below), no DATE through the stencil bit,
+no destination read (but the attachment read under GS state as shader data, [PIPELINES.md](PIPELINES.md#gs-state-as-data):
+read in rasterization order, a merged draw's triangles see each earlier one's writes as the draws one by one would; `vuMergeDst`), is outside the loss bisect's window and the pass split, and has the same pipeline key, group 1 (the stream buffer, the record, the ring),
 group 2 (the textures and the sampler), DrawCB bytes, FrameCB, scissor, render pass and GPU timing
 effect as the run, up to 16 draws whose raised index values (below) stay within the device's
 (`maxDrawIndexedIndexValue`). Anything else that records ends the run first
@@ -450,7 +460,7 @@ The run is one indexed draw. A run of one draws its own index list. A longer run
 index lists into the ring one after the other: the first draw's values as they are, each later
 draw's raised by `next - lo` (its lowest value `lo` moved to one past the highest value before it),
 so the draws' values are disjoint and in order. A table of one `uint4` a draw goes into the ring
-too: x the draw's first raised value (draw 0: the table's length), y its VuCB's float4 index in t5,
+too: x the draw's first raised value (draw 0: the table's length), y its VuCB's qword index in t5,
 z its VuBoneCB's, w its raise. The VuCB of every draw is copied into the ring as before, and its
 `mark[3]` lane, which nothing else reads, holds the table's index; b2 is bound at the first draw's.
 A draw alone through a merge build gets a table of one (its VuCB, raise 0). The span check of issue
@@ -475,16 +485,38 @@ Every pipeline of those vertex shaders takes its merge build while the merge is 
 same: `port/render/rd_pipeline.c` takes the module by `g_rd.vuMerge`, set once at start, so the
 start-up set and the pipeline count do not change). The skinned programs and the particles have no
 merge build: their draws are one a command, as before. The merge serves both paths: the record's
-main shader and the programs' own entries (the tile-based GPUs', whose pre-pass is off). It is off
-on Direct3D 11 (its main draws do not bind t5), by `[dev] vu_merge = false` (`ICO_RD_VU_MERGE=0`:
-one GPU draw a VU draw through the plain builds, an A/B), or when a merge module is missing. The
-start line says which: `rd: VU merge: on: consecutive mesh and grid draws with the same pipeline,
+main shader and the programs' own entries (the tile-based GPUs', whose pre-pass is off, and any
+device whose start-up self-test turned it off). It is off by `[dev] vu_merge = false` (`ICO_RD_VU_MERGE=0`: one GPU draw a VU draw
+through the plain builds, an A/B), or when a merge module is missing. On Direct3D 11 a module is
+only its description until the first pipeline that uses it (the backend compiles the HLSL with
+FXC in its pipeline workers), so the start line adds `(Direct3D 11: compiled at their first
+pipeline, t5 bound)` and a build FXC refuses shows as that pipeline's `pipeline creation failed
+...` line, which then ends `; vertex shader vu_X_merge_vs, the draw merge's build ([dev] vu_merge
+= false avoids it)`. Its draws are skipped in that replay only: the failure (on Direct3D 11, or on
+any backend under `ICO_RD_FAKE_MERGE_FAIL=1`, which keeps the first pipeline made with a merge
+build as failed; not a full pipeline pool) turns the merge and the fuse off at the start of the
+next replay, before it asks for a pipeline (`rd__vu_merge_fallback`): the device idle, every
+pipeline dropped (a key names its vertex shader, not the module, so a key made with a merge build
+or its failed entry would otherwise stay), the merge builds destroyed, and once `rd: VU merge: off:
+the driver could not compile vu_X_merge_vs (Direct3D 11); one GPU draw a VU draw from here`. From
+there every VU draw is drawn one a command through the plain builds, and the start-up set's keys
+are made again on first use. A failure of the key's pixel shader also takes this path (the
+renderer cannot tell which module the driver refused); the plain key then fails too and its own
+line says so. `rd_vumerge_fallback` (ctest and the WARP job) fakes the failure. The start line
+says which: `rd: VU merge: on: consecutive mesh and grid draws with the same pipeline,
 textures, DrawCB, FrameCB and scissor drawn as one indexed draw of up to 16, ...` or `rd: VU merge:
 off ...`, and the summary line has `VU merge on` or `VU merge off` after the pre-pass. `rd_replay_tool
 --stats` prints `VU merge: N draws in M GPU draws (K merged into G, A alone; merge on)` beside the
 count of what could join, and the window's 10 s line `VU merge: N draws a replay in G GPU draws, A
-alone` (`RdPerfRecord.vuMergeIn`, `vuMergeGpu`, `vuMergeAlone`). The merge builds are 6,770 to
-51,903 words (`vu_lit_merge_vs`), within their budgets, about 500 words above the plain builds.
+alone (kept apart by pipeline P, texture group T, DrawCB D, split/DATE/dst S, scissor/FrameCB F)`
+(`RdPerfRecord.vuMergeIn`, `vuMergeGpu`, `vuMergeAlone`, and `vuMergeBlocked` per replay: the
+first key on which a draw differed from the one before it in the same pass, the reasons `--stats`
+prints after `blocked by`), so a phone's log says why its draws stay alone. The merge builds are 6,755 to
+52,266 words (`vu_lit_merge_vs`), within their budgets, about 550 to 920 words above the plain builds.
+Every table, raise, flags word and VuCB `uint4` vector they read from t5 is loaded as an integer
+(`vu_ring` is `StructuredBuffer<uint4>`): read through a float load, those words are denormal
+floats, which a driver may flush to zero (issue 164 on a Mali-G52;
+[SHADERS.md](SHADERS.md#integer-lanes-never-through-a-float-load)).
 
 ## The fused scissor pair
 
@@ -525,7 +557,8 @@ pixel with a negative distance is discarded before its output in any case. The t
 builds take the mark as one more argument of `vu_dual_out_f` (`fused` not 0 joins the PABE rule's
 unblended case: the same c0 and c1 as `vu_dual_out_fused`); every unfused pixel's arithmetic is
 unchanged, and every other build keeps the function as it was (`VU_FUSED_ARG`, `VU_FUSED_OR`). The
-`_nodual` twins are unchanged: without dual-source blending a cut is two passes and never fuses. On
+`_nodual` twins take the mark the same way ([The draw merge without dual-source
+blending](#the-draw-merge-without-dual-source-blending)). On
 the phone's three frames the existing tool counted every pair kept apart for the twins at Resolution
 Auto (257, 355 and 398 pairs) where 2x fused them all.
 
@@ -535,11 +568,11 @@ that fails:
 
 | reason | the pair is kept apart when |
 |---|---|
-| fuse off | `[dev] vu_fuse = false` (`ICO_RD_VU_FUSE=0`), or the draw merge off (Direct3D 11, `vu_merge = false`) |
+| fuse off | `[dev] vu_fuse = false` (`ICO_RD_VU_FUSE=0`), or the draw merge off (`vu_merge = false`, a merge module missing) |
 | no merge build | the draw's vertex shader or the fallback's has no merge build (only those mark the kicks) |
-| passes | either state's plan is not one pass: the alpha test's split, or no dual-source blending (a lerp is two passes there) |
-| dst/DATE | a destination read (the exact blend) or DATE through the stencil bit |
-| blend form | the cut's blend is not a lerp or Cd*FIX + Cs: the premultiplied adds and subtracts (ONE, ONE) and the Ad forms cannot drop Cd per pixel (`rd_pipeline.c` `keyBlendPath`, `blendState`) |
+| passes | either state's plan is not one pass (the alpha test's split), the cut's two passes without dual-source blending excepted (a colour pass and its alpha pass, joined back for these rules; kept apart where the alpha pass's Z test is not the colour pass's: GREATER with Z write) |
+| dst/DATE | a destination read (the exact blend) or DATE through the stencil bit; not the attachment read under GS state as shader data, where both draws go through it |
+| blend form | the cut's blend is not a lerp or Cd*FIX + Cs: the premultiplied adds and subtracts (ONE, ONE) and the Ad forms cannot drop Cd per pixel (`rd_pipeline.c` `keyBlendPath`, `blendState`); under GS state as shader data every form fuses: the cut and the kick have one key, and the kick's marked pixels take the ALPHA register `0x00` (Cs) in the shader, what the kick's own pass (`csOnly`) stores (`port/shaders/vu_common.hlsli` `VU_RETURN` under `ICO_DST_MODE` 2) |
 | no planes | the cut's pixel shader reads no mark: neither `vu_ps` / `vu_texa_ps` (`r.w`) nor a no-planes twin without `ICO_DF_PLANE` (the plane's sign). None expected: a twin never draws a clip plane's draw |
 | plans differ | the kick's plan is not the cut's with the blend off: the cut's pass with the key's blend, the flags `FIX_FACTOR`, `PREMUL` and `C1_DST`, the clamped FIX and `dstWant` as the alpha plan's blending off sets them (`rd_alpha_plan.c`) must equal the kick's pass in every other field (shaders, depth, mask, alpha test, flags) |
 
@@ -556,9 +589,59 @@ one pipeline already, M kept apart (...)` with the same reasons (`RdPerfRecord.v
 `vuFuseSame`, `vuFuseKept`). The marks cost the five merge builds of those entries 93 to 108 words
 (46 to 51 for `r.w`, 47 to 57 for the plane's sign: `vu_lit_merge_vs` 51,950, `vu_lit_merge_plain_vs`
 23,904, `vu_merge_main_vs` 6,827), `vu_ps` and `vu_texa_ps` 142 each and `vu_np_ps` and
-`vu_texa_np_ps` 44 each (4,927 and 11,063); the other builds (the `_nodual` and destination-read
-twins, every build without `ICO_VU_MERGE`) are the same word for word. `rd_vufuse_ab` is its byte gate
-([TESTING.md](TESTING.md)).
+`vu_texa_np_ps` 44 each (4,927 and 11,063); the other builds (the destination-read twins, every
+build without `ICO_VU_MERGE`) are the same word for word, and the `_nodual` twins 34 to 44 words
+more ([below](#the-draw-merge-without-dual-source-blending)). `rd_vufuse_ab` is its byte gate
+([TESTING_PROGRAMS.md](TESTING_PROGRAMS.md)).
+
+## The draw merge without dual-source blending
+
+Issue 164: a Mali-G52 phone (Vulkan 1.1, no `dualSrcBlend`) logged `VU merge: 34 draws a replay in
+10 GPU draws, 1047 alone`, 1,979 draws and 1,928 pipeline binds a replay. Its dump replays the same
+way on lavapipe under `ICO_VK_FAKE_NO_DUAL=1` alone (`1097 draws in 1073 GPU draws (34 merged into
+10, 1063 alone)`; `blocked by ... DrawCB 358`; `VU fuse: 0 pairs fused, 471 kept apart (... passes
+471)`), and the same under `ICO_VK_FAKE_LIMITS=mali` with it; the Mali limits alone (256-byte
+offsets, four descriptor sets, 16 images a stage, index values to 2^24 - 1) merge as the desktop does
+(`826 merged into 87`). So the limit was the missing dual-source blending, not a device limit:
+without it every lerp and Cd*FIX + Cs draw is two passes (`port/render/rd_pipeline.c`
+`rd__expand_no_dual`: a colour pass whose c0.a is the factor, mask RGB, then an alpha pass writing
+As with blending off, no Z write, under a Z test that admits the Z the colour pass left), and the
+merge took a draw of one planned pass only, the fuse a cut of one pass only. Code 36's cuts
+(PRIM.ABE forced on, so lerps) stayed two passes apart from their one-pass kicks, and the draws
+alternated: nothing joined.
+
+So the merge and the fuse take the two passes (`port/render/rd_replay_vu.c` `vuMergePasses`,
+`vuNoDualJoin`):
+
+- A draw of two passes, the colour pass and its alpha pass (`rd__no_dual_second`), is held in the
+  run as a one-pass draw is; the run keeps both passes' keys, pipelines and DrawCBs (a draw joins
+  when all of them are the run's) and draws the colour pass over every draw's raised index list,
+  then the alpha pass over the same list, one draw counted as `vuDraw` counts the pair. The pixels
+  are the same: no colour pass reads the stored alpha (these blends never read Ad), and the alpha
+  passes write no Z. With Z write off the depth does not move inside the run, so each draw's alpha
+  pass admits the fragments its colour pass did. With Z write on, under GEQUAL (and GREATER, whose
+  alpha pass takes GEQUAL) the depth only grows, the fragments that pass carry it, and the alpha left
+  is the last fragment's at the final depth, whether the alpha passes follow each draw or the run;
+  under ALWAYS the last fragment's either way. That is the argument the two passes already rest on
+  for one draw's triangles; the run is a longer list of them under the same state.
+- The fuse joins a cut's two passes back into the pass the planner made before the split (the mask
+  RGB plus A, `ICO_DF_NODUAL_FACTOR` off) for its rules, and fuses as with dual-source blending. The
+  kick then draws through the cut's two passes, and `vu_ps`, `vu_texa_ps` and their no-planes twins'
+  `_nodual` builds take the mark (`r.w`, or the plane's sign) as `vu_dual_out_f`'s `fused` argument:
+  the colour pass's factor 1.0 for the lerps and 0 for Cd*FIX + Cs, so the blender stores Cs, and
+  the alpha pass's As with FBA's MSB, what the kick's own pass (blending off) stores. A cut whose
+  alpha pass's Z test differs (GREATER with Z write) stays apart: there a fragment at the stored Z
+  would write its alpha, which the kick's one pass does not. The dual-source builds are the same
+  word for word; the four `_nodual` builds grow 34 to 44 words (`vu_ps_nodual` 5,606,
+  `vu_texa_ps_nodual` 11,749, `vu_np_ps_nodual` 4,992, `vu_texa_np_ps_nodual` 11,128).
+
+Expected on the 164 dump under the fakes: `1097 draws in 358 GPU draws (826 merged into 87, 271
+alone)` and `397 pairs fused`, the desktop's figures. `rd_vumerge_mali` (`port/render/test/rd_vumerge_mali.cmake`,
+label `mali`) is its gate: the dumps of the machine-local list `tools/vumerge_mali_dumps.txt` (the
+164 frame in `/primary/dev/ico-dumps/164/`, the two phone frames `rd_vufuse_ab` reads and a capture)
+on the plain device and under `ICO_VK_FAKE_LIMITS=mali ICO_VK_FAKE_NO_DUAL=1`, under
+`ICO_RD_BLEND=fixed`: every named target byte for byte, the merge's figures and the fused pairs the
+plain device's, and the 164 frame's `826 merged into 87`.
 
 ## Tests
 

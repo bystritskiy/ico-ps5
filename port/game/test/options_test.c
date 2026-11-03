@@ -9,6 +9,8 @@
 #include <stdlib.h>
 #include <stdio.h>
 #include <string.h>
+#include <fcntl.h>
+#include <unistd.h>
 #include "config.h"
 #include "options.h"
 /* the region table (port/core/region.h, by its path: the game's include
@@ -109,6 +111,7 @@ static void test_defaults(void)
     CHECK(ico_opt_stick_fix() == ico_opt_stick_fix_default());
     CHECK(ico_opt_yorda_safe() == 0);
     CHECK(ico_opt_pit_time() == ICO_PIT_ORIGINAL && ico_opt_pit_time_factor() == 1.0f);
+    CHECK(ico_opt_shadow_speed() == ICO_SPEED_ORIGINAL && ico_opt_shadow_speed_factor() == 1.0f);
     CHECK(ico_opt_door_fix() == 0);
     CHECK(ico_opt_mirror() == 0);
     CHECK(ico_opt_developer_mode() == 0);
@@ -119,6 +122,12 @@ static void test_defaults(void)
     CHECK(ico_opt_door_fix() == 1);
     ico_opt_reload();
     CHECK(ico_opt_door_fix() == 0);
+    /* Yorda trips: the same (off, the setter's 0 or 1, back on reload) */
+    CHECK(ico_opt_yorda_trips() == 0);
+    ico_opt_set_yorda_trips(6);
+    CHECK(ico_opt_yorda_trips() == 1);
+    ico_opt_reload();
+    CHECK(ico_opt_yorda_trips() == 0);
     /* Natural chains: the same (off, the setter's 0 or 1, back on reload) */
     CHECK(ico_opt_natural_chains() == 0);
     ico_opt_set_natural_chains(9);
@@ -134,6 +143,12 @@ static void test_defaults(void)
     ico_opt_set_skip_opening(1);
     ico_opt_reload();
     CHECK(ico_opt_skip_opening() == 0);
+    /* Second memory card: the same (off, the setter's 0 or 1, back on reload) */
+    CHECK(ico_opt_second_memory_card() == 0);
+    ico_opt_set_second_memory_card(3);
+    CHECK(ico_opt_second_memory_card() == 1);
+    ico_opt_reload();
+    CHECK(ico_opt_second_memory_card() == 0);
     /* Hold type: the disc's own by default (the region row's hold_type_own),
        the setter keeps 0 or 1, a reload goes back to the config's (absent:
        the disc's own) */
@@ -169,6 +184,15 @@ static void test_defaults(void)
     CHECK(ico_opt_developer_mode() == 0);
 }
 
+/* the Second memory card's listener (main_host.c points it at port 1) */
+static int s_card_heard = -1, s_card_count;
+
+static void card_listener(int on)
+{
+    s_card_heard = on;
+    s_card_count++;
+}
+
 static void test_config(const char *dir)
 {
     char path[512];
@@ -182,7 +206,8 @@ static void test_config(const char *dir)
         return;
     }
     fputs("[gameplay]\nstick_fix = true\nyorda_safe = true\ndoor_fix = true\nmirror = true\n"
-          "developer_mode = true\nnatural_chains = true\nskip_opening = true\n[dev]\n"
+          "developer_mode = true\nnatural_chains = true\nskip_opening = true\n"
+          "yorda_trips = true\nsecond_memory_card = true\n[dev]\n"
           "debug_option = 1\n",
           f);
     fclose(f);
@@ -193,6 +218,19 @@ static void test_config(const char *dir)
     CHECK(ico_opt_door_fix() == 1);
     CHECK(ico_opt_natural_chains() == 1);
     CHECK(ico_opt_skip_opening() == 1);
+    CHECK(ico_opt_yorda_trips() == 1);
+    CHECK(ico_opt_second_memory_card() == 1);
+    /* its listener hears the current value at registration, then each set
+       (a toggle puts the card in or takes it out at once) */
+    ico_opt_set_second_memory_card_listener(card_listener);
+    CHECK(s_card_heard == 1 && s_card_count == 1);
+    ico_opt_set_second_memory_card(0);
+    CHECK(s_card_heard == 0 && s_card_count == 2 && ico_opt_second_memory_card() == 0);
+    ico_opt_set_second_memory_card(1);
+    CHECK(s_card_heard == 1 && s_card_count == 3);
+    ico_opt_set_second_memory_card_listener(NULL);
+    ico_opt_set_second_memory_card(0);
+    CHECK(s_card_count == 3);
     CHECK(ico_opt_mirror() == 1);
     /* developer mode and the debug option file switch */
     CHECK(ico_opt_developer_mode() == 1);
@@ -225,6 +263,27 @@ static void test_config(const char *dir)
             ico_config_reset(path, "/nonexistent/options_test.ini");
             ico_opt_reload();
             CHECK(ico_opt_pit_time_factor() == want[i]);
+        }
+        remove(path);
+    }
+    /* shadow_speed: each name reads its factor; an unknown word reads original */
+    {
+        static const char *const names[] = {"slower", "original", "faster", "fastest", "bogus"};
+        static const float want[] = {0.75f, 1.0f, 1.25f, 1.5f, 1.0f};
+        int i;
+
+        for (i = 0; i < 5; i++) {
+            f = fopen(path, "wb");
+            if (f == NULL) {
+                failures++;
+                break;
+            }
+            fprintf(f, "[gameplay]\nshadow_speed = \"%s\"\n", names[i]);
+            fclose(f);
+            ico_config_reset(path, "/nonexistent/options_test.ini");
+            ico_opt_reload();
+            CHECK(ico_opt_shadow_speed_factor() == want[i]);
+            CHECK(ico_opt_shadow_speed() == (i < 4 ? i : ICO_SPEED_ORIGINAL));
         }
         remove(path);
     }
@@ -348,11 +407,15 @@ static void test_hold_discs(const char *dir)
 }
 
 /* [ui] language: auto (-1) by default and for a value that is not one of
-   the eight; each name its UiLang number (port/ui/strings.h order); the
-   setter and the names the Settings menu writes */
+   the eight and the community translations; each name its UiLang number
+   (port/ui/strings.h order); the setter and the names the Settings menu
+   writes */
 static void test_ui_language(const char *dir)
 {
-    static const char *const names[8] = {"en", "fr", "de", "it", "es", "ja", "ko", "zh"};
+    enum { N = ICO_OPT_UI_LANGUAGE_COUNT };
+
+    static const char *const names[N] = {"en", "fr", "de",        "it",          "es",   "ja",
+                                         "ko", "zh", "ru-bobttz", "ru-cobra838", "pt-br"};
     char path[512];
     char text[64];
     FILE *f;
@@ -362,8 +425,8 @@ static void test_ui_language(const char *dir)
     CHECK(ico_opt_ui_language() == -1);
     CHECK(strcmp(ico_opt_ui_language_name(-1), "auto") == 0);
     snprintf(path, sizeof(path), "%s/options_test.toml", dir);
-    for (int i = 0; i < 8 + 2; i++) {
-        const char *v = i < 8 ? names[i] : i == 8 ? "auto" : "klingon";
+    for (int i = 0; i < N + 2; i++) {
+        const char *v = i < N ? names[i] : i == N ? "auto" : "klingon";
         f = fopen(path, "wb");
         if (f == NULL) {
             fprintf(stderr, "cannot write %s\n", path);
@@ -375,21 +438,86 @@ static void test_ui_language(const char *dir)
         fclose(f);
         ico_config_reset(path, "/nonexistent/options_test.ini");
         ico_opt_reload();
-        CHECK(ico_opt_ui_language() == (i < 8 ? i : -1));
-        CHECK(strcmp(ico_opt_ui_language_name(ico_opt_ui_language()), i < 8 ? v : "auto") == 0);
+        CHECK(ico_opt_ui_language() == (i < N ? i : -1));
+        CHECK(strcmp(ico_opt_ui_language_name(ico_opt_ui_language()), i < N ? v : "auto") == 0);
     }
     remove(path);
     ico_opt_set_ui_language(5);
     CHECK(ico_opt_ui_language() == 5);
-    ico_opt_set_ui_language(8);
+    ico_opt_set_ui_language(N);
     CHECK(ico_opt_ui_language() == -1);
     ico_opt_set_ui_language(7);
     CHECK(ico_opt_ui_language() == 7);
+    ico_opt_set_ui_language(8);
+    CHECK(ico_opt_ui_language() == 8 && strcmp(ico_opt_ui_language_name(8), "ru-bobttz") == 0);
     ico_opt_set_ui_language(9);
+    CHECK(ico_opt_ui_language() == 9 && strcmp(ico_opt_ui_language_name(9), "ru-cobra838") == 0);
+    ico_opt_set_ui_language(10);
+    CHECK(ico_opt_ui_language() == 10 && strcmp(ico_opt_ui_language_name(10), "pt-br") == 0);
+    ico_opt_set_ui_language(-5);
     CHECK(ico_opt_ui_language() == -1);
     ico_config_reset("/nonexistent/options_test.toml", "/nonexistent/options_test.ini");
     ico_opt_reload();
     CHECK(ico_opt_ui_language() == -1);
+}
+
+/* [game] text_language: "" (-1, none) by default and for a word that is not
+   a community translation (a disc language among them: those are [game]
+   language's); "ru-bobttz", "ru-cobra838" and "pt-br" their UiLang numbers
+   (8, 9 and 10, the community translations); the setter takes only a community translation; the names
+   the Language row writes; a reload reads the file again */
+static void test_text_language(const char *dir)
+{
+    static const char *const words[] = {
+        "",         "ru-bobttz", "ru-cobra838", "en", "ja",    "auto",  "ru",      "RU-BOBTTZ",
+        "cobra838", "ru-cobra",  "pt-br",       "pt", "PT-BR", "pt_br", "ichagas7"};
+    static const int want[] = {-1, 8, 9, -1, -1, -1, -1, -1, -1, -1, 10, -1, -1, -1, -1};
+    char path[512];
+    char text[96];
+    FILE *f;
+
+    ico_config_reset("/nonexistent/options_test.toml", "/nonexistent/options_test.ini");
+    ico_opt_reload();
+    CHECK(ico_opt_text_language() == -1);
+    CHECK(strcmp(ico_opt_text_language_name(-1), "") == 0);
+    CHECK(ICO_OPT_TEXT_LANGUAGE_FIRST == 8 && ICO_OPT_UI_LANGUAGE_COUNT == 11);
+    snprintf(path, sizeof(path), "%s/options_test.toml", dir);
+    for (unsigned i = 0; i < sizeof(words) / sizeof(words[0]); i++) {
+        f = fopen(path, "wb");
+        if (f == NULL) {
+            fprintf(stderr, "cannot write %s\n", path);
+            failures++;
+            return;
+        }
+        snprintf(text, sizeof(text), "[game]\ntext_language = \"%s\"\n", words[i]);
+        fputs(text, f);
+        fclose(f);
+        ico_config_reset(path, "/nonexistent/options_test.ini");
+        ico_opt_reload();
+        CHECK(ico_opt_text_language() == want[i]);
+        CHECK(strcmp(ico_opt_text_language_name(ico_opt_text_language()),
+                     want[i] < 0 ? "" : words[i]) == 0);
+        /* not the menu language's key: [ui] language stays auto */
+        CHECK(ico_opt_ui_language() == -1);
+    }
+    remove(path);
+    ico_opt_set_text_language(8);
+    CHECK(ico_opt_text_language() == 8 && strcmp(ico_opt_text_language_name(8), "ru-bobttz") == 0);
+    ico_opt_set_text_language(9);
+    CHECK(ico_opt_text_language() == 9 &&
+          strcmp(ico_opt_text_language_name(9), "ru-cobra838") == 0);
+    ico_opt_set_text_language(10);
+    CHECK(ico_opt_text_language() == 10 && strcmp(ico_opt_text_language_name(10), "pt-br") == 0);
+    for (int l = -2; l < 8; l++) {
+        ico_opt_set_text_language(l);
+        CHECK(ico_opt_text_language() == -1 && strcmp(ico_opt_text_language_name(l), "") == 0);
+    }
+    ico_opt_set_text_language(11);
+    CHECK(ico_opt_text_language() == -1);
+    ico_opt_set_text_language(8);
+    ico_config_reset("/nonexistent/options_test.toml", "/nonexistent/options_test.ini");
+    ico_opt_reload();
+    CHECK(ico_opt_text_language() == -1);
 }
 
 /* --- pit_time: the dive ratio and the hook in actEnemyKidnapEnd ---------- */
@@ -458,6 +586,235 @@ static void test_pit_time(void)
     snprintf(hook, sizeof(hook), "ctrl.motion == %d && ico_opt_pit_time_factor() != 1.0f", motion);
     CHECK(count_of(text, hook) == 1);
     free(text);
+}
+
+/* --- shadow_speed: the setter, its log line and the sources that carry it - */
+
+/* the whole text of a source file (caller frees), or NULL */
+static char *read_source(const char *path)
+{
+    FILE *f = fopen(path, "rb");
+    char *text;
+    long n;
+
+    if (f == NULL) {
+        return NULL;
+    }
+    fseek(f, 0, SEEK_END);
+    n = ftell(f);
+    fseek(f, 0, SEEK_SET);
+    text = (char *)malloc((size_t)n + 1);
+    if (text == NULL || fread(text, 1, (size_t)n, f) != (size_t)n) {
+        free(text);
+        fclose(f);
+        return NULL;
+    }
+    text[n] = 0;
+    fclose(f);
+    return text;
+}
+
+/* Review finding 15: the motions shadow_speed scales on this disc (options.h
+   ico_opt_shadow_speed_motion; the ids are the decomp's motion-def.c names per disc): the
+   locomotion ones in, and the stand, the fly start, the run's end, an attack, the grab, a
+   hit, the dissolve's first sink motion and the pit dive out */
+static void test_shadow_speed_motions(void)
+{
+    static const struct {
+        const char *slug;
+        int in[13];  /* -1 ends */
+        int out[10]; /* stand, fly start, run end, attack1, hug start, hit1 front, sink A,
+                        the dive (sink E), -1 */
+    } kDiscs[] = {
+        {"pal",
+         {836, 838, 841, 842, 843, 844, 845, 846, 941, 942, -1},
+         {834, 835, 847, 911, 938, 897, 948, 952, -1}},
+        {"jpn",
+         {836, 838, 841, 842, 843, 844, 845, 846, 941, 942, -1},
+         {834, 835, 847, 911, 938, 897, 948, 952, -1}},
+        {"kor",
+         {836, 838, 841, 842, 843, 844, 845, 846, 941, 942, -1},
+         {834, 835, 847, 911, 938, 897, 948, 952, -1}},
+        {"cn",
+         {836, 838, 841, 842, 843, 844, 845, 846, 941, 942, -1},
+         {834, 835, 847, 911, 938, 897, 948, 952, -1}},
+        {"ntsc",
+         {790, 792, 795, 796, 797, 798, 799, 800, 888, 889, -1},
+         {788, 789, 801, 865, 896, 851, 899, 903, -1}},
+        {"aug6",
+         {792, 794, 797, 798, 799, 800, 801, 802, 890, 891, -1},
+         {790, 791, 803, 867, 898, 853, 901, 905, -1}},
+        {"jun26",
+         {823, 825, 828, 829, 830, 831, 832, 833, 923, 924, 942, 944, 955},
+         {821, 822, 834, 900, 931, 886, 934, 938, -1}},
+    };
+
+    const char *mine = ico_region_cur()->slug;
+    size_t d;
+    int i;
+
+    for (d = 0; d < sizeof(kDiscs) / sizeof(kDiscs[0]); d++) {
+        CHECK(ico_region_select(kDiscs[d].slug) == 0);
+        for (i = 0; i < 13 && kDiscs[d].in[i] >= 0; i++) {
+            if (!ico_opt_shadow_speed_motion(kDiscs[d].in[i])) {
+                fprintf(stderr, "%s: motion %d is not scaled\n", kDiscs[d].slug, kDiscs[d].in[i]);
+                failures++;
+            }
+        }
+        for (i = 0; kDiscs[d].out[i] >= 0; i++) {
+            if (ico_opt_shadow_speed_motion(kDiscs[d].out[i])) {
+                fprintf(stderr, "%s: motion %d is scaled\n", kDiscs[d].slug, kDiscs[d].out[i]);
+                failures++;
+            }
+        }
+        CHECK(!ico_opt_shadow_speed_motion(-1) && !ico_opt_shadow_speed_motion(0));
+    }
+    CHECK(ico_region_select(mine) == 0);
+}
+
+static void test_shadow_speed(void)
+{
+    static const float factor[ICO_SPEED_COUNT] = {0.75f, 1.0f, 1.25f, 1.5f};
+    static const char *const name[ICO_SPEED_COUNT] = {"slower", "original", "faster", "fastest"};
+    char *text;
+    char logpath[512];
+    char line[128];
+    char want[96];
+    FILE *lf;
+    int v, got = 0;
+
+    for (v = 0; v < ICO_SPEED_COUNT; v++) {
+        ico_opt_set_shadow_speed(v);
+        CHECK(ico_opt_shadow_speed() == v && ico_opt_shadow_speed_factor() == factor[v]);
+    }
+    ico_opt_set_shadow_speed(99); /* out of range reads original */
+    CHECK(ico_opt_shadow_speed() == ICO_SPEED_ORIGINAL && ico_opt_shadow_speed_factor() == 1.0f);
+
+    /* the log line on a change: fd 2 to a file for the three calls (one repeats: no line) */
+    {
+        const char *dir = getenv("TMPDIR");
+        int saved, fd;
+
+        snprintf(logpath, sizeof(logpath), "%s/ico_shadow_speed_%d.log", dir != NULL ? dir : "/tmp",
+                 (int)getpid());
+        fd = open(logpath, O_WRONLY | O_CREAT | O_TRUNC, 0600);
+        saved = dup(2);
+        if (fd < 0 || saved < 0) {
+            failures++;
+            return;
+        }
+        dup2(fd, 2);
+        close(fd);
+        ico_opt_set_shadow_speed(ICO_SPEED_FASTEST);
+        ico_opt_set_shadow_speed(ICO_SPEED_FASTEST); /* no change: no line */
+        ico_opt_set_shadow_speed(ICO_SPEED_SLOWER);
+        fflush(stderr);
+        dup2(saved, 2);
+        close(saved);
+    }
+    lf = fopen(logpath, "rb");
+    snprintf(want, sizeof(want), "gameplay: shadow speed %s (x%.2f)\n", name[ICO_SPEED_FASTEST],
+             (double)factor[ICO_SPEED_FASTEST]);
+    while (lf != NULL && fgets(line, sizeof(line), lf) != NULL) {
+        got++;
+        if (got == 1) {
+            CHECK(strcmp(line, want) == 0);
+        } else {
+            CHECK(strcmp(line, "gameplay: shadow speed slower (x0.75)\n") == 0);
+        }
+    }
+    CHECK(got == 2);
+    if (lf != NULL) {
+        fclose(lf);
+    }
+    remove(logpath);
+    ico_opt_set_shadow_speed(ICO_SPEED_ORIGINAL);
+
+    /* the hook: the multiplier in the one place that resolves the ratio, for enemies, not on
+       the freeze, only on this disc's locomotion motions */
+    text = read_source(ICO_ACT_GAME_SRC);
+    CHECK(text != NULL);
+    if (text != NULL) {
+        CHECK(count_of(text, "ratio *= ico_opt_shadow_speed_factor();") == 1);
+        CHECK(count_of(text, "ratio > 0.001f &&") == 1);
+        CHECK(count_of(text, "ico_opt_shadow_speed_factor() != 1.0f") == 1);
+        CHECK(count_of(text, "kind == 4 && ratio > 0.001f") == 1);
+        CHECK(count_of(text, "ico_opt_shadow_speed_motion(GOBJ_SUB(self)->ctrl.motion)") == 1);
+        CHECK(count_of(text, "diveMotion") == 0);
+        free(text);
+    }
+    /* the flight push: scaled once in each of the three flyCoreLoop copies */
+    text = read_source(ICO_COMMONACT_SRC);
+    CHECK(text != NULL);
+    if (text != NULL) {
+        CHECK(count_of(text, "v.f[2] *= ico_opt_shadow_speed_factor();") == 3);
+        free(text);
+    }
+    /* the simulation keys name it (the pad recording's header and a save
+       state's validity: port/platform/sim_keys.c ICO_SIM_KEYS) */
+    text = read_source(ICO_SIM_KEYS_SRC);
+    CHECK(text != NULL);
+    if (text != NULL) {
+        CHECK(count_of(text, "\"gameplay.shadow_speed\",") == 1);
+        CHECK(strstr(text, "\"gameplay.pit_time\",") < strstr(text, "\"gameplay.shadow_speed\","));
+        free(text);
+    }
+}
+
+/* --- yorda_trips: the hooks in the game's sources -------------------------
+   Each actGirlHand copy calls the tick where it sets her run-pulled bit,
+   with its disc's sit-down mail (the gate script's, st04a.c
+   actSt04aGirlSitChk): 109 on the European, Japanese, Korean and Asian
+   discs, 102 on the North American, 101 on the August 2001 preview, 100 on
+   the June 2001 demo; each InitIcoMisc copy calls the stage load after the
+   stage's pack; the key changes the simulation. */
+static void test_yorda_trips(void)
+{
+    const char *slug = ico_region_cur()->slug;
+    const int mail = strcmp(slug, "jun26") == 0  ? 100
+                     : strcmp(slug, "aug6") == 0 ? 101
+                     : strcmp(slug, "ntsc") == 0 ? 102
+                                                 : 109;
+    char hook[96];
+    char *text = read_source(ICO_GIRL_ACT_SRC);
+
+    CHECK(text != NULL);
+    if (text != NULL) {
+        CHECK(count_of(text, "ico_opt_yorda_trip_tick(") == 4 + 1 /* the declaration */);
+        snprintf(hook, sizeof(hook), "ico_opt_yorda_trip_tick((GObj *)self, %d);", mail);
+        CHECK(count_of(text, hook) == 1);
+        /* each right after its copy's run-pulled bit */
+        static const char *const kSet[4] = {"|= 0x100000;\n", "|= 0x200;\n", "|= 0x40;\n",
+                                            "|= 0x10;\n"};
+        static const int kMail[4] = {109, 102, 101, 100};
+        for (int i = 0; i < 4; i++) {
+            char want[320];
+            snprintf(want, sizeof(want),
+                     "ICO_RAW(long long, sub, 0x20, sub->flags20.ll) %s"
+                     "                /* PC port ([gameplay] yorda_trips): she may trip on this "
+                     "run-pulled tick */\n"
+                     "                ico_opt_yorda_trip_tick((GObj *)self, %d);",
+                     kSet[i], kMail[i]);
+            CHECK(count_of(text, want) == 1);
+        }
+        free(text);
+    }
+    text = read_source(ICO_ICOMISC_SRC);
+    CHECK(text != NULL);
+    if (text != NULL) {
+        CHECK(count_of(text, "ico_yorda_trip_stage_loaded(") == 2 + 1 /* the declaration */);
+        CHECK(count_of(text, "    iosCdvdLoadPackFile(pack, GetDataFileName(stage, pack), 1);\n"
+                             "    /* PC port ([gameplay] yorda_trips): her fall's motions, where "
+                             "the pack has none */\n"
+                             "    ico_yorda_trip_stage_loaded(stage);") == 2);
+        free(text);
+    }
+    text = read_source(ICO_SIM_KEYS_SRC);
+    CHECK(text != NULL);
+    if (text != NULL) {
+        CHECK(count_of(text, "\"gameplay.yorda_trips\",") == 1);
+        free(text);
+    }
 }
 
 static void test_brain(void)
@@ -941,6 +1298,231 @@ static void test_video_effects(const char *dir)
         CHECK(ico_video_save() == 0);
         text = read_text(path);
         CHECK(text != NULL && strstr(text, "effect_motion_blur_mode = \"original\"") != NULL);
+    }
+    /* Motion blur strength ([video] effect_motion_blur_strength, issue 181):
+       100 by default and with no key (a file from before it), 10..100 read
+       as written in tens, a value off the tens rounded to the nearest (half
+       up), outside 10..100 clamped (each with a stderr line); the getter
+       reads it whatever Motion blur's way, Off keeps it; saved with every
+       save and read back; outside the preset */
+    {
+        static const struct {
+            const char *text;
+            int want;
+        } kStr[] = {{NULL, 100}, {"100", 100}, {"50", 50},  {"10", 10},   {"55", 60},
+                    {"54", 50},  {"0", 10},    {"-30", 10}, {"250", 100}, {"\"half\"", 100}};
+
+        ico_video_defaults(&d);
+        CHECK(d.effectMotionBlurStrength == 100);
+        for (size_t i = 0; i < sizeof(kStr) / sizeof(kStr[0]); i++) {
+            f = fopen(path, "wb");
+            if (f != NULL) {
+                fputs("[video]\neffect_motion_blur_mode = \"smooth\"\n", f);
+                if (kStr[i].text != NULL) {
+                    fprintf(f, "effect_motion_blur_strength = %s\n", kStr[i].text);
+                }
+                fclose(f);
+            }
+            ico_config_reset(path, "/nonexistent/options_test.ini");
+            ico_video_reload();
+            ico_video_get(&o);
+            CHECK(o.effectMotionBlurStrength == kStr[i].want &&
+                  ico_video_effect_motion_blur_strength() == kStr[i].want &&
+                  ico_video_effect_motion_blur_smooth() == 1 &&
+                  ico_video_preset(&o) == ICO_VIDEO_ORIGINAL);
+        }
+        /* the clamp itself */
+        CHECK(ico_video_motion_blur_strength_clamp(5) == 10 &&
+              ico_video_motion_blur_strength_clamp(14) == 10 &&
+              ico_video_motion_blur_strength_clamp(15) == 20 &&
+              ico_video_motion_blur_strength_clamp(95) == 100 &&
+              ico_video_motion_blur_strength_clamp(1000) == 100 &&
+              ico_video_motion_blur_strength_clamp(70) == 70);
+        /* ico_video_set clamps; Off keeps the value; the save writes it */
+        ico_video_get(&o);
+        o.effectMotionBlur = 0;
+        o.effectMotionBlurStrength = 33;
+        ico_video_set(&o);
+        ico_video_get(&o);
+        CHECK(o.effectMotionBlurStrength == 30 && ico_video_effect_motion_blur_strength() == 30 &&
+              ico_video_effect_motion_blur() == 0);
+        CHECK(ico_video_save() == 0);
+        text = read_text(path);
+        CHECK(text != NULL && strstr(text, "effect_motion_blur_strength = 30\n") != NULL &&
+              strstr(text, "effect_motion_blur = false") != NULL);
+        ico_config_reset(path, "/nonexistent/options_test.ini");
+        ico_video_reload();
+        ico_video_get(&o);
+        CHECK(o.effectMotionBlurStrength == 30 && o.effectMotionBlur == 0);
+        ico_video_set_preset(&o, ICO_VIDEO_ENHANCED);
+        CHECK(o.effectMotionBlurStrength == 30);
+        ico_video_set_preset(&o, ICO_VIDEO_ORIGINAL);
+        CHECK(o.effectMotionBlurStrength == 30 && ico_video_preset(&o) == ICO_VIDEO_ORIGINAL);
+        /* a file without the key saved by this build gains it as 100 */
+        f = fopen(path, "wb");
+        if (f != NULL) {
+            fputs("[video]\neffect_fog = false\n", f);
+            fclose(f);
+        }
+        ico_config_reset(path, "/nonexistent/options_test.ini");
+        ico_video_reload();
+        CHECK(ico_video_save() == 0);
+        text = read_text(path);
+        CHECK(text != NULL && strstr(text, "effect_motion_blur_strength = 100\n") != NULL);
+    }
+    /* Glow between frames ([video] effect_glow_mode): Original with no key
+       under the Original rows, "original" and "smooth" read in any case,
+       anything else Original (with a stderr line); Smooth beside the
+       Original rows is Custom; the getter is 1 only while Glow is on; saved
+       with every save and read back; the Enhanced preset sets Smooth, the
+       Original preset Original; no key under the Enhanced rows is Smooth
+       and an explicit key wins */
+    {
+        static const struct {
+            const char *text;
+            int smooth;
+        } kGlow[] = {{NULL, 0}, {"original", 0}, {"Smooth", 1}, {"fast", 0}};
+
+        static const char kEnhancedRows[] =
+            "preset = \"enhanced\"\nresolution = \"window\"\naspect = \"auto\"\n"
+            "texture_filter = \"anisotropic\"\nfull_height = true\n";
+
+        ico_video_defaults(&d);
+        CHECK(d.effectGlowSmooth == 0 && strcmp(ico_video_glow_name(&d), "original") == 0);
+        for (int i = 0; i < 4; i++) {
+            f = fopen(path, "wb");
+            if (f != NULL) {
+                fputs("[video]\n", f);
+                if (kGlow[i].text != NULL) {
+                    fprintf(f, "effect_glow_mode = \"%s\"\n", kGlow[i].text);
+                }
+                fclose(f);
+            }
+            ico_config_reset(path, "/nonexistent/options_test.ini");
+            ico_video_reload();
+            ico_video_get(&o);
+            CHECK(o.effectGlow == 1 && o.effectGlowSmooth == kGlow[i].smooth &&
+                  ico_video_effect_glow_smooth() == kGlow[i].smooth &&
+                  ico_video_preset(&o) ==
+                      (kGlow[i].smooth ? ICO_VIDEO_CUSTOM : ICO_VIDEO_ORIGINAL) &&
+                  ico_video_preset_rows(&o) == ICO_VIDEO_ORIGINAL);
+        }
+        f = fopen(path, "wb");
+        if (f != NULL) {
+            fputs("[video]\neffect_glow = false\neffect_glow_mode = \"smooth\"\n", f);
+            fclose(f);
+        }
+        ico_config_reset(path, "/nonexistent/options_test.ini");
+        ico_video_reload();
+        ico_video_get(&o);
+        CHECK(o.effectGlow == 0 && o.effectGlowSmooth == 1 && ico_video_effect_glow_smooth() == 0 &&
+              strcmp(ico_video_glow_name(&o), "off") == 0);
+        o.effectGlow = 1;
+        o.effectGlowSmooth = 4;
+        ico_video_set(&o);
+        ico_video_get(&o);
+        CHECK(o.effectGlowSmooth == 1 && ico_video_effect_glow_smooth() == 1 &&
+              strcmp(ico_video_glow_name(&o), "smooth") == 0);
+        CHECK(ico_video_save() == 0);
+        text = read_text(path);
+        CHECK(text != NULL && strstr(text, "effect_glow_mode = \"smooth\"") != NULL);
+        ico_video_set_preset(&o, ICO_VIDEO_ORIGINAL);
+        CHECK(o.effectGlowSmooth == 0 && ico_video_preset(&o) == ICO_VIDEO_ORIGINAL);
+        ico_video_set_preset(&o, ICO_VIDEO_ENHANCED);
+        CHECK(o.effectGlowSmooth == 1 && ico_video_preset(&o) == ICO_VIDEO_ENHANCED);
+        /* no key under the Enhanced rows: Smooth, as Enhanced */
+        f = fopen(path, "wb");
+        if (f != NULL) {
+            fputs("[video]\n", f);
+            fputs(kEnhancedRows, f);
+            fclose(f);
+        }
+        ico_config_reset(path, "/nonexistent/options_test.ini");
+        ico_video_reload();
+        ico_video_get(&o);
+        CHECK(o.effectGlowSmooth == 1 && ico_video_preset(&o) == ICO_VIDEO_ENHANCED &&
+              ico_video_effect_glow_smooth() == 1);
+        /* an explicit key wins over the rows */
+        f = fopen(path, "wb");
+        if (f != NULL) {
+            fputs("[video]\n", f);
+            fputs(kEnhancedRows, f);
+            fputs("effect_glow_mode = \"original\"\n", f);
+            fclose(f);
+        }
+        ico_config_reset(path, "/nonexistent/options_test.ini");
+        ico_video_reload();
+        ico_video_get(&o);
+        CHECK(o.effectGlowSmooth == 0 && ico_video_preset(&o) == ICO_VIDEO_CUSTOM);
+        /* a file with other rows and no key: Original */
+        f = fopen(path, "wb");
+        if (f != NULL) {
+            fputs("[video]\npreset = \"custom\"\nresolution = \"3x\"\n", f);
+            fclose(f);
+        }
+        ico_config_reset(path, "/nonexistent/options_test.ini");
+        ico_video_reload();
+        ico_video_get(&o);
+        CHECK(o.effectGlowSmooth == 0);
+        /* Glow off keeps the mode: the save writes "smooth", not the log's
+           "off", so the next start reads it back without a "not understood"
+           line and the Preset row still reads Enhanced */
+        f = fopen(path, "wb");
+        if (f != NULL) {
+            fputs("[video]\n", f);
+            fputs(kEnhancedRows, f);
+            fputs("effect_glow_mode = \"smooth\"\n", f);
+            fclose(f);
+        }
+        ico_config_reset(path, "/nonexistent/options_test.ini");
+        ico_video_reload();
+        ico_video_get(&o);
+        o.effectGlow = 0;
+        ico_video_set(&o);
+        CHECK(ico_video_save() == 0);
+        text = read_text(path);
+        CHECK(text != NULL && strstr(text, "effect_glow = false") != NULL &&
+              strstr(text, "effect_glow_mode = \"smooth\"") != NULL &&
+              strstr(text, "effect_glow_mode = \"off\"") == NULL);
+        {
+            const char *dir = getenv("TMPDIR");
+            char glowLog[512], line[256];
+            int saved, fd, notUnderstood = 0;
+            FILE *lf;
+
+            snprintf(glowLog, sizeof(glowLog), "%s/ico_glow_off_%d.log", dir != NULL ? dir : "/tmp",
+                     (int)getpid());
+            fd = open(glowLog, O_WRONLY | O_CREAT | O_TRUNC, 0600);
+            saved = dup(2);
+            CHECK(fd >= 0 && saved >= 0);
+            if (fd >= 0 && saved >= 0) {
+                fflush(stderr);
+                dup2(fd, 2);
+                close(fd);
+                ico_config_reset(path, "/nonexistent/options_test.ini");
+                ico_video_reload();
+                ico_video_get(&o);
+                fflush(stderr);
+                dup2(saved, 2);
+                close(saved);
+            }
+            lf = fopen(glowLog, "rb");
+            while (lf != NULL && fgets(line, sizeof(line), lf) != NULL) {
+                notUnderstood += strstr(line, "effect_glow_mode not understood") != NULL;
+            }
+            if (lf != NULL) {
+                fclose(lf);
+            }
+            remove(glowLog);
+            CHECK(notUnderstood == 0);
+        }
+        CHECK(o.effectGlow == 0 && o.effectGlowSmooth == 1 &&
+              ico_video_preset_rows(&o) == ICO_VIDEO_ENHANCED &&
+              ico_video_preset(&o) == ICO_VIDEO_ENHANCED);
+        o.effectGlow = 1;
+        ico_video_set(&o);
+        ico_video_get(&o);
+        CHECK(ico_video_effect_glow_smooth() == 1);
     }
     /* the Glow size key an older version wrote (effect_glow_size) is read
        by nothing: a file holding it loads as one without it (every effect
@@ -1456,10 +2038,13 @@ static void test_video_auto(const char *dir)
     ico_video_defaults(&o);
     CHECK(o.framerate == 60 && ico_video_preset(&o) == ICO_VIDEO_ORIGINAL);
     ico_video_set_preset(&o, ICO_VIDEO_ENHANCED);
-    CHECK(o.resScale == ICO_RES_AUTO && o.aspect == ICO_ASPECT_AUTO &&
-          o.filter == ICO_FILTER_ANISOTROPIC && o.fullHeight);
+    /* the window's size on Android too (v0.10.0: Auto is the player's choice, never the
+       preset's) */
+    CHECK(o.resScale == 0 && o.aspect == ICO_ASPECT_AUTO && o.filter == ICO_FILTER_ANISOTROPIC &&
+          o.fullHeight);
     CHECK(ico_video_preset(&o) == ICO_VIDEO_ENHANCED);
-    o.resScale = 0; /* a saved Enhanced with "window" stays Enhanced */
+    o.resScale =
+        ICO_RES_AUTO; /* a saved Enhanced with "auto" (v0.9.x's Android preset) stays Enhanced */
     CHECK(ico_video_preset(&o) == ICO_VIDEO_ENHANCED);
     o.resScale = 2; /* any other resolution is Custom */
     CHECK(ico_video_preset(&o) == ICO_VIDEO_CUSTOM);
@@ -1481,11 +2066,8 @@ static void test_video_auto(const char *dir)
     ico_config_reset(path, "/nonexistent/options_test.ini");
     ico_video_reload();
     ico_video_get(&o);
-    CHECK(o.resScale == ICO_RES_AUTO && o.framerate == 60 &&
-          ico_video_preset(&o) == ICO_VIDEO_ENHANCED);
-    /* a file with Enhanced at resolution "window" (written before "auto"
-       existed) keeps its preset name and its resolution; the shortcut then
-       writes "auto" */
+    CHECK(o.resScale == 0 && o.framerate == 60 && ico_video_preset(&o) == ICO_VIDEO_ENHANCED);
+    /* a file with Enhanced at resolution "window" keeps its preset name and its resolution */
     f = fopen(path, "wb");
     if (f != NULL) {
         fputs("[video]\npreset = \"enhanced\"\nresolution = \"window\"\naspect = "
@@ -1499,7 +2081,7 @@ static void test_video_auto(const char *dir)
     CHECK(o.resScale == 0 && o.resW == 0 && o.resH == 0 &&
           ico_video_preset(&o) == ICO_VIDEO_ENHANCED);
     ico_video_set_preset(&o, ICO_VIDEO_ENHANCED);
-    CHECK(o.resScale == ICO_RES_AUTO && ico_video_preset(&o) == ICO_VIDEO_ENHANCED);
+    CHECK(o.resScale == 0 && ico_video_preset(&o) == ICO_VIDEO_ENHANCED);
     /* and no file at all: Original at 1x, 60 a second */
     ico_config_reset("/nonexistent/options_test.toml", "/nonexistent/options_test.ini");
     ico_video_reload();
@@ -1562,6 +2144,11 @@ static void test_video_changes_text(void)
     was.texturePack = !now.texturePack;
     (void)ico_video_changes_text(&was, &now, line, sizeof(line));
     CHECK(strstr(line, "vsync ") == line && strstr(line, ", texture pack ") != NULL);
+    /* Motion blur strength in the words (issue 181) */
+    was = now;
+    was.effectMotionBlurStrength = 50;
+    (void)ico_video_changes_text(&was, &now, line, sizeof(line));
+    CHECK(strcmp(line, "motion blur strength 50 % -> 100 %") == 0);
     /* cut at the size, never past it */
     CHECK(ico_video_changes_text(&was, &now, line, 8) < 8 && strlen(line) < 8);
 }
@@ -1582,8 +2169,12 @@ int main(int argc, char **argv)
     test_mirror_discs(argc > 1 ? argv[1] : ".");
     test_players_slots(argc > 1 ? argv[1] : ".");
     test_pit_time();
+    test_shadow_speed();
+    test_shadow_speed_motions();
+    test_yorda_trips();
     test_brain();
     test_ui_language(argc > 1 ? argv[1] : ".");
+    test_text_language(argc > 1 ? argv[1] : ".");
     test_video_effects(argc > 1 ? argv[1] : ".");
     test_video_effects_depth(argc > 1 ? argv[1] : ".");
     test_video_full_pixel(argc > 1 ? argv[1] : ".");

@@ -115,19 +115,25 @@
 #include "diag_host.h"
 #include "extract.h"
 #include "fpenv.h"
+#include "gpu_hang.h"
 #include "host_config.h"
 #include "host_fs.h"
 #include "../core/region.h" /* the disc's region (select_disc) */
 #include "startup_retry.h"
 #include "host_loop.h"
+#include "backup.h" /* Options > Extras > Restore from a backup, put in place at the start */
 #include "report.h"
 #include "ico_build_commit.h" /* ICO_BUILD_COMMIT, generated (port/platform/CMakeLists.txt) */
 #include "ico_version.h" /* ICO_VERSION_LABEL, generated (CMakeLists.txt; "" in a development build) */
 #include "input_record.h"
 #include "pad_script.h"
+#include "sim_keys.h"    /* the recording's config keys */
+#include "state.h"       /* save states: the poll, the [dev] keys */
+#include "state_rules.h" /* port/game: ico_state_parse_at, ico_state_can_save_here */
 #include "tables.h"
 #include "trace_host.h"
 #include "options.h"       /* the recording's effective stick_fix */
+#include "mc_host.h"       /* ico_mc_host_second_card_changed */
 #include "video_options.h" /* the recording's frame: ico_video_frame */
 #ifdef ICO_PS5
 #include "../ps5/src/ps5_host.h" /* the image folders, the notifications */
@@ -148,8 +154,11 @@ extern int systemStatus[]; /* common/src/main.c: [0] the video mode word */
 #include "settings.h"       /* port/ui: Display > Model pack's "None installed" */
 #include "texpack.h"        /* PCSX2 texture packs */
 #include "texpack_export.h" /* Options > Extras > Export textures */
+#include "backup_host.h"    /* Options > Extras > Back up your data */
 #include "window_host.h"
 #include "window_switch.h" /* ico_window_switch_end_text */
+#include "popup.h"         /* port/ui: the save states' results */
+#include "strings.h"
 
 #endif
 /* Android's window build: the window opens before the game
@@ -422,33 +431,6 @@ static void timestamp(char *out, size_t size, const char *fmt)
 
 /* --- the pad recording (port/input/input_record.h) ---------------------- */
 
-/* The config values the simulation depends on, written into the recording's
-   header and compared when a recording is replayed as the pad script. */
-static const char *const record_keys[] = {
-    "video.video_mode",
-    "game.language",
-    "gameplay.mirror",
-    "gameplay.stick_fix",
-    "gameplay.yorda_safe",
-    "gameplay.pit_time",
-    "gameplay.developer_mode",
-    "dev.start_stage",
-    "gameplay.door_fix",
-    "video.anti_aliasing",
-    "gameplay.hold_type",
-    "gameplay.hold_type_chosen", /* an earlier "hold" without it is the disc's own */
-    "gameplay.skip_opening",
-    /* the game variants (port/game/variants.h): each changes the simulation */
-    "variants.shade_toughness",
-    "variants.one_hit",
-    "variants.never_dodge",
-    "variants.aggression",
-    "variants.no_hints",
-    "variants.barrier_hits",
-    "variants.no_cutscene_look",
-    "variants.ignore_cutscene_cameras",
-};
-
 #define RECORD_MAGIC "# ico-pc input recording"
 
 static const char *fixed_clock_now(void)
@@ -474,8 +456,12 @@ static void record_header(char *out, size_t size, const char *stamp)
         RECORD_MAGIC);
     PUT("# build %s\n", ICO_BUILD_COMMIT);
     PUT("# started %s\n", stamp);
-    for (i = 0; i < sizeof(record_keys) / sizeof(record_keys[0]); i++) {
-        PUT("# config %s = %s\n", record_keys[i], ico_config_get_string(record_keys[i], "(unset)"));
+    /* the config values the simulation depends on (sim_keys.h: the save
+       states hash the same list), compared when a recording is replayed as
+       the pad script */
+    for (i = 0; ICO_SIM_KEYS[i] != NULL; i++) {
+        PUT("# config %s = %s\n", ICO_SIM_KEYS[i],
+            ico_config_get_string(ICO_SIM_KEYS[i], "(unset)"));
     }
     PUT("# effective fixed_clock = %s\n", fixed_clock_now());
     /* the stick_fix value the run used (config.toml's, else the default:
@@ -939,22 +925,55 @@ static int find_iso(const Args *a, const IcoIni *ini, const char *exe_dir, char 
                    ico_disc_image_names_text(""), ico_disc_list_text());
     return 1;
 #else
+    {
+        /* the disc the game expects (config.toml's disc, else the one played
+           last): the dialog's title says so; none known: the plain title */
+        const IcoDiscInfo *expect = disc_setting() != NULL ? disc_setting() : last_disc();
+        char title[160] = "";
+        char pref[ICO_PATH_MAX] = "";
+        char there[ICO_PATH_MAX + 16] = "";
+        const char *names;
+
+        if (expect != NULL) {
+            snprintf(title, sizeof(title),
+                     "Choose your ICO disc image (%s, or another supported disc)",
+                     expect->product_name);
+        }
+        names = expect != NULL ? expect->archive_name : ico_disc_archive_names_text();
+        ico_host_pref_dir(pref, sizeof(pref));
+        snprintf(there, sizeof(there), "%s", exe_dir);
 #if !defined(ICO_HEADLESS) && !defined(_WIN32)
-    if (pick_iso_sdl(iso, ICO_PATH_MAX) == 0) {
+        (void)title;
+        if (pick_iso_sdl(iso, ICO_PATH_MAX) == 0) {
 #else
-    if (ico_host_pick_iso(iso, ICO_PATH_MAX) == 0) {
+        if (ico_host_pick_iso(title[0] != '\0' ? title : NULL, iso, ICO_PATH_MAX) == 0) {
 #endif
-        fprintf(stderr, "ico_pc: disc image chosen in the dialog: %s\n", iso);
-        *picked = 1;
-        return 0;
+            fprintf(stderr, "ico_pc: disc image chosen in the dialog: %s\n", iso);
+            *picked = 1;
+            return 0;
+        }
+        fprintf(stderr, "ico_pc: no game data (%s) in %s or %s, and no disc image\n", names, pref,
+                there);
+        ico_host_fatal(log_file(),
+                       "No ICO disc image was found or chosen.\n"
+                       "\n"
+                       "The game looked for your game data (%s) in\n"
+                       "%s\n"
+                       "and next to the program, in\n"
+                       "%s\n"
+                       "\n"
+                       "If you played an earlier version, its game data, saves and settings "
+                       "are in that version's own userdata folder (the portable download) or "
+                       "in the first folder above. Copy that userdata folder next to this "
+                       "program, or extract the new version over the old folder, and start "
+                       "again.\n"
+                       "\n"
+                       "Otherwise put your disc image next to the program, named %s\n"
+                       "(for %s),\n"
+                       "as a .iso, .chd, .bin or .cue file, choose it in the dialog, or set "
+                       "iso=<path> in ico-pc.ini.",
+                       names, pref, there, ico_disc_image_names_text(""), ico_disc_list_text());
     }
-    ico_host_fatal(log_file(),
-                   "No ICO disc image was found or chosen.\n"
-                   "\n"
-                   "Put your disc image next to the program, named %s\n"
-                   "(for %s),\n"
-                   "as a .iso, .chd, .bin or .cue file, or set iso=<path> in ico-pc.ini.",
-                   ico_disc_image_names_text(""), ico_disc_list_text());
 #endif
     return 0;
 #endif
@@ -1540,9 +1559,10 @@ static int mount_archive(const char *path, const IcoDiscInfo *want, const IcoDis
     ico_vfs_set_disc(vfs);
     fprintf(stderr,
             "ico_pc: game data %s (%s, %u files, %llu bytes; from an image with SHA-1 %s, "
-            "accepted by %s)\n",
+            "accepted by %s)%s\n",
             path, info.disc_id, (unsigned)info.stored, (unsigned long long)info.file_bytes,
-            info.iso_sha1, info.accepted_by);
+            info.iso_sha1, info.accepted_by, ico_host_drive_note(ICO_DRIVE_DATA, path));
+    ico_host_drive_warn(ICO_DRIVE_DATA);
     *disc = row;
     return 0;
 }
@@ -1589,6 +1609,29 @@ static int given_iso(const Args *a, const IcoIni *ini, const char *exe_dir, char
 static int archive_path(char *out, size_t size, const char *dir, const IcoDiscInfo *disc)
 {
     return ico_path_join(out, size, dir, disc->archive_name);
+}
+
+/* Whether s ends with suffix, ASCII case ignored (issue 165's program check:
+   ".Exe", ".DLL", ".appimage" too; review finding 13) */
+static int ends_with_nocase(const char *s, const char *suffix)
+{
+    const size_t n = strlen(s), k = strlen(suffix);
+    size_t i;
+
+    if (n <= k) {
+        return 0;
+    }
+    for (i = 0; i < k; i++) {
+        char c = s[n - k + i];
+        char d = suffix[i];
+
+        c = (char)(c >= 'A' && c <= 'Z' ? c - 'A' + 'a' : c);
+        d = (char)(d >= 'A' && d <= 'Z' ? d - 'A' + 'a' : d);
+        if (c != d) {
+            return 0;
+        }
+    }
+    return 1;
 }
 
 /* The archive mode: mount the disc's archive (ico.o2r for the European
@@ -1650,8 +1693,8 @@ static int mount_game_data(const Args *a, const IcoIni *ini, const char *exe_dir
                 snprintf(there + n, sizeof(there) - n, "%s%s", n > 0 ? ", " : "", ico_discs[d].id);
             }
         }
-        fprintf(stderr, "ico_pc: disc %s (%s), by %s; game data there: %s\n", want->id,
-                want->product_name, rule, there[0] != '\0' ? there : "none");
+        fprintf(stderr, "ico_pc: disc %s (%s), by %s; game data in %s and %s: %s\n", want->id,
+                want->product_name, rule, pref, exe_dir, there[0] != '\0' ? there : "none");
     }
 
     if (have & (1u << (want - ico_discs))) {
@@ -1746,6 +1789,23 @@ static int mount_game_data(const Args *a, const IcoIni *ini, const char *exe_dir
             ico_host_fatal(log_file(), ICO_WRONG_DISC_TEXT, iso, ico_disc_list_text());
         }
         if (res.unreadable) {
+            /* a program file chosen in the dialog (issue 165: the game's own
+               .exe): say what a disc image is before the usual words */
+            const int program = ends_with_nocase(iso, ".exe") || ends_with_nocase(iso, ".dll") ||
+                                ends_with_nocase(iso, ".appimage");
+
+            if (program) {
+                ico_host_fatal(log_file(),
+                               "%s is a program, not a disc image.\n"
+                               "\n"
+                               "The disc image is your own copy of the PlayStation 2 disc as a "
+                               "file: a .iso, .chd, or .bin with .cue, of\n"
+                               "%s.\n"
+                               "Choose that file in the dialog, put it next to the program, or "
+                               "copy the earlier version's userdata folder next to this program "
+                               "if you played before.",
+                               iso, ico_disc_list_text());
+            }
             ico_host_fatal(log_file(), ICO_UNREADABLE_DISC_TEXT, iso, ico_disc_list_text());
         }
         ico_host_fatal(log_file(),
@@ -1930,6 +1990,238 @@ static void remove_old_lettering(void)
 }
 #endif
 
+/* Save states' [dev] keys (state.h ico_state_dev_set): state_save_at and
+   state_load_at "<tick>:<slot>", state_hash_at and state_dump_at "<tick>";
+   a value that does not parse is logged and left off. */
+static void setup_state_dev(const IcoIni *ini)
+{
+    static const char *const keys[3] = {"state_save_at", "state_load_at", "state_hash_at"};
+    unsigned int tick[3] = {0, 0, 0};
+    int slot[3] = {0, 0, 0};
+    int i;
+
+    for (i = 0; i < 3; i++) {
+        const char *v = ico_ini_get(ini, keys[i]);
+
+        if (v == NULL || v[0] == '\0') {
+            continue;
+        }
+        if (ico_state_parse_at(v, &tick[i], i < 2 ? &slot[i] : NULL) != 0) {
+            fprintf(stderr, "state: [dev] %s = \"%s\" is not %s; ignored\n", keys[i], v,
+                    i < 2 ? "<Main tick>:<slot 1-4>" : "a Main tick");
+        }
+    }
+    ico_state_dev_set(tick[0], slot[0], tick[1], slot[1], tick[2]);
+    {
+        const char *v = ico_ini_get(ini, "state_dump_at");
+        unsigned int dump = 0;
+
+        if (v != NULL && v[0] != '\0' && ico_state_parse_at(v, &dump, NULL) != 0) {
+            fprintf(stderr, "state: [dev] state_dump_at = \"%s\" is not a Main tick; ignored\n", v);
+            dump = 0;
+        }
+        ico_state_dev_set_dump(dump);
+    }
+}
+
+#ifndef ICO_HEADLESS
+/* The Save states page's host (port/ui/settings.h UiStatesHost) and the
+   results' popups: the page and the pause row know nothing of files. */
+static int state_refusal_str(IcoStateResult r)
+{
+    switch (r) {
+    case ICO_STATE_OK:
+        return 0;
+    case ICO_STATE_OFF:
+        return UI_STR_STATES_OFF;
+    case ICO_STATE_NOT_PAUSED:
+        return UI_STR_STATES_PAUSE_FIRST;
+    case ICO_STATE_EMPTY:
+        return UI_STR_STATES_EMPTY;
+    case ICO_STATE_OTHER_BUILD:
+    case ICO_STATE_OTHER_PLATFORM:
+        return UI_STR_STATES_REFUSED_BUILD;
+    case ICO_STATE_OTHER_DISC:
+        return UI_STR_STATES_REFUSED_DISC;
+    case ICO_STATE_OTHER_SETTINGS:
+        return UI_STR_STATES_REFUSED_SETTINGS;
+    case ICO_STATE_BAD_FILE:
+    case ICO_STATE_SELF_CHECK:
+        return UI_STR_STATES_REFUSED_CHECK;
+    case ICO_STATE_IO:
+        return UI_STR_STATES_SAVE_FAILED;
+    case ICO_STATE_STAGE_SWITCH:
+    case ICO_STATE_CARD_BUSY:
+    case ICO_STATE_DISC_BUSY:
+    case ICO_STATE_MOVIE:
+    case ICO_STATE_PHOTO:
+    case ICO_STATE_BUSY:
+        return UI_STR_STATES_REFUSED_BUSY;
+    }
+    return UI_STR_STATES_REFUSED_BUSY;
+}
+
+static void states_list(UiStateSlotInfo out[UI_STATES_SLOTS])
+{
+    IcoStateSlotInfo in[ICO_STATE_SLOTS];
+    int i;
+
+    ico_state_list(in);
+    for (i = 0; i < UI_STATES_SLOTS && i < ICO_STATE_SLOTS; i++) {
+        out[i].present = in[i].present;
+        out[i].loadable = in[i].loadable;
+        out[i].refusal_str =
+            in[i].present && !in[i].loadable ? state_refusal_str(in[i].why_not) : 0;
+        out[i].play_frames = in[i].play_frames;
+        out[i].stage_no = in[i].stage_no;
+        out[i].saved_at = in[i].saved_at;
+        snprintf(out[i].png_path, sizeof out[i].png_path, "%s", in[i].png_path);
+    }
+}
+
+static int states_request(int action, int slot, int *refusal_str)
+{
+    if (!ico_state_available()) {
+        *refusal_str = UI_STR_STATES_OFF;
+        return -1;
+    }
+    if (action == UI_STATES_ACT_SAVE && !ico_state_can_save_here()) {
+        *refusal_str = UI_STR_STATES_PAUSE_FIRST;
+        return -1;
+    }
+    if (action == UI_STATES_ACT_SAVE) {
+        ico_state_request_save(slot);
+    } else if (action == UI_STATES_ACT_LOAD) {
+        ico_state_request_load(slot);
+    } else {
+        ico_state_request_delete(slot);
+    }
+    *refusal_str = 0;
+    return 0;
+}
+
+/* the box's words for a load another version's state refused
+   (state.h IcoStateBlocker): 1 with body filled, 0 for none known */
+static int states_other_version(char *body, size_t n)
+{
+    IcoStateRefusal f;
+
+    ico_state_last_refusal(&f);
+    switch (f.blocker) {
+    case ICO_STATE_BLOCK_OLD:
+        snprintf(body, n, ui_str(UI_STR_STATES_XB_OLD), f.saved_version);
+        return 1;
+    case ICO_STATE_BLOCK_CODE:
+        snprintf(body, n, ui_str(UI_STR_STATES_XB_CODE), f.saved_version, f.this_version);
+        return 1;
+    case ICO_STATE_BLOCK_DATA:
+        snprintf(body, n, ui_str(UI_STR_STATES_XB_DATA), f.saved_version, f.this_version);
+        return 1;
+    case ICO_STATE_BLOCK_PINNED:
+        snprintf(body, n, ui_str(UI_STR_STATES_XB_PINNED), f.saved_version);
+        return 1;
+    case ICO_STATE_BLOCK_NONE:
+        break;
+    }
+    return 0;
+}
+
+static void states_done(int action, int slot, IcoStateResult r, const char *detail, void *user)
+{
+    static const int ok_str[3] = {UI_STR_STATES_SAVED, UI_STR_STATES_LOADED, UI_STR_STATES_DELETED};
+    char body[UI_POPUP_TEXT];
+
+    (void)user;
+    if (r == ICO_STATE_OK) {
+        snprintf(body, sizeof body, ui_str((UiStrId)ok_str[action]), slot);
+    } else if (r == ICO_STATE_OTHER_SETTINGS) {
+        /* the key that differs, as the log has it */
+        snprintf(body, sizeof body, ui_str(UI_STR_STATES_REFUSED_SETTINGS), detail);
+    } else if (r == ICO_STATE_OTHER_BUILD && action == 1 &&
+               states_other_version(body, sizeof body)) {
+        /* another version's state: which one, and what in this one blocks it */
+    } else {
+        snprintf(body, sizeof body, "%s", ui_str((UiStrId)state_refusal_str(r)));
+    }
+    (void)ui_popup_push(ui_str(UI_STR_STATES), body);
+}
+#endif
+
+/* Options > Extras > Restore from a backup's second step (backup.h): the
+   backup the last run unpacked put in place before anything reads the
+   settings, the memory card or the achievements; a failure leaves the data
+   as it was and says so in a box */
+static void apply_restore(void)
+{
+    char user[ICO_PATH_MAX];
+    IcoBackupManifest m;
+    IcoBackupReport rep;
+
+    if (ico_host_pref_dir(user, sizeof(user)) != 0) {
+        return;
+    }
+    const IcoBackupResult r = ico_backup_apply_pending(user, (long long)time(NULL), &m, &rep);
+    if (rep.stale[0] != '\0') {
+        fprintf(stderr,
+                "backup: old copies an earlier restore left beside your data: %s (each holds "
+                "your data from before that restore; nothing reads them)\n",
+                rep.stale);
+    }
+    if (rep.leftover) {
+        fprintf(stderr, "backup: a restore the last run did not finish unpacking was deleted; "
+                        "nothing changed\n");
+    }
+    if (r == ICO_BACKUP_NONE) {
+        return;
+    }
+    if (r == ICO_BACKUP_OK) {
+        fprintf(stderr, "backup: restored from %s (version %s, discs %s): %d files replaced (%s)\n",
+                m.from, m.version, m.discs, rep.files, m.items);
+        return;
+    }
+    if (rep.left[0] == '\0') {
+        fprintf(stderr,
+                "backup: the backup from %s could not be put in place: %s (%s); the data is "
+                "as it was\n",
+                m.from[0] != '\0' ? m.from : "the last run", ico_backup_result_text(r), rep.why);
+        ico_host_message_box("The backup could not be put in place, so your data is as it was "
+                             "before. Try Restore from a backup again; the log says what stopped "
+                             "it.",
+                             1);
+        return;
+    }
+    {
+        /* a move back failed too: what is not as it was, and where the
+           player's own copy is */
+        char box[800];
+
+        fprintf(stderr,
+                "backup: the backup from %s could not be put in place: %s (%s); not moved back: "
+                "%s\n",
+                m.from[0] != '\0' ? m.from : "the last run", ico_backup_result_text(r), rep.why,
+                rep.left);
+        snprintf(box, sizeof(box),
+                 "The backup could not be put in place, and some of your data could not be put "
+                 "back as it was: %s. Your own copy is in the folder or file named there, in the "
+                 "game's user folder; the log says what stopped it.",
+                 rep.left);
+        ico_host_message_box(box, 1);
+    }
+}
+
+static void setup_states(const IcoIni *ini)
+{
+#ifndef ICO_HEADLESS
+    static const UiStatesHost host = {states_list, states_request, ico_state_can_save_here};
+
+    ico_state_set_done_callback(states_done, NULL);
+    ui_settings_set_states_host(&host);
+    /* Options > Extras > Back up your data / Restore from a backup */
+    ico_backup_host_install();
+#endif
+    setup_state_dev(ini);
+}
+
 /* the pad: a script from --pad-script or [dev] pad_script */
 static void setup_pad(const Args *a, const IcoIni *ini, const char *exe_dir)
 {
@@ -2014,6 +2306,14 @@ static void setup_trace(const Args *a, const IcoIni *ini, const char *exe_dir, c
 }
 
 /* the game's thread functions, by name in the crash report */
+/* Options > Gameplay > Second memory card: the card folder of port 1
+   (host_config.h), put in or taken out at once (mc_host.h) */
+static void second_card_changed(int on)
+{
+    ico_host_set_second_card(on);
+    ico_mc_host_second_card_changed();
+}
+
 static void name_threads(void)
 {
     ico_diag_name_func((void *)Main, "Main");
@@ -2078,6 +2378,35 @@ static void open_model_pack(const char *exe_dir)
     at_shutdown(modelpack_shutdown);
 }
 #endif
+
+/* The GPU hang limit (gpu_hang.h, issue 123): half the watchdog's, before
+   the window opens, so the graphics backend's loss diagnostics line names
+   it (ICO_GPU_HANG_LIMIT, port/rhi/vk/vk_device.c); a watchdog= that is
+   not a number takes the default here (the watchdog's own read below ends
+   the run on it) */
+static void set_gpu_hang_limit(const IcoIni *ini)
+{
+    unsigned long watchdog = WATCHDOG_DEFAULT_S;
+    const char *v = ico_ini_get(ini, "watchdog");
+    char text[32];
+    double limit;
+
+    if (v != NULL && v[0] != '\0' && parse_count(v, &watchdog) != 0) {
+        watchdog = WATCHDOG_DEFAULT_S;
+    }
+    limit = ico_gpu_hang_limit_s(watchdog);
+    ico_diag_set_gpu_hang_limit(limit);
+    snprintf(text, sizeof(text), "%.1f", limit);
+#ifdef _WIN32
+    _putenv_s("ICO_GPU_HANG_LIMIT", text);
+#else
+    setenv("ICO_GPU_HANG_LIMIT", text, 1);
+#endif
+    fprintf(stderr,
+            "ico_pc: GPU hang limit %s s (half the watchdog's %lu s, at least %.0f s; 0 = off): "
+            "one wait for the GPU this long ends the run as a GPU hang\n",
+            text, watchdog, ICO_GPU_HANG_MIN_S);
+}
 
 /* the watchdog, from the limit in seconds (0 off) */
 static void start_watchdog(unsigned long watchdog)
@@ -2263,8 +2592,10 @@ static int host_main(int argc, char **argv)
         char user[ICO_PATH_MAX];
 
         ico_host_pref_dir(user, sizeof(user));
-        fprintf(stderr, "ico_pc: user folder %s (%s)\n", user,
-                ico_host_pref_is_portable() ? "portable" : "user profile");
+        fprintf(stderr, "ico_pc: user folder %s (%s)%s\n", user,
+                ico_host_pref_is_portable() ? "portable" : "user profile",
+                ico_host_drive_note(ICO_DRIVE_USER, user));
+        ico_host_drive_warn(ICO_DRIVE_USER);
         /* the report file of an abnormal end (report.h): its files' places
            now, the oldest reports beyond the newest few deleted */
         if (logs_ready) {
@@ -2278,6 +2609,8 @@ static int host_main(int argc, char **argv)
             }
         }
     }
+
+    apply_restore();
 
     /* config.toml on the first run, so there is a file to edit; the window
        build by default, the headless one (whose per-user folder is the
@@ -2298,6 +2631,7 @@ static int host_main(int argc, char **argv)
         }
     }
 
+    set_gpu_hang_limit(&ini);
 #ifdef ICO_ANDROID_UI
     /* Android: the window first, the first start's picker, copy and
        progress are shown in it (SDL has one window there) */
@@ -2421,11 +2755,18 @@ static int host_main(int argc, char **argv)
     if (ico_opt_skip_opening()) {
         fprintf(stderr, "boot: the opening is skipped (Options > Gameplay > Skip the opening)\n");
     }
+    /* save states: the page's host and the popups before the menus are
+       built in the boot, the [dev] keys (state.h) */
+    setup_states(&ini);
+    ico_opt_set_second_memory_card_listener(second_card_changed);
     ico_diag_milestone("boot starts (ico_host_init)");
     ico_host_init();
     ico_diag_milestone("boot ran until every thread waits");
     for (;;) {
         ico_host_step();
+        /* the quiescent point: every game thread waits, the frame closed;
+           a latched save, load or delete runs here (state.h) */
+        ico_state_host_poll();
         if (ico_host_vsync_count() == 1) {
             ico_diag_milestone("first vsync done");
         }

@@ -104,6 +104,34 @@ static unsigned int pac_hostCollect(const PacHeader *pk, unsigned int *nb, unsig
     return pac_hostStream(pk, pacHostQw, pacHostQwCap, pacHostBatch, nb, qpv);
 }
 
+/* PC port: a save state's load (port/game/state_host.c).  The scratch
+   stream is a host block the restored game data cannot name: freeLive 1
+   frees this run's before the load takes its backup, freeLive 0 forgets
+   the pointer a restore brought back (another run's, or a freed one); the
+   next packet allocates the block again. */
+void pac_HostStateFixup(int freeLive)
+{
+    if (freeLive) {
+        free(pacHostQw);
+    }
+    pacHostQw = 0;
+    pacHostQwCap = 0;
+}
+
+/* PC port: the host's words in this file's data, which two runs of the same
+   play hold differently (a save state's hash leaves them out,
+   port/game/state_host.c dev_hash): the scratch stream's pointer (ptr 1),
+   its capacity, the batches it last held and the declined pack hash. */
+static uint64_t pacHostDeclined;
+
+void pac_HostStateWords(void (*fn)(const void *p, size_t n, int ptr, void *user), void *user)
+{
+    fn(&pacHostQw, sizeof pacHostQw, 1, user);
+    fn(&pacHostQwCap, sizeof pacHostQwCap, 0, user);
+    fn(pacHostBatch, sizeof pacHostBatch, 0, user);
+    fn(&pacHostDeclined, sizeof pacHostDeclined, 0, user);
+}
+
 /* The packet's mesh desc (its stream in pacHostQw); 0 when the packet has
    no batches. */
 static int pac_hostDesc(const PacHeader *pk, RdVuMeshDesc *d, const char *name)
@@ -155,6 +183,7 @@ static void pac_hostBuild(PacHeader *pk, const char *name, const PacHostIdent *i
     RdMesh m = {0};
     char part[64];
     uint64_t h;
+    void *field;
     int e;
 
     memset(pk->pad9C, 0, sizeof(pk->pad9C));
@@ -178,7 +207,10 @@ static void pac_hostBuild(PacHeader *pk, const char *name, const PacHostIdent *i
     if (m.id == 0) {
         m = rd_create_vu_mesh(&d);
     }
-    memcpy(pk->pad9C, &m.id, sizeof(m.id));
+    /* PC port: a host id in the game's memory; the field noted is the copy's
+     * destination (memcpy returns it) */
+    field = memcpy(pk->pad9C, &m.id, sizeof(m.id));
+    rd_vu_mesh_note_field(field, m.id);
 }
 
 unsigned int pac_HostMeshFor(PacHeader *pk, const PacHostIdent *id)
@@ -197,8 +229,6 @@ unsigned int pac_HostMesh(PacHeader *pk)
 {
     return pac_HostMeshFor(pk, 0);
 }
-
-static uint64_t pacHostDeclined;
 
 static bool pac_hostRetireDeclined(uint64_t hash, bool replaced, void *user)
 {

@@ -21,7 +21,7 @@ others.
 | `port/input/pad_script.h`, `pad_script.c` | the pad script reader and its timeline |
 | `port/input/pad-boot.txt` | a pad script from power-on through the boot signs and the title to New Game |
 | `port/input/input_record.h`, `input_record.c` | the pad recording |
-| `port/input/mouse_look.h`, `mouse_look.c` | the mouse capture rule, Escape's button, photo mode's look accumulator |
+| `port/input/mouse_look.h`, `mouse_look.c` | the mouse capture rule, Escape's button, whether Start opens the pause menu (F6), photo mode's look accumulator |
 | `port/input/mouse_camera.h`, `mouse_camera.c` | the mouse camera's speed and range for the game's hand camera |
 | `port/input/pointer.h`, `pointer.c` | the mouse pointer in the menus |
 | `port/input/touch.h`, `touch.c` | the touch overlay's input mapper |
@@ -256,7 +256,7 @@ Main reads the pad). Lines are written after the vsync step that read them
 `port/platform/main_host.c` (`record_open`, `record_header`) opens it: on by default in the window
 build as `logs/input-<time>.txt`, off headless; the ini's `input_record=` (`[dev] input_record`)
 takes `false`, `true` or a path. The header (`# ico-pc input recording`) carries the build, the
-config values the simulation depends on (`record_keys`, which includes `gameplay.hold_type` and `gameplay.hold_type_chosen`), the effective fixed clock and stick fix,
+config values the simulation depends on (`ICO_SIM_KEYS`, `port/platform/sim_keys.c`, which includes `gameplay.hold_type` and `gameplay.hold_type_chosen`), the effective fixed clock and stick fix,
 and the [native frame](ARCHITECTURE.md#terms)'s width and aspect; a width change adds
 `# tick N gs_width W`. Loading a recording as the pad script compares each header value with the
 run's and logs each difference (`record_check`), since the replay may then not follow the session.
@@ -307,6 +307,11 @@ with Cross, except in the touch layout editor, where Cross is Opacity + and Back
 press and held until the release, and a press lasts at least two steps
 (`ICO_ESCAPE_TAP_STEPS`), since the game reads the pad every second vsync (`ico_escape_latch`,
 `ico_escape_take`).
+
+F6 (the Save states page, [PLATFORM.md](PLATFORM.md#hotkeys-and-dump-zips)) uses the same latch
+for its Start in play: a press and a release at once, so Start stays on the pad for those two
+steps. It asks first `ico_start_opens_pause`: play as for Escape's Start and the play layout itself,
+not a scene's layout, where Start would skip the scene (`port/input/mouse_look.c`).
 
 ### The pointer
 
@@ -425,8 +430,21 @@ every change bumps.
   control blocks it is the mouse's click there (`ico_pointer_move` and `ico_pointer_button`;
   `port/input/input_sdl.c` (`touch_menu_tap`)): the click the menus already take from a mouse
   ([UI.md](UI.md#the-mouse-in-menus)), so Options > Controls > Touch screen > Reset stays reachable.
-  `ico_touch_blocks_menu_tap(l, x, y, confirmCtl)` decides what blocks: a button that is not Off
-  (Hidden too), and the stick's area only while the stick and the disc's confirm control
+  `ico_touch_menu_tap_cover(l, x, y, confirmCtl, &ctl)` tells a control that is drawn
+  (`ICO_TOUCH_COVER_SHOWN`, alpha above 0) from one that is only Hidden (`ICO_TOUCH_COVER_HIDDEN`):
+  a drawn control wins over a menu row under the finger and the finger is the control's; a Hidden
+  one gives way when a row is under the finger (`ico_pointer_row_at`, the probe `ui_mouse.c`
+  registers with `ico_pointer_set_row_probe`: the same hit test as the mouse), and then the finger
+  is the row's alone: `touch_finger` never hands it to `ico_touch_event`, down to its lift, so the
+  A Hidden Start over the pause menu's Options row cannot close the menu. A Hidden control with
+  no row under the finger keeps the finger. The gate stays `ico_touch_menu_taps` (D-pad, Cross or
+  Circle Off): with all three working there are no row taps. Logged, the first 8 then every 100th:
+  `touch: tap at X,Y on menu row R (layout L) over hidden|shown <control>: the row|control (N)`.
+  After the start-up `touch: layout edits` line the log has one line per edited control of the
+  layout in play, `touch: <control>: hidden|shown|off at x,y w x h px (size S)`, in window pixels
+  after the safe-area placement, repeated only when they change (`touch_boxes_log`).
+  `ico_touch_blocks_menu_tap(l, x, y, confirmCtl)` is the older yes/no (any working control,
+  Hidden too): a button that is not Off (Hidden too), and the stick's area only while the stick and the disc's confirm control
   (`confirmCtl`: Cross, Circle on the Japanese and Korean discs, from `port/core/region.h`
   `pad_confirm`) are not Off. The look pad's area never blocks (it does nothing in a menu), nor does
   the stick's once the confirm is Off (it only moves the cursor there), so a row under either can
@@ -559,4 +577,4 @@ The editor is driven by the Edit layout page (`port/ui/touch_edit_ui.c` (`ui_tou
 The first five are registered in `port/input/CMakeLists.txt`, `pad_script` in
 `port/null/CMakeLists.txt`, `movie_pad` in `port/platform/CMakeLists.txt`. Run them with
 `ctest --preset linux-x64 -R '^(input|input_record|touch|touch_edit|mouse_camera|pad_script|movie_pad)$'`
-([TESTING.md](TESTING.md)).
+([TESTING_PROGRAMS.md](TESTING_PROGRAMS.md)).

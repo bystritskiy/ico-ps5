@@ -8,6 +8,15 @@
 #include <stdlib.h>
 #include <string.h>
 #include <sys/stat.h>
+#include <stdio.h>
+#if !defined(_WIN32)
+#if defined(__APPLE__)
+#include <sys/mount.h>
+#include <sys/param.h>
+#else
+#include <sys/vfs.h>
+#endif
+#endif
 
 #ifdef _WIN32
 #ifndef WIN32_LEAN_AND_MEAN
@@ -319,10 +328,10 @@ static int walk_name_cmp(const void *a, const void *b)
     return strcmp(*(char *const *)a, *(char *const *)b);
 }
 
-/* The entries of dir except the hidden ones (a leading '.'), as
-   malloc'd UTF-8 names in *out, sorted: the count, or -1 when dir cannot
-   be read. */
-static int walk_list(const char *dir, char ***out)
+/* The entries of dir except "." and ".." and, unless hidden, the hidden
+   ones (a leading '.'), as malloc'd UTF-8 names in *out, sorted: the
+   count, or -1 when dir cannot be read. */
+static int walk_list(const char *dir, char ***out, int hidden)
 {
 #ifdef _WIN32
     wchar_t *wp = ico_widen(dir);
@@ -362,7 +371,7 @@ static int walk_list(const char *dir, char ***out)
         }
         name = e->d_name;
 #endif
-        if (name[0] == '.') {
+        if (name[0] == '.' && (!hidden || name[1] == '\0' || (name[1] == '.' && name[2] == '\0'))) {
             continue;
         }
         if (n == cap) {
@@ -423,7 +432,7 @@ static int walk_is_link(const char *path)
 static int walk_dir(const char *dir, int depth, IcoDirWalkFn fn, void *user, int *files)
 {
     char **names;
-    int n = walk_list(dir, &names);
+    int n = walk_list(dir, &names, 0);
     int stop = 0;
 
     if (n < 0) {
@@ -463,4 +472,363 @@ int ico_dir_walk(const char *dir, int depth, IcoDirWalkFn fn, void *user)
         return -1;
     }
     return files;
+}
+
+int ico_dir_entries(const char *dir, int hidden, IcoDirEntryFn fn, void *user)
+{
+    char **names;
+    const int n = dir != NULL && dir[0] != '\0' && fn != NULL ? walk_list(dir, &names, hidden) : -1;
+    int visited = 0, stop = 0;
+
+    if (n < 0) {
+        return -1;
+    }
+    for (int i = 0; i < n; i++) {
+        const size_t len = strlen(dir) + 1 + strlen(names[i]) + 1;
+        char *path = stop ? NULL : malloc(len);
+
+        if (path != NULL) {
+            snprintf(path, len, "%s/%s", dir, names[i]);
+            int kind = ico_path_kind(path, NULL, NULL);
+            if (kind < 0 || (kind == 1 && walk_is_link(path))) {
+                kind = 2;
+            }
+            visited++;
+            stop = fn(names[i], kind, user) != 0;
+            free(path);
+        }
+        free(names[i]);
+    }
+    free(names);
+    return visited;
+}
+
+int ico_remove_tree(const char *path)
+{
+    const int kind = path != NULL && path[0] != '\0' ? ico_path_kind(path, NULL, NULL) : -1;
+    char **names;
+    int n, bad = 0;
+
+    if (path == NULL || path[0] == '\0') {
+        return -1;
+    }
+    if (walk_is_link(path)) {
+        /* the link itself, never what it points to */
+#ifdef _WIN32
+        return (kind == 1 ? ico_rmdir(path) : ico_remove(path)) == 0 ? 0 : -1;
+#else
+        return ico_remove(path) == 0 ? 0 : -1;
+#endif
+    }
+    if (kind < 0) {
+        return 0; /* nothing there */
+    }
+    if (kind == 0) {
+        return ico_remove(path) == 0 ? 0 : -1;
+    }
+    n = walk_list(path, &names, 1);
+    if (n < 0) {
+        return -1;
+    }
+    for (int i = 0; i < n; i++) {
+        const size_t len = strlen(path) + 1 + strlen(names[i]) + 1;
+        char *sub = malloc(len);
+
+        if (sub == NULL) {
+            bad = 1;
+        } else {
+            snprintf(sub, len, "%s/%s", path, names[i]);
+            bad |= ico_remove_tree(sub) != 0;
+            free(sub);
+        }
+        free(names[i]);
+    }
+    free(names);
+    return ico_rmdir(path) == 0 && !bad ? 0 : -1;
+}
+
+/* ---- the drive a path sits on ---- */
+
+static int drive_word(char *out, size_t n, const char *w)
+{
+    if (n == 0) {
+        return -1;
+    }
+    if (strlen(w) >= n) {
+        out[0] = '\0';
+        return -1;
+    }
+    strcpy(out, w);
+    return 0;
+}
+
+int ico_host_drive_kind(const char *path, char *out, size_t n)
+{
+    if (out == NULL || n == 0) {
+        return -1;
+    }
+    out[0] = '\0';
+    if (path == NULL || path[0] == '\0') {
+        return drive_word(out, n, "unknown");
+    }
+#ifdef _WIN32
+    {
+        wchar_t *wp = ico_widen(path);
+        wchar_t full[MAX_PATH * 2];
+        wchar_t root[4];
+        const char *w = "unknown";
+        DWORD got;
+
+        if (wp == NULL) {
+            return drive_word(out, n, "unknown");
+        }
+        got = GetFullPathNameW(wp, (DWORD)(sizeof(full) / sizeof(full[0])), full, NULL);
+        free(wp);
+        if (got == 0 || got >= sizeof(full) / sizeof(full[0])) {
+            return drive_word(out, n, "unknown");
+        }
+        if (full[0] == L'\\' && full[1] == L'\\' && full[2] != L'?' && full[2] != L'.') {
+            w = "network"; /* \\server\share */
+        } else if (full[0] == L'\\' && full[1] == L'\\' && full[2] == L'?' && full[3] == L'\\' &&
+                   (full[4] == L'U' || full[4] == L'u') && (full[5] == L'N' || full[5] == L'n') &&
+                   (full[6] == L'C' || full[6] == L'c') && full[7] == L'\\') {
+            w = "network"; /* \\?\UNC\server\share */
+        } else {
+            const wchar_t *d = full;
+
+            if (full[0] == L'\\' && full[1] == L'\\' && (full[2] == L'?' || full[2] == L'.') &&
+                full[3] == L'\\') {
+                d = full + 4;
+            }
+            if (d[0] != L'\0' && d[1] == L':') {
+                root[0] = d[0];
+                root[1] = L':';
+                root[2] = L'\\';
+                root[3] = L'\0';
+                switch (GetDriveTypeW(root)) {
+                case DRIVE_FIXED:
+                    w = "fixed";
+                    break;
+                case DRIVE_REMOVABLE:
+                    w = "removable";
+                    break;
+                case DRIVE_REMOTE:
+                    w = "network";
+                    break;
+                case DRIVE_RAMDISK:
+                    w = "RAM disk";
+                    break;
+                case DRIVE_CDROM:
+                    w = "CD-ROM";
+                    break;
+                default:
+                    break;
+                }
+            }
+        }
+        return drive_word(out, n, w);
+    }
+#else
+    {
+        struct statfs sf;
+        const char *w = "fixed";
+
+        if (statfs(path, &sf) != 0) {
+            return drive_word(out, n, "unknown");
+        }
+#ifdef __APPLE__
+        if (strcmp(sf.f_fstypename, "nfs") == 0 || strcmp(sf.f_fstypename, "smbfs") == 0 ||
+            strcmp(sf.f_fstypename, "afpfs") == 0 || strcmp(sf.f_fstypename, "webdav") == 0) {
+            w = "network";
+        }
+#else
+        switch ((unsigned long)sf.f_type) {
+        case 0x6969UL:     /* NFS */
+        case 0x517BUL:     /* SMB */
+        case 0xFF534D42UL: /* CIFS */
+        case 0xFE534D42UL: /* SMB2 */
+        case 0x00C36400UL: /* Ceph */
+        case 0x5346414FUL: /* AFS */
+        case 0x01021997UL: /* 9p */
+            w = "network";
+            break;
+        case 0x65735546UL: /* FUSE (sshfs, ntfs-3g, exfat ...: the medium is not known) */
+            w = "fuse";
+            break;
+        case 0x01021994UL: /* tmpfs */
+        case 0x858458F6UL: /* ramfs */
+            w = "RAM disk";
+            break;
+        default:
+            break;
+        }
+#endif
+        return drive_word(out, n, w);
+    }
+#endif
+}
+
+int ico_host_drive_fs_name(const char *path, char *out, size_t n)
+{
+    if (out == NULL || n == 0) {
+        return -1;
+    }
+    out[0] = '\0';
+    if (path == NULL || path[0] == '\0') {
+        return -1;
+    }
+#ifdef _WIN32
+    {
+        wchar_t *wp = ico_widen(path);
+        wchar_t full[MAX_PATH * 2];
+        wchar_t root[MAX_PATH * 2];
+        wchar_t fs[MAX_PATH + 1];
+        DWORD got;
+        char name[64];
+
+        if (wp == NULL) {
+            return -1;
+        }
+        got = GetFullPathNameW(wp, (DWORD)(sizeof(full) / sizeof(full[0])), full, NULL);
+        free(wp);
+        if (got == 0 || got >= sizeof(full) / sizeof(full[0]) ||
+            !GetVolumePathNameW(full, root, (DWORD)(sizeof(root) / sizeof(root[0]))) ||
+            !GetVolumeInformationW(root, NULL, 0, NULL, NULL, NULL, fs,
+                                   (DWORD)(sizeof(fs) / sizeof(fs[0]))) ||
+            fs[0] == L'\0' || ico_narrow(fs, name, sizeof(name)) != 0) {
+            return -1;
+        }
+        return drive_word(out, n, name);
+    }
+#else
+    {
+        struct statfs sf;
+        const char *w = NULL;
+
+        if (statfs(path, &sf) != 0) {
+            return -1;
+        }
+#ifdef __APPLE__
+        w = sf.f_fstypename;
+#else
+        switch ((unsigned long)sf.f_type) {
+        case 0xEF53UL: /* ext2, ext3 and ext4 share the magic */
+            w = "ext4";
+            break;
+        case 0x9123683EUL:
+            w = "btrfs";
+            break;
+        case 0x58465342UL:
+            w = "xfs";
+            break;
+        case 0xF2F52010UL:
+            w = "f2fs";
+            break;
+        case 0x5346544EUL: /* ntfs-3g reports FUSE; this is the kernel's ntfs and ntfs3 */
+            w = "NTFS";
+            break;
+        case 0x4D44UL:
+            w = "FAT";
+            break;
+        case 0x2011BAB0UL:
+            w = "exFAT";
+            break;
+        case 0x2FC12FC1UL:
+            w = "zfs";
+            break;
+        case 0x794C7630UL:
+            w = "overlay";
+            break;
+        case 0x01021994UL:
+            w = "tmpfs";
+            break;
+        case 0x858458F6UL:
+            w = "ramfs";
+            break;
+        case 0x65735546UL:
+            w = "FUSE";
+            break;
+        case 0x6969UL:
+            w = "NFS";
+            break;
+        case 0x517BUL:
+        case 0xFF534D42UL:
+        case 0xFE534D42UL:
+            w = "SMB";
+            break;
+        case 0x01021997UL:
+            w = "9p";
+            break;
+        case 0x9660UL:
+            w = "ISO 9660";
+            break;
+        case 0x15013346UL:
+            w = "UDF";
+            break;
+        case 0x73717368UL:
+            w = "squashfs";
+            break;
+        default:
+            break;
+        }
+#endif
+        if (w == NULL || w[0] == '\0') {
+            return -1;
+        }
+        return drive_word(out, n, w);
+    }
+#endif
+}
+
+static char drive_kinds[2][16] = {"unknown", "unknown"};
+
+static const char *drive_suffix(const char *kind)
+{
+    if (strcmp(kind, "network") == 0) {
+        return " on a network drive";
+    }
+    if (strcmp(kind, "removable") == 0) {
+        return " on a removable drive";
+    }
+    if (strcmp(kind, "CD-ROM") == 0) {
+        return " on a CD or DVD drive";
+    }
+    return "";
+}
+
+const char *ico_host_drive_note(int which, const char *path)
+{
+    char kind[16];
+
+    if (which < 0 || which > 1) {
+        return "";
+    }
+    if (ico_host_drive_kind(path, kind, sizeof(kind)) != 0) {
+        snprintf(kind, sizeof(kind), "unknown");
+    }
+    snprintf(drive_kinds[which], sizeof(drive_kinds[which]), "%s", kind);
+    return drive_suffix(kind);
+}
+
+void ico_host_drive_warn(int which)
+{
+    static const char *const place[2] = {"the game data", "the save folder"};
+    const char *note;
+
+    if (which < 0 || which > 1) {
+        return;
+    }
+    note = drive_suffix(drive_kinds[which]);
+    if (note[0] != '\0') {
+        fprintf(stderr,
+                "ico_pc: %s is%s: loads%s can stall and the sound can cut out while they do; a "
+                "local drive is faster\n",
+                place[which], note, which == ICO_DRIVE_USER ? " and saves" : "");
+    }
+}
+
+void ico_host_drive_summary(char *out, size_t n)
+{
+    snprintf(out, n, "drives: data %s, user %s", drive_kinds[ICO_DRIVE_DATA],
+             drive_kinds[ICO_DRIVE_USER]);
 }

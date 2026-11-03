@@ -28,13 +28,15 @@
    up with the game's rows. */
 #define ROW_CAPS_ABOVE_CENTRE 2.0f
 
-enum { ROW_TEXT = 0, ROW_GLYPH, ROW_RECT };
+enum { ROW_TEXT = 0, ROW_GLYPH, ROW_RECT, ROW_IMAGE };
 
 typedef struct ExtRow {
-    int kind;              /* ROW_TEXT, ROW_GLYPH, ROW_RECT */
+    int kind;              /* ROW_TEXT, ROW_GLYPH, ROW_RECT, ROW_IMAGE */
     int glyph;             /* ROW_GLYPH: LtExtGlyph */
     unsigned char rgba[4]; /* ROW_RECT: the colour at a full row colour */
     float fill;            /* ROW_RECT: the left part drawn, 0..1 */
+    uint32_t tex;          /* ROW_IMAGE: the page's RdTex id (0: nothing drawn) */
+    int texW, texH;        /* ROW_IMAGE: the texel rectangle drawn, from (0, 0) */
     LtExtText text;
     char literal[TEXT_MAX];
     int hasLiteral;
@@ -182,7 +184,7 @@ int lt_ext_set_title_sheet(int index, int on)
 int lt_ext_set_pointer_role(int index, int role)
 {
     ExtRow *r = rowOf(index);
-    if (!r || role < LT_POINTER_AUTO || role > LT_POINTER_DOWN) {
+    if (!r || role < LT_POINTER_AUTO || role > LT_POINTER_SQUARE) {
         return -1;
     }
     r->role = role;
@@ -396,6 +398,107 @@ static void drawRect(const ExtRow *r, const int box[4], const unsigned char rgba
     ui_draw_rect(x0, y0, x0 + w * r->fill, y0 + h, c);
 }
 
+int lt_ext_add_image(int x, int y, int w, int h)
+{
+    LtProperty r;
+    memset(&r, 0, sizeof(r));
+    r.word0 = r.word4 = r.word8 = r.wordC = -1;
+    r.ownerItem = -1;
+    r.up = r.down = r.left = r.right = -1;
+    r.rightItem = r.leftItem = r.downItem = r.upItem = -1;
+    r.word40 = 1;
+    r.dispX = x;
+    r.dispY = y;
+    r.dispW = w > 0 ? w : 1;
+    r.dispH = h > 0 ? h : 1;
+    r.texFileNo = 0x7000 + s_propCount; /* as a glyph row's */
+    int i = lt_ext_add_property(&r, NULL);
+    if (i >= 0) {
+        s_rows[i - LT_GAME_PROPERTY_COUNT].kind = ROW_IMAGE;
+    }
+    return i;
+}
+
+int lt_ext_set_image(int index, uint32_t tex, int texW, int texH)
+{
+    ExtRow *r = rowOf(index);
+    if (!r || r->kind != ROW_IMAGE) {
+        return -1;
+    }
+    r->tex = tex;
+    r->texW = texW > 0 ? texW : 0;
+    r->texH = texH > 0 ? texH : 0;
+    return 0;
+}
+
+uint32_t lt_ext_row_image(int index, int *texW, int *texH)
+{
+    ExtRow *r = rowOf(index);
+    if (!r || r->kind != ROW_IMAGE) {
+        return 0;
+    }
+    if (texW) {
+        *texW = r->texW;
+    }
+    if (texH) {
+        *texH = r->texH;
+    }
+    return r->tex;
+}
+
+void lt_ext_image_fit(const float in[4], int texW, int texH, float out[4])
+{
+    const float w = in[2] - in[0], h = in[3] - in[1];
+    memcpy(out, in, 4 * sizeof(float));
+    if (texW <= 0 || texH <= 0 || !(w > 0.0f) || !(h > 0.0f)) {
+        return;
+    }
+    const float a = (float)texW / (float)texH, shown = h * UI_X_PER_Y; /* the height in x units */
+    if (w > shown * a) {
+        /* a box wider than the picture: as tall as the box, centred across */
+        const float fw = shown * a;
+        out[0] = in[0] + (w - fw) * 0.5f;
+        out[2] = out[0] + fw;
+    } else {
+        /* narrower: as wide as the box, centred down */
+        const float fh = w / a / UI_X_PER_Y;
+        out[1] = in[1] + (h - fh) * 0.5f;
+        out[3] = out[1] + fh;
+    }
+}
+
+/* an image row: the box (the rect row's conversion), the texture's
+   texels (0, 0)..(texW, texH) at their own shape inside it
+   (lt_ext_image_fit), the row's colour as the modulate; no texture, an
+   empty slot or the headless build: nothing */
+static void drawImage(const ExtRow *r, const int box[4], const unsigned char rgba[4])
+{
+#ifdef ICO_RD
+    if (!r->tex || r->texW <= 0 || r->texH <= 0) {
+        return;
+    }
+    UiTexQuad q;
+    float in[4], fit[4];
+    in[0] = (float)(box[0] - 4) / 16.0f + UI_GRID_CX;
+    in[1] = (float)(box[1] - 4) / 8.0f + UI_GRID_CY;
+    in[2] = in[0] + (float)(box[2] + 16) / 16.0f;
+    in[3] = in[1] + (float)(box[3] + 16) / 8.0f;
+    lt_ext_image_fit(in, r->texW, r->texH, fit);
+    q.x0 = fit[0];
+    q.y0 = fit[1];
+    q.x1 = fit[2];
+    q.y1 = fit[3];
+    q.u0 = q.v0 = 0.0f;
+    q.u1 = (float)r->texW;
+    q.v1 = (float)r->texH;
+    ui__draw_tex_quads(r->tex, &q, 1, rgba, 0, NULL, 0);
+#else
+    (void)r;
+    (void)box;
+    (void)rgba;
+#endif
+}
+
 /* An index that names no row gets a scratch row instead of memory outside
    the tables: its readers see zeros, its writers write nowhere that
    matters (re-zeroed on every such lookup).  -1 is the tables' "none" (a
@@ -483,6 +586,14 @@ void lt_ext_draw_row(const LtProperty *e, const int box[4], const unsigned char 
     ExtRow *r = &s_rows[e - s_props];
     if (r->kind == ROW_GLYPH) {
         return; /* a glyph without its texture (tables not PAL): nothing */
+    }
+    if (r->kind == ROW_IMAGE) {
+        if (!glow) {
+            const uint64_t owner = ui_set_draw_key(rowKey(e, 0));
+            drawImage(r, box, rgba);
+            ui_set_draw_key(owner);
+        }
+        return;
     }
     if (r->kind == ROW_RECT) {
         if (!glow) {

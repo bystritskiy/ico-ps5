@@ -172,7 +172,11 @@ typedef enum RdStencilMode {
     RD_STENCIL_DATE_TEST0,
     RD_STENCIL_DATE_TEST1,
     RD_STENCIL_DATE_TEST0_SET,
-    RD_STENCIL_DATE_TEST1_CLR
+    RD_STENCIL_DATE_TEST1_CLR,
+    /* the shadow resolve's A on a disc whose count steps by 8 (rd_shadow.c
+     * "The step"): NOTEQUAL 0 under read mask 0x1F, the five bits 8 n mod
+     * 256 keeps */
+    RD_STENCIL_TEST_NONZERO5
 } RdStencilMode;
 
 typedef enum RdTargetFormat {
@@ -310,6 +314,9 @@ typedef struct RdPostParams {
     uint32_t lines;     /* RD_POST_LETTERBOX bar height, GS lines */
 } RdPostParams;
 
+/* RdCamera.cut's value for rd_camera_cut_wall's cut */
+#define RD_CAMERA_CUT_WALL 2
+
 typedef struct RdCamera {
     float view[16];
     float proj[16];     /* the game's screen matrix +0xC0 (gsb_SetVSMatrix): the native
@@ -317,7 +324,11 @@ typedef struct RdCamera {
     float zoom, aspect; /* vsParam[0]; the display aspect the frame was built for (GsBase.c
                          * gsFrame.aspect; 4/3 in version 9 and older dumps) */
     float nearZ, farZ;
-    uint8_t cut; /* 1 on a camera cut this tick; disables interpolation for the frame */
+    /* 1 on a camera cut this tick (rd_camera_cut), RD_CAMERA_CUT_WALL when the
+     * eye's path from the tick before crossed the stage (rd_camera_cut_wall;
+     * dumps from before it hold 0 or 1); either disables interpolation for
+     * the frame */
+    uint8_t cut;
     /* 1: the port's own free camera drew this tick (photo mode, rd_free_camera):
      * the VU draws keep the triangles with a vertex behind the eye, GPU-clipped
      * (vu_common.hlsli VU_F_BEHIND_EYE); 0 in the game's cameras and in older
@@ -427,6 +438,22 @@ typedef struct RdSettings {
      * game's own (Original), as before this option; the replay tool's
      * --motion-blur smooth sets it */
     uint8_t motionBlurSmooth;
+    /* Options > Effects > Motion blur strength ([video]
+     * effect_motion_blur_strength, 10..100 in tens).  The motion blur's
+     * sprite is drawn with FIX x motionBlurStrength / 100 rounded in place of
+     * the game's FIX, under Original and Smooth alike (Smooth spreads that
+     * FIX over the tick's presents): the trail fades faster below 100
+     * (rd_blur_smooth.c rd__blur_strength_fix, rd_blur_border.c
+     * rd__blur_post_sprite).  0 in a zeroed RdSettings, and 100 or more: the
+     * game's own FIX, as before this option */
+    uint8_t motionBlurStrength;
+    /* Glow between frames: Smooth ([video] effect_glow_mode = "smooth" with
+     * effect_glow on).  Above Frame rate Original the glow's chain
+     * (rd_glow_hold.c) is drawn again at every present instead of the
+     * tick's first present's glow pasted.  0 in a zeroed RdSettings: the
+     * glow held, as before this option.  An explicit ICO_RD_GLOW_REDRAW
+     * ([dev] glow_redraw) wins over it. */
+    uint8_t glowSmooth;
     /* The internal scene resolution, in texels: the scene's
      * texture is sceneWidth x sceneHeight (GS coordinates unchanged); 0 x 0
      * with sceneScale 0 = the presentation box in the window under the
@@ -528,7 +555,7 @@ void rd_reset_scene(uint32_t gsWidth, uint32_t gsHeight);
 /* Settings menu: applies at the next rd_begin_frame. */
 void rd_set_settings(const RdSettings *settings);
 /* Before rd_init: the fallback's program entries take the plain variants
- * (issue 107; docs/port/RENDER.md, "The fallback entries"), reason saying
+ * (issue 107; docs/port/PIPELINES.md, "The fallback entries"), reason saying
  * why for the log; NULL clears it; ICO_RD_VU_EXTENDED=1 overrides it.  No
  * caller in the tree: the window's went with [dev] vu_plain_only, which is
  * read and ignored (port/platform/host_config.c retired_dev). */
@@ -537,15 +564,31 @@ void rd_set_vu_plain_only(const char *reason);
  * rd_init), and why (NULL when it does not) */
 const char *rd_vu_plain_only(void);
 /* Before rd_init: the run draws without the VU vertex pre-pass
- * (docs/port/RENDER.md, "The vertex pre-pass"), reason saying why for the
+ * (docs/port/PIPELINES.md, "The vertex pre-pass"), reason saying why for the
  * log ("for this start: the last start ended while the graphics driver
  * compiled its pipelines"); NULL clears it.  The host calls it after a
  * start that ended inside the pre-pass's compile and in a restart whose
  * step draws without it (window_host.c, startup_retry.h). */
 void rd_set_vu_prepass_off(const char *reason);
+/* Before rd_init, or after it and before the start-up set (the host reads
+ * the device's name and driver from the device rd_init made): the run
+ * never makes the sprite planes builds (the
+ * screen-prim triangles' exact planes, rd_screen_planes.c), reason saying
+ * why for the log ("the driver hung creating them on 2026-10-30, compiler
+ * E031.41.03.47"); NULL or "" clears it.  Those triangles draw through the
+ * plain sprite builds (the GPU's interpolation of their corners:
+ * byte-identical on the dumps measured, a level apart possible at a
+ * fractional scale; docs/port/WORK_BUFFERS.md "Without the sprite
+ * planes"), which the start-up set holds instead, and none of the
+ * family is created on first use.  The host calls it from [dev]
+ * pipeline_skip (issue 161, port/platform/pipeline_skip.h);
+ * ICO_RD_NO_SPRITE_PLANES=1 does the same for the tests. */
+void rd_set_sprite_planes_off(const char *reason);
+/* Whether the run draws without the sprite planes builds (after rd_init) */
+bool rd_sprite_planes_off(void);
 
 /* How the start-up pipeline set is made (rd_precreate_pipelines;
- * docs/port/RENDER.md "The start-up set"): the batch size, the worker
+ * docs/port/PIPELINES.md "The start-up set"): the batch size, the worker
  * threads (0: the backend's choice), the process-memory growth in MB past
  * which the set stops and the rest is made on first use (0: no bound), and
  * whether the pipeline cache is written after every batch.  Zero fields
@@ -599,6 +642,13 @@ void rd_end_frame(int keep);
  * the host FP mode and returns; NULL (the default, tests and tools) calls
  * fn directly. */
 typedef void (*RdHostCall)(void (*fn)(void *arg), void *arg);
+/* The Vulkan pipeline cache file's name for this build's shaders,
+ * "pipelines-<16 hex digits>.vkcache" (rd_cache_name.h: every module of
+ * the embedded table by name, stage, length and XXH3-64, and
+ * RD_PIPELINE_CACHE_FORMAT; not the build), into out (at least 35
+ * bytes; 0, or -1 with out "" when it is shorter).  Needs no device: the
+ * window names the file before rd_init.  The key is made once a run. */
+int rd_pipeline_cache_file(char *out, size_t cap);
 /* Creates every pipeline of the reachable set (rd__enumerate_reachable) now,
  * so the first frames that use them do not stall on the driver's pipeline
  * compile; logs the count, the time, the compiles and the threads.  The keys
@@ -675,7 +725,7 @@ void rd_set_memory_fn(RdMemoryFn fn);
  * pipelines on one thread).  NULL (the default): never asked. */
 typedef int (*RdLowMemoryFn)(char *why, size_t size);
 void rd_set_low_memory_fn(RdLowMemoryFn fn);
-/* No start-up set (issues 93 and 107; docs/port/RENDER.md, "The start-up
+/* No start-up set (issues 93 and 107; docs/port/PIPELINES.md, "The start-up
  * set"): the window calls it instead of rd_precreate_pipelines, why saying
  * why ("on this device (Adreno 740, issues 93 and 107)", "by the settings
  * ([dev] pipeline_set = \"lazy\")", ...), logged as "rd: pipelines: no
@@ -694,6 +744,31 @@ bool rd_pipelines_lazy_on(void);
  * open lazy batch once no pipeline was made for 0.5 s or 2 s after its
  * first.  Nothing outside rd_pipelines_lazy's runs. */
 void rd_pipelines_lazy_tick(void);
+/* The background finisher (port/render/rd_pipe_finish.h; docs/port/
+ * PIPELINES.md "The background finisher"): after rd_precreate_pipelines
+ * stopped the set at the free-memory floor (the low-memory function said
+ * yes for the floor, not for the system's signal), the window calls it so
+ * the set's keys not made yet are compiled in the background instead of
+ * on first use: one batch of RD_FINISH_BATCH at a time, on
+ * RD_FINISH_THREADS pipeline threads at low priority
+ * (rhi_create_pipelines_begin), begun and taken after a picture on the
+ * thread that draws (the render thread), the memory function asked before
+ * each batch (2: the system's signal, the finisher ends; 1: under the
+ * floor, asked again RD_FINISH_FLOOR_MS later), no batch begun while a
+ * late step or a slow picture holds it (rd_pipelines_background_hold).
+ * A draw that needs a key the finisher has not made yet still makes it on
+ * the spot.  Logs "pipelines: the stopped set resumes in the background (N
+ * left: ...)", each batch as the set's ("compiled background VU batch
+ * 290-321 of 1196 ..."), and its end.  Returns the keys left (0: nothing
+ * to finish, or the backend has no background creation: then not started,
+ * logged).  The game thread, before the render thread starts. */
+typedef int (*RdBackgroundMemoryFn)(char *why, size_t size);
+uint32_t rd_pipelines_background_start(RdBackgroundMemoryFn memory);
+/* A late game step or a slow picture: no background batch begins for
+ * RD_FINISH_HOLD_MS (a batch in flight goes on).  Any thread. */
+void rd_pipelines_background_hold(void);
+/* Whether the finisher has keys left or a batch in flight */
+bool rd_pipelines_background_on(void);
 /* The pipelines made so far this run (the start-up set's and the frames'),
  * for the window's low-memory line. */
 uint32_t rd_pipeline_count(void);
@@ -788,6 +863,16 @@ bool rd_vuprepass_selftest(void);
  * statistics line. */
 double rd_replay_time_max(int reset, uint32_t *count);
 void rd_set_host_call(RdHostCall call);
+/* Frame rate Original (interpolation off): asked on the host (rd__on_host)
+ * before rd_end_frame replays and presents a frame, with the frame's keep
+ * flag; false leaves the frame unreplayed and unpresented (the last picture
+ * stays on the screen), so a renderer slower than the game's step does not
+ * hold the simulation below its rate (window_host.c's late skip at
+ * Original, pace_policy.h pace_original_present).  NULL (the default, tests
+ * and tools) replays every frame.  Nothing else of the frame changes: a
+ * replayed frame draws the same picture as without the gate. */
+typedef bool (*RdReplayGate)(int keep);
+void rd_set_replay_gate(RdReplayGate gate);
 /* dl_Clear without dl_Swap (gsb_UpdateGSSystem(1)
  * on the movie path, gsb_UpdateGSSystem before gsSystemReady): the lists
  * recorded since rd_begin_frame are dropped unreplayed, as the PS2 drops a
@@ -858,6 +943,13 @@ uint32_t rd_frame_number(void);
  * (window_host.c) waits on it for a frame at the aspect it asked for. */
 bool rd_last_frame_native(uint32_t *number, float *aspect, uint32_t *gsW);
 void rd_camera_cut(void);
+/* rd_camera_cut_wall: the frame being recorded is not blended from the one
+ * before because the eye's path between them crossed the stage's collision
+ * (port/game/camera_wall.h; GsBase.c gsbHostCullFlip calls it at the flip
+ * that closes the frame): RdCamera.cut RD_CAMERA_CUT_WALL, the snap
+ * RD_SNAP_WALL.  A frame rd_camera_cut marks too stays a plain cut (1).
+ * Outside an open frame it does nothing (the step belongs to no frame). */
+void rd_camera_cut_wall(void);
 /* rd_free_camera: the frame being recorded is drawn from the port's own free
  * camera (photo mode, port/game/photo_view.c), not a camera the game's
  * artists placed: RdCamera.freeCamera.  Outside an open frame it applies to
@@ -987,8 +1079,14 @@ RdBlendExact rd_blend_exact(void);
  *                       font atlases) are uploaded with the frame.  Also at
  *                       the movie picture's presents (rd_video.c), laid out
  *                       in the picture's 4:3 box.  The registration
- *                       survives rd_shutdown / rd_init
- * rd_overlay_prims       valid only inside fn (ignored elsewhere): prims in
+ *                       survives rd_shutdown / rd_init.  fn runs on the
+ *                       thread that records (with the window's render
+ *                       thread, before the picture is handed to it;
+ *                       rd_thread.h), or on the render thread only inside a
+ *                       call the recording thread waits for (rd_end_frame's
+ *                       present with interpolation off, the movie's)
+ * rd_overlay_prims       valid only inside fn, on fn's thread (ignored
+ *                       elsewhere): prims in
  *                       12.4 fixed-point OUTPUT pixels, origin at the
  *                       output's top-left corner, an integer coordinate on
  *                       a pixel's top-left edge (pixel (x, y) is the square
@@ -1088,7 +1186,49 @@ bool rd_read_presented(void *dst, uint32_t *w, uint32_t *h);
  *                       capture, with its path in path; 0 while it is
  *                       pending or when there is none */
 bool rd_capture_presented(const char *png);
+/* The same, the picture box-downscaled (area average, same aspect) to at
+ * most maxW pixels wide first when the output is wider (0: as it is).  The
+ * bug-report picture, which goes in a zip a phone shares. */
+bool rd_capture_presented_max(const char *png, uint32_t maxW);
 int rd_capture_result(char *path, uint32_t pathSize);
+
+/* ------------------------------------------------- a save state's picture
+ * The picture a save state keeps (port/game/state_host.c): the game as it
+ * was the moment before the pause menu came up, taken without the menu.
+ *
+ * rd_capture_shot        the next present of a frame begun by the time of
+ *                       the call (the frame open now, or an earlier one)
+ *                       copies the output as rd_capture_presented does
+ *                       (before the overlay: no popup, no HUD), cropped
+ *                       to the presentation box (the picture without the
+ *                       bars around it), and after the submit hands fn
+ *                       that box as RGBA8 (pitch w * 4, alpha 255) in a
+ *                       malloc block fn owns and frees.  A present of a
+ *                       later frame drops it instead, and so do a failed
+ *                       copy and the renderer's shutdown: fn(NULL, 0, 0,
+ *                       user).  fn runs once per accepted call, on the
+ *                       thread that presents, after the present.  A second
+ *                       call before the present replaces the first
+ *                       (whose fn is then told NULL).  Its own slot beside
+ *                       rd_capture_presented's: one copy serves both when
+ *                       both are armed.  false: no device or fn NULL
+ * rd_capture_shot_cancel  forgets an armed one (fn is not called)
+ * rd_present_box_size    the size of the last present's presentation box in
+ *                       output pixels (the picture's own aspect); false
+ *                       before the first present */
+typedef void (*RdShotFn)(uint8_t *rgba, uint32_t w, uint32_t h, void *user);
+bool rd_capture_shot(RdShotFn fn, void *user);
+void rd_capture_shot_cancel(void);
+/* The same picture as a deferred answer, for a caller on the game thread
+ * while the window's render thread presents (rd_thread.h): no fn runs on
+ * the presenting thread.  rd_capture_shot_arm arms it as rd_capture_shot
+ * does (false: no device); rd_capture_shot_take hands the answer once it
+ * came: 1 with *rgba the box (or NULL when the present dropped it, as fn's
+ * NULL), the caller owning the block; 0 while none is waiting.  An answer
+ * not taken is freed by the next arm and by rd_capture_shot_cancel */
+bool rd_capture_shot_arm(void);
+int rd_capture_shot_take(uint8_t **rgba, uint32_t *w, uint32_t *h);
+bool rd_present_box_size(uint32_t *w, uint32_t *h);
 
 /* --------------------------------------------------------- deferred text
  * Text the game shows in lists 11 and 12 (the layout's menu rows, through
@@ -1349,12 +1489,31 @@ void rd_update_texture_rect(RdTex t, uint32_t x, uint32_t y, uint32_t w, uint32_
  *                        colour, fades and the glow's additive draw
  *                        multiply in as for a sheet sprite.
  *                        port/render/test/sheet_ref.c computes the same
- *                        texels and samples on the CPU (the tests' oracle)
+ *                        texels and samples on the CPU (the tests' oracle).
+ *                        At scale 1 the renderer computes these texels
+ *                        itself when it uploads the texture (the changed
+ *                        rectangle and the rim's reach round it, the whole
+ *                        page after a style change) and the device holds
+ *                        them as RGBA8 with an apron
+ *                        (ICO_SHEET_BAKE_AX/AY) for the texels outside;
+ *                        font_sheet_baked_ps (RD_FS_FONT_SHEET_BAKED)
+ *                        blends four of them as font_sheet_ps blends the
+ *                        texels it rebuilds, so the bytes are the same at
+ *                        a fraction of the cost (issue 173).  A
+ *                        scaled strip's page of scale 2 is baked the
+ *                        same way (rd_tex.c rd__sheet_bake_scaled_rect:
+ *                        its rim's magnification blends by odd 4ths,
+ *                        exact in the shader's floats), both halves'
+ *                        rows with the apron; 3 and 4 are drawn by
+ *                        font_sheet_ps.  ICO_RD_SHEET_SHADER=1 ([dev]
+ *                        sheet_shader) draws every scale through
+ *                        font_sheet_ps instead (the A/B)
  * rd_set_texture_sheet_style  the style the next replays draw t with (the
  *                        language's rim level, without rasterising
  *                        again); ignored for any other texture.  The style
  *                        is read when a frame is replayed, not when its
- *                        draws are recorded
+ *                        draws are recorded (a baked sheet is baked again
+ *                        whole at the next replay)
  * rd_update_texture_rect   takes a sheet texture's rectangles as R8's: w * h
  *                        bytes of coverage
  * Scaled strips: with
@@ -1394,7 +1553,7 @@ void rd_update_texture_rect(RdTex t, uint32_t x, uint32_t y, uint32_t w, uint32_
  *                        rd_sheet_rim); the coverage and the rim are 0
  *                        outside their halves, and a draw addresses the
  *                        top half.  s = 1 draws the unscaled path above
- *                        (the rim made by the shader).
+ *                        (the rim made from the coverage, baked).
  * rd_sheet_rim            R of the sheet texels (s x s texels each) that
  *                        the rw x rh texels at (x, y) of a w x h coverage
  *                        at scale s touch (rows packed, 0 outside it),
@@ -1461,7 +1620,9 @@ void rd_shadow_strip(const float (*v)[4], uint32_t count, float sign, RdKey key)
  * face colour 0x04 or 0xFC by its facing, so a pixel ends at 4 n mod 256
  * for n the net count of the faces in front of the scene.  rd keeps n mod
  * 64 in the stencil of the bound depth target (INCR_WRAP / DECR_WRAP under
- * write mask 0x3F) and writes the same colour at the resolve.
+ * write mask 0x3F) and writes the same colour at the resolve.  The North
+ * American disc and the 2001 previews use 0x08 and 0xF8, the step 8: a
+ * pixel ends at 8 n mod 256 = 8 (n mod 32), the count's low five bits.
  *
  * rd_shadow_count_target  the per-frame stand-in for FBP 0x142: an RGBA8
  *                       target of the scene size gsW x gsH, created by the
@@ -1469,20 +1630,25 @@ void rd_shadow_strip(const float (*v)[4], uint32_t count, float sign, RdKey key)
  *                       outside a frame
  * rd_shadow_reset        shadow_Reset's clear of FBP 0x142: the stencil of
  *                       the bound depth target to 0 (the colour target is
- *                       written whole by the resolve)
+ *                       written whole by the resolve); the step 4
+ * rd_shadow_reset_step   the same with the disc's step, 4 (0x04 / 0xFC) or
+ *                       8 (0x08 / 0xF8; anything else is taken as 4): the
+ *                       reset and the resolve after it carry it, so a dump
+ *                       replays with it on any machine
  * rd_shadow_tris         shadow_RenderVolume's strips as triangles: v holds
  *                       3 x triCount XYZ2 (x, y, z; the rest unused), sign[t]
  *                       > 0 for a triangle whose last vertex had the colour
- *                       0x04 (flat shading), < 0 for 0xFC.  Depth-tested
- *                       with the state's TEST against the bound depth
- *                       target, no colour or depth writes
+ *                       0x04 or 0x08 (flat shading), < 0 for 0xFC or
+ *                       0xF8.  Depth-tested with the state's TEST against
+ *                       the bound depth target, no colour or depth writes
  * rd_shadow_resolve      the count into the bound colour target: RGB =
- *                       4 n mod 256, A = 0x80 where that is not 0, else 0
+ *                       step x n mod 256, A = 0x80 where that is not 0, else 0
  *                       (the TEXA expansion shadow_Draw's PSMCT24 read of
  *                       FBP 0x142 applies, TA0 0x80 AEM, baked so the chain
  *                       filters expanded texels as the GS does) */
 RdTarget rd_shadow_count_target(uint32_t gsW, uint32_t gsH);
 void rd_shadow_reset(void);
+void rd_shadow_reset_step(uint32_t step);
 void rd_shadow_tris(const RdScreenVtx *v, const int8_t *sign, uint32_t triCount, RdKey key);
 void rd_shadow_resolve(void);
 
@@ -1726,6 +1892,25 @@ bool rd_dump_frame(const char *path);
  * written) otherwise.  F12 zips it beside the frame, so `rd_replay_tool
  * --interp T` rebuilds the pictures between the two. */
 bool rd_dump_prev_frame(const char *path);
+/* The blended present's frame (F12, port/platform/window_host.c): the next
+ * rd_present that draws a picture between two ticks (alpha below 1, not a
+ * keep frame) writes the frame it drew (rd_interp.c's blended copy of the
+ * tick, its commands, payload, scratch meshes and the ticks' cameras) to
+ * path as an ordinary dump, after the present, so rd_replay_tool replays
+ * it as drawn without --interp; a present at alpha 1 or of a keep frame,
+ * the tick's own picture, writes nothing.  The next rd_present takes the
+ * arm either way; NULL or "" disarms.  false: interpolation is off (no
+ * rd_present draws), nothing armed.  An rd_present that draws nothing (a
+ * movie, interpolation off, no closed frame) expires the arm, as does a
+ * result poll with interpolation off or two frames closed since the arm.
+ * rd_dump_blended_result  once the arm is taken: 1 written, 0 the present
+ *                         was the tick's own picture, -1 the write failed,
+ *                         with the present's frame and alpha; -3 the arm
+ *                         expired, nothing written (the last closed frame,
+ *                         alpha 1); -2 while armed or with nothing armed
+ *                         (nothing reported) */
+bool rd_dump_blended_arm(const char *path);
+int rd_dump_blended_result(uint32_t *frame, float *alpha);
 /* The device-loss dump (port/platform/window_host.c device_lost_quit;
  * docs/port/RENDER.md, "The loss dump"): the frames the renderer still holds
  * as two ordinary dumps, the last closed frame (the one the lost replay
@@ -1823,7 +2008,9 @@ void rd_loss_bisect_step(const char *path, uint32_t pass, uint32_t drawFirst, ui
 bool rd_dump_frame_size(const char *path, uint32_t *gsW, uint32_t *gsH, float *aspect);
 /* Readback of the DISPLAY target (the reduced frame the presenter scales;
  * the output itself is rd_read_presented), tightly packed RGBA8, for
- * screenshots and image comparison. */
+ * screenshots and image comparison.  dst NULL: *w and *h get the size a
+ * dst must have room for (w * h * 4 bytes; the read may return a narrower
+ * picture), nothing read. */
 bool rd_read_display(void *dst, uint32_t *w, uint32_t *h);
 
 /* --------------------------------------------------------- statistics */
@@ -1928,10 +2115,12 @@ enum {
     RD_PERF_TARGET_TEMP,                    /* another temporary target */
     RD_PERF_TARGET_NONE,                    /* none (the uploads), or gone */
     RD_PERF_TARGET_WINDOW,                  /* the window (the present) */
-    RD_PERF_TARGET_RECORD                   /* the VU pre-pass's record */
+    RD_PERF_TARGET_RECORD,                  /* the VU pre-pass's record */
+    RD_PERF_TARGET_ROWBOX,                  /* the aura's row sums (rd_aura_box.c) */
+    RD_PERF_TARGET_SHADOW_COUNT             /* the shadow count at its GS size (rd_shadow_one.c) */
 };
 
-/* RdPerfPass.target as text: "SCENE", "block", "window", ... */
+/* RdPerfPass.target as text: "SCENE", "block", "window", "ROWBOX", ... */
 const char *rd_perf_target_name(int code);
 
 /* One piece of a timed replay's GPU work (rd_perf_passes_of): what it is,
@@ -1957,10 +2146,14 @@ typedef struct RdPerfPass {
     /* OpenGL: the bound groups' entries in it and those skipped as already
      * bound (RhiStats.entryBinds, entryBindsSkipped; 0 elsewhere) */
     uint32_t entryBinds, entrySkipped;
+    /* a render pass's area (rd_pass_area.c, RhiRenderPassDesc.area): its
+     * offset and size in texels; aw 0 the whole target */
+    uint16_t ax, ay, aw, ah;
 } RdPerfPass;
 
 /* A piece's label as the window's summary writes it: the effect for a
- * render pass of one, "list N" for another render pass, else the kind
+ * render pass of one, "shadow" for the shadow count's (its target "count":
+ * "shadow count 848x448"), "list N" for another render pass, else the kind
  * ("DATE snapshot"); the length written, as snprintf */
 int rd_perf_pass_label(const RdPerfPass *p, char *buf, size_t n);
 
@@ -1987,6 +2180,93 @@ enum {
     RD_VU_FUSE_WHY_COUNT
 };
 
+/* Why a planned replay dropped no depth store (RdPerfRecord.storeWhy;
+ * rd_store_plan.c rd__store_plan_end, docs/port/WORK_BUFFERS.md "The store
+ * plan"), for the depth the line names (SCENE's where the replay has it):
+ * NONE a store was dropped, or no pass had a depth; EFFECTS the present
+ * reads SCENE's depth for an effects program ([video] effects_depth with
+ * one loaded); KEEP a read before the clear or a readback kept it; STENCIL
+ * a shadow window was open on it (rd__stencil_live); ANY a command the plan
+ * does not know came later; LAST no pass with the depth bound began after
+ * its last touch; FULL more depths than the plan holds */
+enum {
+    RD_STORE_WHY_NONE,
+    RD_STORE_WHY_EFFECTS,
+    RD_STORE_WHY_KEEP,
+    RD_STORE_WHY_STENCIL,
+    RD_STORE_WHY_ANY,
+    RD_STORE_WHY_LAST,
+    RD_STORE_WHY_FULL,
+    RD_STORE_WHY_COUNT
+};
+
+/* RdPerfRecord.passAreaWhy: why a render pass on a target with its own
+ * depth (SCENE) began whole, the first that holds (rd_pass_area.c
+ * rd__pass_area_begin; docs/port/WORK_BUFFERS.md "The pass area"): SCAN no
+ * scan entry for the command it began at (the switch off, a pass window,
+ * another replay's scan, the target's size changed); CLEAR it takes a clear
+ * as its load; MSAA in the MSAA epoch; STORAGE a storage pass; BEGIN begun
+ * at a command no area starts at (a clear's pass, a fold's or a flush's
+ * draw); VU, FOG, SHADOW, POST, SCREEN the first command of the pass's run
+ * whose texels only the GPU knows: a VU draw (mesh, skinned, grid,
+ * particles), the fog, a shadow command, a post sprite other than the
+ * aura's, a flat draw under DATE or COLCLAMP 0's wrap; EMPTY nothing drawn;
+ * LARGE the draws' tiles leave no tile column or row of the target out (a
+ * full-frame sprite: the aura's paste, list 11's fades) */
+enum {
+    RD_AREA_WHY_SCAN,
+    RD_AREA_WHY_CLEAR,
+    RD_AREA_WHY_MSAA,
+    RD_AREA_WHY_STORAGE,
+    RD_AREA_WHY_BEGIN,
+    RD_AREA_WHY_VU,
+    RD_AREA_WHY_FOG,
+    RD_AREA_WHY_SHADOW,
+    RD_AREA_WHY_POST,
+    RD_AREA_WHY_SCREEN,
+    RD_AREA_WHY_EMPTY,
+    RD_AREA_WHY_LARGE,
+    RD_AREA_WHY_COUNT
+};
+
+/* RdPerfRecord.lastStoreWhy: why the pass holding a depth's last touch kept
+ * its store (rd_pass_cut.c rd__last_store_drop, counted once a depth a
+ * replay at rd__store_plan_end: the reason of the last pass begun with the
+ * depth bound before its last touch was done; docs/port/WORK_BUFFERS.md
+ * "Passes cut"): NOSCAN no scan this replay; SETTING MSAA, the exact blend,
+ * GS state as shader data, the pass split or the tool's pass window; PASS
+ * the pass was not begun by a draw on its colour and this depth (a post
+ * sprite's, a clear's or a fold's pass); LOAD the depth not loaded (a
+ * clear's load); SHADOW a shadow window open on the depth; UNKNOWN a
+ * command the store plan does not know; and the first command of the pass
+ * (its start, or between it and the last touch) the walk may end the pass
+ * at: DATE a DATE draw; TARGET a draw sampling its own target, a depth
+ * view, or a target not readable when the pass began; WRAP a flat draw
+ * under COLCLAMP 0's wrap; POST a post sprite; FOG the fog other than at
+ * the pass's start on the local read with no probe and no edge read due;
+ * ELSEWHERE a draw on another colour or depth; OTHER a clear, a copy, an
+ * exact blend, a shadow command or another action */
+enum {
+    RD_LAST_WHY_NOSCAN,
+    RD_LAST_WHY_SETTING,
+    RD_LAST_WHY_PASS,
+    RD_LAST_WHY_LOAD,
+    RD_LAST_WHY_SHADOW,
+    RD_LAST_WHY_UNKNOWN,
+    RD_LAST_WHY_DATE,
+    RD_LAST_WHY_TARGET,
+    RD_LAST_WHY_WRAP,
+    RD_LAST_WHY_POST,
+    RD_LAST_WHY_FOG,
+    RD_LAST_WHY_ELSEWHERE,
+    RD_LAST_WHY_OTHER,
+    RD_LAST_WHY_COUNT
+};
+
+/* RdPerfRecord.pipeFamily's counts: one per pipeline key family
+ * (rd_internal.h RdKeyFamily) */
+#define RD_PERF_PIPE_FAMILIES 8
+
 typedef struct RdPerfRecord {
     uint32_t replay; /* 1, 2, ... */
     uint32_t frame;  /* the replayed frame's number */
@@ -1996,6 +2276,10 @@ typedef struct RdPerfRecord {
     double fenceWaitMs; /* the backend's blocked time on GPU completion (inside wait, readback) */
     uint32_t buffersCreated, buffersDestroyed, texturesCreated, texturesDestroyed;
     uint32_t memoryAllocs, memoryFrees, bindGroups, pipelineBinds, bindGroupBinds;
+    /* the binds and state sets the RHI's bind cache found already in force
+     * and recorded nothing for (RhiStats.pipelineBindsSkipped,
+     * bindGroupBindsSkipped, stateSetsSkipped) */
+    uint32_t pipelineBindsSkipped, bindGroupBindsSkipped, stateSetsSkipped;
     uint32_t dynamicSets; /* dynamic depth and blend commands (RhiStats.dynamicSets) */
     /* of those, the blend equations for draws without blending and those
      * that replaced a dual-source one (RhiStats.blendEqOffSets,
@@ -2093,6 +2377,10 @@ typedef struct RdPerfRecord {
      * staticBlur pairs drawn as one pass (fx_blur2_ps, rd_replay.c
      * rd__replay_blur_fold) */
     uint32_t dateStencilDraws, dateStencilTakes, fogLocalDraws, blurFolds;
+    /* GS state as shader data (rd_uber.c): the DATE draws whose shader read
+     * the alpha from the colour attachment (rd_replay.c prepareDrawEx), no
+     * snapshot or stencil bit taken */
+    uint32_t dateDstDraws;
     /* The pixel diet (docs/port/RENDER.md, "The device profile"):
      * alphaOnePass the draws the alpha/blend planner drew in one pass where
      * their plan had the alpha test's two, alphaOpaque those it drew
@@ -2100,8 +2388,14 @@ typedef struct RdPerfRecord {
      * fxAdditive and fxLocal the staticBlur sprites the frame-size plan drew
      * as a constant fold, through the fixed-function premultiplied add, and
      * reading their destination by local read (rd_fx_plan.c); vuNoPlanes
-     * the VU draw passes through vu_np_ps or vu_texa_np_ps (rd_pixel_plan.c) */
+     * the VU draw passes through vu_np_ps or vu_texa_np_ps (rd_pixel_plan.c);
+     * spriteNoPlanes the screen-prim triangle commands drawn through the
+     * plain sprite builds because the sprite planes builds are off for the
+     * run (rd_set_sprite_planes_off, issue 161; rd_replay.c doScreen);
+     * fxLocalDate those of fxLocal under DATE (the shader's test against
+     * the alpha it read, no snapshot, no stencil bit) */
     uint32_t alphaOnePass, alphaOpaque, fxConstant, fxAdditive, fxLocal, vuNoPlanes;
+    uint32_t spriteNoPlanes, fxLocalDate;
     /* Motion blur: Smooth (rd_blur_smooth.c): blurSmoothPasses the
      * accumulator's passes this replay (the resolve and the accumulate, two
      * a present; one on a restart) */
@@ -2117,14 +2411,69 @@ typedef struct RdPerfRecord {
      * shadowSeven through the seven stencil-tested draws (and the box
      * reduction above 1x) */
     uint32_t shadowOne, shadowSeven;
+    /* of shadowOne, the draws that read the stencil four texels a gather
+     * (the rest a texel a load: g_rd.shadowLoad, rd_shadow_selftest.c) */
+    uint32_t shadowGathered;
+    /* The one draw's pass (rd_shadow_one.c): its colour, written whole,
+     * shadowOneW x shadowOneH (no depth attachment), and the stencil it
+     * reads through its view, shadowReadW x shadowReadH texels (the last
+     * one draw of the replay).  The count target's colour passes the store
+     * plan left neither loaded nor stored between the reset and the
+     * resolve (shadowColorDropped, also in storeColorDropped; the reset's
+     * own pass and the volumes' passes), that colour shadowColorW x
+     * shadowColorH texels (rd_store_plan.c rd__store_plan_count_color) */
+    uint16_t shadowOneW, shadowOneH, shadowReadW, shadowReadH, shadowColorW, shadowColorH;
+    uint32_t shadowColorDropped;
     /* A cleared source read as its colour (rd_const_read.c): constReads the
      * staticBlur sprites drawn untextured in the colour of a target that
      * held only its clear, constKept those reading another target that
      * were not (the source drawn since its clear, or not cleared in this
      * replay) */
     uint32_t constReads, constKept;
+    /* The fades fold (rd_fades_fold.c): list 11's last full-frame lerp
+     * sprites the reduction applied instead of drawing them into SCENE */
+    uint32_t fadesFolded;
+    /* The aura's read of SCENE into FEED128 in two passes (rd_aura_box.c):
+     * the reads drawn so this replay (each one pass more, ROWBOX's: 0 or 1
+     * a replay; none while the game is paused) */
+    uint32_t auraBoxDraws;
+    /* The pass area (rd_pass_area.c): the render passes begun this replay
+     * with an area smaller than their target (only the tiles the draws
+     * touch loaded and stored), the 32 x 32 tiles their areas hold and the
+     * tiles their whole targets hold (passAreaTiles / passAreaTargetTiles:
+     * the share of those passes' tiles a tile-based GPU loads and stores),
+     * and the passes ended early at the end of their area's commands (the
+     * walk would have gone on in the same pass: 0 in a usual replay) */
+    uint32_t passAreas, passAreaTiles, passAreaTargetTiles, passAreaEnds;
+    /* the passes on a target with its own depth begun whole, by why
+     * (RD_AREA_WHY_*: the 10 s line's "kept whole" clause) */
+    uint16_t passAreaWhy[RD_AREA_WHY_COUNT];
+    /* Passes cut (rd_pass_cut.c; docs/port/WORK_BUFFERS.md "Passes cut"):
+     * clearsCarried the pending clears carried past a source's barrier
+     * that the next pass on their target took as its load op (a pass
+     * fewer each; the reduction's DISPLAY clear in a play replay),
+     * clearsSkipped the clears not recorded because nothing read their
+     * target before it was cleared again (AURA_WORK's under the constant
+     * read), storeLastDropped the depth stores dropped at the pass that
+     * holds the depth's last touch (counted in storeDepthDropped too) */
+    uint32_t clearsCarried, clearsSkipped, storeLastDropped;
+    /* The shadow volumes in the scene's pass (rd_shadow_merge.c;
+     * docs/port/WORK_BUFFERS.md "The shadow volumes in the scene's pass"):
+     * shadowMerged the shadow resets whose volumes were drawn in the
+     * scene's open pass (a pass fewer each, and the scene's depth not
+     * stored and loaded again), shadowMergeArmed the passes begun with
+     * their stencil stored for a later reset (those not taken stored it
+     * for nothing) */
+    uint32_t shadowMerged, shadowMergeArmed;
+    /* the shadow count targets whose new-target clear was not drawn
+     * (rd_shadow_merge.c rd__shadow_count_clear: nothing reads them before
+     * their resolve; 9.7 MB written fewer each at the phone's size) */
+    uint32_t shadowClearSkipped;
+    /* the depths whose last touch's pass kept its store, by why
+     * (RD_LAST_WHY_*: the "last store kept" clause) */
+    uint16_t lastStoreWhy[RD_LAST_WHY_COUNT];
     /* The VU vertex and triangle pre-passes (rd_replay_vu.c rd__vu_prepass;
-     * docs/port/RENDER.md, "The vertex and triangle pre-passes"):
+     * docs/port/PIPELINES.md, "The vertex and triangle pre-passes"):
      * vuPrePasses their render passes (0, 1: the vertices and sprites, or 2:
      * and the triangles), vuPreVertices the vertices recorded, vuPreSprites
      * the sprites, vuTriSlots the triangles' record slots (two a kick, three
@@ -2175,12 +2524,28 @@ typedef struct RdPerfRecord {
      * outside it, docs/port/WORK_BUFFERS.md "The store plan"), those with a
      * depth outside the MSAA epoch (storeDepthPasses), the depth stores
      * dropped (storeDepthDropped: the depth and its stencil neither loaded
-     * nor stored) and the colour stores dropped (storeColorDropped: 0, the
-     * plan keeps every colour); storePlanMode 0 every store kept ([dev]
+     * nor stored) and the colour stores dropped (storeColorDropped: the
+     * shadow count's colour while it is made, rd__store_plan_count_color;
+     * every other colour is kept); storePlanMode 0 every store kept ([dev]
      * store_plan = false, or a pass window), 1 the plan, 2 every depth
-     * store dropped (ICO_RD_STORE_PLAN=all, tests) */
+     * store dropped (ICO_RD_STORE_PLAN=all, tests); storeKept the
+     * replay's depths whose stores the plan keeps from an earlier replay on
+     * (a read before the clear, a readback), and the first such depth's
+     * target (storeKeptTarget, RD_PERF_TARGET_* codes) and the frame that
+     * kept it (storeKeptFrame), where this replay has that depth;
+     * storeWhy, in a planned replay that dropped no depth store with a
+     * depth bound, why (RD_STORE_WHY_*; NONE otherwise) */
     uint32_t storePasses, storeDepthPasses, storeDepthDropped, storeColorDropped;
     uint8_t storePlanMode;
+    uint8_t storeKept, storeKeptTarget, storeWhy;
+    uint32_t storeKeptFrame;
+    /* GS state as shader data (rd_uber.c): uber 1 while it is in force;
+     * pipeFamily the pipeline cache by family at the replay's end, in
+     * rd_internal.h RdKeyFamily's order (2D, VU, VU point, shadow, fog,
+     * CRT, fx, DATE): the 10 s summary's "pipelines by family"
+     * (rd_perf_backend_text) */
+    uint8_t uber;
+    uint16_t pipeFamily[RD_PERF_PIPE_FAMILIES];
     /* The per-pass timing (rd_perf_passes_of; docs/port/RENDER.md,
      * "Performance records").  passKinds: the pieces of GPU work begun, by
      * RD_PERF_PASS_* (every replay); passEffects: of the render passes, those
@@ -2211,6 +2576,16 @@ typedef struct RdPerfRecord {
      * gpuMs counts both) */
     uint8_t gpuBusyValid;
     double gpuBusyMs;
+    /* gpuGapValid: the replay before's record came just before this one
+     * with its timestamps; gpuGapNs this replay's first stamp less that
+     * one's last (the same GPU clock): over 0 the GPU idle between them
+     * (waiting for this replay's submit), under 0 this replay's first
+     * stamp written before the one before ended, so gpuMs counts that end
+     * too (the window's 10 s 'GPU between replays' line, pace_policy.h
+     * PaceGpuGap; the step rule's GPU time a picture is the median of
+     * gpuMs) */
+    uint8_t gpuGapValid;
+    int64_t gpuGapNs;
 } RdPerfRecord;
 
 /* The oldest finished record not yet popped (a queue of 64; the oldest are
@@ -2221,11 +2596,26 @@ bool rd_perf_pop(RdPerfRecord *out);
  * they wrote none (every other backend); the count starts again.  The
  * window's uploaded KB line ends with it (docs/port/DISPLAY.md). */
 const char *rd_perf_backend_text(void);
+/* "N passes kept whole (A <why>, B <why>, ...)" from per-reason counts
+ * over `replays` replays (the mean a replay; 1 the replay tool's one):
+ * which 0 the pass area's (RD_AREA_WHY_*, RD_AREA_WHY_COUNT counts), 1 the
+ * last store's (RD_LAST_WHY_*: "N last stores kept (...)"); the reasons
+ * that hold none are left out, "" with none at all.  Into buf (size). */
+void rd_perf_why_text(char *buf, size_t size, int which, const uint64_t *counts, double replays);
 
 /* The CPU time of the replay finished last (its RdPerfRecord.totalMs,
  * popped or not): with interpolation off the window's pacing reads the
  * frame's one replay, rd_end_frame's present, after the step. */
 double rd_last_replay_ms(void);
+
+/* The game thread's own cost of closing a frame since the last take:
+ * rd_end_frame's walk of the frame for its end state and the rest of its
+ * bookkeeping, from after its wait for a picture's reads (the window's read
+ * waits) to before the replay it makes with interpolation off (that is the
+ * picture's); the record of the frame's draws is inside the game's step.
+ * The closes counted, their mean and the longest in ms; the sums start
+ * again.  The window's 10 s line gives it (render_thread.c). */
+void rd_frame_close_take(unsigned *closes, double *meanMs, double *maxMs);
 
 /* The pieces of timed replay `replay` (RdPerfRecord.passTimed): their
  * count, *out pointing at them until the next replay; 0 when that replay was

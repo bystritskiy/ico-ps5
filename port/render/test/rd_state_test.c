@@ -30,6 +30,8 @@
  *              5, a version 7 and a version 12 dump's temps at the handles
  *              FEED_HELD, DISPLAY_HELD and WORK3_HELD (appended after them)
  *              are recreated
+ *   dump v14   a tick's frame loads without the ticks' cameras; a blended
+ *              frame's (hasTickCams, tickCams) round-trip
  *   dump v10   the native frame (aspect, wExact, cullW) after gsH round-trips
  *              and peeks (rd__dump_peek); a version 9 dump loads as the 4:3
  *              frame; a header the renderer cannot size is refused; the
@@ -58,6 +60,12 @@
  *              stores; the reset is the volumes' pass's stencil CLEAR, not
  *              a pass of its own (rd__stencil_ops); two depths' windows
  *              interleaved keep their own counts (rd__stencil_open/Close)
+ *   shadow colour rd__store_plan_count_color: under the store plan the
+ *              temporary count target's loaded colour goes DONT_CARE both
+ *              ways (counted in storeColorDropped and shadowColorDropped);
+ *              a CLEAR, a named target as the count, [dev] store_plan =
+ *              false and no replay keep their ops; the pass list's
+ *              "shadow count" (label "shadow", target "count")
  *   date area  the DATE snapshot of a screen-prim command covers its box
  *              (rd__screen_area: the vertices' box padded by two pixels, in
  *              the scissor), not the whole target; a sprite larger than the
@@ -65,13 +73,14 @@
  *              one snapshot each (rd__date_retake)
  *   pipelines  the reachable screen and post set is under 400 keys (the
  *              sprite_texa_ps twins and the triangle planes included), with the VU program families
- *              under RD_PIPELINE_REACHABLE_MAX; font_sheet_ps has font_ps's
- *              10 keys; the VU keys: 176 program-entry keys without the
- *              pre-pass, 32 + 32 + 10 + 5 with it (printed with the 2D
- *              part: 446 in all when the 2D part is 367)
+ *              under RD_PIPELINE_REACHABLE_MAX; font_sheet_ps and
+ *              font_sheet_baked_ps have font_ps's 10 keys each; the VU keys: 242 program-entry keys without the
+ *              pre-pass (16 a shader and the 6 of a material TEST's
+ *              RGB_ONLY half), 38 + 38 + 10 + 5 with it (printed with the
+ *              2D part)
  *   dynamic    rd__key_dynamic_normalise: keys differing only in Z write or
  *              Z test (dynamic depth), blend or mask (dynamic blend) map to
- *              one; the collapsed sets' VU parts 8 + 8 + 10 + 5 and
+ *              one; the collapsed sets' VU parts 14 + 14 + 10 + 5 and
  *              2 + 2 + 10 + 5, every static key's normalised form in them
  *   tiler      the tile-based profile's sets (static, dynamic depth,
  *              dynamic depth and blend; with and without local read), and
@@ -79,8 +88,45 @@
  *              fractional Enhanced scale (every vu_ps key's vu_np_ps twin),
  *              each under RD_PIPELINE_REACHABLE_MAX and inside the RHI's
  *              pipeline pool less its headroom (rhi_pipeline_pool.h)
+ *   uber set   GS state as shader data (rd_uber.c) under the raster-order
+ *              device's flags (g_rd.uber with the attachment read, the
+ *              twins assumed: no device here) on the tiler profile at the
+ *              phone's fractional scale, the pre-pass off: a LERP, a
+ *              premultiplied subtract, an unblended mask-7 pass and a DATE
+ *              pass plan to one key (blend off, mask 0xF in the cache's
+ *              key, Cs for the unblended, DATE from the read); the set at
+ *              least four times smaller than the fixed-function one, no
+ *              DATE key, every key the read can draw only as its image
+ *              (the overlay's plain keys aside), the VU family at most a
+ *              third of the fixed-function one's (the four blend paths
+ *              gone); the counts and families printed
+ *   vu set     rd__vu_set_choose: the stock Adreno 740's table row and a
+ *              Turnip driver's text ("turnip Mesa driver", "Turnip Mesa
+ *              26.3.0") take the plain set, with the start line's words;
+ *              Qualcomm's own driver without a row, lavapipe, RADV and
+ *              NVIDIA the extended one; [dev] vu_set = plain (envPlain:
+ *              ICO_RD_VU_SET=plain or ICO_RD_VU_PLAIN=1) and the host's
+ *              reason the plain one; vu_set = extended the extended one
+ *              over each of them
+ *   aura kernel rd__aura_kernel_pick: [dev] aura_kernel = gs drops the box
+ *              of the aura's read of SCENE into FEED128 only; unset, empty
+ *              or box keeps it
+ *   pass area  rd__pass_area_cmd's boxes for a screen sprite and the aura's
+ *              sprite on SCENE at 1x, at the phone's 848 x 448 GS frame in
+ *              2364 x 1080 texels and under Full pixel's crop hold every
+ *              texel they cover, within the pad; VU, DATE and another
+ *              target's draws the whole target, a clear the pass's end; the
+ *              pass begun at the sprite holds the two boxes' union out to
+ *              whole tiles and ends before the other target's draw
+ *              (rd_state_pass_area_test.inc)
+ *   aura box   rd__aura_box_pick: [dev] aura_box auto (unset, empty, auto,
+ *              another word) is the profile's, on/off words over it; never
+ *              on without a device, no key of it in the set then; the pass
+ *              list's name ROWBOX (the pixels: rd_blur_test aura_box)
  *
  * argv[1]: a writable directory for the dump.  Exit 0 or 1. */
+#include <math.h>
+#include <stdint.h>
 #include <stdio.h>
 #include <stdlib.h>
 #include <string.h>
@@ -964,7 +1010,27 @@ static void testDumpBlock(const char *dir)
         seen++;
     }
     CHECK(seen == 2, "block: two targets bound in the loaded list (%d)", seen);
+    CHECK(!g.hasTickCams, "block: a tick's frame loads without the ticks' cameras");
     rd__frame_free(&g);
+    /* version 14: a blended frame's ticks' cameras round-trip (rd_interp.c
+       sets them on its copy; F12's blended present's frame) */
+    static RdFrame b; /* a shallow copy: its lists and payload stay the frame's */
+    b = *rd__last_frame();
+    b.hasTickCams = 1;
+    for (int k = 0; k < 2; k++) {
+        for (int j = 0; j < 16; j++) {
+            b.tickCams[k][j] = (float)(k * 16 + j) * 0.25f - 3.0f;
+        }
+    }
+    CHECK(rd__dump_frame(&b, path), "tick cameras: dump written");
+    if (rd__load_frame(path, &g)) {
+        CHECK(g.hasTickCams == 1 && memcmp(g.tickCams, b.tickCams, sizeof(b.tickCams)) == 0,
+              "tick cameras: hasTickCams %u, the matrices %s", g.hasTickCams,
+              memcmp(g.tickCams, b.tickCams, sizeof(b.tickCams)) == 0 ? "the same" : "differ");
+        rd__frame_free(&g);
+    } else {
+        CHECK(0, "tick cameras: dump loaded");
+    }
     remove(path);
 }
 
@@ -1484,7 +1550,8 @@ static uint32_t checkStageKeys(const RdPipeKeyInt *keys, uint32_t n, const char 
 /* The VU keys of the start-up set with the vertex pre-pass
  * (rd__set_vu_prepass; docs/port/RENDER.md, "The vertex and triangle
  * pre-passes"): vu_main_vs's (RD_PROG_PRELIT) and vu_particle_main_vs's
- * (RD_PROG_PARTICLE) keys under the VU states and TEST Z ALWAYS, 32 each,
+ * (RD_PROG_PARTICLE) keys under the VU states and TEST Z ALWAYS, 38 each
+ * (32 and the 6 of a material TEST's RGB_ONLY half),
  * the ten pre-pass keys (rd__vu_pre_key) and the five stage keys
  * (rd__vu_stage_key), each once; no program entry's key (the fallback's
  * are made on first use); every program entry's key enumerated without the
@@ -1493,7 +1560,7 @@ static uint32_t checkStageKeys(const RdPipeKeyInt *keys, uint32_t n, const char 
  * keys (rc2, PowerVR: program 0 blend 4 and 12 through the triangle stage
  * fs vu_ps fmt 1/8, under Z ALWAYS) and the 2D one (program 9 blend 4,
  * sprite_ui_vs + sprite_ps, fmt 1/8, under the list head's Z GEQUAL) are
- * in it; the whole set is the 2D keys and 79 VU keys, under
+ * in it; the whole set is the 2D keys and 91 VU keys, under
  * RD_PIPELINE_REACHABLE_MAX.  The pre-pass is off again after. */
 static void testEnumerationPrepass(RdPipeKeyInt *keys, uint32_t entriesOff)
 {
@@ -1530,11 +1597,12 @@ static void testEnumerationPrepass(RdPipeKeyInt *keys, uint32_t entriesOff)
            "+ pre-pass %u + stages %u (%u without the pre-pass: 2D %u + program entries %u)\n",
            n, n2d, c.main, c.particleMain, c.pre, c.stages, nOff, nOff - entriesOff, entriesOff);
     CHECK(c.entries == 0, "pre-pass: %u program entries' keys", c.entries);
-    CHECK(c.main == 32 && c.particleMain == 32,
+    CHECK(c.main == 38 && c.particleMain == 38,
           "pre-pass: vu_main_vs %u, vu_particle_main_vs %u "
-          "keys (32 each)",
+          "keys (38 each)",
           c.main, c.particleMain);
-    CHECK(c.main * 11u == entriesOff * 2u,
+    /* a program entry's keys are vu_main_vs's but its 16 under Z ALWAYS */
+    CHECK(c.main * 11u == entriesOff + 11u * 16u,
           "pre-pass: vu_main_vs's %u keys against the eleven program entries' %u without", c.main,
           entriesOff);
     /* every VU key without the pre-pass has its twin with it */
@@ -1599,15 +1667,95 @@ static void testEnumerationPrepass(RdPipeKeyInt *keys, uint32_t entriesOff)
     }
     CHECK(pre == RD_VS_VU_PRE_LAST - RD_VS_VU_PRE_FIRST + 1 && stages == 5,
           "pre-pass: %u pre-pass keys, %u stage keys", pre, stages);
-    CHECK(vuTotal(&c) == 79u && n == nOff - entriesOff + 79u && n < RD_PIPELINE_REACHABLE_MAX,
+    CHECK(vuTotal(&c) == 91u && n == nOff - entriesOff + 91u && n < RD_PIPELINE_REACHABLE_MAX,
           "pre-pass: %u keys (%u VU), %u without the pre-pass", n, vuTotal(&c), nOff);
     rd__set_vu_prepass(keepPrepass);
 }
 
+/* A material's own TEST with AFAIL RGB_ONLY (the disc's model data, ATE
+ * GREATER with its AREF, Z GEQUAL: the commands before a skinned mesh or a
+ * grid in the corpus dumps and a phone's dump): the failing
+ * pixels' pass is colour mask 7, Z write off (rd_pipeline.c
+ * rd__plan_screen_draw_ex), its key in the set for every program entry
+ * under ABE off, the LERP and mode 0 (blend 12, 4 and 5), with vu_ps and
+ * vu_texa_ps, whatever the AREF and the Z write; the passing pixels' pass
+ * is a key the list defaults give.  Not under the premultiplied subtract
+ * (no dump has it), and no DATE twin (testTilerSet: the material's TEST
+ * has no DATE).  keys[0..n) is the set without the pre-pass. */
+static void testRgbOnlyHalf(const RdPipeKeyInt *keys, uint32_t n)
+{
+    static const uint64_t kTests[] = {0x5340Dull, 0x5330Dull, 0x5346Dull, 0x535ADull, 0x5301Dull};
+    static const int kBlends[] = {-1, RD_BLEND_LERP_AS, RD_BLEND_CS_FIX_ADD_CD};
+    uint32_t checked = 0, missing = 0;
+    for (size_t t = 0; t < sizeof(kTests) / sizeof(kTests[0]); t++) {
+        for (int zw = 0; zw < 2; zw++) {
+            for (size_t b = 0; b < sizeof(kBlends) / sizeof(kBlends[0]); b++) {
+                RdStateBlock st;
+                rd__reset_state_block(&st);
+                st.ds.test = rd_test_from_gs(kTests[t]);
+                st.ds.zwrite = zw ? RD_ZWRITE_ON : RD_ZWRITE_OFF;
+                st.ds.abe = kBlends[b] >= 0;
+                st.ds.blend = (uint8_t)(kBlends[b] >= 0 ? kBlends[b] : 0);
+                RdDrawPass dp[2];
+                const int np = rd__plan_screen_draw(&st, RD_PRIM_TRIANGLES, RD_SPACE_WORLD,
+                                                    RHI_FMT_RGBA8_UNORM, RHI_FMT_D32F_S8, dp);
+                CHECK(np == 2 && dp[1].key.gs.colorMask == 0x7 &&
+                          dp[1].key.gs.zwrite == RD_ZWRITE_OFF &&
+                          dp[1].key.gs.ztst == RD_ZTST_GEQUAL && dp[0].key.gs.colorMask == 0xF,
+                      "RGB_ONLY TEST %llx: %d passes, the second mask %X zwrite %u",
+                      (unsigned long long)kTests[t], np, dp[1].key.gs.colorMask,
+                      dp[1].key.gs.zwrite);
+                for (uint8_t vs = RD_VS_VU_PRELIT; vs <= RD_VS_VU_PARTICLE; vs++) {
+                    for (int f = 0; f < 2 * np; f++) {
+                        RdPipeKeyInt k = dp[f / 2].key;
+                        k.gs.program = 0xFF;
+                        for (uint32_t i = 0; i < n && i < RD_PIPELINE_REACHABLE_MAX; i++) {
+                            if (keys[i].vs == vs) {
+                                k.gs.program = keys[i].gs.program; /* the entry's own */
+                                break;
+                            }
+                        }
+                        k.vs = vs;
+                        k.fs = (f & 1) ? RD_FS_VU_TEXA : RD_FS_VU;
+                        checked++;
+                        if (!keyIn(keys, n, &k) && missing++ < 4) {
+                            char w[160];
+                            rd__pipe_key_text(&k, w, sizeof(w));
+                            CHECK(0, "RGB_ONLY TEST %llx: %s not in the set",
+                                  (unsigned long long)kTests[t], w);
+                        }
+                    }
+                }
+            }
+        }
+    }
+    /* the PowerVR phone's first-use keys (at Original: vu_ps for vu_np_ps,
+       testTilerFracSet checks the twins) */
+    RdPipeKeyInt k = vuKey(RD_VS_VU_PRELIT, RD_TEST_Z_GEQUAL, 0, -1);
+    k.gs.colorMask = 0x7;
+    const bool none = keyIn(keys, n, &k);
+    k.gs.blend = RD_BLEND_LERP_AS;
+    const bool lerp = keyIn(keys, n, &k);
+    k.vs = RD_VS_VU_GRID_SPEC;
+    k.gs.program = RD_PROG_GRID_LIT;
+    const bool grid = keyIn(keys, n, &k);
+    uint32_t mask7 = 0;
+    for (uint32_t i = 0; i < n && i < RD_PIPELINE_REACHABLE_MAX; i++) {
+        mask7 += keys[i].vs >= RD_VS_VU_PRELIT && keys[i].vs <= RD_VS_VU_PARTICLE &&
+                 keys[i].gs.colorMask == 0x7;
+    }
+    printf("  RGB_ONLY halves: %u keys checked, %u missing; %u program-entry keys with mask 7\n",
+           checked, missing, mask7);
+    CHECK(missing == 0 && none && lerp && grid && mask7 == 11u * 3u * 2u,
+          "RGB_ONLY halves: %u missing, the phone's keys %d %d %d, %u mask 7 keys (66 wanted)",
+          missing, none, lerp, grid, mask7);
+}
+
 /* The VU keys of the start-up set (rd__enumerate_reachable_vu) without the
  * vertex pre-pass: the eleven program entries with vu_ps and vu_texa_ps,
- * 16 keys each, whatever the preset (one module set: no variant);
- * then with it (testEnumerationPrepass). */
+ * 22 keys each (16, and the 6 of a material TEST's RGB_ONLY half), whatever
+ * the preset (one module set: no variant); the RGB_ONLY halves' keys
+ * (testRgbOnlyHalf); then with the pre-pass (testEnumerationPrepass). */
 static void testEnumerationVu(RdPipeKeyInt *keys)
 {
     const RdPreset keepPreset = g_rd.settings.preset;
@@ -1625,10 +1773,11 @@ static void testEnumerationVu(RdPipeKeyInt *keys)
     printf("  VU keys without the pre-pass: Original %u (vu_ps or vu_texa_ps %u), Enhanced with "
            "interpolation %u\n",
            o.entries, o.vuPs, e.entries);
-    CHECK(o.entries == 11u * 16u && o.vuPs == o.entries && vuTotal(&o) == o.entries,
-          "without the pre-pass: %u program entries' keys (%u with vu_ps or vu_texa_ps; 176 "
+    CHECK(o.entries == 11u * 22u && o.vuPs == o.entries && vuTotal(&o) == o.entries,
+          "without the pre-pass: %u program entries' keys (%u with vu_ps or vu_texa_ps; 242 "
           "wanted)",
           o.entries, o.vuPs);
+    testRgbOnlyHalf(keys, n);
     CHECK(e.entries == o.entries && vuTotal(&e) == vuTotal(&o),
           "the VU keys do not depend on the state (%u, %u)", o.entries, e.entries);
     g_rd.settings.preset = RD_PRESET_ORIGINAL;
@@ -1649,8 +1798,9 @@ static void testEnumerationVu(RdPipeKeyInt *keys)
  * its blend, the point keys everything.  The collapsed sets (with the
  * pre-pass, the fixed-function blend): every key normalised and once, every
  * key of the static set's normalised form in it and nothing else, the VU
- * part 8 + 8 + 10 + 5 with dynamic depth and 2 + 2 + 10 + 5 with both (the
- * point keys stay static), each printed with its 2D part. */
+ * part 14 + 14 + 10 + 5 with dynamic depth and 2 + 2 + 10 + 5 with both (the
+ * point keys stay static), each printed with its 2D part; 8 + 6 with
+ * dynamic depth: the RGB_ONLY halves keep their mask 7. */
 static void testDynamicNormalise(RdPipeKeyInt *keys)
 {
     static RdPipeKeyInt stat[RD_PIPELINE_REACHABLE_MAX];
@@ -1720,7 +1870,7 @@ static void testDynamicNormalise(RdPipeKeyInt *keys)
             rd__key_dynamic_normalise(&k);
             absent += keyCount(keys, n, &k) != 1;
         }
-        const uint32_t want = pass ? 2u : 8u;
+        const uint32_t want = pass ? 2u : 14u;
         printf("  dynamic %s: %u keys = 2D %u + vu_main_vs %u + vu_particle_main_vs %u + pre-pass "
                "%u + stages %u (static %u = 2D %u + %u VU)\n",
                pass ? "depth and blend" : "depth", n, n - vuTotal(&c), c.main, c.particleMain,
@@ -1778,7 +1928,7 @@ static bool isDateStencil(uint8_t m)
 /* The largest set a device meets (an Adreno 710 phone at 2340x1080,
  * Custom = Enhanced: 1153 keys, more than 1024): the tile class with local
  * read as rd_profile.c makes it (testTilerSet's flags and the alpha plan,
- * the fx plan and its local read, whose 30 keys rd_fx_plan.c
+ * the fx plan and its local read, whose 31 keys rd_fx_plan.c
  * rd__fx_enumerate adds: 977 at 2x, 1153 at the fractional scale),
  * the vertex pre-pass off (the eleven program entries under every depth,
  * Z write and blend), every state static, at a fractional Enhanced scale
@@ -1797,7 +1947,11 @@ static void testTilerFracSet(RdPipeKeyInt *keys)
     /* the fx plan's modules and the local read's layout: stand-ins, as
        testTilerSet's (never made) */
     const RhiShader keepFrame = g_rd.fs[RD_FS_FX_FRAME], keepLocal = g_rd.fs[RD_FS_FX_LOCAL];
+    const RhiShader keepCount = g_rd.fs[RD_FS_SHADOW_COUNT];
     const RhiBindGroupLayout keepLayout = g_rd.layoutLocal;
+    if (g_rd.fs[RD_FS_SHADOW_COUNT].id == 0) {
+        g_rd.fs[RD_FS_SHADOW_COUNT].id = 0x7F000013u;
+    }
     if (g_rd.fs[RD_FS_FX_FRAME].id == 0) {
         g_rd.fs[RD_FS_FX_FRAME].id = 0x7F000010u;
     }
@@ -1821,6 +1975,7 @@ static void testTilerFracSet(RdPipeKeyInt *keys)
     g_rd.profile.fxPlan = true;
     g_rd.profile.fxDstLocal = true;
     g_rd.profile.vuPlanesFrac = true;
+    g_rd.profile.shadowOne = true;
     g_rd.settings.preset = RD_PRESET_ENHANCED;
     g_rd.dstMode = RD_BLEND_EXACT_OFF;
     g_rd.sceneSx = g_rd.sceneSy = 2.0f;
@@ -1862,14 +2017,53 @@ static void testTilerFracSet(RdPipeKeyInt *keys)
     CHECK(n <= RHI_PIPELINE_POOL_MAX - RHI_PIPELINE_POOL_HEADROOM,
           "tiler, fractional scale: %u keys past the pool's %d less its headroom %d", n,
           RHI_PIPELINE_POOL_MAX, RHI_PIPELINE_POOL_HEADROOM);
+    /* the PowerVR phone's five first-use keys, in the set: the RGB_ONLY halves of a material TEST through vu_np_ps
+       (list 0: program 0 blend 4 and 12 vs 4; list 2: program 7 blend 4 vs
+       13; ztst 2 zwrite 1 mask 7), without a DATE twin, and the shadow
+       count self-test's volumes under Z ALWAYS (list 3: program 11 blend 12
+       vs 1 fs 0, ztst 1 zwrite 1 mask 0, stencil 1 and 2) */
+    {
+        RdPipeKeyInt v[3];
+        for (int i = 0; i < 3; i++) {
+            v[i] = vuKey(i == 2 ? RD_VS_VU_GRID_SPEC : RD_VS_VU_PRELIT, RD_TEST_Z_GEQUAL, 0,
+                         i == 1 ? -1 : RD_BLEND_LERP_AS);
+            v[i].gs.program = i == 2 ? RD_PROG_GRID_LIT : RD_PROG_PRELIT;
+            v[i].gs.colorMask = 0x7;
+            v[i].fs = RD_FS_VU_NP;
+            char w[160];
+            rd__pipe_key_text(&v[i], w, sizeof(w));
+            CHECK(keyIn(keys, n, &v[i]), "tiler, fractional scale: the phone's key %s", w);
+            RdPipeKeyInt d = v[i];
+            d.gs.stencil = RD_STENCIL_DATE_TEST1;
+            CHECK(!keyIn(keys, n, &d), "tiler, fractional scale: a DATE twin of %s", w);
+        }
+        CHECK(v[0].gs.blend == 4 && v[1].gs.blend == 12 && v[2].vs == 13 &&
+                  v[0].gs.ztst == RD_ZTST_GEQUAL && v[0].gs.zwrite == RD_ZWRITE_OFF,
+              "the phone's VU keys' fields");
+        RdStateBlock sa;
+        rd__reset_state_block(&sa);
+        sa.ds.test = rd_test_from_gs(RD_TEST_Z_ALWAYS);
+        for (int decr = 0; decr < 2; decr++) {
+            const RdPipeKeyInt k = rd__shadow_volume_key(&sa, RHI_FMT_RGBA8_UNORM, decr);
+            CHECK(k.gs.program == RD_PROG_SHADOW_VOLUME && k.gs.ztst == RD_ZTST_ALWAYS &&
+                      k.gs.zwrite == RD_ZWRITE_OFF && k.gs.stencil == 1 + decr &&
+                      k.vs == RD_VS_SPRITE_WORLD && k.fs == RD_FS_SPRITE,
+                  "the self-test's volume key %d", decr);
+            CHECK(keyIn(keys, n, &k), "tiler, fractional scale: the self-test's volume key %d",
+                  decr);
+        }
+    }
     g_rd.settings.preset = keepPreset;
     g_rd.sceneSx = keepSx;
     g_rd.sceneSy = keepSy;
     g_rd.dstMode = keepDst;
     g_rd.fs[RD_FS_FX_FRAME] = keepFrame;
     g_rd.fs[RD_FS_FX_LOCAL] = keepLocal;
+    g_rd.fs[RD_FS_SHADOW_COUNT] = keepCount;
     g_rd.layoutLocal = keepLayout;
 }
+
+static void testAuraBox(RdPipeKeyInt *keys);
 
 static void testTilerSet(RdPipeKeyInt *keys)
 {
@@ -2018,6 +2212,183 @@ static void testTilerSet(RdPipeKeyInt *keys)
     rd__set_vu_prepass(keepPrepass);
 }
 
+/* GS state as shader data (rd_uber.c; docs/port/PIPELINES.md "GS state as
+ * data"): the planner's images and the start-up set under the raster-order
+ * device's flags.  No device: the twins' ids are not needed for the plans
+ * (rd__fs_has_dstatt assumes vu_np_ps's without one) and the tiler flags
+ * and modules are the stand-ins testTilerFracSet sets. */
+static void testUberSet(RdPipeKeyInt *keys)
+{
+    static RdPipeKeyInt fixedSet[RD_PIPELINE_REACHABLE_MAX];
+    static RdPipeKeyInt overlay[64];
+    static const uint16_t kFs[6] = {RD_FS_DATE_STENCIL, RD_FS_DATE_CLEAR, RD_FS_FOG_LOCAL,
+                                    RD_FS_FX_BLUR2,     RD_FS_FX_FRAME,   RD_FS_FX_LOCAL};
+    const RdProfile keepProfile = g_rd.profile;
+    const bool keepD = g_rd.dynDepth, keepB = g_rd.dynBlend, keepPrepass = g_rd.vuPrepass;
+    const bool keepUber = g_rd.uber, keepUberDate = g_rd.uberDate;
+    const bool keepUberPremul = g_rd.uberPremul;
+    const uint8_t keepDst = g_rd.dstMode;
+    const RdPreset keepPreset = g_rd.settings.preset;
+    const float keepSx = g_rd.sceneSx, keepSy = g_rd.sceneSy;
+    const RhiBindGroupLayout keepLayout = g_rd.layoutLocal;
+    RhiShader keepFs[6];
+    for (int i = 0; i < 6; i++) {
+        keepFs[i] = g_rd.fs[kFs[i]];
+        if (g_rd.fs[kFs[i]].id == 0) {
+            g_rd.fs[kFs[i]].id = 0x7F000020u + (uint32_t)i; /* stand-ins: never made */
+        }
+    }
+    if (g_rd.layoutLocal.id == 0) {
+        g_rd.layoutLocal.id = 0x7F000030u;
+    }
+    g_rd.dynDepth = g_rd.dynBlend = false;
+    rd__set_vu_prepass(false);
+    memset(&g_rd.profile, 0, sizeof(g_rd.profile));
+    g_rd.profile.tiler = true;
+    g_rd.profile.blurFold = true;
+    g_rd.profile.localRead = true;
+    g_rd.profile.dateStencil = true;
+    g_rd.profile.fogLocal = true;
+    g_rd.profile.alphaPlan = true;
+    g_rd.profile.fxPlan = true;
+    g_rd.profile.fxDstLocal = true;
+    g_rd.profile.vuPlanesFrac = true;
+    g_rd.settings.preset = RD_PRESET_ENHANCED;
+    g_rd.sceneSx = 2.8125f; /* the phone's Resolution Auto */
+    g_rd.sceneSy = 2.41071f;
+
+    /* the planner: four passes of one vs/fs/Z state, every blend form.
+     * The flags as rd__uber_init sets them with no A/B switch (no device
+     * here, so it never ran): uberPremul too, or rd__expand_dst leaves a
+     * premultiplied form the exact blend does not want (the subtract, c
+     * = 1) on the blender (ICO_RD_UBER_PREMUL=0's A/B) */
+    g_rd.uber = g_rd.uberDate = g_rd.uberPremul = true;
+    g_rd.dstMode = RD_BLEND_EXACT_ATTACHMENT;
+    CHECK(rd__uber_on(), "uber: not in force with the attachment read");
+    {
+        static const int kBlend[4] = {RD_BLEND_LERP_AS, RD_BLEND_CD_SUB_CS_AS, -1,
+                                      RD_BLEND_LERP_AS};
+        static const uint8_t kMask[4] = {0xF, 0xF, 0x7, 0xF};
+        RdPipeKeyInt first;
+        memset(&first, 0, sizeof(first));
+        for (int c = 0; c < 4; c++) {
+            RdStateBlock s;
+            rd__reset_state_block(&s);
+            s.ds.test = rd_test_from_gs(c == 3 ? RD_TEST_DATE1_Z_GEQUAL : RD_TEST_Z_GEQUAL);
+            s.ds.zwrite = RD_ZWRITE_OFF;
+            s.ds.abe = kBlend[c] >= 0;
+            s.ds.blend = (uint8_t)(kBlend[c] >= 0 ? kBlend[c] : 0);
+            s.ds.colorMask = kMask[c];
+            RdDrawPass dp[2], ex[4];
+            const int np = rd__plan_screen_draw(&s, RD_PRIM_TRIANGLES, RD_SPACE_WORLD,
+                                                RHI_FMT_RGBA8_UNORM, RHI_FMT_D32F_S8, dp);
+            CHECK(np == 1, "uber plan %d: %d passes", c, np);
+            const int ne = rd__expand_dst(dp, 1, RD_BLEND_EXACT_ATTACHMENT, ex);
+            CHECK(ne == 1, "uber plan %d: %d images", c, ne);
+            RdPipeKeyInt k = ex[0].key;
+            const uint32_t wmask = (ex[0].flags >> ICO_DF_WMASK_SHIFT) & 15u;
+            CHECK(k.dst == RHI_DST_READ_ATTACHMENT && k.gs.blend == RD_BLEND_COUNT &&
+                      k.gs.nodual == 0 && wmask == kMask[c] &&
+                      (ex[0].flags & (ICO_DF_FIX_FACTOR | ICO_DF_PREMUL | ICO_DF_C1_DST)) == 0,
+                  "uber plan %d: dst %u blend %u nodual %u wmask %X flags %08X", c, k.dst,
+                  k.gs.blend, k.gs.nodual, wmask, ex[0].flags);
+            CHECK(ex[0].csOnly == (kBlend[c] < 0), "uber plan %d: csOnly %u", c, ex[0].csOnly);
+            CHECK(((ex[0].flags & (uint32_t)ICO_DF_DATE_DST) != 0) == (c == 3),
+                  "uber plan %d: DATE from the read %d", c,
+                  (ex[0].flags & (uint32_t)ICO_DF_DATE_DST) != 0);
+            CHECK(rd__uber_normal(&k) == (kMask[c] != 0xF), "uber plan %d: the mask normalised", c);
+            rd__uber_normalise(&k);
+            if (c == 0) {
+                first = k;
+            }
+            CHECK(memcmp(&k, &first, sizeof(k)) == 0,
+                  "uber plan %d: another pipeline key than the LERP's", c);
+        }
+        /* the same passes with the read not in force: the plain keys */
+        g_rd.uber = false;
+        RdStateBlock s;
+        rd__reset_state_block(&s);
+        s.ds.test = rd_test_from_gs(RD_TEST_Z_GEQUAL);
+        s.ds.abe = 1;
+        s.ds.blend = RD_BLEND_CD_SUB_CS_AS;
+        RdDrawPass dp[2], ex[4];
+        (void)rd__plan_screen_draw(&s, RD_PRIM_TRIANGLES, RD_SPACE_WORLD, RHI_FMT_RGBA8_UNORM,
+                                   RHI_FMT_D32F_S8, dp);
+        const int ne = rd__expand_dst(dp, 1, RD_BLEND_EXACT_ATTACHMENT, ex);
+        CHECK(ne == 1 && ex[0].key.dst == RHI_DST_READ_NONE,
+              "attachment read alone: the premultiplied subtract left on the blender");
+        g_rd.uber = true;
+    }
+
+    /* the sets: fixed-function, then GS state as shader data */
+    g_rd.uber = false;
+    g_rd.dstMode = RD_BLEND_EXACT_OFF;
+    const uint32_t m = rd__enumerate_reachable(fixedSet, RD_PIPELINE_REACHABLE_MAX);
+    g_rd.uber = true;
+    g_rd.dstMode = RD_BLEND_EXACT_ATTACHMENT;
+    const uint32_t n = rd__enumerate_reachable(keys, RD_PIPELINE_REACHABLE_MAX);
+    const uint32_t no = rd__enumerate_reachable_overlay(overlay, 64, 0);
+    uint32_t famM[RD_KF_COUNT], famN[RD_KF_COUNT];
+    (void)rd__pipe_family_counts(fixedSet, m, RD_PIPELINE_REACHABLE_MAX, famM);
+    (void)rd__pipe_family_counts(keys, n, RD_PIPELINE_REACHABLE_MAX, famN);
+    uint32_t dstKeys = 0, badDst = 0, plainEligible = 0, dup = 0;
+    for (uint32_t i = 0; i < n && i < RD_PIPELINE_REACHABLE_MAX; i++) {
+        const RdPipeKeyInt *k = &keys[i];
+        for (uint32_t j = i + 1; j < n && j < RD_PIPELINE_REACHABLE_MAX; j++) {
+            dup += rd__pipe_key_equal(k, &keys[j]);
+        }
+        if (k->dst == RHI_DST_READ_ATTACHMENT) {
+            dstKeys++;
+            badDst += k->gs.blend != RD_BLEND_COUNT || k->gs.colorMask != 0xF ||
+                      k->gs.nodual != 0 || k->gs.stencil != RD_STENCIL_OFF;
+        } else if (rd__uber_key_ok(k) && !keyIn(overlay, no, k)) {
+            plainEligible++; /* a plain twin of a key the read draws */
+        }
+    }
+    printf("  uber set (tiler, the pre-pass off, 2.8125x2.41071): %u keys instead of %u (%u "
+           "through the colour read)\n    families:",
+           n, m, dstKeys);
+    for (int f = 0; f < RD_KF_COUNT; f++) {
+        printf("%s %s %u (%u)", f ? "," : "", rd__pipe_family_name((RdKeyFamily)f), famN[f],
+               famM[f]);
+    }
+    printf("\n");
+    CHECK(n > 0 && n * 4u <= m, "uber set: %u keys against %u (want at least four times fewer)", n,
+          m);
+    CHECK(n < RD_PIPELINE_REACHABLE_MAX && m < RD_PIPELINE_REACHABLE_MAX,
+          "uber set: %u and %u keys under %d", n, m, RD_PIPELINE_REACHABLE_MAX);
+    CHECK(famN[RD_KF_DATE] == 0 && famM[RD_KF_DATE] > 0, "uber set: DATE keys %u (fixed %u)",
+          famN[RD_KF_DATE], famM[RD_KF_DATE]);
+    CHECK(famN[RD_KF_VU] > 0 && famN[RD_KF_VU] * 3u <= famM[RD_KF_VU],
+          "uber set: VU keys %u against %u (the four blend paths one: at most a third)",
+          famN[RD_KF_VU], famM[RD_KF_VU]);
+    CHECK(famN[RD_KF_2D] > 0 && famN[RD_KF_2D] < famM[RD_KF_2D], "uber set: 2D keys %u against %u",
+          famN[RD_KF_2D], famM[RD_KF_2D]);
+    CHECK(dstKeys > 0 && badDst == 0 && plainEligible == 0 && dup == 0,
+          "uber set: %u read keys (%u not normalised), %u plain twins of read keys, %u twice",
+          dstKeys, badDst, plainEligible, dup);
+    CHECK(famN[RD_KF_FX] < famM[RD_KF_FX],
+          "uber set: fx keys %u against %u (the plan's own forms "
+          "of a destination-reading sprite unused)",
+          famN[RD_KF_FX], famM[RD_KF_FX]);
+
+    for (int i = 0; i < 6; i++) {
+        g_rd.fs[kFs[i]] = keepFs[i];
+    }
+    g_rd.layoutLocal = keepLayout;
+    g_rd.profile = keepProfile;
+    g_rd.dynDepth = keepD;
+    g_rd.dynBlend = keepB;
+    rd__set_vu_prepass(keepPrepass);
+    g_rd.uber = keepUber;
+    g_rd.uberDate = keepUberDate;
+    g_rd.uberPremul = keepUberPremul;
+    g_rd.dstMode = keepDst;
+    g_rd.settings.preset = keepPreset;
+    g_rd.sceneSx = keepSx;
+    g_rd.sceneSy = keepSy;
+}
+
 static void testEnumeration(void)
 {
     static RdPipeKeyInt keys[RD_PIPELINE_REACHABLE_MAX];
@@ -2041,17 +2412,22 @@ static void testEnumeration(void)
      * blends on the two outputs and the frame's text, two blends, with and
      * without depth, colour mask F and 7 (the overlay's RGBA8 keys are the
      * frame's depthless mask F ones: 10 in all) */
-    uint32_t font = 0, sheet = 0;
+    uint32_t font = 0, sheet = 0, baked = 0;
     for (uint32_t i = 0; i < n && i < 512; i++) {
         font += keys[i].fs == RD_FS_FONT;
         sheet += keys[i].fs == RD_FS_FONT_SHEET;
+        baked += keys[i].fs == RD_FS_FONT_SHEET_BAKED;
     }
-    printf("  font_ps keys %u, font_sheet_ps keys %u\n", font, sheet);
-    CHECK(font == 10 && sheet == 10, "font_ps keys %u, font_sheet_ps keys %u (10 each)", font,
-          sheet);
+    printf("  font_ps keys %u, font_sheet_ps keys %u, font_sheet_baked_ps keys %u\n", font, sheet,
+           baked);
+    CHECK(font == 10 && sheet == 10 && baked == 10,
+          "font_ps keys %u, font_sheet_ps keys %u, font_sheet_baked_ps keys %u (10 each)", font,
+          sheet, baked);
     testEnumerationVu(keys);
     testDynamicNormalise(keys);
     testTilerSet(keys);
+    testUberSet(keys);
+    testAuraBox(keys);
 }
 
 /* The native frame's region scale (rd__region_scale, FrameCB g_frame.x):
@@ -2667,6 +3043,269 @@ static void testDateArea(void)
           (int32_t)tc->w - 1 - 142);
 }
 
+/* ---- the pass area (rd_pass_area.c) ---- */
+#include "rd_state_pass_area_test.inc"
+
+/* ---- the fallback's VU set (rd_pipeline.c rd__vu_set_choose) ---- */
+static RhiLimits vuSetLimits(uint32_t vendor, const char *driverText, const char *row)
+{
+    RhiLimits lim;
+    memset(&lim, 0, sizeof(lim));
+    lim.vendorId = vendor;
+    lim.driverText = driverText;
+    lim.vuFallbackPlain = row;
+    return lim;
+}
+
+static void testVuSetPolicy(void)
+{
+    static const char kTurnipWhy[] =
+        "(Turnip driver: the extended set's clipped triangles showed a stray vertex there, issue "
+        "163; [dev] vu_set = extended asks for the extended one)";
+    RdVuSetChoice c;
+    /* the stock Adreno 740: vk_device.c kVuPlainOnly's row */
+    RhiLimits lim = vuSetLimits(0x5143u,
+                                "device 5143:43050a01; driver Qualcomm Technologies Inc. Adreno "
+                                "Vulkan Driver, version 512.676.53",
+                                "Adreno 740, issue 107");
+    rd__vu_set_choose(&lim, false, false, "", &c);
+    CHECK(c.plain && !c.overridden && strcmp(c.kind, "plain set by the device table") == 0 &&
+              strcmp(c.why, "on this device (Adreno 740, issue 107)") == 0,
+          "vu set: the stock Adreno 740: plain %d, \"%s\" \"%s\"", c.plain, c.kind, c.why);
+    rd__vu_set_choose(&lim, false, true, "", &c);
+    CHECK(!c.plain && c.overridden && strstr(c.kind, "ICO_RD_VU_EXTENDED=1") != NULL &&
+              strcmp(c.why, "on this device (Adreno 740, issue 107)") == 0,
+          "vu set: the stock Adreno 740 with ICO_RD_VU_EXTENDED=1: plain %d, overridden %d",
+          c.plain, c.overridden);
+    /* Qualcomm's own driver on a GPU without a row */
+    lim = vuSetLimits(0x5143u,
+                      "device 5143:43050b00; driver Qualcomm Technologies Inc. Adreno Vulkan "
+                      "Driver, version 512.744.0",
+                      NULL);
+    rd__vu_set_choose(&lim, false, false, "", &c);
+    CHECK(!c.plain && !c.overridden && c.why[0] == '\0',
+          "vu set: Qualcomm's driver without a row: plain %d \"%s\"", c.plain, c.why);
+    /* Turnip: the driver name as Mesa writes it, and as the issue 163
+     * tablet's line has it (the same Adreno 740 chip id, no table row: the
+     * row is Qualcomm's own driver only) */
+    static const char *const turnip[] = {
+        "turnip Mesa driver",
+        "device 5143:43050a01; driver Turnip Mesa 26.3.0-devel (git-a995eaeda4), version 26.2.99",
+    };
+    for (size_t i = 0; i < sizeof(turnip) / sizeof(turnip[0]); i++) {
+        lim = vuSetLimits(0x5143u, turnip[i], NULL);
+        CHECK(rd__driver_is_turnip(&lim), "vu set: \"%s\" is not Turnip", turnip[i]);
+        rd__vu_set_choose(&lim, false, false, "", &c);
+        CHECK(c.plain && !c.overridden && strcmp(c.kind, "plain set") == 0 &&
+                  strcmp(c.why, kTurnipWhy) == 0 &&
+                  strcmp(c.brief, "Turnip driver, issue 163") == 0,
+              "vu set: \"%s\": plain %d, \"%s\" \"%s\"", turnip[i], c.plain, c.kind, c.why);
+        /* the dev override still wins */
+        rd__vu_set_choose(&lim, false, true, "", &c);
+        CHECK(!c.plain && c.overridden &&
+                  strcmp(c.kind, "extended set by [dev] (vu_set = extended, "
+                                 "ICO_RD_VU_SET=extended or ICO_RD_VU_EXTENDED=1)") == 0 &&
+                  strcmp(c.why, kTurnipWhy) == 0,
+              "vu set: \"%s\" with ICO_RD_VU_EXTENDED=1: plain %d, overridden %d, \"%s\"",
+              turnip[i], c.plain, c.overridden, c.kind);
+    }
+
+    /* the desktop drivers */
+    static const struct {
+        uint32_t vendor;
+        const char *text;
+    } desk[] = {
+        {0x10005u, "device 10005:0000; driver llvmpipe Mesa 25.0.7-2 (LLVM 19.1.7), version 0.0.1"},
+        {0x1002u, "device 1002:744c; driver radv Mesa 25.0.7-2 (LLVM 19.1.7), version 25.0.7"},
+        {0x10DEu, "device 10de:2684; driver NVIDIA 570.153.02, version 570.153.2.0"},
+    };
+
+    for (size_t i = 0; i < sizeof(desk) / sizeof(desk[0]); i++) {
+        lim = vuSetLimits(desk[i].vendor, desk[i].text, NULL);
+        CHECK(!rd__driver_is_turnip(&lim), "vu set: \"%s\" taken for Turnip", desk[i].text);
+        rd__vu_set_choose(&lim, false, false, "", &c);
+        CHECK(!c.plain && !c.overridden && c.why[0] == '\0' &&
+                  strncmp(c.kind, "extended set (no device-table row", 33) == 0,
+              "vu set: \"%s\": plain %d, \"%s\"", desk[i].text, c.plain, c.kind);
+        rd__vu_set_choose(&lim, true, false, "", &c);
+        CHECK(c.plain &&
+                  strcmp(c.why, "(vu_set = plain: ICO_RD_VU_SET=plain or ICO_RD_VU_PLAIN=1)") ==
+                      0 &&
+                  strcmp(c.kind, "plain set by [dev]") == 0 &&
+                  strcmp(c.brief, "[dev] vu_set = plain") == 0,
+              "vu set: \"%s\" with ICO_RD_VU_PLAIN=1: plain %d, \"%s\"", desk[i].text, c.plain,
+              c.why);
+        rd__vu_set_choose(&lim, false, false, "a lost start", &c);
+        CHECK(c.plain && strcmp(c.why, "(a lost start)") == 0 &&
+                  strcmp(c.kind, "plain set after a lost start") == 0,
+              "vu set: \"%s\" after the host's reason: plain %d, \"%s\"", desk[i].text, c.plain,
+              c.why);
+        rd__vu_set_choose(&lim, true, true, "a lost start", &c);
+        CHECK(!c.plain && c.overridden, "vu set: \"%s\" both settings: plain %d", desk[i].text,
+              c.plain);
+    }
+    /* no device's limits: the extended set */
+    rd__vu_set_choose(NULL, false, false, NULL, &c);
+    CHECK(!c.plain && !rd__driver_is_turnip(NULL), "vu set: no limits: plain %d", c.plain);
+}
+
+/* rd__frame_payload zeroes the alignment gap before an append: a reused
+ * frame's buffer keeps the last frame's bytes there otherwise, and a dump
+ * (rd__dump_frame) writes the payload whole, so the same frame would give
+ * different bytes by what the heap or the slot held before */
+static void testPayloadPad(void)
+{
+    RdFrame f;
+    memset(&f, 0, sizeof(f));
+    uint8_t junk[64];
+    memset(junk, 0xA5, sizeof(junk));
+    (void)rd__frame_payload(&f, junk, sizeof(junk));
+    f.payloadSize = 0; /* the slot reused (rd__frame_reset), its bytes kept */
+    const uint8_t three[3] = {1, 2, 3};
+    const uint32_t a = rd__frame_payload(&f, three, sizeof(three));
+    const uint32_t b = rd__frame_payload(&f, three, sizeof(three));
+    int gap = 0;
+    for (uint32_t i = 3; i < b; i++) {
+        gap += f.payload[i] != 0;
+    }
+    CHECK(a == 0 && b == 8 && gap == 0 && f.payloadSize == 11 &&
+              memcmp(f.payload + b, three, sizeof(three)) == 0,
+          "payload gap: offsets %u %u, %d stale byte(s) between them", a, b, gap);
+    rd__frame_free(&f);
+}
+
+/* ---- the aura's feedback read as a measurement (rd_aura_kernel.c) ---- */
+static void testAuraKernelPick(void)
+{
+    const uint32_t steps = 591u * 4096u + 270u; /* the phone's: 18.5 x 8.4 SCENE texels */
+    CHECK(rd__aura_kernel_pick(steps, 1, NULL) == steps &&
+              rd__aura_kernel_pick(steps, 1, "") == steps &&
+              rd__aura_kernel_pick(steps, 1, "box") == steps,
+          "aura kernel: the box by default");
+    CHECK(rd__aura_kernel_pick(steps, 1, "gs") == 0u, "aura kernel: gs drops the box");
+    CHECK(rd__aura_kernel_pick(steps, 0, "gs") == steps,
+          "aura kernel: gs leaves every other sprite its kernel");
+    CHECK(rd__aura_kernel_pick(0u, 1, "gs") == 0u, "aura kernel: no kernel at 1x either way");
+}
+
+/* ---- the shadow count's colour while it is made (rd_store_plan.c
+ * rd__store_plan_count_color) and its pass's name in the pass list ---- */
+static void testShadowCountColor(void)
+{
+    const RdTarget scene = rd_target(RD_TARGET_SCENE);
+    const RdTargetRec *sr = rd__target_rec(scene.id);
+    if (!sr || !sr->withDepth) {
+        CHECK(0, "shadow count colour: SCENE without depth");
+        return;
+    }
+    rd_begin_frame();
+    rd_select_list(3);
+    const RdTarget cnt = rd_shadow_count_target(sr->w, sr->h);
+    rd_set_target(cnt, scene, sr->w, sr->h, 0);
+    rd_shadow_reset();
+    rd_shadow_resolve();
+    rd_end_frame(0);
+    const RdFrame *f = rd__last_frame();
+    const RdTargetRec *cr = rd__target_rec(cnt.id);
+    if (!f || !cr) {
+        CHECK(0, "shadow count colour: no frame or count target");
+        return;
+    }
+    const bool keepPlan = g_rd.profile.storePlan, keepAll = g_rd.profile.storeAll;
+    RhiColorAttachment a;
+    for (int plan = 0; plan < 2; plan++) {
+        g_rd.profile.storePlan = plan != 0;
+        g_rd.profile.storeAll = false;
+        rd__store_plan_scan(f, (int)f->keep);
+        g_rdPerf.storeColorDropped = g_rdPerf.shadowColorDropped = 0;
+        /* the volumes' pass on the temporary count target: a loaded colour */
+        memset(&a, 0, sizeof(a));
+        a.load = RHI_LOAD_LOAD;
+        a.store = RHI_STORE_STORE;
+        rd__store_plan_count_color(cr, &a);
+        if (plan) {
+            CHECK(a.load == RHI_LOAD_DONT_CARE && a.store == RHI_STORE_DONT_CARE &&
+                      g_rdPerf.storeColorDropped == 1 && g_rdPerf.shadowColorDropped == 1 &&
+                      g_rdPerf.shadowColorW == cr->tw && g_rdPerf.shadowColorH == cr->th,
+                  "shadow count colour: under the plan the volumes' colour is neither loaded nor "
+                  "stored (load %d store %d, %u dropped)",
+                  (int)a.load, (int)a.store, g_rdPerf.shadowColorDropped);
+        } else {
+            CHECK(a.load == RHI_LOAD_LOAD && a.store == RHI_STORE_STORE &&
+                      g_rdPerf.storeColorDropped == 0,
+                  "shadow count colour: [dev] store_plan = false keeps the colour's load and "
+                  "store");
+        }
+        /* a cleared colour (a pending clear, the seven draws' pass) keeps its ops */
+        memset(&a, 0, sizeof(a));
+        a.load = RHI_LOAD_CLEAR;
+        rd__store_plan_count_color(cr, &a);
+        CHECK(a.load == RHI_LOAD_CLEAR && a.store == RHI_STORE_STORE,
+              "shadow count colour: a CLEAR keeps its load and store (plan %d)", plan);
+        /* a named target as the count (the self-test's SCENE) keeps its ops */
+        memset(&a, 0, sizeof(a));
+        a.load = RHI_LOAD_LOAD;
+        rd__store_plan_count_color(sr, &a);
+        rd__store_plan_count_color(NULL, &a);
+        CHECK(a.load == RHI_LOAD_LOAD && a.store == RHI_STORE_STORE &&
+                  g_rdPerf.shadowColorDropped == (plan ? 1u : 0u),
+              "shadow count colour: SCENE as the count keeps its load and store (plan %d)", plan);
+        rd__store_plan_end();
+    }
+    /* outside a replay (no plan): nothing changes */
+    memset(&a, 0, sizeof(a));
+    a.load = RHI_LOAD_LOAD;
+    rd__store_plan_count_color(cr, &a);
+    CHECK(a.load == RHI_LOAD_LOAD && a.store == RHI_STORE_STORE,
+          "shadow count colour: outside a replay the colour keeps its ops");
+    g_rd.profile.storePlan = keepPlan;
+    g_rd.profile.storeAll = keepAll;
+    g_rdPerf.storeColorDropped = g_rdPerf.shadowColorDropped = 0;
+    g_rdPerf.shadowColorW = g_rdPerf.shadowColorH = 0;
+    /* the pass list names the one draw's and the reduction's pass "shadow count" */
+    RdPerfPass pp;
+    memset(&pp, 0, sizeof(pp));
+    pp.kind = RD_PERF_PASS_RENDER;
+    pp.list = 3;
+    pp.post = -1;
+    pp.target = RD_PERF_TARGET_SHADOW_COUNT;
+    char label[32];
+    rd_perf_pass_label(&pp, label, sizeof label);
+    CHECK(strcmp(label, "shadow") == 0 &&
+              strcmp(rd_perf_target_name(RD_PERF_TARGET_SHADOW_COUNT), "count") == 0,
+          "shadow count: the pass list says \"%s %s\" (\"shadow count\")", label,
+          rd_perf_target_name(RD_PERF_TARGET_SHADOW_COUNT));
+    pp.target = RD_PERF_TARGET_TEMP;
+    rd_perf_pass_label(&pp, label, sizeof label);
+    CHECK(strcmp(label, "list 3") == 0, "shadow count: another pass is \"%s\" (\"list 3\")", label);
+}
+
+/* ---- the aura's read in two passes (rd_aura_box.c) ---- */
+static void testAuraBox(RdPipeKeyInt *keys)
+{
+    CHECK(rd__aura_box_pick(NULL, 1) == 1 && rd__aura_box_pick("", 0) == 0 &&
+              rd__aura_box_pick("auto", 1) == 1 && rd__aura_box_pick("auto", 0) == 0,
+          "aura box: unset, empty or auto is the profile's");
+    CHECK(rd__aura_box_pick("1", 0) == 1 && rd__aura_box_pick("on", 0) == 1 &&
+              rd__aura_box_pick("true", 0) == 1 && rd__aura_box_pick("yes", 0) == 1,
+          "aura box: on over an immediate-mode GPU's default");
+    CHECK(rd__aura_box_pick("0", 1) == 0 && rd__aura_box_pick("off", 1) == 0 &&
+              rd__aura_box_pick("false", 1) == 0 && rd__aura_box_pick("no", 1) == 0,
+          "aura box: off over a tile-based GPU's default");
+    CHECK(rd__aura_box_pick("maybe", 1) == 1 && rd__aura_box_pick("maybe", 0) == 0,
+          "aura box: another word is auto");
+    /* no device: never on, and the start-up set has no key of it */
+    CHECK(!rd__aura_box_on(), "aura box: on without a device");
+    const uint32_t n = rd__enumerate_reachable(keys, RD_PIPELINE_REACHABLE_MAX);
+    uint32_t box = 0;
+    for (uint32_t i = 0; i < n && i < RD_PIPELINE_REACHABLE_MAX; i++) {
+        box += keys[i].fs == RD_FS_FX_AURA_ROWS || keys[i].fs == RD_FS_FX_AURA_SUM;
+    }
+    CHECK(box == 0, "aura box: %u keys of it in the set without a device", box);
+    CHECK(strcmp(rd_perf_target_name(RD_PERF_TARGET_ROWBOX), "ROWBOX") == 0,
+          "aura box: the pass list names ROWBOX");
+}
+
 int main(int argc, char **argv)
 {
     rd__set_not_implemented_fatal(true); /* a stub command replayed stops the test */
@@ -2691,7 +3330,12 @@ int main(int argc, char **argv)
     testAuraFilter();
     testPassOps();
     testStencilOps();
+    testShadowCountColor();
     testDateArea();
+    testPassArea();
+    testVuSetPolicy();
+    testPayloadPad();
+    testAuraKernelPick();
     rd_shutdown();
     if (failures) {
         printf("rd_state_test: %d failures\n", failures);

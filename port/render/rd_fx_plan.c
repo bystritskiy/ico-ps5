@@ -1,6 +1,6 @@
 /* rd_fx_plan.c: the frame-size post sprites' plan (rd_replay.h RdFxDraw,
  * rd__fx_plan_draw; rd_internal.h rd__fx_enumerate; RdProfile.fxPlan,
- * fxDstLocal; docs/port/RENDER.md "Post passes").
+ * fxDstLocal; docs/port/RENDER_POST.md "Post passes").
  *
  * A staticBlur sprite (rd_replay.c doBlurSpriteDraw) that reads its
  * destination takes a snapshot of its target, or swaps it, and draws in a
@@ -16,7 +16,13 @@
  *             sprites and the glow's WORK0 fill, alpha written over a
  *             picture the blend keeps).  The alpha is As (with FBA's bit)
  *             either way; DATE and AFAIL RGB_ONLY, which read the
- *             destination's alpha, are not taken
+ *             destination's alpha, are not taken.  A sprite of the alpha
+ *             alone without a Z test draws in the open pass on its target
+ *             with that pass's depth attached, its test ALWAYS and no
+ *             write (fxAttachDepth), instead of ending the pass for one
+ *             without the depth: cleanUpFB's two sprites stay in the fog's
+ *             pass on SCENE (on the PowerVR phone two of the glow's three
+ *             full-size SCENE passes, each the picture loaded and stored)
  *   additive  the four premultiplied forms Cs * FIX + Cd, Cs * As + Cd,
  *             Cd - Cs * FIX, Cd - Cs * As under COLCLAMP 1 without PABE
  *             (the glow's paste, WORK3 into SCENE through FIX 128):
@@ -43,6 +49,11 @@
  *             0 and no blend (the glow's mask, SCENE's alpha into WORK2):
  *             fx_frame_ps computes the alpha alone (FXF_ALPHA_ONLY), RGB 0
  *             as (t * 0) >> 7 is.  Not counted (it had no snapshot)
+ * A sprite whose source target is still an attachment ends the open pass
+ * for its read keeping a pending clear of another target
+ * (rd__replay_end_pass_for, rd_replay.c endPassFor, as doBlurSpriteDraw):
+ * the glow's WORK2 fill (fillWork2's sprite, a clear) is the load op of the
+ * mask's pass, not a full-size pass of its own.
  * A sprite that samples the target it draws into keeps doBlurSpriteDraw's
  * path, and so does every sprite that reads its destination in a frame
  * with the MSAA epoch or under an exact blend the player opted into
@@ -56,7 +67,20 @@
  * (rd__fx_local_selftest) are here too: the frame-size draws' CPU side.
  *
  * Counters (rd.h RdPerfRecord.fxConstant, fxAdditive, fxLocal): the sprites
- * drawn each way (the black sprite's clear counts as a constant). */
+ * drawn each way (the black sprite's clear counts as a constant);
+ * fxLocalDate those of fxLocal under DATE.
+ *
+ * DATE on a post sprite: fx_sprite_ps and its local twin test the
+ * destination alpha's MSB against DATM in the shader (FXF_DATE), from the
+ * snapshot or, by local read, from the attachment at the fragment's own
+ * texel before the sprite writes it (one triangle: no other fragment of
+ * the draw wrote it), the same value at the same point in the order.  So
+ * a post sprite never takes DATE's stencil bit (rd_replay.c prepareDrawEx
+ * with dateStencil is doScreen's and the VU draws' only), and with
+ * fxDstLocal a DATE sprite needs no snapshot and no depth or stencil
+ * bound for it: the pass binds the depth only for the sprite's Z test or
+ * Z write (rd__blur_key).  The store plan counts a post sprite's DATE as
+ * no touch of the depth (rd_store_plan.c planPost). */
 #include <math.h>
 #include <stdio.h>
 #include <stdlib.h>
@@ -185,7 +209,10 @@ static bool fxDraw(Replay *r, const RdFxDraw *x, const RdPipeKeyInt *key, uint32
     RhiTexture srcTex = x->srcTex;
     if (x->src) {
         if (x->src->colorState != RHI_STATE_SHADER_READ) {
-            rd__replay_end_pass(r);
+            /* as doBlurSpriteDraw: a pending clear of the target (the glow's
+             * WORK2 fill before its mask) stays the load op of the pass the
+             * draw begins, not a full-size pass of its own */
+            rd__replay_end_pass_for(r, x->src->color.id);
             rd__transition(rd__replay_cl(), x->src->color, &x->src->colorState,
                            RHI_STATE_SHADER_READ);
         }
@@ -194,15 +221,34 @@ static bool fxDraw(Replay *r, const RdFxDraw *x, const RdPipeKeyInt *key, uint32
     DrawSetup ds;
     memset(&ds, 0, sizeof(ds));
     ds.tc = x->tc;
-    ds.tdId = x->useDepth ? r->st.depth : 0;
-    ds.depthFmt = x->useDepth ? RHI_FMT_D32F_S8 : RHI_FMT_UNKNOWN;
+    /* the depth the key has: the draw's own (x->useDepth), or the open
+     * pass's that the constant fold draws in without using it
+     * (fxDepthAttached) */
+    ds.tdId = key->depthFmt != RHI_FMT_UNKNOWN ? r->st.depth : 0;
+    ds.depthFmt = (RhiFormat)key->depthFmt;
     ds.tex = local ? g_rd.dummy : srcTex;
     ds.dateTex = g_rd.dummy;
     ds.tw = x->tw;
     ds.th = x->th;
     ds.textured = x->textured;
     ds.screenCopy = 1; /* a post sprite: target texels onto screen pixels */
+    /* the last store (rd_pass_cut.c): without the local read the pass this
+     * bindDraw begins records the sprite's draw and nothing else of the
+     * command (every return below the bind is true, the source made
+     * readable above); not for a kind whose caller may draw again in the
+     * command (rd_blur_border.c: the reduction's strips, a textured flare's
+     * or bloom's glow edge; rd_blur_smooth.c: Motion blur: Smooth) */
+    const uint8_t post = x->c->b[0];
+    const bool alone = post != RD_POST_REDUCTION && post != RD_POST_MOTION_BLUR &&
+                       !(r->st.ds.texEnabled && (post == RD_POST_FLARE || post == RD_POST_BLOOM));
+    rd__last_store_post(!local && alone);
+    if (local) {
+        /* the crack fill armed for this pass (the aura's paste): its first
+         * draw, the pass begun here as bindDraw would begin it */
+        rd__crack_fill_in_pass(r, ds.tdId);
+    }
     RhiBindGroup g2 = rd__replay_bind_draw(r, &ds);
+    rd__last_store_post(false);
     if (!g2.id) {
         return true; /* the scissor leaves nothing: nothing drawn, as doBlurSpriteDraw */
     }
@@ -280,7 +326,7 @@ static bool fxDraw(Replay *r, const RdFxDraw *x, const RdPipeKeyInt *key, uint32
     if (local) {
         rhi_cmd_local_read_barrier(cl, RHI_LOCAL_READ_BACK);
     }
-    g_rd.stats.draws++;
+    rd__stats_here()->draws++;
     if (key->gs.colorMask & 8) {
         r->writeSerial++;
     }
@@ -290,9 +336,52 @@ static bool fxDraw(Replay *r, const RdFxDraw *x, const RdPipeKeyInt *key, uint32
         g_rdPerf.fxAdditive++;
     } else if (kind == FX_LOCAL) {
         g_rdPerf.fxLocal++;
+        /* DATE tested in fx_local_ps against the alpha it reads (FXF_DATE) */
+        g_rdPerf.fxLocalDate += d->test.date != RD_DATE_OFF;
     }
     fxNote(kind);
     return true;
+}
+
+/* The constant fold's key in a pass with a depth it does not use: the
+ * depth attached, its test ALWAYS and its write off (rd_pipeline.c
+ * pipelineDesc: the test on with compare ALWAYS, which passes every
+ * fragment and writes nothing), so the same colour bytes as the key
+ * without the depth.  rd__fx_enumerate lists it. */
+static void fxDepthAttached(RdPipeKeyInt *k)
+{
+    k->depthFmt = (uint8_t)RHI_FMT_D32F_S8;
+    k->gs.ztst = RD_ZTST_ALWAYS;
+    k->gs.zwrite = RD_ZWRITE_OFF;
+}
+
+/* once a run: the constant fold drawn in the open pass with its depth
+ * attached (a reporter's log says the glow's SCENE passes went) */
+static void fxAttachedNote(const Replay *r)
+{
+    static bool said;
+    if (!said) {
+        said = true;
+        rd__log("fx plan: a staticBlur sprite without a Z test drawn by the constant fold in the "
+                "open pass on %s with its depth attached and unused, not in a pass of its own "
+                "(the glow's cleanUpFB in the fog's pass; reported once)",
+                rd__target_name(r->st.color));
+    }
+}
+
+/* Whether a sprite that uses no depth draws in the open pass with its
+ * depth attached (fxDepthAttached) instead of ending it and beginning one
+ * without the depth: the open pass is on the sprite's colour target with
+ * the state's depth (of the target's size: x->td), single-sampled, not a
+ * storage pass.  cleanUpFB's two sprites into SCENE after the fog
+ * (staticBlur.c: the first without the Z test, the second under GEQUAL)
+ * then stay in the fog's pass: on a tile-based GPU two passes fewer, each a
+ * load and a store of the whole picture (10 MB each way at 2364 x 1080) */
+static bool fxAttachDepth(const Replay *r, const RdFxDraw *x)
+{
+    return !x->useDepth && x->td && r->st.depth != 0 && r->passOpen &&
+           r->passColor == r->st.color && r->passDepth == r->st.depth && !r->passStorage &&
+           g_rd.passSamples <= 1u;
 }
 
 /* the constant fold of an untextured blending sprite: -1 not taken, else
@@ -314,10 +403,64 @@ static int fxConstantDraw(Replay *r, const RdFxDraw *x)
         return -1; /* a mask the start-up set has no key of */
     }
     k.gs.colorMask = mask;
-    return fxDraw(r, x, &k, 0, RD_FXF_ABE | RD_FXF_DST | RD_FXF_PABE, rgb, 0, FX_CONSTANT) ? 1 : -1;
+    /* the alpha alone in the open pass with its depth (the start-up set
+     * has that key: rd__fx_enumerate) */
+    const bool attached = mask == 8u && fxAttachDepth(r, x);
+    if (attached) {
+        fxDepthAttached(&k);
+    }
+    if (fxDraw(r, x, &k, 0, RD_FXF_ABE | RD_FXF_DST | RD_FXF_PABE, rgb, 0, FX_CONSTANT)) {
+        if (attached) {
+            fxAttachedNote(r);
+        }
+        return 1;
+    }
+    return -1;
 }
 
+/* The way fxPlanDraw takes for a sprite that reads its destination is the
+ * local read (the constant fold and the premultiplied blend not before
+ * it): the crack fill armed for the aura's paste is then drawn first in
+ * that pass (fxDraw, rd_crack_fill.c rd__crack_fill_in_pass) */
+static bool fxLocalNext(const RdFxDraw *x)
+{
+    const RdDrawState *d = x->d;
+    const bool rgbOnly = d->test.ate && d->test.afail == RD_AFAIL_RGB_ONLY;
+    const bool dstAlpha = d->test.date != RD_DATE_OFF || rgbOnly;
+    if (!g_rd.profile.fxPlan || !g_rd.hasDevice || x->selfSample || !x->dstRead ||
+        g_rd.dstMode != RD_BLEND_EXACT_OFF || rd__replay_msaa_want() > 1u) {
+        return false;
+    }
+    uint8_t ident = 0, rgb[3];
+    if (!x->textured && d->abe && !dstAlpha && rd__fx_fold(d, x->p->rgba, &ident, rgb)) {
+        return false; /* the constant fold first */
+    }
+    const int form = d->abe ? fxPremulForm(d->blend) : 0;
+    if (form && !d->pabe && d->colclamp && !dstAlpha && g_rd.fs[RD_FS_FX_FRAME].id) {
+        return false; /* the premultiplied blend first */
+    }
+    return g_rd.profile.fxDstLocal && g_rd.fs[RD_FS_FX_LOCAL].id && g_rd.layoutLocal.id;
+}
+
+static bool fxPlanDraw(Replay *r, const RdFxDraw *x);
+
 bool rd__fx_plan_draw(Replay *r, const RdFxDraw *x)
+{
+    /* the crack fill armed for this sprite's pass (rd_crack_fill.c: the
+     * aura's paste): taken by the local read's pass; drawn any other way
+     * the sprite comes after the fill's own pass */
+    const bool paste = rd__crack_fill_paste_due();
+    if (paste && !fxLocalNext(x)) {
+        rd__crack_fill_paste_late(r, "the paste reads its destination through a snapshot");
+    }
+    const bool drawn = fxPlanDraw(r, x);
+    if (paste) {
+        rd__crack_fill_paste_late(r, "the paste's local read was not taken");
+    }
+    return drawn;
+}
+
+static bool fxPlanDraw(Replay *r, const RdFxDraw *x)
 {
     if (!g_rd.profile.fxPlan || !g_rd.hasDevice || x->selfSample) {
         return false;
@@ -377,6 +520,10 @@ uint32_t rd__fx_enumerate(RdPipeKeyInt *out, uint32_t max, uint32_t n)
     const bool frame = g_rd.fs[RD_FS_FX_FRAME].id != 0;
     const bool local =
         g_rd.profile.fxDstLocal && g_rd.fs[RD_FS_FX_LOCAL].id != 0 && g_rd.layoutLocal.id != 0;
+    /* under GS state as shader data (rd_uber.c: an exact blend) a sprite
+     * that reads the destination keeps its own path (rd__fx_plan_draw), so
+     * of these only the alpha alone is drawn */
+    const bool dstForms = !rd__uber_on();
     RdStateBlock s;
     rd__reset_state_block(&s);
     s.ds.colorMask = 0xF;
@@ -389,17 +536,30 @@ uint32_t rd__fx_enumerate(RdPipeKeyInt *out, uint32_t max, uint32_t n)
                 rd__blur_key(&s, RHI_FMT_RGBA8_UNORM, RHI_FMT_D32F_S8, NULL, 0);
             RdPipeKeyInt k = base;
             k.gs.colorMask = 8; /* the constant fold: the alpha alone */
-            n = rd__add_pipe_key(out, max, n, &k);
+            if (dstForms) {
+                n = rd__add_pipe_key(out, max, n, &k);
+                if (z == 0 && !zw) {
+                    /* and in an open pass with the depth it does not use
+                     * (fxAttachDepth: cleanUpFB's first sprite in the fog's
+                     * pass) */
+                    fxDepthAttached(&k);
+                    n = rd__add_pipe_key(out, max, n, &k);
+                }
+            }
             if (frame) {
                 k = base;
                 k.fs = RD_FS_FX_FRAME; /* the alpha alone */
                 n = rd__add_pipe_key(out, max, n, &k);
                 k.gs.blend = RD_BLEND_CS_AS_ADD_CD; /* the premultiplied add */
-                n = rd__add_pipe_key(out, max, n, &k);
+                if (dstForms) {
+                    n = rd__add_pipe_key(out, max, n, &k);
+                }
                 k.gs.blend = RD_BLEND_CD_SUB_CS_AS; /* and subtract */
-                n = rd__add_pipe_key(out, max, n, &k);
+                if (dstForms) {
+                    n = rd__add_pipe_key(out, max, n, &k);
+                }
             }
-            if (local) {
+            if (local && dstForms) {
                 k = base;
                 k.fs = RD_FS_FX_LOCAL;
                 n = rd__add_pipe_key(out, max, n, &k);

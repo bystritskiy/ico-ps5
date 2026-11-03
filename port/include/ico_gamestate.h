@@ -85,7 +85,9 @@ typedef struct IcoGsSnapshot {
     int layout;     /* current_layout_id */
     int system_status[12];
     int mc_preview[6]; /* IosMcPreviewInfo: [0] stage, [1] clear, [2] play
-                          time in frames, [3] couch id */
+                          time in frames, [3] couch id; on the 2001 discs
+                          [1] play time, [2] couch id (the region row's
+                          mc_preview_play and mc_preview_sofa) */
     unsigned char gflags[ICO_GS_GFLAG_BYTES];
     /* derived (only when actors_valid) */
     int actors_valid; /* the boy's and girl's objects are readable now */
@@ -93,7 +95,7 @@ typedef struct IcoGsSnapshot {
     int girl_present;
     int weapon_kind;            /* scpGameStat_BoyWeaponkind: 0 bare hands */
     int hand_held;              /* ACTGame_FLAG_TETSUNAGI: holding hands */
-    int yorda_carried_by_enemy; /* girl actMode 0x6F, carrier an enemy */
+    int yorda_carried_by_enemy; /* girl in the disc's carried actMode, carrier an enemy */
     const char *stage_name;     /* stageData[stage_no].name, or NULL */
 } IcoGsSnapshot;
 
@@ -104,10 +106,30 @@ void ico_gs_set_sampler(IcoGsSampler fn);
 /* The sampler over the game's globals (ICO_GS_LIVE builds only). */
 void ico_gs_sample_live(IcoGsSnapshot *out);
 
+/* The girl's actMode while an enemy carries her on the selected disc (0x6F;
+   107 on the North American and August 2001 discs; 106 on the June 2001
+   demo), and the snapshot's yorda_carried_by_enemy from her mode and
+   whether her carrier is an enemy (the live sampler's rule, apart so the
+   tests can drive it). */
+int ico_gs_carried_act_mode(void);
+
+/* ICO_GS_EV_GAME_OVER from the June 2001 demo's death paths (they switch to
+   the game-over layout without ACT_LAYOUT_GAMEOVER's guard flag): at most
+   one signal per stage entry */
+void ico_gs_signal_game_over_once(void);
+int ico_gs_girl_carried_by_enemy(int act_mode, int carrier_is_enemy);
+
 /* Once per Main tick, before the reads below. */
 void ico_gs_tick(void);
 /* Forgets everything (signals, counters, the run); tests and a new profile. */
 void ico_gs_reset(void);
+/* After a save state's load (port/game/state_host.c): the snapshot sampled
+   now and taken as the previous one too, so nothing rises between the game
+   before the load and the restored one (no stage entry, flag or capture is
+   seen); the pending signals dropped.  The run (fresh, captures, game
+   overs) and the session's counters are kept: a load does not rewind them
+   (docs/port/DIVERGENCES.md). */
+void ico_gs_rebaseline(void);
 /* Main ticks seen by ico_gs_tick */
 unsigned int ico_gs_ticks(void);
 

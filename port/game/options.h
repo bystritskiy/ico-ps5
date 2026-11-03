@@ -14,9 +14,15 @@
  *   [gameplay] yorda_safe  false  the shadows never take Yorda
  *   [gameplay] pit_time    "original"  the time a shadow takes to pull Yorda
  *                                 into a pit (half..triple)
+ *   [gameplay] shadow_speed "original"  how fast shadows walk, run and fly
+ *                                 (slower..fastest)
  *   [gameplay] door_fix    false  holding hands, an arrival does not send
  *                                 Ico and Yorda straight back through the
  *                                 door they came in by (door_grace.h)
+ *   [gameplay] yorda_trips false  after 3 s of Ico running pulling her by
+ *                                 the hand Yorda trips and falls, the main
+ *                                 gate's second stage's fall and rule
+ *                                 (yorda_trip.h)
  *   [gameplay] mirror      false  mirrored play (negated stick X, swapped pan)
  *   [gameplay] natural_chains
  *                          false  a chain let down for the player keeps its
@@ -28,6 +34,13 @@
  *                                 Sony presents sign and no opening scene
  *                                 (common/src/kanbanBoot.c, script/src/op.c);
  *                                 a pad-recording key (boot timing)
+ *   [gameplay] second_memory_card
+ *                          false  a second memory card in port 1, the
+ *                                 folder memcard2 beside memcard
+ *                                 (host_config.h ico_host_saves2_dir); the
+ *                                 game's own save and load screens offer
+ *                                 both cards. The card is the host's, not
+ *                                 the simulation's: no pad-recording key
  *   [gameplay] hold_type   "disc" Yorda's hand: "disc" plays the disc's own
  *                                 way (A on the European, Japanese, Korean and
  *                                 Asian discs, B on the three 2001 discs);
@@ -45,7 +58,12 @@
  *   [ui] language          auto   the language of the port's own text:
  *                                 auto (Japanese on the Japanese disc,
  *                                 the game's language on the European
- *                                 one) or en, fr, de, it, es, ja
+ *                                 one) or en, fr, de, it, es, ja, ko,
+ *                                 zh, ru-bobttz, ru-cobra838, pt-br
+ *   [game] text_language   ""     a community translation of the game's
+ *                                 menu words and subtitles, drawn as text
+ *                                 over the English disc data: "" none or
+ *                                 ru-bobttz, ru-cobra838 or pt-br
  *   [dev] debug_option     0      with developer mode: non-zero loads the
  *                                 debug option table the Debug Mode page saves
  *
@@ -92,9 +110,41 @@ float ico_opt_pit_time_factor(void);
 /* the dive's play-speed ratio actEnemyKidnapEnd reserves: 1/factor, or 2/factor
    under a stage camera effect (the game's own 2x) */
 float ico_opt_pit_dive_ratio(int camera);
+/* [gameplay] shadow_speed (default "original"): how fast shadows walk, run and fly.
+   The names are slower, original, faster, fastest (ICO_SPEED_*); the factors 0.75, 1,
+   1.25, 1.5.  Walking and running scale by the play speed of the shadow's motion
+   (ico2/fumi/src/act-game.c ACTGame_SetMotionPlaySpeedRatio_Exec), flying by the forward
+   push of flyCoreLoop (ico2/fumi/src/commonact.c).  Only the locomotion motions take the
+   factor (ico_opt_shadow_speed_motion): attacks, grabs, hits, the dissolve, the pit dive
+   (pit_time owns it) and the turns keep the game's play speed, so the AI's tick-counted
+   waits stay in step with them (review finding 15); not a frozen shadow, not how often
+   they attack.  Logs "gameplay: shadow speed <name> (x<factor>)" at load and on change. */
+#define ICO_SPEED_SLOWER 0
+#define ICO_SPEED_ORIGINAL 1
+#define ICO_SPEED_FASTER 2
+#define ICO_SPEED_FASTEST 3
+#define ICO_SPEED_COUNT 4
+int ico_opt_shadow_speed(void);
+void ico_opt_set_shadow_speed(int v);
+float ico_opt_shadow_speed_factor(void);
+/* 1 when motion (a motionKind index, a shadow's ctrl.motion) is one of this disc's
+   shadow locomotion motions, by their names in the disc's motion table (the decomp's
+   generated motion-def.c): "EN1 FLY", "EN1 CARRY_FLY", "EN1 WALKLOOP1/2",
+   "EN1 RUNLOOP1-4", "EN1 CARRY_RUN", and "EN1 CARRY_RUN_13C" (the later discs) or
+   "EN1 CARRY_WALK" (the 2001 discs and the North American one); the June 2001 demo's
+   second "EN1 FLY" and its big shadow's "EN3 WALKLOOP1", "EN3 LIFT_WALK" and
+   "EN3 CARRY_WALK".  European, Japanese, Korean and Chinese: 836, 838, 841-846, 941, 942;
+   North American: 790, 792, 795-800, 888, 889; August 2001: 792, 794, 797-802, 890, 891;
+   June 2001: 823, 825, 828-833, 923, 924, 942, 944, 955. */
+int ico_opt_shadow_speed_motion(int motion);
 /* [gameplay] door_fix (default false): the doorway fix of door_grace.h */
 int ico_opt_door_fix(void);
 void ico_opt_set_door_fix(int on);
+/* [gameplay] yorda_trips (default false): Yorda trips (yorda_trip.h).  Logs
+   "gameplay: yorda trips on|off" at its first read and on a change; the stage
+   load adds her motions from the next stage on. */
+int ico_opt_yorda_trips(void);
+void ico_opt_set_yorda_trips(int on);
 /* [gameplay] natural_chains (default false): Natural chains (rd_chain.h) */
 int ico_opt_natural_chains(void);
 void ico_opt_set_natural_chains(int on);
@@ -103,6 +153,16 @@ void ico_opt_set_natural_chains(int on);
    so a change takes effect at the next start */
 int ico_opt_skip_opening(void);
 void ico_opt_set_skip_opening(int on);
+/* [gameplay] second_memory_card (default false): Second memory card.  Logs
+   "gameplay: second memory card on|off" at its first read and on a change.
+   The listener (main_host.c: host_config.h ico_host_set_second_card and
+   port/save/mc_host.h ico_mc_host_second_card_changed) puts the card in or
+   takes it out at once. */
+int ico_opt_second_memory_card(void);
+void ico_opt_set_second_memory_card(int on);
+/* Called with the new value on every ico_opt_set_second_memory_card, and once
+   at registration with the current one.  NULL unregisters.  One listener. */
+void ico_opt_set_second_memory_card_listener(void (*fn)(int on));
 /* Mirror mode: ico_input negates the stick X (ico_input_mirror), the audio
    host swaps the pan (ico_audio_pan_mirror), the renderer flips the picture
    (rd.h rd_set_mirror, through the listener below).
@@ -189,6 +249,25 @@ void ico_opt_set_circle_back(int on);
 int ico_opt_ui_language(void);
 void ico_opt_set_ui_language(int lang);
 const char *ico_opt_ui_language_name(int lang);
+/* The names [ui] language and [game] text_language take, UiLang order
+   (port/ui/strings.h: the eight tables, then the community translations
+   from ICO_OPT_TEXT_LANGUAGE_FIRST, port/ui/ui_lang.c asserts both). */
+#define ICO_OPT_UI_LANGUAGE_COUNT 11
+#define ICO_OPT_TEXT_LANGUAGE_FIRST 8
+/* [game] text_language: a community translation of the game's text
+   (docs/TRANSLATING.md), the Language row's entries after the game's five:
+   "" (-1, the default: none, the game's own language and pictures) or
+   "ru-bobttz" (UI_LANG_RU_BOBTTZ, 8), "ru-cobra838" (UI_LANG_RU_COBRA838,
+   9) or "pt-br" (UI_LANG_PT_BR, 10); any other word is "", logged once.
+   It applies on a disc whose game has a language of its own (the European
+   disc) while that language is English (port/ui/ui_lang.h
+   ui_settings_text_language): the menu words and the subtitles in the
+   translation, the disc's English data under them.  Not a pad-recording
+   key: it changes what is drawn only.  ico_opt_text_language_name gives the
+   config value ("" for -1). */
+int ico_opt_text_language(void);
+void ico_opt_set_text_language(int lang);
+const char *ico_opt_text_language_name(int lang);
 /* [audio] output: the
    PS2's stereo or mono choice, the game's soundOutputModeGet value (0
    stereo, 1 mono), which the memory card's system file keeps and the

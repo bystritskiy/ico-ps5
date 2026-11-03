@@ -297,13 +297,62 @@ bool sprite_above1x(float2 uv, out uint4 t)
     return true;
 }
 
+#ifndef ICO_DST_READ
+// The fades fold on the reduction's hardware sprite above 1x (DF_FOLD,
+// port/render/rd_fades_fold.c; the reduction never blends, so never in the
+// destination-read twins): the steps (common.hlsli gs_fold) on the sampled
+// texel t, after the filter: each step is affine in the texel and the
+// filter's weights sum to 1, so this is the filter of the stepped texels
+// but for their rounding to 8 bits (a level at most).  Where the filter's
+// two rows lie on either side of a bar's edge (bars: the rows below aux1.z
+// & 0xFFFF and from aux1.z >> 16 on, SCENE's texel rows), each row is
+// sampled alone at its centre, its own steps applied, and the two weighed
+// as the filter weighs them.
+uint4 sprite_fold(float2 uv, uint4 t)
+{
+    const uint meta = g_aux1.x, alphas = g_aux1.y, bars = g_aux1.z;
+    uint w, h;
+    g_texture.GetDimensions(w, h);
+    const float y = uv.y * float(h) - 0.5;
+    const float y0 = floor(y);
+    const int hi = max(int(h), 1) - 1;
+    const int r0 = clamp(int(y0), 0, hi), r1 = clamp(int(y0) + 1, 0, hi);
+    const bool b0 = r0 < int(bars & 0xFFFFu) || r0 >= int(bars >> 16);
+    const bool b1 = r1 < int(bars & 0xFFFFu) || r1 >= int(bars >> 16);
+    const bool split = (meta & 0xF0u) != 0u && b0 != b1;
+    uint4 t1 = t;
+    [branch] if (split) {
+        const float ih = 1.0 / float(hi + 1);
+        const float4 s0 = g_texture.SampleLevel(g_sampler, float2(uv.x, (y0 + 0.5) * ih), 0.0);
+        const float4 s1 = g_texture.SampleLevel(g_sampler, float2(uv.x, (y0 + 1.5) * ih), 0.0);
+        t = gs_texa_expand(uint4(floor(s0 * 255.0 + 0.5)), g_mode.y & 0xFFu, g_mode.y >> 8);
+        t1 = gs_texa_expand(uint4(floor(s1 * 255.0 + 0.5)), g_mode.y & 0xFFu, g_mode.y >> 8);
+    }
+    const int r = (meta & 8u) != 0u ? 64 : 0;
+    [loop] for (uint i = 0u; i < (meta & 7u); i++) {
+        // step i without a dynamic index into the constant block (FXC)
+        const uint s = i == 0u ? g_aux0.x : (i == 1u ? g_aux0.y : (i == 2u ? g_aux0.z : g_aux0.w));
+        const uint al = (alphas >> (8u * i)) & 255u;
+        if (gs_fold_applies(i, meta, bars, r0)) {
+            t = uint4(gs_fold_ch(s, 0u, t.r, r), gs_fold_ch(s, 1u, t.g, r),
+                      gs_fold_ch(s, 2u, t.b, r), al);
+        }
+        if (split && gs_fold_applies(i, meta, bars, r1)) {
+            t1 = uint4(gs_fold_ch(s, 0u, t1.r, r), gs_fold_ch(s, 1u, t1.g, r),
+                       gs_fold_ch(s, 2u, t1.b, r), al);
+        }
+    }
+    return split ? uint4(floor(lerp(float4(t), float4(t1), y - y0) + 0.5)) : t;
+}
+#endif
+
 GS_PS_ATTR GS_PS_OUT sprite_ps(SpriteVSOut i)
 {
     float3 st = float3(i.uv, 1.0);
     SPRITE_PLANE_ATTRS(i, i.col, st);
     i.uv = st.xy;
     if ((g_mode.x & DF_DATE) != 0u) {
-        if (gs_date_discard(g_mode.x, g_dateSnap.Load(int3(int2(i.pos.xy), 0)))) {
+        if (gs_date_discard(g_mode.x, GS_DATE_SNAP(g_dateSnap, int2(i.pos.xy)))) {
             GS_DISCARD;
         }
     }
@@ -317,6 +366,11 @@ GS_PS_ATTR GS_PS_OUT sprite_ps(SpriteVSOut i)
             t = uint4(floor(tf * 255.0 + 0.5));
             t = gs_texa_expand(t, g_mode.y & 0xFFu, g_mode.y >> 8);
         }
+#ifndef ICO_DST_READ
+        [branch] if ((g_mode.x & DF_FOLD) != 0u) {
+            t = sprite_fold(i.uv, t);
+        }
+#endif
         col = gs_texture_function(t, col, g_mode.x);
     }
     if (gs_alpha_discard(g_mode.z, g_mode.w, col.a)) {
@@ -336,7 +390,7 @@ GS_PS_ATTR GS_PS_OUT sprite_texa_ps(SpriteVSOut i)
     SPRITE_PLANE_ATTRS(i, i.col, st);
     i.uv = st.xy;
     if ((g_mode.x & DF_DATE) != 0u) {
-        if (gs_date_discard(g_mode.x, g_dateSnap.Load(int3(int2(i.pos.xy), 0)))) {
+        if (gs_date_discard(g_mode.x, GS_DATE_SNAP(g_dateSnap, int2(i.pos.xy)))) {
             GS_DISCARD;
         }
     }
@@ -360,7 +414,7 @@ GS_PS_ATTR GS_PS_OUT sprite_texa_ps(SpriteVSOut i)
 uint4 sprite_colour(float4 pos, float4 vcol, float2 uv, float q)
 {
     if ((g_mode.x & DF_DATE) != 0u) {
-        if (gs_date_discard(g_mode.x, g_dateSnap.Load(int3(int2(pos.xy), 0)))) {
+        if (gs_date_discard(g_mode.x, GS_DATE_SNAP(g_dateSnap, int2(pos.xy)))) {
             GS_DISCARD;
         }
     }

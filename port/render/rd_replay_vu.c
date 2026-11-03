@@ -230,13 +230,16 @@ static RhiBindGroup vuGroupMake(RhiBuffer streamBuf, uint64_t streamOff, uint64_
     b[4].slot = 4;
     b[4].type = RHI_BIND_STORAGE_BUFFER;
     b[4].buffer = recBinding(&b[4].size);
-    /* t5, the ring the pre-pass's batch modules stream from: the layout
-     * keeps the slot everywhere, but Direct3D 11 never makes a batch
-     * module (no pre-pass there) nor a merge module (vuMergeInit: the
-     * merge is off there), and a bound storage range is rewritten
-     * up to the written mark at every submit (d3d11_cmd.c, the SRV part's
-     * touch): there the bind is skipped, so a submit writes only the bytes
-     * its draws stream (the slot reads zeros, which no module reads) */
+    /* t5, the ring the pre-pass's batch modules and the draw merge's
+     * builds read: the layout keeps the slot everywhere.  On Direct3D 11 a
+     * bound storage range is rewritten up to the written mark at every
+     * submit (d3d11_cmd.c, the SRV part's touch), so with neither reader
+     * (the pre-pass or its batches off: [dev] vu_prepass = false,
+     * vu_prepass_batch = false, its self-test; the merge off by [dev]
+     * vu_merge = false or a merge module missing) the bind is skipped and a
+     * submit writes only the bytes its draws stream (the slot reads zeros,
+     * which no module then reads); with either on, those bytes are what
+     * their builds read */
     if (!g_rd.vuPreBatch && !g_rd.vuMerge && rhi_backend() == RHI_BACKEND_D3D11) {
         return rd__replay_bind_group(g_rd.layoutVu, b, 5);
     }
@@ -378,36 +381,28 @@ static void passSplit(Replay *r)
  * vuMergeGpu, vuMergeAlone).  The last VU draw's tuple: a draw equal to it
  * on every key, with the predicates a merged draw needs, could join its run
  * in one GPU draw.  A new pass, a draw of anything else between
- * (g_rd.stats.draws moved past what the VU draws drew, s_mergeExpect) or a
+ * (rd__stats_here()->draws moved past what the VU draws drew, s_mergeExpect) or a
  * draw that cannot merge ends the run. */
 typedef struct VuMergeLast {
     bool valid;
     uint32_t replay, pass, pipe, g1, g2, frame, frameOff, color;
-    uint64_t cbHash;
+    /* its DrawCB's bytes, compared whole (a 64-bit FNV of its 144 bytes, one
+     * byte a step, had cost 0.1 ms a replay of the walk on lavapipe) */
+    IcoDrawCB cb;
     RhiRect sc;
 } VuMergeLast;
 
 static VuMergeLast s_mergeLast;
 
-/* g_rd.stats.draws as it stands when nothing but the VU draws of this file
+/* rd__stats_here()->draws as it stands when nothing but the VU draws of this file
  * drew since the last note (ownDraw keeps it in step) */
 static uint32_t s_mergeExpect;
 
 /* a GPU draw of the VU draws: counted, and in step for the note */
 static void ownDraw(void)
 {
-    g_rd.stats.draws++;
+    rd__stats_here()->draws++;
     s_mergeExpect++;
-}
-
-static uint64_t vuFnv(const void *data, size_t n)
-{
-    const uint8_t *b = data;
-    uint64_t h = 1469598103934665603ull;
-    for (size_t i = 0; i < n; i++) {
-        h = (h ^ b[i]) * 1099511628211ull;
-    }
-    return h;
 }
 
 /* eligible: single planned pass, no DATE stencil, no destination read, not
@@ -419,36 +414,26 @@ static void vuMergeNote(const Replay *r, bool eligible, uint32_t pipe, uint32_t 
     if (list < 0 || list >= RD_LIST_COUNT) {
         return;
     }
-    VuMergeLast t;
-    memset(&t, 0, sizeof(t));
-    t.valid = eligible;
-    t.replay = g_rdPerf.replay;
-    t.pass = r->passSerial;
-    t.pipe = pipe;
-    t.g1 = g1;
-    t.g2 = g2;
-    t.frame = r->frameBG.group.id;
-    t.frameOff = r->frameBG.offset;
-    t.color = r->st.color;
-    t.cbHash = vuFnv(cb, sizeof(*cb));
-    t.sc = r->sc;
-    const VuMergeLast *l = &s_mergeLast;
-    const bool samePass = l->valid && l->replay == t.replay && l->pass == t.pass;
+    VuMergeLast *l = &s_mergeLast;
+    const uint32_t replay = g_rdPerf.replay, pass = r->passSerial;
+    const uint32_t frame = r->frameBG.group.id, frameOff = r->frameBG.offset, color = r->st.color;
+    const bool samePass = l->valid && l->replay == replay && l->pass == pass;
     /* nothing drawn between but the VU draws' own */
-    const bool adjacent = samePass && g_rd.stats.draws == s_mergeExpect;
-    if (adjacent && eligible && l->pipe == t.pipe && l->g2 == t.g2 && l->g1 == t.g1 &&
-        l->cbHash == t.cbHash && l->frame == t.frame && l->frameOff == t.frameOff &&
-        l->color == t.color && memcmp(&l->sc, &t.sc, sizeof(t.sc)) == 0) {
+    const bool adjacent = samePass && rd__stats_here()->draws == s_mergeExpect;
+    const bool sameCb = samePass && memcmp(&l->cb, cb, sizeof(*cb)) == 0;
+    if (adjacent && eligible && l->pipe == pipe && l->g2 == g2 && l->g1 == g1 && sameCb &&
+        l->frame == frame && l->frameOff == frameOff && l->color == color &&
+        memcmp(&l->sc, &r->sc, sizeof(l->sc)) == 0) {
         g_rdPerf.vuMergeDraws[list]++;
     } else {
         g_rdPerf.vuMergeRuns[list]++;
         if (samePass) {
             uint32_t why = 4;
-            if (l->pipe != t.pipe) {
+            if (l->pipe != pipe) {
                 why = 0;
-            } else if (l->g2 != t.g2 || l->g1 != t.g1) {
+            } else if (l->g2 != g2 || l->g1 != g1) {
                 why = 1;
-            } else if (l->cbHash != t.cbHash) {
+            } else if (!sameCb) {
                 why = 2;
             } else if (!eligible || !adjacent) {
                 why = 3;
@@ -456,8 +441,18 @@ static void vuMergeNote(const Replay *r, bool eligible, uint32_t pipe, uint32_t 
             g_rdPerf.vuMergeBlocked[why]++;
         }
     }
-    s_mergeLast = t;
-    s_mergeExpect = g_rd.stats.draws;
+    l->valid = eligible;
+    l->replay = replay;
+    l->pass = pass;
+    l->pipe = pipe;
+    l->g1 = g1;
+    l->g2 = g2;
+    l->frame = frame;
+    l->frameOff = frameOff;
+    l->color = color;
+    memcpy(&l->cb, cb, sizeof(*cb));
+    l->sc = r->sc;
+    s_mergeExpect = rd__stats_here()->draws;
 }
 
 /* ------------------------------------------------------ the merge's run
@@ -484,7 +479,20 @@ static void vuMergeNote(const Replay *r, bool eligible, uint32_t pipe, uint32_t 
  * vu_merge_entry) giving each draw's first raised value, VuCB, VuBoneCB
  * and raise, the merge builds reading each draw's VuCB through t5 by it.
  * The same triangles in the same order through the same words: the
- * picture is the same byte for byte. */
+ * picture is the same byte for byte.
+ * Without dual-source blending (g_rd.noDual: Mali-G52 class phones) a lerp
+ * or Cd*FIX + Cs draw is two passes (rd__expand_no_dual: a colour pass,
+ * then an alpha pass writing As with blending off and no Z write); such a
+ * draw is held too, its two passes' keys, pipelines and DrawCBs the run's
+ * (vuMergePasses), and the run draws its colour pass over every draw's
+ * triangles and then its alpha pass over the same list.  The same pixels:
+ * no colour pass reads the stored alpha (those blends never read Ad), the
+ * alpha passes write no Z, so with Z write off each alpha pass admits what
+ * its colour pass did, and with Z write on (GEQUAL, GREATER's alpha pass
+ * GEQUAL, ALWAYS) the alpha left is the last fragment's at the final depth
+ * either way: what the two passes already give for one draw's triangles,
+ * now for the run's (docs/port/VU1_PROGRAMS.md, "The draw merge without
+ * dual-source blending"). */
 #define RD_VU_MERGE_MAX 16u /* vu_common.hlsli VU_MERGE_MAX */
 
 /* A VU draw's index list: the bound list (buf at off; id 0: not indexed),
@@ -511,13 +519,14 @@ static struct {
     uint32_t n; /* the draws held; 0: no run */
     uint32_t replay, pass;
     int post;
-    RdPipeKeyInt key;
-    RhiPipeline p;
+    uint32_t np; /* its passes: 1, or 2 (a colour pass and its alpha pass) */
+    RdPipeKeyInt key[2];
+    RhiPipeline p[2];
     RhiBindGroup g1, g2;
     RdUniform frame;
     RhiRect sc;
-    IcoDrawCB cb;
-    uint64_t dOff;
+    IcoDrawCB cb[2];
+    uint64_t dOff[2];
     uint64_t top; /* the next draw's first raised value (two draws or more) */
     VuRunDraw d[RD_VU_MERGE_MAX];
 } s_run;
@@ -689,28 +698,34 @@ void rd__replay_vu_flush(Replay *r)
         rhi_cmd_set_scissor(cl, &s_run.sc);
     }
     rhi_cmd_set_index_buffer(cl, ib, ibOff, true);
-    /* b2 the first draw's VuCB (its mark[3] the table), b3 its VuBoneCB
-       (the merge builds read neither else) */
-    const uint32_t offs[3] = {(uint32_t)s_run.dOff, (uint32_t)vOff0, (uint32_t)d0->bonesOff};
-    rd__set_pipeline(cl, s_run.p, &s_run.key);
-    rd__bind_uniform(cl, 0, s_run.frame);
-    rhi_cmd_set_bind_group_offsets(cl, 1, s_run.g1, offs, 3);
-    rhi_cmd_set_bind_group(cl, 2, s_run.g2);
-    rd__replay_dst_bind(r, &s_run.key); /* nothing for these keys */
-    rd__span_draw(first, count);
-    rd__replay_draw_indexed(cl, count, first, 0, 1);
+    /* each pass over the whole list (two: the colour pass, then the alpha
+       pass, without dual-source blending), counted as one draw as vuDraw
+       counts the pair */
+    for (uint32_t i = 0; i < s_run.np; i++) {
+        /* b2 the first draw's VuCB (its mark[3] the table), b3 its VuBoneCB
+           (the merge builds read neither else) */
+        const uint32_t offs[3] = {(uint32_t)s_run.dOff[i], (uint32_t)vOff0, (uint32_t)d0->bonesOff};
+        rd__set_pipeline(cl, s_run.p[i], &s_run.key[i]);
+        rd__bind_uniform(cl, 0, s_run.frame);
+        rhi_cmd_set_bind_group_offsets(cl, 1, s_run.g1, offs, 3);
+        rhi_cmd_set_bind_group(cl, 2, s_run.g2);
+        rd__replay_dst_bind(r, &s_run.key[i]); /* the attachment read's group 3 (rd_uber.c) */
+        rd__span_draw(first, i ? 0 : count);
+        rd__replay_draw_indexed(cl, count, first, 0, 1);
+    }
     ownDraw();
     if (scMoved) {
         rhi_cmd_set_scissor(cl, &now);
     }
 }
 
-/* Holds a draw in the open run, or (it does not join) draws the run and
- * opens one with it; false when it cannot be held (its DrawCB not in the
- * ring): the caller draws it alone */
-static bool vuRunTake(Replay *r, const RdPipeKeyInt *key, RhiPipeline p, RhiBindGroup g1,
-                      RhiBindGroup g2, const IcoDrawCB *cb, const IcoVuCB *vcb, uint64_t bonesOff,
-                      const VuIdx *ix, uint32_t first, uint32_t count)
+/* Holds a draw of np passes (1, or the no-dual pair: vuMergePasses) in the
+ * open run, or (it does not join) draws the run and opens one with it;
+ * false when it cannot be held (a DrawCB not in the ring): the caller draws
+ * it alone */
+static bool vuRunTake(Replay *r, uint32_t np, const RdPipeKeyInt *key, const RhiPipeline *p,
+                      RhiBindGroup g1, RhiBindGroup g2, const IcoDrawCB *cb, const IcoVuCB *vcb,
+                      uint64_t bonesOff, const VuIdx *ix, uint32_t first, uint32_t count)
 {
     VuRunDraw nd;
     nd.vcb = *vcb;
@@ -720,12 +735,17 @@ static bool vuRunTake(Replay *r, const RdPipeKeyInt *key, RhiPipeline p, RhiBind
     nd.count = count;
     nd.lo = nd.hi = 0;
     nd.ranged = false;
-    if (s_run.n && s_run.n < RD_VU_MERGE_MAX && s_run.replay == g_rd.replayCounter && r->passOpen &&
-        s_run.pass == r->passSerial && s_run.post == r->perfPost && s_run.p.id == p.id &&
-        memcmp(&s_run.key, key, sizeof(*key)) == 0 && s_run.g1.id == g1.id &&
-        s_run.g2.id == g2.id && s_run.frame.group.id == r->frameBG.group.id &&
-        s_run.frame.offset == r->frameBG.offset && memcmp(&s_run.sc, &r->sc, sizeof(r->sc)) == 0 &&
-        memcmp(&s_run.cb, cb, sizeof(*cb)) == 0) {
+    bool same = s_run.n && s_run.n < RD_VU_MERGE_MAX && s_run.replay == g_rd.replayCounter &&
+                r->passOpen && s_run.pass == r->passSerial && s_run.post == r->perfPost &&
+                s_run.np == np && s_run.g1.id == g1.id && s_run.g2.id == g2.id &&
+                s_run.frame.group.id == r->frameBG.group.id &&
+                s_run.frame.offset == r->frameBG.offset &&
+                memcmp(&s_run.sc, &r->sc, sizeof(r->sc)) == 0;
+    for (uint32_t i = 0; same && i < np; i++) {
+        same = s_run.p[i].id == p[i].id && memcmp(&s_run.key[i], &key[i], sizeof(key[i])) == 0 &&
+               memcmp(&s_run.cb[i], &cb[i], sizeof(cb[i])) == 0;
+    }
+    if (same) {
         /* raised past the run's values, within the device's */
         if (s_run.n == 1) {
             vuRunRange(&s_run.d[0]);
@@ -740,21 +760,27 @@ static bool vuRunTake(Replay *r, const RdPipeKeyInt *key, RhiPipeline p, RhiBind
         }
     }
     rd__replay_vu_flush(r);
-    const uint64_t dOff = rd__draw_cb_offset(cb);
-    if (dOff == ~0ull) {
-        return false;
+    uint64_t dOff[2];
+    for (uint32_t i = 0; i < np; i++) {
+        dOff[i] = rd__draw_cb_offset(&cb[i]);
+        if (dOff[i] == ~0ull) {
+            return false;
+        }
     }
     s_run.replay = g_rd.replayCounter;
     s_run.pass = r->passSerial;
     s_run.post = r->perfPost;
-    s_run.key = *key;
-    s_run.p = p;
+    s_run.np = np;
+    for (uint32_t i = 0; i < np; i++) {
+        s_run.key[i] = key[i];
+        s_run.p[i] = p[i];
+        s_run.cb[i] = cb[i];
+        s_run.dOff[i] = dOff[i];
+    }
     s_run.g1 = g1;
     s_run.g2 = g2;
     s_run.frame = r->frameBG;
     s_run.sc = r->sc;
-    s_run.cb = *cb;
-    s_run.dOff = dOff;
     s_run.top = 0;
     s_run.d[0] = nd;
     s_run.n = 1;
@@ -766,6 +792,49 @@ void rd__replay_vu_flush_post(Replay *r, int post)
     if (s_run.n && s_run.post != post) {
         rd__replay_vu_flush(r); /* the run's draw belongs to the effect before */
     }
+}
+
+/* a pass the draw merge may hold: no destination read, or the attachment
+ * read under GS state as shader data (vuDraw) */
+static bool vuMergeDst(const RdPipeKeyInt *k)
+{
+    return k->dst == RHI_DST_READ_NONE || (k->dst == RHI_DST_READ_ATTACHMENT && rd__uber_on());
+}
+
+/* The passes a merged draw may have (vuDraw, vuRunTake): one, or without
+ * dual-source blending a lerp or Cd*FIX + Cs pass's two, its colour pass
+ * and the alpha pass after it (rd__expand_no_dual, rd__no_dual_second);
+ * else 0 (an alpha-test split, an exact blend's passes: drawn alone) */
+static uint32_t vuMergePasses(const RdDrawPass *dp, int np)
+{
+    if (np == 1) {
+        return 1u;
+    }
+    return np == 2 && rd__no_dual_second(dp, 1) ? 2u : 0u;
+}
+
+/* Without dual-source blending (g_rd.noDual) a cut's lerp or Cd*FIX + Cs
+ * pass is planned as a colour pass (ICO_DF_NODUAL_FACTOR, the mask's RGB)
+ * and, the mask with A, an alpha pass (rd__expand_no_dual): *one receives
+ * the pass as planned before that split, for vuFuseVerdict's rules; false
+ * when cut is not such a split, or its alpha pass's Z test is not the
+ * colour pass's (GREATER with Z write, whose alpha pass takes GEQUAL: a
+ * fragment at the stored Z writes its alpha there, which the kick's own
+ * one pass does not, so that pair stays apart) */
+static bool vuNoDualJoin(const RdDrawPass *cut, int nc, RdDrawPass *one)
+{
+    if (nc < 1 || nc > 2 || !(cut[0].flags & ICO_DF_NODUAL_FACTOR)) {
+        return false;
+    }
+    if (nc == 2 && (!rd__no_dual_second(cut, 1) || cut[1].key.gs.ztst != cut[0].key.gs.ztst)) {
+        return false;
+    }
+    *one = cut[0];
+    one->flags &= ~(uint32_t)ICO_DF_NODUAL_FACTOR;
+    if (nc == 2) {
+        one->key.gs.colorMask |= cut[1].key.gs.colorMask;
+    }
+    return true;
 }
 
 /* The passes of a VU draw under state s (vuDraw): the screen planner's,
@@ -828,7 +897,18 @@ static int vuPlan(const Replay *r, const RdStateBlock *s, const DrawSetup *ds, u
  * on a twin's pass would keep the pair apart); the kick's plan the
  * cut's but for the blend (PLANS: the key's blend, the flags FIX_FACTOR,
  * PREMUL and C1_DST, the clamped FIX and dstWant, as the alpha plan's
- * blending off normalises them, rd_alpha_plan.c) */
+ * blending off normalises them, rd_alpha_plan.c).
+ * Under GS state as shader data (rd_uber.c) both draws go through the
+ * attachment read's twin, blending off, with one key: the cut's DrawCB
+ * holds its ALPHA register, the kick's own the register 0x00 (Cs,
+ * RdDrawPass.csOnly), and nothing else of the two plans differs (the
+ * blend's flags and the clamped FIX are dropped by the read's image,
+ * rd_dst_read.c dstPass); the kick drawn under the cut's DrawCB has its
+ * pixels' register 0x00 in the shader (vu_common.hlsli VU_RETURN under
+ * ICO_DST_MODE 2: the mark as above), so its colour is Cs and its alpha,
+ * mask, PABE and FBA the pixel's own, what the kick's own pass stores, for
+ * every blend form: DST and BLEND do not apply, PLANS compares the kick's
+ * plan with the cut's under csOnly */
 enum { VU_FUSE_YES = -1, VU_FUSE_SAME = -2 }; /* else RD_VU_FUSE_*, the reason kept apart */
 
 static bool vuPassEqual(const RdDrawPass *a, const RdDrawPass *b)
@@ -870,33 +950,44 @@ static int vuFuseVerdict(const Replay *r, const RdStateBlock *fan, const DrawSet
     if (same) {
         return VU_FUSE_SAME;
     }
-    if (nc != 1 || nk != 1) {
+    /* without dual-source blending: the cut's two passes as one
+       (vuNoDualJoin); the kick then draws them too, its pixels' colour
+       pass at factor 1.0 (or 0 for Cd*FIX + Cs) and its alpha pass's As:
+       vu_common.hlsli vu_dual_out_f's fused argument */
+    RdDrawPass joined;
+    const bool split = vuNoDualJoin(cut, nc, &joined);
+    if ((!split && nc != 1) || nk != 1) {
         return RD_VU_FUSE_PASSES;
     }
-    if (r->dateStNow || cut[0].key.dst != RHI_DST_READ_NONE ||
-        kick[0].key.dst != RHI_DST_READ_NONE) {
+    const RdDrawPass *c0 = split ? &joined : &cut[0];
+    const bool uber = !split && rd__uber_on() && c0->key.dst == RHI_DST_READ_ATTACHMENT &&
+                      kick[0].key.dst == RHI_DST_READ_ATTACHMENT;
+    if (r->dateStNow ||
+        (!uber && (c0->key.dst != RHI_DST_READ_NONE || kick[0].key.dst != RHI_DST_READ_NONE))) {
         return RD_VU_FUSE_DST;
     }
-    const RdBlendPath bp = cut[0].key.colorFmt == RHI_FMT_RGBA8_UINT
-                               ? RD_BP_NONE
-                               : rd__blend_path(cut[0].key.gs.blend);
-    if (bp != RD_BP_LERP && bp != RD_BP_DST_FIX) {
+    const RdBlendPath bp =
+        c0->key.colorFmt == RHI_FMT_RGBA8_UINT ? RD_BP_NONE : rd__blend_path(c0->key.gs.blend);
+    if (!uber && bp != RD_BP_LERP && bp != RD_BP_DST_FIX) {
         return RD_VU_FUSE_BLEND;
     }
-    const uint8_t fs = cut[0].key.fs;
+    const uint8_t fs = c0->key.fs;
     const bool planes = fs == RD_FS_VU || fs == RD_FS_VU_TEXA;
-    const bool twin =
-        (fs == RD_FS_VU_NP || fs == RD_FS_VU_TEXA_NP) && !(cut[0].flags & ICO_DF_PLANE);
+    const bool twin = (fs == RD_FS_VU_NP || fs == RD_FS_VU_TEXA_NP) && !(c0->flags & ICO_DF_PLANE);
     if (!planes && !twin) {
         return RD_VU_FUSE_PLANES;
     }
     /* the cut's pass as the planner makes it with ABE off (rd_alpha_plan.c
      * rd__plan_screen_draw_alpha's normalisation) */
-    RdDrawPass off = cut[0];
-    off.key.gs.blend = RD_BLEND_COUNT;
-    off.flags &= ~(uint32_t)(ICO_DF_FIX_FACTOR | ICO_DF_PREMUL | ICO_DF_C1_DST);
-    off.fix = r->st.ds.blendFix;
-    off.dstWant = 0;
+    RdDrawPass off = *c0;
+    if (uber) {
+        off.csOnly = 1; /* the kick's own pass: the register 0x00 */
+    } else {
+        off.key.gs.blend = RD_BLEND_COUNT;
+        off.flags &= ~(uint32_t)(ICO_DF_FIX_FACTOR | ICO_DF_PREMUL | ICO_DF_C1_DST);
+        off.fix = r->st.ds.blendFix;
+        off.dstWant = 0;
+    }
     return vuPassEqual(&off, &kick[0]) ? VU_FUSE_YES : RD_VU_FUSE_PLANS;
 }
 
@@ -964,23 +1055,36 @@ static void vuDraw(Replay *r, const RdStateBlock *s, const DrawSetup *ds, RhiBin
             own = true;
         }
     }
+    /* the passes a merged draw takes: one, or the no-dual pair; a
+     * destination read only under GS state as shader data (rd_uber.c: the
+     * attachment read in rasterization order, so a merged draw's triangles
+     * read what the earlier ones wrote, as the draws one by one would) */
+    const uint32_t mp = vuMergePasses(dp, np);
+    bool mergeable = mp != 0u;
+    for (uint32_t i = 0; mergeable && i < mp; i++) {
+        mergeable = pipes[i].id && g_rd.vsMerge[keys[i].vs].id && vuMergeDst(&keys[i]);
+    }
     /* M0's predicates for the count (vuMergeNote) */
-    const bool noteable = np == 1 && !r->dateStNow && dp[0].key.dst == RHI_DST_READ_NONE &&
+    const bool noteable = mp != 0u && !r->dateStNow && vuMergeDst(&dp[0].key) &&
+                          (mp == 1u || vuMergeDst(&dp[1].key)) &&
                           s_zeroBonesFor == g_rd.replayCounter && bonesOff == s_zeroBones;
     const RdStateBlock saved = r->st;
     r->st = *s; /* fillDrawCB reads the state the passes were planned from */
-    if (g_rd.vuMerge && np == 1 && indexed && pipes[0].id && !own && g_rd.vsMerge[keys[0].vs].id &&
-        !r->dateStNow && keys[0].dst == RHI_DST_READ_NONE && !g_rdWin.first && !g_rd.passSplit &&
-        r->passOpen) {
+    if (g_rd.vuMerge && mergeable && indexed && !own && !r->dateStNow && !g_rdWin.first &&
+        !g_rd.passSplit && r->passOpen) {
         /* the draw merge: held in the run (drawn when it ends) */
-        IcoDrawCB cb;
-        rd__replay_fill_draw_cb(r, &dp[0], ds, &cb);
-        rd__replay_dst_pass_mode(r, &keys[0]); /* a storage pass ends first (its run drawn) */
-        if (vuRunTake(r, &keys[0], pipes[0], g1, g2, &cb, vcb, bonesOff, ix, first, count)) {
-            if (dp[0].key.gs.colorMask & 8) {
-                r->writeSerial++;
+        IcoDrawCB cb[2];
+        for (uint32_t i = 0; i < mp; i++) {
+            rd__replay_fill_draw_cb(r, &dp[i], ds, &cb[i]);
+            rd__replay_dst_pass_mode(r, &keys[i]); /* a storage pass ends first (its run drawn) */
+        }
+        if (vuRunTake(r, mp, keys, pipes, g1, g2, cb, vcb, bonesOff, ix, first, count)) {
+            for (uint32_t i = 0; i < mp; i++) {
+                if (dp[i].key.gs.colorMask & 8) {
+                    r->writeSerial++;
+                }
             }
-            vuMergeNote(r, noteable, pipes[0].id, g1.id, g2.id, &cb);
+            vuMergeNote(r, noteable, pipes[0].id, g1.id, g2.id, &cb[0]);
             r->st = saved;
             return;
         }
@@ -1295,7 +1399,7 @@ static bool vuSource(const RdFrame *f, const RdCmd *c, VuSource *s)
 }
 
 /* --------------------------------------- the vertex and triangle pre-passes
- * docs/port/RENDER.md, "The vertex and triangle pre-passes".  Before list 0
+ * docs/port/PIPELINES.md, "The vertex and triangle pre-passes".  Before list 0
  * (replayFrame, after the uploads and the first clears) every mesh, grid
  * and particle command of the replayed lists gets its VuSource (kept for
  * its draws); a mesh or grid command the vertices its index range reads,
@@ -2384,11 +2488,14 @@ static void preBatchInit(void)
  * VuCB and VuBoneCB through t5 by a table (vu_common.hlsli vu_merge_entry),
  * so consecutive draws with the same state are one indexed draw (vuDraw,
  * vuRunTake, rd__replay_vu_flush).  Off: [dev] vu_merge = false
- * (ICO_RD_VU_MERGE=0), Direct3D 11 (its run-time compile and its views of
- * the ring are not set up for t5 in the main draws), or a merge module
- * missing.  Before any pipeline (the keys are the same either way,
- * rd_pipeline.c) */
-static char s_mergeWhy[224];
+ * (ICO_RD_VU_MERGE=0) or a merge module missing.  On Direct3D 11 a module
+ * is only its description here (rhi_create_shader: FXC compiles it in the
+ * pipeline workers at the first pipeline that uses it), so a build FXC
+ * refuses shows as that pipeline's failure line, its draws skipped as any
+ * failed key's (rd_pipeline.c keepPipeline names the merge build and the
+ * setting that avoids it).  Before any pipeline (the keys are the same
+ * either way, rd_pipeline.c) */
+static char s_mergeWhy[288];
 
 /* the mesh and grid programs' entries and the main shader with a merge
  * build (the skinned programs and the particles have none: their draws are
@@ -2431,17 +2538,62 @@ static void vuMergeFree(void)
     g_rd.vuFuse = false;
 }
 
+/* the fallback (rd_internal.h rd__vu_merge_build_failed): the build the
+ * driver refused, noted until the next replay begins */
+static bool s_mergeOffPending;
+static char s_mergeOffBuild[64];
+
+void rd__vu_merge_build_failed(const char *build)
+{
+    if (!g_rd.vuMerge || s_mergeOffPending) {
+        return;
+    }
+    s_mergeOffPending = true;
+    snprintf(s_mergeOffBuild, sizeof(s_mergeOffBuild), "%s", build && build[0] ? build : "?");
+}
+
+static const char *backendWords(void)
+{
+    switch (rhi_backend()) {
+    case RHI_BACKEND_D3D11:
+        return "Direct3D 11";
+    case RHI_BACKEND_D3D12:
+        return "Direct3D 12";
+    case RHI_BACKEND_OPENGL:
+        return "OpenGL";
+    default:
+        return "Vulkan";
+    }
+}
+
+void rd__vu_merge_fallback(void)
+{
+    if (!s_mergeOffPending) {
+        return;
+    }
+    s_mergeOffPending = false;
+    if (!g_rd.vuMerge) {
+        return;
+    }
+    /* no list of an earlier replay holds a pipeline or a merge build
+       destroyed here; the start-up set's keys are made again on first use */
+    rhi_wait_idle();
+    rd__pipeline_cache_clear();
+    vuMergeFree();
+    snprintf(s_mergeWhy, sizeof(s_mergeWhy),
+             "off: the driver could not compile %s (%s); one GPU draw a VU draw from here",
+             s_mergeOffBuild, backendWords());
+    rd__log("VU merge: %s", s_mergeWhy);
+}
+
 static void vuMergeInit(void)
 {
     vuMergeFree();
+    s_mergeOffPending = false;
     const char *env = getenv("ICO_RD_VU_MERGE");
     if (env && strcmp(env, "0") == 0) {
         snprintf(s_mergeWhy, sizeof(s_mergeWhy),
                  "off ([dev] vu_merge = false, ICO_RD_VU_MERGE=0): one GPU draw a VU draw");
-    } else if (rhi_backend() == RHI_BACKEND_D3D11) {
-        snprintf(s_mergeWhy, sizeof(s_mergeWhy),
-                 "off on Direct3D 11 (the main draws do not bind t5 there): one GPU draw a VU "
-                 "draw");
     } else {
         bool ok = true;
         for (size_t i = 0; i < sizeof(kMergeVs) && ok; i++) {
@@ -2460,8 +2612,11 @@ static void vuMergeInit(void)
             snprintf(s_mergeWhy, sizeof(s_mergeWhy),
                      "on: consecutive mesh and grid draws with the same pipeline, textures, "
                      "DrawCB, FrameCB and scissor drawn as one indexed draw of up to %u, through "
-                     "the programs' merge builds ([dev] vu_merge = false draws one a command)",
-                     RD_VU_MERGE_MAX);
+                     "the programs' merge builds%s ([dev] vu_merge = false draws one a command)",
+                     RD_VU_MERGE_MAX,
+                     rhi_backend() == RHI_BACKEND_D3D11
+                         ? " (Direct3D 11: compiled at their first pipeline, t5 bound)"
+                         : "");
         } else {
             vuMergeFree();
         }
@@ -2500,18 +2655,15 @@ void rd__vu_prepass_init(const RhiLimits *lim)
         snprintf(g_rd.vuPrepassWhy, sizeof(g_rd.vuPrepassWhy),
                  "on a tile-based GPU (the pictures between two ticks shook through it on a "
                  "PowerVR phone; [dev] vu_prepass = true turns it on)");
-    } else if (bytes != 0u && bytes < ICO_VU_REC_BYTES && rhi_backend() == RHI_BACKEND_D3D11) {
-        /* d3d11_device.c reports 32 bytes: the record's read-back copies
-         * are not in that backend (a texture only into a readback buffer) */
-        snprintf(g_rd.vuPrepassWhy, sizeof(g_rd.vuPrepassWhy),
-                 "on Direct3D 11 (the backend holds the colour targets to %u bytes a pixel, the "
-                 "record %u: its copies are not in that backend)",
-                 bytes, ICO_VU_REC_BYTES);
     } else if (bytes != 0u && bytes < ICO_VU_REC_BYTES) {
+        /* an Apple A9 or A10 GPU under MoltenVK (rhi_metal_color_bytes);
+         * Direct3D 11 reports 0 since v0.10.0 (its record copies are a
+         * compute shader, d3d11_cmd.c), 32 only below feature level 11_0,
+         * which its rhi_init never takes */
         snprintf(g_rd.vuPrepassWhy, sizeof(g_rd.vuPrepassWhy),
                  "on this device (its colour targets hold %u bytes a pixel together, the record "
-                 "%u: an Apple A9 or A10 GPU)",
-                 bytes, ICO_VU_REC_BYTES);
+                 "%u%s)",
+                 bytes, ICO_VU_REC_BYTES, lim->moltenvk ? ": an Apple A9 or A10 GPU" : "");
     }
     g_rd.vuPrepass = g_rd.vuPrepassWhy[0] == '\0';
     if (!s_recNull.id) {

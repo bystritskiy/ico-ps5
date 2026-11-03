@@ -7,12 +7,16 @@
  * deflection, dead zone, the run ring), the D-pad, face buttons under two
  * fingers, a finger sliding off a button, cancel, the look pad's decay,
  * hiding after 5 s and with a gamepad, the fades, and the merged pad
- * through ico_input_vpad_to_frame with the stick fix off and on.
+ * through ico_input_vpad_to_frame with the stick fix off and on; the menu
+ * row tap's finger mark (touch_eaten.h) let go when the touch editor opens
+ * or closes, so a reused finger id reaches the controls (review finding 4).
  */
 #include <stdio.h>
 #include <string.h>
 #include "input.h"
+#include "pointer.h"
 #include "touch.h"
+#include "touch_eaten.h"
 #include "touch_edit.h"
 #include "touch_shapes.h"
 
@@ -1463,8 +1467,175 @@ static void test_menu_tap_areas(void)
     CHECK(!l.stickActive && !ico_touch_blocks_menu_tap(&l, sx, sy, ICO_TOUCH_CTL_CROSS));
 }
 
+/* the menu row probe the menu layer registers: a row where y is in the band */
+static int probe_row(float nx, float ny, int *layout, int *row)
+{
+    (void)nx;
+    if (ny >= 0.0f && ny <= 1.0f) {
+        *layout = 3;
+        *row = 7;
+        return 1;
+    }
+    return 0;
+}
+
+static int probe_none(float nx, float ny, int *layout, int *row)
+{
+    (void)nx, (void)ny, (void)layout, (void)row;
+    return 0;
+}
+
+/* what the device layer (input_sdl.c touch_menu_tap) decides for a finger
+   going down at (x, y): 1 the row takes it (clicked, never shown to the
+   controls), 0 the controls get it. menu is ico_pointer_menu(). */
+static int row_takes(const IcoTouchLayout *l, int menu, float x, float y, int confirm)
+{
+    int ctl = -1;
+    int cover;
+
+    if (!menu || !ico_touch_menu_taps(l)) {
+        return 0;
+    }
+    cover = ico_touch_menu_tap_cover(l, x, y, confirm, &ctl);
+    if (cover == ICO_TOUCH_COVER_NONE) {
+        return 1;
+    }
+    return cover == ICO_TOUCH_COVER_HIDDEN &&
+           ico_pointer_row_at(x / (float)l->outW, y / (float)l->outH, NULL, NULL);
+}
+
+/* A tap on a menu row against a control under it: a Hidden Triangle (not
+   drawn) over a row gives way, the row is clicked and Triangle is not
+   pressed; a shown one wins and is pressed; with no menu up the Hidden one
+   takes the finger as in play. Hidden Start (the report) the same; a Hidden
+   control with no row under the finger keeps the finger. */
+static void test_menu_tap_cover(void)
+{
+    const IcoTouchEnv env = env_of(420.0f, ICO_TOUCH_FOLD_NONE, 0, 0, 0, 0, 0, 0);
+
+    static const struct {
+        int ctl, zone;
+        unsigned int pad;
+    } kC[] = {{ICO_TOUCH_CTL_TRIANGLE, ICO_TOUCH_B_TRIANGLE, ICO_PAD_TRIANGLE},
+              {ICO_TOUCH_CTL_START, ICO_TOUCH_B_START, ICO_PAD_START}};
+
+    IcoTouchEdits e;
+    IcoTouchLayout l;
+    IcoTouchState t;
+    IcoVirtualPad v;
+    float x, y;
+    int k, ctl = -1, layout = -1, row = -1;
+
+    CHECK(!ico_pointer_row_at(0.5f, 0.5f, NULL, NULL)); /* no probe: no row */
+    ico_pointer_set_row_probe(probe_row);
+    CHECK(ico_pointer_row_at(0.5f, 0.5f, &layout, &row) && layout == 3 && row == 7);
+    for (k = 0; k < 2; k++) {
+        int pass;
+
+        for (pass = 0; pass < 3; pass++) {
+            /* pass 0: Hidden, 1: shown, 2: Hidden with Cross working (no taps) */
+            ico_touch_edits_defaults(&e);
+            if (pass != 2) {
+                CHECK(ico_touch_edit_parse(&e.ctl[ICO_TOUCH_RULE_FULL][ICO_TOUCH_CTL_CROSS],
+                                           ICO_TOUCH_CTL_CROSS, "off") == 0);
+            }
+            if (pass != 1) {
+                CHECK(ico_touch_edit_parse(&e.ctl[ICO_TOUCH_RULE_FULL][kC[k].ctl], kC[k].ctl,
+                                           "hidden") == 0);
+            }
+            l = ico_touch_layout_edits(2340, 1080, no_insets(), ICO_TOUCH_MEDIUM, &env, &e);
+            g_l = &l;
+            centre_of(&l, kC[k].zone, &x, &y);
+            ico_pointer_set_row_probe(probe_row);
+            CHECK(ico_touch_menu_tap_cover(&l, x, y, ICO_TOUCH_CTL_CROSS, &ctl) ==
+                      (pass == 1 ? ICO_TOUCH_COVER_SHOWN : ICO_TOUCH_COVER_HIDDEN) &&
+                  ctl == kC[k].ctl);
+            /* the row wins over a Hidden control only; a shown one wins; Cross
+               working: no row taps at all */
+            CHECK(row_takes(&l, 1, x, y, ICO_TOUCH_CTL_CROSS) == (pass == 0));
+            /* no menu up: gameplay, the control keeps the finger */
+            CHECK(!row_takes(&l, 0, x, y, ICO_TOUCH_CTL_CROSS));
+            /* a Hidden control with no row under the finger keeps it */
+            ico_pointer_set_row_probe(probe_none);
+            CHECK(!row_takes(&l, 1, x, y, ICO_TOUCH_CTL_CROSS));
+            /* a finger the controls do get presses the control, Hidden or shown */
+            memset(&t, 0, sizeof(t));
+            ico_touch_reset(&t, 1 * S);
+            ev(&t, 1, x, y, ICO_TOUCH_DOWN, 1 * S);
+            v = step(&t, 1 * S);
+            CHECK(v.buttons == kC[k].pad);
+        }
+    }
+    /* the stick: Hidden gives way, drawn wins (Cross Off, Circle confirms on
+       the Japanese disc's side) */
+    ico_touch_edits_defaults(&e);
+    CHECK(ico_touch_edit_parse(&e.ctl[ICO_TOUCH_RULE_FULL][ICO_TOUCH_CTL_CROSS],
+                               ICO_TOUCH_CTL_CROSS, "off") == 0);
+    l = ico_touch_layout_edits(2340, 1080, no_insets(), ICO_TOUCH_MEDIUM, &env, &e);
+    CHECK(ico_touch_menu_tap_cover(&l, l.stickHomeX, l.stickHomeY, ICO_TOUCH_CTL_CIRCLE, &ctl) ==
+              ICO_TOUCH_COVER_SHOWN &&
+          ctl == ICO_TOUCH_CTL_STICK);
+    CHECK(ico_touch_edit_parse(&e.ctl[ICO_TOUCH_RULE_FULL][ICO_TOUCH_CTL_STICK],
+                               ICO_TOUCH_CTL_STICK, "hidden") == 0);
+    l = ico_touch_layout_edits(2340, 1080, no_insets(), ICO_TOUCH_MEDIUM, &env, &e);
+    CHECK(ico_touch_menu_tap_cover(&l, l.stickHomeX, l.stickHomeY, ICO_TOUCH_CTL_CIRCLE, &ctl) ==
+              ICO_TOUCH_COVER_HIDDEN &&
+          ctl == ICO_TOUCH_CTL_STICK);
+    /* the boxes the start-up lines print */
+    {
+        IcoTouchRect b;
+
+        CHECK(ico_touch_ctl_box(&l, ICO_TOUCH_CTL_START, &b) && b.w > 0.0f && b.h > 0.0f);
+        CHECK(ico_touch_ctl_box(&l, ICO_TOUCH_CTL_DPAD, &b) && b.w > 0.0f);
+        CHECK(!ico_touch_ctl_box(&l, ICO_TOUCH_CTL_COUNT, &b));
+    }
+    ico_pointer_set_row_probe(NULL);
+}
+
+/* Review finding 4: the row tap's finger mark (touch_eaten.h, as
+   input_sdl.c drives it).  The row eats finger 0: its MOVE and UP stay from
+   the controls, and the UP lets it go.  A row tap that opens the touch
+   editor: its lift goes to the editor, the editor's opening (and closing)
+   drops the mark, so the next finger 0 reaches the controls for its DOWN,
+   MOVE and UP.  A DOWN of the marked id is a new finger.  Another finger's
+   events and cancel are never the row's. */
+static void test_menu_tap_eaten(void)
+{
+    IcoTouchEaten e;
+
+    memset(&e, 0, sizeof(e));
+    /* the row eats finger 0 down to its lift */
+    CHECK(!ico_touch_eaten_event(&e, 0, ICO_TOUCH_DOWN));
+    ico_touch_eaten_take(&e, 0);
+    CHECK(ico_touch_eaten_event(&e, 0, ICO_TOUCH_MOVE));
+    CHECK(!ico_touch_eaten_event(&e, 1, ICO_TOUCH_MOVE));
+    CHECK(!ico_touch_eaten_event(&e, 1, ICO_TOUCH_CANCEL));
+    CHECK(ico_touch_eaten_event(&e, 0, ICO_TOUCH_UP));
+    CHECK(!e.on);
+    CHECK(!ico_touch_eaten_event(&e, 0, ICO_TOUCH_DOWN));
+    CHECK(!ico_touch_eaten_event(&e, 0, ICO_TOUCH_UP));
+    /* the tap opens the editor: its lift goes there, the mark is dropped
+       (ico_input_sdl_touch_edit_begin, touch_tap_drop) */
+    ico_touch_eaten_take(&e, 0);
+    ico_touch_eaten_drop(&e); /* the editor opens */
+    ico_touch_eaten_drop(&e); /* ... and closes */
+    CHECK(!ico_touch_eaten_event(&e, 0, ICO_TOUCH_DOWN));
+    CHECK(!ico_touch_eaten_event(&e, 0, ICO_TOUCH_MOVE));
+    CHECK(!ico_touch_eaten_event(&e, 0, ICO_TOUCH_UP));
+    /* the mark kept by a lost lift: a DOWN of its id is a new finger */
+    ico_touch_eaten_take(&e, 0);
+    CHECK(!ico_touch_eaten_event(&e, 0, ICO_TOUCH_DOWN));
+    CHECK(!ico_touch_eaten_event(&e, 0, ICO_TOUCH_MOVE));
+    CHECK(!ico_touch_eaten_event(&e, 0, ICO_TOUCH_UP));
+    /* its cancel lets it go too */
+    ico_touch_eaten_take(&e, 2);
+    CHECK(ico_touch_eaten_event(&e, 2, ICO_TOUCH_CANCEL));
+    CHECK(!e.on);
+}
+
 int main(void)
 {
+    test_menu_tap_eaten();
     test_layouts();
     test_fold_rules();
     test_stick();
@@ -1477,6 +1648,7 @@ int main(void)
     test_gamepad_drop();
     test_hidden_off();
     test_menu_tap_areas();
+    test_menu_tap_cover();
     if (failures != 0) {
         fprintf(stderr, "touch_test: %d failure(s)\n", failures);
         return 1;

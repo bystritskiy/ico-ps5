@@ -82,6 +82,13 @@ typedef struct IcoRegionInfo {
        directory with records of another layout (port/save/mc_host.c
        sceMcInit) */
     const char *mc_card_suffix;
+    /* the card preview record the game keeps in IosMcPreviewInfo
+       (port/game/gamestate.c's snapshot): the word holding the play time in
+       frames and the one holding the save's sofa (GetSaveSofaLayoutID).  The
+       European program's record is stage, cleared, play time, sofa; the 2001
+       discs' stage, play time, sofa (issue 160) */
+    int mc_preview_play;
+    int mc_preview_sofa;
 
     /* --- the game's options ------------------------------------------- */
     int has_50hz_row;      /* the game offers 50/60 Hz (the port's row too) */
@@ -153,8 +160,9 @@ typedef struct IcoRegionInfo {
     int layout_play;           /* la_game_loop */
     int layout_scene;          /* la_game_demo (the empty layout of a scene) */
     int layout_mc_files;       /* la_mc_file_select */
-    int layout_load;           /* la_load_processing */
-    int layout_save_complete;  /* la_save_confirm_complete */
+    int layout_load_files; /* la_mc_load_file_select (the Continue screen, linked to the above) */
+    int layout_load;       /* la_load_processing */
+    int layout_save_complete; /* la_save_confirm_complete */
 
     /* --- menu rows (texProperty rows) ----------------------------------- */
     int property_count;    /* LT_GAME_PROPERTY_COUNT */
@@ -233,6 +241,11 @@ const IcoRegionInfo *ico_region_cur(void);
    and through disc_id (when not NULL) the disc's id for the log: what
    la_host_new_game_go raises after the New Game screen's confirm. */
 int ico_region_new_game_flag(const char **disc_id);
+
+/* The selected disc's story flag count (gflag_count): gflag.c's
+   gflagChk/gflagOn/gflagOff log an id at or past it (diag_host.h
+   ico_host_gflag_range). */
+int ico_region_gflag_count(void);
 
 /* A [dev] start_stage or switch_to value (ICO_START_STAGE, ICO_SWITCH_TO:
    decimal digits only) as a stage of the selected disc: 1 ..

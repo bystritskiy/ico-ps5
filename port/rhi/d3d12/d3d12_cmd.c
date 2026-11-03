@@ -1,9 +1,17 @@
 /* d3d12_cmd.c: frames, command lists, submission, barriers, render passes,
  * draws, copies and readback for the D3D12 backend. */
 #include "d3d12_internal.h"
+#include "../rhi_bind_cache.h"
 #include <assert.h>
 #include <stdlib.h>
 #include <string.h>
+
+/* DxCmdList.known: the bind cache's state the list holds (d3d12_internal.h) */
+#define DX_KNOW_VIEWPORT 1u
+#define DX_KNOW_SCISSOR 2u
+#define DX_KNOW_INDEX 4u
+#define DX_KNOW_STENCIL 8u
+#define DX_KNOW_BLEND_CONSTANT 16u
 
 /* ------------------------------------------------------------------ fence */
 uint64_t dx_signal(void)
@@ -240,6 +248,33 @@ uint32_t rhi_read_timestamps_busy(uint64_t *ns, uint32_t max)
     return 0;
 }
 
+/* ------------------------------------------------------- occlusion queries
+ * Not supported here (rhi.h rhi_cmd_begin_occlusion: the replay tool's
+ * measurement is Vulkan's); an occlusion query heap (D3D12_QUERY_HEAP_TYPE_OCCLUSION, BeginQuery/EndQuery of D3D12_QUERY_TYPE_OCCLUSION) resolved into the slot's readback buffer as the timestamps are would be the form. */
+bool rhi_occlusion_supported(void)
+{
+    return false;
+}
+
+void rhi_cmd_begin_occlusion(RhiCommandList cl, uint32_t index)
+{
+    (void)cl;
+    (void)index;
+}
+
+void rhi_cmd_end_occlusion(RhiCommandList cl, uint32_t index)
+{
+    (void)cl;
+    (void)index;
+}
+
+uint32_t rhi_read_occlusion(uint64_t *samples, uint32_t max)
+{
+    (void)samples;
+    (void)max;
+    return 0;
+}
+
 /* ------------------------------------------------------------------ frames */
 static bool dx_new_list(ID3D12CommandAllocator **alloc, ID3D12GraphicsCommandList **cl)
 {
@@ -389,6 +424,11 @@ RhiCommandList rhi_begin_commands(void)
     }
     dx_bind_heaps(c->cl);
     c->recording = true;
+    /* the bind cache starts empty (Reset cleared the list's state; the
+     * slot's recycle zeroed the cache too) */
+    c->pipeline = NULL;
+    c->pipelineId = 0;
+    c->known = 0;
     c->serial = ++g_dx.listSerial;
     c->topoSet = D3D_PRIMITIVE_TOPOLOGY_UNDEFINED;
     f->listCount++;
@@ -551,6 +591,9 @@ static void dx_pass_area_check(uint32_t *w, uint32_t *h, const RhiRenderPassDesc
 
 void rhi_cmd_begin_render_pass(RhiCommandList cl, const RhiRenderPassDesc *pass)
 {
+    /* pass->area (rhi.h RhiRenderPassDesc) is ignored: D3D12 has no render pass objects here and no tiles to spare; the
+     * pass covers its whole size, and the caller's draws lie inside the
+     * area anyway (a tile-based GPU's saving, Vulkan only) */
     DxCmdList *c = dx_get_cmd(cl);
     if (!c || !pass || pass->colorCount > RHI_MAX_COLOR_TARGETS) {
         return;
@@ -613,6 +656,9 @@ void rhi_cmd_begin_render_pass(RhiCommandList cl, const RhiRenderPassDesc *pass)
     g_dx.counts.renderPasses++;
     uint32_t areaW = pass->width, areaH = pass->height;
     dx_pass_area_check(&areaW, &areaH, pass, dt);
+    /* the defaults are recorded whatever the list held (the bind cache
+     * forgets the viewport and scissor at a pass's start) */
+    c->known &= ~(DX_KNOW_VIEWPORT | DX_KNOW_SCISSOR);
     RhiViewport vp = {0.0f, 0.0f, (float)areaW, (float)areaH, 0.0f, 1.0f};
     RhiRect sc = {0, 0, areaW, areaH};
     rhi_cmd_set_viewport(cl, &vp);
@@ -635,7 +681,14 @@ void rhi_cmd_set_viewport(RhiCommandList cl, const RhiViewport *v)
     }
     /* D3D's clip space is the RHI's: no flip (the Vulkan backend flips) */
     D3D12_VIEWPORT vp = {v->x, v->y, v->w, v->h, v->minDepth, v->maxDepth};
+    if (rhi_bind_cache_enabled() && (c->known & DX_KNOW_VIEWPORT) &&
+        memcmp(&vp, &c->vp, sizeof(vp)) == 0) {
+        g_dx.counts.stateSetsSkipped++;
+        return;
+    }
     ID3D12GraphicsCommandList_RSSetViewports(c->cl, 1, &vp);
+    c->vp = vp;
+    c->known |= DX_KNOW_VIEWPORT;
 }
 
 void rhi_cmd_set_scissor(RhiCommandList cl, const RhiRect *r)
@@ -645,7 +698,14 @@ void rhi_cmd_set_scissor(RhiCommandList cl, const RhiRect *r)
         return;
     }
     D3D12_RECT sc = {r->x, r->y, r->x + (LONG)r->w, r->y + (LONG)r->h};
+    if (rhi_bind_cache_enabled() && (c->known & DX_KNOW_SCISSOR) &&
+        memcmp(&sc, &c->sc, sizeof(sc)) == 0) {
+        g_dx.counts.stateSetsSkipped++;
+        return;
+    }
     ID3D12GraphicsCommandList_RSSetScissorRects(c->cl, 1, &sc);
+    c->sc = sc;
+    c->known |= DX_KNOW_SCISSOR;
 }
 
 void rhi_cmd_set_pipeline(RhiCommandList cl, RhiPipeline p)
@@ -655,21 +715,31 @@ void rhi_cmd_set_pipeline(RhiCommandList cl, RhiPipeline p)
     if (!c || !pp) {
         return;
     }
-    if (c->pipeline != pp) {
-        if (!c->pipeline) {
-            c->vbDirty = 0xFFu;
-        } else {
-            /* strides live in the vertex buffer views */
-            for (uint32_t b = 0; b < RHI_MAX_VERTEX_ATTRS; b++) {
-                if (c->pipeline->strides[b] != pp->strides[b]) {
-                    c->vbDirty |= 1u << b;
-                }
+    /* by id: a pipeline destroyed and another made in its pool slot has the
+     * same pointer but a new id (the slot's generation) */
+    /* the bind cache off (rhi_bind_cache.h): bound and every view set
+     * again at every pipeline bind */
+    const bool cache = rhi_bind_cache_enabled();
+    if (cache && c->pipelineId == p.id) {
+        g_dx.counts.pipelineBindsSkipped++;
+        return;
+    }
+    if (!cache || !c->pipeline || c->pipeline == pp) {
+        /* none bound, or a new pipeline in the bound one's slot (its
+         * strides are the new ones): every view set again */
+        c->vbDirty = 0xFFFFFFFFu;
+    } else {
+        /* strides live in the vertex buffer views */
+        for (uint32_t b = 0; b < RHI_MAX_VERTEX_ATTRS; b++) {
+            if (c->pipeline->strides[b] != pp->strides[b]) {
+                c->vbDirty |= 1u << b;
             }
         }
-        c->pipeline = pp;
-        ID3D12GraphicsCommandList_SetPipelineState(c->cl, pp->pso);
-        g_dx.counts.pipelineBinds++;
     }
+    c->pipeline = pp;
+    c->pipelineId = p.id;
+    ID3D12GraphicsCommandList_SetPipelineState(c->cl, pp->pso);
+    g_dx.counts.pipelineBinds++;
 }
 
 void rhi_cmd_set_bind_group_offsets(RhiCommandList cl, uint32_t group, RhiBindGroup bg,
@@ -690,10 +760,18 @@ void rhi_cmd_set_bind_group_offsets(RhiCommandList cl, uint32_t group, RhiBindGr
         DX_LOG("rhi_cmd_set_bind_group_offsets: %u offsets for %u dynamic slots", count, dyn);
         count = dyn;
     }
-    memset(c->offsets[group], 0, sizeof(c->offsets[group]));
-    for (uint32_t i = 0; i < count && offsets; i++) {
-        c->offsets[group][i] = offsets[i];
+    uint32_t off[RHI_MAX_DYNAMIC_OFFSETS] = {0};
+    for (uint32_t i = 0; i < count && offsets && i < RHI_MAX_DYNAMIC_OFFSETS; i++) {
+        off[i] = offsets[i];
     }
+    /* the group the slot holds with the same offsets: its root arguments
+     * are set (or will be at the next draw, its dirty bit kept) */
+    if (rhi_bind_cache_enabled() && c->groups[group] == bg.id &&
+        memcmp(c->offsets[group], off, sizeof(off)) == 0) {
+        g_dx.counts.bindGroupBindsSkipped++;
+        return;
+    }
+    memcpy(c->offsets[group], off, sizeof(off));
     c->groups[group] = bg.id;
     c->groupDirty |= 1u << group;
 }
@@ -709,12 +787,15 @@ static void dx_flush(DxCmdList *c)
 {
     DxPipeline *p = c->pipeline;
     DxRootSig *r = p->root;
-    if (c->rootSet != r->rs) {
+    /* the bind cache off (rhi_bind_cache.h): the root signature (and so
+     * every root argument) and the topology set again at every draw */
+    const bool cache = rhi_bind_cache_enabled();
+    if (!cache || c->rootSet != r->rs) {
         ID3D12GraphicsCommandList_SetGraphicsRootSignature(c->cl, r->rs);
         c->rootSet = r->rs;
         c->groupDirty = 0xFFu; /* root arguments are reset with the signature */
     }
-    if (c->topoSet != p->topo) {
+    if (!cache || c->topoSet != p->topo) {
         ID3D12GraphicsCommandList_IASetPrimitiveTopology(c->cl, p->topo);
         c->topoSet = p->topo;
     }
@@ -768,8 +849,15 @@ void rhi_cmd_set_vertex_buffer(RhiCommandList cl, uint32_t binding, RhiBuffer b,
     if (!c || !buf || binding >= RHI_MAX_VERTEX_ATTRS || offset >= buf->size) {
         return;
     }
-    c->vbAddr[binding] = buf->gpu + offset;
-    c->vbSize[binding] = (uint32_t)(buf->size - offset);
+    const D3D12_GPU_VIRTUAL_ADDRESS addr = buf->gpu + offset;
+    const uint32_t size = (uint32_t)(buf->size - offset);
+    if (rhi_bind_cache_enabled() && c->vbAddr[binding] == addr && c->vbSize[binding] == size) {
+        /* the view the binding holds (or gets at the next draw) */
+        g_dx.counts.stateSetsSkipped++;
+        return;
+    }
+    c->vbAddr[binding] = addr;
+    c->vbSize[binding] = size;
     c->vbDirty |= 1u << binding;
 }
 
@@ -782,23 +870,46 @@ void rhi_cmd_set_index_buffer(RhiCommandList cl, RhiBuffer b, uint64_t offset, b
     }
     D3D12_INDEX_BUFFER_VIEW v = {buf->gpu + offset, (UINT)(buf->size - offset),
                                  u32 ? DXGI_FORMAT_R32_UINT : DXGI_FORMAT_R16_UINT};
+    if (rhi_bind_cache_enabled() && (c->known & DX_KNOW_INDEX) &&
+        c->ib.BufferLocation == v.BufferLocation && c->ib.SizeInBytes == v.SizeInBytes &&
+        c->ib.Format == v.Format) {
+        g_dx.counts.stateSetsSkipped++;
+        return;
+    }
     ID3D12GraphicsCommandList_IASetIndexBuffer(c->cl, &v);
+    c->ib = v;
+    c->known |= DX_KNOW_INDEX;
 }
 
 void rhi_cmd_set_stencil_ref(RhiCommandList cl, uint8_t ref)
 {
     DxCmdList *c = dx_get_cmd(cl);
-    if (c) {
-        ID3D12GraphicsCommandList_OMSetStencilRef(c->cl, ref);
+    if (!c) {
+        return;
     }
+    if (rhi_bind_cache_enabled() && (c->known & DX_KNOW_STENCIL) && c->stencilRef == ref) {
+        g_dx.counts.stateSetsSkipped++;
+        return;
+    }
+    ID3D12GraphicsCommandList_OMSetStencilRef(c->cl, ref);
+    c->stencilRef = ref;
+    c->known |= DX_KNOW_STENCIL;
 }
 
 void rhi_cmd_set_blend_constant(RhiCommandList cl, const float rgba[4])
 {
     DxCmdList *c = dx_get_cmd(cl);
-    if (c) {
-        ID3D12GraphicsCommandList_OMSetBlendFactor(c->cl, rgba);
+    if (!c || !rgba) {
+        return;
     }
+    if (rhi_bind_cache_enabled() && (c->known & DX_KNOW_BLEND_CONSTANT) &&
+        memcmp(c->blendConst, rgba, sizeof(c->blendConst)) == 0) {
+        g_dx.counts.stateSetsSkipped++;
+        return;
+    }
+    ID3D12GraphicsCommandList_OMSetBlendFactor(c->cl, rgba);
+    memcpy(c->blendConst, rgba, sizeof(c->blendConst));
+    c->known |= DX_KNOW_BLEND_CONSTANT;
 }
 
 /* Dynamic state and local read (rhi.h): D3D12 has neither (its

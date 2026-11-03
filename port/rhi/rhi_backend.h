@@ -24,6 +24,8 @@
     X(backend)                                                                                     \
     X(limits)                                                                                      \
     X(adapter_name)                                                                                \
+    X(adapter_list)                                                                                \
+    X(set_adapter_wanted)                                                                          \
     X(device_lost)                                                                                 \
     X(resize_swapchain)                                                                            \
     X(swapchain_format)                                                                            \
@@ -50,6 +52,8 @@
     X(create_bind_group)                                                                           \
     X(create_pipeline)                                                                             \
     X(create_pipelines)                                                                            \
+    X(create_pipelines_begin)                                                                      \
+    X(create_pipelines_end)                                                                        \
     X(destroy_pipeline)                                                                            \
     X(begin_commands)                                                                              \
     X(end_commands)                                                                                \
@@ -91,8 +95,14 @@
     X(cmd_write_timestamp)                                                                         \
     X(read_timestamps)                                                                             \
     X(read_timestamps_busy)                                                                        \
+    X(occlusion_supported)                                                                         \
+    X(cmd_begin_occlusion)                                                                         \
+    X(cmd_end_occlusion)                                                                           \
+    X(read_occlusion)                                                                              \
     X(prefer_mailbox)                                                                              \
     X(present_mailbox)                                                                             \
+    X(present_fifo_fallback)                                                                       \
+    X(present_fifo_fallback_on)                                                                    \
     X(set_exclusive_fullscreen)                                                                    \
     X(present_mode_name)                                                                           \
     X(present_timing)                                                                              \

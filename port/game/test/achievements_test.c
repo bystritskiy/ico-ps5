@@ -181,7 +181,10 @@ static void new_game(void)
 
 static int file_count(const char *needle)
 {
-    FILE *f = fopen(s_path, "rb");
+    FILE *f;
+
+    ico_ach_writer_idle(); /* the file is written in the background */
+    f = fopen(s_path, "rb");
     char buf[16384];
     size_t n;
     int c = 0;
@@ -227,6 +230,17 @@ static const PeekWant kPeekWant[] = {
     {0x00679410u, 0x00272D30u, 0, 0x0067AB3Cu, 0x002695B8u, 12, 44, 16},           /* jun26 */
     {0x00633890u, 0x002A3040u, 0x00634548u, 0x0063513Cu, 0x00299940u, 13, 50, 24}, /* cn */
 };
+/* IosMcPreviewInfo's play time word on each disc, in config/regions.txt's
+   order, as literals: [2] on the European program's discs (la_playtime_count
+   counts IosMcPreviewInfo[2]), [1] on the North American disc and the 2001
+   previews (their la_playtime_count / la_game_loop count [1], and
+   la_save_processing puts the sofa in [2]: the decomp's 2001 McPreview); the
+   sofa is the word after it (issue 160) */
+static const int kPreviewPlay[] = {2, 2, 2, 1, 1, 1, 2};
+#define PLAY (kPreviewPlay[ico_region])
+#define SOFA (kPreviewPlay[ico_region] + 1)
+_Static_assert(sizeof(kPreviewPlay) / sizeof(kPreviewPlay[0]) == ICO_REGION_COUNT,
+               "a preview layout for each row of config/regions.txt");
 _Static_assert(sizeof(kPeekWant) / sizeof(kPeekWant[0]) == ICO_REGION_COUNT,
                "a row of retail addresses for each row of config/regions.txt");
 
@@ -240,7 +254,7 @@ static void test_view(void)
     g.stage_no = ST_WINDMILL;
     g.stage_name = "st09a (WINDMILL)";
     g.game_clear = 1;
-    g.mc_preview[2] = 50 * 3725; /* frames at 50 a second: 1 h 2 min 5 s */
+    g.mc_preview[PLAY] = 50 * 3725; /* frames at 50 a second: 1 h 2 min 5 s */
     g.weapon_kind = 5;
     g.hand_held = 1;
     g.girl_present = 1;
@@ -293,7 +307,7 @@ static void test_view(void)
         }
         CHECK(ico_gs_peek(layout, 4, &v) == 0 &&
               v == (unsigned)R->layout_save_complete); /* current_layout_id */
-        CHECK(ico_gs_peek(preview + 8, 4, &v) == 0 && v == 50u * 3725u);
+        CHECK(ico_gs_peek(preview + 4u * (unsigned)PLAY, 4, &v) == 0 && v == 50u * 3725u);
         CHECK(ico_gs_peek(preview + w->previewBytes - 4, 4, &v) == 0);
         CHECK(ico_gs_peek(preview + w->previewBytes, 4, &v) == -1);
         if (pal) {
@@ -335,7 +349,7 @@ static void test_signals(void)
 
     /* polled: a save (layout 38 then 41), a load (25), a new game (382) */
     g.layout = R->layout_pause; /* any layout before the save-complete one */
-    g.mc_preview[3] = 1203;
+    g.mc_preview[SOFA] = 1203;
     ticks(1);
     g.layout = R->layout_save_complete;
     ticks(1);
@@ -416,6 +430,129 @@ static void test_signals(void)
         CHECK(file_count("[unlocked." id "]") == 1);                                               \
     } while (0)
 
+/* a capture counts once (issue 162): the hook fires when the shadow takes
+   Yorda, her carried mode follows a tick or so later; the pause menu's
+   count is ico_gs_run_captures */
+static void capture_start(void)
+{
+    start("capture_once");
+    new_game();
+    g.stage_no = ST_GATE;
+    g.girl_present = 1;
+    ticks(1);
+}
+
+static void test_capture_once(void)
+{
+    int r;
+    const int saved_region = ico_region;
+
+    /* the hook on tick N, the flag on tick N+1 (no hook): one */
+    capture_start();
+    ico_gs_signal(ICO_GS_EV_YORDA_GRABBED, 3757);
+    ticks(1);
+    CHECK(ico_gs_run_captures() == 1);
+    g.yorda_carried_by_enemy = 1;
+    ticks(1);
+    CHECK(ico_gs_run_captures() == 1);
+    ticks(6); /* still carried: nothing more */
+    CHECK(ico_gs_run_captures() == 1);
+
+    /* the flag alone: one */
+    capture_start();
+    g.yorda_carried_by_enemy = 1;
+    ticks(1);
+    CHECK(ico_gs_run_captures() == 1);
+    ticks(3);
+    CHECK(ico_gs_run_captures() == 1);
+
+    /* the hook alone (her mode never changes): one */
+    capture_start();
+    ico_gs_signal(ICO_GS_EV_YORDA_GRABBED, 3757);
+    ticks(10);
+    CHECK(ico_gs_run_captures() == 1);
+
+    /* the hook, the flag, a drop, a second hook and its flag: two */
+    capture_start();
+    ico_gs_signal(ICO_GS_EV_YORDA_GRABBED, 3757);
+    ticks(1);
+    g.yorda_carried_by_enemy = 1;
+    ticks(1);
+    g.yorda_carried_by_enemy = 0;
+    ticks(1);
+    CHECK(ico_gs_run_captures() == 1);
+    ico_gs_signal(ICO_GS_EV_YORDA_GRABBED, 3757);
+    ticks(1);
+    g.yorda_carried_by_enemy = 1;
+    ticks(1);
+    CHECK(ico_gs_run_captures() == 2);
+
+    /* the flag with a hook 3 ticks back and 5 ticks back, no drop between:
+       the same capture; after a drop, 5 ticks on: a new one the hook missed */
+    capture_start();
+    ico_gs_signal(ICO_GS_EV_YORDA_GRABBED, 3757);
+    ticks(5);
+    g.yorda_carried_by_enemy = 1; /* the mail was slow: still the same capture */
+    ticks(1);
+    CHECK(ico_gs_run_captures() == 1);
+    g.yorda_carried_by_enemy = 0;
+    ticks(5);
+    g.yorda_carried_by_enemy = 1;
+    ticks(1);
+    CHECK(ico_gs_run_captures() == 2);
+
+    /* another stage clears the hooked capture: a flag-only capture counts */
+    capture_start();
+    ico_gs_signal(ICO_GS_EV_YORDA_GRABBED, 3757);
+    ticks(1);
+    g.stage_no = ST_GRAVE;
+    ticks(6);
+    g.yorda_carried_by_enemy = 1;
+    ticks(1);
+    CHECK(ico_gs_run_captures() == 2);
+
+    /* the June 2001 demo's game-over hook counts once per stage entry (its
+       death paths have no guard flag of their own) */
+    capture_start();
+    ico_gs_signal_game_over_once();
+    ico_gs_signal_game_over_once();
+    ticks(1);
+    ico_gs_signal_game_over_once();
+    ticks(1);
+    CHECK(ico_gs_run_game_overs() == 1 && ico_gs_game_overs() == 1);
+    ico_gs_signal(ICO_GS_EV_STAGE_ENTER, ST_GATE); /* the retry reloads the stage */
+    ico_gs_signal_game_over_once();
+    ticks(1);
+    CHECK(ico_gs_run_game_overs() == 2 && ico_gs_game_overs() == 2);
+
+    /* the carried mode, by disc: the disc's own mode (and only that) is
+       Yorda carried by an enemy; an enemy must be the carrier */
+    {
+        static const int kCarried[ICO_REGION_COUNT] = {
+            0x6F, /* pal */
+            0x6F, /* jpn */
+            0x6F, /* kor */
+            107,  /* ntsc */
+            107,  /* aug6 */
+            106,  /* jun26 */
+            0x6F, /* cn */
+        };
+        static const int kModes[] = {0x6F, 107, 106, 0, 105, 108, 110, 112};
+
+        for (r = 0; r < ICO_REGION_COUNT; r++) {
+            size_t m;
+
+            ico_region = r;
+            CHECK(ico_gs_carried_act_mode() == kCarried[r]);
+            for (m = 0; m < sizeof(kModes) / sizeof(kModes[0]); m++) {
+                CHECK(ico_gs_girl_carried_by_enemy(kModes[m], 1) == (kModes[m] == kCarried[r]));
+                CHECK(!ico_gs_girl_carried_by_enemy(kModes[m], 0));
+            }
+        }
+        ico_region = saved_region;
+    }
+}
+
 static void stage(int n)
 {
     g.stage_no = n;
@@ -469,7 +606,7 @@ static void save_on(int sofa)
 {
     g.layout = R->layout_pause; /* any layout before the save-complete one */
     ticks(1);
-    g.mc_preview[3] = sofa;
+    g.mc_preview[SOFA] = sofa;
     g.layout = R->layout_save_complete;
     ticks(1);
     g.layout = R->layout_play;
@@ -479,7 +616,7 @@ static void save_on(int sofa)
 static void ending(int clear_before, int play_seconds)
 {
     g.game_clear = clear_before;
-    g.mc_preview[2] = play_seconds * 50;
+    g.mc_preview[PLAY] = play_seconds * 50;
     ico_gs_signal(ICO_GS_EV_ENDING, clear_before);
     ticks(1);
 }
@@ -761,7 +898,7 @@ static void test_persistence(void)
 
     start("persist");
     new_game();
-    g.mc_preview[2] = 50 * 754;
+    g.mc_preview[PLAY] = 50 * 754;
     stage(ST_GATE);
     stage(ST_WINDMILL);
     kills(3);
@@ -1014,7 +1151,10 @@ static void test_run_counts(void)
        partial, the flag kept across a save and its load, cleared by a New
        Game */
     {
-        IcoToml *t = ico_toml_load(s_path);
+        IcoToml *t;
+
+        ico_ach_reread_file(); /* the edit below is to the file on disk */
+        t = ico_toml_load(s_path);
         CHECK(t != NULL);
         if (t != NULL) {
             char key[64];
@@ -1115,6 +1255,7 @@ static void test_discs(void)
     /* the file as the other disc left it: its visited set (stage 0), a run
        in its slot 3, an unlock */
     snprintf(s_path, sizeof(s_path), "%s/discs.toml", s_dir);
+    ico_ach_writer_idle(); /* the unlocks above write in the background: let them land first */
     remove(s_path);
     t = ico_toml_parse("");
     CHECK(t != NULL);
@@ -1199,6 +1340,127 @@ static void test_discs(void)
     CHECK(file_count(want) == 1);
     ico_region = me;
     remove(s_path);
+}
+
+/* --- the file's write path (the writer thread) ---------------------------------- */
+
+static char *read_whole(const char *path)
+{
+    FILE *f = fopen(path, "rb");
+    char *buf = malloc(65536);
+    size_t n;
+
+    if (f == NULL || buf == NULL) {
+        if (f != NULL) {
+            fclose(f);
+        }
+        free(buf);
+        return NULL;
+    }
+    n = fread(buf, 1, 65535, f);
+    fclose(f);
+    buf[n] = '\0';
+    return buf;
+}
+
+static void test_write_path(void)
+{
+    unsigned int sub0, wr0, rep0, sub, wr, rep;
+    unsigned int hand_due;
+    char want[64];
+    char *text;
+    char *disk;
+    char bad[700];
+
+    start("writepath");
+    new_game();
+    ico_ach_flush();
+    /* the first kill unlocks first_shadow, and an unlock writes at once: get
+       it out of the way so the kills below change a counter and nothing else */
+    kills(1);
+    ico_ach_writer_idle();
+    /* only the hand-held time changes: written every 60 s of Main ticks, not
+       every ICO_ACH_STATS_FLUSH_TICKS */
+    g.girl_present = 1;
+    g.hand_held = 1;
+    ticks(1);
+    hand_due = 60u * (unsigned int)ico_gs_tick_hz();
+    CHECK(ico_ach_flush_due_ticks() == (int)hand_due);
+    CHECK(hand_due > ICO_ACH_STATS_FLUSH_TICKS);
+    ico_ach_writer_counts(&sub0, &wr0, &rep0);
+    ticks((int)hand_due - 10);
+    ico_ach_writer_counts(&sub, &wr, &rep);
+    CHECK(sub == sub0); /* the short period has long passed: nothing was written */
+    ticks(20);
+    ico_ach_writer_counts(&sub, &wr, &rep);
+    CHECK(sub == sub0 + 1);
+    ico_ach_writer_idle();
+    CHECK(ico_ach_flush_due_ticks() == (int)hand_due); /* the write cleared the dirty mark */
+
+    /* any other change writes at the short period */
+    g.hand_held = 0;
+    kills(1);
+    CHECK(ico_ach_flush_due_ticks() == ICO_ACH_STATS_FLUSH_TICKS);
+    ico_ach_writer_counts(&sub0, &wr0, &rep0);
+    ticks(ICO_ACH_STATS_FLUSH_TICKS - 20);
+    ico_ach_writer_counts(&sub, &wr, &rep);
+    CHECK(sub == sub0);
+    ticks(40);
+    ico_ach_writer_counts(&sub, &wr, &rep);
+    CHECK(sub == sub0 + 1);
+
+    /* the text handed to the writer is the file's: held back, a newer text
+       replaces the waiting one, and the newer one is what lands on disk */
+    ico_ach_writer_idle();
+    ico_ach_writer_hold(1);
+    ico_ach_writer_counts(&sub0, &wr0, &rep0);
+    kills(1);
+    ticks(ICO_ACH_STATS_FLUSH_TICKS + 20);
+    kills(1);
+    ticks(ICO_ACH_STATS_FLUSH_TICKS + 20);
+    ico_ach_writer_counts(&sub, &wr, &rep);
+    CHECK(sub == sub0 + 2);
+    CHECK(rep == rep0 + 1); /* the first waiting text was replaced */
+    CHECK(wr == wr0);       /* held: nothing was written */
+    CHECK(ico_ach_written_text() != NULL);
+    text = ico_ach_written_text() != NULL ? strdup(ico_ach_written_text()) : NULL;
+    snprintf(want, sizeof(want), "enemies = %u", stats().enemies);
+    CHECK(text != NULL && strstr(text, want) != NULL);
+    ico_ach_writer_hold(0);
+    ico_ach_flush();
+    ico_ach_writer_counts(&sub, &wr, &rep);
+    CHECK(wr == wr0 + 1); /* one file write for the two texts */
+    disk = read_whole(s_path);
+    CHECK(disk != NULL && text != NULL && strcmp(disk, text) == 0);
+    free(disk);
+    free(text);
+
+    /* a flush writes a pending change and waits for it */
+    kills(1);
+    ico_ach_flush();
+    snprintf(want, sizeof(want), "enemies = %u", stats().enemies);
+    disk = read_whole(s_path);
+    CHECK(disk != NULL && strstr(disk, want) != NULL);
+    free(disk);
+
+    /* a write that fails stays pending: the next period hands the text over again */
+    snprintf(bad, sizeof(bad), "%s/no_such_folder_for_ach/x.toml", s_dir);
+    ico_ach_reset(bad);
+    ico_ach_set_clock(fixed_clock);
+    ico_gs_set_sampler(sampler);
+    fresh_world();
+    ticks(1);
+    kills(1);              /* first_shadow unlocks: its write fails at once */
+    ico_ach_writer_idle(); /* that write is over before the counts are taken */
+    ico_ach_writer_counts(&sub0, &wr0, &rep0);
+    ticks(ICO_ACH_STATS_FLUSH_TICKS + 20);
+    ico_ach_writer_idle();
+    ico_ach_writer_counts(&sub, &wr, &rep);
+    CHECK(sub == sub0 + 1 && wr == wr0 + 1);
+    ticks(ICO_ACH_STATS_FLUSH_TICKS + 20); /* the failure was seen: pending again */
+    ico_ach_writer_counts(&sub, &wr, &rep);
+    CHECK(sub == sub0 + 2);
+    ico_ach_flush();
 }
 
 /* --- popups ---------------------------------------------------------------------- */
@@ -1298,6 +1560,7 @@ int main(int argc, char **argv)
     ico_config_reset(s_no_config, s_no_config);
     test_view();
     test_signals();
+    test_capture_once();
     test_each();
     test_opening();
     test_run_slots();
@@ -1305,6 +1568,7 @@ int main(int argc, char **argv)
     test_suspended();
     test_yorda_safe_counts();
     test_persistence();
+    test_write_path();
     test_popups();
     test_discs();
     if (failures) {

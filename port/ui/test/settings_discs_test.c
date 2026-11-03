@@ -46,9 +46,10 @@ static const Expect *expectFor(const char *slug)
 
 /* the rows every disc has, from both entries */
 static const UiSettingsOpt kEveryDisc[] = {
-    UI_OPT_MENU_LANGUAGE, UI_OPT_BRIGHTNESS, UI_OPT_VIBRATION, UI_OPT_STICK_FIX,
-    UI_OPT_YORDA,         UI_OPT_PIT_TIME,   UI_OPT_DOOR_FIX,  UI_OPT_SKIP_OPENING,
-    UI_OPT_OUTPUT,        UI_OPT_DEVELOPER,
+    UI_OPT_MENU_LANGUAGE, UI_OPT_BRIGHTNESS,   UI_OPT_VIBRATION,    UI_OPT_STICK_FIX,
+    UI_OPT_YORDA,         UI_OPT_PIT_TIME,     UI_OPT_SHADOW_SPEED, UI_OPT_DOOR_FIX,
+    UI_OPT_YORDA_TRIPS,   UI_OPT_SKIP_OPENING, UI_OPT_SECOND_CARD,  UI_OPT_OUTPUT,
+    UI_OPT_DEVELOPER,
 };
 
 /* the rows the title shows and the pause menu does not (on every disc) */
@@ -82,8 +83,10 @@ static void checkTitleRows(const Expect *e)
           "%s title: Extras > Credits %d, want %d", e->slug,
           ui_settings_opt_shown(UI_OPT_EXTRAS_CREDITS), e->credits);
     CHECK(ui_settings_opt_shown(UI_OPT_MENU_LANGUAGE) && ui_settings_opt_shown(UI_OPT_STICK_FIX) &&
-              ui_settings_opt_shown(UI_OPT_SKIP_OPENING) && ui_settings_opt_shown(UI_OPT_YORDA),
-          "%s title: Menu language, stick fix, Skip the opening, Yorda", e->slug);
+              ui_settings_opt_shown(UI_OPT_SKIP_OPENING) && ui_settings_opt_shown(UI_OPT_YORDA) &&
+              ui_settings_opt_shown(UI_OPT_SECOND_CARD),
+          "%s title: Menu language, stick fix, Skip the opening, Yorda, Second memory card",
+          e->slug);
     ico_opt_set_developer_mode(1);
     CHECK(ui_settings_opt_shown(UI_OPT_VAR_DEBUG_MENU) == e->debugMenu,
           "%s: the Debug menu row %d, want %d", e->slug,
@@ -115,17 +118,37 @@ static void checkPauseRows(const Expect *e)
           ui_settings_opt_shown(UI_OPT_FILM_EFFECT), e->film,
           ui_settings_opt_shown(UI_OPT_PLAYERS));
     /* a row that is not shown is not reached: on the page as it opens, its
-       row is masked (layoutPage) */
-    openPage(mainL, -1, UI_PAGE_GAMEPLAY);
+       row is masked (layoutPage).  With Yorda trips and Second memory card
+       the cleared page has up to eleven rows before Back, more than the
+       window's slots: Film effect (the tenth) and Players (the eleventh)
+       may open below the window, masked as the window masks a row out of
+       view, so a disc with the row has it shown by its rule and in view,
+       unmasked, with the cursor on it */
+    const int gpL = openPage(mainL, -1, UI_PAGE_GAMEPLAY);
     const int film = ui_settings_row_of(UI_PAGE_GAMEPLAY, UI_OPT_FILM_EFFECT);
-    CHECK(film >= 0 && lt_ext_prop(film)->defaultMask == !e->film,
-          "%s pause: the Film effect row masked %d, want %d", e->slug,
-          film >= 0 ? lt_ext_prop(film)->defaultMask : -1, !e->film);
+    if (e->film) {
+        CHECK(film >= 0 && ui_settings_row_shown(film), "%s pause: the Film effect row shown",
+              e->slug);
+        lt_ext_layout(gpL)->curItem = film;
+        frame(0);
+        CHECK(film >= 0 && lt_ext_prop(film)->defaultMask == 0,
+              "%s pause: the Film effect row masked %d with the cursor on it, want 0", e->slug,
+              film >= 0 ? lt_ext_prop(film)->defaultMask : -1);
+    } else {
+        CHECK(film >= 0 && !ui_settings_row_shown(film) && lt_ext_prop(film)->defaultMask == 1,
+              "%s pause: the Film effect row shown %d, masked %d, want 0 and 1", e->slug,
+              film >= 0 ? ui_settings_row_shown(film) : -1,
+              film >= 0 ? lt_ext_prop(film)->defaultMask : -1);
+    }
     /* Players is reached on every disc once cleared (the 2001 discs too:
        the port carries the second-pad Yorda into their arms) */
     const int players = ui_settings_row_of(UI_PAGE_GAMEPLAY, UI_OPT_PLAYERS);
+    CHECK(players >= 0 && ui_settings_row_shown(players), "%s pause: the Players row shown",
+          e->slug);
+    lt_ext_layout(gpL)->curItem = players;
+    frame(0);
     CHECK(players >= 0 && lt_ext_prop(players)->defaultMask == 0,
-          "%s pause: the Players row masked %d, want 0", e->slug,
+          "%s pause: the Players row masked %d with the cursor on it, want 0", e->slug,
           players >= 0 ? lt_ext_prop(players)->defaultMask : -1);
     gFlagGameClear = 0;
     CHECK(!ui_settings_opt_shown(UI_OPT_FILM_EFFECT) && !ui_settings_opt_shown(UI_OPT_PLAYERS),

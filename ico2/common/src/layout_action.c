@@ -85,6 +85,23 @@ ICO_LAYOUT_AT(struct McPreview, word10, McFileInfo, word10);
 
 ICO_LAYOUT_SIZE(struct McPreview, McFileInfo);
 
+/* PC port: a preview's play time and sofa.  On the 2001 discs the record is
+   stage, play time, sofa and a word no code reads (the decomp's 2001
+   McPreview: la_playtime_count and la_game_loop count IosMcPreviewInfo[1],
+   la_save_processing puts the sofa in [2]); the host's McPreview keeps the
+   European names and the card code keeps the disc's order
+   (ico2/fumi/ios/mcard.c), so there the words named cleared and playTime
+   hold them (issue 160) */
+static inline int la_preview_play(const struct McPreview *p) /* port */
+{
+    return ICO_NTSCAUG6JUN26 ? p->cleared : p->playTime;
+}
+
+static inline int la_preview_sofa(const struct McPreview *p) /* port */
+{
+    return ICO_NTSCAUG6JUN26 ? p->playTime : p->sofa;
+}
+
 /* .sbss, thirteen words: the port-0 lock state _la_set_current_port_2 records and the one
    _la_set_current_port_lock_2 records, the lock results for port 0 and port 1
    of _la_set_current_port_new, the icoMisc lock saved by the logo, the title
@@ -210,20 +227,86 @@ static sceVu0IVECTOR barLine[4][2] = {{{0, 3, 0, 0}, {7, 3, 0, 0}},
                                       {{3, 0, 0, 0}, {3, 7, 0, 0}},
                                       {{7, 0, 0, 0}, {0, 7, 0, 0}}}; /* derived name */
 
-/* .data: the game-flag ids the load carries across gflagInit.  The list
-   holds five ids and the key-config tables follow it; the keep/restore loops
-   below walk twenty words. */
+/* .data: the game-flag ids the load carries across gflagInit, each disc's
+   own five (that build's flag numbers; the last is its "new game started"
+   flag).  On the June 2001 demo progressive_bar's table barLine follows the
+   list (16-aligned, at .data+0x20), then the key-config tables; on the
+   other discs the key-config tables follow it (8-aligned, at .data+0x18).
+   The keep/restore loops below walk twenty words. */
+static int keepFlagNo_pal[5] = {388, 384, 383, 385, 382}; /* PAL, JPN, KOR, CN; derived name */
 
-/* The keep/restore loops read twenty words from keepFlagNo: the five ids, then
-   keyConfigCode and the first seven keyConfigSlot, which follow it in the EE's
-   .data (so a load also keeps those game flag ids and the key-config slots).  The host holds the three as one
-   array so the walk is in bounds and reads the same words. */
-static int keepWords[21] = {388, 384, 383, 385, 382, 16, 128, 32, 64, 8, 2,
-                            1,   4,   1,   2,   3,   4,  5,   0,  0,  0};
+static int keepFlagNo_ntsc[5] = {355, 351, 350, 352, 349}; /* derived name */
 
-#define keepFlagNo keepWords
-#define keyConfigCode (keepWords + 5)
-#define keyConfigSlot (keepWords + 13)
+static int keepFlagNo_aug6[5] = {354, 350, 349, 351, 348}; /* derived name */
+
+static int keepFlagNo_jun26[5] = {339, 335, 334, 336, 333}; /* derived name */
+
+/* the eight pad button codes the key-config screen offers, and the
+   six-plus-two slot assignments it edits. */
+static int keyConfigCode[8] = {16, 128, 32, 64, 8, 2, 1, 4}; /* derived name */
+
+static int keyConfigSlot[8] = {1, 2, 3, 4, 5, 0, 0, 0}; /* derived name */
+
+/* PC port: the keep/restore loops read twenty words from the disc's
+   keepFlagNo: its five ids, then what follows the list in that disc's EE
+   .data, the alignment's zero padding included (the decomp's objects:
+   keepFlagNo at .data+0, 20 bytes; keyConfigCode at +0x18 and keyConfigSlot
+   at +0x38 on every disc but the June 2001 demo, barLine at +0x20 there).
+   So the walk is the five ids, one zero word, keyConfigCode[0..7] and
+   keyConfigSlot[0..5] on those discs, and the five ids, three zero words
+   and barLine's first twelve words on the June 2001 demo; a load keeps
+   those words as game flag ids too (flag 0 for a pad word).  The host keeps
+   the arrays apart and reads the same twenty words, in the disc's order,
+   through this (issue 160: one European list on every disc re-raised the
+   North American disc's new-game flag 349 on Continue). */
+static int keepFlagWord(unsigned int i) /* PC port */
+{
+    unsigned int j;
+
+    if (i < 5) {
+        return PAL_NTSC_AUG6_JUN26(keepFlagNo_pal, keepFlagNo_ntsc, keepFlagNo_aug6,
+                                   keepFlagNo_jun26)[i];
+    }
+    j = i - 5;
+    if (ICO_JUN26) {
+        /* the zero padding at .data+0x14 to 0x1F, then barLine */
+        if (j < 3) {
+            return 0;
+        }
+        j -= 3;
+        return barLine[j / 8][(j / 4) % 2][j % 4];
+    }
+    /* the zero padding word at .data+0x14, then keyConfigCode and
+       keyConfigSlot[0..5] */
+    if (j == 0) {
+        return 0;
+    }
+    j -= 1;
+    return j < 8 ? keyConfigCode[j] : keyConfigSlot[j - 8];
+}
+
+/* PC port: the twenty words the load's walk reads on the selected disc,
+   for the keep-flag test (port/game/test/keep_flags_test.c) */
+void la_host_keep_words(int out[20])
+{
+    unsigned int i;
+
+    for (i = 0; i < 20; i++) {
+        out[i] = keepFlagWord(i);
+    }
+}
+
+/* PC port: for the keep-flag test only, the key-config slots as the
+   Button configuration screen leaves them (its first entry and its reset
+   item set keyConfigSlot[k] = k) */
+void la_host_set_key_config_slots(const int slots[8])
+{
+    unsigned int i;
+
+    for (i = 0; i < 8; i++) {
+        keyConfigSlot[i] = slots[i];
+    }
+}
 
 /* the memory-card request block the layout actions drive */
 McMgr mc = {{0}};
@@ -350,6 +433,7 @@ void ico_opt_output_toggled(int mode);
 void ico_opt_hold_type_toggled(int type);
 void la_host_new_game_go(void);
 int la_host_mc_slot_pickable(int slot);
+int la_host_mc_files_shown(void);
 
 /* la_vibe_select's confirm: the New Game screen in place of the start, which
    its confirm runs (la_host_new_game_go, after la_vibe_select) */
@@ -1821,9 +1905,10 @@ static void _la_mask_preview_info(void)
 static inline void playTime_jun26(struct McPreview *p, int *hour, int *min,
                                   int *sec) /* derived name */
 {
-    *sec = (p->playTime / FRAME_RATE) % 60;
-    *min = (p->playTime / (FRAME_RATE * 60)) % 60;
-    *hour = (p->playTime / (FRAME_RATE * 3600)) % 100;
+    /* PC port: la_preview_play, the disc's play-time word */
+    *sec = (la_preview_play(p) / FRAME_RATE) % 60;
+    *min = (la_preview_play(p) / (FRAME_RATE * 60)) % 60;
+    *hour = (la_preview_play(p) / (FRAME_RATE * 3600)) % 100;
 }
 
 /* the play time of a save record split into hours, minutes and seconds and
@@ -1832,7 +1917,7 @@ static inline void playTime_jun26(struct McPreview *p, int *hour, int *min,
 static inline void playTime_aug6(struct McPreview *p, int *hour, int *min,
                                  int *sec) /* derived name */
 {
-    int frames = p->playTime;
+    int frames = la_preview_play(p); /* PC port: the disc's play-time word */
 
     *sec = (frames / FRAME_RATE) % 60;
     *min = (frames / (FRAME_RATE * 60)) % 60;
@@ -1854,7 +1939,7 @@ static inline void playTime(struct McPreview *p, int *hour, int *min, int *sec) 
         playTime_aug6(p, hour, min, sec);
         return;
     }
-    int frames = p->playTime;
+    int frames = la_preview_play(p); /* PC port: the disc's play-time word */
     int fps = ((60 - systemStatus[0] * 10) / systemStatus[1]) * systemStatus[1];
 
     *sec = (frames / fps) % 60;
@@ -1905,7 +1990,8 @@ static void _la_set_preview_info_jun26(void)
 
     n = previewInfo.stage;
     if (n >= 3 && n < 56) {
-        switch (previewInfo.sofa + 42) { /* the demo's ids 42 lower */
+        /* PC port: la_preview_sofa, the disc's sofa word */
+        switch (la_preview_sofa(&previewInfo) + 42) { /* the demo's ids 42 lower */
         case 329:
             n = 39;
             break;
@@ -1970,7 +2056,8 @@ static void _la_set_preview_info(void)
         }
     }
     if (n >= 3 && n < 56) {
-        switch (previewInfo.sofa +
+        /* PC port: la_preview_sofa, the disc's sofa word */
+        switch (la_preview_sofa(&previewInfo) +
                 PAL_NTSC_AUG6JUN26(0, 30, 31)) { /* NTSC ids 30 lower, AUG6 ids 31 lower */
         case 329:
             n = 39;
@@ -2554,7 +2641,7 @@ static inline void gflagKeepState(void) /* derived name */
     unsigned int i;
 
     for (i = 0; i < 20; i++) {
-        keepFlags[i] = gflagChk(keepFlagNo[i]);
+        keepFlags[i] = gflagChk(keepFlagWord(i)); /* PC port: keepFlagNo[i] */
     }
 }
 
@@ -2565,11 +2652,44 @@ static inline void gflagRestoreState(void) /* derived name */
 
     for (i = 0; i < 20; i++) {
         if (keepFlags[i]) {
-            gflagOn(keepFlagNo[i]);
+            gflagOn(keepFlagWord(i)); /* PC port: keepFlagNo[i] */
         } else {
-            gflagOff(keepFlagNo[i]);
+            gflagOff(keepFlagWord(i)); /* PC port: keepFlagNo[i] */
         }
     }
+}
+
+/* PC port: the five kept ids' values in the save just read, taken between
+   gamesysMemoryLoad and gflagRestoreState for la_host_load_log */
+static int loadSavedKeep[5];
+
+static void la_host_load_saved(void) /* PC port */
+{
+    unsigned int i;
+
+    for (i = 0; i < 5; i++) {
+        loadSavedKeep[i] = gflagChk(keepFlagWord(i));
+    }
+}
+
+/* PC port: one line a load, after gflagRestoreState: the slot, the stage
+   the save goes to and each kept id as "id=in the save/after the restore",
+   with the disc's new-game flag (the fifth id on every disc), so a log
+   shows what a Continue kept */
+static void la_host_load_log(int slot) /* PC port */
+{
+    int f[5];
+    unsigned int i;
+
+    for (i = 0; i < 5; i++) {
+        f[i] = keepFlagWord(i);
+    }
+    ico_diag_milestone("load: slot %d, stage %d; kept flags (id=in the save/kept) %d=%d/%d "
+                       "%d=%d/%d %d=%d/%d %d=%d/%d %d=%d/%d; new game flag %d",
+                       slot, gFlagSaveStage, f[0], loadSavedKeep[0], gflagChk(f[0]), f[1],
+                       loadSavedKeep[1], gflagChk(f[1]), f[2], loadSavedKeep[2], gflagChk(f[2]),
+                       f[3], loadSavedKeep[3], gflagChk(f[3]), f[4], loadSavedKeep[4],
+                       gflagChk(f[4]), ico_region_new_game_flag(NULL));
 }
 
 static int loadStep = 0; /* derived name */
@@ -2608,7 +2728,9 @@ static int la_load_processing_jun26(int first)
         gflagKeepState();
         gflagInit();
         gamesysMemoryLoad(gameSysMemoryFuncList, gameSysMainSaveBuff, 0);
+        la_host_load_saved(); /* PC port: for the load's log line */
         gflagRestoreState();
+        la_host_load_log(mc.fileNo); /* PC port */
         systemStatus[3] = 1;
         systemStatus[4] = 1;
         /* falls through */
@@ -2749,7 +2871,9 @@ int la_load_processing(int first)
         gflagKeepState();
         gflagInit();
         gamesysMemoryLoad(gameSysMemoryFuncList, gameSysMainSaveBuff, 0);
+        la_host_load_saved(); /* PC port: for the load's log line */
         gflagRestoreState();
+        la_host_load_log(mc.fileNo); /* PC port */
         systemStatus[3] = 1;
         systemStatus[4] = 1;
         debug_StdPrintfDummy("case 10\n");
@@ -5682,6 +5806,15 @@ void la_host_leave(void)
 {
     lt_set_item_select_func(0);
     actionStarted = 0;
+}
+
+/* PC port: whether the Continue screen (la_mc_load_file_select) shows the
+   card's files and takes the pad: its card check has read the file mask
+   and started the action, as a confirm on a file needs.  The port's Save
+   states prompt on that screen (port/ui/settings.c) answers Square then. */
+int la_host_mc_files_shown(void)
+{
+    return fileMask != 0 && actionStarted != 0;
 }
 
 /* PC port: what the pause menu's Back does before it returns la_game_loop

@@ -75,8 +75,11 @@ add_custom_command(
     COMMENT "Embedding the UI font for Chinese"
     VERBATIM)
 set(_ui_font_srcs "${_ui_font_c}" "${_ui_font_ja_c}" "${_ui_font_ko_c}" "${_ui_font_zh_c}")
+# strings_ru_bobttz.c, strings_ru_cobra838.c, strings_pt_br.c: the community
+# translations (docs/TRANSLATING.md)
 set(_ui_string_srcs strings.c strings_en.c strings_fr.c strings_de.c strings_it.c strings_es.c
-                    strings_ja.c strings_ko.c strings_zh.c)
+                    strings_ja.c strings_ko.c strings_zh.c strings_ru_bobttz.c
+                    strings_ru_cobra838.c strings_pt_br.c)
 
 set(_ui_sources
     font.c
@@ -90,9 +93,10 @@ set(_ui_sources
 # layout_ext.h includes the game's layout_texture.h (LtProp, LtProperty),
 # whose typedef.h has unprototyped declarations the port warnings reject
 ico_include_dirs(common _ico_ui_game_incs)
-set_source_files_properties(layout_ext.c menu_font.c menu_text.c popup.c settings.c ui_list.c
+set_source_files_properties(layout_ext.c menu_font.c menu_text.c popup.c settings.c
+                            settings_states.c ui_list.c
                             ui_hint.c gallery.c photo_ui.c ui_mouse.c touch_ui.c ui_fps.c
-                            touch_edit_ui.c PROPERTIES
+                            touch_edit_ui.c subtitle_text.c PROPERTIES
                             COMPILE_OPTIONS "-Wno-strict-prototypes")
 
 function(ico_ui_library name rd)
@@ -124,8 +128,19 @@ function(ico_ui_settings name)
     # in ui_mouse_geom.c; the pointer's state is port/input's pointer.c);
     # the port text's language from [ui] language and the disc (ui_lang.c);
     # the Edit layout page's side of the touch layout editor (touch_edit_ui.c)
-    target_sources(${name} PRIVATE settings.c ui_list.c ui_hint.c gallery.c photo_ui.c ui_mouse.c
-                                   ui_mouse_geom.c ui_lang.c touch_edit_ui.c)
+    # the Graphics page's rows and Apply (settings_graphics.c)
+    # Extras' Back up your data and Restore from a backup (settings_backup.c)
+    # the Save states page's cards, actions and F6 latch (settings_states.c)
+    # a community translation's subtitles as text (subtitle_text.c, jimaku.c's
+    # hook, over port/game's tables: subtitles_ru_bobttz.c, subtitles_ru_cobra838.c,
+    # subtitles_pt_br.c)
+    target_sources(${name} PRIVATE settings.c settings_graphics.c settings_backup.c
+                                   settings_states.c ui_list.c
+                                   ui_hint.c gallery.c photo_ui.c ui_mouse.c ui_mouse_geom.c
+                                   ui_lang.c touch_edit_ui.c subtitle_text.c
+                                   "${CMAKE_SOURCE_DIR}/port/game/subtitles_ru_bobttz.c"
+                                   "${CMAKE_SOURCE_DIR}/port/game/subtitles_ru_cobra838.c"
+                                   "${CMAKE_SOURCE_DIR}/port/game/subtitles_pt_br.c")
     foreach(_lib ${_ui_settings_deps})
         target_include_directories(${name} PRIVATE
                                    $<TARGET_PROPERTY:${_lib},INTERFACE_INCLUDE_DIRECTORIES>)
@@ -212,14 +227,39 @@ ico_settings_test(settings_test test/settings_test.c)
 # settings_extras_test: the Extras and Characters pages and the pages that
 # hide the title's logo
 ico_settings_test(settings_extras_test test/settings_extras_test.c)
+# settings_states_test: the Save states page, the pause menu's row at pitch 16
+# and the Continue screen's Square prompt over a fake host and a fake Continue
+# screen; Extras has no Save states row (the other discs' runs: the pause
+# rows, Extras and the prompt on their numbers)
+ico_settings_test(settings_states_test test/settings_states_test.c)
 # settings_extra_test: more Settings menu tests; each settings test file
 # stays well under the source size cap (tools/check_no_rom.sh), so new
-# settings tests go in settings_extra_test.c
+# settings tests go in settings_extra_test.c or, once it is near the cap, in
+# a program of their own (settings_adapter_test.c)
 ico_settings_test(settings_extra_test test/settings_extra_test.c)
+# settings_adapter_test: Options > Graphics > Graphics card (the row, its
+# names, Apply on another card with Keep and Revert, a fake host)
+ico_settings_test(settings_adapter_test test/settings_adapter_test.c)
+# settings_backup_test: Extras > Back up your data and Restore from a backup
+# (settings_backup.c) over a fake host: the rows, the confirmations, the
+# backup read and the end popups
+ico_settings_test(settings_backup_test test/settings_backup_test.c)
 # settings_discs_test: the rows each disc's Options has, from the title and
 # the pause menu (docs/port/GAME_FEATURES.md, Options on each disc): the
 # European run and the six others (the three above and the 2001 discs below)
 ico_settings_test(settings_discs_test test/settings_discs_test.c)
+# subtitles_ru_test: the Russian (bob-ttz) community translation: its
+# subtitle table, the words jimaku.c's hook gets (subtitle_text.c) and their
+# layout in the band, the Language row's entry and [game] text_language, the
+# menu words over the English sheet (the other runs: no entry, nothing in
+# force)
+ico_settings_test(subtitles_ru_test test/subtitles_ru_test.c)
+# subtitles_ru_cobra838_test: the same for the Russian (cobra838) translation,
+# the Language row's seventh entry
+ico_settings_test(subtitles_ru_cobra838_test test/subtitles_ru_cobra838_test.c)
+# subtitles_pt_br_test: the same for the Brazilian Portuguese translation (Igor
+# Chagas, ichagas7), the Language row's eighth entry
+ico_settings_test(subtitles_pt_br_test test/subtitles_pt_br_test.c)
 if(ICO_RUN_TESTS)
     # the three 2001 discs (the North American disc, the August 2001 preview,
     # the June 2001 demo): Extras > Game variants on each (settings_extra_test
@@ -234,6 +274,8 @@ if(ICO_RUN_TESTS)
         add_test(NAME settings_${_slug} COMMAND settings_test "${CMAKE_CURRENT_BINARY_DIR}" ${_slug})
         add_test(NAME settings_extras_${_slug}
                  COMMAND settings_extras_test "${CMAKE_CURRENT_BINARY_DIR}" ${_slug})
+        add_test(NAME settings_states_${_slug}
+                 COMMAND settings_states_test "${CMAKE_CURRENT_BINARY_DIR}" ${_slug})
     endforeach()
     # the settings executables write the same settings_test.toml in
     # this directory: never in parallel
@@ -244,6 +286,14 @@ if(ICO_RUN_TESTS)
                          settings_discs_kor settings_discs_cn settings_discs_ntsc settings_discs_aug6
                          settings_discs_jun26 settings_ntsc settings_aug6 settings_jun26
                          settings_extras_ntsc settings_extras_aug6 settings_extras_jun26
+                         settings_states settings_states_jpn settings_states_kor settings_states_cn
+                         settings_states_ntsc settings_states_aug6 settings_states_jun26
+                         settings_adapter settings_adapter_jpn settings_adapter_kor settings_adapter_cn
+                         settings_backup settings_backup_jpn settings_backup_kor settings_backup_cn
+                         subtitles_ru subtitles_ru_jpn subtitles_ru_kor subtitles_ru_cn
+                         subtitles_ru_cobra838 subtitles_ru_cobra838_jpn subtitles_ru_cobra838_kor
+                         subtitles_ru_cobra838_cn subtitles_pt_br subtitles_pt_br_jpn
+                         subtitles_pt_br_kor subtitles_pt_br_cn
                          PROPERTIES RESOURCE_LOCK settings_toml)
 endif()
 
@@ -448,14 +498,15 @@ endif()
 # font.c and the embedded font alone, with ICO_RD: rd_present_test's overlay
 # check (port/render/CMakeLists.txt) draws a glyph through its
 # overlay mode; rd_replay_tool's overlay test draws text through it;
-# font_edge_test (below) draws both
+# rd_sheet_bake_test rasterises its strips with it; font_edge_test (below)
+# draws both
 add_library(ico_ui_font_rd OBJECT font.c ${_ui_font_srcs})
 target_include_directories(ico_ui_font_rd PUBLIC "${CMAKE_CURRENT_SOURCE_DIR}"
                            PRIVATE "${CMAKE_SOURCE_DIR}/port/third_party/stb")
 target_compile_definitions(ico_ui_font_rd PRIVATE ICO_HOST=1 ICO_RD=1)
 target_compile_options(ico_ui_font_rd PRIVATE ${ICO_SEMANTIC_OPTIONS} ${ICO_PORT_WARNINGS})
 target_link_libraries(ico_ui_font_rd PUBLIC ico_render)
-foreach(_t rd_present_test rd_replay_tool)
+foreach(_t rd_present_test rd_replay_tool rd_sheet_bake_test)
     if(TARGET ${_t})
         target_sources(${_t} PRIVATE $<TARGET_OBJECTS:ico_ui_font_rd>)
         target_include_directories(${_t} PRIVATE "${CMAKE_CURRENT_SOURCE_DIR}")
@@ -529,8 +580,8 @@ target_compile_options(menu_text_test PRIVATE ${ICO_SEMANTIC_OPTIONS} ${ICO_GAME
                        ${ICO_GAME_WARNINGS})
 target_link_libraries(menu_text_test PRIVATE ico_render ico_math ico_region)
 # font_coverage_test: every character of the
-# text the port draws (the six languages' tables, the port's roll lines and
-# the corpus, test/font_corpus) has a glyph in one of the embedded subsets
+# text the port draws (the languages' tables, the community translations'
+# subtitles, the port's roll lines and the corpus, test/font_corpus) has a glyph in one of the embedded subsets
 # (Arimo, Noto Sans JP), a Japanese character the second's own; with the
 # base ELF, the sound names too. CPU only. The strings and
 # the font are compiled again here (font.c from ico_ui_font_rd) so the test
@@ -538,7 +589,9 @@ target_link_libraries(menu_text_test PRIVATE ico_render ico_math ico_region)
 ico_include_dirs(common _ico_cov_incs)
 ico_include_dirs(sugipon _ico_cov_data_incs)
 add_executable(font_coverage_test test/font_coverage_test.c $<TARGET_OBJECTS:ico_ui_font_rd>
-    ${_ui_string_srcs}
+    ${_ui_string_srcs} "${CMAKE_SOURCE_DIR}/port/game/subtitles_ru_bobttz.c"
+    "${CMAKE_SOURCE_DIR}/port/game/subtitles_ru_cobra838.c"
+    "${CMAKE_SOURCE_DIR}/port/game/subtitles_pt_br.c"
     "${CMAKE_SOURCE_DIR}/port/game/credits.c" "${CMAKE_SOURCE_DIR}/port/platform/host_config.c")
 target_include_directories(font_coverage_test PRIVATE "${CMAKE_CURRENT_SOURCE_DIR}"
                            "${CMAKE_CURRENT_SOURCE_DIR}/test" ${_ico_cov_incs} "${CMAKE_SOURCE_DIR}/port/include"

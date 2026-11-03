@@ -35,9 +35,12 @@
 #include "popup.h"
 #include "strings.h"
 #include "sysconf.h"
-#include "touch_edit.h"    /* the touch layout edits (port/input) */
-#include "touch_edit_ui.h" /* the Edit layout page */
-#include "variants.h"      /* Extras > Game variants */
+#include "touch_edit.h"        /* the touch layout edits (port/input) */
+#include "settings_graphics.h" /* the Graphics page's rows and Apply */
+#include "settings_backup.h"   /* Extras' Back up your data and Restore from a backup */
+#include "settings_states.h"   /* the Save states page's cards, actions and F6 latch */
+#include "touch_edit_ui.h"     /* the Edit layout page */
+#include "variants.h"          /* Extras > Game variants */
 #include "ui_hint.h"
 #include "ui_internal.h" /* ui__font_prefer_chinese */
 #include "ui_list.h"
@@ -64,6 +67,7 @@ extern void CUR_SE(void);        /* layout_action.c: the menus' sounds */
 extern void POSITIVE_SE(void);
 extern void NEGATIVE_SE(void);
 extern void la_host_leave(void); /* layout_action.c (ICO_HOST) */
+extern int la_host_mc_files_shown(void);
 /* layout_action.c: what the pause menu's Back does before la_game_loop */
 extern void la_host_resume_play(void);
 /* fumi/sound/s_init.c: the PS2's stereo (0) or mono (1) output */
@@ -88,6 +92,8 @@ extern void la_host_film_effect(int mode);
 /* port/platform/trace_host.h (ico_pc): the Main ticks so far, with the
    clock the seed of Extras > Characters' Randomize */
 extern unsigned int ico_host_main_ticks(void);
+extern int frame_count;       /* common/src/main.c: one a flip, a Main tick */
+extern int enable_game_pause; /* layout_action.c: 0 where Start does not pause */
 
 /* on the port's screens the face button that does not confirm goes back
    as Triangle does (Circle on the European disc, Cross on the Japanese and Korean ones:
@@ -107,6 +113,10 @@ extern unsigned int ico_host_main_ticks(void);
 #define LAYOUT_PAUSE (ico_region_cur()->layout_pause)
 #define LAYOUT_TITLE_CONTINUE (ico_region_cur()->layout_title_continue)
 #define LAYOUT_TITLE_NEW (ico_region_cur()->layout_title_new)
+/* the Continue screen's file select (19, la_mc_load_file_select) and its
+   files' layout linked after it (14, la_mc_file_select) */
+#define LAYOUT_LOAD_FILES (ico_region_cur()->layout_load_files)
+#define LAYOUT_MC_FILES (ico_region_cur()->layout_mc_files)
 /* the game's Options screen (58: not reached, but la_key_config's way
    back when the pause menu was left as the game's) and its button
    configuration screen (59: Settings > Controls opens it) */
@@ -127,6 +137,10 @@ extern unsigned int ico_host_main_ticks(void);
 #define ROW_TITLE_COPYRIGHT2 (ico_region_cur()->row_title_copyright2)
 /* the pause menu's pitch in the PAL data (Options 50, Back 70) */
 #define PAUSE_PITCH 20
+/* the pitch with the Save states row shown: Options 50, Photo mode 66, Save
+   states 82, Back 98, End Game 120 where it was (the boxes are 20 lines
+   tall; the letters stay where they are in them) */
+#define PAUSE_PITCH_STATES 16
 
 /* the brightness step's range (la_adjust_screen) */
 #define BRIGHTNESS_MAX 14
@@ -378,6 +392,9 @@ static int stepIndex(int i, int n, int dir)
 static const char *const kPitWords[ICO_PIT_COUNT] = {"half", "original", "longer", "double",
                                                      "triple"};
 
+/* [gameplay] shadow_speed's words, in ICO_SPEED_* order */
+static const char *const kSpeedWords[ICO_SPEED_COUNT] = {"slower", "original", "faster", "fastest"};
+
 static const float kMouseSens[] = {0.25f, 0.5f, 0.75f, 1.0f, 1.25f, 1.5f, 2.0f, 2.5f, 3.0f, 4.0f};
 /* the Mouse camera speed row's steps; the last one is "Instant" */
 static const float kMouseCamSpeed[] = {0.5f, 1.0f, 1.5f, 2.0f, 3.0f, 5.0f, 10.0f};
@@ -586,284 +603,14 @@ static int s_gpuPending; /* an install is running: installPoll every frame */
 static int
     s_gpuFileCur; /* the zip of the drivers folder the Add from the drivers folder row shows */
 
-/* the renderers the build links (ui_settings_set_backend_names): the config
-   values the Graphics API row writes after "" (Automatic) */
-#define MAX_BACKENDS 8
-static const char *s_backendNames[MAX_BACKENDS];
-static int s_backendCount;
-
-/* Graphics > Apply (settings.h UiGraphicsHost): the host, and the switch
-   under way or the countdown that follows it */
-static UiGraphicsHost s_gfxHost;
-static int s_gfxHostSet;
-
-enum { GFX_IDLE, GFX_APPLYING, GFX_COUNTDOWN, GFX_REVERTING };
-
-static struct {
-    int state;     /* GFX_* */
-    int left;      /* the countdown's vsyncs left */
-    int focus;     /* the countdown began: the cursor goes to Revert */
-    int haveEntry; /* entry holds the value the page found */
-    char want[16]; /* the renderer Apply asked for */
-    char prev[16]; /* the renderer running before Apply */
-    char entry[32];
-    /* the row's value from Apply until Keep, outside the config (which
-       holds entry: every save path writes that, the close button's too) */
-    char trial[32];
-} s_gfx;
-
-/* [video] backend as the row shows it: the trial while Apply's switch or
-   the countdown is under way, else the config's */
-static const char *backendValue(void)
-{
-    return s_gfx.state == GFX_APPLYING || s_gfx.state == GFX_COUNTDOWN
-               ? s_gfx.trial
-               : ico_config_get_string("video.backend", "");
-}
-
-/* [video] backend as the page found it (its first step, or Apply), which
-   Revert puts back; forgotten when the page is entered again */
-static void gfxEntry(void)
-{
-    if (!s_gfx.haveEntry) {
-        snprintf(s_gfx.entry, sizeof(s_gfx.entry), "%s",
-                 ico_config_get_string("video.backend", ""));
-        s_gfx.haveEntry = 1;
-    }
-}
-
-void ui_settings_set_backend_names(const char *const *names, int count)
-{
-    s_backendCount = 0;
-    for (int i = 0; names != NULL && i < count && i < MAX_BACKENDS; i++) {
-        if (names[i] != NULL && names[i][0] != '\0') {
-            s_backendNames[s_backendCount++] = names[i];
-        }
-    }
-}
-
-/* the config's value as rhi_create_backend reads it: any case, "vk" for
-   "vulkan" and "gl" for "opengl" (port/rhi/rhi_backend.c), into buf */
-static const char *backendCanon(const char *v, char *buf, unsigned size)
-{
-    unsigned n = 0;
-    for (; v != NULL && v[n] != '\0' && n + 1 < size; n++) {
-        const char ch = v[n];
-        buf[n] = ch >= 'A' && ch <= 'Z' ? (char)(ch - 'A' + 'a') : ch;
-    }
-    buf[n] = '\0';
-    if (strcmp(buf, "vk") == 0) {
-        return "vulkan";
-    }
-    if (strcmp(buf, "gl") == 0) {
-        return "opengl";
-    }
-    return buf;
-}
-
-/* the Graphics API row: Automatic is index 0, then each name; the config's
-   value decides (a value the build does not link reads as Automatic when
-   stepped and shows as written) */
-static int backendCurrent(void)
-{
-    char buf[32];
-    const char *v = backendCanon(backendValue(), buf, sizeof(buf));
-    for (int i = 0; i < s_backendCount; i++) {
-        if (strcmp(v, s_backendNames[i]) == 0) {
-            return i + 1;
-        }
-    }
-    return 0;
-}
-
-/* a renderer's name as the player knows it (proper names, not translated) */
-static const char *backendLabel(const char *name)
-{
-    char buf[32];
-    const char *raw = name;
-    name = backendCanon(name, buf, sizeof(buf));
-    if (strcmp(name, "vulkan") == 0) {
-        return "Vulkan";
-    }
-    if (strcmp(name, "opengl") == 0) {
-        return "OpenGL";
-    }
-    if (strcmp(name, "d3d12") == 0) {
-        return "Direct3D 12";
-    }
-    if (strcmp(name, "d3d11") == 0) {
-        return "Direct3D 11";
-    }
-    return raw;
-}
-
-static const char *backendText(char *buf, unsigned size)
-{
-    const char *v = backendValue();
-    if (v == NULL || v[0] == '\0') {
-        return ui_str(UI_STR_VAL_GRAPHICS_AUTOMATIC);
-    }
-    snprintf(buf, size, "%s", backendLabel(v));
-    return buf;
-}
-
-static void stepBackend(int dir)
-{
-    if (s_backendCount < 2) {
-        return;
-    }
-    const int to = stepIndex(backendCurrent(), s_backendCount + 1, dir);
-    const char *v = to == 0 ? "" : s_backendNames[to - 1];
-    gfxEntry();
-    ico_config_set_string("video.backend", v);
-    s_dirtyConfig = 1;
-    fprintf(stderr, "settings: Graphics API set to %s (used from the next start)\n",
-            v[0] ? v : "automatic");
-}
-
-/* the renderer the row's value starts: its name; for Automatic the one it
-   started this run (the host's automatic(): a fallback or a restart's), else
-   "vulkan" (the start's first try); NULL for a value the build does not
-   link */
-static const char *gfxChosen(void)
-{
-    const int i = backendCurrent();
-    const char *v = backendValue();
-    const char *a = s_gfxHostSet && s_gfxHost.automatic != NULL ? s_gfxHost.automatic() : NULL;
-    if (i > 0) {
-        return s_backendNames[i - 1];
-    }
-    for (int k = 0; (v == NULL || v[0] == '\0') && k < s_backendCount; k++) {
-        if (strcmp(s_backendNames[k], a != NULL ? a : "vulkan") == 0) {
-            return s_backendNames[k];
-        }
-    }
-    return NULL;
-}
-
-/* Apply's row: shown while the value is a renderer the build has and not
-   the one running, and nothing is under way */
-static int gfxApplyShown(void)
-{
-    const char *c = gfxChosen();
-    return s_gfxHostSet && s_backendCount >= 2 && s_gfx.state == GFX_IDLE && c != NULL &&
-           strcmp(c, s_gfxHost.running()) != 0;
-}
-
-/* what came of a switch the page asked for */
-static void gfxResult(int r)
-{
-    char body[UI_POPUP_TEXT];
-    const int applying = s_gfx.state == GFX_APPLYING;
-    s_gfx.state = GFX_IDLE;
-    if (r == UI_GFX_SWITCH_DONE && applying) {
-        /* the countdown, the cursor on Revert (gfxRefresh) */
-        s_gfx.state = GFX_COUNTDOWN;
-        s_gfx.left = UI_GFX_KEEP_SECONDS * ui_popup_vsync_hz();
-        s_gfx.focus = 1;
-    } else if (r == UI_GFX_SWITCH_REFUSED && applying) {
-        /* nothing tried: the row keeps the player's value */
-        ico_config_set_string("video.backend", s_gfx.trial);
-    } else if (r == UI_GFX_SWITCH_FAILED) {
-        /* the host is back on the renderer that ran; after Apply the value
-           the page found stays (the config held it since Apply), so the
-           file names a renderer that starts, as after Revert */
-        if (applying) {
-            fprintf(stderr, "settings: Graphics API back to %s (%s did not start)\n",
-                    s_gfx.entry[0] ? s_gfx.entry : "automatic", s_gfx.want);
-        }
-        const char *fmt = ui_str(UI_STR_GRAPHICS_FAILED);
-        const char *bad = applying ? s_gfx.want : s_gfx.prev;
-        const char *kept = applying ? s_gfx.prev : s_gfx.want;
-        snprintf(body, sizeof(body), fmt, backendLabel(bad), backendLabel(kept));
-        ui_popup_push(body, "");
-    }
-}
-
-/* a switch to name; the host answers now or later (gfxPoll) */
-static void gfxBegin(const char *name, int why, int state)
-{
-    s_gfx.state = state;
-    const int r = s_gfxHost.switchBegin(name, why);
-    if (r != UI_GFX_SWITCH_PENDING) {
-        gfxResult(r);
-    }
-}
-
-static void gfxPoll(void)
-{
-    if (s_gfxHostSet && (s_gfx.state == GFX_APPLYING || s_gfx.state == GFX_REVERTING)) {
-        const int r = s_gfxHost.switchPoll();
-        if (r != UI_GFX_SWITCH_PENDING) {
-            gfxResult(r);
-        }
-    }
-}
-
-static void gfxApply(void)
-{
-    const char *c = gfxChosen();
-    if (!gfxApplyShown() || c == NULL) {
-        return;
-    }
-    gfxEntry();
-    snprintf(s_gfx.want, sizeof(s_gfx.want), "%s", c);
-    snprintf(s_gfx.prev, sizeof(s_gfx.prev), "%s", s_gfxHost.running());
-    /* the choice on trial outside the config, which holds the value the
-       page found until Keep */
-    snprintf(s_gfx.trial, sizeof(s_gfx.trial), "%s", ico_config_get_string("video.backend", ""));
-    ico_config_set_string("video.backend", s_gfx.entry);
-    gfxBegin(s_gfx.want, UI_GFX_WHY_APPLY, GFX_APPLYING);
-}
-
-/* Revert, Circle or the countdown's end: the renderer that ran before, the
-   row's value as the page found it, nothing written */
-static void gfxRevert(int why)
-{
-    if (s_gfx.state != GFX_COUNTDOWN) {
-        return;
-    }
-    ico_config_set_string("video.backend", s_gfx.entry);
-    fprintf(stderr, "settings: Graphics API back to %s (%s)\n",
-            s_gfx.entry[0] ? s_gfx.entry : "automatic",
-            why == UI_GFX_WHY_TIMEOUT ? "not kept in 10 s" : "reverted");
-    gfxBegin(s_gfx.prev, why, GFX_REVERTING);
-}
-
-/* Keep: the choice into the config, written on leaving */
-static void gfxKeep(void)
-{
-    if (s_gfx.state != GFX_COUNTDOWN) {
-        return;
-    }
-    s_gfx.state = GFX_IDLE;
-    ico_config_set_string("video.backend", s_gfx.trial);
-    s_dirtyConfig = 1;
-    snprintf(s_gfx.entry, sizeof(s_gfx.entry), "%s", s_gfx.trial);
-    if (s_gfxHost.kept != NULL) {
-        s_gfxHost.kept();
-    }
-}
-
-void ui_settings_set_graphics_host(const UiGraphicsHost *host)
-{
-    s_gfxHostSet = host != NULL && host->running != NULL && host->switchBegin != NULL &&
-                   host->switchPoll != NULL;
-    if (s_gfxHostSet) {
-        s_gfxHost = *host;
-    }
-    memset(&s_gfx, 0, sizeof(s_gfx));
-}
-
 static void texExportEnd(void);
 
 void ui_settings_vsync(void)
 {
-    gfxPoll();
+    ui__gfx_poll();
     texExportEnd();
-    if (s_gfx.state == GFX_COUNTDOWN && --s_gfx.left <= 0) {
-        gfxRevert(UI_GFX_WHY_TIMEOUT);
-    }
+    ui__gfx_vsync();
+    ui__backup_vsync();
 }
 
 /* the zips waiting in the drivers folder, 0 without a host */
@@ -1106,6 +853,63 @@ void ui_settings_set_steam_handler(int (*fn)(void))
 static UiTextureExportHost s_texExportHost;
 static int s_texExportHostSet, s_texExportPending;
 
+/* The Save states host (settings.h).  The pause menu's Save states row and
+   the Continue screen's prompt are built only when it was set before the
+   menus were built (ui_settings_install: main_host.c sets it first), so a
+   build without one has neither; the page itself is always built and
+   unreachable then (settings_states.c holds the host). */
+static int s_statesAtBuild;   /* the host was set when build() ran */
+static int s_statesRow = -1;  /* the pause menu's Save states row, -1 none */
+static int s_contLayout = -1; /* the Continue screen's prompt layout (contProc), -1 none */
+static int s_contWarned;
+/* the prompt's line: under the frame of the file picture (field lines 60 to
+   180 on the European disc, to 169 on the others) and above the bar of OK
+   and Back (from 200) on every disc */
+#define CONT_HINT_Y 183
+static UiHint s_contHint;
+static void statesCloseAfterLoad(void);
+static void gameCursorOn(int to, int row);
+static void buildStatesPage(void);
+static int contProc(int first, int item);
+
+/* the Save states page's geometry (the page: after parentLayout; its state is
+   settings_states.c's) and how it was reached */
+#define ST_Y0 40
+#define ST_PITCH 44
+#define ST_IMG_X 40
+#define ST_IMG_W 72
+#define ST_IMG_H 54 /* y units */
+#define ST_TEXT_X 124
+#define ST_LABEL_W 230 /* ends at the left arrow's x (ARROW_L_X, 362) less a gap */
+#define ST_LABEL_H 26
+#define ST_LABEL_SIZE 24.0f
+#define ST_INFO_W 480
+#define ST_INFO_H 20
+#define ST_INFO1_DY 13
+#define ST_INFO2_DY 22
+#define ST_STATUS_Y 205
+#define ST_STATUS_H 30
+
+static int s_stFromPause;     /* opened from the pause menu's row: Back returns there */
+static int s_stFromContinue;  /* opened from the Continue screen: Back returns there */
+static int s_stLeave;         /* a state was loaded: the page closes at the next tick */
+static int s_procLayout = -1; /* the layout the last settings proc ran in */
+
+void ui_settings_sync_after_state_load(void)
+{
+    statesCloseAfterLoad();
+}
+
+int ui_settings_states_row(void)
+{
+    return s_statesRow;
+}
+
+int ui_settings_states_prompt_layout(void)
+{
+    return s_contLayout;
+}
+
 void ui_settings_set_texture_export_host(const UiTextureExportHost *host)
 {
     s_texExportHostSet =
@@ -1336,6 +1140,12 @@ static const char *fmtText(UiStrId id, const char *want, const int *v, const cha
     return buf;
 }
 
+const char *ui__settings_fmt(int id, const char *want, const int *v, const char *str, char *buf,
+                             unsigned size)
+{
+    return fmtText((UiStrId)id, want, v, str, buf, size);
+}
+
 /* Extras > Export textures: the job's state now (IDLE without a host) */
 static int texExportPoll(UiTextureExportStatus *st)
 {
@@ -1490,13 +1300,15 @@ static void setGameLanguage(int game)
     }
 }
 
-/* a UiLang's own name (the Menu language row) */
+/* a UiLang's own name (the Menu language row, the Language row's community
+   entries) */
 static const char *menuLanguageName(int lang)
 {
-    static const int ids[UI_LANG_COUNT] = {UI_STR_LANG_EN, UI_STR_LANG_FR, UI_STR_LANG_DE,
-                                           UI_STR_LANG_IT, UI_STR_LANG_ES, UI_STR_LANG_JA,
-                                           UI_STR_LANG_KO, UI_STR_LANG_ZH};
-    return ui_str((UiStrId)ids[lang >= 0 && lang < UI_LANG_COUNT ? lang : 0]);
+    static const int ids[UI_LANG_TABLES] = {
+        UI_STR_LANG_EN,        UI_STR_LANG_FR,          UI_STR_LANG_DE,   UI_STR_LANG_IT,
+        UI_STR_LANG_ES,        UI_STR_LANG_JA,          UI_STR_LANG_KO,   UI_STR_LANG_ZH,
+        UI_STR_LANG_RU_BOBTTZ, UI_STR_LANG_RU_COBRA838, UI_STR_LANG_PT_BR};
+    return ui_str((UiStrId)ids[lang >= 0 && lang < UI_LANG_TABLES ? lang : 0]);
 }
 
 void ui_settings_apply_language(void)
@@ -1513,6 +1325,9 @@ void ui_settings_apply_language(void)
     ui_set_sheet_language(sheet >= 0            ? sheet
                           : gameLanguage() >= 0 ? (int)ui_lang_from_game(gameLanguage())
                                                 : (int)UI_LANG_EN);
+    /* the game's menu words in a community translation over the English
+       sheets while one is in force (ui_lang.h ui_settings_text_language) */
+    ui_set_menu_words_language(ui_settings_text_language());
 }
 
 static const char *languageName(int game)
@@ -1521,6 +1336,41 @@ static const char *languageName(int game)
                                UI_STR_LANG_ES};
     int i = game - ICO_GAME_LANGUAGE_ENGLISH;
     return ui_str((UiStrId)ids[i >= 0 && i < 5 ? i : 0]);
+}
+
+/* The Language row's entries: the game's five (0..4, NonLinearCameraMove 2..6
+   as the boot's step 102 stores it), then the community translations (5..,
+   UI_LANG_COMMUNITY_FIRST on: English disc data, [game] text_language) */
+#define LANGUAGE_ENTRIES (5 + UI_LANG_COMMUNITY_COUNT)
+
+static int languageEntry(void)
+{
+    const int text = ui_settings_text_language();
+    if (text >= 0) {
+        return 5 + text - UI_LANG_COMMUNITY_FIRST;
+    }
+    const int i = gameLanguage() - ICO_GAME_LANGUAGE_ENGLISH;
+    return i < 0 || i > 4 ? 0 : i;
+}
+
+static const char *languageEntryName(int entry)
+{
+    return entry >= 5 ? menuLanguageName(UI_LANG_COMMUNITY_FIRST + entry - 5)
+                      : languageName(ICO_GAME_LANGUAGE_ENGLISH + entry);
+}
+
+/* the game's language and [game] text_language for entry (a community
+   entry keeps the English disc data: the subtitle files, the menu sheets,
+   the saves' language byte) */
+static void setLanguageEntry(int entry)
+{
+    const int text = entry >= 5 ? UI_LANG_COMMUNITY_FIRST + entry - 5 : -1;
+    setGameLanguage(ICO_GAME_LANGUAGE_ENGLISH + (entry >= 5 ? 0 : entry));
+    ico_opt_set_text_language(text);
+    ico_config_set_string("game.text_language", ico_opt_text_language_name(text));
+    fprintf(stderr, "settings: Language %s (game language %d, [game] text_language \"%s\")\n",
+            entry >= 5 ? ico_opt_ui_language_name(text) : ico_opt_ui_language_name(entry),
+            gameLanguage(), ico_opt_text_language_name(text));
 }
 
 /* the game's brightness step as gsb_controlBrightness clamps it */
@@ -1610,7 +1460,7 @@ static int aaLocked(void)
 {
     IcoVideoOptions o;
     ico_video_get(&o);
-    return ico_video_preset(&o) == ICO_VIDEO_ORIGINAL;
+    return ico_video_preset_rows(&o) == ICO_VIDEO_ORIGINAL;
 }
 
 /* the order the row steps through (the numbers are the enum's, shared with
@@ -1969,6 +1819,9 @@ static const char *rawValue(int opt, char *buf, unsigned size)
         return onOff(o.dumpModels);
     case UI_OPT_EFFECT_GLOW:
         return onOff(o.effectGlow);
+    case UI_OPT_EFFECT_GLOW_SMOOTH:
+        /* Original (the game's own frame's glow held) or Smooth */
+        return ui_str(o.effectGlowSmooth ? UI_STR_VAL_SMOOTH : UI_STR_VAL_ORIGINAL);
     case UI_OPT_EFFECT_DEPTH_OF_FIELD:
         return onOff(o.effectDepthOfField);
     case UI_OPT_EFFECT_SOFTENING:
@@ -1978,6 +1831,9 @@ static const char *rawValue(int opt, char *buf, unsigned size)
         return !o.effectMotionBlur        ? ui_str(UI_STR_OFF)
                : o.effectMotionBlurSmooth ? ui_str(UI_STR_VAL_SMOOTH)
                                           : ui_str(UI_STR_VAL_ORIGINAL);
+    case UI_OPT_EFFECT_MOTION_BLUR_STRENGTH:
+        snprintf(buf, size, "%d %%", o.effectMotionBlurStrength);
+        return buf;
     case UI_OPT_EFFECT_FOG:
         return onOff(o.effectFog);
     case UI_OPT_EFFECT_WATER:
@@ -2051,7 +1907,12 @@ static const char *rawValue(int opt, char *buf, unsigned size)
     case UI_OPT_GPU_ADD_FILE:
         return gpuFileCount() > 0 ? gpuFileText(buf, size) : "";
     case UI_OPT_GRAPHICS_API:
-        return backendText(buf, size);
+        return ui__gfx_backend_text(buf, size);
+    case UI_OPT_GRAPHICS_ADAPTER: {
+        /* Automatic, or the card's name (not translated), cut to its box */
+        const char *v = ui__gfx_adapter_value();
+        return v[0] != '\0' ? gpuFit(buf, size, v) : ui_str(UI_STR_VAL_GRAPHICS_AUTOMATIC);
+    }
     case UI_OPT_STICK_FIX:
         return onOff(ico_opt_stick_fix());
     case UI_OPT_ACH_POPUPS:
@@ -2125,14 +1986,24 @@ static const char *rawValue(int opt, char *buf, unsigned size)
                                                   UI_STR_VAL_PIT_TRIPLE};
         return ui_str(pitStr[ico_opt_pit_time()]);
     }
+    case UI_OPT_SHADOW_SPEED: {
+        static const int speedStr[ICO_SPEED_COUNT] = {UI_STR_VAL_SPEED_SLOWER, UI_STR_VAL_ORIGINAL,
+                                                      UI_STR_VAL_SPEED_FASTER,
+                                                      UI_STR_VAL_SPEED_FASTEST};
+        return ui_str(speedStr[ico_opt_shadow_speed()]);
+    }
     case UI_OPT_DOOR_FIX:
         return onOff(ico_opt_door_fix());
+    case UI_OPT_YORDA_TRIPS:
+        return onOff(ico_opt_yorda_trips());
     case UI_OPT_NATURAL_CHAINS:
         return onOff(ico_opt_natural_chains());
     case UI_OPT_SKIP_OPENING:
         return onOff(ico_opt_skip_opening());
+    case UI_OPT_SECOND_CARD:
+        return onOff(ico_opt_second_memory_card());
     case UI_OPT_LANGUAGE:
-        return languageName(gameLanguage());
+        return languageEntryName(languageEntry());
     case UI_OPT_MENU_LANGUAGE: {
         const int pref = ico_opt_ui_language();
         return pref < 0 ? ui_str(UI_STR_VAL_AUTO) : menuLanguageName(pref);
@@ -2190,13 +2061,20 @@ static int optShown(int opt, int link)
         return s_gpuHostSet && s_gpuHost.adreno() != 0;
     }
     if (opt == UI_OPT_LINK && link == UI_PAGE_GRAPHICS) {
-        return s_backendCount >= 2; /* one renderer: nothing to choose */
+        /* one renderer and one card: nothing to choose */
+        return ui__gfx_backend_count() >= 2 || ui__gfx_adapter_count() >= 2;
+    }
+    if (opt == UI_OPT_GRAPHICS_API) {
+        return ui__gfx_backend_count() >= 2;
+    }
+    if (opt == UI_OPT_GRAPHICS_ADAPTER) {
+        return ui__gfx_adapter_count() >= 2;
     }
     if (opt == UI_OPT_GRAPHICS_APPLY) {
-        return gfxApplyShown();
+        return ui__gfx_apply_shown();
     }
     if (opt == UI_OPT_GRAPHICS_KEEP || opt == UI_OPT_GRAPHICS_REVERT) {
-        return s_gfx.state == GFX_COUNTDOWN;
+        return ui__gfx_state() == UI__GFX_COUNTDOWN;
     }
     if (opt == UI_OPT_LINK && link == UI_PAGE_TOUCH) {
         return touchPresent(); /* Controls > Touch screen */
@@ -2229,6 +2107,9 @@ static int optShown(int opt, int link)
     }
     if (opt == UI_OPT_EXTRAS_EXPORT_TEXTURES) {
         return onTitle() && s_texExportHostSet;
+    }
+    if (opt == UI_OPT_EXTRAS_BACKUP || opt == UI_OPT_EXTRAS_RESTORE) {
+        return onTitle() && ui__backup_hosted();
     }
     if (opt == UI_OPT_CHAR_SWITCH) {
         return ui_settings_characters_in_viewer();
@@ -2292,6 +2173,9 @@ static int optShown(int opt, int link)
     if (opt == UI_OPT_WINDOW_MODE) {
         return !ico_video_android(); /* the phone's window is the screen */
     }
+    if (opt == UI_OPT_EFFECT_MOTION_BLUR_STRENGTH) {
+        return ico_video_effect_motion_blur(); /* nothing to weaken with Motion blur Off */
+    }
     if (opt == UI_OPT_MOUSE_CAMERA || opt == UI_OPT_MOUSE_SENS || opt == UI_OPT_MOUSE_INVERT ||
         opt == UI_OPT_MOUSE_SPEED || opt == UI_OPT_MOUSE_RANGE || opt == UI_OPT_MOUSE_RETURN) {
         return !ico_video_android(); /* no mouse camera on a phone */
@@ -2322,7 +2206,8 @@ int ui_settings_opt_shown(UiSettingsOpt opt)
 static int steppable(int opt)
 {
     return (opt >= UI_OPT_PRESET && opt <= UI_OPT_DEVELOPER) /* includes the Effects rows */ ||
-           opt == UI_OPT_GPU_DRIVER || opt == UI_OPT_GPU_ADD_FILE || opt == UI_OPT_GRAPHICS_API;
+           opt == UI_OPT_GPU_DRIVER || opt == UI_OPT_GPU_ADD_FILE || opt == UI_OPT_GRAPHICS_API ||
+           opt == UI_OPT_GRAPHICS_ADAPTER;
 }
 
 static int resolutionLocked(void)
@@ -2332,6 +2217,15 @@ static int resolutionLocked(void)
     return crtForcesNative(&o);
 }
 
+/* Glow between frames does nothing at Frame rate Original (every picture is
+   the game's own) or with Glow off: greyed, with the note that says so */
+static int glowSmoothLocked(void)
+{
+    IcoVideoOptions o;
+    ico_video_get(&o);
+    return o.framerate == ICO_FRAMERATE_ORIGINAL || !o.effectGlow;
+}
+
 /* a press changes the option now: the video mode only from the title, the
    resolution not under the CRT filter */
 static int canStep(int opt)
@@ -2339,6 +2233,7 @@ static int canStep(int opt)
     return steppable(opt) && (opt != UI_OPT_VIDEO_MODE || onTitle()) && optShown(opt, -1) &&
            (opt != UI_OPT_RESOLUTION || !resolutionLocked()) &&
            (opt != UI_OPT_ANTI_ALIAS || !aaLocked()) &&
+           (opt != UI_OPT_EFFECT_GLOW_SMOOTH || !glowSmoothLocked()) &&
            (opt != UI_OPT_TEXTURE_PACK || texturePackInstalled()) &&
            (opt != UI_OPT_MODEL_PACK || modelPackInstalled());
 }
@@ -2521,6 +2416,13 @@ void ui_settings_step(UiSettingsOpt opt, int dir)
         video = 1;
         break;
     }
+    case UI_OPT_EFFECT_GLOW_SMOOTH:
+        if (glowSmoothLocked()) {
+            return; /* nothing to change at Frame rate Original or with Glow off */
+        }
+        o.effectGlowSmooth = !o.effectGlowSmooth;
+        video = 1;
+        break;
     case UI_OPT_EFFECT_MOTION_BLUR: {
         /* Off, Original, Smooth, around (Right from Original is Smooth);
            Off keeps the way chosen last in the file's mode key */
@@ -2530,6 +2432,17 @@ void ui_settings_step(UiSettingsOpt opt, int dir)
         if (i) {
             o.effectMotionBlurSmooth = i == 2;
         }
+        video = 1;
+        break;
+    }
+    case UI_OPT_EFFECT_MOTION_BLUR_STRENGTH: {
+        /* 10 .. 100 % in tens, held at both ends (as CRT strength) */
+        const int v = ico_video_motion_blur_strength_clamp(o.effectMotionBlurStrength +
+                                                           dir * ICO_MOTION_BLUR_STRENGTH_STEP);
+        if (v == o.effectMotionBlurStrength) {
+            return;
+        }
+        o.effectMotionBlurStrength = v;
         video = 1;
         break;
     }
@@ -2600,7 +2513,10 @@ void ui_settings_step(UiSettingsOpt opt, int dir)
         stepGpuFile(dir);
         break;
     case UI_OPT_GRAPHICS_API:
-        stepBackend(dir);
+        s_dirtyConfig |= ui__gfx_step_backend(dir);
+        break;
+    case UI_OPT_GRAPHICS_ADAPTER:
+        s_dirtyConfig |= ui__gfx_step_adapter(dir);
         break;
     case UI_OPT_STICK_FIX:
         ico_opt_set_stick_fix(!ico_opt_stick_fix());
@@ -2732,9 +2648,22 @@ void ui_settings_step(UiSettingsOpt opt, int dir)
         ico_config_set_string("gameplay.pit_time", kPitWords[ico_opt_pit_time()]);
         s_dirtyConfig = 1;
         break;
+    case UI_OPT_SHADOW_SPEED:
+        /* Slower, Original, Faster, Fastest around; read every game tick (options.h) */
+        ico_opt_set_shadow_speed(stepIndex(ico_opt_shadow_speed(), ICO_SPEED_COUNT, dir));
+        ico_config_set_string("gameplay.shadow_speed", kSpeedWords[ico_opt_shadow_speed()]);
+        s_dirtyConfig = 1;
+        break;
     case UI_OPT_DOOR_FIX:
         ico_opt_set_door_fix(!ico_opt_door_fix());
         ico_config_set_bool("gameplay.door_fix", ico_opt_door_fix());
+        s_dirtyConfig = 1;
+        break;
+    case UI_OPT_YORDA_TRIPS:
+        /* the motions are added at a stage load, so the next room has them
+           (port/game/yorda_trip.h) */
+        ico_opt_set_yorda_trips(!ico_opt_yorda_trips());
+        ico_config_set_bool("gameplay.yorda_trips", ico_opt_yorda_trips());
         s_dirtyConfig = 1;
         break;
     case UI_OPT_NATURAL_CHAINS:
@@ -2748,16 +2677,25 @@ void ui_settings_step(UiSettingsOpt opt, int dir)
         ico_config_set_bool("gameplay.skip_opening", ico_opt_skip_opening());
         s_dirtyConfig = 1;
         break;
+    case UI_OPT_SECOND_CARD:
+        /* the card goes in or out at once (options.h): the game's next save
+           or load screen reads both ports */
+        ico_opt_set_second_memory_card(!ico_opt_second_memory_card());
+        ico_config_set_bool("gameplay.second_memory_card", ico_opt_second_memory_card());
+        s_dirtyConfig = 1;
+        break;
     case UI_OPT_LANGUAGE: {
         /* as kanbanBoot.c step 102 stores it; the game's text and subtitles
            follow at their next load, the port's strings at once while the
-           menu language is Auto */
-        int i = gameLanguage() - ICO_GAME_LANGUAGE_ENGLISH;
+           menu language is Auto; a community entry's menu words and
+           subtitles at once (it draws them over the English data) */
         if (gameLanguage() < 0) {
             break; /* no language of the game's own (the row is hidden) */
         }
-        i = i < 0 || i > 4 ? 0 : stepIndex(i, 5, dir);
-        setGameLanguage(ICO_GAME_LANGUAGE_ENGLISH + i);
+        const int i = gameLanguage() - ICO_GAME_LANGUAGE_ENGLISH;
+        setLanguageEntry(ui_settings_text_language() < 0 && (i < 0 || i > 4)
+                             ? 0
+                             : stepIndex(languageEntry(), LANGUAGE_ENTRIES, dir));
         ui_settings_apply_language();
         ico_sysconf_set_language(ico_game_to_scf_language(gameLanguage()));
         s_dirtyConfig = 1;
@@ -2779,8 +2717,9 @@ void ui_settings_step(UiSettingsOpt opt, int dir)
         break;
     }
     case UI_OPT_MENU_LANGUAGE: {
-        /* Auto, then the eight tables (UiLang order): [ui] language */
-        const int i = stepIndex(ico_opt_ui_language() + 1, UI_LANG_COUNT + 1, dir) - 1;
+        /* Auto, then the eight tables and the community translations
+           (UiLang order): [ui] language */
+        const int i = stepIndex(ico_opt_ui_language() + 1, UI_LANG_TABLES + 1, dir) - 1;
         ico_opt_set_ui_language(i);
         ico_config_set_string("ui.language", ico_opt_ui_language_name(i));
         ui_settings_apply_language();
@@ -3370,7 +3309,9 @@ static void buildOptionPage(int id, int header, const int *opts, const int *strs
         break;
     case UI_PAGE_EFFECTS:
         addNote(pg, UI_OPT_EFFECT_GLOW, UI_STR_EFFECTS_NOTE);
+        addNote(pg, UI_OPT_EFFECT_GLOW_SMOOTH, UI_STR_EFFECT_GLOW_SMOOTH_NOTE);
         addNote(pg, UI_OPT_EFFECT_MOTION_BLUR, UI_STR_EFFECT_MOTION_BLUR_NOTE);
+        addNote(pg, UI_OPT_EFFECT_MOTION_BLUR_STRENGTH, UI_STR_EFFECT_MOTION_BLUR_STRENGTH_NOTE);
         addNote(pg, UI_OPT_EFFECT_WATER, UI_STR_EFFECT_WATER_NOTE);
         break;
     case UI_PAGE_GPU_DRIVER:
@@ -3385,6 +3326,7 @@ static void buildOptionPage(int id, int header, const int *opts, const int *strs
         break;
     case UI_PAGE_GRAPHICS:
         addNote(pg, UI_OPT_GRAPHICS_API, UI_STR_GRAPHICS_API_NOTE);
+        addNote(pg, UI_OPT_GRAPHICS_ADAPTER, UI_STR_GRAPHICS_ADAPTER_NOTE);
         addNote(pg, UI_OPT_GRAPHICS_APPLY, UI_STR_GRAPHICS_APPLY_NOTE);
         /* the countdown's question under Keep and Revert both (gfxNote) */
         addNote(pg, UI_OPT_GRAPHICS_KEEP, UI_STR_GRAPHICS_KEEP_ASK);
@@ -3409,9 +3351,12 @@ static void buildOptionPage(int id, int header, const int *opts, const int *strs
     case UI_PAGE_GAMEPLAY:
         addNote(pg, UI_OPT_YORDA, UI_STR_OPT_YORDA_NOTE);
         addNote(pg, UI_OPT_PIT_TIME, UI_STR_OPT_PIT_TIME_NOTE);
+        addNote(pg, UI_OPT_SHADOW_SPEED, UI_STR_OPT_SHADOW_SPEED_NOTE);
         addNote(pg, UI_OPT_DOOR_FIX, UI_STR_OPT_DOOR_FIX_NOTE);
+        addNote(pg, UI_OPT_YORDA_TRIPS, UI_STR_OPT_YORDA_TRIPS_NOTE);
         addNote(pg, UI_OPT_NATURAL_CHAINS, UI_STR_OPT_NATURAL_CHAINS_NOTE);
         addNote(pg, UI_OPT_SKIP_OPENING, UI_STR_OPT_SKIP_OPENING_NOTE);
+        addNote(pg, UI_OPT_SECOND_CARD, UI_STR_OPT_SECOND_CARD_NOTE);
         addNote(pg, UI_OPT_PLAYERS, UI_STR_PLAYERS_NOTE);
         break;
     case UI_PAGE_EXTRAS:
@@ -3425,6 +3370,8 @@ static void buildOptionPage(int id, int header, const int *opts, const int *strs
         }
         addNote(pg, UI_OPT_EXTRAS_CREDITS, UI_STR_EXTRAS_LOCKED_NOTE);
         addNote(pg, UI_OPT_EXTRAS_EXPORT_TEXTURES, UI_STR_EXPORT_TEXTURES_NOTE);
+        addNote(pg, UI_OPT_EXTRAS_BACKUP, UI_STR_BACKUP_NOTE);
+        addNote(pg, UI_OPT_EXTRAS_RESTORE, UI_STR_RESTORE_NOTE);
         addNote(pg, UI_OPT_ACH_POPUPS, UI_STR_ACH_POPUPS_ALSO_NOTE);
         break;
     case UI_PAGE_VARIANTS:
@@ -3683,6 +3630,32 @@ static const char *areaName(int stage)
     return NULL;
 }
 
+/* settings_states.h: settings.c's helpers for the Save states page's texts */
+int ui__settings_built(void)
+{
+    return s_built;
+}
+
+int ui__settings_on_title(void)
+{
+    return onTitle();
+}
+
+void ui__settings_wrap_note(const char *text, float width, char *out, unsigned outSize)
+{
+    wrapText(text, NOTE_SIZE, width, out, outSize);
+}
+
+const char *ui__settings_area_name(int stage)
+{
+    return areaName(stage);
+}
+
+void ui__settings_play_time(unsigned int frames, char *buf, size_t size)
+{
+    playTimeText(frames, buf, size);
+}
+
 /* the achievements unlocked (not ICO_ACH_LOCKED) */
 static int achUnlocked(void)
 {
@@ -3792,8 +3765,34 @@ static void buildEntries(void)
                                      UI_ALIGN_LEFT);
     /* the journey's lines in the same layout (the rows are contiguous),
        placed and filled by pauseStats */
+    /* "Save states" under it (placePause), when a host was set: the page's
+       row opens the page as Photo mode's opens photo_ui.c's layout */
+    s_statesRow = -1;
+    if (s_statesAtBuild) {
+        s_statesRow = ui_settings_add_row(0, 0, PAUSE_ROW_W, 40, 1, -1, UI_STR_STATES, NULL, 0.0f,
+                                          UI_ALIGN_LEFT);
+        if (s_statesRow >= 0) {
+            P(s_statesRow)->defaultMask = 1;
+            P(s_statesRow)->right = s_pages[UI_PAGE_STATES].layout;
+        }
+    }
+    /* the Continue screen's prompt: Square and "Save states" on a line of
+       its own under the file picture's frame (contProc shows it), in a
+       layout with no cursor that repoint chains after the file select */
+    s_contLayout = -1;
+    if (s_statesAtBuild) {
+        static const UiHintItem kCont[1] = {{LT_GLYPH_SQUARE, -1, UI_STR_STATES}};
+        const int first = lt_ext_prop_count() + LT_GAME_PROPERTY_COUNT;
+        ui_hint_build(&s_contHint, CONT_HINT_Y, NOTE_SIZE, kCont, 1);
+        const int end = lt_ext_prop_count() + LT_GAME_PROPERTY_COUNT;
+        for (int r = first; r < end; r++) {
+            lt_ext_set_pointer_role(r, LT_POINTER_SQUARE);
+        }
+        s_contLayout = addLayout(first, end, 0.0f, contProc, -1);
+    }
     int last = buildStats();
-    addEntryLayout(ENTRY_PAUSE, s_photoRow, last >= 0 ? last : s_photoRow);
+    addEntryLayout(ENTRY_PAUSE, s_photoRow,
+                   last >= 0 ? last : (s_statesRow >= 0 ? s_statesRow : s_photoRow));
     for (int e = ENTRY_TITLE12; e <= ENTRY_TITLE13; e++) {
         /* "Options": the pause menu's word (UI_STR_MT_OPTIONS, the
            sheets' own wording in each language), a text row in the menus'
@@ -3878,11 +3877,13 @@ static void build(void)
 #endif
                                     UI_PAGE_DEVELOPER,
                                     -1};
-    /* the Graphics API page (its link needs two or more renderers) */
-    static const int apiOpts[] = {UI_OPT_GRAPHICS_API, UI_OPT_GRAPHICS_APPLY, UI_OPT_GRAPHICS_KEEP,
+    /* the Graphics page (its link needs two or more renderers or cards) */
+    static const int apiOpts[] = {UI_OPT_GRAPHICS_API,    UI_OPT_GRAPHICS_ADAPTER,
+                                  UI_OPT_GRAPHICS_APPLY,  UI_OPT_GRAPHICS_KEEP,
                                   UI_OPT_GRAPHICS_REVERT, UI_OPT_BACK};
-    static const int apiStrs[] = {UI_STR_OPT_GRAPHICS_API, UI_STR_GRAPHICS_APPLY,
-                                  UI_STR_GRAPHICS_KEEP, UI_STR_GRAPHICS_REVERT, UI_STR_BACK};
+    static const int apiStrs[] = {UI_STR_OPT_GRAPHICS_API, UI_STR_OPT_GRAPHICS_ADAPTER,
+                                  UI_STR_GRAPHICS_APPLY,   UI_STR_GRAPHICS_KEEP,
+                                  UI_STR_GRAPHICS_REVERT,  UI_STR_BACK};
     /* Android's Graphics driver page (its link needs a host) */
     static const int gpuOpts[] = {UI_OPT_GPU_DRIVER, UI_OPT_GPU_ADD, UI_OPT_GPU_ADD_FILE,
                                   UI_OPT_GPU_REMOVE, UI_OPT_BACK};
@@ -3890,17 +3891,21 @@ static void build(void)
                                   UI_STR_GPU_DRIVER_ADD_FILE, UI_STR_GPU_DRIVER_REMOVE,
                                   UI_STR_BACK};
     static const int fxOpts[] = {UI_OPT_EFFECT_GLOW,
+                                 UI_OPT_EFFECT_GLOW_SMOOTH,
                                  UI_OPT_EFFECT_DEPTH_OF_FIELD,
                                  UI_OPT_EFFECT_SOFTENING,
                                  UI_OPT_EFFECT_MOTION_BLUR,
+                                 UI_OPT_EFFECT_MOTION_BLUR_STRENGTH,
                                  UI_OPT_EFFECT_FOG,
                                  UI_OPT_EFFECT_WATER,
                                  UI_OPT_EFFECT_CINEMATIC_BARS,
                                  UI_OPT_BACK};
     static const int fxStrs[] = {UI_STR_OPT_EFFECT_GLOW,
+                                 UI_STR_OPT_EFFECT_GLOW_SMOOTH,
                                  UI_STR_OPT_EFFECT_DEPTH_OF_FIELD,
                                  UI_STR_OPT_EFFECT_SOFTENING,
                                  UI_STR_OPT_EFFECT_MOTION_BLUR,
+                                 UI_STR_OPT_EFFECT_MOTION_BLUR_STRENGTH,
                                  UI_STR_OPT_EFFECT_FOG,
                                  UI_STR_OPT_EFFECT_WATER,
                                  UI_STR_OPT_EFFECT_CINEMATIC_BARS,
@@ -3930,16 +3935,34 @@ static void build(void)
                                   UI_STR_OPT_DUMP_MODELS, UI_STR_BACK};
     /* Characters after Credits (from both entries; the other three
        from the title only) */
-    static const int extrasOpts[] = {
-        UI_OPT_EXTRAS_MUSIC, UI_OPT_EXTRAS_MODELS, UI_OPT_EXTRAS_CREDITS,         UI_OPT_LINK,
-        UI_OPT_LINK,         UI_OPT_EXTRAS_STEAM,  UI_OPT_EXTRAS_EXPORT_TEXTURES, UI_OPT_ACH_POPUPS,
-        UI_OPT_BACK};
-    static const int extrasStrs[] = {
-        UI_STR_EXTRAS_MUSIC,           UI_STR_EXTRAS_MODELS,    UI_STR_EXTRAS_CREDITS,
-        UI_STR_SECTION_CHARACTERS,     UI_STR_SECTION_VARIANTS, UI_STR_EXTRAS_STEAM,
-        UI_STR_EXTRAS_EXPORT_TEXTURES, UI_STR_OPT_ACH_POPUPS,   UI_STR_BACK};
-    static const int extrasLinks[] = {-1, -1, -1, UI_PAGE_CHARACTERS, UI_PAGE_VARIANTS, -1,
+    static const int extrasOpts[] = {UI_OPT_EXTRAS_MUSIC,
+                                     UI_OPT_EXTRAS_MODELS,
+                                     UI_OPT_EXTRAS_CREDITS,
+                                     UI_OPT_LINK,
+                                     UI_OPT_LINK,
+                                     UI_OPT_EXTRAS_STEAM,
+                                     UI_OPT_EXTRAS_EXPORT_TEXTURES,
+                                     UI_OPT_EXTRAS_BACKUP,
+                                     UI_OPT_EXTRAS_RESTORE,
+                                     UI_OPT_ACH_POPUPS,
+                                     UI_OPT_BACK};
+    static const int extrasStrs[] = {UI_STR_EXTRAS_MUSIC,
+                                     UI_STR_EXTRAS_MODELS,
+                                     UI_STR_EXTRAS_CREDITS,
+                                     UI_STR_SECTION_CHARACTERS,
+                                     UI_STR_SECTION_VARIANTS,
+                                     UI_STR_EXTRAS_STEAM,
+                                     UI_STR_EXTRAS_EXPORT_TEXTURES,
+                                     UI_STR_EXTRAS_BACKUP,
+                                     UI_STR_EXTRAS_RESTORE,
+                                     UI_STR_OPT_ACH_POPUPS,
+                                     UI_STR_BACK};
+    static const int extrasLinks[] = {-1, -1, -1, UI_PAGE_CHARACTERS, UI_PAGE_VARIANTS, -1, -1, -1,
                                       -1, -1, -1};
+    /* the Save states page's ways in (the pause menu's row, the Continue
+       screen's prompt) exist when its host was set before the menus were
+       built */
+    s_statesAtBuild = ui__states_hosted();
     /* Extras > Game variants (from both entries, with the Characters link
        before it): the eight [variants] rows, the Debug menu (Developer mode
        only) and Back */
@@ -4023,13 +4046,15 @@ static void build(void)
         UI_STR_TOUCH_RESET,    UI_STR_TOUCH_RESET_ALL, UI_STR_BACK};
     static const int touchLinks[] = {-1, -1, -1, UI_PAGE_TOUCH_LAYOUT, -1, -1, -1, -1, -1};
     /* the game's Film effect and Players, once the game is cleared */
-    static const int gameOpts[] = {UI_OPT_YORDA,       UI_OPT_PIT_TIME,       UI_OPT_STICK_FIX,
-                                   UI_OPT_DOOR_FIX,    UI_OPT_NATURAL_CHAINS, UI_OPT_SKIP_OPENING,
-                                   UI_OPT_FILM_EFFECT, UI_OPT_PLAYERS,        UI_OPT_BACK};
+    static const int gameOpts[] = {UI_OPT_YORDA,          UI_OPT_PIT_TIME,     UI_OPT_SHADOW_SPEED,
+                                   UI_OPT_STICK_FIX,      UI_OPT_DOOR_FIX,     UI_OPT_YORDA_TRIPS,
+                                   UI_OPT_NATURAL_CHAINS, UI_OPT_SKIP_OPENING, UI_OPT_SECOND_CARD,
+                                   UI_OPT_FILM_EFFECT,    UI_OPT_PLAYERS,      UI_OPT_BACK};
     static const int gameStrs[] = {
-        UI_STR_OPT_YORDA,       UI_STR_OPT_PIT_TIME,       UI_STR_OPT_STICK_FIX,
-        UI_STR_OPT_DOOR_FIX,    UI_STR_OPT_NATURAL_CHAINS, UI_STR_OPT_SKIP_OPENING,
-        UI_STR_OPT_FILM_EFFECT, UI_STR_OPT_PLAYERS,        UI_STR_BACK};
+        UI_STR_OPT_YORDA,          UI_STR_OPT_PIT_TIME,     UI_STR_OPT_SHADOW_SPEED,
+        UI_STR_OPT_STICK_FIX,      UI_STR_OPT_DOOR_FIX,     UI_STR_OPT_YORDA_TRIPS,
+        UI_STR_OPT_NATURAL_CHAINS, UI_STR_OPT_SKIP_OPENING, UI_STR_OPT_SECOND_CARD,
+        UI_STR_OPT_FILM_EFFECT,    UI_STR_OPT_PLAYERS,      UI_STR_BACK};
     _Static_assert(sizeof(dispOpts) == sizeof(dispStrs), "a string for each Display row");
     _Static_assert(sizeof(ctlOpts) == sizeof(ctlStrs) && sizeof(ctlOpts) == sizeof(ctlLinks),
                    "a string and a link for each Controls row");
@@ -4102,6 +4127,7 @@ static void build(void)
                     N_OF(charOpts), UI_PAGE_EXTRAS);
     buildOptionPage(UI_PAGE_VARIANTS, UI_STR_SECTION_VARIANTS, varOpts, varStrs, NULL,
                     N_OF(varOpts), UI_PAGE_EXTRAS);
+    buildStatesPage();
     buildListPage(UI_PAGE_ACHIEVEMENTS, UI_STR_SECTION_ACHIEVEMENTS, &kAchDef, UI_PAGE_MAIN);
     buildListPage(UI_PAGE_REMAP, UI_STR_OPT_REMAP, &kRemapDef, UI_PAGE_CONTROLS);
     buildListPage(UI_PAGE_MUSIC, UI_STR_EXTRAS_MUSIC, &kGalDef, UI_PAGE_EXTRAS);
@@ -4471,45 +4497,76 @@ static void placeTitle(void)
     }
 }
 
-/* The pause menu: "Photo mode" one pitch under Options while a stage
-   runs (ui_photo_available), with Back (295) one pitch lower to make room
-   (End Game, 296, is further down in the PAL data); otherwise masked and
+/* The pause menu: the port's rows (Photo mode while a stage runs,
+   ui_photo_available, and Save states when the host was set) one pitch
+   apart under Options, with Back (295) below them to make room (End Game,
+   296, is further down in the PAL data); a row not shown is masked and
    stepped over through the item links (layout_texture.c's visibility skip
-   does not look at masks), Back in its own place: Options -> Back and Back
-   -> Options directly, as without the row.  The row's letters start where the
-   pause rows' do. */
+   does not look at masks), and with neither, Back is in its own place:
+   Options -> Back and Back -> Options directly, as without the rows.  The
+   pitch is the game's 20 lines, 16 while the Save states row shows (Options
+   50, Photo mode 66, Save states 82, Back 98, End Game 120).  The rows'
+   letters start where the pause rows' do. */
 static void placePause(void)
 {
     LtProperty *opt = &texProperty[ROW_PAUSE_OPTIONS], *back = &texProperty[ROW_PAUSE_BACK];
     if (s_photoRow < 0) {
         return;
     }
-    const int on = ui_photo_available();
-    LtProperty *ph = P(s_photoRow);
-    ph->dispX = opt->dispX + PAUSE_LETTERS_IN;
-    ph->dispY = opt->dispY + PAUSE_PITCH;
-    ph->dispH = opt->dispH;
-    ph->defaultMask = on ? 0 : 1;
-    lt_mask_property(s_photoRow, on ? 0 : 1);
-    ph->upItem = ROW_PAUSE_OPTIONS;
-    ph->downItem = ROW_PAUSE_BACK;
-    back->dispY = opt->dispY + (on ? 2 : 1) * PAUSE_PITCH;
-    opt->downItem = on ? s_photoRow : ROW_PAUSE_BACK;
-    back->upItem = on ? s_photoRow : ROW_PAUSE_OPTIONS;
+    const int rowOf[2] = {s_photoRow, s_statesRow};
+    const int shown[2] = {ui_photo_available(), s_statesRow >= 0 && ui__states_hosted()};
+    const int pitch = shown[1] ? PAUSE_PITCH_STATES : PAUSE_PITCH;
+    int prev = ROW_PAUSE_OPTIONS, n = 0;
+    for (int i = 0; i < 2; i++) {
+        if (rowOf[i] < 0) {
+            continue;
+        }
+        LtProperty *r = P(rowOf[i]);
+        r->dispX = opt->dispX + PAUSE_LETTERS_IN;
+        r->dispH = opt->dispH;
+        r->defaultMask = shown[i] ? 0 : 1;
+        lt_mask_property(rowOf[i], shown[i] ? 0 : 1);
+        r->upItem = ROW_PAUSE_OPTIONS;
+        r->downItem = ROW_PAUSE_BACK;
+        if (shown[i]) {
+            n++;
+            r->dispY = opt->dispY + n * pitch;
+            r->upItem = prev;
+            if (prev == ROW_PAUSE_OPTIONS) {
+                opt->downItem = rowOf[i];
+            } else {
+                P(prev)->downItem = rowOf[i];
+            }
+            prev = rowOf[i];
+        } else {
+            r->dispY = opt->dispY + pitch;
+        }
+    }
+    back->dispY = opt->dispY + (n + 1) * pitch;
+    if (prev == ROW_PAUSE_OPTIONS) {
+        opt->downItem = ROW_PAUSE_BACK;
+    } else {
+        P(prev)->downItem = ROW_PAUSE_BACK;
+    }
+    back->upItem = prev;
 }
 
 /* whether the pause menu's rows are the PAL ones (or as placePause and
-   repoint left them) */
+   repoint left them: the port's rows chained between Options and Back, at
+   the game's pitch or the Save states row's) */
 static int pauseRowsOk(void)
 {
     const LtProperty *o = &texProperty[ROW_PAUSE_OPTIONS], *b = &texProperty[ROW_PAUSE_BACK];
-    const int ph = s_photoRow;
+    const int ph = s_photoRow, st = s_statesRow;
+    const int dy = b->dispY - o->dispY;
+    const int pitchOk = dy == PAUSE_PITCH || dy == 2 * PAUSE_PITCH ||
+                        (st >= 0 && (dy == PAUSE_PITCH_STATES || dy == 2 * PAUSE_PITCH_STATES ||
+                                     dy == 3 * PAUSE_PITCH_STATES));
     return texLayout[LAYOUT_PAUSE].first == ico_region_cur()->pause_first &&
            texLayout[LAYOUT_PAUSE].last == ico_region_cur()->pause_last &&
            (o->right == LAYOUT_GAME_OPTIONS || o->right == s_pages[UI_PAGE_MAIN].layout) &&
-           (o->downItem == ROW_PAUSE_BACK || o->downItem == ph) &&
-           (b->upItem == ROW_PAUSE_OPTIONS || b->upItem == ph) &&
-           (b->dispY == o->dispY + PAUSE_PITCH || b->dispY == o->dispY + 2 * PAUSE_PITCH) &&
+           (o->downItem == ROW_PAUSE_BACK || o->downItem == ph || o->downItem == st) &&
+           (b->upItem == ROW_PAUSE_OPTIONS || b->upItem == ph || b->upItem == st) && pitchOk &&
            texProperty[ROW_PAUSE_END].dispY >= o->dispY + 3 * PAUSE_PITCH;
 }
 
@@ -4544,6 +4601,17 @@ static void repoint(void)
             lt_ext_layout(s_entryLayout[e])->link = texLayout[g].link;
             texLayout[g].link = s_entryLayout[e];
         }
+    }
+    /* the Continue screen's prompt between its file select and the files'
+       layout (the files' procs run first and hand their item on through it) */
+    LtProp *files = &texLayout[LAYOUT_LOAD_FILES];
+    if (s_contLayout >= 0 && files->link == LAYOUT_MC_FILES) {
+        lt_ext_layout(s_contLayout)->link = files->link;
+        files->link = s_contLayout;
+    } else if (s_contLayout >= 0 && files->link != s_contLayout && !s_contWarned) {
+        fprintf(stderr, "settings: layout %d links %d, not the files' %d: no Save states prompt\n",
+                LAYOUT_LOAD_FILES, files->link, LAYOUT_MC_FILES);
+        s_contWarned = 1;
     }
 }
 
@@ -4594,6 +4662,13 @@ void ui_settings_reset(void)
         s_entryRow[e] = s_entryLayout[e] = s_quitRow[e] = -1;
     }
     s_photoRow = -1;
+    ui__states_reset(); /* the pictures released, the cards' rows -1 */
+    s_statesRow = -1;
+    s_statesAtBuild = 0;
+    s_contLayout = -1;
+    s_contWarned = 0;
+    s_stLeave = s_stFromPause = s_stFromContinue = 0;
+    s_procLayout = -1;
     s_statsBuilt = 0;
     s_statBack = -1;
     for (int i = 0; i < STAT_LINES; i++) {
@@ -4868,6 +4943,10 @@ static int entryProc(int first, int item)
     (void)first;
     (void)item;
     int cur = current_layout_id;
+    s_procLayout = cur;
+    if (ui__states_is_open()) {
+        ui__states_release(); /* the Save states page was left for this layout */
+    }
     if (cur == LAYOUT_PAUSE || cur == LAYOUT_TITLE_CONTINUE || cur == LAYOUT_TITLE_NEW) {
         s_origin = cur;
         /* the menu opens on its first row each time, as Options did, and so
@@ -4890,6 +4969,15 @@ static int entryProc(int first, int item)
            default is the game's again for its next showing */
         texLayout[s_restoreTitle].defaultItem = s_restoreDefault;
         s_restoreTitle = -1;
+    }
+    if (cur == LAYOUT_PAUSE && lt_fade_status() == 2 && s_statesRow >= 0 && ui__states_key_take()) {
+        /* F6 (ui_settings_states_key): the page as the row opens it; Back
+           there returns to the row (statesLeave) */
+        POSITIVE_SE();
+        lt_switch_layout(s_pages[UI_PAGE_STATES].layout);
+        if (ui__states_key_line(0)) {
+            fprintf(stderr, "hotkeys: F6 opened the Save states page\n");
+        }
     }
     return -1;
 }
@@ -4950,6 +5038,229 @@ static int closeForDebugMenu(void)
 static int parentLayout(const Page *pg)
 {
     return pg->parent >= 0 ? s_pages[pg->parent].layout : s_origin;
+}
+
+/* ------------------------------------------------- the Save states page
+ * The pause menu's Save states row (placePause) and the Continue screen's
+ * prompt (contProc), when a UiStatesHost was set before the menus were
+ * built; the page's rows (four cards, the status line) are built here and
+ * handed to settings_states.c, which holds the cards' texts and pictures,
+ * the actions and F6's latch (settings_states.h). */
+
+static void buildStatesPage(void)
+{
+    Page *pg = &s_pages[UI_PAGE_STATES];
+    memset(pg, 0, sizeof(*pg));
+    pg->parent = UI_PAGE_EXTRAS;
+    pg->version = -1;
+    pg->markUp = pg->markDown = -1;
+    int first = lt_ext_prop_count() + LT_GAME_PROPERTY_COUNT;
+    addHeader(pg, UI_STR_STATES);
+    for (int i = 0; i < UI_STATES_SLOTS; i++) {
+        int c[7]; /* image, label, action, arrowL, arrowR, info1, info2 */
+        const int y = ST_Y0 + i * ST_PITCH;
+        c[0] = lt_ext_add_image(ST_IMG_X, y, ST_IMG_W, ST_IMG_H);
+        c[1] = ui_settings_add_row(ST_TEXT_X, y, ST_LABEL_W, ST_LABEL_H, 1, -1, 0, " ",
+                                   ST_LABEL_SIZE, UI_ALIGN_LEFT);
+        c[2] = ui_settings_add_row(STEP_X, y, STEP_W, ST_LABEL_H, 1, c[1], 0, " ", ST_LABEL_SIZE,
+                                   UI_ALIGN_CENTER);
+        c[3] = ui_settings_add_row(ARROW_L_X, y, ARROW_W, ST_LABEL_H, 1, c[1], 0, "\xE2\x80\xB9",
+                                   ST_LABEL_SIZE, UI_ALIGN_LEFT);
+        c[4] = ui_settings_add_row(ARROW_R_X, y, ARROW_W, ST_LABEL_H, 1, c[1], 0, "\xE2\x80\xBA",
+                                   ST_LABEL_SIZE, UI_ALIGN_LEFT);
+        c[5] = ui_settings_add_row(ST_TEXT_X, y + ST_INFO1_DY, ST_INFO_W, ST_INFO_H, 0, -1, 0, " ",
+                                   NOTE_SIZE, UI_ALIGN_LEFT);
+        c[6] = ui_settings_add_row(ST_TEXT_X, y + ST_INFO2_DY, ST_INFO_W, ST_INFO_H, 0, -1, 0, " ",
+                                   NOTE_SIZE, UI_ALIGN_LEFT);
+        lt_ext_set_pointer_role(c[0], LT_POINTER_NONE);
+        lt_ext_set_pointer_role(c[2], LT_POINTER_STEP);
+        lt_ext_set_pointer_role(c[3], LT_POINTER_LEFT);
+        lt_ext_set_pointer_role(c[4], LT_POINTER_RIGHT);
+        lt_ext_set_pointer_role(c[5], LT_POINTER_NONE);
+        lt_ext_set_pointer_role(c[6], LT_POINTER_NONE);
+        Row *r = &pg->rows[pg->count++];
+        r->opt = UI_OPT_STATE_SLOT;
+        r->label = c[1];
+        r->value = c[2];
+        r->note = -1;
+        r->link = -1;
+        ui__states_set_card(i, c);
+    }
+    const int status = ui_settings_add_row(20, ST_STATUS_Y, 600, ST_STATUS_H, 0, -1, 0, " ",
+                                           NOTE_SIZE, UI_ALIGN_CENTER);
+    if (status >= 0) {
+        P(status)->centerX = 1;
+    }
+    ui__states_set_status(status);
+    int last = lt_ext_prop_count() + LT_GAME_PROPERTY_COUNT - 1;
+    linkRows(pg);
+    finishPage(pg, first, last);
+}
+
+/* the page opens: the listing, no second press pending, where Back goes */
+static void statesOpen(int fromLayout)
+{
+    ui__states_release();
+    s_stFromPause = fromLayout == LAYOUT_PAUSE;
+    s_stFromContinue = fromLayout == LAYOUT_LOAD_FILES;
+    if (s_stFromContinue) {
+        la_host_leave(); /* the file select's cursor filter, which it set again after contProc */
+    }
+    s_stLeave = 0;
+    ui__states_open();
+}
+
+/* Back (or a load that closes the page): the pictures released, the cursor
+   back on the row that led here */
+static int statesLeave(Page *pg, int id)
+{
+    const int pause = s_stFromPause;
+    ui__states_release();
+    s_stLeave = 0;
+    if (s_stFromContinue) {
+        /* the screen reads the card again (its first tick) */
+        s_stFromContinue = 0;
+        fprintf(stderr, "settings: Save states closed, back to the Continue screen\n");
+        return leaveTo(id, LAYOUT_LOAD_FILES);
+    }
+    if (pause) {
+        const int r = leaveTo(id, LAYOUT_PAUSE);
+        if (s_statesRow >= 0) {
+            gameCursorOn(LAYOUT_PAUSE, s_statesRow);
+        }
+        return r;
+    }
+    return leaveTo(id, parentLayout(pg));
+}
+
+/* the page closes after a load: no sound, nothing saved, the pause menu on
+   its Save states row */
+static int statesLeaveQuiet(void)
+{
+    ui__states_release();
+    s_stLeave = 0;
+    if (s_statesRow >= 0) {
+        gameCursorOn(LAYOUT_PAUSE, s_statesRow);
+    }
+    return LAYOUT_PAUSE;
+}
+
+/* A state was loaded (ui_settings_sync_after_state_load): the restored game
+   is on the pause layout (or on this page, which then closes at its next
+   tick), and the menu sits on the pause menu's entry, the cursor on the
+   Save states row */
+static void statesCloseAfterLoad(void)
+{
+    if (!s_built) {
+        return;
+    }
+    ui__states_release();
+    s_origin = LAYOUT_PAUSE;
+    if (s_statesRow >= 0) {
+        gameCursorOn(LAYOUT_PAUSE, s_statesRow);
+        if (current_layout_id == LAYOUT_PAUSE) {
+            texLayout[LAYOUT_PAUSE].curItem = s_statesRow;
+        }
+    }
+    s_stFromPause = 1;
+    s_stFromContinue = 0;
+    if (pageOfLayout(current_layout_id, NULL) == &s_pages[UI_PAGE_STATES]) {
+        s_stLeave = 1;
+    }
+}
+
+/* The Continue screen's prompt (its layout chained after the file select,
+   whose proc runs after this one with the item this one returns: the file
+   la_mc_file_select picked, handed on as it came).  Shown while the screen
+   shows the card's files; Square there (a button no proc of the screen
+   reads on any disc) opens the page as the title's (s_origin the title: its
+   hint line; the host allows no Save there), what the file select does
+   when it leaves done first.  Back on the page returns here (statesLeave). */
+static int contProc(int first, int item)
+{
+    (void)first;
+    const int shown = ui__states_hosted() && current_layout_id == LAYOUT_LOAD_FILES &&
+                      s_pages[UI_PAGE_STATES].layout >= 0 && la_host_mc_files_shown();
+    s_procLayout = current_layout_id;
+    ui_hint_show(&s_contHint, 0, shown);
+    ui_hint_layout(&s_contHint);
+    if (shown && lt_fade_status() == 2 && (pad[0].flags & LT_PAD_SQUARE) &&
+        !(pad[0].flags & (PAD_OK | PAD_BACK))) { /* not with a file's confirm or Back */
+        POSITIVE_SE();
+        la_host_leave();
+        s_origin = LAYOUT_TITLE_CONTINUE;
+        lt_switch_layout(s_pages[UI_PAGE_STATES].layout);
+        fprintf(stderr, "settings: Save states opened from the Continue screen\n");
+    }
+    return item;
+}
+
+int ui_settings_states_key(int startOpensPause)
+{
+    const char *why = NULL;
+#if defined(__ANDROID__)
+    why = "the keyboard's F6 is not used on Android";
+#else
+    const int onPage = s_built && current_layout_id == s_pages[UI_PAGE_STATES].layout &&
+                       s_pages[UI_PAGE_STATES].layout >= 0;
+    if (!s_built || !ui__states_hosted() || s_statesRow < 0 || s_pages[UI_PAGE_STATES].layout < 0) {
+        why = "save states are off";
+    } else if (ico_photo_active()) {
+        why = "photo mode is open";
+    } else if (stage_no <= ico_region_cur()->stage_title) {
+        why = "on the title (Square on the Continue screen opens the page there)";
+    } else if (startOpensPause && !enable_game_pause) {
+        why = "the game cannot be paused here";
+    } else if (!startOpensPause && !onPage && current_layout_id != LAYOUT_PAUSE) {
+        why = "only in play, on the pause menu or on the Save states page";
+    }
+#endif
+    if (why != NULL) {
+        if (ui__states_key_line(1)) {
+            fprintf(stderr, "hotkeys: F6 ignored: %s\n", why);
+        }
+        return 0;
+    }
+    (void)ui__states_key_take(); /* an earlier press never taken: its line */
+    ui__states_key_arm();
+    if (startOpensPause && ui__states_key_line(0)) {
+        fprintf(stderr, "hotkeys: F6 in play: Start pressed, the pause menu first\n");
+    }
+    return startOpensPause;
+}
+
+/* the page closed by F6: what changed saved, the pictures released, back
+   into the game as the pause menu's Back does (la_host_resume_play, then
+   the region's play layout; closeForDebugMenu's way) */
+static int statesKeyClose(void)
+{
+    ui__states_release();
+    s_stLeave = 0;
+    s_stFromPause = s_stFromContinue = 0;
+    NEGATIVE_SE();
+    ui_settings_save();
+    la_host_resume_play();
+    if (ui__states_key_line(0)) {
+        fprintf(stderr, "hotkeys: F6 closed the Save states page (back to the game)\n");
+    }
+    return ico_region_cur()->layout_play;
+}
+
+/* The page's tick (settingsProc, after the fade): Back, Left and Right, Cross */
+static int statesProc(Page *pg, int id, LtProp *lay, int flags)
+{
+    const int slot = ui__states_cursor_slot(lay->curItem);
+    ui__states_tick(slot); /* the second press's time, the listing */
+    if (ui__states_key_take()) {
+        return statesKeyClose(); /* F6 again: back to the game */
+    }
+    if (flags & PAD_BACK) {
+        return statesLeave(pg, id);
+    }
+    const int dir = (flags & LT_PAD_LEFT) ? -1 : (flags & LT_PAD_RIGHT) ? 1 : 0;
+    ui__states_input(slot, dir, (flags & PAD_OK) != 0);
+    ui__states_refresh(lay->curItem);
+    return -1;
 }
 
 /* ------------------------------------------------- the list pages (ui_list.h)
@@ -5287,6 +5598,9 @@ static int rowLocked(const Row *r)
     if (r->opt == UI_OPT_ANTI_ALIAS) {
         return aaLocked(); /* Off under Original */
     }
+    if (r->opt == UI_OPT_EFFECT_GLOW_SMOOTH) {
+        return glowSmoothLocked(); /* Frame rate Original, or Glow off */
+    }
     if (r->opt == UI_OPT_TEXTURE_PACK) {
         return !texturePackInstalled(); /* "None installed" */
     }
@@ -5303,8 +5617,9 @@ static int rowLocked(const Row *r)
    countdown alone while it runs */
 static int rowShown(int id, const Row *r)
 {
-    const int countdown = id == UI_PAGE_GRAPHICS && s_gfx.state == GFX_COUNTDOWN &&
-                          (r->opt == UI_OPT_GRAPHICS_API || r->opt == UI_OPT_BACK);
+    const int countdown = id == UI_PAGE_GRAPHICS && ui__gfx_state() == UI__GFX_COUNTDOWN &&
+                          (r->opt == UI_OPT_GRAPHICS_API || r->opt == UI_OPT_GRAPHICS_ADAPTER ||
+                           r->opt == UI_OPT_BACK);
     return optShown(r->opt, r->link) && !countdown;
 }
 
@@ -5674,7 +5989,7 @@ static void gfxNote(int row)
     char text[160], buf[256];
     const int hz = ui_popup_vsync_hz();
     const int secs =
-        s_gfx.state == GFX_COUNTDOWN ? (s_gfx.left + hz - 1) / hz : UI_GFX_KEEP_SECONDS;
+        ui__gfx_state() == UI__GFX_COUNTDOWN ? (ui__gfx_left() + hz - 1) / hz : UI_GFX_KEEP_SECONDS;
     wrapText(intText(UI_STR_GRAPHICS_KEEP_ASK, secs, text, sizeof(text)), NOTE_SIZE, 580.0f, buf,
              sizeof(buf));
     lt_ext_set_text(row, buf);
@@ -5699,14 +6014,26 @@ static void texExportNote(int row, const UiTextureExportStatus *st)
     }
 }
 
+/* a note's own words (the backup rows'), wrapped; the note cache is
+   cleared as gfxNote's */
+static void liveNoteText(int row, const char *text)
+{
+    char buf[256];
+    wrapText(text, NOTE_SIZE, 580.0f, buf, sizeof(buf));
+    lt_ext_set_text(row, buf);
+    const int i = row - LT_GAME_PROPERTY_COUNT;
+    if (i >= 0 && i < LT_EXT_MAX_PROPERTIES) {
+        s_noteStr[i] = -1;
+    }
+}
+
 /* the countdown began: the cursor on Revert, so a second press of Cross
    meant for Apply goes back */
 static void gfxRefresh(Page *pg)
 {
-    if (!s_gfx.focus || s_gfx.state != GFX_COUNTDOWN || pg->layout < 0) {
+    if (pg->layout < 0 || !ui__gfx_take_focus()) {
         return;
     }
-    s_gfx.focus = 0;
     for (int i = 0; i < pg->count; i++) {
         if (pg->rows[i].opt == UI_OPT_GRAPHICS_REVERT) {
             lt_ext_layout(pg->layout)->curItem = pg->rows[i].label;
@@ -5718,12 +6045,13 @@ static void gfxRefresh(Page *pg)
    and Circle; nothing while a switch is under way.  1 when taken */
 static int gfxProc(const Row *r, int flags)
 {
-    if (s_gfx.state == GFX_APPLYING || s_gfx.state == GFX_REVERTING) {
+    const int st = ui__gfx_state();
+    if (st == UI__GFX_APPLYING || st == UI__GFX_REVERTING) {
         return 1;
     }
-    if (s_gfx.state == GFX_COUNTDOWN && (flags & PAD_BACK)) {
+    if (st == UI__GFX_COUNTDOWN && (flags & PAD_BACK)) {
         NEGATIVE_SE();
-        gfxRevert(UI_GFX_WHY_REVERT);
+        ui__gfx_revert(UI_GFX_WHY_REVERT);
         return 1;
     }
     if (r == NULL || !(flags & PAD_OK)) {
@@ -5731,17 +6059,17 @@ static int gfxProc(const Row *r, int flags)
     }
     if (r->opt == UI_OPT_GRAPHICS_APPLY) {
         POSITIVE_SE();
-        gfxApply();
+        ui__gfx_apply();
         return 1;
     }
     if (r->opt == UI_OPT_GRAPHICS_KEEP) {
         POSITIVE_SE();
-        gfxKeep();
+        s_dirtyConfig |= ui__gfx_keep();
         return 1;
     }
     if (r->opt == UI_OPT_GRAPHICS_REVERT) {
         POSITIVE_SE();
-        gfxRevert(UI_GFX_WHY_REVERT);
+        ui__gfx_revert(UI_GFX_WHY_REVERT);
         return 1;
     }
     return 0;
@@ -5771,6 +6099,10 @@ static void refreshPage(Page *pg, int id, int cur)
 {
     if (pg->isList) {
         ui_list_refresh(&pg->list, cur);
+        return;
+    }
+    if (id == UI_PAGE_STATES) {
+        ui__states_refresh(cur);
         return;
     }
     layoutPage(pg, id);
@@ -5811,12 +6143,26 @@ static void refreshPage(Page *pg, int id, int cur)
                 texExportNote(r->note, &st);
             }
         }
+        int liveNote = 0; /* the backup rows' words written below, not setNote's */
+        if (r->opt == UI_OPT_EXTRAS_BACKUP || r->opt == UI_OPT_EXTRAS_RESTORE) {
+            char text[256];
+            lt_ext_set_str(r->label, (UiStrId)ui__backup_label(r->opt, cur == r->label));
+            r->noteStr = ui__backup_note(r->opt, text, sizeof(text));
+            liveNote = text[0] != '\0';
+            if (liveNote && r->note >= 0) {
+                liveNoteText(r->note, text);
+            }
+        }
         if (r->opt == UI_OPT_VAR_TOUGHNESS) {
             r->noteStr = variantNote(r->opt, UI_STR_OPT_VAR_TOUGHNESS_NOTE);
         } else if (r->opt == UI_OPT_VAR_NO_HINTS) {
             r->noteStr = variantNote(r->opt, UI_STR_OPT_VAR_NO_HINTS_NOTE);
         } else if (r->opt == UI_OPT_VAR_NO_LOOK) {
             r->noteStr = variantNote(r->opt, UI_STR_OPT_VAR_NO_LOOK_NOTE);
+        }
+        if (r->opt == UI_OPT_EFFECT_GLOW_SMOOTH) {
+            /* locked: the note says when the row matters (it shows always) */
+            r->noteStr = locked ? UI_STR_EFFECT_GLOW_SMOOTH_LOCKED : UI_STR_EFFECT_GLOW_SMOOTH_NOTE;
         }
         if (r->opt == UI_OPT_TOUCH_EDIT) {
             /* locked: Cross does nothing, the note says why */
@@ -5825,7 +6171,7 @@ static void refreshPage(Page *pg, int id, int cur)
         }
         if (isExtrasOpt(r->opt) || r->opt == UI_OPT_RESOLUTION || r->opt == UI_OPT_ANTI_ALIAS ||
             r->opt == UI_OPT_TEXTURE_PACK || r->opt == UI_OPT_MODEL_PACK ||
-            r->opt == UI_OPT_TOUCH_EDIT) {
+            r->opt == UI_OPT_TOUCH_EDIT || r->opt == UI_OPT_EFFECT_GLOW_SMOOTH) {
             /* the locked style: the label and its value greyed */
             lt_ext_set_dim(r->label, locked);
             if (r->value >= 0) {
@@ -5835,7 +6181,7 @@ static void refreshPage(Page *pg, int id, int cur)
         if (r->note >= 0) {
             if (r->noteStr == UI_STR_GRAPHICS_KEEP_ASK) {
                 gfxNote(r->note);
-            } else if (r->noteStr != UI_STR_EXPORT_TEXTURES_PROGRESS) {
+            } else if (r->noteStr != UI_STR_EXPORT_TEXTURES_PROGRESS && !liveNote) {
                 setNote(r->note, r->noteStr); /* the progress was written above */
             }
             if (cur == r->label && (!lockedNote(r) || locked) && !charsNoteHidden(id, r)) {
@@ -5854,10 +6200,17 @@ static int settingsProc(int first, int item)
     if (pg == NULL) {
         return -1;
     }
+    /* the layout this proc ran in before (the Save states page's Back goes
+       to the pause menu when it was opened from its row) */
+    const int prevLayout = s_procLayout;
+    s_procLayout = current_layout_id;
+    if (id != UI_PAGE_STATES && ui__states_is_open()) {
+        ui__states_release(); /* the Save states page was left for this one */
+    }
     /* the port's strings follow the game's language (ui_host.c does too) */
     ui_settings_apply_language();
-    gpuPoll(); /* an install the page started, on any page */
-    gfxPoll(); /* a renderer switch Apply asked for */
+    gpuPoll();      /* an install the page started, on any page */
+    ui__gfx_poll(); /* a renderer switch Apply asked for */
     if (id == UI_PAGE_TOUCH_LAYOUT) {
         /* the touch layout editor has the page: begun on the first call,
            stepped every call (the pad word once the page has faded in), and
@@ -5877,13 +6230,19 @@ static int settingsProc(int first, int item)
     if (id == UI_PAGE_MUSIC) {
         gallery_tick(); /* the engine, once a Main tick while the page is up */
     }
+    if (id == UI_PAGE_STATES && s_stLeave) {
+        return statesLeaveQuiet(); /* a state was loaded */
+    }
     if (first) {
+        if (id == UI_PAGE_STATES) {
+            statesOpen(prevLayout);
+        }
         if (pg->isList) {
             ui_list_reset(&pg->list);
         }
         memset(&s_capture, 0, sizeof(s_capture));
-        if (id == UI_PAGE_GRAPHICS && s_gfx.state == GFX_IDLE) {
-            s_gfx.haveEntry = 0; /* Revert's value: as the page is found now */
+        if (id == UI_PAGE_GRAPHICS) {
+            ui__gfx_page_entered(); /* Revert's values: as the page is found now */
         }
     }
     refreshPage(pg, id, lay->curItem);
@@ -5899,6 +6258,9 @@ static int settingsProc(int first, int item)
         int r = ui_list_proc(&pg->list, lay, flags);
         refreshPage(pg, id, lay->curItem);
         return r;
+    }
+    if (id == UI_PAGE_STATES) {
+        return statesProc(pg, id, lay, flags);
     }
     if (id == UI_PAGE_CHARACTERS && ui_settings_characters_in_viewer()) {
         if (charsShown() < 0) {
@@ -6014,6 +6376,18 @@ static int settingsProc(int first, int item)
         if ((flags & PAD_OK) && r->opt == UI_OPT_EXTRAS_EXPORT_TEXTURES) {
             POSITIVE_SE();
             texExportPress();
+            refreshPage(pg, id, lay->curItem);
+        }
+        if ((flags & PAD_OK) &&
+            (r->opt == UI_OPT_EXTRAS_BACKUP || r->opt == UI_OPT_EXTRAS_RESTORE)) {
+            const int took = ui__backup_press(r->opt);
+            if (took > 0) {
+                POSITIVE_SE();
+            } else if (took == 0) {
+                CUR_SE();
+            } else {
+                NEGATIVE_SE();
+            }
             refreshPage(pg, id, lay->curItem);
         }
         if ((flags & PAD_OK) && r->opt == UI_OPT_VAR_DEBUG_MENU) {

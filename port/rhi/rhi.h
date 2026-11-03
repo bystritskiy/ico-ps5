@@ -118,6 +118,13 @@ typedef enum RhiFormat {
      * on every device, the specification's required format support;
      * D3D12: a render target at feature level 11_0) */
     RHI_FMT_RGBA32_UINT,
+    /* four 16-bit unsigned words a texel: the aura's row sums
+     * (port/render/rd_aura_box.c, ROWBOX), a colour target and sampled
+     * (Load only), never blended (Vulkan: a colour attachment and sampled
+     * on every device, the specification's required format support;
+     * D3D11 and D3D12 at feature level 10_0 and up; OpenGL 3.0 and
+     * OpenGL ES 3.0 colour-renderable) */
+    RHI_FMT_RGBA16_UINT,
     RHI_FMT_COUNT
 } RhiFormat;
 
@@ -550,21 +557,38 @@ typedef struct RhiDepthAttachment {
     bool readable;
 } RhiDepthAttachment;
 
+typedef struct RhiRect {
+    int32_t x, y;
+    uint32_t w, h;
+} RhiRect;
+
+/* width x height: the pass's size (its default viewport, and its render
+ * area unless `area` says otherwise).  area: the part of it the pass loads,
+ * draws and stores, in pixels from the top-left corner; w or h 0 (a zeroed
+ * desc) is the whole size.  On a tile-based GPU only the tiles inside it
+ * are loaded and stored; the pixels outside it are not accessed and keep
+ * their contents (Vulkan: load and store operations apply within the
+ * render area only), whatever the load and store ops say, so a CLEAR load
+ * clears the area alone.  Every draw of the pass must lie inside it:
+ * rendering outside the render area is undefined in Vulkan, so the
+ * default scissor is the area and every rhi_cmd_set_scissor in the pass is
+ * cut to it; the default viewport stays width x height (the draws'
+ * coordinates do not move).  Vulkan: VkRenderingInfo /
+ * VkRenderPassBeginInfo renderArea (offset and extent), clamped to the
+ * attachments (an area that leaves nothing is the whole size).  D3D11,
+ * D3D12 and OpenGL have no tiles to spare: they ignore it (the pass covers
+ * the whole size, and the caller's draws lie inside the area anyway). */
 typedef struct RhiRenderPassDesc {
     RhiColorAttachment color[RHI_MAX_COLOR_TARGETS];
     uint32_t colorCount;
     RhiDepthAttachment depth;
     uint32_t width, height;
+    RhiRect area;
 } RhiRenderPassDesc;
 
 typedef struct RhiViewport {
     float x, y, w, h, minDepth, maxDepth;
 } RhiViewport;
-
-typedef struct RhiRect {
-    int32_t x, y;
-    uint32_t w, h;
-} RhiRect;
 
 /* ------------------------------------------------------------- device */
 typedef struct RhiLimits {
@@ -576,6 +600,9 @@ typedef struct RhiLimits {
     uint32_t maxRenderTargetSize;
     bool dualSourceBlend; /* optional; without it rd blends in two passes */
     bool stencilWrap;     /* must be true */
+    /* D32F (RHI_FMT_D32F, depth alone) can be a depth attachment: false on a
+     * Vulkan driver without the attachment bit; the effects depth is then off */
+    bool depth32Attachment;
     /* true when rhi_readback_texture(RHI_ASPECT_DEPTH) of a D32F_S8 texture
      * returns float depth (frame dumps and tests that compare depth); false
      * on D24S8, where that readback fails (returns false) */
@@ -747,6 +774,22 @@ typedef struct RhiLimits {
     const char *driverText;
     const char *robustText;
     bool robustDefaultOff;
+    /* Every RHI call must come from one thread: OpenGL runs each rhi_cmd_*
+     * at once on the context bound to the calling thread, Direct3D 11 on
+     * its immediate context (true there).  Vulkan and D3D12 (false) take a
+     * command list recorded on one thread and submitted and presented on
+     * another, the calls never at the same time (rhi_set_call_guard).  The
+     * window's render thread makes every call where this is true, the
+     * OpenGL context moved to a game-thread call's thread for it
+     * (port/platform/render_thread.c). */
+    bool singleThreadCommands;
+    /* The frame slots are apart (Vulkan with the timeline sync; false
+     * elsewhere and under ICO_VK_SLOT_OVERLAP=0): a list of slot A ended,
+     * submitted and its image presented on one thread while another
+     * recycles slot B, acquires B's image and records B's lists.  The call
+     * guard then lets the slot calls (rhi_set_slot_guard) of the thread
+     * that records run beside the other thread's work of another slot. */
+    bool slotOverlap;
 } RhiLimits;
 
 typedef struct RhiDeviceDesc {
@@ -773,6 +816,42 @@ RhiBackendKind rhi_backend(void);
 const char *rhi_backend_kind_name(RhiBackendKind kind);
 const RhiLimits *rhi_limits(void);
 const char *rhi_adapter_name(void);
+
+/* The graphics cards the backend's last rhi_init looked at, in its own
+ * order (Vulkan's vkEnumeratePhysicalDevices, DXGI's high-performance
+ * order on Direct3D; OpenGL lists the one GL_RENDERER names), at most
+ * RHI_MAX_ADAPTERS.  suitable: hardware that can run the renderer (the
+ * Options > Graphics > Graphics card row lists these; a software renderer
+ * such as WARP or lavapipe is listed unsuitable, though the automatic
+ * pick still takes one when nothing else runs); current: the device in
+ * use; automatic: the one the automatic rule picks (Vulkan: the highest
+ * score; Direct3D: the first suitable); score: Vulkan's rating
+ * (vk_device.c vkr_rate_device), 0 where the backend has none, -1 for a
+ * device that cannot run the renderer; why: what makes it unsuitable, NULL
+ * when suitable. */
+#define RHI_MAX_ADAPTERS 8
+
+typedef struct RhiAdapterInfo {
+    char name[256];
+    bool suitable;
+    bool current;
+    bool automatic;
+    int score;
+    const char *why;
+} RhiAdapterInfo;
+
+/* Copies up to max entries into out; returns how many the list holds
+ * (0 before the first rhi_init). */
+uint32_t rhi_adapter_list(RhiAdapterInfo *out, uint32_t max);
+/* [video] adapter: the card the next rhi_init takes, by its exact name as
+ * rhi_adapter_list gives it; NULL or "" is automatic.  The backend's own
+ * environment variable (ICO_VK_DEVICE, ICO_D3D12_ADAPTER, ICO_D3D11_ADAPTER)
+ * wins over it; a name no runnable device has is logged and the pick is
+ * automatic; OpenGL takes the device the system gives it.  Kept by the
+ * dispatcher (rhi_backend.c) across rhi_create_backend; rhi_adapter_wanted
+ * returns it ("" automatic). */
+void rhi_set_adapter_wanted(const char *name);
+const char *rhi_adapter_wanted(void);
 /* True once the device is gone (Vulkan VK_ERROR_DEVICE_LOST; D3D12
  * DXGI_ERROR_DEVICE_REMOVED, _RESET or _HUNG).  The backend logged the
  * reason once; every later call is a no-op or fails, and the caller ends
@@ -891,11 +970,40 @@ typedef struct RhiPipelineBatch {
     /* in, optional: at most this many worker threads (0: the backend's
      * choice); a device whose driver dies compiling in parallel takes 1 */
     uint32_t maxThreads;
+    /* in, optional: called on the compiling thread (a worker, or the
+     * calling thread) right before and right after the driver's call for
+     * descs[index] (issue 161: the renderer keeps which pipelines are inside
+     * the driver, so the start-up activity note names the one a stall is
+     * in).  They must only note it (no RHI, no file).  The Vulkan backend
+     * calls them; the others leave them uncalled. */
+    void (*begin)(void *ctx, uint32_t index);
+    void (*end)(void *ctx, uint32_t index);
 } RhiPipelineBatch;
 
 #define RHI_PIPELINE_WAIT_MS 50u
 uint32_t rhi_create_pipelines(const RhiPipelineDesc *descs, uint32_t n, RhiPipeline *out,
                               RhiPipelineBatch *batch);
+/* Several pipelines compiled while the caller goes on (the renderer's
+ * background finisher, port/render/rd.h rd_pipelines_background_start):
+ * begin makes on the calling thread what rhi_create_pipelines makes there
+ * before its workers start (pool slots, pipeline layouts), starts the
+ * workers (at most maxThreads, 0 the backend's choice; lowPriority: each
+ * at SDL_THREAD_PRIORITY_LOW) and returns at once; the workers touch only
+ * the driver (vkCreateGraphicsPipelines through the internally
+ * synchronised pipeline cache).  NULL when the backend has no such call
+ * (Direct3D 12, Direct3D 11 and OpenGL: nothing done) or n is 0.  end, on
+ * the thread that began (the one that owns the RHI): with wait false it
+ * returns false at once while any compile goes on; else (or once all have
+ * finished) it waits for the workers, makes the pipelines as
+ * rhi_create_pipelines does after its workers (out[i] descs[i]'s pipeline,
+ * {0} where it failed; ms[i] its compile time, optional; *threads the
+ * workers, optional), frees jobs and returns true.  A begun set is always
+ * ended before rhi_shutdown. */
+typedef struct RhiPipelineJobs RhiPipelineJobs;
+RhiPipelineJobs *rhi_create_pipelines_begin(const RhiPipelineDesc *descs, uint32_t n,
+                                            uint32_t maxThreads, bool lowPriority);
+bool rhi_create_pipelines_end(RhiPipelineJobs *jobs, bool wait, RhiPipeline *out, float *ms,
+                              uint32_t *threads);
 void rhi_destroy_pipeline(RhiPipeline p);
 
 /* ------------------------------------------------------------ commands
@@ -945,8 +1053,10 @@ void rhi_cmd_set_bind_group(RhiCommandList cl, uint32_t group, RhiBindGroup bg);
  * order (count = their number), each a multiple of rhi_limits()->uniformAlign
  * and added to the binding's base offset.  rhi_cmd_set_bind_group is this call
  * with every offset 0.  Binding the group already bound with the same
- * offsets records nothing on Vulkan; D3D12 sets the group's root arguments
- * again at the next draw. */
+ * offsets records nothing on any backend (the bind cache: docs/port/RHI.md
+ * "The bind cache"; RhiStats.bindGroupBindsSkipped), nor does a bind of
+ * the pipeline bound (by its id) or a set of the viewport, scissor, vertex
+ * or index buffer, stencil reference or blend constant in force. */
 void rhi_cmd_set_bind_group_offsets(RhiCommandList cl, uint32_t group, RhiBindGroup bg,
                                     const uint32_t *offsets, uint32_t count);
 void rhi_cmd_set_vertex_buffer(RhiCommandList cl, uint32_t binding, RhiBuffer b, uint64_t offset);
@@ -1044,7 +1154,14 @@ void rhi_set_submit_tag(uint32_t replay, uint32_t frame);
  *                 rhi_wait_idle, a readback), 0 when none is in progress;
  *   waitingNs     how long that wait has blocked so far;
  *   submittedAgoNs how long ago the newest submission was made;
- *   replay, frame the newest submission's rhi_set_submit_tag.
+ *   replay, frame the newest submission's rhi_set_submit_tag;
+ *   bgPipesDone   the compiles of rhi_create_pipelines_begin's sets that
+ *                 have returned since rhi_init (a count that only grows:
+ *                 the background set's own heartbeat while nothing takes
+ *                 its batch), bgPipesLeft those begun and not returned
+ *                 (0 when none is in progress, a set whose compiles have
+ *                 all returned and is not ended yet included); 0 and 0 on
+ *                 a backend with no background creation.
  * A wait in progress whose number is above finished is work the GPU has
  * not finished: while the wait has not returned, it is still running.
  * False (and *out zeroed) when the backend does not track it (Direct3D 12)
@@ -1053,6 +1170,7 @@ typedef struct RhiGpuProgress {
     uint64_t submitted, finished, waitingFor;
     uint64_t waitingNs, submittedAgoNs;
     uint32_t replay, frame;
+    uint32_t bgPipesDone, bgPipesLeft;
 } RhiGpuProgress;
 
 bool rhi_gpu_progress(RhiGpuProgress *out);
@@ -1097,6 +1215,20 @@ typedef struct RhiStats {
      * Direct3D 11 and 12) */
     uint64_t blendEqOffSets, dualLeftovers;
     uint64_t bindGroupBinds; /* bind group changes recorded (likewise) */
+    /* The bind cache (docs/port/RHI.md "The bind cache"): the calls that
+     * found the command list already holding what they asked for and so
+     * recorded nothing.  pipelineBindsSkipped: rhi_cmd_set_pipeline with
+     * the pipeline bound (the same id); bindGroupBindsSkipped:
+     * rhi_cmd_set_bind_group(_offsets) with the group and dynamic offsets
+     * the slot holds; stateSetsSkipped: rhi_cmd_set_viewport, _scissor,
+     * _vertex_buffer, _index_buffer, _stencil_ref and _blend_constant equal
+     * to the value in force, the dynamic depth and blend commands a draw
+     * did not record because rhi_cmd_set_depth_state / _blend_state since
+     * the last draw asked for the value in force (Vulkan, OpenGL), and on
+     * Direct3D 11 the objects of a pipeline change that the list already
+     * had bound (its shaders, input layout, topology, rasterizer, blend
+     * and depth-stencil state) */
+    uint64_t pipelineBindsSkipped, bindGroupBindsSkipped, stateSetsSkipped;
     /* OpenGL: the entries of the groups bound (one bind each: a buffer
      * range, a texture and its sampler, an image) and of them those skipped
      * because their binding point already held the same (gl_cmd.c
@@ -1124,6 +1256,9 @@ typedef struct RhiStats {
     /* allocations a memory type of their kind refused that another took
      * (Vulkan: a full PCIe BAR window, uploads then in system memory) */
     uint64_t memoryFallbacks;
+    /* a gauge: the current swapchain's images (Vulkan; 0 elsewhere), for
+     * the FIFO fallback's line (window_host.c present_fallback_switch) */
+    uint64_t swapImages;
     /* The pipeline pool (both backends): its size (RHI_PIPELINE_POOL_MAX),
      * the pipelines alive now and the most alive at once (gauges); the
      * creations refused because the pool was full (pipelinePoolFull) and
@@ -1158,9 +1293,97 @@ typedef struct RhiStats {
      * constant buffers; d3d11_resource.c d11_buffer_flush), a count; 0 on
      * the other backends, whose GPU reads the mapped memory itself */
     uint64_t uploadWriteBytes;
+    /* Direct3D 11 and 12: the adapter's local video memory segment
+     * (IDXGIAdapter3::QueryVideoMemoryInfo): the budget the system gives
+     * this process, what it uses now, and what it can still reserve, bytes.
+     * Read at most four times a second.  0 where the adapter does not say
+     * (a Windows without IDXGIAdapter3) and on the other backends */
+    uint64_t videoMemBudget, videoMemUsage, videoMemAvailable;
 } RhiStats;
 
 void rhi_get_stats(RhiStats *out);
+
+/* The call guard (the window's render thread, port/platform/render_thread.c):
+ * a thread that submits and presents work recorded on another.  busy(user):
+ * work was handed to that thread and has not finished, and the calling
+ * thread is not it; wait(user) returns once it has finished.  Every rhi.h
+ * entry point that changes the device's state (every one but the queries
+ * below and the rhi_cmd_* recording calls, which only the thread that
+ * began the list makes, before it hands the list over) first waits while
+ * busy, so two threads never run inside the backend at once, but for the
+ * slot calls the slot guard lets through with the frame slots apart
+ * (rhi_set_slot_guard, RhiLimits.slotOverlap), which run beside the other
+ * thread's end, submit and present of another slot.  The queries
+ * that do not wait: rhi_limits, rhi_backend, the adapter calls,
+ * rhi_device_lost, rhi_gpu_progress, rhi_frame_slot, rhi_swapchain_format,
+ * rhi_swapchain_size, rhi_present_mailbox, rhi_present_mode_name,
+ * rhi_present_shown, rhi_present_timing, rhi_present_last_id,
+ * rhi_present_timing_next, rhi_present_statistics (the display line's
+ * counts: a present's last, at worst one present old), rhi_present_fifo_fallback_on,
+ * rhi_timestamps_supported, rhi_occlusion_supported,
+ * rhi_pipeline_cache_loaded, rhi_pipeline_cache_size, rhi_injector_name,
+ * rhi_overlay_name and rhi_get_stats, which while busy gives the counters
+ * as rhi_call_guard_snapshot took them (the hand-over's) instead of the
+ * ones the other thread is writing.  NULL: no guard (the default; every
+ * call runs at once).  Set and cleared on the thread that records, with
+ * the other thread idle.  stale(user) (NULL: busy's answer) is what
+ * rhi_get_stats asks instead of busy: another thread may be writing the
+ * counters now; a thread whose busy is true only for work of its own still
+ * to hand over (the render thread's list kept for the submit thread,
+ * port/render/rd_submit_thread.h) reads them live. */
+typedef struct RhiCallGuard {
+    void *user;
+    bool (*busy)(void *user);
+    void (*wait)(void *user);
+    bool (*stale)(void *user);
+} RhiCallGuard;
+
+void rhi_set_call_guard(const RhiCallGuard *guard);
+
+/* The slot guard (port/render/rd_submit_thread.c; docs/port/RHI.md "Frame
+ * slots and the submit thread"): with RhiLimits.slotOverlap, the call
+ * guard's wait is skipped for a slot call when free(user, slot) says the
+ * calling thread may make it beside the other thread's work: the thread
+ * that records (the render thread), no list of its own kept for the other
+ * thread, and none of the other thread's jobs of that frame slot queued or
+ * running.  The slot calls and their slot: rhi_wait_frame (the slot it
+ * recycles: (rhi_frame_slot() + 1) % RHI_FRAMES_IN_FLIGHT),
+ * rhi_begin_commands, rhi_create_bind_group, rhi_map_buffer,
+ * rhi_unmap_buffer, rhi_read_timestamps, rhi_read_timestamps_busy,
+ * rhi_read_occlusion and rhi_acquire_backbuffer (rhi_frame_slot()).  Each
+ * touches the recording thread's slot and nothing the other thread's end,
+ * submit and present of another slot write (the backend's partition,
+ * port/rhi/vk/vk_cmd.c "Frame slots"); every other call that changes the
+ * device's state waits as before, so the queue, the swapchain's making,
+ * the object pools, the pipeline cache and the deferred destroys stay one
+ * thread's at a time.  pending(user, slot): the other thread has work of
+ * that slot (any thread may ask; the backend's acquire, which takes an
+ * image a failed replay gave up only from a slot with none); worker(user):
+ * the calling thread is that other thread (its present leaves a swapchain
+ * rebuild to the next acquire).  Set and cleared with the other thread
+ * idle; NULL: none (every slot call waits as the call guard says). */
+typedef struct RhiSlotGuard {
+    void *user;
+    bool (*free)(void *user, uint32_t slot);
+    bool (*pending)(void *user, uint32_t slot);
+    bool (*worker)(void *user);
+} RhiSlotGuard;
+
+void rhi_set_slot_guard(const RhiSlotGuard *guard);
+/* The slot guard's answers for a backend (false with none) */
+bool rhi_slot_guard_pending(uint32_t slot);
+bool rhi_slot_guard_worker(void);
+/* The counters now, for rhi_get_stats while the guard is busy: called by
+ * the recording thread right before it hands work over, the other thread
+ * idle */
+void rhi_call_guard_snapshot(void);
+/* The guard's wait made now, as an entry point makes it: for a backend
+ * that calls back into its caller in the middle of an entry point
+ * (RhiPipelineBatch.wait), whose callback may have handed work to the
+ * guard's other thread (a progress screen's picture), so the backend is
+ * the calling thread's again (OpenGL: its context current here) before
+ * the entry point goes on */
+void rhi_call_guard_settle(void);
 
 /* GPU timestamps.  Each frame slot (rhi_wait_frame) has RHI_MAX_TIMESTAMPS
  * of them; rhi_cmd_write_timestamp(cl, i) records slot i when the GPU has
@@ -1231,6 +1454,35 @@ uint32_t rhi_read_timestamps(uint64_t *ns, uint32_t max);
  * D3D12 and D3D11 return 0 (their lists are submitted whole). */
 uint32_t rhi_read_timestamps_busy(uint64_t *ns, uint32_t max);
 
+/* Occlusion queries (the replay tool's hidden-draw measurement,
+ * port/render/rd_occlusion.c).  Each frame slot has RHI_MAX_OCCLUSION of
+ * them, apart from the timestamps; rhi_cmd_begin_occlusion(cl, i) and
+ * rhi_cmd_end_occlusion(cl, i) around draws inside ONE render pass count the
+ * samples that passed the depth and stencil tests between them (query i
+ * once a slot; one query open at a time; a begin outside a pass, a second
+ * begin of i or an index past the count is dropped, and its end with it).
+ * rhi_read_occlusion hands back the slot rhi_wait_frame last recycled, as
+ * rhi_read_timestamps does: samples[i] the count, RHI_OCCLUSION_NONE for an
+ * index that frame did not write (or whose result was not available);
+ * returns 1 + the highest index written (0 = none, or not supported).
+ * Vulkan: a VK_QUERY_TYPE_OCCLUSION pool per slot, made at the first begin
+ * (the game never asks for one), reset in the slot's first command list from
+ * then on (the first slot by a one-time submit at that begin, after the
+ * call guard's wait like any call that submits), precise where
+ * the device offers occlusionQueryPrecise; without it a count is exact only
+ * as zero or not zero.  Direct3D 12, Direct3D 11 and OpenGL: not supported
+ * (false, the calls do nothing, reads 0); their forms would be an occlusion
+ * query heap resolved like the timestamps, D3D11_QUERY_OCCLUSION and
+ * GL_SAMPLES_PASSED. */
+#define RHI_MAX_OCCLUSION 8192
+#define RHI_OCCLUSION_WORDS (RHI_MAX_OCCLUSION / 32)
+#define RHI_OCCLUSION_NONE UINT64_MAX
+
+bool rhi_occlusion_supported(void);
+void rhi_cmd_begin_occlusion(RhiCommandList cl, uint32_t index);
+void rhi_cmd_end_occlusion(RhiCommandList cl, uint32_t index);
+uint32_t rhi_read_occlusion(uint64_t *samples, uint32_t max);
+
 /* Swapchain present mode with vsync on: mailbox (the newest
  * finished image is shown at each refresh, older ones are dropped; a present
  * never waits for the display) instead of FIFO.  Applies from the next
@@ -1239,6 +1491,14 @@ uint32_t rhi_read_timestamps_busy(uint64_t *ns, uint32_t max);
  * not offered (false). */
 void rhi_prefer_mailbox(bool on);
 bool rhi_present_mailbox(void);
+/* The FIFO fallback: every later swapchain (re)creation presents FIFO with
+ * the surface's fewest images, whatever vsync and rhi_prefer_mailbox ask
+ * for; set by the window when presents keep blocking in the driver under
+ * mailbox (port/platform/present_fallback.c).  Kept across rhi_init like the
+ * mailbox preference; rhi_present_fifo_fallback_on returns the flag.
+ * Vulkan only: D3D12, D3D11 and OpenGL ignore it (false). */
+void rhi_present_fifo_fallback(bool on);
+bool rhi_present_fifo_fallback_on(void);
 /* Whether the driver may take exclusive fullscreen presentation of the
  * window (true, the default: the driver decides) or must keep it a
  * composed window that other programs can draw over or capture (false:

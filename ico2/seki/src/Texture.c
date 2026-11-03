@@ -423,6 +423,41 @@ static struct { /* port */
     unsigned int appearanceSerial; /* ico_appearance_serial() last frame */
 } texHost = {.packOn = -1};
 
+/* PC port: a save state's load (port/game/state_host.c).  The restored
+   texHost holds the saving run's serials, which may name entries the
+   texture cache of this run made for other pictures: before the restore
+   the load reads the live counter, after it every loaded texture gets a new
+   serial above both, so each is decoded again at its next use. */
+unsigned int tex_HostNextSerial(void)
+{
+    return texHost.nextSerial;
+}
+
+void tex_HostReserialAll(unsigned int liveNext)
+{
+    int i;
+
+    if (texHost.nextSerial < liveNext) {
+        texHost.nextSerial = liveNext;
+    }
+    for (i = 0; i < 200; i++) {
+        if (texHost.serial[i] != 0) {
+            texHost.serial[i] = ++texHost.nextSerial;
+        }
+    }
+    texHost.packOn = -1;
+}
+
+/* PC port: the whole record above is the host's (serials, the cache's
+   bindings, the CLUT snapshot, the pack state), which two runs of the same
+   play hold differently after a load (a save state's hash leaves it out,
+   port/game/state_host.c dev_hash); its bytes in *bytes */
+void *tex_HostStateBlock(size_t *bytes)
+{
+    *bytes = sizeof texHost;
+    return &texHost;
+}
+
 /* PC port: texture packs.  The texture just decoded for (id, gen) as
    texpack_name.h's source (every level of the TIM2, the CLUT in CSM1
    order), so the pack's replacement under the first of its candidate
@@ -580,9 +615,10 @@ static RdTex texHostTexture(int id)
     smp.wrapT = RD_WRAP_REPEAT;
     smp.tex1Lod = tex1Lod;
     /* the characters' colours decode from a recoloured copy of the
-       CLUT (appearance.h); rdtex_store decodes before it returns
-       (rd_tex.c rdtex_store -> rdtex_decode), so the copy on the stack
-       is enough.  t->clut.addr is never written (texHostClutCheck and the
+       CLUT (appearance.h); rdtex_store decodes before it returns or
+       queues the decode with a copy of the bytes (rd_tex.c store,
+       rd_tex_decode.h), so the copy on the stack is enough.
+       t->clut.addr is never written (texHostClutCheck and the
        CLUT scroll compare it), and texHostPack names and dumps the
        original */
     draw = im;
@@ -739,6 +775,52 @@ static void texHostClutCheck(int id, TexData *t)
         memcmp(texHost.clutSnap, (char *)t->clut.addr + 0x20, t->pic.clutSize) != 0) {
         texHost.serial[id] = ++texHost.nextSerial;
     }
+}
+
+/* A load into slot no (tex_initTextureSub).  tex_Init hands the next
+   stage the slots of the stage before, which nothing frees
+   (tex_FreeTexture is the subtitles' alone), so the slot may still hold
+   the old stage's picture in the cache.  A new generation of the same
+   size and format would be re-expanded into the same rd texture
+   (rd_tex.h "update", right for a CLUT scroll), and every frame recorded
+   before the load that is replayed after it (a later present of the
+   tick, a picture for a bug report) would draw the old stage with the
+   next stage's texels (issue 174: the walls of the room changing before
+   the fade).  The old picture leaves the cache as tex_FreeTexture's does
+   instead: its rd texture lives on for the frames that drew it
+   (rdtex_drop: destroyed two frame ticks later) and the new picture gets
+   a texture of its own.  Counted for the log line in tex_ResetVram.
+   Kept out of texHost, whose bytes a save state holds. */
+static unsigned int texHostReloads; /* port: slots reloaded since the last line */
+
+static unsigned int texHostReloadLines; /* port: the lines written */
+
+static void texHostSlotReload(int no)
+{
+    if (texHost.serial[no] != 0 && rdtex_sampler((unsigned int)no, RDTEX_TEXA_REPLAY) != NULL) {
+        rdtex_drop((unsigned int)no);
+        texHostReloads++;
+    }
+}
+
+/* once a frame: the slots reloaded since the last frame, first 8 then
+   every 100th */
+static void texHostReloadLog(void)
+{
+    if (texHostReloads == 0) {
+        return;
+    }
+    texHostReloadLines++;
+    if (texHostReloadLines <= 8 || texHostReloadLines % 100 == 0) {
+        fprintf(stderr,
+                "tex: %u textures loaded into slots that held another picture (a stage "
+                "change): each got a new texture, the old ones kept for the pictures already "
+                "drawn with them until two frames later%s\n",
+                texHostReloads,
+                texHostReloadLines == 8 ? " (8 of these so far; from here every 100th is written)"
+                                        : "");
+    }
+    texHostReloads = 0;
 }
 
 #endif /* ICO_RD */
@@ -1887,7 +1969,10 @@ static int tex_initTextureSub_jun26(char *name, void *pkt)
     texTable[texCount].rec.ext.partition = malloc_GetPartition();
     texCount++;
 #ifdef ICO_RD
-    /* a new content generation for the slot, decoded now */
+    /* a new picture in the slot: the picture it held leaves the cache
+       first (texHostSlotReload), then a new content generation, decoded
+       now */
+    texHostSlotReload(no);
     texHost.serial[no] = ++texHost.nextSerial;
     texHostTexture(no);
 #endif
@@ -1965,7 +2050,10 @@ static int tex_initTextureSub(char *name, void *pkt)
     texTable[texCount].rec.ext.partition = malloc_GetPartition();
     texCount++;
 #ifdef ICO_RD
-    /* a new content generation for the slot, decoded now */
+    /* a new picture in the slot: the picture it held leaves the cache
+       first (texHostSlotReload), then a new content generation, decoded
+       now */
+    texHostSlotReload(no);
     texHost.serial[no] = ++texHost.nextSerial;
     texHostTexture(no);
 #endif
@@ -2642,6 +2730,7 @@ void tex_ResetVram(void)
     /* once per frame; destroys the rd textures retired two frames
        ago */
     rdtex_frame_tick();
+    texHostReloadLog();
     /* the texture pack's finished loads go in; the pack (or the
        dump) switched on gives every loaded texture a new generation, so
        each is decoded again and looked up (switched off, rd_set_settings

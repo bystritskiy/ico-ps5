@@ -139,6 +139,18 @@ if(ICO_RUN_TESTS)
     add_test(NAME rhi_driver_version COMMAND rhi_driver_version_test)
 endif()
 
+# --- The [video] adapter rules (CPU only, every target) ---------------------
+# rhi_adapter.c: the exact-name match the Vulkan and Direct3D backends force
+# a pick with, and the device-list line's text. Each of those backends links
+# its own copy (a static library member, taken once).
+add_executable(rhi_adapter_match_test test/rhi_adapter_match_test.c rhi_adapter.c)
+target_include_directories(rhi_adapter_match_test PRIVATE "${CMAKE_CURRENT_SOURCE_DIR}")
+target_compile_options(rhi_adapter_match_test PRIVATE ${ICO_SEMANTIC_OPTIONS}
+                       ${ICO_PORT_WARNINGS})
+if(ICO_RUN_TESTS)
+    add_test(NAME rhi_adapter_match COMMAND rhi_adapter_match_test)
+endif()
+
 # --- SDL3 ---------------------------------------------------------------------
 # One prefix per target: the source builds for Linux x86-64 and arm64, SDL's
 # mingw development release for the two Windows targets, the NDK build for
@@ -262,7 +274,7 @@ endif()
 
 # --- ico_rhi_vulkan -------------------------------------------------------------
 if(_ico_have_vk)
-    set(_ico_vk_sources rhi_driver_version.c vk/vk_cmd.c vk/vk_device.c vk/vk_memory.c
+    set(_ico_vk_sources rhi_adapter.c rhi_bind_cache.c rhi_driver_version.c vk/vk_cmd.c vk/vk_device.c vk/vk_memory.c
                         vk/vk_pipeline.c vk/vk_present_mode.c vk/vk_renderpass.c vk/vk_resource.c
                         vk/vk_swapchain.c vk/vk_sync.c)
     if(ANDROID)
@@ -298,6 +310,8 @@ endif()
 # --- ico_rhi_d3d12 --------------------------------------------------------------
 if(_ico_have_d3d12)
     add_library(ico_rhi_d3d12 STATIC
+        rhi_adapter.c
+        rhi_bind_cache.c
         d3d12/d3d12_cmd.c
         d3d12/d3d12_device.c
         d3d12/d3d12_pipeline.c
@@ -324,6 +338,8 @@ endif()
 # the bind group layouts and the DXBC input signature reader.
 if(_ico_have_d3d11)
     add_library(ico_rhi_d3d11 STATIC
+        rhi_adapter.c
+        rhi_bind_cache.c
         d3d11/d3d11_cmd.c
         d3d11/d3d11_device.c
         d3d11/d3d11_pipeline.c
@@ -351,6 +367,7 @@ endif()
 # port/data); d3d12/d3d12_plan.c gives the handle pools and the layout rules.
 if(_ico_have_gl)
     set(_ico_gl_sources
+        rhi_bind_cache.c
         gl/gl_cmd.c
         gl/gl_device.c
         gl/gl_glsl.c
@@ -443,6 +460,8 @@ if(_ico_have_vk)
     # Headless rendering on whatever device is present (lavapipe in the
     # container); exits 77 (skipped) when there is no Vulkan device.
     add_executable(rhi_vk_test test/rhi_vk_test.c ${_ico_rhi_test_common})
+    # the thread submit cell's second thread (rhi_test_common.c threadSubmitCell)
+    target_link_libraries(rhi_vk_test PRIVATE ico_thread)
     target_include_directories(rhi_vk_test PRIVATE "${CMAKE_CURRENT_SOURCE_DIR}/test/shaders")
     target_compile_options(rhi_vk_test PRIVATE ${ICO_SEMANTIC_OPTIONS} ${ICO_PORT_WARNINGS})
     target_link_libraries(rhi_vk_test PRIVATE ico_rhi)
@@ -495,6 +514,15 @@ if(_ico_have_vk)
         set(_ico_vk_nodual_env ${_ico_vk_test_env} "ICO_VK_FAKE_NO_DUAL=1")
         set_tests_properties(rhi_vk_nodual PROPERTIES SKIP_RETURN_CODE 77 ENVIRONMENT
                              "${_ico_vk_nodual_env}")
+        # the cells with the bind cache off (ICO_RHI_BIND_CACHE=0,
+        # rhi_bind_cache.c): every bind recorded as given, the same pictures,
+        # no skip counted (rhi_test_common.c bindCacheCell, dynamicCell)
+        file(MAKE_DIRECTORY "${CMAKE_CURRENT_BINARY_DIR}/nobindcache")
+        add_test(NAME rhi_vk_nobindcache COMMAND rhi_vk_test
+                 WORKING_DIRECTORY "${CMAKE_CURRENT_BINARY_DIR}/nobindcache")
+        set(_ico_vk_nobindcache_env ${_ico_vk_test_env} "ICO_RHI_BIND_CACHE=0")
+        set_tests_properties(rhi_vk_nobindcache PROPERTIES SKIP_RETURN_CODE 77 ENVIRONMENT
+                             "${_ico_vk_nobindcache_env}")
         # the D24S8 depth-stencil fallback (ICO_VK_FAKE_D24S8=1)
         file(MAKE_DIRECTORY "${CMAKE_CURRENT_BINARY_DIR}/d24s8")
         add_test(NAME rhi_vk_d24s8 COMMAND rhi_vk_test
@@ -523,6 +551,43 @@ if(_ico_have_vk)
                              "${_ico_vk_vk11_env}")
         get_test_property(rhi_vk_vk11 LABELS _ico_vk11_labels)
         set_tests_properties(rhi_vk_vk11 PROPERTIES LABELS "${_ico_vk11_labels};vk11")
+        # the cells on a Vulkan 1.0 driver (ICO_VK_FAKE_API=1.0, issue 158):
+        # a 1.0 instance with VK_KHR_get_physical_device_properties2, the
+        # device at 1.0 with VK_KHR_maintenance1/2, the core 1.1 entry points
+        # cleared, the fence ring and VkRenderPass objects as under =1.1, every
+        # pipeline state static (as on Android).  Label vk10 (ctest -L vk10),
+        # with port/render's _vk10 twins
+        file(MAKE_DIRECTORY "${CMAKE_CURRENT_BINARY_DIR}/vk10")
+        add_test(NAME rhi_vk_vk10 COMMAND rhi_vk_test
+                 WORKING_DIRECTORY "${CMAKE_CURRENT_BINARY_DIR}/vk10")
+        set(_ico_vk_vk10_env ${_ico_vk_test_env} "ICO_VK_FAKE_API=1.0" "ICO_VK_FAKE_NO_DYNAMIC=1")
+        set_tests_properties(rhi_vk_vk10 PROPERTIES SKIP_RETURN_CODE 77 ENVIRONMENT
+                             "${_ico_vk_vk10_env}")
+        get_test_property(rhi_vk_vk10 LABELS _ico_vk10_labels)
+        set_tests_properties(rhi_vk_vk10 PROPERTIES LABELS "${_ico_vk10_labels};vk10")
+        # the 1.0 cells with the D32F attachment bit hidden
+        # (ICO_VK_FAKE_NO_D32F_ATTACHMENT, an Adreno 505 on a 1.0.61
+        # driver): the device is picked, RhiLimits.depth32Attachment is false
+        file(MAKE_DIRECTORY "${CMAKE_CURRENT_BINARY_DIR}/vk10nod32f")
+        add_test(NAME rhi_vk_vk10_nod32f COMMAND rhi_vk_test
+                 WORKING_DIRECTORY "${CMAKE_CURRENT_BINARY_DIR}/vk10nod32f")
+        set_tests_properties(rhi_vk_vk10_nod32f PROPERTIES SKIP_RETURN_CODE 77 ENVIRONMENT
+                             "${_ico_vk_vk10_env};ICO_VK_FAKE_NO_D32F_ATTACHMENT=1")
+        get_test_property(rhi_vk_vk10_nod32f LABELS _ico_vk10_labels)
+        set_tests_properties(rhi_vk_vk10_nod32f PROPERTIES LABELS "${_ico_vk10_labels};vk10")
+        # the same on a Vulkan 1.0 loader without
+        # VK_KHR_get_physical_device_properties2 (ICO_VK_FAKE_API=1.0bare,
+        # review finding 5): the instance goes on without it and the device
+        # is made without the extended queries, every cell as under =1.0
+        file(MAKE_DIRECTORY "${CMAKE_CURRENT_BINARY_DIR}/vk10bare")
+        add_test(NAME rhi_vk_vk10bare COMMAND rhi_vk_test
+                 WORKING_DIRECTORY "${CMAKE_CURRENT_BINARY_DIR}/vk10bare")
+        set(_ico_vk_vk10bare_env ${_ico_vk_test_env} "ICO_VK_FAKE_API=1.0bare"
+            "ICO_VK_FAKE_NO_DYNAMIC=1")
+        set_tests_properties(rhi_vk_vk10bare PROPERTIES SKIP_RETURN_CODE 77 ENVIRONMENT
+                             "${_ico_vk_vk10bare_env}")
+        get_test_property(rhi_vk_vk10bare LABELS _ico_vk10bare_labels)
+        set_tests_properties(rhi_vk_vk10bare PROPERTIES LABELS "${_ico_vk10bare_labels};vk10")
         if(TARGET rhi_vk_swapchain_test)
             add_test(NAME rhi_vk_swapchain COMMAND rhi_vk_swapchain_test)
             set_tests_properties(rhi_vk_swapchain PROPERTIES SKIP_RETURN_CODE 77)
@@ -539,6 +604,14 @@ if(_ico_have_vk)
             get_test_property(rhi_vk_swapchain_vk11 LABELS _ico_vk11_labels)
             set_tests_properties(rhi_vk_swapchain_vk11 PROPERTIES LABELS
                                  "${_ico_vk11_labels};vk11")
+            # and on the Vulkan 1.0 profile
+            add_test(NAME rhi_vk_swapchain_vk10 COMMAND rhi_vk_swapchain_test
+                     WORKING_DIRECTORY "${CMAKE_CURRENT_BINARY_DIR}/vk10")
+            set_tests_properties(rhi_vk_swapchain_vk10 PROPERTIES SKIP_RETURN_CODE 77
+                                 ENVIRONMENT "${_ico_vk_vk10_env}")
+            get_test_property(rhi_vk_swapchain_vk10 LABELS _ico_vk10_labels)
+            set_tests_properties(rhi_vk_swapchain_vk10 PROPERTIES LABELS
+                                 "${_ico_vk10_labels};vk10")
         endif()
     endif()
 endif()
@@ -551,6 +624,8 @@ endif()
 # contexts through EGL without a display.
 if(_ico_have_gl)
     add_executable(rhi_gl_test test/rhi_gl_test.c ${_ico_rhi_test_common})
+    # the thread submit cell's second thread (rhi_test_common.c threadSubmitCell)
+    target_link_libraries(rhi_gl_test PRIVATE ico_thread)
     target_include_directories(rhi_gl_test PRIVATE "${CMAKE_CURRENT_SOURCE_DIR}/test/shaders")
     target_compile_options(rhi_gl_test PRIVATE ${ICO_SEMANTIC_OPTIONS} ${ICO_PORT_WARNINGS})
     target_link_libraries(rhi_gl_test PRIVATE ico_rhi SDL3::SDL3)
@@ -570,6 +645,12 @@ if(_ico_have_gl)
         set(_ico_gl_nodual_env ${_ico_gl_test_env} "ICO_GL_FAKE_NO_DUAL=1")
         set_tests_properties(rhi_gl_nodual PROPERTIES SKIP_RETURN_CODE 77 ENVIRONMENT
                              "${_ico_gl_nodual_env}")
+        # the cells with the bind cache off (ICO_RHI_BIND_CACHE=0, as
+        # rhi_vk_nobindcache)
+        add_test(NAME rhi_gl_nobindcache COMMAND rhi_gl_test)
+        set(_ico_gl_nobindcache_env ${_ico_gl_test_env} "ICO_RHI_BIND_CACHE=0")
+        set_tests_properties(rhi_gl_nobindcache PROPERTIES SKIP_RETURN_CODE 77 ENVIRONMENT
+                             "${_ico_gl_nobindcache_env}")
     endif()
 endif()
 
@@ -580,6 +661,8 @@ endif()
 # Windows build (ICO_RUN_TESTS).
 if(_ico_have_d3d12)
     add_executable(rhi_d3d12_test test/rhi_d3d12_test.c ${_ico_rhi_test_common})
+    # the thread submit cell's second thread (rhi_test_common.c threadSubmitCell)
+    target_link_libraries(rhi_d3d12_test PRIVATE ico_thread)
     target_include_directories(rhi_d3d12_test PRIVATE "${CMAKE_CURRENT_SOURCE_DIR}/test/shaders")
     target_compile_options(rhi_d3d12_test PRIVATE ${ICO_SEMANTIC_OPTIONS} ${ICO_PORT_WARNINGS})
     target_link_libraries(rhi_d3d12_test PRIVATE ico_rhi user32)
@@ -604,6 +687,8 @@ endif()
 # native Windows build (ICO_RUN_TESTS).
 if(_ico_have_d3d11)
     add_executable(rhi_d3d11_test test/rhi_d3d11_test.c ${_ico_rhi_test_common})
+    # the thread submit cell's second thread (rhi_test_common.c threadSubmitCell)
+    target_link_libraries(rhi_d3d11_test PRIVATE ico_thread)
     target_include_directories(rhi_d3d11_test PRIVATE "${CMAKE_CURRENT_SOURCE_DIR}/test/shaders")
     target_compile_options(rhi_d3d11_test PRIVATE ${ICO_SEMANTIC_OPTIONS} ${ICO_PORT_WARNINGS})
     target_link_libraries(rhi_d3d11_test PRIVATE ico_rhi user32)

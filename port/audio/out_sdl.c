@@ -773,6 +773,20 @@ void ico_audio_sdl_device_removed(uint32_t which)
     }
 }
 
+void ico_audio_sdl_flush(void)
+{
+    if (stream == NULL) {
+        return;
+    }
+    /* the queued sound is the game's before the load: dropped by the
+       pause and resume the Android lifecycle uses (the resume empties the
+       queue and starts the pull path's accounting again while no callback
+       runs) */
+    ico_audio_sdl_pause(1);
+    ico_audio_sdl_pause(0);
+    fprintf(stderr, "audio: the output's queue dropped after a save state's load\n");
+}
+
 void ico_audio_sdl_pause(int paused)
 {
     if (stream == NULL) {
@@ -1061,6 +1075,11 @@ int ico_audio_sdl_summary_text(char *out, size_t size)
     P_at.ticks = t.ticks;
     P_at.long_gaps = t.long_gaps;
     return 1;
+}
+
+unsigned long long ico_audio_sdl_held_ms(void)
+{
+    return pull_render != NULL ? (unsigned long long)(P_LOAD(P.held) * 1000u / RATE) : 0u;
 }
 
 void ico_audio_sdl_log_summary(void)

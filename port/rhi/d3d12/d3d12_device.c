@@ -3,7 +3,9 @@
  * of the D3D12 backend. */
 #include "d3d12_internal.h"
 #include "rhi_d3d12.h"
+#include "../rhi_adapter.h"
 #include "../rhi_backend.h"
+#include "../rhi_bind_cache.h"
 #include <stdlib.h>
 #include <string.h>
 
@@ -54,7 +56,9 @@ bool dx_check(HRESULT hr, const char *what, const char *file, int line)
      * another failure on a device whose removed reason is set */
     HRESULT reason = g_dx.device ? ID3D12Device_GetDeviceRemovedReason(g_dx.device) : S_OK;
     if (dx_is_loss_code(hr) || reason != S_OK) {
-        g_dx.deviceLost = true;
+        /* rhi_device_lost reads it on any thread (the window's and its render
+           thread's) */
+        __atomic_store_n(&g_dx.deviceLost, true, __ATOMIC_RELEASE);
         fprintf(stderr,
                 "rhi_d3d12: the device was lost (%s); removed reason 0x%08lx (%s). Rendering "
                 "stops; the session ends.\n",
@@ -401,6 +405,8 @@ static bool dx_load_runtime(bool debug)
     return DX_CHECK(hr);
 }
 
+static void dx_video_memory(void);
+
 /* ------------------------------------------------------- adapter selection */
 static void dx_adapter_name(IDXGIAdapter1 *a, char *out, size_t size)
 {
@@ -458,13 +464,33 @@ static bool dx_is_software(IDXGIAdapter1 *a)
     return (d.Flags & DXGI_ADAPTER_FLAG_SOFTWARE) != 0;
 }
 
+/* the adapters the last pick looked at (rhi_adapter_list) and [video]
+   adapter (rhi_set_adapter_wanted, from the dispatcher before each
+   rhi_init) */
+static RhiAdapterInfo s_adapters[RHI_MAX_ADAPTERS];
+static uint32_t s_adapterCount;
+static char s_adapterWanted[256];
+
+/* ICO_D3D12_ADAPTER=warp, an index into the list below, or a substring of
+ * the adapter's name forces a pick (it wins); else [video] adapter's exact
+ * name among the suitable adapters; else the first suitable one; without
+ * one, WARP.  One line lists every adapter and says which was picked and
+ * why. */
 static bool dx_pick_adapter(void)
 {
-    /* ICO_D3D12_ADAPTER=warp, an index into the list below, or a substring
-     * of the adapter's name forces a pick */
     const char *force = getenv("ICO_D3D12_ADAPTER");
+    const bool forcing = force && *force;
     bool forceWarp = force && (_stricmp(force, "warp") == 0);
+    const char *names[RHI_MAX_ADAPTERS];
     IDXGIAdapter1 *pick = NULL;
+    int pickIdx = -1, autoIdx = -1;
+    char source[320];
+    if (forcing) {
+        snprintf(source, sizeof(source), "ICO_D3D12_ADAPTER=%s", force);
+    } else {
+        snprintf(source, sizeof(source), "automatic");
+    }
+    s_adapterCount = 0;
     if (!forceWarp) {
         for (UINT i = 0;; i++) {
             IDXGIAdapter1 *a = dx_enum_hardware(i);
@@ -473,26 +499,71 @@ static bool dx_pick_adapter(void)
             }
             char name[128];
             dx_adapter_name(a, name, sizeof(name));
-            bool ok = !dx_is_software(a) && dx_adapter_ok(a);
+            const bool soft = dx_is_software(a);
+            bool ok = !soft && dx_adapter_ok(a);
             DX_LOG("adapter %u: %s%s", i, name,
                    ok ? "" : " (unsuitable: a software adapter, or no feature level 11_0)");
+            if (i < RHI_MAX_ADAPTERS) {
+                RhiAdapterInfo *e = &s_adapters[i];
+                memset(e, 0, sizeof(*e));
+                snprintf(e->name, sizeof(e->name), "%s", name);
+                e->suitable = ok;
+                e->score = ok ? 0 : -1;
+                e->why = ok ? NULL : soft ? "a software adapter" : "no feature level 11_0";
+                names[i] = ok ? e->name : NULL;
+                s_adapterCount = i + 1;
+            }
+            if (ok && autoIdx < 0) {
+                autoIdx = (int)i;
+            }
             bool forced = false;
-            if (force && *force && ok) {
+            if (forcing && ok) {
                 char idx[16];
                 snprintf(idx, sizeof(idx), "%u", i);
                 forced = strcmp(force, idx) == 0 || strstr(name, force) != NULL;
             }
-            if (ok && (forced || (!pick && !(force && *force)))) {
+            if (ok && (forced || (!pick && !forcing))) {
                 if (pick) {
                     IDXGIAdapter1_Release(pick);
                 }
                 IDXGIAdapter1_AddRef(a);
                 pick = a;
+                pickIdx = (int)i;
             }
             IDXGIAdapter1_Release(a);
         }
-        if (!pick && force && *force) {
+        if (!pick && forcing) {
             DX_LOG("ICO_D3D12_ADAPTER=%s matched no adapter", force);
+        }
+    }
+    if (!forcing && s_adapterWanted[0] != '\0') {
+        const int want = rhi_adapter_match(s_adapterWanted, names, (int)s_adapterCount);
+        IDXGIAdapter1 *a = want >= 0 ? dx_enum_hardware((UINT)want) : NULL;
+        if (a != NULL) {
+            if (pick) {
+                IDXGIAdapter1_Release(pick);
+            }
+            pick = a;
+            pickIdx = want;
+            snprintf(source, sizeof(source), "[video] adapter \"%s\"", s_adapterWanted);
+        } else {
+            DX_LOG("[video] adapter \"%s\" is not among the devices; automatic pick",
+                   s_adapterWanted);
+        }
+    }
+    if (autoIdx >= 0 && autoIdx < RHI_MAX_ADAPTERS) {
+        s_adapters[autoIdx].automatic = true;
+    }
+    if (pick && pickIdx >= 0 && pickIdx < RHI_MAX_ADAPTERS) {
+        s_adapters[pickIdx].current = true;
+    }
+    {
+        char text[RHI_MAX_ADAPTERS * 320];
+        rhi_adapter_list_text(s_adapters, (int)s_adapterCount, text, sizeof(text));
+        if (pick) {
+            DX_LOG("devices: %s; picked %d (%s)", text, pickIdx, source);
+        } else {
+            DX_LOG("devices: %s; picked WARP (%s)", text, source);
         }
     }
     if (!pick) {
@@ -504,6 +575,10 @@ static bool dx_pick_adapter(void)
         g_dx.warp = true;
     }
     g_dx.adapter = pick;
+    if (pick &&
+        FAILED(IDXGIAdapter1_QueryInterface(pick, &IID_IDXGIAdapter3, (void **)&g_dx.adapter3))) {
+        g_dx.adapter3 = NULL;
+    }
     dx_adapter_name(pick, g_dx.adapterName, sizeof(g_dx.adapterName));
     dx_driver_text(pick);
     return true;
@@ -617,6 +692,7 @@ static void dx_fill_limits(void)
     o->maxRenderTargetSize = D3D12_REQ_TEXTURE2D_U_OR_V_DIMENSION;    /* 16384 */
     o->dualSourceBlend = true; /* every D3D12 device (feature level 11_0) */
     o->stencilWrap = true;
+    o->depth32Attachment = true;
     o->depthReadback = true;
     o->depthStencilFormatName = "D32S8";
     o->depthSampled = true;
@@ -786,6 +862,11 @@ bool rhi_init(const RhiDeviceDesc *desc)
            "offered)",
            g_dx.adapterName, g_dx.warp ? ", WARP" : "", s_driverText,
            g_dx.swapchain ? "" : ", headless", g_dx.limits.maxDrawIndexedIndexValue);
+    dx_video_memory();
+    if (g_dx.memBudget == 0) {
+        DX_LOG("video memory budget: not reported by this adapter");
+    }
+    DX_LOG("bind cache: %s", rhi_bind_cache_words());
     dx_drain_messages();
     return true;
 }
@@ -816,6 +897,7 @@ void rhi_shutdown(void)
     dx_drain_messages();
     DX_RELEASE(g_dx.info);
     DX_RELEASE(g_dx.device);
+    DX_RELEASE(g_dx.adapter3);
     DX_RELEASE(g_dx.adapter);
     DX_RELEASE(g_dx.factory);
     if (g_dx.fenceEvent) {
@@ -846,9 +928,22 @@ const char *rhi_adapter_name(void)
     return g_dx.adapterName;
 }
 
+uint32_t rhi_adapter_list(RhiAdapterInfo *out, uint32_t max)
+{
+    for (uint32_t i = 0; out != NULL && i < max && i < s_adapterCount; i++) {
+        out[i] = s_adapters[i];
+    }
+    return s_adapterCount;
+}
+
+void rhi_set_adapter_wanted(const char *name)
+{
+    snprintf(s_adapterWanted, sizeof(s_adapterWanted), "%s", name != NULL ? name : "");
+}
+
 bool rhi_device_lost(void)
 {
-    return g_dx.deviceLost;
+    return __atomic_load_n(&g_dx.deviceLost, __ATOMIC_ACQUIRE);
 }
 
 /* The performance entry points (rhi.h) on D3D12: the counts the Vulkan
@@ -859,10 +954,34 @@ bool rhi_device_lost(void)
  * and presents as before; the memory gauges read zero.  Timestamps are
  * d3d12_cmd.c's.  There is no mailbox mode (DXGI's flip model with sync
  * interval 1 is FIFO; docs/port/RHI.md, "Direct3D 12"). */
+/* The adapter's local video memory segment (RhiStats videoMem*), asked of
+ * DXGI at most every 250 ms; 0 without an IDXGIAdapter3 */
+static void dx_video_memory(void)
+{
+    const ULONGLONG now = GetTickCount64();
+    DXGI_QUERY_VIDEO_MEMORY_INFO m;
+
+    if (!g_dx.adapter3 || (g_dx.memTick && now - g_dx.memTick < 250u)) {
+        return;
+    }
+    g_dx.memTick = now ? now : 1u;
+    memset(&m, 0, sizeof(m));
+    if (SUCCEEDED(IDXGIAdapter3_QueryVideoMemoryInfo(g_dx.adapter3, 0,
+                                                     DXGI_MEMORY_SEGMENT_GROUP_LOCAL, &m))) {
+        g_dx.memBudget = m.Budget;
+        g_dx.memUsage = m.CurrentUsage;
+        g_dx.memAvail = m.AvailableForReservation;
+    }
+}
+
 void rhi_get_stats(RhiStats *out)
 {
     if (out) {
+        dx_video_memory();
         *out = g_dx.counts;
+        out->videoMemBudget = g_dx.memBudget;
+        out->videoMemUsage = g_dx.memUsage;
+        out->videoMemAvailable = g_dx.memAvail;
         out->swapchains = g_dx.swapchains;
         out->presents = g_dx.presents;
         out->presentNs = g_dx.presentNs;
@@ -882,6 +1001,17 @@ void rhi_prefer_mailbox(bool on)
 }
 
 bool rhi_present_mailbox(void)
+{
+    return false;
+}
+
+/* rhi.h: no mailbox here, so no FIFO fallback either */
+void rhi_present_fifo_fallback(bool on)
+{
+    (void)on;
+}
+
+bool rhi_present_fifo_fallback_on(void)
 {
     return false;
 }

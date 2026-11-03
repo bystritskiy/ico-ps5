@@ -123,6 +123,11 @@ typedef struct VkrPipeline {
     VkPipeline pipeline;
     VkPipelineLayout layout;
     uint32_t layoutCount;
+    /* the RhiBindGroupLayout id of each set of the layout: a pipeline
+     * change keeps the descriptor sets bound below the first set whose
+     * layout differs (Vulkan's pipeline layout compatibility: identical
+     * set layouts, no push constants; vk_cmd.c vkr_groups_disturbed) */
+    uint32_t setLayoutIds[RHI_MAX_BIND_SLOTS];
     uint8_t dstRead; /* RhiDstRead (vk_cmd.c vkr_dst_order) */
     /* the RHI_DYN_* states the pipeline leaves dynamic (only where the
      * device has them: g_vkr.dynDepth, dynBlend), their values in the
@@ -221,6 +226,11 @@ typedef struct VkrCmdList {
     VkCommandBuffer cb;
     bool recording;
     bool submitted;
+    /* the frame slot whose pool the list came from (rhi_begin_commands):
+     * the end and the submit find the slot's own acquire, fence value and
+     * query pools through it, not through the current frame index, which
+     * the recording thread may have moved on ("Frame slots" in vk_cmd.c) */
+    uint8_t slot;
     /* draw-time state */
     VkrPipeline *pipeline;
     VkDescriptorSet groups[RHI_MAX_BIND_SLOTS];
@@ -229,9 +239,10 @@ typedef struct VkrCmdList {
     uint32_t offsets[RHI_MAX_BIND_SLOTS][RHI_MAX_DYNAMIC_OFFSETS];
     uint32_t groupDirty; /* bit per group */
     bool inPass;
-    /* the open pass's render area (vk_cmd.c vkr_pass_area_fits): every
-     * scissor set inside it is cut to it */
-    uint32_t areaW, areaH;
+    /* the open pass's render area (vk_cmd.c vkr_pass_area_fits, and
+     * RhiRenderPassDesc.area inside it): offset areaX, areaY, extent areaW
+     * x areaH; every scissor set inside the pass is cut to it */
+    uint32_t areaX, areaY, areaW, areaH;
     /* a draw, and a RHI_DST_READ_STORAGE draw, recorded in the open
      * render pass (vk_cmd.c vkr_dst_order) */
     bool drawnInPass, storageDrawn;
@@ -264,10 +275,64 @@ typedef struct VkrCmdList {
      * (VK_NULL_HANDLE: none): its submit signals the present semaphore
      * (rhi_submit) */
     VkImage presentImage;
+    /* the occlusion query open in the list (rhi_cmd_begin_occlusion),
+     * its index + 1; 0 for none */
+    uint32_t occOpen;
+    /* The bind cache (vk_cmd.c; docs/port/RHI.md "The bind cache"): the
+     * bound pipeline's id (pipeline above is its pool slot, which a
+     * destroyed pipeline's successor takes over), and what the set calls
+     * last recorded, valid for the VKR_KNOW_* bits of known (the vertex
+     * buffers per binding in vbKnown): a set equal to it records nothing.
+     * Zero at the slot's recycle; the viewport and scissor are forgotten
+     * at each pass's start.  dynFresh: the RHI_DYN_* groups set since the
+     * last draw (RhiStats.stateSetsSkipped counts their commands the draw
+     * found in force) */
+    uint32_t pipelineId;
+    uint32_t known;
+    VkViewport vp;
+    VkRect2D sc;
+    uint32_t vbId[RHI_MAX_VERTEX_ATTRS];
+    uint64_t vbOff[RHI_MAX_VERTEX_ATTRS];
+    uint32_t vbKnown;
+    uint32_t ibId;
+    uint64_t ibOff;
+    bool ib32;
+    uint8_t stencilRef;
+    float blendConst[4];
+    uint8_t dynFresh;
 } VkrCmdList;
+
+/* A frame slot's swapchain image (vk_swapchain.c): acquired, not yet
+ * presented; waitPending: its acquire semaphore (the slot's acquireSem)
+ * not yet waited on by a submit of the slot; signalled: renderDone[image]
+ * is signalled by the submit of the slot's list that moved the image to
+ * PRESENT (rhi_submit), so rhi_present submits nothing before presenting;
+ * seq: the acquire's number (VkrState.acqSeq), the present takes the
+ * oldest acquired.  Written under the swapchain's lock by the acquire and
+ * the present, and by the submit of the slot's own list (signalled,
+ * waitPending), which the acquire's thread handed over after the acquire;
+ * cleared for every slot where the swapchain is made again or released
+ * (vkr_acq_reset_all), the device idle and the submit thread with it. */
+typedef struct VkrAcquire {
+    bool acquired;
+    bool waitPending;
+    bool signalled;
+    uint32_t image;
+    uint64_t seq;
+} VkrAcquire;
 
 typedef struct VkrFrame {
     uint64_t waitValue; /* timeline value of the frame's last submit */
+    /* the frame index the slot was last recycled at, masked as a command
+     * list handle's tag (VKR_GEN_MASK): vkr_get_cmd checks a list's tag
+     * against its own slot's */
+    uint32_t gen;
+    /* the slot's swapchain image (VkrAcquire) */
+    VkrAcquire acq;
+    /* rhi_set_submit_tag's numbers for the slot's submits (the loss
+     * report's and rhi_gpu_progress's names), set by the recording thread
+     * after the slot's recycle and read by the slot's submits */
+    uint32_t tagReplay, tagFrame;
     VkCommandPool cmdPool;
     VkrCmdList lists[VKR_MAX_CMD_LISTS];
     uint32_t listCount;
@@ -284,6 +349,12 @@ typedef struct VkrFrame {
     VkQueryPool queryPool;
     uint32_t tsWritten[RHI_TIMESTAMP_WORDS]; /* the indices written since the slot was recycled */
     bool tsReset; /* the pool's reset is recorded in this slot's first list */
+    /* the slot's occlusion queries (rhi_cmd_begin_occlusion): the pool made
+     * at the first begin of the run, the indices begun since the slot was
+     * recycled, and whether the pool is reset for this use of the slot */
+    VkQueryPool occPool;
+    uint32_t occWritten[RHI_OCCLUSION_WORDS];
+    bool occReset;
 } VkrFrame;
 
 /* A render pass as both paths take it (vk_cmd.c rhi_cmd_begin_render_pass
@@ -294,8 +365,9 @@ typedef struct VkrFrame {
  * ops (a depth-stencil format's stencil ops in stencilLoad/stencilStore; a
  * colour target's are DONT_CARE) and the clear value; hasStencil: the depth
  * format has a stencil aspect; readOnlyDepth as asked; the render area
- * (vkr_pass_area_fits) and the framebuffer's size (the smallest
- * attachment's, the render area's without one). */
+ * (vkr_pass_area_fits, then RhiRenderPassDesc.area inside it: offset
+ * areaX, areaY, extent areaW x areaH) and the framebuffer's size (the
+ * smallest attachment's, the pass's own size without one). */
 typedef struct VkrPassAttach {
     VkrTexture *tex;
     VkImageView view;
@@ -312,7 +384,7 @@ typedef struct VkrPassDesc {
     VkrPassAttach color[RHI_MAX_COLOR_TARGETS];
     bool hasDepth, hasStencil, readOnlyDepth;
     VkrPassAttach depth;
-    uint32_t areaW, areaH;
+    uint32_t areaX, areaY, areaW, areaH;
     uint32_t fbW, fbH;
 } VkrPassDesc;
 
@@ -338,8 +410,9 @@ typedef struct VkrState {
     /* the Vulkan format behind RHI_FMT_D32F_S8 (D32_SFLOAT_S8_UINT, or
      * D24_UNORM_S8_UINT without it or under ICO_VK_FAKE_D24S8) */
     VkFormat dsFormat;
-    bool dsSampled;    /* dsFormat has the sampled-image feature (RhiLimits.depthSampled) */
-    bool dualSrcBlend; /* the feature enabled (RhiLimits.dualSourceBlend) */
+    bool d32fAttachment; /* D32_SFLOAT is a depth attachment (RhiLimits.depth32Attachment) */
+    bool dsSampled;      /* dsFormat has the sampled-image feature (RhiLimits.depthSampled) */
+    bool dualSrcBlend;   /* the feature enabled (RhiLimits.dualSourceBlend) */
     /* texture packs: textureCompressionBC enabled and the four BC formats
      * sampleable and copyable (RhiLimits.bcTextures) */
     bool bc;
@@ -437,7 +510,6 @@ typedef struct VkrState {
     } submits[VKR_SUBMIT_HISTORY];
 
     uint32_t submitCount; /* ever; the newest is submits[(submitCount - 1) % N] */
-    uint32_t tagReplay, tagFrame;
     /* the timeline value of the wait that failed, 0: none (vkr_wait_value) */
     uint64_t lostWaitValue;
     /* rhi_gpu_progress (rhi.h; read from any thread): the newest
@@ -471,14 +543,19 @@ typedef struct VkrState {
     uint64_t fenceFinished;
     uint32_t fenceRecycleWaits;
     /* ICO_VK_FAKE_API (vk_device.c vkr_create_instance): the profile in
-     * force ("1.1", "1.1ext"; NULL: none), both holding the instance and the
-     * device to Vulkan 1.1; fakeHideExts: the 1.1 profile, whose device
-     * also lacks the extensions a stock Vulkan 1.1 driver has not
+     * force ("1.0", "1.1", "1.1ext"; NULL: none), the 1.1 ones holding the
+     * instance and the device to Vulkan 1.1, "1.0" to Vulkan 1.0 (issue
+     * 158); fakeHideExts: the 1.0 and 1.1 profiles, whose device also lacks
+     * the extensions a stock Vulkan 1.1 driver has not
      * (vkr_device_has_ext), so it has no timeline semaphores
-     * (fakeNoTimeline, VKR_SYNC_FENCES) */
+     * (fakeNoTimeline, VKR_SYNC_FENCES); fakeNoProps2: "1.0bare", the
+     * "1.0" profile (fakeApi "1.0") on a loader without
+     * VK_KHR_get_physical_device_properties2 (review finding 5: the
+     * instance goes on without it, the device without the extended queries) */
     const char *fakeApi;
     bool fakeHideExts;
     bool fakeNoTimeline;
+    bool fakeNoProps2;
     /* the paths the device's version and extensions give (vkr_create_device;
      * driverProps vkr_driver_text): legacyPasses, render passes as VkRenderPass
      * objects (no dynamic rendering: vk_renderpass.c; cmdBeginRendering and
@@ -490,11 +567,15 @@ typedef struct VkrState {
      * VK_ATTACHMENT_STORE_OP_NONE taken (Vulkan 1.3, or below it on a
      * Vulkan 1.1 device or one without dynamic rendering
      * VK_KHR_load_store_op_none, VK_EXT_load_store_op_none or
-     * VK_QCOM_render_pass_store_ops, whose NONE_QCOM is the same value) */
+     * VK_QCOM_render_pass_store_ops, whose NONE_QCOM is the same value);
+     * viewUsage, VkImageViewUsageCreateInfo chained on the UINT views
+     * (Vulkan 1.1, or VK_KHR_maintenance2 on a Vulkan 1.0 device: issue
+     * 158; without it the view keeps the image's usages) */
     bool legacyPasses;
     bool driverProps;
     bool formatList;
     bool storeOpNone;
+    bool viewUsage;
 
     /* frames */
     VkrFrame frames[RHI_FRAMES_IN_FLIGHT];
@@ -520,14 +601,22 @@ typedef struct VkrState {
     uint32_t swapImageCount;
     uint32_t swapTextures[VKR_MAX_SWAP_IMAGES];  /* texture ids */
     VkSemaphore renderDone[VKR_MAX_SWAP_IMAGES]; /* per image */
-    uint32_t swapImage;                          /* acquired index */
-    bool swapAcquired;                           /* image acquired, not yet presented */
-    bool acquireWaitPending; /* acquire semaphore not yet waited on by a submit */
-    /* renderDone[swapImage] is signalled by the submit of the list that
-     * moved the image to PRESENT (rhi_submit): rhi_present submits nothing
-     * before presenting.  Cleared wherever swapAcquired is. */
-    bool presentSignalled;
-    VkSemaphore acquireSem; /* the semaphore that acquire signals */
+    /* the surface's minImageCount the swapchain was made with: a second
+     * image may be acquired before the first is presented while
+     * swapImageCount - swapMinImages is at least 1 (the spec's limit for an
+     * acquire without a timeout; vk_swapchain.c vkr_acquire_ahead_ok) */
+    uint32_t swapMinImages;
+    /* the acquires' numbers (VkrAcquire.seq), under the swapchain's lock */
+    uint64_t acqSeq;
+    /* a present on the submit thread does not make the swapchain or the
+     * surface again (the recording thread may run beside it,
+     * rhi_slot_guard_worker): what it found is kept here, under the
+     * swapchain's lock, and done at the next acquire, with the submit
+     * thread idle (vk_swapchain.c vkr_take_deferred).  VKR_DEFER_* bits;
+     * deferW/H the size the poll found (VKR_DEFER_POLL) */
+    uint32_t deferred;
+    uint32_t deferW, deferH;
+    uint64_t deferredCount; /* ever, for the line */
 
     /* one-shot command pool for readback */
     VkCommandPool oneShotPool;
@@ -535,14 +624,37 @@ typedef struct VkrState {
     /* every pipeline is created through it (vkr_pipeline_cache_init) */
     VkPipelineCache pipelineCache;
 
-    /* counters (rhi_get_stats), timestamps, the mailbox option */
+    /* counters (rhi_get_stats), timestamps, the mailbox option.  stats is
+     * written by the recording thread alone (and by any thread while the
+     * submit thread is idle); the counters a list's end, a submit and a
+     * present add go into late with __atomic adds, from whichever thread
+     * makes them, and rhi_get_stats adds them in (vk_device.c): the submit
+     * thread's end, submit and present run beside the next picture's
+     * recording (RhiLimits.slotOverlap) */
     RhiStats stats;
+
+    struct {
+        uint64_t barriers, submits, presents, presentNs;
+    } late;
+
+    /* RhiLimits.slotOverlap's answer and why not, for the device line */
+    bool slotOverlap;
     bool timestamps;        /* the queue writes timestamps */
     float timestampPeriod;  /* ns per tick */
     uint64_t timestampMask; /* the valid bits */
     uint64_t tsResult[RHI_MAX_TIMESTAMPS];
     uint32_t tsCount; /* of the slot rhi_wait_frame recycled last */
-    bool mailbox;     /* the swapchain presents in mailbox mode (rhi_prefer_mailbox) */
+    /* occlusion queries (rhi_cmd_begin_occlusion): the pools exist (made at
+     * the first begin), the device counts precisely (occlusionQueryPrecise,
+     * enabled), and the counts of the slot rhi_wait_frame recycled last
+     * (RHI_MAX_OCCLUSION, allocated with the pools; RHI_OCCLUSION_NONE for
+     * an index not written) with 1 + the highest index written */
+    bool occUsed;
+    bool occBroken; /* the pools or the array could not be made: no more tries this run */
+    bool occPrecise;
+    uint64_t *occResult;
+    uint32_t occCount;
+    bool mailbox; /* the swapchain presents in mailbox mode (rhi_prefer_mailbox) */
 
     /* the swapchain's present mode (rhi_present_mode_name) */
     VkPresentModeKHR presentMode;
@@ -571,7 +683,11 @@ typedef struct VkrState {
 
     /* hazard tracking (vk_cmd.c, "Hazards") */
     bool globalBarriers; /* ICO_VK_GLOBAL_BARRIERS=1: a global barrier before every pass and copy */
-    uint64_t hzEpoch;    /* the last command list's epoch (one per rhi_begin_commands) */
+    /* ICO_VK_DEPTH_ALWAYS=1: every depth test compares ALWAYS (the
+     * occlusion measurement's run without the depth: what draws nothing
+     * whatever the depth says; the picture is not the game's) */
+    bool depthAlways;
+    uint64_t hzEpoch; /* the last command list's epoch (one per rhi_begin_commands) */
 
     VkrGarbage overflow[VKR_GARBAGE_OVERFLOW]; /* see VKR_GARBAGE_OVERFLOW */
     uint32_t overflowCount;
@@ -623,16 +739,38 @@ bool vkr_check(VkResult r, const char *what, const char *file, int line);
 /* A monotonic clock in ns, for the blocked-time counters (RhiStats). */
 uint64_t vkr_now_ns(void);
 
+/* The recording thread's frame slot (rhi_frame_slot).  Only the thread
+ * that calls rhi_wait_frame may ask: the end, the submit and the present of
+ * a list take the list's own slot (VkrCmdList.slot, the acquire's), as the
+ * submit thread makes them while the recording thread has moved on */
 static inline VkrFrame *vkr_cur_frame(void)
 {
     return &g_vkr.frames[g_vkr.frameIndex % RHI_FRAMES_IN_FLIGHT];
 }
 
+/* a handle's tag names its slot: the slot is the tag modulo the slots */
+_Static_assert(((VKR_GEN_MASK + 1u) % RHI_FRAMES_IN_FLIGHT) == 0u,
+               "a command list's frame tag must name its slot");
+
+/* VkrState.deferred: what a present on the submit thread left for the next
+ * acquire (vk_swapchain.c) */
+#define VKR_DEFER_REBUILD 1u      /* out of date (or suboptimal on the desktop) */
+#define VKR_DEFER_SIZE 2u         /* Android's suboptimal with another size */
+#define VKR_DEFER_POLL 4u         /* the poll found another size (deferW x deferH) */
+#define VKR_DEFER_SURFACE_LOST 8u /* the surface went away */
+
+/* the late counters (VkrState.late) */
+static inline void vkr_late_add(uint64_t *counter, uint64_t n)
+{
+    __atomic_fetch_add(counter, n, __ATOMIC_RELAXED);
+}
+
 /* vk_device.c: the device-loss report (VkrState, "GPU loss diagnostics"),
  * once, from vkr_check at the first VK_ERROR_DEVICE_LOST */
 void vkr_lost_report(void);
-/* vk_cmd.c: a submission into VkrState.submits */
-void vkr_note_submit(uint64_t value, uint32_t lists, bool present);
+/* vk_cmd.c: a submission of slot f into VkrState.submits, with the slot's
+ * tag (rhi_set_submit_tag) */
+void vkr_note_submit(const VkrFrame *f, uint64_t value, uint32_t lists, bool present);
 /* vk_cmd.c: blocks until submission `value` of the port's counter has
  * finished (0, or a lost device: returns at once), counted and seen by the
  * watchdog (rhi_gpu_progress); a failed wait is logged and noted
@@ -709,7 +847,8 @@ void vkr_defer_memory(VkDeviceMemory memory, VkDeviceSize size);
 /* vkFreeMemory and the live counts (every free goes through it) */
 void vkr_free_memory(VkDeviceMemory memory, VkDeviceSize size);
 void vkr_destroy_garbage(VkrFrame *f);
-bool vkr_submit_empty(void); /* vk_cmd.c: an empty submit that waits on a pending acquire */
+/* vk_cmd.c: an empty submit that waits on slot f's pending acquire */
+bool vkr_submit_empty(VkrFrame *f);
 VkrBuffer *vkr_get_buffer(RhiBuffer b);
 VkrTexture *vkr_get_texture(RhiTexture t);
 
@@ -723,26 +862,31 @@ void vkr_release_all_objects(void);
  * saved to the file and destroyed before the device goes */
 void vkr_pipeline_cache_init(void);
 void vkr_pipeline_cache_shutdown(void);
+/* vk_pipeline.c: the background sets' compiles (rhi.h RhiGpuProgress
+ * bgPipesDone, bgPipesLeft); any thread */
+void vkr_pipe_background_progress(uint32_t *done, uint32_t *left);
 /* vk_pipeline.c */
 VkDescriptorSet vkr_get_bind_group(RhiBindGroup bg);
 /* The number of dynamic uniform slots of a bind group's layout. */
 uint32_t vkr_bind_group_dynamic_count(RhiBindGroup bg);
 /* vk_cmd.c */
 bool vkr_frames_init(void);
-/* Empty submit after the frame's work that signals the image's present
+/* Empty submit after slot f's work that signals its image's present
  * semaphore (rhi_present), when no list's submit signalled it
- * (presentSignalled). */
-bool vkr_submit_present_signal(void);
+ * (VkrAcquire.signalled). */
+bool vkr_submit_present_signal(VkrFrame *f);
 void vkr_frames_shutdown(void);
 VkrCmdList *vkr_get_cmd(RhiCommandList cl);
 void vkr_image_barrier(VkrCmdList *c, VkrTexture *t, RhiState before, RhiState after);
 /* vk_present_mode.c: the present mode for a swapchain from the surface's
- * modes[n]: with vsync, MAILBOX when preferMailbox and offered, else FIFO;
+ * modes[n]: FIFO when forceFifo (the FIFO fallback, rhi_present_fifo_fallback);
+ * with vsync, MAILBOX when preferMailbox and offered, else FIFO;
  * without, IMMEDIATE when offered, else MAILBOX when offered, else FIFO.
  * vkr_present_mode_name: "immediate", "mailbox", "fifo", "fifo_relaxed", or
  * NULL for any other mode. */
 VkPresentModeKHR vkr_choose_present_mode(const VkPresentModeKHR *modes, uint32_t n, bool vsync,
-                                         bool preferMailbox, bool preferLatestReady);
+                                         bool preferMailbox, bool preferLatestReady,
+                                         bool forceFifo);
 const char *vkr_present_mode_name(VkPresentModeKHR m);
 /* vk_present_mode.c: whether the display's timing of presents
  * (VK_KHR_present_id + VK_KHR_present_wait, rhi_present_timing) is used:

@@ -43,6 +43,9 @@ ico_add_shader(fog_lut_ms_ps fog_lut.hlsl fog_lut_ps fragment DEFINES FOG_MS=1)
 ico_add_shader(font_ps font.hlsl font_ps fragment)
 # sheet text, coverage strips drawn in the menu sheets' style
 ico_add_shader(font_sheet_ps font.hlsl font_sheet_ps fragment)
+# the same from a 1x sheet the renderer baked on the CPU (rd_tex.c
+# rd__sheet_bake_rect): four reads of the finished texels
+ico_add_shader(font_sheet_baked_ps font.hlsl font_sheet_baked_ps fragment)
 # the VU1 microprograms
 ico_add_shader(vu_prelit_vs vu_prelit.hlsl vu_prelit_vs vertex)
 ico_add_shader(vu_ps vu_prelit.hlsl vu_ps fragment)
@@ -57,7 +60,7 @@ ico_add_shader(vu_grid_vs vu_grid.hlsl vu_grid_vs vertex)
 ico_add_shader(vu_grid_lit_vs vu_grid.hlsl vu_grid_lit_vs vertex)
 ico_add_shader(vu_grid_spec_vs vu_grid.hlsl vu_grid_spec_vs vertex)
 ico_add_shader(vu_particle_vs vu_particle.hlsl vu_particle_vs vertex)
-# the vertex pre-pass (docs/port/RENDER.md, "The vertex pre-pass";
+# the vertex pre-pass (docs/port/PIPELINES.md, "The vertex pre-pass";
 # rd_replay_vu.c rd__vu_prepass): each mesh program's vertices once, as records
 # (vu_X_pre_vs, vu_pre_ps into three RGBA32_UINT targets)
 foreach(_v prelit:prelit lit:lit lit_spec:lit reflect:lit skin:skin skin_spec:skin skin_debug:skin
@@ -112,6 +115,8 @@ ico_add_shader(fog_lut_ms_ps fog_lut.hlsl fog_lut_ps fragment
                DEFINES FOG_MS=1 ICO_NO_DUAL=1 SUFFIX _nodual)
 ico_add_shader(font_ps font.hlsl font_ps fragment DEFINES ICO_NO_DUAL=1 SUFFIX _nodual)
 ico_add_shader(font_sheet_ps font.hlsl font_sheet_ps fragment DEFINES ICO_NO_DUAL=1 SUFFIX _nodual)
+ico_add_shader(font_sheet_baked_ps font.hlsl font_sheet_baked_ps fragment DEFINES ICO_NO_DUAL=1
+               SUFFIX _nodual)
 ico_add_shader(vu_ps vu_prelit.hlsl vu_ps fragment DEFINES ICO_NO_DUAL=1 SUFFIX _nodual)
 ico_add_shader(vu_texa_ps vu_prelit.hlsl vu_texa_ps fragment DEFINES ICO_NO_DUAL=1 SUFFIX _nodual)
 
@@ -134,6 +139,8 @@ foreach(_v rov:1 att:2)
     ico_add_shader(font_ps font.hlsl font_ps fragment DEFINES ICO_DST_READ=${_d} SUFFIX _dst${_s})
     ico_add_shader(font_sheet_ps font.hlsl font_sheet_ps fragment DEFINES ICO_DST_READ=${_d}
                    SUFFIX _dst${_s})
+    ico_add_shader(font_sheet_baked_ps font.hlsl font_sheet_baked_ps fragment
+                   DEFINES ICO_DST_READ=${_d} SUFFIX _dst${_s})
     ico_add_shader(vu_ps vu_prelit.hlsl vu_ps fragment DEFINES ICO_DST_READ=${_d} SUFFIX _dst${_s})
     ico_add_shader(vu_texa_ps vu_prelit.hlsl vu_texa_ps fragment DEFINES ICO_DST_READ=${_d}
                    SUFFIX _dst${_s})
@@ -222,8 +229,8 @@ ico_add_shader(fx_blur2_ps fx_sprite.hlsl fx_blur2_ps fragment)
 ico_add_shader(fx_acc_ps fx_sprite.hlsl fx_acc_ps fragment)
 ico_add_shader(fx_acc_resolve_ps fx_sprite.hlsl fx_acc_resolve_ps fragment)
 # The crack filler above 1x (port/render/rd_crack_fill.c): the pixels no
-# draw covered between two drawn ones take the nearer one's colour and depth
-# before the fog, and the filled pixels counted a 16 x 16 block a texel,
+# draw covered between two drawn ones take the nearer one's colour after
+# lists 4-6, and the filled pixels counted a 16 x 16 block a texel,
 # behind blit_vs; used on both backends
 ico_add_shader(crack_fill_ps blit.hlsl crack_fill_ps fragment)
 ico_add_shader(crack_count_ps blit.hlsl crack_count_ps fragment)
@@ -238,16 +245,26 @@ ico_add_shader(shadow_count_ps blit.hlsl shadow_count_ps fragment)
 # fx_sprite_ps reading its textures through their RGBA8_UINT views
 # (RHI_TEX_UINT_VIEW; rd_replay.c doBlurSpriteDraw)
 ico_add_shader(fx_sprite_u_ps fx_sprite.hlsl fx_sprite_ps fragment DEFINES ICO_UINT_SRC=1)
-# The pixel-diet builds (vu_np_ps, vu_texa_np_ps, fx_frame_ps, fx_local_ps)
+# The aura's feedback read in two passes (port/render/rd_aura_box.c): the
+# box's rows into ROWBOX (RGBA16_UINT), then FEED128's draw summing them
+# (the UINT build: t1 ROWBOX read as integers), behind fx_rect_vs; the same
+# bytes as fx_sprite_ps; used on every backend where it is on
+ico_add_shader(fx_aura_rows_ps fx_sprite.hlsl fx_aura_rows_ps fragment)
+ico_add_shader(fx_aura_sum_ps fx_sprite.hlsl fx_aura_sum_ps fragment DEFINES ICO_UINT_SRC=1)
+# The pixel-diet builds (vu_np_ps, vu_np_ps_dstatt, vu_texa_np_ps, fx_frame_ps, fx_local_ps)
 # vu_ps and vu_texa_ps without the planes' inputs, for a target at a
 # fractional scale (ICO_VU_NO_PLANES; port/render/rd_pixel_plan.c
 # rd__vu_pixel_fs), with their two-pass twins; fx_sprite_ps's frame-size
 # forms (ICO_FX_FRAME: the alpha-only and premultiplied outputs) and its
 # destination read by local read (ICO_FX_DST_LOCAL; port/render/rd_fx_plan.c
-# rd__fx_plan_draw). No exact-blend twins
+# rd__fx_plan_draw). vu_np_ps also has the attachment read's twin
+# (vu_np_ps_dstatt: GS state as shader data at a fractional scale,
+# port/render/rd_uber.c; the storage read has none); no other exact-blend twins
 ico_add_shader(vu_np_ps vu_prelit.hlsl vu_ps fragment DEFINES ICO_VU_NO_PLANES=1)
 ico_add_shader(vu_np_ps vu_prelit.hlsl vu_ps fragment DEFINES ICO_VU_NO_PLANES=1 ICO_NO_DUAL=1
                SUFFIX _nodual)
+ico_add_shader(vu_np_ps vu_prelit.hlsl vu_ps fragment DEFINES ICO_VU_NO_PLANES=1 ICO_DST_READ=2
+               SUFFIX _dstatt)
 ico_add_shader(vu_texa_np_ps vu_prelit.hlsl vu_texa_ps fragment DEFINES ICO_VU_NO_PLANES=1)
 ico_add_shader(vu_texa_np_ps vu_prelit.hlsl vu_texa_ps fragment DEFINES ICO_VU_NO_PLANES=1
                ICO_NO_DUAL=1 SUFFIX _nodual)

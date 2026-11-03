@@ -39,6 +39,12 @@ const char *const ui_strings_en[UI_STR_COUNT] = {
     [UI_STR_VAL_PIT_LONGER] = "Longer",
     [UI_STR_VAL_PIT_DOUBLE] = "Double",
     [UI_STR_VAL_PIT_TRIPLE] = "Triple",
+    [UI_STR_OPT_SHADOW_SPEED] = "Shadow speed",
+    [UI_STR_OPT_SHADOW_SPEED_NOTE] =
+        "How fast shadows walk, run and fly. It does not change how often they attack.",
+    [UI_STR_VAL_SPEED_SLOWER] = "Slower",
+    [UI_STR_VAL_SPEED_FASTER] = "Faster",
+    [UI_STR_VAL_SPEED_FASTEST] = "Fastest",
     [UI_STR_LANG_EN] = "English",
     [UI_STR_LANG_FR] = "Français",
     [UI_STR_LANG_DE] = "Deutsch",
@@ -431,7 +437,7 @@ const char *const ui_strings_en[UI_STR_COUNT] = {
     [UI_STR_OPT_EFFECT_MOTION_BLUR] = "Motion blur",
     [UI_STR_OPT_EFFECT_FOG] = "Fog",
     [UI_STR_EFFECTS_NOTE] =
-        "The game’s own picture effects. All On is the PS2 picture; the Preset does not change these.",
+        "The game’s own picture effects. All On is the PS2 picture; the Preset does not change these, except Glow between frames.",
     [UI_STR_STATS_PLAY_TIME] = "Play time",
     [UI_STR_STATS_DEATHS] = "Deaths",
     [UI_STR_STATS_CAPTURES] = "Yorda captured",
@@ -523,6 +529,10 @@ const char *const ui_strings_en[UI_STR_COUNT] = {
     [UI_STR_VAL_GRAPHICS_AUTOMATIC] = "Automatic",
     [UI_STR_GRAPHICS_API_NOTE] =
         "Apply switches now; without Apply the choice is used from the next start.",
+    [UI_STR_OPT_GRAPHICS_ADAPTER] = "Graphics card",
+    [UI_STR_GRAPHICS_ADAPTER_NOTE] =
+        "Which graphics card draws the game. Apply switches now; without Apply the choice is used from the next start.",
+    [UI_STR_GRAPHICS_ADAPTER_FAILED] = "The graphics card %s could not start; %s is kept",
     [UI_STR_GRAPHICS_APPLY] = "Apply",
     [UI_STR_GRAPHICS_APPLY_NOTE] =
         "Switches now, without leaving the game. A short pause is normal.",
@@ -567,12 +577,18 @@ const char *const ui_strings_en[UI_STR_COUNT] = {
     [UI_STR_OPT_DOOR_FIX] = "East Reflector door fix",
     [UI_STR_OPT_DOOR_FIX_NOTE] =
         "Holding hands, Ico and Yorda no longer come straight back out of a doorway.",
+    [UI_STR_OPT_YORDA_TRIPS] = "Yorda trips",
+    [UI_STR_OPT_YORDA_TRIPS_NOTE] =
+        "Off: as the original. On: as after the main gate: running hand in hand for three seconds, she falls.",
     [UI_STR_OPT_NATURAL_CHAINS] = "Natural chains",
     [UI_STR_OPT_NATURAL_CHAINS_NOTE] =
         "A chain that comes down for Ico keeps its links the right size the whole way down.",
     [UI_STR_OPT_SKIP_OPENING] = "Skip the opening",
     [UI_STR_OPT_SKIP_OPENING_NOTE] =
         "The game starts at the title screen, without the Sony sign and the opening scene. Takes effect at the next start.",
+    [UI_STR_OPT_SECOND_CARD] = "Second memory card",
+    [UI_STR_OPT_SECOND_CARD_NOTE] =
+        "Off: one memory card, as the original. On: a second card with ten more saves; the game’s save and load screens offer both.",
     [UI_STR_OPT_AA] = "Anti-aliasing",
     [UI_STR_OPT_AA_NOTE] =
         "Smooths jagged edges. Supersampling draws 4 times (2x) or 16 times (4x) the pixels; lower it if the counter drops to 30.",
@@ -611,6 +627,51 @@ const char *const ui_strings_en[UI_STR_COUNT] = {
     [UI_STR_EXPORT_TEXTURES_STOPPED_BODY] = "Stopped after %d pictures",
     [UI_STR_EXPORT_TEXTURES_FAILED] = "Could not export textures",
     [UI_STR_EXPORT_TEXTURES_FAILED_BODY] = "The folder %s\ncould not be written",
+    [UI_STR_EXTRAS_BACKUP] = "Back up your data",
+    [UI_STR_EXTRAS_RESTORE] = "Restore from a backup",
+    [UI_STR_BACKUP_NOTE] =
+        "Saves your memory card, save states, settings and achievements in one .zip file, to keep or move to another device.",
+    [UI_STR_RESTORE_NOTE] =
+        "Puts back the memory card, save states, settings and achievements from a backup .zip. The game restarts after.",
+    [UI_STR_BACKUP_CHOOSING] = "Choose where to save the backup.",
+    [UI_STR_BACKUP_PROGRESS] = "Backing up: %d of %d files",
+    [UI_STR_RESTORE_AGAIN] = "Press again to choose a backup",
+    [UI_STR_RESTORE_CONFIRM_TITLE] = "Restore from a backup?",
+    [UI_STR_RESTORE_CONFIRM_BODY] =
+        "The memory card, save states, settings and achievements here are replaced by the backup’s, and the game restarts.\nPress again to choose the backup.",
+    [UI_STR_RESTORE_CHOOSING] = "Choose the backup to restore.",
+    [UI_STR_RESTORE_READING] = "Reading the backup…",
+    [UI_STR_RESTORE_PROGRESS] = "Restoring: %d of %d files",
+    [UI_STR_RESTORE_THIS] = "Restore this backup",
+    [UI_STR_RESTORE_ASK_NOTE] = "Made by version %s. Press again to restore it.",
+    [UI_STR_RESTORE_ASK_TITLE] = "Restore this backup?",
+    [UI_STR_RESTORE_VERSION] = "Version: %s",
+    [UI_STR_RESTORE_SAVED] = "Saved: %s",
+    [UI_STR_RESTORE_DISCS] = "Discs: %s",
+    [UI_STR_RESTORE_OTHER_DISC] = "Made while another disc was played",
+    [UI_STR_RESTORE_PRESS] = "Press again to restore it",
+    [UI_STR_BACKUP_DONE] = "Your data is backed up",
+    [UI_STR_BACKUP_DONE_BODY] = "%d files saved to\n%s",
+    [UI_STR_BACKUP_FAILED] = "Could not back up your data",
+    [UI_STR_RESTORE_DONE] = "Restoring your data",
+    [UI_STR_RESTORE_DONE_RESTART] = "The game restarts now and puts the backup in place.",
+    [UI_STR_RESTORE_DONE_CLOSE] =
+        "The game closes now. Start it again: it puts the backup in place as it starts.",
+    [UI_STR_RESTORE_FAILED] = "Could not restore the backup",
+    [UI_STR_BACKUP_WHY_BUSY] = "Not now: the game is saving. Try again in a moment.",
+    [UI_STR_BACKUP_WHY_NOTHING] = "There is nothing to back up yet.",
+    [UI_STR_BACKUP_WHY_WRITE] =
+        "The data could not be written. Check the free space and try again.",
+    [UI_STR_BACKUP_WHY_READ] = "The file could not be read.",
+    [UI_STR_BACKUP_WHY_NOT_BACKUP] = "This file is not a backup made by this game.",
+    [UI_STR_BACKUP_WHY_NEWER] =
+        "This backup was made by a newer version. Update the game to restore it.",
+    [UI_STR_BACKUP_WHY_DAMAGED] = "This backup is damaged.",
+    [UI_STR_BACKUP_WHY_UNSAFE] =
+        "This backup holds files outside the game’s own folders, so it is not used.",
+    [UI_STR_BACKUP_WHY_TOO_BIG] = "This backup is larger than the game accepts.",
+    [UI_STR_BACKUP_WHY_NO_DIALOG] = "No file chooser could be opened.",
+    [UI_STR_BACKUP_WHY_NO_SPACE] = "There is not enough free space on the device.",
     [UI_STR_LANG_KO] = "한국어",
     [UI_STR_LANG_ZH] = "繁體中文",
     /* Controls > Touch screen and the touch layout editor */
@@ -691,4 +752,45 @@ const char *const ui_strings_en[UI_STR_COUNT] = {
         "This version of the game gives no hints, so this changes nothing. Achievements stay on.",
     [UI_STR_OPT_VAR_NO_LOOK_NOTE_2001] =
         "This version of the game has no look-around in cutscenes, so this changes nothing. Achievements stay on.",
+    [UI_STR_GPU_HANG_TURNIP] =
+        "On this device’s own Qualcomm driver, a Turnip driver package can help: add one under Options > Graphics driver > Add a driver. It is used from the next start.",
+    [UI_STR_STATES] = "Save states",
+    [UI_STR_STATES_SLOT] = "Slot %d",
+    [UI_STR_STATES_EMPTY] = "Empty",
+    [UI_STR_STATES_ACT_SAVE] = "Save",
+    [UI_STR_STATES_ACT_LOAD] = "Load",
+    [UI_STR_STATES_ACT_DELETE] = "Delete",
+    [UI_STR_STATES_CONFIRM] = "Press again to %s",
+    [UI_STR_STATES_SAVED] = "State saved to slot %d",
+    [UI_STR_STATES_LOADED] = "State loaded from slot %d",
+    [UI_STR_STATES_DELETED] = "Slot %d cleared",
+    [UI_STR_STATES_NOTE] =
+        "A state belongs to this disc. Later versions may load it too. Left and Right pick the action.",
+    [UI_STR_STATES_PAUSE_FIRST] = "Pause the game to save a state",
+    [UI_STR_STATES_REFUSED_BUILD] = "Saved by another version of the game",
+    [UI_STR_STATES_REFUSED_DISC] = "Saved from another disc",
+    [UI_STR_STATES_REFUSED_SETTINGS] = "A gameplay setting differs: %s",
+    [UI_STR_STATES_REFUSED_BUSY] = "Not now: the game is loading or saving",
+    [UI_STR_STATES_REFUSED_CHECK] = "The state could not be restored; the game goes on",
+    [UI_STR_STATES_OFF] = "Save states are off on this build",
+    [UI_STR_STATES_TITLE_HINT] = "Saving is done from the pause menu",
+    [UI_STR_STATES_SAVE_FAILED] = "The state could not be saved",
+    [UI_STR_STATES_XB_OLD] =
+        "This save state was made by version %s,\nbefore save states could carry over\nto newer versions.\nYour memory-card saves still work.",
+    [UI_STR_STATES_XB_CODE] =
+        "This save state was made by version %s.\nVersion %s changed the part of the game\nit was saved in, so it cannot be resumed.\nYour memory-card saves still work.",
+    [UI_STR_STATES_XB_DATA] =
+        "This save state was made by version %s.\nVersion %s changed how the game keeps\nits progress in memory, so it cannot be resumed.\nYour memory-card saves still work.",
+    [UI_STR_STATES_XB_PINNED] =
+        "This save state was made by version %s,\nand only that version can resume it.\nYour memory-card saves still work.",
+    [UI_STR_OPT_EFFECT_GLOW_SMOOTH] = "Glow between frames",
+    [UI_STR_EFFECT_GLOW_SMOOTH_NOTE] =
+        "Original keeps the game’s own frame’s glow between frames. Smooth makes it again for every frame shown; it costs more graphics time.",
+    [UI_STR_EFFECT_GLOW_SMOOTH_LOCKED] = "Only matters above Frame rate Original, with Glow on.",
+    [UI_STR_OPT_EFFECT_MOTION_BLUR_STRENGTH] = "Motion blur strength",
+    [UI_STR_EFFECT_MOTION_BLUR_STRENGTH_NOTE] =
+        "Lower values make the trail fade faster; 100 is the PS2’s own trail.",
+    [UI_STR_LANG_RU_BOBTTZ] = "Русский (bob-ttz)",
+    [UI_STR_LANG_RU_COBRA838] = "Русский (cobra838)",
+    [UI_STR_LANG_PT_BR] = "Português (Brasil) (ichagas7)",
 };

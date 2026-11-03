@@ -29,6 +29,11 @@ const IcoRegionInfo ico_region_info_jpn = {
     .mc_product_size = 0x1E8,         /* targets/jpn/ico2/common/include/typedef.h:1441,1465:
                                  no cameraMove/palMode, aligned 8 */
 
+    /* IosMcPreviewInfo's words (layout_action.c): stage, cleared, play time
+       (la_playtime_count's [2]), sofa (la_save_processing's [3]) */
+    .mc_preview_play = 2,
+    .mc_preview_sofa = 3,
+
     .has_50hz_row = 0,      /* NTSC only: no 50 Hz branches (docs/TARGETS.md) */
     .has_game_language = 0, /* kanbanBootMcCheck has no language step; jimaku.c
                                no per-language subtitles */
@@ -74,6 +79,7 @@ const IcoRegionInfo ico_region_info_jpn = {
     .layout_play = 51,          /* texLayout[51] la_game_loop */
     .layout_scene = 52,         /* texLayout[52] la_game_demo */
     .layout_mc_files = 11,      /* texLayout[11] la_mc_file_select; layout_action.c:1026 */
+    .layout_load_files = 16,    /* texLayout[16] la_mc_load_file_select, its link 11 */
     .layout_load = 22,          /* texLayout[22] la_load_processing */
     .layout_save_complete = 38, /* texLayout[38] la_save_confirm_complete */
 

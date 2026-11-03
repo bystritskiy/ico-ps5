@@ -18,13 +18,30 @@
  * recorded (UpdateSubresource1 on the deferred context), so the rows must
  * be written before the copy is recorded, as every caller does. */
 #include "d3d11_internal.h"
+#include "../rhi_bind_cache.h"
 #include <assert.h>
+#include <stdarg.h>
 #include <stdlib.h>
 #include <string.h>
 
 #define D11_STAGE_VS (1u << RHI_STAGE_VERTEX)
 #define D11_STAGE_PS (1u << RHI_STAGE_FRAGMENT)
 #define D11_GROUPS_ALL ((1u << RHI_MAX_BIND_SLOTS) - 1u)
+
+/* D11CmdState.objKnown and .known: what the bind cache knows the deferred
+ * context holds (d3d11_internal.h) */
+#define D11_OBJ_IL 1u
+#define D11_OBJ_TOPO 2u
+#define D11_OBJ_VS 4u
+#define D11_OBJ_PS 8u
+#define D11_OBJ_RS 16u
+#define D11_OBJ_BLEND 32u
+#define D11_OBJ_DS 64u
+#define D11_KNOW_VIEWPORT 1u
+#define D11_KNOW_SCISSOR 2u
+#define D11_KNOW_INDEX 4u
+#define D11_KNOW_STENCIL 8u
+#define D11_KNOW_BLEND_CONSTANT 16u
 
 /* logged once per kind of misuse the backend can only skip */
 static bool d11_once(bool *flag)
@@ -149,6 +166,9 @@ static void d11_pair_size_note(const D11Texture *colour, const D11Texture *depth
 
 void rhi_cmd_begin_render_pass(RhiCommandList cl, const RhiRenderPassDesc *pass)
 {
+    /* pass->area (rhi.h RhiRenderPassDesc) is ignored: D3D11 has no render area; the
+     * pass covers its whole size, and the caller's draws lie inside the
+     * area anyway (a tile-based GPU's saving, Vulkan only) */
     D11CommandList *c = d11_rec(cl);
     if (!c || !pass || pass->colorCount > RHI_MAX_COLOR_TARGETS) {
         return;
@@ -241,6 +261,9 @@ void rhi_cmd_begin_render_pass(RhiCommandList cl, const RhiRenderPassDesc *pass)
     d11_pass_area_check(&areaW, &areaH, pass, dt);
     c->st.passW = areaW;
     c->st.passH = areaH;
+    /* the defaults are recorded whatever the list held (the bind cache
+     * forgets the viewport and scissor at a pass's start) */
+    c->st.known &= ~(D11_KNOW_VIEWPORT | D11_KNOW_SCISSOR);
     RhiViewport vp = {0.0f, 0.0f, (float)areaW, (float)areaH, 0.0f, 1.0f};
     RhiRect sc = {0, 0, areaW, areaH};
     rhi_cmd_set_viewport(cl, &vp);
@@ -268,8 +291,14 @@ void rhi_cmd_set_viewport(RhiCommandList cl, const RhiViewport *v)
     }
     /* D3D's clip space is the RHI's: no flip (the Vulkan backend flips) */
     D3D11_VIEWPORT vp = {v->x, v->y, v->w, v->h, v->minDepth, v->maxDepth};
+    if (rhi_bind_cache_enabled() && (c->st.known & D11_KNOW_VIEWPORT) &&
+        memcmp(&vp, &c->st.vp, sizeof(vp)) == 0) {
+        g_d11.counts.stateSetsSkipped++;
+        return;
+    }
     ID3D11DeviceContext_RSSetViewports(c->ctx, 1, &vp);
     c->st.vp = vp;
+    c->st.known |= D11_KNOW_VIEWPORT;
 }
 
 void rhi_cmd_set_scissor(RhiCommandList cl, const RhiRect *r)
@@ -279,11 +308,49 @@ void rhi_cmd_set_scissor(RhiCommandList cl, const RhiRect *r)
         return;
     }
     D3D11_RECT sc = {r->x, r->y, r->x + (LONG)r->w, r->y + (LONG)r->h};
+    if (rhi_bind_cache_enabled() && (c->st.known & D11_KNOW_SCISSOR) &&
+        memcmp(&sc, &c->st.sc, sizeof(sc)) == 0) {
+        g_d11.counts.stateSetsSkipped++;
+        return;
+    }
     ID3D11DeviceContext_RSSetScissorRects(c->ctx, 1, &sc);
     c->st.sc = sc;
+    c->st.known |= D11_KNOW_SCISSOR;
 }
 
 /* ------------------------------------------------------------------ state */
+/* The output merger's two states with their values (the blend factor, the
+ * stencil reference), set unless the context holds them; true when set */
+static bool d11_om_blend(D11CommandList *c, ID3D11BlendState *b, const float factor[4])
+{
+    if (rhi_bind_cache_enabled() && (c->st.objKnown & D11_OBJ_BLEND) && c->st.blendSet == b &&
+        memcmp(c->st.blendFactorSet, factor, sizeof(c->st.blendFactorSet)) == 0) {
+        return false;
+    }
+    ID3D11DeviceContext_OMSetBlendState(c->ctx, b, factor, 0xFFFFFFFFu);
+    c->st.blendSet = b;
+    memcpy(c->st.blendFactorSet, factor, sizeof(c->st.blendFactorSet));
+    c->st.objKnown |= D11_OBJ_BLEND;
+    return true;
+}
+
+static bool d11_om_ds(D11CommandList *c, ID3D11DepthStencilState *ds, uint8_t ref)
+{
+    if (rhi_bind_cache_enabled() && (c->st.objKnown & D11_OBJ_DS) && c->st.dsSet == ds &&
+        c->st.stencilRefSet == ref) {
+        return false;
+    }
+    ID3D11DeviceContext_OMSetDepthStencilState(c->ctx, ds, ref);
+    c->st.dsSet = ds;
+    c->st.stencilRefSet = ref;
+    c->st.objKnown |= D11_OBJ_DS;
+    return true;
+}
+
+/* A pipeline change sets the objects of the new pipeline that the context
+ * does not hold already (pipelines of one shader pair share their shaders
+ * and input layout, the state tables their rasterizer, blend and
+ * depth-stencil objects); each one not set is a stateSetsSkipped */
 void rhi_cmd_set_pipeline(RhiCommandList cl, RhiPipeline p)
 {
     D11CommandList *c = d11_rec(cl);
@@ -292,17 +359,49 @@ void rhi_cmd_set_pipeline(RhiCommandList cl, RhiPipeline p)
         return;
     }
     c->st.pipeline = p.id;
-    if (c->st.pipelineSet == p.id) {
+    /* the bind cache off (rhi_bind_cache.h): every object set again */
+    const bool cache = rhi_bind_cache_enabled();
+    if (cache && c->st.pipelineSet == p.id) {
+        g_d11.counts.pipelineBindsSkipped++;
         return;
     }
-    ID3D11DeviceContext_IASetInputLayout(c->ctx, pp->il);
-    ID3D11DeviceContext_IASetPrimitiveTopology(c->ctx, pp->topo);
-    ID3D11DeviceContext_VSSetShader(c->ctx, pp->vs, NULL, 0);
-    ID3D11DeviceContext_PSSetShader(c->ctx, pp->ps, NULL, 0);
-    ID3D11DeviceContext_RSSetState(c->ctx, pp->rs);
-    ID3D11DeviceContext_OMSetBlendState(c->ctx, pp->blend, c->st.blendConstant, 0xFFFFFFFFu);
-    ID3D11DeviceContext_OMSetDepthStencilState(c->ctx, pp->ds, c->st.stencilRef);
-    c->st.pipelineSet = p.id;
+    D11CmdState *st = &c->st;
+    uint32_t same = 0;
+    if (cache && (st->objKnown & D11_OBJ_IL) && st->ilSet == pp->il) {
+        same++;
+    } else {
+        ID3D11DeviceContext_IASetInputLayout(c->ctx, pp->il);
+        st->ilSet = pp->il;
+    }
+    if (cache && (st->objKnown & D11_OBJ_TOPO) && st->topoSet == pp->topo) {
+        same++;
+    } else {
+        ID3D11DeviceContext_IASetPrimitiveTopology(c->ctx, pp->topo);
+        st->topoSet = pp->topo;
+    }
+    if (cache && (st->objKnown & D11_OBJ_VS) && st->vsSet == pp->vs) {
+        same++;
+    } else {
+        ID3D11DeviceContext_VSSetShader(c->ctx, pp->vs, NULL, 0);
+        st->vsSet = pp->vs;
+    }
+    if (cache && (st->objKnown & D11_OBJ_PS) && st->psSet == pp->ps) {
+        same++;
+    } else {
+        ID3D11DeviceContext_PSSetShader(c->ctx, pp->ps, NULL, 0);
+        st->psSet = pp->ps;
+    }
+    if (cache && (st->objKnown & D11_OBJ_RS) && st->rsSet == pp->rs) {
+        same++;
+    } else {
+        ID3D11DeviceContext_RSSetState(c->ctx, pp->rs);
+        st->rsSet = pp->rs;
+    }
+    st->objKnown |= D11_OBJ_IL | D11_OBJ_TOPO | D11_OBJ_VS | D11_OBJ_PS | D11_OBJ_RS;
+    same += !d11_om_blend(c, pp->blend, st->blendConstant);
+    same += !d11_om_ds(c, pp->ds, st->stencilRef);
+    g_d11.counts.stateSetsSkipped += same;
+    st->pipelineSet = p.id;
     g_d11.counts.pipelineBinds++;
 }
 
@@ -323,12 +422,22 @@ void rhi_cmd_set_bind_group_offsets(RhiCommandList cl, uint32_t group, RhiBindGr
         D11_LOG("rhi_cmd_set_bind_group_offsets: %u offsets for %u dynamic slots", count, dyn);
         count = dyn;
     }
-    memset(c->st.offsets[group], 0, sizeof(c->st.offsets[group]));
-    for (uint32_t i = 0; i < count && offsets; i++) {
-        c->st.offsets[group][i] = offsets[i];
+    uint32_t off[RHI_MAX_DYNAMIC_OFFSETS] = {0};
+    for (uint32_t i = 0; i < count && offsets && i < RHI_MAX_DYNAMIC_OFFSETS; i++) {
+        off[i] = offsets[i];
     }
+    const uint32_t bit = 1u << group;
+    /* the group the slot holds with the same offsets, its registers not
+     * written over since (groupStale): bound, or flushed at the next draw
+     * (its dirty bit kept, as after a pass's start) */
+    if (rhi_bind_cache_enabled() && c->st.groups[group] == bg.id && !(c->st.groupStale & bit) &&
+        memcmp(c->st.offsets[group], off, sizeof(off)) == 0) {
+        g_d11.counts.bindGroupBindsSkipped++;
+        return;
+    }
+    memcpy(c->st.offsets[group], off, sizeof(off));
     c->st.groups[group] = bg.id;
-    c->st.groupDirty |= 1u << group;
+    c->st.groupDirty |= bit;
 }
 
 void rhi_cmd_set_bind_group(RhiCommandList cl, uint32_t group, RhiBindGroup bg)
@@ -344,6 +453,12 @@ void rhi_cmd_set_vertex_buffer(RhiCommandList cl, uint32_t binding, RhiBuffer b,
         !buf->part[D11_PART_VI] || offset > 0xFFFFFFFFull) {
         return;
     }
+    if (rhi_bind_cache_enabled() && c->st.vb[binding] == b.id &&
+        c->st.vbOffset[binding] == offset) {
+        /* the buffer the slot holds (or gets at the next draw) */
+        g_d11.counts.stateSetsSkipped++;
+        return;
+    }
     c->st.vb[binding] = b.id;
     c->st.vbOffset[binding] = offset;
     c->st.vbDirty |= 1u << binding;
@@ -356,6 +471,12 @@ void rhi_cmd_set_index_buffer(RhiCommandList cl, RhiBuffer b, uint64_t offset, b
     if (!c || !buf || offset >= buf->size || !buf->part[D11_PART_VI] || offset > 0xFFFFFFFFull) {
         return;
     }
+    if (rhi_bind_cache_enabled() && (c->st.known & D11_KNOW_INDEX) && c->st.ib == b.id &&
+        c->st.ibOffset == offset && c->st.ib32 == u32) {
+        g_d11.counts.stateSetsSkipped++;
+        return;
+    }
+    c->st.known |= D11_KNOW_INDEX;
     ID3D11DeviceContext_IASetIndexBuffer(c->ctx, buf->part[D11_PART_VI],
                                          u32 ? DXGI_FORMAT_R32_UINT : DXGI_FORMAT_R16_UINT,
                                          (UINT)offset);
@@ -372,10 +493,15 @@ void rhi_cmd_set_stencil_ref(RhiCommandList cl, uint8_t ref)
     if (!c) {
         return;
     }
+    if (rhi_bind_cache_enabled() && (c->st.known & D11_KNOW_STENCIL) && c->st.stencilRef == ref) {
+        g_d11.counts.stateSetsSkipped++;
+        return;
+    }
     c->st.stencilRef = ref;
+    c->st.known |= D11_KNOW_STENCIL;
     D11Pipeline *p = c->st.pipelineSet ? d11_get_pipeline(c->st.pipelineSet) : NULL;
     if (p) {
-        ID3D11DeviceContext_OMSetDepthStencilState(c->ctx, p->ds, ref);
+        d11_om_ds(c, p->ds, ref);
     }
 }
 
@@ -385,10 +511,16 @@ void rhi_cmd_set_blend_constant(RhiCommandList cl, const float rgba[4])
     if (!c || !rgba) {
         return;
     }
+    if (rhi_bind_cache_enabled() && (c->st.known & D11_KNOW_BLEND_CONSTANT) &&
+        memcmp(c->st.blendConstant, rgba, sizeof(c->st.blendConstant)) == 0) {
+        g_d11.counts.stateSetsSkipped++;
+        return;
+    }
     memcpy(c->st.blendConstant, rgba, sizeof(c->st.blendConstant));
+    c->st.known |= D11_KNOW_BLEND_CONSTANT;
     D11Pipeline *p = c->st.pipelineSet ? d11_get_pipeline(c->st.pipelineSet) : NULL;
     if (p) {
-        ID3D11DeviceContext_OMSetBlendState(c->ctx, p->blend, c->st.blendConstant, 0xFFFFFFFFu);
+        d11_om_blend(c, p->blend, c->st.blendConstant);
     }
 }
 
@@ -437,7 +569,7 @@ static void d11_set_cb(D11CommandList *c, uint32_t stage, uint32_t slot, ID3D11B
                        UINT first, UINT num)
 {
     ID3D11Buffer **held = &c->st.cbSet[stage][slot];
-    if (*held == cb &&
+    if (rhi_bind_cache_enabled() && *held == cb &&
         (!cb || (c->st.cbFirst[stage][slot] == first && c->st.cbNum[stage][slot] == num))) {
         return;
     }
@@ -469,6 +601,8 @@ static void d11_bind_entry(D11CommandList *c, const D11BindEntry *e, const uint3
 {
     static bool s_slotLogged;
     const uint32_t stages = e->stages ? e->stages : (D11_STAGE_VS | D11_STAGE_PS);
+    /* the bind cache off (rhi_bind_cache.h): every register set again */
+    const bool cache = rhi_bind_cache_enabled();
     switch ((RhiBindType)e->type) {
     case RHI_BIND_UNIFORM_BUFFER:
     case RHI_BIND_UNIFORM_BUFFER_DYNAMIC: {
@@ -511,12 +645,13 @@ static void d11_bind_entry(D11CommandList *c, const D11BindEntry *e, const uint3
             d11_cmd_touch(c, e->buffer, D11_PART_SRV, e->lo, e->hi);
         }
         /* a register already holding the view is not set again */
-        if ((stages & D11_STAGE_VS) && c->st.srvSet[RHI_STAGE_VERTEX][e->slot] != srv) {
+        if ((stages & D11_STAGE_VS) && (!cache || c->st.srvSet[RHI_STAGE_VERTEX][e->slot] != srv)) {
             ID3D11DeviceContext_VSSetShaderResources(c->ctx, e->slot, 1, &srv);
             c->st.srvSet[RHI_STAGE_VERTEX][e->slot] = srv;
             c->st.srvMask[RHI_STAGE_VERTEX] |= 1u << e->slot;
         }
-        if ((stages & D11_STAGE_PS) && c->st.srvSet[RHI_STAGE_FRAGMENT][e->slot] != srv) {
+        if ((stages & D11_STAGE_PS) &&
+            (!cache || c->st.srvSet[RHI_STAGE_FRAGMENT][e->slot] != srv)) {
             ID3D11DeviceContext_PSSetShaderResources(c->ctx, e->slot, 1, &srv);
             c->st.srvSet[RHI_STAGE_FRAGMENT][e->slot] = srv;
             c->st.srvMask[RHI_STAGE_FRAGMENT] |= 1u << e->slot;
@@ -533,11 +668,12 @@ static void d11_bind_entry(D11CommandList *c, const D11BindEntry *e, const uint3
         }
         ID3D11SamplerState *smp = e->smp ? e->smp : g_d11.defaultSampler;
         /* a register already holding the sampler is not set again */
-        if ((stages & D11_STAGE_VS) && c->st.smpSet[RHI_STAGE_VERTEX][e->slot] != smp) {
+        if ((stages & D11_STAGE_VS) && (!cache || c->st.smpSet[RHI_STAGE_VERTEX][e->slot] != smp)) {
             ID3D11DeviceContext_VSSetSamplers(c->ctx, e->slot, 1, &smp);
             c->st.smpSet[RHI_STAGE_VERTEX][e->slot] = smp;
         }
-        if ((stages & D11_STAGE_PS) && c->st.smpSet[RHI_STAGE_FRAGMENT][e->slot] != smp) {
+        if ((stages & D11_STAGE_PS) &&
+            (!cache || c->st.smpSet[RHI_STAGE_FRAGMENT][e->slot] != smp)) {
             ID3D11DeviceContext_PSSetSamplers(c->ctx, e->slot, 1, &smp);
             c->st.smpSet[RHI_STAGE_FRAGMENT][e->slot] = smp;
         }
@@ -590,6 +726,57 @@ static void d11_flush_vertex_buffers(D11CommandList *c, const D11Pipeline *p, bo
     }
 }
 
+/* The registers an entry writes, OR-ed into regs[stage][b, t, s] (the
+ * bind cache's groupRegs: d11_bind_entry's cases) */
+static void d11_entry_regs(const D11BindEntry *e, uint32_t regs[2][3])
+{
+    const uint32_t stages = e->stages ? e->stages : (D11_STAGE_VS | D11_STAGE_PS);
+    int kind;
+    switch ((RhiBindType)e->type) {
+    case RHI_BIND_UNIFORM_BUFFER:
+    case RHI_BIND_UNIFORM_BUFFER_DYNAMIC:
+        kind = 0;
+        break;
+    case RHI_BIND_STORAGE_BUFFER:
+    case RHI_BIND_SAMPLED_TEXTURE:
+        kind = 1;
+        break;
+    case RHI_BIND_SAMPLER:
+        kind = 2;
+        break;
+    default:
+        return;
+    }
+    if (e->slot >= 32u) {
+        return; /* past every register file: d11_bind_entry binds nothing */
+    }
+    for (uint32_t st = 0; st < 2; st++) {
+        if (stages & (1u << st)) {
+            regs[st][kind] |= 1u << e->slot;
+        }
+    }
+}
+
+/* Slot g's group just flushed into regs: any other slot whose group had a
+ * register among them no longer holds it whole (groupStale: bound again,
+ * it is flushed again, as any changed bind is) */
+static void d11_group_regs_note(D11CmdState *st, uint32_t g, const uint32_t regs[2][3])
+{
+    for (uint32_t h = 0; h < RHI_MAX_BIND_SLOTS; h++) {
+        if (h == g) {
+            continue;
+        }
+        for (uint32_t k = 0; k < 6u; k++) {
+            if (st->groupRegs[h][k / 3u][k % 3u] & regs[k / 3u][k % 3u]) {
+                st->groupStale |= 1u << h;
+                break;
+            }
+        }
+    }
+    memcpy(st->groupRegs[g], regs, sizeof(st->groupRegs[g]));
+    st->groupStale &= ~(1u << g);
+}
+
 /* Before a draw: the dirty bind groups of the pipeline's layouts and the
  * vertex buffers.  False when no pipeline is bound. */
 static D11Pipeline *d11_flush(D11CommandList *c)
@@ -611,9 +798,12 @@ static D11Pipeline *d11_flush(D11CommandList *c)
             continue;
         }
         g_d11.counts.bindGroupBinds++;
+        uint32_t regs[2][3] = {{0, 0, 0}, {0, 0, 0}};
         for (uint32_t i = 0; i < bg->count; i++) {
             d11_bind_entry(c, &bg->e[i], c->st.offsets[g]);
+            d11_entry_regs(&bg->e[i], regs);
         }
+        d11_group_regs_note(&c->st, g, regs);
     }
     return p;
 }
@@ -1029,17 +1219,209 @@ void rhi_cmd_resolve_color(RhiCommandList cl, RhiTexture src, RhiTexture dst)
     g_d11.counts.copies++;
 }
 
+/* ------------------------------------------- the copy into a storage buffer
+ * Direct3D 11 copies a texture into a buffer only through a staging
+ * texture the CPU maps (the readback branch below).  The VU vertex
+ * pre-pass's record (port/render/rd_replay_vu.c vuRecPassCopy: three
+ * RGBA32_UINT planes, 1024 texels a row, into the frame slot's storage
+ * buffer, which the next pass's vertex shaders and the main ones read as
+ * StructuredBuffer<uint4> vu_rec_buf) needs the copy on the GPU, ordered
+ * between two passes of one list.  So a copy into a storage-only device
+ * buffer is this compute shader (cs_5_0, feature level 11_0, which
+ * rhi_init requires): a texel of the region a thread, Load from the
+ * texture's SRV into the buffer's UAV (d3d11_resource.c: an RGBA32_UINT
+ * copy source has an SRV, a storage-only device buffer a structured UAV of
+ * 16-byte elements), element first + row * pitch + column.  Its limits,
+ * each refused with its line: an RGBA32_UINT single-sampled source, a
+ * storage-only device destination, dstOffset and rowPitch whole 16-byte
+ * elements (the structured part's rule, d11_copy_into_structured), outside
+ * a render pass.  The runtime orders the dispatch after every earlier draw
+ * that read the buffer and before every later read; a resource bound as a
+ * UAV and as an SRV at once is not allowed, so every SRV the list bound is
+ * unbound first (the groups are bound again at the next draw, as at a
+ * pass's start) and the copy's SRV and UAV are unbound after it. */
+static const char s_copyCsHlsl[] =
+    "// d3d11_cmd.c: a texture region into a structured buffer\n"
+    "Texture2D<uint4> g_src : register(t0);\n"
+    "RWStructuredBuffer<uint4> g_dst : register(u0);\n"
+    "cbuffer CopyCB : register(b0) {\n"
+    "    uint4 g_rect; // the region: x, y, w, h\n"
+    "    uint4 g_to;   // the first element, the row pitch in elements\n"
+    "};\n"
+    "[numthreads(64, 1, 1)]\n"
+    "void cs_copy(uint3 id : SV_DispatchThreadID) {\n"
+    "    if (id.x >= g_rect.z || id.y >= g_rect.w) {\n"
+    "        return;\n"
+    "    }\n"
+    "    g_dst[g_to.x + id.y * g_to.y + id.x] =\n"
+    "        g_src.Load(int3(int(g_rect.x + id.x), int(g_rect.y + id.y), 0));\n"
+    "}\n";
+
+#define D11_COPY_CS_GROUP 64u
+
+/* The shader and its constant buffer, made once (any thread: the first
+ * copy's); false when they could not be (g_d11.copyCsWhy, logged once) */
+static bool d11_copy_cs_ready(void)
+{
+    const int st = __atomic_load_n(&g_d11.copyCsState, __ATOMIC_ACQUIRE);
+    if (st != 0) {
+        return st == 1;
+    }
+    AcquireSRWLockExclusive(&g_d11.copyCsLock);
+    if (g_d11.copyCsState != 0) {
+        const bool ok = g_d11.copyCsState == 1;
+        ReleaseSRWLockExclusive(&g_d11.copyCsLock);
+        return ok;
+    }
+    const uint64_t t0 = d11_now_ns();
+    char err[256];
+    void *dxbc = NULL;
+    size_t len = 0;
+    bool ok =
+        d3d11_shader_compile_text("d3d11_copy_cs.hlsl", s_copyCsHlsl, sizeof(s_copyCsHlsl) - 1u,
+                                  "cs_copy", "cs_5_0", &dxbc, &len, err, sizeof(err));
+    if (!ok) {
+        snprintf(g_d11.copyCsWhy, sizeof(g_d11.copyCsWhy), "%s", err);
+    } else if (!D11_CHECK(ID3D11Device_CreateComputeShader(g_d11.device, dxbc, len, NULL,
+                                                           &g_d11.copyCs)) ||
+               !g_d11.copyCs) {
+        g_d11.copyCs = NULL;
+        snprintf(g_d11.copyCsWhy, sizeof(g_d11.copyCsWhy),
+                 "CreateComputeShader refused its %zu bytes of DXBC", len);
+        ok = false;
+    } else {
+        D3D11_BUFFER_DESC bd;
+        memset(&bd, 0, sizeof(bd));
+        bd.ByteWidth = 32;
+        bd.Usage = D3D11_USAGE_DEFAULT;
+        bd.BindFlags = D3D11_BIND_CONSTANT_BUFFER;
+        if (!D11_CHECK(ID3D11Device_CreateBuffer(g_d11.device, &bd, NULL, &g_d11.copyCb)) ||
+            !g_d11.copyCb) {
+            g_d11.copyCb = NULL;
+            D11_RELEASE(g_d11.copyCs);
+            snprintf(g_d11.copyCsWhy, sizeof(g_d11.copyCsWhy),
+                     "its 32-byte constant buffer could not be made");
+            ok = false;
+        }
+    }
+    free(dxbc);
+    if (ok) {
+        d11_set_name((ID3D11DeviceChild *)g_d11.copyCs, "rhi_d3d11 texture-to-buffer copy");
+        D11_LOG("texture-to-buffer copies into storage buffers: a compute shader (cs_5_0, %u "
+                "texels a group, made in %.1f ms; the VU vertex pre-pass's record)",
+                D11_COPY_CS_GROUP, (double)(d11_now_ns() - t0) / 1e6);
+    } else {
+        D11_LOG("texture-to-buffer copies into storage buffers: the compute shader could not be "
+                "made (%s): every such copy is skipped, and the VU vertex pre-pass's start-up "
+                "self-test turns the pre-pass off",
+                g_d11.copyCsWhy);
+    }
+    __atomic_store_n(&g_d11.copyCsState, ok ? 1 : 2, __ATOMIC_RELEASE);
+    ReleaseSRWLockExclusive(&g_d11.copyCsLock);
+    return ok;
+}
+
+void d11_copy_cs_release(void)
+{
+    D11_RELEASE(g_d11.copyCb);
+    D11_RELEASE(g_d11.copyCs);
+    g_d11.copyCsState = 0;
+}
+
+/* A copy into a buffer the backend cannot make: the first 8 lines, then
+ * every 100th (a refused record copy repeats every replay) */
+static void d11_copy_refused(const char *fmt, ...) __attribute__((format(printf, 1, 2)));
+
+static void d11_copy_refused(const char *fmt, ...)
+{
+    static uint32_t s_n;
+    const uint32_t n = __atomic_add_fetch(&s_n, 1u, __ATOMIC_RELAXED);
+    if (n > 8u && n % 100u != 0u) {
+        return;
+    }
+    char text[384];
+    va_list ap;
+    va_start(ap, fmt);
+    vsnprintf(text, sizeof(text), fmt, ap);
+    va_end(ap);
+    D11_LOG("rhi_cmd_copy_texture_to_buffer: %s; skipped (%u so far%s)", text, (unsigned)n,
+            n == 8u ? "; from here every 100th is written" : "");
+}
+
+static void d11_copy_texture_to_storage(D11CommandList *c, D11Texture *t, RhiRect region,
+                                        D11Buffer *d, uint64_t dstOffset, uint32_t rowPitch)
+{
+    static bool s_firstLogged;
+    if (c->st.inPass) {
+        d11_copy_refused("inside a render pass");
+        return;
+    }
+    if (t->rhiFormat != RHI_FMT_RGBA32_UINT || t->samples > 1u || !t->srv) {
+        d11_copy_refused("into a device buffer only from a single-sampled RGBA32_UINT texture "
+                         "made with RHI_TEX_COPY_SRC on Direct3D 11 (format %d, %u samples)",
+                         (int)t->rhiFormat, t->samples);
+        return;
+    }
+    if (!d->uav) {
+        d11_copy_refused("into a device buffer only when it is storage-only "
+                         "(RHI_BUF_STORAGE_READ | RHI_BUF_COPY_DST) on Direct3D 11");
+        return;
+    }
+    if (((dstOffset | rowPitch) & 15u) != 0u) {
+        d11_copy_refused("offset %llu and row pitch %u are not whole 16-byte elements of the "
+                         "storage buffer",
+                         (unsigned long long)dstOffset, rowPitch);
+        return;
+    }
+    const uint64_t rowBytes = (uint64_t)region.w * 16u;
+    if ((uint64_t)region.x + region.w > t->width || (uint64_t)region.y + region.h > t->height ||
+        rowPitch < rowBytes || dstOffset > d->size ||
+        (uint64_t)(region.h - 1u) * rowPitch + rowBytes > d->size - dstOffset ||
+        region.h > D3D11_CS_DISPATCH_MAX_THREAD_GROUPS_PER_DIMENSION) {
+        d11_copy_refused("%ux%u texels at (%d,%d) of a %ux%u texture into %llu of a %llu-byte "
+                         "buffer, rows %u bytes apart, do not fit",
+                         region.w, region.h, region.x, region.y, t->width, t->height,
+                         (unsigned long long)dstOffset, (unsigned long long)d->size, rowPitch);
+        return;
+    }
+    if (!d11_copy_cs_ready()) {
+        d11_copy_refused("the compute shader is missing (%s)", g_d11.copyCsWhy);
+        return;
+    }
+    d11_unbind_srvs(c);
+    const uint32_t words[8] = {(uint32_t)region.x,          (uint32_t)region.y, region.w, region.h,
+                               (uint32_t)(dstOffset / 16u), rowPitch / 16u,     0u,       0u};
+    ID3D11DeviceContext_UpdateSubresource(c->ctx, (ID3D11Resource *)g_d11.copyCb, 0, NULL, words, 0,
+                                          0);
+    ID3D11DeviceContext_CSSetShader(c->ctx, g_d11.copyCs, NULL, 0);
+    ID3D11DeviceContext_CSSetConstantBuffers(c->ctx, 0, 1, &g_d11.copyCb);
+    ID3D11DeviceContext_CSSetShaderResources(c->ctx, 0, 1, &t->srv);
+    ID3D11DeviceContext_CSSetUnorderedAccessViews(c->ctx, 0, 1, &d->uav, NULL);
+    ID3D11DeviceContext_Dispatch(c->ctx, (region.w + D11_COPY_CS_GROUP - 1u) / D11_COPY_CS_GROUP,
+                                 region.h, 1);
+    ID3D11ShaderResourceView *noSrv = NULL;
+    ID3D11UnorderedAccessView *noUav = NULL;
+    ID3D11DeviceContext_CSSetShaderResources(c->ctx, 0, 1, &noSrv);
+    ID3D11DeviceContext_CSSetUnorderedAccessViews(c->ctx, 0, 1, &noUav, NULL);
+    g_d11.counts.copies++;
+    __atomic_add_fetch(&g_d11.copyCsCount, 1u, __ATOMIC_RELAXED);
+    if (d11_once(&s_firstLogged)) {
+        D11_LOG("texture-to-buffer copy by the compute shader: the first, %ux%u texels at (%d,%d) "
+                "into byte %llu, rows %u bytes apart (logged once)",
+                region.w, region.h, region.x, region.y, (unsigned long long)dstOffset, rowPitch);
+    }
+}
+
 /* Direct3D 11 has no copy from a texture into a buffer.  Into a readback
  * buffer (the crack filler's readback, rd_crack_fill.c) the region goes to
  * a staging texture, whose rows land in the buffer's shadow at the next
- * rhi_map_buffer (d11_readback_texture_target); into any other buffer (the
- * vertex pre-pass, off on this backend: colorBytesPerPixel 32) the copy is
- * skipped and logged once. */
+ * rhi_map_buffer (d11_readback_texture_target); into a storage-only device
+ * buffer (the VU vertex pre-pass's record) it is the compute shader above;
+ * into any other buffer the copy is skipped with a line. */
 void rhi_cmd_copy_texture_to_buffer(RhiCommandList cl, RhiTexture src, RhiViewAspect aspect,
                                     RhiRect region, RhiBuffer dst, uint64_t dstOffset,
                                     uint32_t rowPitch)
 {
-    static bool s_otherLogged;
     D11CommandList *c = d11_rec(cl);
     D11Texture *t = d11_get_texture(src);
     D11Buffer *d = d11_get_buffer(dst);
@@ -1048,10 +1430,7 @@ void rhi_cmd_copy_texture_to_buffer(RhiCommandList cl, RhiTexture src, RhiViewAs
         return;
     }
     if (d->kind != RHI_MEM_READBACK) {
-        if (d11_once(&s_otherLogged)) {
-            D11_LOG("rhi_cmd_copy_texture_to_buffer: only into a readback buffer on Direct3D 11; "
-                    "skipped (logged once)");
-        }
+        d11_copy_texture_to_storage(c, t, region, d, dstOffset, rowPitch);
         return;
     }
     if (t->samples > 1u) {

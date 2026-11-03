@@ -5,6 +5,7 @@
 #include "gl_internal.h"
 #include "rhi_gl.h"
 #include "../rhi_backend.h"
+#include "../rhi_bind_cache.h"
 #include <stdlib.h>
 #include <string.h>
 
@@ -336,6 +337,7 @@ static void gl_fill_limits(void)
     o->maxRenderTargetSize = rt > 0 ? (uint32_t)rt : 0u;
     o->dualSourceBlend = gl_int(GL_MAX_DUAL_SOURCE_DRAW_BUFFERS) >= 1 && !s_fakeNoDual &&
                          !gl_env_on("ICO_GL_FAKE_NO_DUAL");
+    o->depth32Attachment = true;
     o->stencilWrap = true; /* GL_INCR_WRAP / GL_DECR_WRAP: core since 1.4 */
     o->depthReadback = true;
     o->depthStencilFormatName = "D32S8"; /* GL_DEPTH32F_STENCIL8, required of every 3.0 driver */
@@ -357,6 +359,8 @@ static void gl_fill_limits(void)
     o->maxStorageRange = ssbo > 0 ? (uint64_t)ssbo : 0u;
     o->bcTextures = g_gl.hasS3tc && g_gl.hasBptc;
     o->tiler = false;
+    o->singleThreadCommands =
+        true; /* rhi.h: each rhi_cmd_* runs at once on the context this thread has current */
     o->msaaCounts = gl_msaa_counts();
     o->sampleRateShading = true; /* glMinSampleShading, core since 4.0 */
     /* the destination read through a storage image in rasterization order:
@@ -684,6 +688,33 @@ uint32_t rhi_read_timestamps_busy(uint64_t *ns, uint32_t max)
     return n;
 }
 
+/* ------------------------------------------------------- occlusion queries
+ * Not supported here (rhi.h rhi_cmd_begin_occlusion: the replay tool's
+ * measurement is Vulkan's); GL_SAMPLES_PASSED queries (glBeginQuery/glEndQuery per index and slot, read once the slot's fence has passed, as the timestamps) would be the form. */
+bool rhi_occlusion_supported(void)
+{
+    return false;
+}
+
+void rhi_cmd_begin_occlusion(RhiCommandList cl, uint32_t index)
+{
+    (void)cl;
+    (void)index;
+}
+
+void rhi_cmd_end_occlusion(RhiCommandList cl, uint32_t index)
+{
+    (void)cl;
+    (void)index;
+}
+
+uint32_t rhi_read_occlusion(uint64_t *samples, uint32_t max)
+{
+    (void)samples;
+    (void)max;
+    return 0;
+}
+
 /* ------------------------------------------------- labels, diagnostics */
 void rhi_cmd_begin_label(RhiCommandList cl, const char *name)
 {
@@ -858,6 +889,7 @@ bool rhi_init(const RhiDeviceDesc *desc)
     glf.GenFramebuffers(1, &g_gl.scratchRead);
     glf.GenFramebuffers(1, &g_gl.scratchDraw);
     gl_timestamps_init();
+    GL_LOG("bind cache: %s", rhi_bind_cache_words());
     g_gl.initialised = true;
     gl_cmd_init();
     if (g_gl.window) {
@@ -978,6 +1010,26 @@ const char *rhi_adapter_name(void)
     return g_gl.adapterName;
 }
 
+/* the one device the context runs on (GL_RENDERER, empty before the first
+   rhi_init); OpenGL cannot choose another, so [video] adapter is not read */
+uint32_t rhi_adapter_list(RhiAdapterInfo *out, uint32_t max)
+{
+    if (g_gl.adapterName[0] == '\0') {
+        return 0;
+    }
+    if (out != NULL && max > 0) {
+        memset(&out[0], 0, sizeof(out[0]));
+        snprintf(out[0].name, sizeof(out[0].name), "%s", g_gl.adapterName);
+        out[0].suitable = out[0].current = out[0].automatic = true;
+    }
+    return 1;
+}
+
+void rhi_set_adapter_wanted(const char *name)
+{
+    (void)name;
+}
+
 /* A context reset (ARB_robustness) is not asked for: no loss to report */
 bool rhi_device_lost(void)
 {
@@ -1023,6 +1075,17 @@ void rhi_prefer_mailbox(bool on)
 }
 
 bool rhi_present_mailbox(void)
+{
+    return false;
+}
+
+/* rhi.h: no mailbox here, so no FIFO fallback either */
+void rhi_present_fifo_fallback(bool on)
+{
+    (void)on;
+}
+
+bool rhi_present_fifo_fallback_on(void)
 {
     return false;
 }

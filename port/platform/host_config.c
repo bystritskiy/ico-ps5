@@ -493,16 +493,33 @@ static const struct {
     {"dev.unlock_credits", "unlock_credits"},
     /* test popups from Main tick 100 (port/ui/popup.h) */
     {"dev.popup_test", "popup_test"},
+    /* save states at a Main tick, for the headless round trip
+       (port/platform/state.h ico_state_dev_set; main_host.c): "<tick>:<slot>",
+       "<tick>:<slot>" and "<tick>" */
+    {"dev.state_save_at", "state_save_at"},
+    {"dev.state_load_at", "state_load_at"},
+    {"dev.state_hash_at", "state_hash_at"},
+    /* the arena and the game's data and bss written raw at a Main tick
+       (state.h ico_state_dev_set_dump; tools/state_region_diff.py): "<tick>" */
+    {"dev.state_dump_at", "state_dump_at"},
     /* the renderer backend of the window build: "" (Automatic: Vulkan,
        then Direct3D 12 where linked, then OpenGL), "vulkan" (also "vk"), "d3d12", "opengl" (also "gl") or
        "d3d11", where the build links it (window_host.c, port/rhi/rhi.h
        rhi_create_backend; the Options > Graphics row writes it) */
     {"video.backend", "backend"},
+    /* the graphics card by its name, "" automatic (window_host.c
+       ico_window_open, port/rhi/rhi.h rhi_set_adapter_wanted; the Options >
+       Graphics > Graphics card row writes it) */
+    {"video.adapter", "adapter"},
     /* the A/B switches a bug report may ask for (ico_dev_env_value):
        fixed-function blending, the fog's depth path, the GPU loss
        diagnostics */
     {"dev.blend", "blend"},
     {"dev.fog_path", "fog_path"},
+    /* GS state as shader data: auto (the default: on where a tile-based
+       GPU reads the colour attachment in rasterization order), on, off
+       (port/render/rd_uber.c rd__uber_wanted) */
+    {"dev.uber", "uber"},
     /* the device profile's flags, one at a time (port/render/rd_profile.c):
        DATE's path, the depth store plan, the folded blur, the UINT views,
        the alpha/blend planner, the frame-size post sprites' plan and their
@@ -527,6 +544,9 @@ static const struct {
        device offers it, depth the depth alone, false neither (every
        pipeline static; port/rhi/vk/vk_device.c) */
     {"dev.dynamic_state", "dynamic_state"},
+    /* the bind cache: true (the default), false records every bind and state
+       set as given, on every backend (port/rhi/rhi_bind_cache.c) */
+    {"dev.bind_cache", "bind_cache"},
     {"dev.gpu_checkpoints", "gpu_checkpoints"},
     {"dev.gpu_robust", "gpu_robust"},
     {"dev.pass_split", "pass_split"},
@@ -538,6 +558,34 @@ static const struct {
        exported */
     {"dev.vu_plain_only", "vu_plain_only"},
     {"dev.vu_extended", "vu_extended"},
+    /* the VU vertex shaders' set for the draws without the pre-pass: auto
+       (the device table's), plain (no card test, no tick cameras) or
+       extended (an A/B; port/render/rd_pipeline.c rd__vu_policy_init) */
+    {"dev.vu_set", "vu_set"},
+    /* true: the menu text through the sheet shader at every scale instead
+       of its baked texels at 1x and 2x (an A/B; port/render/rd_core.c
+       rd_init, rd_tex.c rd__sheet_baked) */
+    {"dev.sheet_shader", "sheet_shader"},
+    /* gs: the aura's feedback read of the frame drawn with the GS's own taps
+       instead of the box above 1x, a measurement of the box's cost (the
+       picture differs; port/render/rd_aura_kernel.c) */
+    {"dev.aura_kernel", "aura_kernel"},
+    /* auto (the default: on on a tile-based GPU), on or off: the aura's
+       feedback read of the frame above 1x in two passes, the same bytes
+       (port/render/rd_aura_box.c) */
+    {"dev.aura_box", "aura_box"},
+    /* auto (the default: on on a tile-based GPU), on or off: a pass on the
+       picture whose draws are all flat and placed before it begins loads
+       and stores only the tiles they touch, the same picture
+       (port/render/rd_pass_area.c) */
+    {"dev.pass_area", "pass_area"},
+    /* auto (the default: on on a tile-based GPU), on or off each: a
+       pending clear carried into the next pass on its target, a clear
+       nothing reads not drawn, the depth store of the pass holding its
+       last touch dropped, the same picture (port/render/rd_pass_cut.c) */
+    {"dev.clear_carry", "clear_carry"},
+    {"dev.clear_skip", "clear_skip"},
+    {"dev.last_store", "last_store"},
     /* false: the VU vertex pre-pass off, every VU draw the old way (an
        A/B; port/render/rd_replay_vu.c rd__vu_prepass_init) */
     {"dev.vu_prepass", "vu_prepass"},
@@ -576,12 +624,44 @@ static const struct {
     /* false: SDL's DirectInput controller scan off (issue 105; window_host.c
        joystick_scan_hints) */
     {"dev.joystick_directinput", "joystick_directinput"},
+    /* the FIFO fallback: auto (the default) presents FIFO for the rest of a
+       run after 3 presents blocked 200 ms or more in 30 s under mailbox
+       with vsync off, off keeps mailbox, fifo presents FIFO from the start
+       (port/platform/present_fallback.h, window_host.c present_blocked) */
+    {"dev.present_fallback", "present_fallback"},
+    /* the window's render thread: auto (the default: on with Vulkan and
+       Direct3D 12), on, off (the submit and the present on the game thread,
+       as before) or sync (on, the game thread waiting for each picture: the
+       A/B; port/platform/render_thread.c, frame_mailbox.c fm_mode_choose) */
+    {"dev.render_thread", "render_thread"},
+    /* false: on Android the render thread and the submit thread are left
+       where the system places them instead of kept to the faster cores (a
+       diagnostic escape, not a performance switch; port/platform/
+       render_thread.c place_init, cpu_place.h) */
+    {"dev.big_cores", "big_cores"},
     /* "lazy": no start-up set, the pipelines made as the game needs them
        (issues 93 and 107; written by window_host.c after a start that
        ended while preparing them), "careful" the set under the careful
        policy (small batches on one thread), "full" the set (the default;
        the careful one on a device of the table) */
     {"dev.pipeline_set", "pipeline_set"},
+    /* the start-up set's free-memory floor on Android in MB (issue 161;
+       diag_host.c memory_floor_stop): auto, the default, by the driver
+       (memory_floor.h: 17 % of the device's memory, at most 2048 MB above
+       8 GB on Qualcomm's own driver, at most 512 MB above 8 GB on any
+       other); 0 off */
+    {"dev.pipeline_memory_floor_mb", "pipeline_memory_floor_mb"},
+    /* the texture decode pool's worker threads: auto (the default: 2, 1 on
+       a machine with 2 hardware threads or fewer), 0 every decode on the
+       game thread as before (an A/B), 1 to 4 (port/render/rd_tex_decode.c) */
+    {"dev.texture_decode_threads", "texture_decode_threads"},
+    /* the disc's reads: thread (the window build's default) on a thread of
+       their own, completed at the next vsync as before; sync on the game
+       thread (issue 126; port/data/cdvd_host.c reader_choose) */
+    {"dev.disc_reader", "disc_reader"},
+    /* the disc reader thread's read-ahead in KB: 256 by default, 0 off, at
+       most 4096 (port/data/cdvd_host.c reader_choose) */
+    {"dev.disc_read_ahead_kb", "disc_read_ahead_kb"},
 };
 
 /* the [dev] keys exported as the environment switches the renderer and the
@@ -591,6 +671,7 @@ static const struct {
     const char *env;
 } dev_env[] = {
     {"blend", "ICO_RD_BLEND"},       /* port/render/rd_dst_read.c rd__dst_init */
+    {"uber", "ICO_RD_UBER"},         /* port/render/rd_uber.c rd__uber_wanted: auto, 1, 0 */
     {"fog_path", "ICO_RD_FOG_PATH"}, /* port/render/rd_fog_path.c rd__fog_path_init */
     /* port/render/rd_profile.c rd__profile_init: the profile's flags */
     {"date_path", "ICO_RD_DATE_PATH"},
@@ -606,6 +687,7 @@ static const struct {
     /* port/rhi/vk/vk_device.c (the dynamic state): 1 both static, blend the
        blend static, 0 as the device offers */
     {"dynamic_state", "ICO_VK_FAKE_NO_DYNAMIC"},
+    {"bind_cache", "ICO_RHI_BIND_CACHE"},          /* port/rhi/rhi_bind_cache.c: 1 (on), 0 */
     {"gpu_checkpoints", "ICO_GPU_CHECKPOINTS"},    /* port/rhi vk_device.c, d3d12_device.c */
     {"gpu_robust", "ICO_GPU_ROBUST"},              /* port/rhi/vk/vk_device.c */
     {"pass_split", "ICO_RD_PASS_SPLIT"},           /* port/render/rd_replay_vu.c passSplit */
@@ -615,6 +697,22 @@ static const struct {
     /* port/render/rd_replay_vu.c rd__vu_prepass_init: 0 draws without the
        vertex pre-pass */
     {"vu_prepass", "ICO_RD_VU_PREPASS"},
+    /* port/render/rd_pipeline.c rd__vu_policy_init: auto, plain or
+       extended (the program entries' set) */
+    {"vu_set", "ICO_RD_VU_SET"},
+    /* port/render/rd_core.c rd_init: 1 draws every menu text page through
+       font_sheet_ps (no bake) */
+    {"sheet_shader", "ICO_RD_SHEET_SHADER"},
+    /* port/render/rd_aura_kernel.c rd__aura_kernel_steps: gs or box */
+    {"aura_kernel", "ICO_RD_AURA_KERNEL"},
+    /* port/render/rd_aura_box.c rd__aura_box_init: auto, 1 or 0 */
+    {"aura_box", "ICO_RD_AURA_BOX"},
+    /* port/render/rd_pass_area.c rd__pass_area_init: auto, 1 or 0 */
+    {"pass_area", "ICO_RD_PASS_AREA"},
+    /* port/render/rd_pass_cut.c rd__pass_cut_init: auto, 1 or 0 each */
+    {"clear_carry", "ICO_RD_CLEAR_CARRY"},
+    {"clear_skip", "ICO_RD_CLEAR_SKIP"},
+    {"last_store", "ICO_RD_LAST_STORE"},
     /* port/render/rd_replay_vu.c preBatchInit: 0 draws the pre-pass one
        draw an entry and stage */
     {"vu_prepass_batch", "ICO_RD_VU_PREPASS_BATCH"},
@@ -644,12 +742,23 @@ static const struct {
     /* port/platform/window_host.c joystick_scan_hints: 0 sets
        SDL_HINT_JOYSTICK_DIRECTINPUT to 0 before SDL_Init */
     {"joystick_directinput", "ICO_JOYSTICK_DIRECTINPUT"},
+    /* port/platform/window_host.c ico_window_open: auto, off or fifo
+       (present_fallback.c ico_present_fallback_mode) */
+    {"present_fallback", "ICO_PRESENT_FALLBACK"},
     /* port/platform/window_host.c: "lazy" skips the start-up set,
        "careful" makes it under the careful policy */
     {"pipeline_set", "ICO_PIPELINE_SET"},
+    /* port/platform/diag_host.c memory_floor_stop: the floor in MB, 0 off */
+    {"pipeline_memory_floor_mb", "ICO_PIPELINE_MEMORY_FLOOR_MB"},
     /* port/audio/audio_host.c ico_audio_host_init: 1 renders the audio on
        the game's clock (the sync path) instead of the device's */
     {"audio_sync", "ICO_AUDIO_SYNC"},
+    /* port/render/rd_tex_decode.c choose: auto, or 0..4 worker threads */
+    {"texture_decode_threads", "ICO_RD_TEXTURE_DECODE_THREADS"},
+    /* port/data/cdvd_host.c reader_choose: thread or sync */
+    {"disc_reader", "ICO_DISC_READER"},
+    /* port/data/cdvd_host.c reader_choose: KB, 0 off */
+    {"disc_read_ahead_kb", "ICO_DISC_READ_AHEAD_KB"},
 };
 
 /* [dev] keys a file may hold that nothing reads now: read (ini_map) and
@@ -691,6 +800,10 @@ const char *ico_dev_env_value(const char *key, const char *value)
     static const char *const blends[] = {"fixed", "attachment", "storage", "exact", NULL};
     static const char *const datePaths[] = {"stencil", "snapshot", NULL};
     static const char *const sets[] = {"full", "careful", "lazy", NULL};
+    static const char *const fallbacks[] = {"auto", "off", "fifo", NULL};
+    static const char *const readers[] = {"thread", "sync", NULL};
+    static const char *const vuSets[] = {"auto", "plain", "extended", NULL};
+    static const char *const auraKernels[] = {"box", "gs", NULL};
 
     if (key == NULL || value == NULL || ico_dev_env_name(key) == NULL) {
         return NULL;
@@ -704,6 +817,20 @@ const char *ico_dev_env_value(const char *key, const char *value)
     }
     if (strcmp(key, "fog_path") == 0) {
         return value_is(value, paths) ? value : NULL;
+    }
+    if (strcmp(key, "uber") == 0 && strcmp(value, "auto") == 0) {
+        return "auto"; /* else on/off as 1/0 below (rd_uber.c rd__uber_asked_env) */
+    }
+    if (strcmp(key, "aura_box") == 0 && strcmp(value, "auto") == 0) {
+        return "auto"; /* else on/off as 1/0 below (rd_aura_box.c rd__aura_box_pick) */
+    }
+    if (strcmp(key, "pass_area") == 0 && strcmp(value, "auto") == 0) {
+        return "auto"; /* else on/off as 1/0 below (rd_pass_area.c rd__pass_area_pick) */
+    }
+    if ((strcmp(key, "clear_carry") == 0 || strcmp(key, "clear_skip") == 0 ||
+         strcmp(key, "last_store") == 0) &&
+        strcmp(value, "auto") == 0) {
+        return "auto"; /* else on/off as 1/0 below (rd_pass_cut.c, pass_area's words) */
     }
     if (strcmp(key, "date_path") == 0) {
         return value_is(value, datePaths) ? value : NULL;
@@ -721,6 +848,55 @@ const char *ico_dev_env_value(const char *key, const char *value)
     }
     if (strcmp(key, "pipeline_set") == 0) {
         return value_is(value, sets) ? value : NULL;
+    }
+    if (strcmp(key, "vu_set") == 0) {
+        /* auto, plain or extended as they are (no boolean form) */
+        return value_is(value, vuSets) ? value : NULL;
+    }
+    if (strcmp(key, "aura_kernel") == 0) {
+        /* box (the default) or gs as they are */
+        return value_is(value, auraKernels) ? value : NULL;
+    }
+    if (strcmp(key, "present_fallback") == 0) {
+        /* auto, off or fifo as they are; false/0/no is off */
+        if (value_is(value, fallbacks)) {
+            return value;
+        }
+        return value_is(value, off) ? "off" : NULL;
+    }
+    if (strcmp(key, "disc_reader") == 0) {
+        /* thread or sync as they are; false/0/no/off is sync */
+        if (value_is(value, readers)) {
+            return value;
+        }
+        return value_is(value, off) ? "sync" : NULL;
+    }
+    if (strcmp(key, "disc_read_ahead_kb") == 0) {
+        /* whole KB 0 (off) to 4096; false/off/no is 0 */
+        char *end = NULL;
+        const long n = strtol(value, &end, 10);
+        if (end != value && *end == '\0' && n >= 0 && n <= 4096) {
+            return value;
+        }
+        return value_is(value, off) ? "0" : NULL;
+    }
+    if (strcmp(key, "pipeline_memory_floor_mb") == 0) {
+        /* auto, or whole MB 0 (off) to 1048576 (memory_floor.h
+           ico_memory_floor_setting reads it) */
+        char *end = NULL;
+        const long n = strtol(value, &end, 10);
+        if (strcmp(value, "auto") == 0 ||
+            (end != value && *end == '\0' && n >= 0 && n <= 1048576L)) {
+            return value;
+        }
+        return value_is(value, off) ? "0" : NULL;
+    }
+    if (strcmp(key, "texture_decode_threads") == 0) {
+        /* auto, 0 (off: the game thread decodes) to 4 worker threads */
+        if (strcmp(value, "auto") == 0 || (value[0] >= '0' && value[0] <= '4' && !value[1])) {
+            return value;
+        }
+        return value_is(value, off) ? "0" : NULL;
     }
     if (strcmp(key, "pass_split") == 0) {
         /* a count of VU draws, 1..65536; 0 or off: none */
@@ -867,8 +1043,8 @@ void ico_ini_export(const IcoIni *ini, const char *path, int r)
            force shows in the log */
         {
             static const char *const kept[] = {"dev.pipeline_set", "dev.vu_prepass",
-                                               "dev.gpu_robust"};
-            char line[256] = "";
+                                               "dev.gpu_robust", "dev.pipeline_skip"};
+            char line[384] = "";
             size_t i;
 
             for (i = 0; t != NULL && i < sizeof(kept) / sizeof(kept[0]); i++) {
@@ -1320,12 +1496,14 @@ static void flush_all(void)
 
 /* --- the dialog and the error box --------------------------------------- */
 
-int ico_host_pick_iso(char *out, size_t size)
+int ico_host_pick_iso(const char *title, char *out, size_t size)
 {
 #ifdef _WIN32
     OPENFILENAMEW ofn;
     wchar_t path[ICO_PATH_MAX] = L"";
     char utf8[ICO_PATH_MAX];
+    wchar_t *wtitle = title != NULL ? ico_widen(title) : NULL;
+    BOOL chosen;
 
     memset(&ofn, 0, sizeof(ofn));
     ofn.lStructSize = sizeof(ofn);
@@ -1335,14 +1513,18 @@ int ico_host_pick_iso(char *out, size_t size)
     ofn.nMaxFile = (DWORD)(sizeof(path) / sizeof(path[0]));
     /* no disc names here: this file is built without the discs table
        (port/data/discs.c) in several test programs */
-    ofn.lpstrTitle = L"Choose your ICO disc image (one of the supported discs)";
+    ofn.lpstrTitle =
+        wtitle != NULL ? wtitle : L"Choose your ICO disc image (one of the supported discs)";
     ofn.Flags = OFN_FILEMUSTEXIST | OFN_PATHMUSTEXIST | OFN_HIDEREADONLY | OFN_NOCHANGEDIR;
-    if (!GetOpenFileNameW(&ofn) || ico_narrow(path, utf8, sizeof(utf8)) != 0) {
+    chosen = GetOpenFileNameW(&ofn);
+    free(wtitle);
+    if (!chosen || ico_narrow(path, utf8, sizeof(utf8)) != 0) {
         return -1;
     }
     copy(out, size, utf8);
     return 0;
 #else
+    (void)title;
     (void)out;
     (void)size;
     return -1;
@@ -2138,30 +2320,27 @@ char *ico_toml_render(const IcoToml *t, const char *existing)
     return result.p;
 }
 
-int ico_toml_save(const IcoToml *t, const char *path)
+char *ico_toml_read_text(const char *path)
 {
-    char *existing = read_text(path);
-    char *text = ico_toml_render(t, existing);
+    return read_text(path);
+}
+
+int ico_toml_write_text(const char *text, const char *path)
+{
     char tmp[ICO_PATH_MAX + 8];
     FILE *f;
     size_t n;
     int ok;
 
-    free(existing);
-    if (text == NULL) {
-        return -1;
-    }
     snprintf(tmp, sizeof(tmp), "%s.tmp", path);
     f = ico_fopen(tmp, "wb");
     if (f == NULL) {
-        free(text);
         return -1;
     }
     n = strlen(text);
     ok = fwrite(text, 1, n, f) == n;
     ok = ico_fsync(f) == 0 && ok; /* on the disk before the move */
     ok = fclose(f) == 0 && ok;
-    free(text);
     if (ok) {
         ok = ico_rename_replace(tmp, path) == 0;
     }
@@ -2170,6 +2349,21 @@ int ico_toml_save(const IcoToml *t, const char *path)
         return -1;
     }
     return 0;
+}
+
+int ico_toml_save(const IcoToml *t, const char *path)
+{
+    char *existing = read_text(path);
+    char *text = ico_toml_render(t, existing);
+    int rc;
+
+    free(existing);
+    if (text == NULL) {
+        return -1;
+    }
+    rc = ico_toml_write_text(text, path);
+    free(text);
+    return rc;
 }
 
 /* portable mode: -1 the folder decides, 0 off (portable=0), 1 on */
@@ -2398,6 +2592,33 @@ int ico_host_card_dir_beside(char *dir, size_t size, const char *suffix)
     return 0;
 }
 
+/* Options > Gameplay > Second memory card: -1 until the options module sets
+   it (host_config.h) */
+static int second_card = -1;
+
+void ico_host_set_second_card(int on)
+{
+    second_card = on < 0 ? -1 : on != 0;
+}
+
+int ico_host_second_card(void)
+{
+    char dir[ICO_PATH_MAX], toml_path[ICO_PATH_MAX];
+    IcoToml *t = NULL;
+    int on;
+
+    if (second_card >= 0) {
+        return second_card;
+    }
+    if (ico_host_pref_dir(dir, sizeof(dir)) == 0 &&
+        ico_path_join(toml_path, sizeof(toml_path), dir, "config.toml") == 0) {
+        t = ico_toml_load(toml_path);
+    }
+    on = t != NULL && ico_toml_get_bool(t, "gameplay.second_memory_card", 0) != 0;
+    ico_toml_free(t);
+    return on;
+}
+
 int ico_host_saves2_dir(char *out, size_t size)
 {
     char dir[ICO_PATH_MAX];
@@ -2416,6 +2637,13 @@ int ico_host_saves2_dir(char *out, size_t size)
     ico_ini_load_layered(ini, ini_path);
     r = card_dir_key(ini, dir, "saves2", out, size);
     free(ini);
+    /* no saves2: the Second memory card option's folder, beside memcard */
+    if (r == 0 && ico_host_second_card()) {
+        r = ico_host_pref_dir(dir, sizeof(dir)) == 0 &&
+                    ico_path_join(out, size, dir, "memcard2") == 0
+                ? 1
+                : -1;
+    }
     if (r < 0 && size > 0) {
         out[0] = '\0';
     }

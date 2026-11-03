@@ -2,8 +2,9 @@
  * port/ui/strings.h
  *
  * The port's UI strings in the European disc's five languages, in
- * Japanese and in Korean: one table per language (port/ui/strings_<lang>.c), indexed by
- * UiStrId, UTF-8. Every word the port draws (the Settings menu, the popups, the achievements, the
+ * Japanese, Korean and Traditional Chinese, and the community translations
+ * (docs/TRANSLATING.md): one table per language (port/ui/strings_<lang>.c,
+ * strings_<lang>_<translator>.c), indexed by UiStrId, UTF-8. Every word the port draws (the Settings menu, the popups, the achievements, the
  * galleries, photo mode, the model viewer, Characters, the Graphics driver
  * page), and the menus' words transcribed from the PAL sheets
  * (UI_STR_MT_*).
@@ -32,8 +33,14 @@ extern "C" {
    boot screen (kanbanBoot.c 101-102) and texFile names them (2 EG, 3 FR,
    4 GR, 5 IT, 6 SP), then Japanese, Korean and Traditional Chinese (the
    port's own text: the Japanese, Korean and Asian discs' own words are
-   their sheets); UI_LANG_COUNT
-   tables, each defining every UiStrId (ctest strings_complete). */
+   their sheets): UI_LANG_COUNT tables, each defining every UiStrId (ctest
+   strings_complete).  Then the community translations, from
+   UI_LANG_COMMUNITY_FIRST (= UI_LANG_COUNT) to UI_LANG_TABLES: a player's
+   translation of the port's text, the European disc's menu words and its
+   subtitles, drawn as text over the English disc data (docs/TRANSLATING.md);
+   their tables leave an id they have not translated NULL (English at run
+   time), so the tests that hold every table to its own word for every id
+   walk the first UI_LANG_COUNT. */
 typedef enum UiLang {
     UI_LANG_EN = 0,
     UI_LANG_FR,
@@ -43,8 +50,23 @@ typedef enum UiLang {
     UI_LANG_JA,
     UI_LANG_KO,
     UI_LANG_ZH,
-    UI_LANG_COUNT
+    UI_LANG_COUNT,
+    /* Russian, by bob-ttz (GitHub issue 132's CSVs) */
+    UI_LANG_RU_BOBTTZ = UI_LANG_COUNT,
+    /* Russian, by cobra838 (GitHub PR 180's tables) */
+    UI_LANG_RU_COBRA838,
+    /* Brazilian Portuguese, by Igor Chagas (ichagas7, GitHub issue 157's CSVs) */
+    UI_LANG_PT_BR,
+    UI_LANG_TABLES
 } UiLang;
+
+/* The community translations, UI_LANG_COMMUNITY_FIRST .. UI_LANG_TABLES - 1:
+   the Language row's entries after the European disc's five, [game]
+   text_language (port/game/options.h ico_opt_text_language), the Menu
+   language row's after the eight, each with a subtitle table
+   (port/ui/subtitle_text.h). */
+#define UI_LANG_COMMUNITY_FIRST UI_LANG_COUNT
+#define UI_LANG_COMMUNITY_COUNT (UI_LANG_TABLES - UI_LANG_COMMUNITY_FIRST)
 
 /* The European disc's languages (UI_LANG_EN .. UI_LANG_ES): its sheets
    letter the menus in each, and the menu text table's geometry
@@ -108,6 +130,11 @@ typedef enum UiStrId {
     UI_STR_VAL_PIT_LONGER,
     UI_STR_VAL_PIT_DOUBLE,
     UI_STR_VAL_PIT_TRIPLE,
+    UI_STR_OPT_SHADOW_SPEED,      /* [gameplay] shadow_speed: the Shadow speed row */
+    UI_STR_OPT_SHADOW_SPEED_NOTE, /* its explanation */
+    UI_STR_VAL_SPEED_SLOWER,      /* its values (Original is UI_STR_VAL_ORIGINAL) */
+    UI_STR_VAL_SPEED_FASTER,
+    UI_STR_VAL_SPEED_FASTEST,
     /* Language: each language's own name, the same in every table */
     UI_STR_LANG_EN,
     UI_STR_LANG_FR,
@@ -636,6 +663,12 @@ typedef enum UiStrId {
     UI_STR_OPT_GRAPHICS_API,
     UI_STR_VAL_GRAPHICS_AUTOMATIC,
     UI_STR_GRAPHICS_API_NOTE,
+    /* Settings > Graphics > Graphics card: the row and its note, and the
+       popup when the card chosen did not start (two %s: that card, the one
+       kept; the cards' names are not translated) */
+    UI_STR_OPT_GRAPHICS_ADAPTER,
+    UI_STR_GRAPHICS_ADAPTER_NOTE,
+    UI_STR_GRAPHICS_ADAPTER_FAILED,
     /* Settings > Graphics > Apply: the row and its note, the countdown's
        note (one %d, the seconds left), Keep, Revert, and the popup when the
        renderer chosen did not start (two %s: that renderer, the one kept) */
@@ -679,12 +712,18 @@ typedef enum UiStrId {
     /* Gameplay > Doorway fix ([gameplay] door_fix) and its explanation */
     UI_STR_OPT_DOOR_FIX,
     UI_STR_OPT_DOOR_FIX_NOTE,
+    /* Gameplay > Yorda trips ([gameplay] yorda_trips) and its explanation */
+    UI_STR_OPT_YORDA_TRIPS,
+    UI_STR_OPT_YORDA_TRIPS_NOTE,
     /* Gameplay > Natural chains ([gameplay] natural_chains) and its explanation */
     UI_STR_OPT_NATURAL_CHAINS,
     UI_STR_OPT_NATURAL_CHAINS_NOTE,
     /* Gameplay > Skip the opening ([gameplay] skip_opening) and its explanation */
     UI_STR_OPT_SKIP_OPENING,
     UI_STR_OPT_SKIP_OPENING_NOTE,
+    /* Gameplay > Second memory card ([gameplay] second_memory_card) and its explanation */
+    UI_STR_OPT_SECOND_CARD,
+    UI_STR_OPT_SECOND_CARD_NOTE,
     /* Display > Anti-aliasing ([video] anti_aliasing), its note and values */
     UI_STR_OPT_AA,
     UI_STR_OPT_AA_NOTE,
@@ -725,6 +764,47 @@ typedef enum UiStrId {
     UI_STR_EXPORT_TEXTURES_STOPPED_BODY,
     UI_STR_EXPORT_TEXTURES_FAILED,
     UI_STR_EXPORT_TEXTURES_FAILED_BODY,
+    /* Extras > Back up your data and Restore from a backup (settings_backup.c):
+       the rows, their notes, the confirmations and the popups' titles,
+       bodies and reasons (settings.h UI_BACKUP_WHY_*) */
+    UI_STR_EXTRAS_BACKUP,
+    UI_STR_EXTRAS_RESTORE,
+    UI_STR_BACKUP_NOTE,
+    UI_STR_RESTORE_NOTE,
+    UI_STR_BACKUP_CHOOSING,
+    UI_STR_BACKUP_PROGRESS,
+    UI_STR_RESTORE_AGAIN,
+    UI_STR_RESTORE_CONFIRM_TITLE,
+    UI_STR_RESTORE_CONFIRM_BODY,
+    UI_STR_RESTORE_CHOOSING,
+    UI_STR_RESTORE_READING,
+    UI_STR_RESTORE_PROGRESS,
+    UI_STR_RESTORE_THIS,
+    UI_STR_RESTORE_ASK_NOTE,
+    UI_STR_RESTORE_ASK_TITLE,
+    UI_STR_RESTORE_VERSION,
+    UI_STR_RESTORE_SAVED,
+    UI_STR_RESTORE_DISCS,
+    UI_STR_RESTORE_OTHER_DISC,
+    UI_STR_RESTORE_PRESS,
+    UI_STR_BACKUP_DONE,
+    UI_STR_BACKUP_DONE_BODY,
+    UI_STR_BACKUP_FAILED,
+    UI_STR_RESTORE_DONE,
+    UI_STR_RESTORE_DONE_RESTART,
+    UI_STR_RESTORE_DONE_CLOSE,
+    UI_STR_RESTORE_FAILED,
+    UI_STR_BACKUP_WHY_BUSY,
+    UI_STR_BACKUP_WHY_NOTHING,
+    UI_STR_BACKUP_WHY_WRITE,
+    UI_STR_BACKUP_WHY_READ,
+    UI_STR_BACKUP_WHY_NOT_BACKUP,
+    UI_STR_BACKUP_WHY_NEWER,
+    UI_STR_BACKUP_WHY_DAMAGED,
+    UI_STR_BACKUP_WHY_UNSAFE,
+    UI_STR_BACKUP_WHY_TOO_BIG,
+    UI_STR_BACKUP_WHY_NO_DIALOG,
+    UI_STR_BACKUP_WHY_NO_SPACE,
     /* Effects > Water reflections: Original (UI_STR_VAL_ORIGINAL) or Sharp */
     UI_STR_OPT_EFFECT_WATER,
     UI_STR_VAL_SHARP,
@@ -825,6 +905,57 @@ typedef enum UiStrId {
     UI_STR_OPT_VAR_TOUGHNESS_NOTE_DEMO,
     UI_STR_OPT_VAR_NO_HINTS_NOTE_2001,
     UI_STR_OPT_VAR_NO_LOOK_NOTE_2001,
+    /* PC port: the last sentence of the Android box after the graphics
+       driver stopped responding (a GPU hang or a device loss), on the
+       device's own Qualcomm driver: the Options route to a Turnip driver
+       package (port/platform/android/gpu_driver_android.c
+       ico_gpu_driver_android_hang_note, issue 123) */
+    UI_STR_GPU_HANG_TURNIP,
+    /* PC port: save states (port/game/state_host.c, the Save states page,
+       the pause menu's row and the popups); the English text in every
+       table until the translations come */
+    UI_STR_STATES,
+    UI_STR_STATES_SLOT,
+    UI_STR_STATES_EMPTY,
+    UI_STR_STATES_ACT_SAVE,
+    UI_STR_STATES_ACT_LOAD,
+    UI_STR_STATES_ACT_DELETE,
+    UI_STR_STATES_CONFIRM,
+    UI_STR_STATES_SAVED,
+    UI_STR_STATES_LOADED,
+    UI_STR_STATES_DELETED,
+    UI_STR_STATES_NOTE,
+    UI_STR_STATES_PAUSE_FIRST,
+    UI_STR_STATES_REFUSED_BUILD,
+    UI_STR_STATES_REFUSED_DISC,
+    UI_STR_STATES_REFUSED_SETTINGS,
+    UI_STR_STATES_REFUSED_BUSY,
+    UI_STR_STATES_REFUSED_CHECK,
+    UI_STR_STATES_OFF,
+    UI_STR_STATES_TITLE_HINT,
+    UI_STR_STATES_SAVE_FAILED,
+    /* the box of a state another version made that this one cannot resume
+       (main_host.c states_done, state.h IcoStateBlocker): made before
+       states carried over (the saved version), the part of the game it
+       was in changed, how the game holds its state changed (the saved
+       version, then this one), only its own version resumes it */
+    UI_STR_STATES_XB_OLD,
+    UI_STR_STATES_XB_CODE,
+    UI_STR_STATES_XB_DATA,
+    UI_STR_STATES_XB_PINNED,
+    /* Effects > Glow between frames (Original or Smooth): the label, the note, and the
+       note while the row is greyed */
+    UI_STR_OPT_EFFECT_GLOW_SMOOTH,
+    UI_STR_EFFECT_GLOW_SMOOTH_NOTE,
+    UI_STR_EFFECT_GLOW_SMOOTH_LOCKED,
+    /* Effects > Motion blur strength (issue 181): the label and the note */
+    UI_STR_OPT_EFFECT_MOTION_BLUR_STRENGTH,
+    UI_STR_EFFECT_MOTION_BLUR_STRENGTH_NOTE,
+    /* the community translations' names (the Language and Menu language
+       rows, after UI_STR_LANG_ZH), in their own language in every table */
+    UI_STR_LANG_RU_BOBTTZ,
+    UI_STR_LANG_RU_COBRA838,
+    UI_STR_LANG_PT_BR,
     UI_STR_COUNT
 } UiStrId;
 
@@ -839,6 +970,14 @@ UiLang ui_get_language(void);
    languages is ignored. */
 void ui_set_sheet_language(int sheetLang);
 int ui_sheet_language(void);
+/* The language of the game's menu words (UI_STR_MT_*, menu_text.h) over
+   sheet language sheetLang: a community translation's table over the
+   English sheets while one is chosen (ui_set_menu_words_language: a UiLang
+   from UI_LANG_COMMUNITY_FIRST, the Language row's community entry; -1, the
+   default, none), else sheetLang itself (any value, unchecked).  The words then keep the English
+   sheet's geometry (menu_text.h UiMenuTextItem: the five European sheets'). */
+void ui_set_menu_words_language(int lang);
+UiLang ui_menu_words_language(int sheetLang);
 /* the game's language number (2..6) to a UiLang; English otherwise */
 UiLang ui_lang_from_game(int nonLinearCameraMove);
 /* the string of id in the current language; "" for an unknown id; a
@@ -883,8 +1022,9 @@ const char *ui_str_serial(UiStrId id, char *buf, size_t n);
    table (the Settings menu, notes, Extras, achievements, popups, the menu
    words UI_STR_MT_*).  A missing translation is not visited (ui_str_in
    would give the English one, which is visited under UI_LANG_EN).  The
-   subtitles and the staff roll's lines are the game's pictures and data,
-   not port tables. */
+   staff roll's lines are the game's data, the disc languages' subtitles its
+   pictures, not port tables; a community translation's subtitles are
+   (port/ui/subtitle_text.h). */
 typedef void (*UiStringFn)(UiLang lang, const char *utf8, void *user);
 void ui_strings_for_each(UiStringFn fn, void *user);
 
@@ -897,6 +1037,9 @@ extern const char *const ui_strings_es[UI_STR_COUNT];
 extern const char *const ui_strings_ja[UI_STR_COUNT];
 extern const char *const ui_strings_ko[UI_STR_COUNT];
 extern const char *const ui_strings_zh[UI_STR_COUNT];
+extern const char *const ui_strings_ru_bobttz[UI_STR_COUNT];
+extern const char *const ui_strings_ru_cobra838[UI_STR_COUNT];
+extern const char *const ui_strings_pt_br[UI_STR_COUNT];
 
 #ifdef __cplusplus
 }

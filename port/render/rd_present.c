@@ -93,6 +93,7 @@
 #include <stdlib.h>
 #include <string.h>
 #include "rd_internal.h"
+#include "rd_submit.h"
 #include "shader_consts.h"
 
 typedef struct RdPresentPreset {
@@ -546,8 +547,19 @@ static uint32_t s_outW, s_outH;
 
 static bool s_window;
 
+static bool presentAcquire(void);
+
 bool rd__present_acquire(void)
 {
+    rd__thread_phase(RD_READ_ACQUIRE); /* the read waits' split (rd_thread.h) */
+    const bool ok = presentAcquire();
+    rd__thread_phase(RD_READ_UPLOAD);
+    return ok;
+}
+
+static bool presentAcquire(void)
+{
+    rd__submit_drain_acquire(); /* the last picture's present reads what this sets (rd_submit.h) */
     s_backbuffer = (RhiTexture){0};
     s_window = rhi_swapchain_format() != RHI_FMT_UNKNOWN;
     if (s_window) {
@@ -893,14 +905,26 @@ static bool depthWanted(void)
     if (!g_rd.settings.effectsDepth) {
         return false;
     }
-    if (s_forceDepth) {
-        return true;
-    }
-#ifdef __ANDROID__
-    return false;
-#else
-    return rhi_injector_name() != NULL;
+    bool want = s_forceDepth;
+#ifndef __ANDROID__
+    want = want || rhi_injector_name() != NULL;
 #endif
+    /* a device that cannot draw into a 32-bit depth buffer alone (a Vulkan
+     * 1.0 driver without the attachment bit): off, said once */
+    if (want && !rhi_limits()->depth32Attachment) {
+        static bool said;
+        if (!said) {
+            said = true;
+            rd__log("present: no effects depth (the device cannot draw to a D32F depth buffer)");
+        }
+        return false;
+    }
+    return want;
+}
+
+bool rd__effects_depth_wanted(void)
+{
+    return depthWanted();
 }
 
 static struct {
@@ -1053,11 +1077,19 @@ bool rd__read_present_depth(float *dst, size_t dstSize, uint32_t *w, uint32_t *h
 /* ------------------------------------------------------------ the overlay */
 
 typedef struct OverlayBatch {
-    uint32_t first, count; /* in s_ov.v */
+    uint32_t first, count; /* in its OverlayBuf's v */
     uint32_t tex;          /* RdTex id, 0 untextured */
     uint8_t prim, blend;
     RhiRect sc; /* the deferred text's region (the whole output for the overlay's) */
 } OverlayBatch;
+
+/* a collect's prims: the vertices and the batches over them */
+typedef struct OverlayBuf {
+    RdScreenVtx *v;
+    uint32_t vCount, vCap;
+    OverlayBatch *b;
+    uint32_t bCount, bCap;
+} OverlayBuf;
 
 /* outside g_rd: the registration outlives rd_shutdown / rd_init (port/ui
  * registers once at start-up; the tests restart rd between checks) */
@@ -1068,24 +1100,43 @@ static struct {
     void *topUser;
     RdDeferredTextFn textFn; /* the deferred text's renderer */
     void *textUser;
-    int inside;          /* in fn or textFn: rd_overlay_prims keeps prims */
-    RhiRect sc;          /* the region rd_overlay_prims gives its batch */
-    RdOverlayCtx ctx;    /* the main layer's (the deferred text's too) */
-    RdOverlayCtx topCtx; /* the top layer's, always the output */
-    RdScreenVtx *v;
-    uint32_t vCount, vCap;
-    OverlayBatch *b;
-    uint32_t bCount, bCap;
+    RdOverlayCtx ctx;     /* the main layer's (the deferred text's too) */
+    RdOverlayCtx topCtx;  /* the top layer's, always the output */
+    OverlayBuf buf;       /* the present's, drawn by the thread that replays it */
     uint32_t textBatches; /* b[0, textBatches) are the deferred text's */
     uint32_t topFirst;    /* b[topFirst, bCount) are the top layer's,
                            * b[textBatches, topFirst) the main layer's */
     int grid;             /* the main layer is on the CRT filter's source grid */
 } s_ov;
 
+/* The UI's two layers collected on the game thread for a picture it hands
+ * to the render thread (rd__overlay_hand_over; rd_thread.h): the
+ * callbacks are UI code that shares port/ui's font state and caches with
+ * the game thread's own text, so they run there, between the drain and
+ * the post, never while the game thread records.  The picture's replay
+ * copies the batches after its deferred text (overlayCollect) instead of
+ * calling them; the render thread writes only `have` (taken, or dropped
+ * at the job's end), and the game thread collects again only after the
+ * next drain. */
+static struct {
+    bool have; /* collected for the picture posted, not drawn yet */
+    bool ok;   /* overlayLayout's answer: something to collect */
+    RdOverlayCtx ctx, topCtx;
+    int grid;
+    OverlayBuf buf;
+    uint32_t topFirst; /* b[0, topFirst) the main layer's, the rest the top layer's */
+} s_pre;
+
+/* where rd_overlay_prims puts the calling thread's prims: the buffer of
+ * the collect it is inside (s_ov's or s_pre's) and the batch's region;
+ * NULL outside one (the prims are dropped) */
+static _Thread_local OverlayBuf *t_into;
+static _Thread_local RhiRect t_sc;
+
 /* the batches collected for a present, forgotten together */
 static void overlayForget(void)
 {
-    s_ov.vCount = s_ov.bCount = s_ov.textBatches = s_ov.topFirst = 0;
+    s_ov.buf.vCount = s_ov.buf.bCount = s_ov.textBatches = s_ov.topFirst = 0;
 }
 
 /* a present's prims at most (a popup is a few hundred) */
@@ -1093,6 +1144,7 @@ static void overlayForget(void)
 
 void rd_set_present_overlay(RdOverlayFn fn, void *user)
 {
+    (void)rd_thread_drain(); /* no picture on the render thread draws the batches */
     s_ov.fn = fn;
     s_ov.user = fn ? user : NULL;
     overlayForget();
@@ -1100,6 +1152,7 @@ void rd_set_present_overlay(RdOverlayFn fn, void *user)
 
 void rd_set_present_overlay_top(RdOverlayFn fn, void *user)
 {
+    (void)rd_thread_drain();
     s_ov.topFn = fn;
     s_ov.topUser = fn ? user : NULL;
     overlayForget();
@@ -1131,6 +1184,7 @@ bool rd_present_blank(void)
     }
     /* lists 11 and 12 of a frame with none: no draw, no target touched */
     static RdFrame empty;
+    (void)rd_thread_drain(); /* no picture on the render thread reads s_blank */
     s_blank = 1;
     const bool ok = rd__replay_frame(&empty, 1, true);
     s_blank = 0;
@@ -1139,6 +1193,7 @@ bool rd_present_blank(void)
 
 void rd_set_deferred_text_fn(RdDeferredTextFn fn, void *user)
 {
+    (void)rd_thread_drain();
     s_ov.textFn = fn;
     s_ov.textUser = fn ? user : NULL;
     overlayForget();
@@ -1149,42 +1204,83 @@ bool rd_deferred_text_active(void)
     return g_rd.deferText;
 }
 
-void rd_overlay_prims(RdPrim type, const RdScreenVtx *v, uint32_t n, RdTex tex, RdBlend blend)
+/* one batch of n prims into o, in region sc */
+static void bufAppend(OverlayBuf *o, RhiRect sc, uint32_t type, const RdScreenVtx *v, uint32_t n,
+                      uint32_t tex, uint32_t blend)
 {
-    if (!s_ov.inside || !v || n == 0 || (uint32_t)type > RD_PRIM_SPRITES ||
-        n > RD_OVERLAY_MAX_VERTICES - s_ov.vCount) {
+    if (!v || n == 0 || type > RD_PRIM_SPRITES || n > RD_OVERLAY_MAX_VERTICES - o->vCount) {
         return;
     }
-    if (s_ov.vCount + n > s_ov.vCap) {
-        uint32_t cap = s_ov.vCap ? s_ov.vCap : 1024;
-        while (cap < s_ov.vCount + n) {
+    if (o->vCount + n > o->vCap) {
+        uint32_t cap = o->vCap ? o->vCap : 1024;
+        while (cap < o->vCount + n) {
             cap *= 2;
         }
-        RdScreenVtx *p = realloc(s_ov.v, (size_t)cap * sizeof(*p));
+        RdScreenVtx *p = realloc(o->v, (size_t)cap * sizeof(*p));
         if (!p) {
             return;
         }
-        s_ov.v = p;
-        s_ov.vCap = cap;
+        o->v = p;
+        o->vCap = cap;
     }
-    if (s_ov.bCount == s_ov.bCap) {
-        const uint32_t cap = s_ov.bCap ? s_ov.bCap * 2 : 64;
-        OverlayBatch *p = realloc(s_ov.b, (size_t)cap * sizeof(*p));
+    if (o->bCount == o->bCap) {
+        const uint32_t cap = o->bCap ? o->bCap * 2 : 64;
+        OverlayBatch *p = realloc(o->b, (size_t)cap * sizeof(*p));
         if (!p) {
             return;
         }
-        s_ov.b = p;
-        s_ov.bCap = cap;
+        o->b = p;
+        o->bCap = cap;
     }
-    memcpy(s_ov.v + s_ov.vCount, v, (size_t)n * sizeof(*v));
-    OverlayBatch *b = &s_ov.b[s_ov.bCount++];
-    b->first = s_ov.vCount;
+    memcpy(o->v + o->vCount, v, (size_t)n * sizeof(*v));
+    OverlayBatch *b = &o->b[o->bCount++];
+    b->first = o->vCount;
     b->count = n;
-    b->tex = tex.id;
+    b->tex = tex;
     b->prim = (uint8_t)type;
     b->blend = (uint8_t)blend;
-    b->sc = s_ov.sc;
-    s_ov.vCount += n;
+    b->sc = sc;
+    o->vCount += n;
+}
+
+void rd_overlay_prims(RdPrim type, const RdScreenVtx *v, uint32_t n, RdTex tex, RdBlend blend)
+{
+    if (t_into) {
+        bufAppend(t_into, t_sc, (uint32_t)type, v, n, tex.id, (uint32_t)blend);
+        return;
+    }
+    /* UI code drawing for the overlay outside a collect on its thread
+     * (the font's overlay mode left on, or entered off the callbacks) */
+    static unsigned dropped;
+    const unsigned k = __atomic_add_fetch(&dropped, 1u, __ATOMIC_RELAXED);
+    if (k <= 8 || k % 100 == 0) {
+        rd__log("overlay: %u prims given outside a present's overlay collect on %s thread were "
+                "dropped (%u times)",
+                n, rd_thread_on_render() ? "the render" : "this", k);
+    }
+}
+
+/* a layer's callback on this thread, its prims into o in region sc */
+static void layerCollect(OverlayBuf *o, RhiRect sc, RdOverlayFn fn, const RdOverlayCtx *c,
+                         void *user)
+{
+    OverlayBuf *const into = t_into;
+    const RhiRect was = t_sc;
+    t_into = o;
+    t_sc = sc;
+    fn(c, user);
+    t_into = into;
+    t_sc = was;
+}
+
+/* s_pre's batches [from, to) after the present's own (the regions and
+ * the bounds as rd_overlay_prims gives them) */
+static void preCopy(uint32_t from, uint32_t to)
+{
+    for (uint32_t i = from; i < to; i++) {
+        const OverlayBatch *b = &s_pre.buf.b[i];
+        bufAppend(&s_ov.buf, b->sc, b->prim, s_pre.buf.v + b->first, b->count, b->tex, b->blend);
+    }
 }
 
 /* ---------------------------------------------------------- deferred text
@@ -1456,28 +1552,33 @@ static void textCollect(const RdFrame *f, int keep)
             if (it.additive && !(it.rgba[0] | it.rgba[1] | it.rgba[2])) {
                 continue; /* adds nothing */
             }
-            s_ov.sc = r;
-            s_ov.inside = 1;
+            OverlayBuf *const into = t_into;
+            const RhiRect was = t_sc;
+            t_into = &s_ov.buf;
+            t_sc = r;
             s_ov.textFn(&s_ov.ctx, &it, s_ov.textUser);
-            s_ov.inside = 0;
+            t_into = into;
+            t_sc = was;
         }
     }
     s_text.n = 0;
     s_text.f = NULL;
 }
 
-/* rd__overlay_collect for a game frame (filmBox NULL) or for a film's
- * present (rd__overlay_collect_film: the film's 4:3 box on the output, no
- * CRT grid, no deferred text) */
-static void overlayCollect(const RdFrame *f, int keep, const RhiRect *filmBox)
+/* The overlay's layout for a game frame (filmBox NULL) or for a film's
+ * present (the film's 4:3 box on the output, no CRT grid): the main
+ * layer's context c, the top layer's t and whether the main layer is on
+ * the CRT filter's grid; false when nothing is collected (no layer or
+ * text registered, no output).  It reads g_rd.settings, the CRT grid,
+ * the frame's exact width and s_blank: the game thread's between
+ * pictures, and as it posted them during one (texLock) */
+static bool overlayLayout(const RhiRect *filmBox, RdOverlayCtx *c, RdOverlayCtx *t, int *grid)
 {
-    overlayForget();
-    s_ov.grid = 0;
-    g_rd.deferText = false;
     uint32_t w = g_rd.settings.outputWidth, h = g_rd.settings.outputHeight;
     const uint32_t outW = w, outH = h;
+    *grid = 0;
     if ((!s_ov.fn && !s_ov.textFn && !s_ov.topFn) || !w || !h) {
-        return;
+        return false;
     }
     /* the output and box rd__present_record will use: both come from
      * g_rd.settings.  One case changes them after this: on the present
@@ -1496,51 +1597,100 @@ static void overlayCollect(const RdFrame *f, int keep, const RhiRect *filmBox)
      * picture: its context is the filter's source grid at the frame's
      * lines (the 1x frame the game's own UI is drawn in), the box all of
      * it, and rd__crt_record draws the prims into that grid */
-    const bool crt = rd__crt_on() && !s_blank && !filmBox;
-    if (crt) {
+    if (rd__crt_on() && !s_blank && !filmBox) {
         uint32_t vw, vh;
         rd__crt_grid(&vw, &vh);
         w = vw;
         h = g_rd.gsH ? g_rd.gsH : 2 * vh;
         box = (RhiRect){0, 0, w, h};
-        s_ov.grid = 1;
+        *grid = 1;
     }
-    RdOverlayCtx *c = &s_ov.ctx;
     c->outW = w;
     c->outH = h;
     c->box = (RdRect){box.x, box.y, box.w, box.h};
     c->boxScale = (float)box.h / 448.0f;
     c->mirror = pr->mirror && rd__mirror_on();
+    /* the top layer (the touch controls) is laid out on the output in
+     * every mode, never on the grid: overlayRecord draws it on the output
+     * after the CRT filter, so it stays sharp */
+    t->outW = outW;
+    t->outH = outH;
+    t->box = (RdRect){outBox.x, outBox.y, outBox.w, outBox.h};
+    t->boxScale = (float)outBox.h / 448.0f;
+    t->mirror = c->mirror;
+    return true;
+}
+
+/* the two layers' callbacks into o with the contexts c and t: the main
+ * layer's batches, then the top layer's from *topFirst */
+static void layersCollect(OverlayBuf *o, const RdOverlayCtx *c, const RdOverlayCtx *t,
+                          uint32_t *topFirst)
+{
+    if (s_ov.fn) {
+        layerCollect(o, (RhiRect){0, 0, c->outW, c->outH}, s_ov.fn, c, s_ov.user);
+    }
+    *topFirst = o->bCount;
+    if (s_ov.topFn) {
+        layerCollect(o, (RhiRect){0, 0, t->outW, t->outH}, s_ov.topFn, t, s_ov.topUser);
+    }
+}
+
+void rd__overlay_hand_over(void)
+{
+    if (s_pre.have) {
+        return; /* this picture's already: a refused post run here */
+    }
+    s_pre.have = true;
+    s_pre.buf.vCount = s_pre.buf.bCount = s_pre.topFirst = 0;
+    s_pre.ok = overlayLayout(NULL, &s_pre.ctx, &s_pre.topCtx, &s_pre.grid);
+    if (s_pre.ok) {
+        layersCollect(&s_pre.buf, &s_pre.ctx, &s_pre.topCtx, &s_pre.topFirst);
+    }
+}
+
+void rd__overlay_hand_over_drop(void)
+{
+    s_pre.have = false;
+}
+
+/* rd__overlay_collect for a game frame (filmBox NULL) or for a film's
+ * present (rd__overlay_collect_film: no CRT grid, no deferred text); a
+ * game frame the game thread handed over takes the layers it collected
+ * (s_pre) */
+static void overlayCollect(const RdFrame *f, int keep, const RhiRect *filmBox)
+{
+    overlayForget();
+    s_ov.grid = 0;
+    g_rd.deferText = false;
+    const bool pre = !filmBox && s_pre.have;
+    if (pre) {
+        s_pre.have = false;
+        if (!s_pre.ok) {
+            return;
+        }
+        s_ov.ctx = s_pre.ctx;
+        s_ov.topCtx = s_pre.topCtx;
+        s_ov.grid = s_pre.grid;
+    } else if (!overlayLayout(filmBox, &s_ov.ctx, &s_ov.topCtx, &s_ov.grid)) {
+        return;
+    }
     /* the deferred text first, so the overlay draws above it; none under
      * the CRT filter (the rows draw as quads into the scene, as in the
      * Original preset, and go through the filter) */
-    if (s_ov.textFn && f && !filmBox && g_rd.settings.preset == RD_PRESET_ENHANCED && !crt &&
+    if (s_ov.textFn && f && !filmBox && g_rd.settings.preset == RD_PRESET_ENHANCED && !s_ov.grid &&
         !s_blank) {
         g_rd.deferText = true;
         textCollect(s_reshowText ? s_reshowText : f, s_reshowText ? 0 : keep);
     }
-    s_ov.textBatches = s_ov.bCount;
-    if (s_ov.fn) {
-        s_ov.sc = (RhiRect){0, 0, w, h};
-        s_ov.inside = 1;
-        s_ov.fn(c, s_ov.user);
-        s_ov.inside = 0;
-    }
-    /* the top layer (the touch controls) last, laid out on
-     * the output in every mode, never on the grid: overlayRecord draws it
-     * on the output after the CRT filter, so it stays sharp */
-    s_ov.topFirst = s_ov.bCount;
-    if (s_ov.topFn) {
-        RdOverlayCtx *t = &s_ov.topCtx;
-        t->outW = outW;
-        t->outH = outH;
-        t->box = (RdRect){outBox.x, outBox.y, outBox.w, outBox.h};
-        t->boxScale = (float)outBox.h / 448.0f;
-        t->mirror = c->mirror;
-        s_ov.sc = (RhiRect){0, 0, outW, outH};
-        s_ov.inside = 1;
-        s_ov.topFn(t, s_ov.topUser);
-        s_ov.inside = 0;
+    s_ov.textBatches = s_ov.buf.bCount;
+    if (pre) {
+        preCopy(0, s_pre.topFirst);
+        s_ov.topFirst = s_ov.buf.bCount;
+        preCopy(s_pre.topFirst, s_pre.buf.bCount);
+    } else {
+        uint32_t top = 0;
+        layersCollect(&s_ov.buf, &s_ov.ctx, &s_ov.topCtx, &top);
+        s_ov.topFirst = top;
     }
 }
 
@@ -1556,7 +1706,7 @@ void rd__overlay_collect_film(const RhiRect *box)
 
 uint64_t rd__overlay_ring_bytes(void)
 {
-    if (!s_ov.bCount) {
+    if (!s_ov.buf.bCount) {
         return 0;
     }
     const uint64_t align = rhi_limits()->uniformAlign;
@@ -1565,8 +1715,8 @@ uint64_t rd__overlay_ring_bytes(void)
      * DrawCB and the expanded vertices (sprites and points give 6 a prim's
      * 2 or 1) a batch */
     uint64_t total = 3 * ((uint64_t)sizeof(IcoFrameCB) + 2 * align);
-    total += (uint64_t)s_ov.bCount * (sizeof(IcoDrawCB) + 2 * align + 16);
-    total += (uint64_t)s_ov.vCount * 6 * sizeof(IcoSpriteVertex);
+    total += (uint64_t)s_ov.buf.bCount * (sizeof(IcoDrawCB) + 2 * align + 16);
+    total += (uint64_t)s_ov.buf.vCount * 6 * sizeof(IcoSpriteVertex);
     return total;
 }
 
@@ -1629,7 +1779,7 @@ static void drawBatchesAt(RhiCommandList cl, RhiTexture out, RhiFormat fmt, uint
      * pixels land 1:1 with integers on pixel edges (rd.h rd_overlay_prims) */
     const RdUniform frame = rd__frame_group(ow, oh, 0.5f, 0.5f);
     for (uint32_t i = from; i < to; i++) {
-        const OverlayBatch *b = &s_ov.b[i];
+        const OverlayBatch *b = &s_ov.buf.b[i];
         /* the deferred text's batches carry their regions */
         if (memcmp(&b->sc, &cur, sizeof(cur)) != 0) {
             cur = b->sc;
@@ -1640,7 +1790,8 @@ static void drawBatchesAt(RhiCommandList cl, RhiTexture out, RhiFormat fmt, uint
                 rhi_cmd_set_scissor(cl, &cur);
             }
         }
-        rd__overlay_draw(cl, fmt, frame, b->prim, s_ov.v + b->first, b->count, b->tex, b->blend);
+        rd__overlay_draw(cl, fmt, frame, b->prim, s_ov.buf.v + b->first, b->count, b->tex,
+                         b->blend);
     }
     if (!inPass) {
         rhi_cmd_end_render_pass(cl);
@@ -1675,8 +1826,8 @@ static void overlayRecord(RhiCommandList cl, RhiTexture out, const RhiRect *box,
                           bool inPass)
 {
     if (!s_ov.grid) {
-        drawBatches(cl, out, s_outFormat, s_outW, s_outH, &s_ov.topCtx, s_ov.topFirst, s_ov.bCount,
-                    inPass);
+        drawBatches(cl, out, s_outFormat, s_outW, s_outH, &s_ov.topCtx, s_ov.topFirst,
+                    s_ov.buf.bCount, inPass);
         drawBatches(cl, out, s_outFormat, s_outW, s_outH, &s_ov.ctx, s_ov.textBatches,
                     s_ov.topFirst, inPass);
     } else {
@@ -1684,8 +1835,8 @@ static void overlayRecord(RhiCommandList cl, RhiTexture out, const RhiRect *box,
             drawBatchesAt(cl, out, s_outFormat, s_outW, s_outH, &s_ov.ctx, box, s_ov.textBatches,
                           s_ov.topFirst, inPass);
         }
-        drawBatches(cl, out, s_outFormat, s_outW, s_outH, &s_ov.topCtx, s_ov.topFirst, s_ov.bCount,
-                    inPass);
+        drawBatches(cl, out, s_outFormat, s_outW, s_outH, &s_ov.topCtx, s_ov.topFirst,
+                    s_ov.buf.bCount, inPass);
     }
     overlayForget();
     s_ov.grid = 0;
@@ -1697,7 +1848,7 @@ static void overlayRecord(RhiCommandList cl, RhiTexture out, const RhiRect *box,
 void rd__overlay_film_record(RhiCommandList cl, RhiTexture out, RhiFormat fmt, uint32_t w,
                              uint32_t h)
 {
-    drawBatches(cl, out, fmt, w, h, &s_ov.topCtx, s_ov.topFirst, s_ov.bCount, false);
+    drawBatches(cl, out, fmt, w, h, &s_ov.topCtx, s_ov.topFirst, s_ov.buf.bCount, false);
     drawBatches(cl, out, fmt, w, h, &s_ov.ctx, s_ov.textBatches, s_ov.topFirst, false);
     overlayForget();
     s_ov.grid = 0;
@@ -1727,25 +1878,210 @@ static struct {
     RhiTexture tex;
     RhiState state;
     uint32_t w, h;
+    uint32_t maxW; /* rd_capture_presented_max's width limit, 0: none */
     RhiFormat fmt;
     int result; /* 1 written, -1 failed, 0 none since the last rd_capture_result */
     char done[1024];
+    int photo; /* this present's copy serves rd_capture_presented (not only the shot) */
 } s_cap;
+
+/* rd.h rd_capture_shot: its own request beside the capture's, the copy
+ * (s_cap.tex) shared when both are armed at one present */
+static struct {
+    int armed;          /* waiting for a present */
+    int copied;         /* this present's copy holds it: cropped and handed on at the finish */
+    int dropped;        /* fn(NULL) at the finish */
+    uint32_t maxFrame;  /* the last frame begun when it was armed */
+    uint32_t dropFrame; /* the frame of the present that came too late, 0 for a failed copy */
+    RhiRect box;        /* the presentation box, inside the output */
+    RdShotFn fn;
+    void *user;
+} s_shot;
+
+/* the shot's lines (one a pause): the first 8, then every 100th */
+static bool shotLogNow(void)
+{
+    static unsigned n;
+    n++;
+    return n <= 8 || n % 100 == 0;
+}
+
+/* the shot's fn, told once (the request forgotten first, so fn may arm
+ * the next one) */
+static void shotHand(uint8_t *rgba, uint32_t w, uint32_t h)
+{
+    const RdShotFn fn = s_shot.fn;
+    void *user = s_shot.user;
+    s_shot.fn = NULL;
+    s_shot.user = NULL;
+    if (fn) {
+        fn(rgba, w, h, user);
+    } else {
+        free(rgba);
+    }
+}
+
+bool rd_capture_shot(RdShotFn fn, void *user)
+{
+    if (!g_rd.hasDevice || !fn) {
+        return false;
+    }
+    (void)rd_thread_drain(); /* no present of the render thread reads the request now */
+    if (s_shot.armed) {
+        s_shot.armed = 0;
+        shotHand(NULL, 0, 0); /* replaced before a present took it */
+    }
+    s_shot.fn = fn;
+    s_shot.user = user;
+    s_shot.maxFrame = g_rd.frameCounter;
+    s_shot.armed = 1;
+    return true;
+}
+
+/* rd_capture_shot_arm's answer, stored by the present's thread; ready
+ * once written (the game thread takes it) */
+static struct {
+    uint8_t *px;
+    uint32_t w, h;
+    int ready;
+} s_shotDone;
+
+static void shotDeferred(uint8_t *rgba, uint32_t w, uint32_t h, void *user)
+{
+    (void)user;
+    s_shotDone.px = rgba;
+    s_shotDone.w = rgba ? w : 0;
+    s_shotDone.h = rgba ? h : 0;
+    __atomic_store_n(&s_shotDone.ready, 1, __ATOMIC_RELEASE);
+}
+
+static void shotDoneForget(void)
+{
+    if (__atomic_load_n(&s_shotDone.ready, __ATOMIC_ACQUIRE)) {
+        free(s_shotDone.px);
+        s_shotDone.px = NULL;
+        __atomic_store_n(&s_shotDone.ready, 0, __ATOMIC_RELEASE);
+    }
+}
+
+bool rd_capture_shot_arm(void)
+{
+    if (!g_rd.hasDevice) {
+        return false;
+    }
+    rd_capture_shot_cancel(); /* an earlier request and an answer not taken go */
+    return rd_capture_shot(shotDeferred, NULL);
+}
+
+int rd_capture_shot_take(uint8_t **rgba, uint32_t *w, uint32_t *h)
+{
+    if (!__atomic_load_n(&s_shotDone.ready, __ATOMIC_ACQUIRE)) {
+        return 0;
+    }
+    *rgba = s_shotDone.px;
+    *w = s_shotDone.w;
+    *h = s_shotDone.h;
+    s_shotDone.px = NULL;
+    __atomic_store_n(&s_shotDone.ready, 0, __ATOMIC_RELEASE);
+    return 1;
+}
+
+void rd_capture_shot_cancel(void)
+{
+    (void)rd_thread_drain();
+    shotDoneForget(); /* an answer not taken goes too */
+    if (s_shot.armed) {
+        s_shot.armed = 0;
+        s_shot.fn = NULL;
+        s_shot.user = NULL;
+    }
+}
+
+bool rd_present_box_size(uint32_t *w, uint32_t *h)
+{
+    uint32_t ow, oh;
+    RhiRect box;
+    if (!rd__last_present_box(&ow, &oh, &box) || box.w == 0 || box.h == 0) {
+        return false;
+    }
+    *w = box.w;
+    *h = box.h;
+    return true;
+}
 
 bool rd_capture_presented(const char *png)
 {
     if (!g_rd.hasDevice || !png || !png[0] || strlen(png) >= sizeof(s_cap.path)) {
         return false;
     }
+    (void)rd_thread_drain(); /* no present of the render thread reads the request now */
     strcpy(s_cap.path, png);
     s_cap.armed = 1;
+    s_cap.maxW = 0;
     s_cap.result = 0;
     return true;
 }
 
+bool rd_capture_presented_max(const char *png, uint32_t maxW)
+{
+    if (!rd_capture_presented(png)) {
+        return false;
+    }
+    s_cap.maxW = maxW;
+    return true;
+}
+
+/* src (w x h RGBA8) averaged down to dw x dh by area: each destination
+ * pixel is the mean of the source pixels its footprint covers (whole
+ * pixels, the footprint's edges rounded), in a malloc block; NULL when
+ * memory is short */
+static uint8_t *boxDownscale(const uint8_t *src, uint32_t w, uint32_t h, uint32_t dw, uint32_t dh)
+{
+    uint8_t *dst = malloc((size_t)dw * dh * 4);
+
+    if (!dst) {
+        return NULL;
+    }
+    for (uint32_t y = 0; y < dh; y++) {
+        const uint32_t y0 = (uint32_t)((uint64_t)y * h / dh);
+        uint32_t y1 = (uint32_t)((uint64_t)(y + 1) * h / dh);
+
+        y1 = y1 > y0 ? y1 : y0 + 1;
+        for (uint32_t x = 0; x < dw; x++) {
+            const uint32_t x0 = (uint32_t)((uint64_t)x * w / dw);
+            uint32_t x1 = (uint32_t)((uint64_t)(x + 1) * w / dw);
+            uint64_t sum[4] = {0, 0, 0, 0};
+
+            x1 = x1 > x0 ? x1 : x0 + 1;
+            for (uint32_t sy = y0; sy < y1; sy++) {
+                const uint8_t *p = src + ((size_t)sy * w + x0) * 4;
+
+                for (uint32_t sx = x0; sx < x1; sx++, p += 4) {
+                    sum[0] += p[0];
+                    sum[1] += p[1];
+                    sum[2] += p[2];
+                    sum[3] += p[3];
+                }
+            }
+            const uint64_t n = (uint64_t)(x1 - x0) * (y1 - y0);
+            uint8_t *d = dst + ((size_t)y * dw + x) * 4;
+
+            for (int c = 0; c < 4; c++) {
+                d[c] = (uint8_t)((sum[c] + n / 2) / n);
+            }
+        }
+    }
+    return dst;
+}
+
 bool rd__capture_armed(void)
 {
-    return s_cap.armed != 0;
+    return s_cap.armed != 0 || s_shot.armed != 0;
+}
+
+bool rd__capture_pending(void)
+{
+    return s_cap.copied != 0 || s_shot.copied != 0 || s_shot.dropped != 0;
 }
 
 int rd_capture_result(char *path, uint32_t pathSize)
@@ -1759,16 +2095,43 @@ int rd_capture_result(char *path, uint32_t pathSize)
     return r;
 }
 
+/* the shot armed: this present takes it (its frame was begun by the time
+ * it was armed, the box inside the output) or drops it */
+static void shotTake(const RhiRect *box)
+{
+    if (!s_shot.armed) {
+        return;
+    }
+    s_shot.armed = 0;
+    RdPresentInfo pi;
+    const uint32_t frame = rd_last_present_info(&pi) ? pi.frame : 0;
+    const int64_t x0 = box->x > 0 ? box->x : 0, y0 = box->y > 0 ? box->y : 0;
+    int64_t x1 = (int64_t)box->x + box->w, y1 = (int64_t)box->y + box->h;
+    x1 = x1 < (int64_t)s_outW ? x1 : (int64_t)s_outW;
+    y1 = y1 < (int64_t)s_outH ? y1 : (int64_t)s_outH;
+    if (frame > s_shot.maxFrame || x1 <= x0 || y1 <= y0) {
+        s_shot.dropped = 1;
+        s_shot.dropFrame = frame > s_shot.maxFrame ? frame : 0;
+        return;
+    }
+    s_shot.box = (RhiRect){(int32_t)x0, (int32_t)y0, (uint32_t)(x1 - x0), (uint32_t)(y1 - y0)};
+    s_shot.copied = 1;
+}
+
 /* the output, out (RENDER_TARGET), into the capture texture; out goes back
  * to RENDER_TARGET for the overlay.  inPass: the output's pass is open
  * (rd__present_record); a copy cannot be recorded inside a pass, so it is
  * ended before the copy and a pass that loads the output is opened after
- * it, for the overlay to draw in */
-static void captureRecord(RhiCommandList cl, RhiTexture out, RhiState *outState, bool inPass)
+ * it, for the overlay to draw in.  box: the presentation box (the shot's
+ * crop) */
+static void captureRecord(RhiCommandList cl, RhiTexture out, RhiState *outState, bool inPass,
+                          const RhiRect *box)
 {
-    if (!s_cap.armed) {
+    shotTake(box);
+    if (!s_cap.armed && !s_shot.copied) {
         return;
     }
+    s_cap.photo = s_cap.armed;
     s_cap.armed = 0;
     if (!s_cap.tex.id || s_cap.w != s_outW || s_cap.h != s_outH || s_cap.fmt != s_outFormat) {
         if (s_cap.tex.id) {
@@ -1783,9 +2146,16 @@ static void captureRecord(RhiCommandList cl, RhiTexture out, RhiState *outState,
         s_cap.fmt = s_outFormat;
     }
     if (!s_cap.tex.id) {
-        rd__log("photo: capture %s: no texture for %ux%u", s_cap.path, s_outW, s_outH);
-        snprintf(s_cap.done, sizeof(s_cap.done), "%s", s_cap.path);
-        s_cap.result = -1;
+        if (s_cap.photo) {
+            rd__log("photo: capture %s: no texture for %ux%u", s_cap.path, s_outW, s_outH);
+            snprintf(s_cap.done, sizeof(s_cap.done), "%s", s_cap.path);
+            s_cap.result = -1;
+        }
+        if (s_shot.copied) {
+            s_shot.copied = 0;
+            s_shot.dropped = 1;
+            s_shot.dropFrame = 0;
+        }
         return;
     }
     if (inPass) {
@@ -1810,10 +2180,24 @@ static void captureRecord(RhiCommandList cl, RhiTexture out, RhiState *outState,
 
 void rd__capture_finish(void)
 {
+    if (s_shot.dropped) {
+        s_shot.dropped = 0;
+        if (shotLogNow()) {
+            if (s_shot.dropFrame != 0) {
+                rd__log("state picture: not taken: the first present after the request showed "
+                        "frame %u, later than frame %u it asked for",
+                        s_shot.dropFrame, s_shot.maxFrame);
+            } else {
+                rd__log("state picture: not taken: no copy of the %ux%u output", s_outW, s_outH);
+            }
+        }
+        shotHand(NULL, 0, 0);
+    }
     if (!s_cap.copied) {
         return;
     }
     s_cap.copied = 0;
+    const double t0 = rd__now_ms();
     const size_t n = (size_t)s_cap.w * s_cap.h * 4;
     uint8_t *px = malloc(n);
     bool ok = px && rd__read_rhi_texture(s_cap.tex, &s_cap.state, s_cap.w, s_cap.h, px, n);
@@ -1824,10 +2208,60 @@ void rd__capture_finish(void)
             px[i + 2] = b;
         }
     }
-    ok = ok && rd_write_png(s_cap.path, px, s_cap.w, s_cap.h, s_cap.w * 4, 0);
+    if (s_shot.copied) {
+        /* the box's rows, opaque */
+        s_shot.copied = 0;
+        const RhiRect b = s_shot.box;
+        const bool fits = (uint64_t)b.x + b.w <= s_cap.w && (uint64_t)b.y + b.h <= s_cap.h;
+        uint8_t *crop = ok && fits ? malloc((size_t)b.w * b.h * 4) : NULL;
+        if (crop) {
+            for (uint32_t y = 0; y < b.h; y++) {
+                memcpy(crop + (size_t)y * b.w * 4, px + ((size_t)(b.y + y) * s_cap.w + b.x) * 4,
+                       (size_t)b.w * 4);
+            }
+            for (size_t i = 3; i < (size_t)b.w * b.h * 4; i += 4) {
+                crop[i] = 255;
+            }
+            if (shotLogNow()) {
+                rd__log("state picture: %ux%u from the %ux%u output (the box at %d,%d), read "
+                        "back in %.1f ms",
+                        b.w, b.h, s_cap.w, s_cap.h, b.x, b.y, rd__now_ms() - t0);
+            }
+        } else {
+            rd__log("state picture: not taken: the %ux%u output could not be read back", s_cap.w,
+                    s_cap.h);
+        }
+        shotHand(crop, crop ? b.w : 0, crop ? b.h : 0);
+    }
+    if (!s_cap.photo) {
+        free(px);
+        return;
+    }
+    s_cap.photo = 0;
+    uint32_t ow = s_cap.w, oh = s_cap.h;
+    if (ok && s_cap.maxW != 0 && s_cap.w > s_cap.maxW) {
+        /* wider than the limit: the same picture at maxW wide */
+        const uint32_t dw = s_cap.maxW;
+        const uint32_t dh = (uint32_t)(((uint64_t)s_cap.h * dw + s_cap.w / 2) / s_cap.w);
+        uint8_t *small = boxDownscale(px, s_cap.w, s_cap.h, dw, dh > 0 ? dh : 1);
+
+        if (small) {
+            free(px);
+            px = small;
+            ow = dw;
+            oh = dh > 0 ? dh : 1;
+        }
+    }
+    ok = ok && rd_write_png(s_cap.path, px, ow, oh, ow * 4, 0);
     free(px);
-    rd__log("photo: capture %ux%u %s %s", s_cap.w, s_cap.h,
-            ok ? "written to" : "failed:", s_cap.path);
+    if (ow != s_cap.w || oh != s_cap.h) {
+        rd__log("photo: capture %ux%u written at %ux%u (the bug-report picture's width limit %u) "
+                "%s %s",
+                s_cap.w, s_cap.h, ow, oh, s_cap.maxW, ok ? "to" : "failed:", s_cap.path);
+    } else {
+        rd__log("photo: capture %ux%u %s %s", s_cap.w, s_cap.h,
+                ok ? "written to" : "failed:", s_cap.path);
+    }
     snprintf(s_cap.done, sizeof(s_cap.done), "%s", s_cap.path);
     s_cap.result = ok ? 1 : -1;
 }
@@ -1886,11 +2320,13 @@ void rd__present_record(RhiCommandList cl)
      * or when it cannot draw, nothing below changes */
     const int mirror = pr->mirror && rd__mirror_on();
     bool filtered = false, uiInPicture = false;
+    RhiRect crtBox = box; /* the picture's box under the filter (the shot's crop) */
     if (rd__crt_on()) {
         /* the filter's box: its grid's shape (the exact width in whole
          * columns, rd__crt_grid), box at 4:3 */
         RhiRect cbox;
         rd__crt_box(s_outW, s_outH, &cbox);
+        crtBox = cbox;
         if (depthWanted()) {
             /* the filter replaces the box blit that carries the effects depth */
             rd__log_once(RD_ONCE_EFFECTS_DEPTH_CRT,
@@ -1908,7 +2344,7 @@ void rd__present_record(RhiCommandList cl)
             capOk =
                 rd__crt_record(cl, disp, out, s_outFormat, s_outW, s_outH, &cbox, mirror, false);
             if (capOk) {
-                captureRecord(cl, out, outState, false);
+                captureRecord(cl, out, outState, false, &cbox);
             }
         }
         /* a failed capture pass: the box blit below, the capture before the
@@ -2004,7 +2440,7 @@ void rd__present_record(RhiCommandList cl)
      * port's own UI on the overlay (the popups, the photo HUD); under the
      * CRT filter with UI in the grid it was taken above, from a pass
      * without that UI (a no-op here then) */
-    captureRecord(cl, out, outState, open);
+    captureRecord(cl, out, outState, open, filtered ? &crtBox : &box);
     overlayRecord(cl, out, &box, uiInPicture, open);
     if (open) {
         rhi_cmd_end_render_pass(cl);
@@ -2021,6 +2457,11 @@ void rd__present_finish(void)
     }
 }
 
+bool rd__present_will_show(void)
+{
+    return s_window && s_backbuffer.id;
+}
+
 void rd__present_shutdown(void)
 {
     if (g_rd.presentLines.id) {
@@ -2034,6 +2475,10 @@ void rd__present_shutdown(void)
         rhi_destroy_texture(s_cap.tex); /* the capture's texture */
     }
     memset(&s_cap, 0, sizeof(s_cap));
+    if (s_shot.armed || s_shot.fn) {
+        shotHand(NULL, 0, 0); /* a shot no present took: dropped */
+    }
+    memset(&s_shot, 0, sizeof(s_shot));
     if (s_probe.tex.id) {
         rhi_destroy_texture(s_probe.tex); /* rd_display_probe's */
     }
@@ -2051,14 +2496,17 @@ void rd__present_shutdown(void)
      * tests that read them after rd_shutdown */
     rd__crt_shutdown(); /* the CRT filter */
     /* the overlay's prims (the registration stays), the deferred text's list */
-    free(s_ov.v);
-    free(s_ov.b);
+    free(s_ov.buf.v);
+    free(s_ov.buf.b);
+    free(s_pre.buf.v);
+    free(s_pre.buf.b);
+    memset(&s_pre, 0, sizeof(s_pre));
     free(s_text.p);
     s_text.p = NULL;
     s_text.n = s_text.cap = 0;
-    s_ov.v = NULL;
-    s_ov.b = NULL;
-    s_ov.vCap = s_ov.bCap = 0;
+    s_ov.buf.v = NULL;
+    s_ov.buf.b = NULL;
+    s_ov.buf.vCap = s_ov.buf.bCap = 0;
     overlayForget();
 }
 
@@ -2136,11 +2584,14 @@ static void setOutputSize(uint32_t width, uint32_t height)
     g_rd.pendingSettings.outputHeight = height;
 }
 
-void rd_resize_output(uint32_t width, uint32_t height)
+typedef struct ResizeOutput {
+    uint32_t w, h;
+} ResizeOutput;
+
+static void resizeOutputHere(void *arg)
 {
-    if (!g_rd.inited || width == 0 || height == 0) {
-        return;
-    }
+    const ResizeOutput *r = arg;
+    const uint32_t width = r->w, height = r->h;
     setOutputSize(width, height);
     if (g_rd.hasDevice && rhi_swapchain_format() != RHI_FMT_UNKNOWN) {
         rhi_resize_swapchain(width, height, g_rd.settings.vsync != 0);
@@ -2150,6 +2601,19 @@ void rd_resize_output(uint32_t width, uint32_t height)
      * (rd__apply_display recreates the targets if their scale changed; a
      * fixed scale or size never changes) */
     g_rd.settingsPending = true;
+}
+
+void rd_resize_output(uint32_t width, uint32_t height)
+{
+    if (!g_rd.inited || width == 0 || height == 0) {
+        return;
+    }
+    /* on the render thread between pictures: the output size its presents
+     * read and the swapchain its own (rd_thread.h) */
+    ResizeOutput r = {width, height};
+    if (!rd__render_call(resizeOutputHere, &r)) {
+        resizeOutputHere(&r);
+    }
 }
 
 /* The output follows the swapchain.  The backend rebuilds the

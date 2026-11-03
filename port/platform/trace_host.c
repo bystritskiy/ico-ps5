@@ -14,6 +14,8 @@
 #include "host_loop.h"
 #include "pad_script.h"
 #include "sif_host.h"
+#include "state_port.h"
+#include "state_registry.h"
 #include "stream_watch.h"
 
 /* The game's state the trace reads (each defined in the file named). */
@@ -50,6 +52,15 @@ static int logged_stage = -1;
 
 static int logged_layout = -1;
 
+/* The save state's block (state_port.h): a load rewinds the Main tick
+   count with the game, so the pad script and the recording go on from the
+   saved tick.  The trace file's own position (traced_ticks) is not part of
+   the game: after a rewind it waits until the count passes it again. */
+int ico_trace_state_register(void)
+{
+    return ico_state_register("trace.main_ticks", &main_ticks, sizeof main_ticks, ICO_STATE_CLOCK);
+}
+
 void ico_host_main_tick(void)
 {
     if (main_ticks == 0) {
@@ -61,10 +72,14 @@ void ico_host_main_tick(void)
         ico_diag_milestone("stage_no %d -> %d", logged_stage, stage_no);
         logged_stage = stage_no;
     }
-    /* the menu screen (layout_action.c's numbers: 12 the title
-       with Continue, 20 the load's card check, 19 the file select, 25 the
-       load itself), so a log that ends after Continue says which step it
-       reached */
+    /* the menu screen (layout_action.c's numbers), so a log that ends
+       after Continue says which step it reached.  The numbers are each
+       disc's own (its region table's layout_* rows,
+       port/core/region_<disc>.c): on the European disc 12 is the title with
+       Continue, 20 the load's card check, 19 the file select, 25 the load
+       itself; on the North American disc 9 is the title with Continue, 11
+       the file select, 22 the load itself, 50 play and 49 the stage
+       manager's loading screen (StageManager.c's lt_switch_layout) */
     if (current_layout_id != logged_layout) {
         ico_diag_milestone("menu screen %d -> %d", logged_layout, current_layout_id);
         logged_layout = current_layout_id;
@@ -84,14 +99,14 @@ void ico_host_status(char *out, size_t size)
     ico_sif_host_last_rpc(&sid, &rpc, &rpcs);
     snprintf(out, size,
              "vsync %u, tick %u, stage %d (sys5 %d sys6 %d sys7 %d sys8 %d), fade %d, mpeg %d/%d, "
-             "stgmgr free %d wake %d, pause %d, kanbanEnd %d | cd: %u reads, %u sectors, last lsn "
-             "%u, busy %d, %d waiting, stream %d@%u, cdvd thread %s%s | sif: %u calls, last "
-             "0x%08x/0x%x",
+             "stgmgr free %d wake %d, pause %d, kanbanEnd %d | cd: %u reads, %u sectors, waited "
+             "%.0f ms, last lsn %u, busy %d, %d waiting, stream %d@%u, cdvd thread %s%s | sif: %u "
+             "calls, last 0x%08x/0x%x",
              ico_host_vsync_count(), main_ticks, stage_no, systemStatus[5], systemStatus[6],
              systemStatus[7], systemStatus[8], fadeStatus, mpegPlay, mpegInitDone,
              stageManagerFreeResourceFlag, stgMgrWakeupRequest, game_pause, kanbanBootEnd, cd.reads,
-             cd.sectors, cd.last_lsn, cd.busy, cd.waiters, cd.stream_active, cd.stream_lsn,
-             IosCdvdMgrSleep ? "asleep" : "awake",
+             cd.sectors, (double)cd.wait_ns / 1e6, cd.last_lsn, cd.busy, cd.waiters,
+             cd.stream_active, cd.stream_lsn, IosCdvdMgrSleep ? "asleep" : "awake",
              iosCdvdBackGroundMgrRunning ? " (background reads)" : "", rpcs, sid, rpc);
     {
         /* the two stream slots as the driver plays them (stream_watch.h) */

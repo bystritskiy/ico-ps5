@@ -106,8 +106,11 @@
  * the camera turned more than RD_INTERP_CAMERA_TURN or moved more than
  * RD_INTERP_CAMERA_MOVE in the tick (a cut the hooks missed), at a fade
  * edge (either frame fully faded: what is behind a black screen may change
- * all at once), after the display options recreated the targets, and when
- * the scene size changed.
+ * all at once), after the display options recreated the targets, when
+ * the scene size changed, and when the eye's path from the tick before
+ * crossed a wall or a floor of the stage (rd_camera_cut_wall from GsBase.c
+ * gsbHostCullFlip, port/game/camera_wall.h: the game's cameras have no wall
+ * test, and the blended eye would be behind the wall; RD_SNAP_WALL).
  *
  * Held at the tick (cur's, unkeyed or state): CLUT animation (textures are
  * updated in place), the rand-driven draws (the menu sparkle, lightning:
@@ -840,84 +843,10 @@ static bool sameQw4(const float (*a)[4], const float (*b)[4], int at)
     return memcmp(a[at], b[at], 4 * 4 * sizeof(float)) == 0;
 }
 
-/* The pivots the rotations turn about.  A skinned draw's bone is the
- * node times the cluster (bind) inverse, so its translation is not the
- * joint: blended about it, a turning limb would leave its joint.  Each
- * bone's pivot is the weighted centroid of the mesh vertices bound to it
- * (the stream's weight qword: VU address bone * 4 + 16 and weight, twice);
- * a rigid mesh's is its vertices' centroid.  Both in the mesh's space, so
- * the part's middle follows the straight line between its two ticks, as an
- * element-wise blend has it, and the turn is blended about it. */
-#define RD_INTERP_BONES 60
-
-static double s_pivot[RD_INTERP_BONES][4]; /* x, y, z, weight */
-
-static uint32_t s_pivotMesh;
-
-static void skinPivots(uint32_t meshId)
-{
-    if (meshId == s_pivotMesh) {
-        return;
-    }
-    memset(s_pivot, 0, sizeof(s_pivot));
-    s_pivotMesh = meshId;
-    const RdMeshRec *m = rd__mesh_rec(meshId);
-    if (!m || !m->vu || m->qwPerVertex != RD_VU_QW_SKIN || !m->stream) {
-        return;
-    }
-    for (uint32_t v = 0; v < m->vertexCount; v++) {
-        const float *pos = m->stream[(size_t)v * RD_VU_QW_SKIN];
-        const float *wt = m->stream[(size_t)v * RD_VU_QW_SKIN + 2];
-        for (int k = 0; k < 2; k++) {
-            uint32_t addr;
-            memcpy(&addr, &wt[k * 2], 4);
-            const float w = wt[k * 2 + 1];
-            if (addr < 16u || ((addr - 16u) & 3u) != 0u || (addr - 16u) / 4u >= RD_INTERP_BONES ||
-                !(w > 0.0f) || !isfinite(pos[0]) || !isfinite(pos[1]) || !isfinite(pos[2])) {
-                continue;
-            }
-            double *pv = s_pivot[(addr - 16u) / 4u];
-            pv[0] += w * pos[0];
-            pv[1] += w * pos[1];
-            pv[2] += w * pos[2];
-            pv[3] += w;
-        }
-    }
-    for (int b = 0; b < RD_INTERP_BONES; b++) {
-        if (s_pivot[b][3] > 0.0) {
-            for (int k = 0; k < 3; k++) {
-                s_pivot[b][k] /= s_pivot[b][3];
-            }
-        }
-    }
-}
-
-/* a rigid mesh's vertex centroid; false without vertices */
-static bool meshCentroid(uint32_t meshId, double out[3])
-{
-    const RdMeshRec *m = rd__mesh_rec(meshId);
-    if (!m || !m->vu || !m->stream || m->vertexCount == 0 || m->qwPerVertex == 0) {
-        return false;
-    }
-    double s[3] = {0.0, 0.0, 0.0};
-    uint32_t n = 0;
-    for (uint32_t v = 0; v < m->vertexCount; v++) {
-        const float *pos = m->stream[(size_t)v * m->qwPerVertex];
-        if (isfinite(pos[0]) && isfinite(pos[1]) && isfinite(pos[2])) {
-            s[0] += pos[0];
-            s[1] += pos[1];
-            s[2] += pos[2];
-            n++;
-        }
-    }
-    if (n == 0) {
-        return false;
-    }
-    for (int k = 0; k < 3; k++) {
-        out[k] = s[k] / n;
-    }
-    return true;
-}
+/* The pivots the rotations turn about (rd_interp_mesh.c
+ * rd__interp_skin_pivots, rd__interp_mesh_centroid: a bone's the weighted
+ * centroid of the vertices bound to it, a rigid mesh's its vertices'
+ * centroid, in the mesh's space) */
 
 /* A bone (4 qwords, affine) blended as a rotation; false: left to the
  * element-wise blend */
@@ -2827,7 +2756,7 @@ static int s_sizeTail;
  * Between ticks a blended draw's block is a function of both ticks' blocks
  * and of its mesh: the element-wise blend of the two re-based blocks, then
  * rotateModel's composition C(t) W(t), whose turn of W is about the mesh's
- * own centroid (meshCentroid), while a draw that is cur's (unmatched,
+ * own centroid (rd__interp_mesh_centroid), while a draw that is cur's (unmatched,
  * jumped, unkeyed) takes cur's block through the blended camera
  * (camCurDraw).  Two pieces with the same model rows at both ticks can come
  * out with model rows that differ in their last bits (another pivot, or the
@@ -3076,7 +3005,7 @@ static int blendVu(uint8_t *op, const RdFrame *prev, const RdCmd *pc, const RdCm
         memcpy(vo[4], vcs[4], 24 * sizeof(vo[0]));
     } else if (cc->type == RDC_MESH && isNormalProg(cc->b[0]) && rot) {
         double centre[3];
-        const bool hasCentre = meshCentroid(cc->u[0], centre);
+        const bool hasCentre = rd__interp_mesh_centroid(cc->u[0], centre);
         s_rotated |= rotateModel(vo, vp, (const float (*)[4])vc, t, hasCentre ? centre : NULL,
                                  cc->b[0] == RD_PROG_LIT || cc->b[0] == RD_PROG_LIT_SPEC);
         s_drawTurn = fmax(s_drawTurn, s_turnDeg);
@@ -3084,15 +3013,16 @@ static int blendVu(uint8_t *op, const RdFrame *prev, const RdCmd *pc, const RdCm
     if (hc.boneQw) {
         float tmp[4], cb[4][4];
         uint32_t q = 0;
+        const double (*pivots)[4] = NULL;
         if (rot && cc->type == RDC_SKINNED) {
-            skinPivots(cc->u[0]);
+            pivots = rd__interp_skin_pivots(cc->u[0]);
         }
         for (; rot && cc->type == RDC_SKINNED && q + 4 <= hc.boneQw; q += 4) {
             memcpy(cb, bo[q], sizeof(cb));
             if (sameQw4(bp + q, (const float (*)[4])cb, 0)) {
                 continue;
             }
-            const double *pv = q / 4u < RD_INTERP_BONES ? s_pivot[q / 4u] : NULL;
+            const double *pv = pivots && q / 4u < RD_INTERP_BONES ? pivots[q / 4u] : NULL;
             if (pv && pv[3] > 0.0 &&
                 rotateBone(bo + q, bp + q, (const float (*)[4])cb, t, pv, q / 4u)) {
                 s_rotated = 1;
@@ -3370,6 +3300,32 @@ typedef struct ShPrism {
     int32_t match;    /* the other tick's prism, -1 */
 } ShPrism;
 
+/* prismSet's answer (blendPrisms: PRISM_GO goes on) and its keep
+ * (prismSetKept) */
+enum { PRISM_GO = 3 };
+
+typedef struct PrismSet {
+    uint32_t np, nc;
+    double mp[3], mc[3], wp[3], wc[3];
+    bool wShift;
+} PrismSet;
+
+#define PRISM_KEEP 8
+
+typedef struct PrismKeep {
+    bool valid, world;
+    int r;
+    uint32_t nvp, nvc, incP, incC, inCap, prCap;
+    double ip[16], ic[16];
+    PrismSet set;
+    RdScreenVtx *in;
+    ShPrism *pr;
+} PrismKeep;
+
+static PrismKeep s_pk[PRISM_KEEP];
+
+static uint32_t s_pkNext;
+
 /* emitVolumeStrip's order[0..9]: the vertex at each strip position */
 static const uint8_t kStripVtx[10] = {0, 1, 3, 4, 5, 1, 2, 0, 5, 3};
 
@@ -3407,6 +3363,11 @@ static uint32_t s_wptCap;
 
 static void prismFree(void)
 {
+    for (int i = 0; i < PRISM_KEEP; i++) {
+        free(s_pk[i].in);
+        free(s_pk[i].pr);
+    }
+    memset(s_pk, 0, sizeof(s_pk));
     free(s_wpt);
     s_wpt = NULL;
     s_wptCap = 0;
@@ -3736,6 +3697,17 @@ static bool alignPrisms(uint32_t np, uint32_t nc, const double *shift)
     return true;
 }
 
+/* the alignment gap before an append to s_out's payload, zeroed: realloc
+ * leaves it as the heap had it, and the frame is hashed (outHash) and
+ * dumped (rd__dump_frame) whole, so the same frame gives the same bytes on
+ * any thread (the render thread's malloc arena hands out fresh pages) */
+static void padZero(uint32_t at)
+{
+    if (at > s_out.payloadSize) {
+        memset(s_out.payload + s_out.payloadSize, 0, at - s_out.payloadSize);
+    }
+}
+
 /* space for n vertices in s_out's payload: cur's place when it fits, else
  * appended (the command is pointed there) */
 static RdScreenVtx *shadowOut(RdCmd *cc, uint8_t *op, uint32_t n)
@@ -3758,6 +3730,7 @@ static RdScreenVtx *shadowOut(RdCmd *cc, uint8_t *op, uint32_t n)
         s_out.payload = p;
         s_out.payloadCap = (uint32_t)(cap > UINT32_MAX ? end : cap);
     }
+    padZero(off);
     s_out.payloadSize = (uint32_t)end;
     cc->u[1] = off;
     return (RdScreenVtx *)(void *)(s_out.payload + off);
@@ -3863,6 +3836,93 @@ static void reprojShadow(RdCmd *c, RdScreenVtx *v, const double *inv)
     c->u[3] = nv - inc * 3;
 }
 
+/* blendPrisms' part t does not change: both ticks' prisms paired (s_prism,
+ * .match), their medians and the volumes' world shift; -1, R_JUMP or
+ * PRISM_GO */
+static int prismSet(const RdScreenVtx *p, uint32_t nvp, uint32_t incP, const RdScreenVtx *c,
+                    uint32_t nvc, uint32_t incC, bool world, PrismSet *o)
+{
+    if (nvp % 3 != 0 || nvc % 3 != 0 || !prismsOf(p, incP / 3, nvp / 3, 0) ||
+        !prismsOf(c, incC / 3, nvc / 3, 1)) {
+        return -1;
+    }
+    const uint32_t np = o->np = nvp / 3 / RD_SHADOW_PRISM_TRIS;
+    const uint32_t nc = o->nc = nvc / 3 / RD_SHADOW_PRISM_TRIS;
+    for (int k = 0; k < 3; k++) {
+        if (!prismMedian(0, np, k, &o->mp[k]) || !prismMedian(1, nc, k, &o->mc[k])) {
+            return -1;
+        }
+    }
+    const double lim = RD_INTERP_JUMP_SCREEN * 16.0;
+    if (fabs(o->mp[0] - o->mc[0]) > lim || fabs(o->mp[1] - o->mc[1]) > lim) {
+        return R_JUMP;
+    }
+    const double shift[2] = {o->mc[0] - o->mp[0], o->mc[1] - o->mp[1]};
+    if (!alignPrisms(np, nc, shift)) {
+        return -1;
+    }
+    o->wShift = world && worldMedian(0, np, s_rp.ip, o->wp) && worldMedian(1, nc, s_rp.ic, o->wc);
+    return PRISM_GO;
+}
+
+/* prismSet's answers kept for the tick's later presents: the same inputs
+ * (both ticks' vertices, their increment counts, the world flag and the
+ * ticks' inverse screens, compared byte for byte) give the same pairs, so a
+ * later present copies them back (the selections and the banded alignment
+ * cost 0.35 ms a present on lavapipe, RSCAN) */
+static int prismSetKept(const RdScreenVtx *p, uint32_t nvp, uint32_t incP, const RdScreenVtx *c,
+                        uint32_t nvc, uint32_t incC, bool world, PrismSet *o)
+{
+    const size_t vb = sizeof(RdScreenVtx), pb = sizeof(ShPrism);
+    for (int i = 0; i < PRISM_KEEP; i++) {
+        PrismKeep *e = &s_pk[i];
+        if (!e->valid || e->nvp != nvp || e->nvc != nvc || e->incP != incP || e->incC != incC ||
+            e->world != world ||
+            (world && (memcmp(e->ip, s_rp.ip, sizeof(e->ip)) != 0 ||
+                       memcmp(e->ic, s_rp.ic, sizeof(e->ic)) != 0)) ||
+            memcmp(e->in, p, nvp * vb) != 0 || memcmp(e->in + nvp, c, nvc * vb) != 0) {
+            continue;
+        }
+        if (e->r == PRISM_GO && (!growTo((void **)&s_prism[0], &s_prismCap[0], e->set.np, pb) ||
+                                 !growTo((void **)&s_prism[1], &s_prismCap[1], e->set.nc, pb))) {
+            break;
+        }
+        if (e->r == PRISM_GO) {
+            memcpy(s_prism[0], e->pr, e->set.np * pb);
+            memcpy(s_prism[1], e->pr + e->set.np, e->set.nc * pb);
+        }
+        *o = e->set;
+        rd__interp_keep_note(RD_KEEP_PRISMS, true);
+        return e->r;
+    }
+    rd__interp_keep_note(RD_KEEP_PRISMS, false);
+    memset(o, 0, sizeof(*o));
+    const int r = prismSet(p, nvp, incP, c, nvc, incC, world, o);
+    PrismKeep *e = &s_pk[s_pkNext++ % PRISM_KEEP];
+    e->valid = false;
+    if (nvp + nvc == 0 || !growTo((void **)&e->in, &e->inCap, nvp + nvc, vb) ||
+        (r == PRISM_GO && !growTo((void **)&e->pr, &e->prCap, o->np + o->nc, pb))) {
+        return r;
+    }
+    memcpy(e->in, p, nvp * vb);
+    memcpy(e->in + nvp, c, nvc * vb);
+    if (r == PRISM_GO) {
+        memcpy(e->pr, s_prism[0], o->np * pb);
+        memcpy(e->pr + o->np, s_prism[1], o->nc * pb);
+    }
+    memcpy(e->ip, s_rp.ip, sizeof(e->ip));
+    memcpy(e->ic, s_rp.ic, sizeof(e->ic));
+    e->nvp = nvp;
+    e->nvc = nvc;
+    e->incP = incP;
+    e->incC = incC;
+    e->world = world;
+    e->r = r;
+    e->set = *o;
+    e->valid = true;
+    return r;
+}
+
 /* R_LERP, R_JUMP, or -1 when the volumes are not tagged prisms (the caller
  * then blends them vertex by vertex or, across a topology change, moves
  * cur's by the median shift: shiftShadow) */
@@ -3871,25 +3931,17 @@ static int blendPrisms(uint8_t *op, const RdFrame *prev, const RdCmd *pc, RdCmd 
     const uint32_t nvp = pc->u[0] + pc->u[3], nvc = cc->u[0] + cc->u[3];
     const RdScreenVtx *p = payloadAt(prev, pc->u[1], nvp * (uint32_t)sizeof(RdScreenVtx));
     const RdScreenVtx *c = (const RdScreenVtx *)(const void *)op;
-    if (!p || nvp % 3 != 0 || nvc % 3 != 0 || !prismsOf(p, pc->u[0] / 3, nvp / 3, 0) ||
-        !prismsOf(c, cc->u[0] / 3, nvc / 3, 1)) {
+    if (!p) {
         return -1;
     }
-    double mp[3], mc[3];
-    const uint32_t np = nvp / 3 / RD_SHADOW_PRISM_TRIS, nc = nvc / 3 / RD_SHADOW_PRISM_TRIS;
-    for (int k = 0; k < 3; k++) {
-        if (!prismMedian(0, np, k, &mp[k]) || !prismMedian(1, nc, k, &mc[k])) {
-            return -1;
-        }
+    const bool world = s_rp.on && frameProjected(pc) && frameProjected(cc);
+    PrismSet ps;
+    const int set = prismSetKept(p, nvp, pc->u[0], c, nvc, cc->u[0], world, &ps);
+    if (set != PRISM_GO) {
+        return set;
     }
-    const double lim = RD_INTERP_JUMP_SCREEN * 16.0;
-    if (fabs(mp[0] - mc[0]) > lim || fabs(mp[1] - mc[1]) > lim) {
-        return R_JUMP;
-    }
-    const double shift[2] = {mc[0] - mp[0], mc[1] - mp[1]};
-    if (!alignPrisms(np, nc, shift)) {
-        return -1;
-    }
+    const uint32_t np = ps.np, nc = ps.nc;
+    const double *mp = ps.mp, *mc = ps.mc;
     /* the prisms drawn: every pair, and the nearer tick's unmatched ones */
     const int prevSide = t < 0.5f;
     uint32_t out = 0, alone = 0;
@@ -3915,11 +3967,10 @@ static int blendPrisms(uint8_t *op, const RdFrame *prev, const RdCmd *pc, RdCmd 
      * the world and are seen through the blended camera (the floor they
      * fall on is), a prism of one tick only moved by the volume's shift in
      * the world; a vertex with no world point keeps the screen-space rule */
-    const bool world = s_rp.on && frameProjected(pc) && frameProjected(cc);
-    double wp[3], wc[3], wd[3];
-    const bool wShift = world && worldMedian(0, np, s_rp.ip, wp) && worldMedian(1, nc, s_rp.ic, wc);
+    double wd[3];
+    const bool wShift = ps.wShift;
     for (int k = 0; k < 3; k++) {
-        wd[k] = wShift ? w * (wc[k] - wp[k]) : 0.0;
+        wd[k] = wShift ? w * (ps.wc[k] - ps.wp[k]) : 0.0;
     }
     uint32_t inc = 0, o = 0;
     for (int pass = 0; pass < 2; pass++) {
@@ -4180,8 +4231,9 @@ static RdMeshRec *scratchFor(const RdMeshRec *c, const float (*stream)[4])
     s_scratchBytes +=
         size + (uint64_t)c->indexCount * 4u + (uint64_t)c->batchCount * sizeof(RdVuBatchRec);
     m->lastUsed = g_rd.frameCounter;
-    m->replaySeen = 0; /* upload again */
-    m->transient = 1;  /* from the ring, not the device arena */
+    rd__mesh_stream_written(m); /* cur's stream copied in (a new mesh has its own) */
+    m->replaySeen = 0;          /* upload again */
+    m->transient = 1;           /* from the ring, not the device arena */
     s_scratchUsed++;
     return m;
 }
@@ -4203,8 +4255,8 @@ static bool morphDraw(RdCmd *o, const RdFrame *prev, const RdCmd *pc, const RdFr
     if (pc && prev && t < 1.0f) {
         const RdMeshRec *mp = rd__mesh_rec(pc->u[0]);
         ps = mp ? rd__mesh_stream_at(mp, prev->number) : NULL;
-        if (ps == cs || (ps && memcmp(ps, cs, size) == 0)) {
-            ps = NULL; /* the same shape: nothing to blend */
+        if (ps && rd__interp_streams_same(pc->u[0], mp, ps, o->u[0], mc, cs, size)) {
+            ps = NULL; /* the same shape: nothing to blend (kept, rd_interp_mesh.c) */
         }
     }
     if (!ps && cs == (const float (*)[4])mc->stream) {
@@ -4223,6 +4275,7 @@ static bool morphDraw(RdCmd *o, const RdFrame *prev, const RdCmd *pc, const RdFr
                 lerpFloats(s->stream[at], ps[at], cs[at], 3, t);
             }
         }
+        rd__mesh_stream_written(s); /* blended */
     }
     const uint32_t scr = s->gen << 16 | (uint32_t)(s - g_rd.meshes + 1);
     const uint64_t two[2] = {s_scrMix, (uint64_t)o->u[0] << 32 | scr};
@@ -4610,6 +4663,7 @@ static uint8_t *outAppend(uint32_t n, uint32_t *off)
         s_out.payload = p;
         s_out.payloadCap = c32;
     }
+    padZero(at);
     s_out.payloadSize = (uint32_t)end;
     *off = at;
     return s_out.payload + at;
@@ -5530,8 +5584,11 @@ int rd__interp_snap(const RdFrame *prev, const RdFrame *cur)
     if (prev->keep || cur->keep) {
         return RD_SNAP_KEEP;
     }
-    if (cur->cut || cur->camera.cut) {
+    if (cur->cut == 1 || cur->camera.cut == 1) {
         return RD_SNAP_CUT;
+    }
+    if (cur->cut || cur->camera.cut) {
+        return RD_SNAP_WALL; /* RD_CAMERA_CUT_WALL: the eye went through the stage */
     }
     if (g_rd.interpFloor && prev->number < g_rd.interpFloor) {
         return RD_SNAP_HISTORY;
@@ -5798,7 +5855,7 @@ const RdFrame *rd__interp_frame(const RdFrame *prev, const RdFrame *cur, float a
     s_lightRot = 0;
     s_turnFull = 0;
     s_lightPair = s_placed = s_gridSt = s_gridStCam = 0;
-    s_pivotMesh = 0; /* the pivots are recomputed per present */
+    rd__interp_pivots_present(); /* the last mesh's pivots asked again (rd_interp_mesh.c) */
     s_scrMix = 0;
     if (s_track) {
         memset(s_ord, 0, sizeof(s_ord));
@@ -6142,14 +6199,16 @@ static void presentLog(void)
     }
     const uint32_t *n = s_pres.snaps;
     rd__log("interp: %u frames, %u presents: %u blended; snapped: %u no previous, %u gap, "
-            "%u keep, %u cut, %u camera, %u fade, %u history, %u size; keyed draws %llu: "
+            "%u keep, %u cut, %u camera, %u fade, %u history, %u size, %u where the camera's path "
+            "crossed the stage; keyed draws %llu: "
             "%llu blended, %llu unmatched, %llu mismatched, %llu jumped; %llu mesh streams kept or "
             "blended",
             s_pres.frames, s_pres.presents, n[RD_SNAP_NONE], n[RD_SNAP_NO_PREV], n[RD_SNAP_GAP],
             n[RD_SNAP_KEEP], n[RD_SNAP_CUT], n[RD_SNAP_CAMERA], n[RD_SNAP_FADE], n[RD_SNAP_HISTORY],
-            n[RD_SNAP_SIZE], (unsigned long long)s_pres.keyed, (unsigned long long)s_pres.lerped,
-            (unsigned long long)s_pres.missing, (unsigned long long)s_pres.mismatch,
-            (unsigned long long)s_pres.jump, (unsigned long long)s_pres.morph);
+            n[RD_SNAP_SIZE], n[RD_SNAP_WALL], (unsigned long long)s_pres.keyed,
+            (unsigned long long)s_pres.lerped, (unsigned long long)s_pres.missing,
+            (unsigned long long)s_pres.mismatch, (unsigned long long)s_pres.jump,
+            (unsigned long long)s_pres.morph);
     /* a separate line, so the line above keeps its form */
     const uint32_t flapping = flapReport();
     rd__log(
@@ -6244,6 +6303,7 @@ static void presentLog(void)
             (unsigned long long)s_pres.mixedCur, (unsigned long long)s_pres.mixedMinority,
             (unsigned long long)s_pres.mixedWhy[RD_CAM_OFF_NO_CAMERA],
             (unsigned long long)s_pres.mixedWhy[RD_CAM_OFF_FAILED]);
+    rd__interp_keeps_log(); /* what earlier presents' work served (rd_interp_mesh.c) */
     /* a ninth line, only when a turn kept the tick's pose: why, and the
      * draws that did it most */
     if (s_pres.turnSnap || s_pres.turnFull) {
@@ -6292,6 +6352,7 @@ static void presentLog(void)
     s_snapTopN = 0;
     rd__blur_smooth_block(); /* Motion blur: Smooth's line, when it drew */
     rd__crack_fill_block();  /* the crack filler's, when it filled or was kept off */
+    rd__aura_box_block();    /* the aura's read in two passes, when it drew or fell back */
     rd__reshow_block();      /* the still re-present's */
     rd__glow_hold_block();   /* the glow held between ticks */
     const uint32_t number = s_pres.number;
@@ -6306,37 +6367,11 @@ static void presentLog(void)
  * clamp, NAN once rd_present has taken it */
 static double s_clockRaw = NAN;
 
-/* rd_last_present_info's record; valid once a present ran */
-static RdPresentInfo s_info;
-static bool s_infoValid;
-
 static void presentReset(void)
 {
     memset(&s_pres, 0, sizeof(s_pres));
-    memset(&s_info, 0, sizeof(s_info));
-    s_infoValid = false;
+    rd__present_info_reset(); /* rd_last_present_info's record (rd_present_info.c) */
     s_snapTopN = 0;
-}
-
-/* with interpolation off rd_end_frame presents each frame once, whole */
-void rd__note_frame_present(const RdFrame *f)
-{
-    s_info.frame = f->number;
-    s_info.keep = f->keep;
-    s_info.fade = f->fade;
-    s_info.snap = (uint32_t)rd__interp_snap(rd__prev_frame(), f);
-    s_info.firstOfTick = 1;
-    s_info.alpha = 1.0f; /* the tick's own picture */
-    s_infoValid = true;
-}
-
-bool rd_last_present_info(RdPresentInfo *out)
-{
-    if (!out || !s_infoValid) {
-        return false;
-    }
-    *out = s_info;
-    return true;
 }
 
 bool rd_interpolation_active(void)
@@ -6371,13 +6406,106 @@ static void mixedNote(const RdInterpStats *st, uint32_t frame, float alpha, doub
             frame, (double)alpha, clamped, st->worldPrevRaw, st->worldCurRaw);
 }
 
+/* rd_dump_blended_arm's request and its result (rd.h) */
+static struct {
+    char path[1100];
+    int armed, result; /* result: -2 nothing to report */
+    uint32_t frame, armFrame;
+    float alpha;
+} s_blendedDump = {.result = -2};
+
+/* an arm no present between the ticks took (rd.h, -3): taken by a present
+ * that draws nothing (interpolation off, a movie, no closed frame), when
+ * interpolation is off at the result's poll, or once two more frames
+ * closed without a present */
+static void blendedDumpExpire(const char *why)
+{
+    if (!s_blendedDump.armed) {
+        return;
+    }
+    s_blendedDump.armed = 0;
+    s_blendedDump.result = -3;
+    s_blendedDump.frame = rd_frame_number();
+    s_blendedDump.alpha = 1.0f;
+    rd__log("dump: no blended present followed F12 at frame %u (%s); nothing written",
+            s_blendedDump.armFrame, why);
+}
+
+bool rd_dump_blended_arm(const char *path)
+{
+    (void)rd_thread_drain(); /* no present on the render thread reads it now */
+    s_blendedDump.armed = 0;
+    s_blendedDump.result = -2;
+    if (!path || !path[0] || !rd_interpolation_active() ||
+        strlen(path) >= sizeof(s_blendedDump.path)) {
+        return false;
+    }
+    snprintf(s_blendedDump.path, sizeof(s_blendedDump.path), "%s", path);
+    s_blendedDump.armed = 1;
+    s_blendedDump.armFrame = rd_frame_number();
+    return true;
+}
+
+bool rd__blended_dump_armed(void)
+{
+    return s_blendedDump.armed != 0;
+}
+
+int rd_dump_blended_result(uint32_t *frame, float *alpha)
+{
+    if (s_blendedDump.armed && !rd_interpolation_active()) {
+        blendedDumpExpire("interpolation off");
+    } else if (s_blendedDump.armed && rd_frame_number() - s_blendedDump.armFrame >= 2u &&
+               rd_frame_number() != 0) {
+        blendedDumpExpire("two frames closed without a present");
+    }
+    if (s_blendedDump.armed || s_blendedDump.result == -2) {
+        return -2;
+    }
+    const int r = s_blendedDump.result;
+    s_blendedDump.result = -2;
+    if (frame) {
+        *frame = s_blendedDump.frame;
+    }
+    if (alpha) {
+        *alpha = s_blendedDump.alpha;
+    }
+    return r;
+}
+
+/* the armed dump taken by this present: f the frame it drew (NULL: none
+ * was built, a failure), tick a keep frame's present (the tick's own
+ * picture, as one at alpha 1: nothing written) */
+static void blendedDumpTake(const RdFrame *f, bool tick, uint32_t number, float alpha)
+{
+    if (!s_blendedDump.armed) {
+        return;
+    }
+    s_blendedDump.armed = 0;
+    s_blendedDump.frame = number;
+    s_blendedDump.alpha = alpha;
+    if (tick || !(alpha < 1.0f)) {
+        s_blendedDump.result = 0;
+        return;
+    }
+    s_blendedDump.result = f && rd__dump_frame(f, s_blendedDump.path) ? 1 : -1;
+    rd__log("dump: the blended present of frame %u at alpha %.9g %s %s", number, (double)alpha,
+            s_blendedDump.result > 0 ? "written to" : "could not be written to",
+            s_blendedDump.path);
+}
+
 bool rd_present(float alpha)
 {
+    rd__thread_picture_begin(); /* the picture before ended (rd_thread.h) */
     if (!rd_interpolation_active() || !g_rd.hasDevice || g_rd.videoShown) {
+        blendedDumpExpire(!rd_interpolation_active() ? "interpolation off"
+                          : g_rd.videoShown          ? "a movie shown"
+                                                     : "no device");
         return false;
     }
     const RdFrame *cur = rd__last_frame();
     if (!cur || !cur->closed) {
+        blendedDumpExpire("no closed frame");
         return false;
     }
     if (!(alpha >= 0.0f)) {
@@ -6391,8 +6519,7 @@ bool rd_present(float alpha)
      * ICO_RD_S2_LEGACY=1 the window replaces the clock's alpha by the
      * measured one after the clock ran, and the bin still follows the
      * clock's value */
-    const double raw = s_clockRaw;
-    s_clockRaw = NAN;
+    const double raw = rd__thread_clock_raw(); /* the poster's, on the render thread */
     /* the tick's first present keeps the feedback passes' inputs (FEED128,
      * and DISPLAY for the motion blur), the later ones start from them
      * again (feedback) */
@@ -6412,22 +6539,17 @@ bool rd_present(float alpha)
             s_pres.lowestRaw = raw;
         }
     }
-    s_info.frame = cur->number;
-    s_info.keep = cur->keep;
-    s_info.fade = cur->fade;
-    s_info.snap = (uint32_t)rd__interp_snap(rd__prev_frame(), cur);
-    s_info.firstOfTick = (uint32_t)first;
-    s_info.alpha = alpha;
-    s_infoValid = true;
+    rd__present_info_note(cur, (uint32_t)first, alpha);
     if (cur->keep) {
         /* a keep frame draws lists 11..12 over DISPLAY: once; the other
          * presents show DISPLAY again (an empty keep frame) */
-        rd__blur_smooth_arm(first, k); /* a keep frame draws no motion blur */
+        rd__blur_smooth_arm(first, k);                   /* a keep frame draws no motion blur */
+        blendedDumpTake(NULL, true, cur->number, alpha); /* the tick's own picture */
         if (first) {
-            return rd__replay_frame(cur, 1, true);
+            return rd__replay_frame_async(cur, 1, true);
         }
         static RdFrame empty;
-        return rd__replay_frame(&empty, 1, true);
+        return rd__replay_frame_async(&empty, 1, true);
     }
     const double t0 = rd__now_ms();
     s_track = first; /* the flap detector, once a frame */
@@ -6440,10 +6562,16 @@ bool rd_present(float alpha)
         presentLog();
     }
     if (f == NULL) {
+        blendedDumpTake(NULL, false, cur->number, alpha);
         return false;
     }
     rd__blur_smooth_arm(first, k); /* Motion blur: Smooth's present */
-    return rd__present_blended(f, first, true);
+    const bool ok = rd__present_blended(f, first, true);
+    /* F12's blended frame: after the present, so the dump's write is not
+     * in the picture's time; s_out stays the frame drawn until the next
+     * rd__interp_frame */
+    blendedDumpTake(f, false, cur->number, alpha);
+    return ok;
 }
 
 /* ---------------------------------------------------------- present clock */
@@ -6466,6 +6594,13 @@ int rd__alpha_bin(float alpha, double raw)
 double rd__present_clock_raw(void)
 {
     return s_clockRaw;
+}
+
+double rd__present_clock_raw_take(void)
+{
+    const double r = s_clockRaw;
+    s_clockRaw = NAN;
+    return r;
 }
 
 float rd_present_clock_alpha(RdPresentClock *c, double nowMs, double tickAtMs, double tickMs,

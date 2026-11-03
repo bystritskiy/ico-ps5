@@ -78,6 +78,7 @@ nothing installed (the headless build, the game's clock, every unit test that in
 | `audioFrame`, `voiceSounding`, `sampleBlocks`, `findEffectVoices`, `streamTick` (`port/ui/gallery_play.c`) | the music gallery's reads of the SPU2 |
 | `iop_write` and the PCM buffer's clearing in `movie_init` (`port/fmv/movie.c`) | the PCM buffer the driver's mixer reads inside the render (`pcm_mix`) |
 | `cut_line` (`port/audio/audio_host.c`) | the once-a-second look at the cut voices |
+| a save state's copy and its load (`port/game/state_host.c`) | the AUDIO blocks of the save state registry (the SPU2, the libsd layer, the gain tags and cached volumes, the driver, the streams, the EE sequencer's .bss: `ico_audio_state_register`, `ico_sound_state_register`) are copied under it at a save; a load holds it for the whole restore, IOP RAM included, so the device's thread renders either the old state or the restored one ([PLATFORM.md](PLATFORM.md#saving-and-loading)) |
 
 One movie write stays outside it: `close_all` (`port/fmv/movie.c`) frees the PCM buffer's IOP
 memory before the `SgStPcmClose` and `SgStPcmQuit` packets it queues reach the driver at the next
@@ -85,6 +86,14 @@ tick, so for that tick `pcm_mix` can still read the freed (and possibly reused) 
 device's thread. It is a race only formally: the end of a film's loop stops its channels at volume
 0 first (`audio_reset`: `SgStPcmVolume(3, 0, 0)`, `SgStPcmStop(3)`), and a film without sound never
 plays them, so nothing read there is heard.
+
+After a load, outside the lock (SDL's stream lock is taken), `ico_audio_host_flush` drops what the
+device has queued: `ico_audio_sdl_flush` pauses and resumes the stream as the Android lifecycle
+does (`ico_audio_sdl_pause`), so the queue is emptied, the pull path's accounting is level with
+the game again and the next sound ramps in from silence, logged as
+`audio: the output's queue dropped after a save state's load`; nothing without the SDL output.
+The cached voice volumes are then issued again under the gains now (`ico_audio_gain_reapply`):
+the gains are the player's settings and are not in a state.
 
 Nothing under the lock switches fibers (the host SIF runs the server synchronously,
 `port/data/sif_host.c`) or calls SDL's stream functions; the audio thread takes it inside SDL's
@@ -703,7 +712,7 @@ two ways, the pull path on the device's clock and the push on the game's
   `SDL_HINT_AUDIO_DEVICE_SAMPLE_FRAMES`; the backends take it as a request).
 - Under the window's [vsync lock](ARCHITECTURE.md#terms) the display is the simulation's clock, so
   the simulation runs a little off 59.94 Hz. The window measures that rate every 10 s and hands the
-  ratio to `ico_audio_set_rate_ratio` (`port/platform/window_host.c` (`pace_log`); the nominal
+  ratio to `ico_audio_set_rate_ratio` (`port/platform/window_host.c` (`window_pace_log`); the nominal
   ratio at lock start in `pace_locked`), and the stream plays at it
   (`SDL_SetAudioStreamFrequencyRatio`); ratios outside 0.5..2 are taken as 1. On the pull path the
   SPU2's time then advances with the game's, so sequenced music keeps its tempo against the game
@@ -821,7 +830,7 @@ stays queued after each take, through `spu2_render` and the mirror swap
   the callbacks that came more than two periods after the one before (SDL's own thread ran late, so
   the device may have run dry), the silence, the part of it the bound held back, and the most it
   was ahead of the game. After the window's 10 s line (`ico_audio_sdl_log_summary`, called by
-  `pace_log`), with the time the trim played slower and the driver's ticks and the longest gap
+  `window_pace_log`), with the time the trim played slower and the driver's ticks and the longest gap
   between two of them (`port/audio/audio_lock.h` (`ico_audio_tick_note`), noted by the serve):
 
       audio: 1000 callbacks, 480000 frames; waited 0.21 ms at most for the driver (0 gave up), 0 callbacks late, 0 ms of silence (0 ms held back behind the game); ahead of the game by 28 ms at most, slowed for 0.0 s; the driver ticked 599 times, longest gap 17 ms (0 over 200 ms)
@@ -831,6 +840,27 @@ stays queued after each take, through `spu2_render` and the mirror swap
   held back behind the game; slowed for N s)`. "held back" over 0 says the game stopped or dropped
   time for longer than the bound; an "ahead" that climbs block after block with no resyncs says
   the device's clock is faster than the system's.
+- What the game was doing while the sound was held back: the held-back total since the open
+  (`ico_audio_sdl_held_ms`) is read by the window after every step, and a step that ended more
+  than 100 ms past its period while the total rose writes (the first 8 such steps, then every
+  100th; `port/platform/window_lines.c` (`window_hold_line`), from the step's profile,
+  `port/platform/host_loop.h` (`IcoStepProfile`)):
+
+      window: the game step was late by 123 ms (loading: 1 disc reads of 64 sectors, 1 texture decodes, 0 pipelines, achievements 0.1 ms): the sound was held back for 98 ms (1 such steps)
+
+  A block of 10 s that held more than 200 ms of sound back while no step was over 100 ms late (a
+  steady shortfall: the steps longer than their period on average, as at Frame rate Original
+  before its late skip, [DISPLAY.md](DISPLAY.md#pacing)) writes once at the block's end (the
+  first 8 such blocks, then every 30th; `window_hold_block_line`), with the steps' average, the
+  period, the frame rate and the replay's average (a whole frame's at Original):
+
+      window: the game step was late (steady: steps average 31.2 ms against a period of 20.0 ms at Original (the picture takes 29.8 ms on this GPU)): the sound was held back for 640 ms in this block (1 such blocks)
+
+  Disc reads with many sectors point at a slow drive (the summary line's `drives: data ...` says
+  what kind the game data sits on), texture decodes at the decode pool's wait (its own `rd: waited N ms for texture
+  decodes` line, [TEXTURES.md](TEXTURES.md#log-lines)), pipelines at a key the start-up set
+  missed, achievements at the stats file's write. The 120 ms bound stays: a longer lead would
+  put the sound further ahead of the picture after every stall.
 
 ### The push
 
@@ -901,7 +931,7 @@ port"):
 | `spu2_render_crc` (`spu2_bench --check`) | five 10 s scenes against golden CRCs of everything observable from the frame-by-frame renderer, and 24 random 2 s scenes rendered both chunked and frame by frame |
 | `volume` (`volume_test.c`) | the output volume's mapping, clamp and integer scaling; the trim's play ratio against a target |
 | `audio_queue` (`audio_queue_test.c`, window build) | `out_sdl.c`'s push on a real SDL stream without a device: the first cushion of two vsyncs, the refill and doubling after a dry queue up to 120 ms with its ramp down from the last pushed frame after the frames still queued, plain silence after a queue run empty, the resume's prime, the halving after 20 s, the trim and drop limit following the cushion, the queued-ms query |
-| `audio_pull` (`audio_pull_test.c`, window build) | `out_sdl.c`'s pull path on a real SDL stream without a device over the real SPU2: a writer thread under the audio lock and a pulling thread, fenced so no write lands late, render the frames one thread renders; 10 s free-running with the writes stamped as the serve stamps them: every pull full, the frames rendered and the silence equal to the frames taken plus the lead left, no miss (the lock's wait bound at 500 ms there, so scheduler delays cannot make one); with the lock held elsewhere the lead, then a 96-frame ramp to 0, then silence, two misses, and the ramp in after; the lead as the queue and a cushion of 0; the 10 s line's numbers and the mode choice; with the game's frames frozen, exactly the bound's 120 ms rendered, then the ramp and silence held back and counted, the hold kept until 40 ms under the bound, the sound ramping in after, and the trim on over 64 ms ahead and off under 32 (every other part steps the game by the frames each pull takes). The program to run under ThreadSanitizer ([TESTING.md](TESTING.md#portaudiotest)) |
+| `audio_pull` (`audio_pull_test.c`, window build) | `out_sdl.c`'s pull path on a real SDL stream without a device over the real SPU2: a writer thread under the audio lock and a pulling thread, fenced so no write lands late, render the frames one thread renders; 10 s free-running with the writes stamped as the serve stamps them: every pull full, the frames rendered and the silence equal to the frames taken plus the lead left, no miss (the lock's wait bound at 500 ms there, so scheduler delays cannot make one); with the lock held elsewhere the lead, then a 96-frame ramp to 0, then silence, two misses, and the ramp in after; the lead as the queue and a cushion of 0; the 10 s line's numbers and the mode choice; with the game's frames frozen, exactly the bound's 120 ms rendered, then the ramp and silence held back and counted, the hold kept until 40 ms under the bound, the sound ramping in after, and the trim on over 64 ms ahead and off under 32 (every other part steps the game by the frames each pull takes). The program to run under ThreadSanitizer ([TESTING_PROGRAMS.md](TESTING_PROGRAMS.md#portaudiotest)) |
 | `mix_gain` (`mix_gain_test.c`) | the gains: identity at 100 %, scaling, sweep words, the stream categories, the cache and its re-issue |
 | `adpcm_slots` (`adpcm_slots_test.c`) | the game's `adpcm_init.c` with the driver stubbed: a stream already fading out gives its slot up at once when both stream slots are taken; the ending's six streams opened one over the other alternate the two slots and the two voice pairs, each open's line names its voices and hands the log watch its length |
 | `adpcm_stream` (`adpcm_stream_test.c`) | the game's `adpcm_init.c` on the real sequencer, driver and SPU2 with synthesized streams: a stream reopened on the voices a fade closed lands VOL 0x3FFF and is heard at its level; the ending's six-stream shape, each stream's level alone against its amplitude; stream 43's length (57.8 s) at 1x with 7 IOP ring wraps, no 10 ms of silence and the close at the file's length (about 2,900 vsyncs, about 2 s); the stream log lines |

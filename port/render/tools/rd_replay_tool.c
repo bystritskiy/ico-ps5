@@ -30,6 +30,22 @@
  * same dump can be rendered on Vulkan, D3D12, OpenGL and D3D11 and the PNGs
  * compared; a name the build does not link is an error (exit 1).
  *
+ * --render-thread off|sync|on runs every replay, the present's
+ * interpolation and the renderer's calls on a thread of their own, as the
+ * window's render thread does (port/render/rd_thread.h): sync waits for
+ * each, on hands the pictures over and reads back after them (the
+ * rd_thread_ab test: the same PNGs as off, byte for byte; a presented
+ * picture without --pass-dump, --occlusion, --save-blended or --dump-temps
+ * goes as the window's presents go, its submit and present on the submit
+ * thread, rd_submit_thread.h).  Not with
+ * OpenGL (its context stays on the main thread; the line says so and the
+ * replays stay on it).  --repeat N (1..8) makes that picture N times in a
+ * row, the PNG read after the last: with --render-thread on the N are
+ * handed over back to back, so with the frame slots apart each one's end,
+ * submit and present on the submit thread go on while the next one
+ * records (rd_submit_thread.h "the slots"); off and sync make the same N
+ * one after the other, so the last picture's bytes compare as one.
+ *
  * The display options: a dump does not carry them, so the replay takes them
  * here, the PS2 picture by default:
  *   --enhanced            the Enhanced flag: the deferred text and UI scale,
@@ -70,6 +86,11 @@
  *                         alone holds none (the trail starts with it); the
  *                         --prev dumps and --presents' PREV feed it, as
  *                         the presents of a run do
+ *   --motion-blur-strength N  10..100: Options > Effects > Motion blur
+ *                         strength (RdSettings.motionBlurStrength): the
+ *                         motion blur's FIX drawn as round(FIX N / 100), with
+ *                         either --motion-blur; 100 (the default) is the
+ *                         dump's own FIX
  *   --no-crack-fill       the crack filler off (rd_crack_fill.c; [dev]
  *                         crack_fill = false): above 1x under --enhanced the
  *                         pixels no draw covered between drawn ones keep the
@@ -120,8 +141,12 @@
  *                         texture, dumped blank), the state's FBA, PABE,
  *                         TEXA, DATE and targets, and a post record's kind,
  *                         rectangle, UVs, scalar, RGBA and blend
- *   --nop L:A[-B]         turns commands A..B of list L into NOPs before the
- *                         replay (repeatable), to find the draw behind a pixel
+ *   --nop SPEC            turns commands A..B of list L into NOPs before the
+ *                         replay (repeatable), to find the draw behind a pixel;
+ *                         SPEC is L:A[-B], several of them separated by commas
+ *                         (0:12-14,0:40, the --occlusion line's form), or
+ *                         @FILE for the spec in FILE (--occlusion-out's);
+ *                         the state commands in a range stay as they are
  *   --mesh NAME           prints the VU meshes of that name vertex by vertex
  *                         (stream quadwords; '*' where the static index list
  *                         draws the triangle ending at the vertex, '^' where
@@ -142,7 +167,11 @@
  *                         pipeline barriers and copies, the screen-prim
  *                         draws one per command and merged (on Direct3D
  *                         11 a line of the bytes its submits wrote to the
- *                         GPU, RdPerfRecord.backendWriteBytes); a second line:
+ *                         GPU, RdPerfRecord.backendWriteBytes), then "stats:
+ *                         bind cache: P pipeline, G bind group and S state
+ *                         repeats skipped" (the binds the RHI found in
+ *                         force and recorded nothing for: RhiStats
+ *                         *Skipped, docs/port/RHI.md); a second line:
  *                         the exact blend's destination-read draws, storage
  *                         passes and pass switches, the glow's passes, the
  *                         target snapshots copied and swapped, the draws
@@ -175,11 +204,48 @@
  *                         missing"; exit 1 on a miss.  <out.png> is unused
  *                         (give -).  The profile the set was made for is
  *                         printed first ("<dump>: keys: profile ...")
+ *   --gpu-repeat K        (with --stats) the GPU times of K warm replays:
+ *                         RHI_FRAMES_IN_FLIGHT + 1 + K replays after the
+ *                         picture, and after the gpu line one more, "<dump>:
+ *                         gpu median of R replays: total X ms, list 0 Y ms,
+ *                         VU pre-pass Z ms" over the records that came back
+ *                         (R, the first replay after the picture left out)
+ *   --occlusion           the hidden-draw measurement (docs/port/RENDER.md,
+ *                         "Culling"; rd_occlusion.c): the picture's replay
+ *                         draws each list-0 GPU draw inside an occlusion
+ *                         query of its own, under ICO_RD_VU_MERGE=0,
+ *                         ICO_RD_BLEND=fixed and the screen-prim runs off
+ *                         (one GPU draw a command; the tool sets them and
+ *                         says so), and prints "<dump>: occlusion: hidden N
+ *                         of M list-0 draws, T of U triangles (index count /
+ *                         3); hidden commands: SPEC": a draw command (screen
+ *                         prims, mesh, skinned, grid, particles) whose draws
+ *                         all passed 0 samples is hidden, SPEC its --nop spec
+ *                         ("none" when there is none); then a line of the
+ *                         commands, the shares, the queries and the draws not
+ *                         counted.  Vulkan only (another backend: exit 77).
+ *                         The same --nop SPEC replayed under --pass-dump
+ *                         draws the same pictures (nothing hidden drew a
+ *                         pixel), and under --stats --gpu-repeat K says what
+ *                         leaving the hidden draws out takes off list 0's
+ *                         GPU time (tools/occlusion_corpus.py)
+ *   --occlusion-out FILE  (with --occlusion) writes SPEC to FILE, for
+ *                         --nop @FILE
+ *   --occlusion-csv FILE  (with --occlusion) writes a line a command of the
+ *                         list that made a GPU draw: "cmd,type,draws,counted,
+ *                         triangles,samples".  Under ICO_VK_DEPTH_ALWAYS=1
+ *                         (every depth test passes) the hidden ones are those
+ *                         that draw nothing whatever the depth says (outside
+ *                         the view or the scissor, every fragment
+ *                         discarded); the corpus script takes them from the
+ *                         hidden set to leave what the depth hid
  *   --pass-times          (implies --stats) every replay timed pass by pass
  *                         ([dev] perf_passes, rd_perf.c): after the gpu line
  *                         the warm replay's passes, one line each ("pass N:
  *                         <label> <target> WxH, list L, D draws, B
- *                         pipeline binds, GPU <us> us, CPU <us> us"), then
+ *                         pipeline binds, GPU <us> us, CPU <us> us"; a
+ *                         pass with a render area says " area WxH at X,Y"
+ *                         after its size, rd_pass_area.c), then
  *                         the window's top-passes text over that replay and
  *                         its passes by kind
  *   --time N              after the picture is written, the frame replayed
@@ -192,8 +258,10 @@
  *                         replays, CPU mean (min) ms: total, interp, wait,
  *                         acquire, upload, walk, bind, submit, present;
  *                         per replay: ring, uniform and interp KB, draws,
- *                         pipeline and bind group binds" (on Direct3D 11
- *                         a line of the KB its submits wrote to the GPU),
+ *                         pipeline and bind group binds", then "time: bind
+ *                         cache: P pipeline, G bind group and S state
+ *                         repeats skipped a replay" (on Direct3D 11 a line
+ *                         of the KB its submits wrote to the GPU),
  *                         then the first replay's interp alone; with
  *                         --interp DISPLAY after the first and the last of
  *                         them compared byte for byte ("pictures
@@ -262,6 +330,12 @@
  *                         frame hashes as the last rendered one's is shown
  *                         again (rd_reshow.c; ICO_RD_STILL_REPRESENT=0
  *                         renders every one, the pictures the same)
+ *   --save-blended DUMP   (with --interp T PREV, not --presents) writes the
+ *                         frame built between the two, after its replay, as
+ *                         the dump F12 saves of a present drawn between the
+ *                         ticks (rd.h rd_dump_blended_arm, the same writer):
+ *                         replayed on its own, without --interp, it gives
+ *                         the same picture
  *   --interp-any          (with --interp) PREV is taken for the tick right
  *                         before <dump> whatever their frame numbers (dumps
  *                         saved some ticks apart, as the F12 sets are): no
@@ -570,6 +644,11 @@ static void listCmd(void *user, int list, uint32_t index, const RdCmd *c, const 
         if (c->type != RDC_TEXTURE_OFF && c->type != RDC_NOP && c->type != RDC_UVOFFSET) {
             printf(" %u", c->b[0]);
         }
+    } else if (c->type == RDC_SHADOW_RESET || c->type == RDC_SHADOW_RESOLVE) {
+        printf(" step %u", rd__shadow_step(c)); /* rd_shadow.c "The step" */
+    } else if (c->type == RDC_SHADOW_STRIP && c->b[0] == RD_SHADOW_TRIS) {
+        /* the triangles that count +1 and -1 (an older North American dump: +1 none) */
+        printf(" tris +1 %u -1 %u", c->u[0] / 3, c->u[3] / 3);
     } else if (c->type == RDC_CLEAR) {
         printf(" %s rgba %u,%u,%u,%u depth %u z %u", targetName(c->u[0], nb[0]), c->b[0], c->b[1],
                c->b[2], c->b[3], c->b[4], c->u[1]);
@@ -948,14 +1027,44 @@ static void overlayTest(const RdOverlayCtx *ctx, void *user)
 }
 
 /* the replay's frame edits and the interpolation (prepareFrame) */
-static struct {
+typedef struct NopRange {
     unsigned l, a, b;
     bool prev; /* --interp-nop-prev: applied to the --interp PREV */
-} nops[64];
+} NopRange;
 
-static int nopCount;
+static NopRange *nops;
+
+static int nopCount, nopCap;
 static bool noAa1, interpAny;
-static const char *interpPrev;
+static const char *interpPrev, *saveBlended;
+
+/* rd__interp_frame where rd_present builds its frame: on the render thread
+ * with --render-thread (rd_thread.h; the interpolation's state is that
+ * thread's), else here */
+typedef struct InterpCall {
+    const RdFrame *prev, *cur;
+    float t;
+    int first;
+    RdInterpStats *st;
+    const RdFrame *out;
+} InterpCall;
+
+static void interpJob(void *arg)
+{
+    InterpCall *c = arg;
+    c->out = rd__interp_frame(c->prev, c->cur, c->t, c->first, c->st);
+}
+
+static const RdFrame *interpAt(const RdFrame *prev, const RdFrame *cur, float t, int first,
+                               RdInterpStats *st)
+{
+    InterpCall c = {prev, cur, t, first, st, NULL};
+    if (!rd__render_call(interpJob, &c)) {
+        interpJob(&c);
+    }
+    return c.out;
+}
+
 static float interpT = 1.0f;
 /* --prev DUMP (repeatable, oldest first): frames replayed in this context
  * before <dump>, so the retained targets (the motion blur's previous
@@ -967,6 +1076,8 @@ static bool noHalf;
  * and --presents N */
 static bool motionSmooth;
 static int presentsN;
+/* --repeat N: the presented picture made N times in a row (1: once) */
+static int repeatN = 1;
 
 /* --no-half: every TARGET command without the field's half pixel
    (RD_TARGET_HALF_Y), as a flip in the other field sends the frame */
@@ -979,6 +1090,243 @@ static void dropHalf(RdFrame *f)
             }
         }
     }
+}
+
+/* one L:A[-B] item of a --nop spec; false when it is not one */
+static bool addNop(const char *item, bool prev)
+{
+    unsigned l = 0, a = 0, b = 0;
+    char tail = 0;
+    const int n = sscanf(item, "%u:%u-%u%c", &l, &a, &b, &tail);
+    if ((n != 2 && n != 3) || l >= RD_LIST_COUNT || (n == 3 && b < a)) {
+        return false;
+    }
+    if (n == 2 && strchr(item, '-') != NULL) {
+        return false;
+    }
+    if (nopCount == nopCap) {
+        const int cap = nopCap ? nopCap * 2 : 64;
+        NopRange *nr = realloc(nops, sizeof(*nr) * (size_t)cap);
+        if (!nr) {
+            return false;
+        }
+        nops = nr;
+        nopCap = cap;
+    }
+    nops[nopCount].l = l;
+    nops[nopCount].a = a;
+    nops[nopCount].b = n == 3 ? b : a;
+    nops[nopCount++].prev = prev;
+    return true;
+}
+
+/* a --nop spec: items separated by commas (and, from a file, white space),
+ * or @FILE; "none" (the --occlusion line's empty spec) adds nothing; false
+ * on a bad item or an unreadable file */
+static bool addNopSpec(const char *spec, bool prev)
+{
+    char *text = NULL;
+    if (spec[0] == '@') {
+        FILE *fp = fopen(spec + 1, "rb");
+        if (!fp) {
+            fprintf(stderr, "%s: cannot be read\n", spec + 1);
+            return false;
+        }
+        size_t cap = 4096, len = 0;
+        text = malloc(cap);
+        size_t got;
+        while (text && (got = fread(text + len, 1, cap - len - 1, fp)) > 0) {
+            len += got;
+            if (len + 1 == cap) {
+                char *t = realloc(text, cap * 2);
+                if (!t) {
+                    free(text);
+                    text = NULL;
+                    break;
+                }
+                text = t;
+                cap *= 2;
+            }
+        }
+        fclose(fp);
+        if (!text) {
+            return false;
+        }
+        text[len] = '\0';
+    } else {
+        text = malloc(strlen(spec) + 1);
+        if (!text) {
+            return false;
+        }
+        strcpy(text, spec);
+    }
+    bool ok = true;
+    for (char *tok = strtok(text, ", \t\r\n"); tok && ok; tok = strtok(NULL, ", \t\r\n")) {
+        if (strcmp(tok, "none") != 0) {
+            ok = addNop(tok, prev);
+            if (!ok) {
+                fprintf(stderr, "bad --nop item '%s' (L:A or L:A-B)\n", tok);
+            }
+        }
+    }
+    free(text);
+    return ok;
+}
+
+/* the median of v[0 .. n - 1] (sorted in place), 0 for none */
+static int cmpDouble(const void *a, const void *b)
+{
+    const double x = *(const double *)a, y = *(const double *)b;
+    return x < y ? -1 : x > y ? 1 : 0;
+}
+
+static double medianOf(double *v, int n)
+{
+    if (!v || n <= 0) {
+        return 0.0;
+    }
+    qsort(v, (size_t)n, sizeof(double), cmpDouble);
+    return n % 2 ? v[n / 2] : 0.5 * (v[n / 2 - 1] + v[n / 2]);
+}
+
+/* setenv for --occlusion's settings: the mingw C runtime has _putenv_s */
+static void setEnv(const char *name, const char *value)
+{
+#ifdef _WIN32
+    _putenv_s(name, value);
+#else
+    setenv(name, value, 1);
+#endif
+}
+
+/* a draw command of the lists (rd_occlusion.c's measurement counts these) */
+static bool isDrawCmd(uint8_t type)
+{
+    return type == RDC_SCREEN || type == RDC_MESH || type == RDC_SKINNED || type == RDC_GRID ||
+           type == RDC_PARTICLES;
+}
+
+/* --occlusion's lines from the measurement (rd__occlusion_take) of frame
+ * f's list; the --nop spec written to outFile when given.  Ranges join
+ * hidden commands across state commands and NOPs only, so a range NOPs
+ * nothing but hidden draws (prepareFrame keeps the state commands) */
+static bool printOcclusion(const char *dump, const RdFrame *f, const RdOccResult *o,
+                           const char *outFile, const char *csvFile)
+{
+    const RdCmdList *cl = &f->lists[o->list];
+    uint64_t draws = 0, hidden = 0, tris = 0, hiddenTris = 0, other = 0;
+    uint32_t cmds = 0, hiddenCmds = 0;
+    bool *hid = calloc(cl->count ? cl->count : 1, sizeof(bool));
+    if (!hid) {
+        return false;
+    }
+    for (uint32_t c = 0; c < o->cmdCount; c++) {
+        const RdOccCmd *e = &o->cmds[c];
+        if (!e->draws) {
+            continue;
+        }
+        if (c >= cl->count || !isDrawCmd(cl->cmds[c].type)) {
+            other += e->draws; /* a clear or a fill drawn in the list: not a candidate */
+            continue;
+        }
+        cmds++;
+        draws += e->draws;
+        tris += e->tris;
+        if (e->counted == e->draws && e->samples == 0) {
+            hid[c] = true;
+            hiddenCmds++;
+            hidden += e->draws;
+            hiddenTris += e->tris;
+        }
+    }
+    size_t cap = 256, len = 0;
+    char *spec = malloc(cap);
+    if (!spec) {
+        free(hid);
+        return false;
+    }
+    spec[0] = '\0';
+    for (uint32_t c = 0; c < cl->count; c++) {
+        if (!hid[c]) {
+            continue;
+        }
+        uint32_t b = c;
+        for (uint32_t k = c + 1; k < cl->count; k++) {
+            const uint8_t t = cl->cmds[k].type;
+            if (hid[k]) {
+                b = k;
+            } else if (!rd__cmd_is_state(t) && t != RDC_NOP) {
+                break;
+            }
+        }
+        char item[48];
+        const int n =
+            b == c ? snprintf(item, sizeof(item), "%s%d:%u", len ? "," : "", o->list, c)
+                   : snprintf(item, sizeof(item), "%s%d:%u-%u", len ? "," : "", o->list, c, b);
+        if (len + (size_t)n + 1 > cap) {
+            while (len + (size_t)n + 1 > cap) {
+                cap *= 2;
+            }
+            char *t = realloc(spec, cap);
+            if (!t) {
+                free(spec);
+                free(hid);
+                return false;
+            }
+            spec = t;
+        }
+        memcpy(spec + len, item, (size_t)n + 1);
+        len += (size_t)n;
+        c = b;
+    }
+    free(hid);
+    printf("%s: occlusion: hidden %llu of %llu list-%d draws, %llu of %llu triangles (index count "
+           "/ 3); hidden commands: %s\n",
+           dump, (unsigned long long)hidden, (unsigned long long)draws, o->list,
+           (unsigned long long)hiddenTris, (unsigned long long)tris, len ? spec : "none");
+    printf("%s: occlusion: %u of %u draw commands hidden; %.1f %% of the draws, %.1f %% of the "
+           "triangles; %u queries, %u without a count, %u draws past the %u queries; %llu draws "
+           "of other commands not counted; measured under ICO_RD_VU_MERGE=0, ICO_RD_BLEND=fixed "
+           "and the screen-prim runs off\n",
+           dump, hiddenCmds, cmds, draws ? 100.0 * (double)hidden / (double)draws : 0.0,
+           tris ? 100.0 * (double)hiddenTris / (double)tris : 0.0, o->queries, o->unread,
+           o->overflow, (unsigned)RHI_MAX_OCCLUSION, (unsigned long long)other);
+    bool ok = true;
+    if (outFile) {
+        FILE *fp = fopen(outFile, "wb");
+        ok = fp && fprintf(fp, "%s\n", len ? spec : "none") >= 0;
+        if (fp && fclose(fp) != 0) {
+            ok = false;
+        }
+        if (!ok) {
+            fprintf(stderr, "%s: the --nop spec could not be written\n", outFile);
+        }
+    }
+    free(spec);
+    if (csvFile) {
+        /* every command of the list that made a GPU draw, for the corpus
+           script's joins (tools/occlusion_corpus.py) */
+        FILE *fp = fopen(csvFile, "wb");
+        bool csvOk = fp && fprintf(fp, "cmd,type,draws,counted,triangles,samples\n") >= 0;
+        for (uint32_t c = 0; csvOk && c < o->cmdCount; c++) {
+            const RdOccCmd *e = &o->cmds[c];
+            if (e->draws) {
+                const uint8_t t = c < cl->count ? cl->cmds[c].type : RDC_NOP;
+                csvOk = fprintf(fp, "%u,%s,%u,%u,%llu,%llu\n", c,
+                                c < cl->count && t < RDC_COUNT ? kCmdNames[t] : "-", e->draws,
+                                e->counted, (unsigned long long)e->tris,
+                                (unsigned long long)e->samples) >= 0;
+            }
+        }
+        if (fp && fclose(fp) != 0) {
+            csvOk = false;
+        }
+        if (!csvOk) {
+            fprintf(stderr, "%s: the per-command table could not be written\n", csvFile);
+            ok = false;
+        }
+    }
+    return ok;
 }
 
 /* replays the --prev dumps in order; false on a load failure */
@@ -1052,7 +1400,7 @@ static const RdFrame *prepareFrame(const char *dump, RdFrame *pf, RdFrame *f)
         if (interpAny) {
             pf->number = f->number - 1; /* the tick before, whatever was saved between */
         }
-        rf = rd__interp_frame(pf, f, interpT, 1, &ist);
+        rf = interpAt(pf, f, interpT, 1, &ist);
         if (!rf) {
             fprintf(stderr, "rd__interp_frame failed\n");
             rd__frame_free(pf);
@@ -1237,6 +1585,7 @@ static bool timeReplays(const char *dump, const RdFrame *pf, const RdFrame *f, c
 
     double sum[P_COUNT] = {0}, low[P_COUNT] = {0};
     double ring = 0.0, uniform = 0.0, interp = 0.0, draws = 0.0, pipes = 0.0, groups = 0.0;
+    double skipPipes = 0.0, skipGroups = 0.0, skipStates = 0.0; /* the bind cache's */
     double d3d11 = 0.0;    /* RdPerfRecord.backendWriteBytes (Direct3D 11 only) */
     uint32_t glowHeld = 0; /* RdPerfRecord.glowHeld: replays that pasted the held glow */
     RdPerfRecord first;
@@ -1248,7 +1597,7 @@ static bool timeReplays(const char *dump, const RdFrame *pf, const RdFrame *f, c
         if (interpPrev) {
             RdInterpStats ist;
             const double t0 = rd__now_ms();
-            rf = rd__interp_frame(pf, f, interpT, k == 0, &ist);
+            rf = interpAt(pf, f, interpT, k == 0, &ist);
             const double ms = rd__now_ms() - t0;
             rd__perf_interp_ms(ms); /* charged to the replay below, as rd_present does */
             if (!rf) {
@@ -1277,6 +1626,9 @@ static bool timeReplays(const char *dump, const RdFrame *pf, const RdFrame *f, c
         draws += r.draws;
         pipes += r.pipelineBinds;
         groups += r.bindGroupBinds;
+        skipPipes += r.pipelineBindsSkipped;
+        skipGroups += r.bindGroupBindsSkipped;
+        skipStates += r.stateSetsSkipped;
         glowHeld += r.glowHeld;
         if (k == 0) {
             first = r;
@@ -1302,6 +1654,9 @@ static bool timeReplays(const char *dump, const RdFrame *pf, const RdFrame *f, c
                sum[P_SUBMIT] / m, low[P_SUBMIT], sum[P_PRESENT] / m, low[P_PRESENT],
                ring / m / 1024.0, uniform / m / 1024.0, interp / m / 1024.0, draws / m, pipes / m,
                groups / m);
+        printf("%s: time: bind cache: %.1f pipeline, %.1f bind group and %.1f state repeats "
+               "skipped a replay\n",
+               dump, skipPipes / m, skipGroups / m, skipStates / m);
         if (d3d11 > 0.0) {
             /* the ring's bytes Direct3D 11's submits copied to the GPU */
             printf("%s: time: Direct3D 11 submits wrote %.1f KB to the GPU a replay\n", dump,
@@ -1417,7 +1772,7 @@ static int presentsRun(const char *dump, const char *png, RdFrame *pf, RdFrame *
     for (int k = 0; k < presentsN && rc == 0; k++) {
         const float a = interpT * (float)(k + 1) / (float)presentsN;
         RdInterpStats ist;
-        const RdFrame *rf = rd__interp_frame(pf, f, a, k == 0, &ist);
+        const RdFrame *rf = interpAt(pf, f, a, k == 0, &ist);
         const int glow = rd__glow_hold_last(); /* rd_glow_hold.c: held or drawn */
         if (!rf) {
             fprintf(stderr, "%s: --presents: rd__interp_frame failed at present %d\n", dump, k);
@@ -1461,15 +1816,19 @@ int main(int argc, char **argv)
                 "usage: %s <dump> <out.png> [--target NAME] [--present WxH] [--enhanced] "
                 "[--aspect A] [--resolution WxH|Nx] [--full-height] [--full-pixel] "
                 "[--border-mask] [--water-sharp] [--motion-blur original|smooth] [--no-crack-fill] "
+                "[--motion-blur-strength N] "
                 "[--work-clear RRGGBB] [--no-glow-edge] "
                 "[--filter F] "
-                "[--mirror] [--overlay-test] [--backend vulkan|d3d12|opengl|d3d11] [--list] "
-                "[--nop L:A[-B]] "
+                "[--mirror] [--overlay-test] [--backend vulkan|d3d12|opengl|d3d11] "
+                "[--render-thread off|sync|on] [--repeat N] [--list] "
+                "[--nop L:A[-B][,...]|@FILE] [--occlusion [--occlusion-out FILE] "
+                "[--occlusion-csv FILE]] "
+                "[--gpu-repeat K] "
                 "[--mesh NAME] [--dump-textures DIR] [--no-aa1] [--stats] [--pass-times] "
                 "[--time N] [--keys] "
                 "[--pass-dump DIR] "
                 "[--prev DUMP]... [--no-half] [--interp T PREV [--interp-any] [--no-reproject] "
-                "[--interp-nop-prev L:A[-B]] [--presents N]]\n"
+                "[--interp-nop-prev L:A[-B]] [--presents N] [--save-blended DUMP]]\n"
                 "       [--loss-bisect] [--passes A[-B]] [--draws A[-B]] [--mask-marks]\n"
                 "       [--no-device (with --list, --mesh or --dump-textures; <out.png> unused)]\n"
                 "       [--crt scanlines|consumer|trinitron|pvm|shadow [--crt-strength K]]\n"
@@ -1484,7 +1843,12 @@ int main(int argc, char **argv)
     /* the display options */
     RdSettings s;
     bool list = false, overlay = false, stats = false, passTimes = false;
-    int timeN = 0; /* --time N */
+    int timeN = 0;                   /* --time N */
+    int gpuRepeat = 1;               /* --gpu-repeat K */
+    bool occlusion = false;          /* --occlusion */
+    const char *occlusionOut = NULL; /* --occlusion-out FILE */
+    const char *occlusionCsv = NULL; /* --occlusion-csv FILE */
+    bool occFailed = false;          /* the spec could not be written */
     bool noDevice = false, aspectGiven = false;
     bool keysCheck = false;
     int vuRefL[8], vuRefCount = 0;
@@ -1543,6 +1907,14 @@ int main(int argc, char **argv)
             }
             motionSmooth = strcmp(m, "smooth") == 0;
             s.motionBlurSmooth = motionSmooth ? 1 : 0;
+        } else if (strcmp(argv[i], "--motion-blur-strength") == 0 && i + 1 < argc) {
+            char *end = NULL;
+            const long n = strtol(argv[++i], &end, 10);
+            if (!end || *end != '\0' || n < 10 || n > 100) {
+                fprintf(stderr, "bad --motion-blur-strength (10..100)\n");
+                return 1;
+            }
+            s.motionBlurStrength = (uint8_t)n;
         } else if (strcmp(argv[i], "--presents") == 0 && i + 1 < argc) {
             char *end = NULL;
             const long n = strtol(argv[++i], &end, 10);
@@ -1557,6 +1929,20 @@ int main(int argc, char **argv)
             s.mirror = 1;
         } else if (strcmp(argv[i], "--pass-dump") == 0 && i + 1 < argc) {
             passDir = argv[++i];
+        } else if (strcmp(argv[i], "--render-thread") == 0 && i + 1 < argc) {
+            RdThreadMode m;
+            if (!rd_thread_mode_parse(argv[++i], &m)) {
+                fprintf(stderr, "bad --render-thread (off, sync or on)\n");
+                return 1;
+            }
+            rd_thread_local_want(m); /* every rd_init from here (rd_thread.h) */
+        } else if (strcmp(argv[i], "--repeat") == 0 && i + 1 < argc) {
+            const int n = atoi(argv[++i]);
+            if (n < 1 || n > 8) {
+                fprintf(stderr, "bad --repeat (1..8)\n");
+                return 1;
+            }
+            repeatN = n;
         } else if (strcmp(argv[i], "--dump-temps") == 0 && i + 1 < argc) {
             tempsDir = argv[++i];
         } else if (strcmp(argv[i], "--aspect") == 0 && i + 1 < argc) {
@@ -1630,6 +2016,8 @@ int main(int argc, char **argv)
             noHalf = true;
         } else if (strcmp(argv[i], "--prev") == 0 && i + 1 < argc && prevCount < 16) {
             prevDumps[prevCount++] = argv[++i];
+        } else if (strcmp(argv[i], "--save-blended") == 0 && i + 1 < argc) {
+            saveBlended = argv[++i];
         } else if (strcmp(argv[i], "--interp") == 0 && i + 2 < argc) {
             char *end = NULL;
             interpT = strtof(argv[++i], &end);
@@ -1710,17 +2098,26 @@ int main(int argc, char **argv)
         } else if (strcmp(argv[i], "--dump-textures") == 0 && i + 1 < argc) {
             texDir = argv[++i];
         } else if ((strcmp(argv[i], "--nop") == 0 || strcmp(argv[i], "--interp-nop-prev") == 0) &&
-                   i + 1 < argc && nopCount < 64) {
-            unsigned l = 0, a = 0, b = 0;
-            int n = sscanf(argv[++i], "%u:%u-%u", &l, &a, &b);
-            if (n < 2 || l >= RD_LIST_COUNT) {
+                   i + 1 < argc) {
+            const bool prev = strcmp(argv[i], "--interp-nop-prev") == 0;
+            if (!addNopSpec(argv[++i], prev)) {
                 fprintf(stderr, "bad %s\n", argv[i - 1]);
                 return 1;
             }
-            nops[nopCount].l = l;
-            nops[nopCount].a = a;
-            nops[nopCount].prev = strcmp(argv[i - 1], "--interp-nop-prev") == 0;
-            nops[nopCount++].b = n == 3 ? b : a;
+        } else if (strcmp(argv[i], "--occlusion") == 0) {
+            occlusion = true;
+        } else if (strcmp(argv[i], "--occlusion-out") == 0 && i + 1 < argc) {
+            occlusionOut = argv[++i];
+        } else if (strcmp(argv[i], "--occlusion-csv") == 0 && i + 1 < argc) {
+            occlusionCsv = argv[++i];
+        } else if (strcmp(argv[i], "--gpu-repeat") == 0 && i + 1 < argc) {
+            char *end = NULL;
+            const long n = strtol(argv[++i], &end, 10);
+            if (!end || *end != '\0' || n < 1 || n > 1000) {
+                fprintf(stderr, "bad --gpu-repeat (a count of replays, 1..1000)\n");
+                return 1;
+            }
+            gpuRepeat = (int)n;
         } else if (strcmp(argv[i], "--present") == 0 && i + 1 < argc) {
             if (sscanf(argv[++i], "%ux%u", &pw, &ph) != 2 || !pw || !ph) {
                 fprintf(stderr, "bad --present size\n");
@@ -1746,6 +2143,28 @@ int main(int argc, char **argv)
     if (presentsN && (!interpPrev || passDir || timeN)) {
         fprintf(stderr, "--presents needs --interp T PREV (and not --pass-dump or --time)\n");
         return 1;
+    }
+    if (saveBlended && (!interpPrev || presentsN)) {
+        fprintf(stderr, "--save-blended needs --interp T PREV (and not --presents)\n");
+        return 1;
+    }
+    if ((occlusionOut || occlusionCsv) && !occlusion) {
+        fprintf(stderr, "--occlusion-out and --occlusion-csv need --occlusion\n");
+        return 1;
+    }
+    if (occlusion && (presentsN || lossBisect || keysCheck || noDevice)) {
+        fprintf(stderr, "--occlusion measures one replay of the frame: not with --presents, "
+                        "--loss-bisect, --keys or --no-device\n");
+        return 1;
+    }
+    if (occlusion) {
+        /* one GPU draw a command (rd_occlusion.c): the VU draw merge off
+           (read at rd_init) and the fixed-function blend, the measurement's
+           settings whatever the environment says */
+        setEnv("ICO_RD_VU_MERGE", "0");
+        setEnv("ICO_RD_BLEND", "fixed");
+        printf("note: --occlusion: the replays run under ICO_RD_VU_MERGE=0, ICO_RD_BLEND=fixed and "
+               "the screen-prim runs off (one GPU draw a command)\n");
     }
     uint32_t gw = 0, gh = 0;
     if (!unzipDump(&dump, 0) || (interpPrev && !unzipDump(&interpPrev, 1))) {
@@ -1943,7 +2362,61 @@ int main(int argc, char **argv)
                    "--interp T PREV --presents N)\n");
         }
     }
-    const bool replayed = rd__replay_frame(rf, (int)rf->keep, pw != 0 && !passDir);
+    if (occlusion) {
+        if (!rhi_occlusion_supported()) {
+            fprintf(stderr, "%s: occlusion: not measured: no occlusion queries on %s\n", dump,
+                    rhi_backend_kind_name(rhi_backend()));
+            rd__frame_free(&f);
+            rd__frame_free(&pf);
+            rd_shutdown();
+            return 77;
+        }
+        rd__set_screen_merge(false);
+        rd__occlusion_arm(0);
+    }
+    bool replayed;
+    if (rd_thread_host_on() && pw != 0 && !passDir && !occlusion && !saveBlended && !tempsDir) {
+        /* --render-thread: the presented picture handed over as the
+           window's are (sync: waited), its submit and present on the
+           submit thread (rd_submit_thread.h), read back after the drain;
+           --repeat's pictures back to back, nothing drained between them */
+        for (int k = 0; k < repeatN; k++) {
+            (void)rd__replay_frame_async(rf, (int)rf->keep, true);
+        }
+        (void)rd_thread_drain();
+        replayed = rd_thread_last_ok();
+    } else {
+        replayed = true;
+        for (int k = 0; k < repeatN && replayed; k++) {
+            replayed = rd__replay_frame(rf, (int)rf->keep, pw != 0 && !passDir);
+        }
+    }
+    if (occlusion) {
+        /* the counts before anything else recycles a frame slot */
+        RdOccResult occ;
+        const bool measured = rd__occlusion_take(&occ);
+        if (!replayed) {
+            fprintf(stderr, "%s: occlusion: the replay failed\n", dump);
+        } else if (!printOcclusion(dump, rf, &occ, occlusionOut, occlusionCsv)) {
+            occFailed = true; /* the picture still written; the exit says the spec is not */
+        } else if (!measured) {
+            printf("%s: occlusion: no list-0 draw was measured\n", dump);
+        }
+        free(occ.cmds);
+    }
+    if (replayed && saveBlended) {
+        /* after the replay, as rd_present writes F12's (rd_interp.c
+           blendedDumpTake) */
+        const bool saved = rd__dump_frame(rf, saveBlended);
+        printf("%s: the blended frame (frame %u at alpha %g) %s %s\n", dump, rf->number,
+               (double)interpT, saved ? "saved to" : "could not be saved to", saveBlended);
+        if (!saved) {
+            rd__frame_free(&f);
+            rd__frame_free(&pf);
+            rd_shutdown();
+            return 1;
+        }
+    }
     if (replayed && tempsDir) {
         /* the frame's temp targets (the water blocks among them), read back
            before anything frees them, as DIR/temp-<n>-<w>x<h>.png */
@@ -1996,6 +2469,8 @@ int main(int argc, char **argv)
                pr->textureGroups, pr->bindGroupBinds, pr->pipelineBinds,
                (unsigned long long)pr->uploadBytes, pr->barriers, pr->copies, pr->screenCmds,
                pr->screenDraws);
+        printf("%s: stats: bind cache: %u pipeline, %u bind group and %u state repeats skipped\n",
+               dump, pr->pipelineBindsSkipped, pr->bindGroupBindsSkipped, pr->stateSetsSkipped);
         if (pr->backendWriteBytes) {
             printf("%s: stats: Direct3D 11 submits wrote %llu bytes to the GPU\n", dump,
                    (unsigned long long)pr->backendWriteBytes);
@@ -2038,9 +2513,27 @@ int main(int argc, char **argv)
                "%u (fog path %s); blur pairs folded %u\n",
                dump, pr->dateSnapshots, pr->dateStencilDraws, pr->dateStencilTakes,
                pr->fogLocalDraws, rd__fog_path_name(g_rd.fogPath), pr->blurFolds);
-        /* the shadow count's resolves (rd_replay.c doShadowResolve) */
-        printf("%s: stats: shadow count: %u in one draw, %u in seven draws (profile %s)\n", dump,
+        /* the shadow count's resolves (rd_replay.c doShadowResolve), the
+         * one draw's pass and the count target's colour passes the store
+         * plan left neither loaded nor stored (rd_store_plan.c) */
+        printf("%s: stats: shadow count: %u in one draw, %u in seven draws (profile %s)", dump,
                pr->shadowOne, pr->shadowSeven, g_rd.profile.shadowOne ? "one draw" : "seven draws");
+        if (pr->shadowOne) {
+            const double mb = 1.0 / 1048576.0;
+            printf("; the one draw's pass: colour %ux%u not loaded, stored (%.1f MB), no depth "
+                   "attachment; the stencil read as a texture, %ux%u (%.1f MB), %s",
+                   pr->shadowOneW, pr->shadowOneH,
+                   (double)pr->shadowOneW * pr->shadowOneH * 4.0 * mb, pr->shadowReadW,
+                   pr->shadowReadH, (double)pr->shadowReadW * pr->shadowReadH * mb,
+                   pr->shadowGathered == pr->shadowOne ? "four texels a gather" : "a texel a load");
+        }
+        printf("; the count target's colour neither loaded nor stored in %u passes",
+               pr->shadowColorDropped);
+        if (pr->shadowColorDropped) {
+            printf(" (%ux%u, %.1f MB each way)", pr->shadowColorW, pr->shadowColorH,
+                   (double)pr->shadowColorW * pr->shadowColorH * 4.0 / 1048576.0);
+        }
+        printf("\n");
         /* the store plan (rd_replay.c storePlanScan): the depth stores (and
          * loads) dropped where no later command touches the depth */
         printf("%s: stats: stores: %u depth and %u colour stores dropped a replay of %u passes "
@@ -2055,11 +2548,48 @@ int main(int argc, char **argv)
                "target reads kept (the source drawn since its clear, or not cleared this "
                "replay)\n",
                dump, rd__const_reads_on() ? "on" : "off", pr->constReads, pr->constKept);
+        /* the fades fold (rd_fades_fold.c) */
+        printf("%s: stats: fades fold %s: %u sprites folded into the reduction\n", dump,
+               rd__fades_fold_on() ? "on" : "off", pr->fadesFolded);
+        /* the aura's read in two passes (rd_aura_box.c) */
+        printf("%s: stats: aura box %s: %u feedback reads in two passes\n", dump,
+               rd__aura_box_on() ? "on" : "off", pr->auraBoxDraws);
+        /* the passes' render areas (rd_pass_area.c), and why the others
+         * on a target with its own depth were whole (rd.h RD_AREA_WHY_*) */
+        uint64_t areaWhy[RD_AREA_WHY_COUNT], lastWhy[RD_LAST_WHY_COUNT];
+        for (int k = 0; k < RD_AREA_WHY_COUNT; k++) {
+            areaWhy[k] = pr->passAreaWhy[k];
+        }
+        for (int k = 0; k < RD_LAST_WHY_COUNT; k++) {
+            lastWhy[k] = pr->lastStoreWhy[k];
+        }
+        char whyText[512];
+        rd_perf_why_text(whyText, sizeof whyText, 0, areaWhy, 1.0);
+        printf("%s: stats: pass area %s: %u passes with an area (%u of their %u tiles loaded), "
+               "%u ended early%s%s\n",
+               dump, rd__pass_area_on() ? "on" : "off", pr->passAreas, pr->passAreaTiles,
+               pr->passAreaTargetTiles, pr->passAreaEnds, whyText[0] ? "; " : "", whyText);
+        /* the passes cut (rd_pass_cut.c), and why a last touch's pass kept
+         * its store (rd.h RD_LAST_WHY_*) */
+        rd_perf_why_text(whyText, sizeof whyText, 1, lastWhy, 1.0);
+        printf("%s: stats: pass cut: clear carry %s: %u clears taken by the next pass; clear skip "
+               "%s: %u clears skipped; last store %s: %u depth stores dropped at the last "
+               "touch%s%s\n",
+               dump, rd__pass_cut_on(RD_CUT_CARRY) ? "on" : "off", pr->clearsCarried,
+               rd__pass_cut_on(RD_CUT_SKIP) ? "on" : "off", pr->clearsSkipped,
+               rd__pass_cut_on(RD_CUT_LAST) ? "on" : "off", pr->storeLastDropped,
+               whyText[0] ? "; " : "", whyText);
+        /* the shadow volumes in the scene's pass (rd_shadow_merge.c) */
+        printf("%s: stats: shadow volumes in the scene's pass %s: %u of %u counts, %u passes "
+               "armed; %u count targets' clears not drawn\n",
+               dump, rd__shadow_merge_on() ? "on" : "off", pr->shadowMerged,
+               pr->shadowOne + pr->shadowSeven, pr->shadowMergeArmed, pr->shadowClearSkipped);
         /* the pixel diet (rd_alpha_plan.c, rd_fx_plan.c, rd_pixel_plan.c) */
         printf("%s: stats: pixel diet: alpha plan %u one-pass, %u opaque; fx plan %u constant, %u "
-               "additive, %u local; vu no-planes %u\n",
+               "additive, %u local (%u post sprites' DATE by local read); vu no-planes %u; "
+               "sprite no-planes %u\n",
                dump, pr->alphaOnePass, pr->alphaOpaque, pr->fxConstant, pr->fxAdditive, pr->fxLocal,
-               pr->vuNoPlanes);
+               pr->fxLocalDate, pr->vuNoPlanes, pr->spriteNoPlanes);
         /* the VU vertex and triangle pre-passes (rd_replay_vu.c rd__vu_prepass):
          * each mesh and grid vertex and triangle and each sprite once, before
          * the lists */
@@ -2123,12 +2653,13 @@ int main(int argc, char **argv)
         rd__crack_fill_counts(&cc);
         printf("%s: stats: crack fill %s: %u passes, %llu pixels filled (%llu replays counted; "
                "scale %.4gx%.4g, reach %ux%u texels; %llu fogged replays above 1x not filled; "
-               "%llu fills inside the scene pass with the local fog; %llu fills after the MSAA "
-               "resolve)\n",
+               "%llu fills after lists 4-6; %llu fills after the MSAA resolve; %llu fills in "
+               "the aura's paste pass; %llu fills after the glow's alpha)\n",
                dump, cc.enabled ? "on" : "off", pr->crackFillPasses, (unsigned long long)cc.pixels,
                (unsigned long long)cc.counted, (double)cc.sx, (double)cc.sy, cc.rx, cc.ry,
-               (unsigned long long)cc.skipped, (unsigned long long)cc.folded,
-               (unsigned long long)cc.afterMsaa);
+               (unsigned long long)cc.skipped, (unsigned long long)cc.late,
+               (unsigned long long)cc.afterMsaa, (unsigned long long)cc.pasted,
+               (unsigned long long)cc.afterAlpha);
         uint32_t satDraws = 0;
         const uint64_t sat = satZVertices(rf, &satDraws);
         printf("%s: stats: VU corners with a saturated GS Z: %llu vertices of region-mode meshes "
@@ -2222,10 +2753,23 @@ int main(int argc, char **argv)
         uint32_t passCount = 0;
         memset(&last, 0, sizeof(last));
         rd__set_perf_passes(passTimes);
-        for (int k = 0; k < RHI_FRAMES_IN_FLIGHT + 2; k++) {
+        /* --gpu-repeat K: the warm records past the first replay after the
+           picture's (whose replay id is g_rdPerf's now) */
+        const uint32_t pictureReplay = g_rdPerf.replay;
+        double *repTotal = gpuRepeat > 1 ? calloc((size_t)gpuRepeat + 4, sizeof(double)) : NULL;
+        double *repList0 = gpuRepeat > 1 ? calloc((size_t)gpuRepeat + 4, sizeof(double)) : NULL;
+        double *repPre = gpuRepeat > 1 ? calloc((size_t)gpuRepeat + 4, sizeof(double)) : NULL;
+        int repN = 0;
+        for (int k = 0; k < RHI_FRAMES_IN_FLIGHT + 1 + gpuRepeat; k++) {
             rd__replay_frame(rf, (int)rf->keep, pw != 0);
             while (rd_perf_pop(&pr)) {
                 if (pr.gpuValid) {
+                    if (repTotal && repList0 && repPre && pr.replay > pictureReplay + 1u &&
+                        repN < gpuRepeat + 4) {
+                        repTotal[repN] = pr.gpuMs;
+                        repList0[repN] = pr.gpuListMs[0];
+                        repPre[repN++] = pr.gpuPrepassMs;
+                    }
                     last = pr;
                     have = true;
                     const RdPerfPass *pp;
@@ -2249,6 +2793,12 @@ int main(int argc, char **argv)
             printf("%s; present %.3f; VU pre-pass %.3f\n",
                    last.gpuPostPartial ? " (not all timed apart)" : "", last.gpuPresentMs,
                    last.gpuPrepassMs);
+            if (gpuRepeat > 1) {
+                printf("%s: gpu median of %d replays: total %.3f ms, list 0 %.3f ms, VU pre-pass "
+                       "%.3f ms\n",
+                       dump, repN, medianOf(repTotal, repN), medianOf(repList0, repN),
+                       medianOf(repPre, repN));
+            }
             if (passTimes) {
                 /* the warm replay pass by pass, then the window's texts */
                 static RdPerfPassAgg agg;
@@ -2257,10 +2807,15 @@ int main(int argc, char **argv)
                 for (uint32_t k = 0; k < passCount; k++) {
                     const RdPerfPass *q = &passes[k];
                     rd_perf_pass_label(q, label, sizeof(label));
-                    printf("%s: pass %u: %s %s %ux%u, list %d, %u draws, %u pipeline binds, GPU "
-                           "%.1f us, CPU %.1f us\n",
+                    char area[48] = ""; /* the pass's render area (rd_pass_area.c) */
+                    if (q->aw) {
+                        snprintf(area, sizeof(area), " area %ux%u at %u,%u", (unsigned)q->aw,
+                                 (unsigned)q->ah, (unsigned)q->ax, (unsigned)q->ay);
+                    }
+                    printf("%s: pass %u: %s %s %ux%u%s, list %d, %u draws, %u pipeline binds, "
+                           "GPU %.1f us, CPU %.1f us\n",
                            dump, k, label, rd_perf_target_name(q->target), (unsigned)q->w,
-                           (unsigned)q->h, (int)q->list, q->draws, q->pipelineBinds,
+                           (unsigned)q->h, area, (int)q->list, q->draws, q->pipelineBinds,
                            (double)q->gpuUs, (double)q->cpuUs);
                 }
                 rd_perf_pass_agg_reset(&agg);
@@ -2281,8 +2836,14 @@ int main(int argc, char **argv)
         } else {
             printf("%s: gpu: no timestamps came back\n", dump);
         }
+        free(repTotal);
+        free(repList0);
+        free(repPre);
     }
     if (rc == 0 && timeN > 0 && !timeReplays(dump, &pf, &f, rf, timeN, pw != 0)) {
+        rc = 1;
+    }
+    if (occFailed) {
         rc = 1;
     }
     rd__frame_free(&f);

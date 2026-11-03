@@ -57,6 +57,7 @@
 #include <string.h>
 #include "rd.h"
 #include "rhi.h"
+#include "rd_thread.h"
 #include "rd_camera_blend.h"
 #include "../include/ico_frame.h"
 
@@ -114,6 +115,8 @@ typedef enum RdCmdType {
                        * (doFog) and the rd__is_blur_kind kinds (rd__blur_post_sprite) replay; any
                        * other kind is a stub (skipped, logged once) */
     /* rd_shadow.c: on the state block's colour and depth targets */
+    /* b[0] of both: the count's step when it is 8 (rd.h rd_shadow_reset_step),
+     * else 0, the step 4 (the European disc's, and every older dump) */
     RDC_SHADOW_RESET,   /* the depth target's stencil to 0 */
     RDC_SHADOW_RESOLVE, /* the stencil count into the colour target (rd.h rd_shadow_resolve) */
     /* PRIM.AA1 (dump version 4): a state delta numbered after the actions,
@@ -192,8 +195,16 @@ static inline int rd__cmd_is_state(uint8_t type)
 
 /* RDC_SHADOW_STRIP's b[0]. */
 #define RD_SHADOW_TRIS 1
-/* The stencil bits the shadow count keeps: n mod 64, as 4 n mod 256 wraps. */
+/* The stencil bits the shadow count keeps: n mod 64, as 4 n mod 256 wraps
+ * (the step 8's 8 n mod 256 reads the low five of them, RD_SHADOW_STEP8_MASK). */
 #define RD_SHADOW_STENCIL_MASK 0x3Fu
+#define RD_SHADOW_STEP8_MASK 0x1Fu
+/* The step a shadow reset or resolve command carries (its b[0]): 8 or 4 */
+uint32_t rd__shadow_step(const RdCmd *c);
+/* The step of the running disc's count (Shadow.c's face colours: 8 on the
+ * North American disc and the 2001 previews, else 4), for what runs before
+ * or without a recorded reset: the start-up set, the shadow self-test */
+uint32_t rd__shadow_disc_step(void);
 /* The stencil bit DATE's stencil path keeps the destination alpha's MSB in
  * (rd_replay_tiler.c rd__replay_date_take; RD_STENCIL_DATE_*): the count writes bits
  * 0-5 only (RD_SHADOW_STENCIL_MASK) and its resolve reads no other, so bit
@@ -327,8 +338,9 @@ typedef struct RdFrame {
      * RDC_TARGET; headValid 0 = no head recorded */
     uint32_t headValid;
     uint32_t headStart[2], headEnd[2], headClear[2], headTarget[2];
-    /* rd_interp.c; not dumped: rd_camera_cut while the frame
-     * was open (rd_end_frame copies it into camera.cut), and the strongest
+    /* rd_interp.c; not dumped: rd_camera_cut (1) or rd_camera_cut_wall
+     * (RD_CAMERA_CUT_WALL) while the frame was open (rd_end_frame copies it
+     * into camera.cut), and the strongest
      * fade rd_post(RD_POST_FADE) recorded, 1 + its alpha (0: none) */
     uint32_t cut;
     uint32_t fade;
@@ -342,7 +354,7 @@ typedef struct RdFrame {
      * the first RD_CULL_DROPS_MAX of cullDropCount */
     uint32_t cullDropCount;
     RdCullDrop cullDrops[RD_CULL_DROPS_MAX];
-    /* rd_interp.c's blended frame; not dumped: hasTickCams 1 when its
+    /* rd_interp.c's blended frame (dump version 14): hasTickCams 1 when its
      * camera is blended between two ticks' that differ, tickCams the two
      * ticks' cameras as R = S_tick St^-1 (column-major; [0] the tick
      * before's, [1] this tick's; S = proj view, St the blended camera's),
@@ -449,6 +461,15 @@ typedef struct RdTargetRec {
  * snapshot copies only this area (rd_replay.c dateSnapshot). */
 bool rd__screen_area(const RdTargetRec *tc, const RdStateBlock *st, const RdScreenVtx *v,
                      uint32_t n, int mirror, int aa1, RhiRect *area);
+/* rd_pass_area.c, for rd_replay.c (its gsRectToTexels and scissorTexels)
+ * and rd__screen_area: GS pixels x0..x1, y0..y1 (inclusive, after
+ * XYOFFSET) of target tc in its texels, through the UI flip when mirror
+ * and the texel scale (Full pixel's crop too), clipped to the target; and
+ * the scissor (SCISSOR_1) of the state st in texels the same way.  False
+ * when nothing is left. */
+bool rd__gs_rect_texels(const RdTargetRec *tc, int32_t x0, int32_t y0, int32_t x1, int32_t y1,
+                        int mirror, RhiRect *out);
+bool rd__scissor_texels(const RdTargetRec *tc, const RdStateBlock *st, int mirror, RhiRect *sc);
 /* Whether the DATE snapshot must be (re)taken for a draw on target tcId at
  * write serial serial that reads area want (texels; NULL = the whole tw x
  * th target), given the snapshot held (for target heldFor at serial
@@ -564,7 +585,11 @@ enum { RD_TEXKIND_IMAGE = 1, RD_TEXKIND_TARGET = 2 };
  * SHEET: rd_create_texture_sheet, 1 byte (coverage
  * 0..255) and RdTexRec.sheet, drawn with font_sheet_ps (RD_FS_FONT_SHEET),
  * never given mips; appended, so the values before it keep their meaning
- * in dumps. */
+ * in dumps.  pixels holds the coverage at every scale; a 1x sheet's RHI
+ * texture holds its finished texels instead (rd__sheet_baked: RGBA8 with
+ * an apron, rd_tex.c rd__sheet_bake_rect, drawn with font_sheet_baked_ps),
+ * so rd__texel_bytes and rd__texel_rhi_format are the CPU copy's and
+ * rd__tex_device_bytes and rd__tex_rhi_format the device's. */
 enum {
     RD_TEXEL_RGBA8 = 0,
     RD_TEXEL_R8 = 1,
@@ -691,6 +716,14 @@ typedef struct RdTexRec {
     /* Its RdSheetStyle.scale, 1..ICO_SHEET_SCALE_MAX
      * (0 in a texture that is no sheet) */
     uint8_t sheetScale;
+    /* A SHEET texture's RHI texture holds the baked texels
+     * (rd__sheet_baked when it was made; rd_upload.c makes it again when
+     * the two differ) */
+    uint8_t sheetBaked;
+    /* A SHEET texture never baked: drawn through font_sheet_ps at 1x too
+     * (the blend self-test's glyph, rd_blend_selftest.c, so its exact-blend
+     * run puts the largest destination-read shader through the device) */
+    uint8_t sheetShader;
     /* The GS mipmap levels of a game texture whose TEX1 asks for mipmapping
      * and whose levels are authored (rdtex_store_levels): gsLevels counts
      * them with the base (0 or 1: none), gsChain holds levels 1.. as RGBA8
@@ -713,6 +746,11 @@ enum {
 };
 
 RdTexRec *rd__tex_rec(uint32_t id);
+/* An RGBA8 image texture's CPU texels replaced by px (w * h * 4 bytes,
+ * malloc'd; the texture owns it from here), the whole texture dirty: the
+ * decode pool's result for a texture rdtex_store made (rd_tex.c
+ * rdtex__job_finish).  false (px still the caller's) for another kind */
+bool rd__tex_take_pixels(RdTex tex, uint8_t *px);
 /* Gives an image texture its GS levels (RdTexRec.gsLevels, gsChain): levels
  * counts the base, chain holds levels 1.. as RGBA8, level l
  * max(w >> l, 1) x max(h >> l, 1) texels (copied).  levels 0 or 1 (or a
@@ -735,6 +773,59 @@ RdTex rd__create_texture_replacement(struct TexpackImage *img, uint32_t uvW, uin
 /* Frees a replacement's pending levels (texpack_free_image) and the
  * TexpackImage holding them; t->pending is null afterwards. */
 void rd__free_pending(RdTexRec *t);
+
+/* Sheet text, baked (rd_tex.c; issue 173 at 1x, the phone's menus above).
+ * rd__sheet_bake_scale: whether strips of that scale are baked (1 or 0,
+ * and 2: a scale whose magnified rim font_sheet_ps blends without a
+ * rounding; not 3, whose blend rounds, nor 4, exact but 34 MB a page).  rd__sheet_baked: t is a sheet texture of such a
+ * scale and the bake is on (g_rd.sheetShader and the texture's own
+ * sheetShader off): its RHI texture is RGBA8, (w + 2 ICO_SHEET_BAKE_AX)
+ * x (h + 2 ICO_SHEET_BAKE_AY), the page's texel (x, y) at (x + AX, y + AY)
+ * (above 1x h is both halves, coverage and rim, so font_sheet_baked_ps's
+ * page size is font_sheet_ps's texture size), and rd__plan_screen_draw
+ * draws it with font_sheet_baked_ps.
+ * rd__tex_device_w/h and rd__tex_device_bytes: the RHI texture's size and
+ * bytes a texel; rd__tex_rhi_format its format (rd__texel_rhi_format of
+ * the CPU copy's for every other texture).
+ * rd__sheet_bake_rect: the texels font_sheet_ps makes at scale 1 (rim,
+ * sheet_texel, the Bayer threshold at the page texel) for the page texels
+ * [x, x + rw) x [y, y + rh) (any integers: outside the page the coverage is
+ * 0) of a w x h coverage page cov under style (RdTexRec.sheet: the rim's
+ * weight 0..64, rimLevel, fillLevel, dither 0/1), each as RGBA8 (grey,
+ * grey, grey, alpha in GS units) into out, rows pitch bytes apart.  The rim
+ * is the separable weighted dilation rd_sheet_rim makes at scale 1.  0
+ * without the memory for its row window (nothing written), else 1. */
+int rd__sheet_bake_scale(uint32_t scale);
+int rd__sheet_baked(const RdTexRec *t);
+uint32_t rd__tex_device_w(const RdTexRec *t);
+uint32_t rd__tex_device_h(const RdTexRec *t);
+uint32_t rd__tex_device_bytes(const RdTexRec *t);
+RhiFormat rd__tex_rhi_format(const RdTexRec *t);
+int rd__sheet_bake_rect(const uint8_t *cov, uint32_t w, uint32_t h, const uint8_t style[4],
+                        int32_t x, int32_t y, int32_t rw, int32_t rh, uint8_t *out, size_t pitch);
+/* rd__sheet_bake_scaled_rect: the texels font_sheet_ps makes above 1x
+ * (font.hlsl sheet_scaled: the texel's own coverage from the top half, the
+ * rim levels of the sheet texels q0 and q0 + 1 around its centre from
+ * texel q s of the bottom half, blended bilinearly, sheet_texel_scaled at
+ * the threshold of the sheet texel it lies in) for the texels [x, x + rw) x
+ * [y, y + rh) (any integers, both halves' rows) of a w x h sheet texture tex
+ * of strip scale scale (2 or 4; 0 for any other, nothing written), in
+ * integers: the shader's lerps by odd 4ths and 8ths are exact floats, so
+ * these are its values.  rd__sheet_bake_texels: t's texels by its scale.
+ * rd__sheet_bake_grow: t's changed rectangle (*rx, *ry, *rw, *rh, in the
+ * texture's texels) turned into the device rectangle of every baked texel
+ * that reads a changed one, clipped to the dw x dh device texture. */
+int rd__sheet_bake_scaled_rect(const uint8_t *tex, uint32_t w, uint32_t h, const uint8_t style[4],
+                               uint32_t scale, int32_t x, int32_t y, int32_t rw, int32_t rh,
+                               uint8_t *out, size_t pitch);
+int rd__sheet_bake_texels(const RdTexRec *t, int32_t x, int32_t y, int32_t rw, int32_t rh,
+                          uint8_t *out, size_t pitch);
+void rd__sheet_bake_grow(const RdTexRec *t, uint32_t dw, uint32_t dh, uint32_t *rx, uint32_t *ry,
+                         uint32_t *rw, uint32_t *rh);
+/* g_rd.sheetShader set to on, every baked sheet texture (scale 1, 2)
+ * marked for upload again (its RHI texture is made in the other layout at
+ * the next replay) */
+void rd__set_sheet_shader(bool on);
 
 /* --------------------------------------------------------------- meshes
  * rd_mesh.c.  A VU mesh keeps its vertex stream (the
@@ -821,11 +912,52 @@ typedef struct RdMeshRec {
      * rd_replay_vu.c doVuDraw) */
     uint32_t *cardStrips;
     uint32_t cardStripCount, boneQwUsed;
+    /* The stream's serial (rd__mesh_stream_written): a new one at every
+     * write of the stream (its creation, rd_update_vu_mesh, the
+     * interpolation's scratch copies and their blend), so what is computed
+     * from the stream alone (the alpha plan's span, rd_alpha_plan.c; a
+     * skinned mesh's pivots, rd_interp.c) holds across replays while the
+     * serial is the same; 0 for a record never written through it (the
+     * tests' own records: kept for the replay alone, as before) */
+    uint64_t streamSerial;
 } RdMeshRec;
 
 /* The stream mesh m had when frame `frame` was recorded, NULL when no
  * kept version covers it */
 const float (*rd__mesh_stream_at(const RdMeshRec *m, uint32_t frame))[4];
+/* m's stream was written: a new RdMeshRec.streamSerial */
+void rd__mesh_stream_written(RdMeshRec *m);
+/* rd_interp_mesh.c: what the interpolation reads from a stream alone, kept
+ * while its serial is the same.
+ *   rd__interp_skin_pivots: skinned mesh meshId's bone pivots (x, y, z,
+ *     weight; weight 0: none), RD_INTERP_BONES of them; valid to the next
+ *     call; rd__interp_pivots_present at every present
+ *   rd__interp_mesh_centroid: a rigid mesh's vertex centroid; false without
+ *     vertices
+ *   rd__interp_streams_same: prev's stream ps (mesh pMesh, record mp) and
+ *     cur's cs (cMesh, mc) hold the same size bytes (memcmp's answer, kept
+ *     per both meshes, serials and buffers); rd__interp_streams_counts:
+ *     since start, the comparisons made and the answers kept (tests) */
+#define RD_INTERP_BONES 60
+const double (*rd__interp_skin_pivots(uint32_t meshId))[4];
+void rd__interp_pivots_present(void);
+bool rd__interp_mesh_centroid(uint32_t meshId, double out[3]);
+bool rd__interp_streams_same(uint32_t pMesh, const RdMeshRec *mp, const float (*ps)[4],
+                             uint32_t cMesh, const RdMeshRec *mc, const float (*cs)[4],
+                             size_t size);
+void rd__interp_streams_counts(uint32_t *compared, uint32_t *kept);
+
+/* the 10 s line's counts (rd_interp.c presentLog): rd__interp_keep_note an
+ * ask of kind what (RD_KEEP_*) and whether an earlier present's work served
+ * it; rd__interp_keeps_log writes the line "interp: kept from an earlier
+ * present ..." and starts the counts again */
+enum { RD_KEEP_SHAPE, RD_KEEP_PIVOTS, RD_KEEP_PRISMS, RD_KEEP_COUNT };
+
+void rd__interp_keep_note(int what, bool kept);
+void rd__interp_keeps_log(void);
+/* rd_alpha_plan.c: the mesh spans asked for since the last take, and those
+ * kept from an earlier ask (meshSpanMemo; the line above names them) */
+void rd__alpha_span_take(uint64_t *asks, uint64_t *kept);
 
 #define RD_MAX_MESHES 16384
 
@@ -962,6 +1094,10 @@ uint32_t rd__vu_sheet_end(const RdMeshRec *m, uint32_t end, bool extended);
  * region rule, vu_common.hlsli vu_region_rule): the Enhanced preset, a frame
  * wider than 4:3 or a scene scale above 1 (rd_replay.c) */
 bool rd__vu_extended(void);
+/* Whether the device's driver is Mesa's Turnip: its text (RhiLimits.driverText,
+ * "turnip Mesa driver" or "Turnip Mesa 26.3.0") has the word in any case;
+ * Qualcomm's own driver does not (rd_profile.c) */
+bool rd__driver_is_turnip(const RhiLimits *lim);
 /* A vertex shader's embedded name (RD_VS_*; rd_replay.c s_vsNames) */
 const char *rd__vs_name(uint8_t vs);
 /* A fragment shader's embedded name (RD_FS_*; rd_replay.c s_fsNames) */
@@ -1032,6 +1168,30 @@ typedef struct RdProfile {
      * default on every class); [dev] shadow_bspline = true sets it, an A/B
      * (rd_fx_plan.c rd__sprite_above1x) */
     bool shadowBspline;
+    /* the aura's feedback read of SCENE into FEED128 above 1x in two passes
+     * (a row pass into ROWBOX, then FEED128's draw summing the rows; the
+     * same bytes: rd_aura_box.c), on by default on the tile-based classes
+     * (Adreno, Mali, PowerVR, Apple, another tiler), off on the
+     * immediate-mode ones; [dev] aura_box over it, read there */
+    bool auraBox;
+    /* the pass area (rd_pass_area.c): a render pass on a target with a
+     * depth, whose draws are all 2D with bounds known before it begins,
+     * loads and stores only the tiles they touch; on by default on the
+     * tile-based classes, off on the immediate-mode ones (which ignore the
+     * area anyway); [dev] pass_area over it, read there */
+    bool passArea;
+    /* passes cut (rd_pass_cut.c): a pending clear carried into the next
+     * pass, a clear nothing reads skipped, the depth store of the pass
+     * holding the depth's last touch dropped; on by default on the
+     * tile-based classes; [dev] clear_carry, clear_skip, last_store over
+     * it, read there */
+    bool passCut;
+    /* the shadow volumes drawn in the scene's open pass (rd_shadow_merge.c)
+     * where it cleared the stencil: no pass of their own, the scene's depth
+     * not stored and loaded again for them; on on the tile-based classes,
+     * off on the immediate-mode ones (no key: the same picture;
+     * ICO_RD_SHADOW_MERGE=0|1 is the tests' way) */
+    bool shadowMerge;
     /* rd_profile.c: the device class's name for the lines; per flag
      * (RD_PROFILE_*) whether a [dev] key set it and whether a self-test
      * turned it off (rd__profile_self_test_off) */
@@ -1228,6 +1388,10 @@ typedef enum RdFsId {
     /* font_sheet_ps, screen and overlay prims sampling a sheet texture
      * (RD_TEXEL_SHEET); DrawCB.param holds its style */
     RD_FS_FONT_SHEET,
+    /* font_sheet_baked_ps, the same draws from a 1x sheet whose texels the
+     * renderer baked on the CPU (rd__sheet_baked; rd_tex.c
+     * rd__sheet_bake_rect): four reads, font_sheet_ps's bytes */
+    RD_FS_FONT_SHEET_BAKED,
     RD_FS_SPRITE_AA1, /* sprite_aa1_ps, sprite_ps with the coverage as As */
     RD_FS_BOX_REDUCE, /* box_reduce_ps, the shadow count at the GS size */
     RD_FS_SPRITE_STQ, /* sprite_stq_ps, sprite_ps dividing S and T by Q per pixel */
@@ -1293,9 +1457,10 @@ typedef enum RdFsId {
     RD_FS_FX_ACC_RESOLVE,
     /* the crack filler above 1x (rd_crack_fill.c), behind blit_vs, each
      * texel by Load: crack_fill_ps the pixels no draw covered between two
-     * drawn ones in SCENE given the nearer one's colour and depth
-     * (SV_Depth), crack_count_ps the pixels it fills counted a 16 x 16
-     * block a texel; keys rd__crack_fill_key, in the fog's family */
+     * drawn ones in SCENE given the nearer one's colour (after lists 4-6,
+     * SCENE's depth sampled, none written), crack_count_ps the pixels it
+     * fills counted a 16 x 16 block a texel; keys rd__crack_fill_key, in
+     * the fog's family */
     RD_FS_CRACK_FILL,
     RD_FS_CRACK_COUNT,
     /* shadow_count_ps: the shadow count read from the stencil in one draw
@@ -1304,6 +1469,12 @@ typedef enum RdFsId {
     /* crack_fill1_ps: crack_fill_ps for a reach of at most 1 texel on each
      * axis (CRACK_REACH_1; key rd__crack_fill_key(2)) */
     RD_FS_CRACK_FILL1,
+    /* the aura's feedback read in two passes (rd_aura_box.c; fx_sprite.hlsl,
+     * behind fx_rect_vs): fx_aura_rows_ps the box's row sums into ROWBOX
+     * (RGBA16_UINT), fx_aura_sum_ps FEED128's draw from them (the UINT
+     * build); keys rd__aura_box_keys, in the fx family */
+    RD_FS_FX_AURA_ROWS,
+    RD_FS_FX_AURA_SUM,
     RD_FS_COUNT
 } RdFsId;
 
@@ -1512,6 +1683,53 @@ RdDrawPass rd__dst_merge(const RdDrawPass *p);
 uint32_t rd__enumerate_dst(const RdPipeKeyInt *in, uint32_t n, RdPipeKeyInt *out, uint32_t max,
                            uint32_t count);
 const char *rd__blend_exact_name(int mode);
+
+/* ------------------------------------------------ GS state as shader data
+ * rd_uber.c (the design is at its top; rd_dst_read.c plans the passes).
+ * rd__uber_asked_env: ICO_RD_UBER ([dev] uber): -1 auto (unset, "auto"), 1
+ * on, 0 off, -2 another word (auto).  rd__uber_wanted: whether the device
+ * and the asks give it (Vulkan, the rasterization-order attachment read,
+ * local read, a tile-based GPU under auto, no [dev] blend other than
+ * attachment), *why its words ("on (raster-order read)", "off (...)"):
+ * rd__dst_asked_env asks for the attachment read when it holds.
+ * rd__uber_init (rd__dst_init, after the mode is set): g_rd.uber and
+ * uberDate, logged.  rd__uber_on: in force (uber with the attachment read
+ * the mode).  rd__uber_off: turned off (a self-test), logged; the
+ * fixed-function blend when the attachment read was its alone.
+ * rd__uber_profile_words: the profile line's words.  rd__fs_has_dstatt:
+ * entry fs has an attachment read twin (rd__fs_has_dst's, and vu_np_ps's
+ * own).  rd__uber_np: vu_np_ps draws through its twin under it.
+ * rd__make_dst_twins: rd__gpu_init's twins of entry fs (name) for the
+ * storage and attachment reads asked for.  rd__uber_key_ok: a key the
+ * read draws (no read yet, RGBA8, a twin, one pass, no stencil,
+ * single-sampled).  rd__uber_normal / rd__uber_normalise: an attachment
+ * read key under it whose mask the cache's key drops (0xF: the shader
+ * writes the mask, DrawCB WMASK).  rd__uber_date: a DATE draw into tc
+ * reads the alpha in its shader (no snapshot, no stencil bit); msaa: the
+ * MSAA epoch is open or may open.  rd__exact_readable: tc's passes begin
+ * readable for the attachment read.  rd__enumerate_uber: the start-up
+ * set's keys under it (rd_dst_read.c).  rd__uber_set_line: the start-up
+ * set's line with the set it replaces (rd_precreate_pipelines).
+ * rd__uber_perf_note: the pipeline cache by family into the replay's
+ * record (rd_perf.c rd__perf_end). */
+int rd__uber_asked_env(void);
+bool rd__uber_wanted(const char **why);
+void rd__uber_init(void);
+bool rd__uber_on(void);
+void rd__uber_off(const char *why);
+const char *rd__uber_profile_words(void);
+bool rd__fs_has_dstatt(uint8_t fs);
+bool rd__uber_np(void);
+void rd__make_dst_twins(uint8_t fs, const char *name, bool storage, bool attach);
+bool rd__uber_key_ok(const RdPipeKeyInt *k);
+bool rd__uber_normal(const RdPipeKeyInt *k);
+void rd__uber_normalise(RdPipeKeyInt *k);
+bool rd__uber_date(const RdTargetRec *tc, bool msaa);
+bool rd__exact_readable(const RdTargetRec *c);
+uint32_t rd__enumerate_uber(const RdPipeKeyInt *in, uint32_t n, RdPipeKeyInt *out, uint32_t max,
+                            uint32_t count);
+void rd__uber_set_line(uint32_t n);
+void rd__uber_perf_note(RdPerfRecord *r);
 /* Turns a planned pass of a command whose prims carry Q != 1
  * into the STQ shaders (IcoSpriteStqVertex); 0 when the pass keeps its own. */
 int rd__stq_pass(RdDrawPass *dp);
@@ -1530,6 +1748,16 @@ const struct IcoSpritePlaneVertex *rd__screen_planes(const void *vb, uint32_t st
  * planned as dp, its planes: not where the planes are dropped
  * (rd__planes_dropped; its STQ passes keep them) */
 int rd__screen_planes_want(const RdStateBlock *s, const RdTargetRec *tc, const RdDrawPass *dp);
+/* The sprite planes builds off for the run (g_rd.spritePlanesOff, issue
+ * 161): rd_set_sprite_planes_off's reason or ICO_RD_NO_SPRITE_PLANES=1,
+ * read and logged once by rd_init (rd_screen_planes.c); the screen-prim
+ * triangles then draw through the plain sprite builds, their STQ ones too,
+ * and the start-up set holds those keys instead (rd_pipeline.c
+ * rd__enumerate_reachable_screen) */
+void rd__sprite_planes_init(void);
+/* Whether a key is one of the sprite planes builds (its vertex shader:
+ * sprite_plane_*_vs, sprite_stq_plane_*_vs) */
+bool rd__key_is_sprite_planes(const RdPipeKeyInt *k);
 /* Whether a draw under this state samples a PSMCT24 or
  * PSMCT16 texture (or one with a 24- or 16-bit CLUT: RdTexRec.src not
  * RGBA32) under a TEXA with AEM through a linear MAG or MIN filter, the
@@ -1549,6 +1777,11 @@ RdPipeKeyInt rd__post_key(RdVsId vs, RdFsId fs, RhiFormat colorFmt);
 RdPipeKeyInt rd__present_depth_key(RhiFormat colorFmt);
 /* The pipeline for k, created on first use.  0 without a device. */
 RhiPipeline rd__get_pipeline(const RdPipeKeyInt *k);
+/* The same, not noted on the pass ring's newest entry
+ * (rd__passring_pipeline_hold): for a pass that looks its pipeline up
+ * before its own entry is pushed, then asks again after it (rd_replay.c
+ * shadowReduce, rd__shadow_one_draw; rd_shadow_one.c) */
+RhiPipeline rd__get_pipeline_held(const RdPipeKeyInt *k);
 /* Binds p and sets the dynamic state the key asks for where the device
  * left it dynamic (RhiLimits.dynamicDepth / dynamicBlend: the depth test,
  * write and compare, the blend and the colour mask), from the
@@ -1622,6 +1855,13 @@ uint32_t rd__pipeline_create_gathered(bool *stopped);
  * clears them) */
 uint32_t rd__pipeline_gathered(RdPipeKeyInt *out, uint32_t max);
 uint32_t rd__pipeline_count(void);
+/* After a presenting replay (rd_replay.c rd__replay_frame_here), on the
+ * thread that draws: the background finisher's step (rd.h
+ * rd_pipelines_background_start): a batch whose compiles ended taken, or
+ * the next one begun when nothing holds it; pictureMs (the replay's time
+ * less the pipelines made in it) over RD_FINISH_SLOW_MS holds the next
+ * batch.  Nothing when the finisher is not running. */
+void rd__pipe_finish_tick(double pictureMs);
 /* A display change (rd_begin_frame, after the settings applied and the
  * targets made again): the new state's reachable keys the cache lacks made
  * in batches as the start-up set's are, with the display change's progress
@@ -1636,6 +1876,41 @@ double rd__pipeline_create_ms(void);
  * the lists (the vertex pre-pass, the present, outside a replay) (rd_perf.c,
  * from the lists' timestamps and rd__passring_list). */
 int rd__replay_list(void);
+
+/* The hidden-draw measurement (rd_occlusion.c; the replay tool's
+ * --occlusion, docs/port/RENDER.md "Culling").  rd__occlusion_arm(list):
+ * the next replay's GPU draws while rd__replay_list() is list go inside
+ * occlusion queries (rhi_cmd_begin_occlusion), one query a draw, each
+ * noted with the command that drew it (g_rdStoreOrd, the index in the
+ * list when list 0 is the first walked; a screen-prim run's draw the
+ * command that opened it, g_rdDrawOwner); -1 disarms.  rd__occlusion_take
+ * after that replay: the slot it recorded in waited for (rd__wait_frame
+ * until rhi_wait_frame recycles it, at most RHI_FRAMES_IN_FLIGHT), the
+ * counts read (rhi_read_occlusion) and summed by command into out (its
+ * cmds array the caller frees); false when nothing was measured (no device
+ * with the queries, or no draw of the list).  The measurement disarms
+ * itself there. */
+typedef struct RdOccCmd {
+    uint32_t draws;   /* GPU draws the command made in the list */
+    uint32_t counted; /* of them, with a count read back */
+    uint64_t tris;    /* their vertex or index counts / 3, times the instances */
+    uint64_t samples; /* the samples their counts add up to */
+} RdOccCmd;
+
+typedef struct RdOccResult {
+    int list;
+    uint32_t cmdCount; /* cmds[0 .. cmdCount - 1]: by command index */
+    RdOccCmd *cmds;
+    uint32_t queries;  /* queries begun */
+    uint32_t overflow; /* draws past RHI_MAX_OCCLUSION, without a query */
+    uint32_t unread;   /* queries begun whose count did not come back */
+} RdOccResult;
+
+void rd__occlusion_arm(int list);
+bool rd__occlusion_take(RdOccResult *out);
+/* the command a screen-prim run's draw belongs to, + 1 (rd_replay.c
+ * flushScreenRun; 0 outside it: the draw is g_rdStoreOrd's) */
+extern uint32_t g_rdDrawOwner;
 /* the VU vertex pre-pass is being recorded (rd_replay_vu.c rd__vu_prepass;
  * the first-use line names it) */
 bool rd__vu_prepass_running(void);
@@ -1654,17 +1929,23 @@ uint32_t rd__add_pipe_key(RdPipeKeyInt *out, uint32_t max, uint32_t n, const RdP
 /* The screen and post families alone (rd_state_test holds them under 400,
  * and the whole set under RD_PIPELINE_REACHABLE_MAX). */
 uint32_t rd__enumerate_reachable_screen(RdPipeKeyInt *out, uint32_t max);
+/* The presentation overlay's keys (rd__overlay_state on the headless
+ * output and the swapchain, with font_ps and the sheet text's), added to
+ * out[0..n): rd__enumerate_reachable_screen's, and GS state as shader
+ * data's plain keys (rd_dst_read.c rd__enumerate_uber) */
+uint32_t rd__enumerate_reachable_overlay(RdPipeKeyInt *out, uint32_t max, uint32_t n);
 /* The VU program families (rd_mesh.c): with the vertex pre-pass the record
  * path's two drawing shaders under the states the mesh lists draw with and
  * the ten pre-pass and five stage keys; without it the eleven program
  * entries with the legacy pixel shaders.  Appends to out[0..n). */
 uint32_t rd__enumerate_reachable_vu(RdPipeKeyInt *out, uint32_t max, uint32_t n);
-/* The VU modules (docs/port/RENDER.md, "The fallback entries"),
+/* The VU modules (docs/port/PIPELINES.md, "The fallback entries"),
  * rd_pipeline.c.
  * rd__vu_policy_init  at rd_init, after the shaders: which program entries
  *                     the fallback draws through (g_rd.vsFallback: the
  *                     plain ones on a device of the table,
- *                     RhiLimits.vuFallbackPlain, with ICO_RD_VU_PLAIN=1 or
+ *                     RhiLimits.vuFallbackPlain, under the Turnip driver,
+ *                     with ICO_RD_VU_PLAIN=1 or
  *                     after rd_set_vu_plain_only; the extended ones
  *                     elsewhere or with ICO_RD_VU_EXTENDED=1; their modules
  *                     made then), the dynamic state in force (g_rd.dynDepth,
@@ -1676,7 +1957,28 @@ uint32_t rd__enumerate_reachable_vu(RdPipeKeyInt *out, uint32_t max, uint32_t n)
  * rd__shader_instructions  its SPIR-V instruction count (the header's five
  *                     words left out), 0 when there is none */
 bool rd__vu_policy_init(const RhiLimits *lim);
-/* The vertex pre-pass (docs/port/RENDER.md, "The vertex pre-pass").
+
+/* The fallback's set and why, without a device (rd__vu_policy_init's
+ * choice; rd_state_test "vu set"), in this order: a device-table row
+ * (lim->vuFallbackPlain), a driver whose text names Turnip
+ * (rd__driver_is_turnip: the extended set's clipped triangles showed a stray
+ * vertex there, issue 163), ICO_RD_VU_PLAIN=1 (envPlain), the host's reason
+ * (hostWhy, rd_set_vu_plain_only); ICO_RD_VU_EXTENDED=1 (envExtended) turns
+ * any of them back to the extended set (overridden, the reason it overrode
+ * kept in why).  kind and why are the start line's words ("plain set" and
+ * "(Turnip driver: ...)"), brief the summary's reason ("Turnip driver, issue
+ * 163"); both empty for the extended set without a reason. */
+typedef struct RdVuSetChoice {
+    bool plain;
+    bool overridden;
+    const char *kind;
+    const char *brief;
+    char why[160];
+} RdVuSetChoice;
+
+void rd__vu_set_choose(const RhiLimits *lim, bool envPlain, bool envExtended, const char *hostWhy,
+                       RdVuSetChoice *out);
+/* The vertex pre-pass (docs/port/PIPELINES.md, "The vertex pre-pass").
  * rd__vu_prepass_init  at rd_init, after the shaders (rd_replay_vu.c): whether
  *                     it draws (g_rd.vuPrepass: ICO_RD_VU_PREPASS=0, [dev]
  *                     vu_prepass = false, keeps it off, as does a device
@@ -1702,11 +2004,213 @@ uint32_t rd__vu_prepass_entry_draws(void);
  * ("on: ...", "off ...") for the summary line */
 void rd__vu_merge_name(uint8_t vs, bool plain, char *out, size_t size);
 const char *rd__vu_merge_text(void);
+/* The draw merge's fallback (rd_replay_vu.c): rd__vu_merge_build_failed,
+ * from rd_pipeline.c keepPipeline, notes that a pipeline made with the
+ * merge build `build` failed for the driver's reason (Direct3D 11 compiles
+ * the build at its first pipeline; any backend under
+ * ICO_RD_FAKE_MERGE_FAIL=1); rd__vu_merge_fallback, at the start of the
+ * next replay, before any pipeline is asked for, turns the merge (and the
+ * fuse) off for the rest of the run: the device idle, every pipeline
+ * dropped (the keys name the vertex shader, not its module, so a key made
+ * with a merge build and its failed entries would otherwise stay), the
+ * merge builds destroyed, logged once */
+void rd__vu_merge_build_failed(const char *build);
+void rd__vu_merge_fallback(void);
 /* The fused scissor pair (g_rd.vuFuse): "on" or "off" for the summary line */
 const char *rd__vu_fuse_text(void);
 /* A cleared source read as its colour (rd_const_read.c): false under [dev]
  * constant_reads = false (ICO_RD_CONSTANT_READS=0, the A/B) */
 bool rd__const_reads_on(void);
+/* The aura's feedback read as a measurement (rd_aura_kernel.c; [dev]
+ * aura_kernel = gs, ICO_RD_AURA_KERNEL=gs).  rd__aura_kernel_pick: steps
+ * (blurAbove1xSteps' packed steps) as they are, or 0 (the GS's own taps)
+ * when env is "gs", steps is not 0 and the sprite is the aura's read of
+ * SCENE into FEED128.  rd__aura_kernel_steps: the same for doBlurSpriteDraw's
+ * target tc and source src, ICO_RD_AURA_KERNEL read at the call, logged
+ * once. */
+uint32_t rd__aura_kernel_pick(uint32_t steps, int feedFromScene, const char *env);
+uint32_t rd__aura_kernel_steps(const RdTargetRec *tc, const RdTargetRec *src, uint32_t steps);
+/* The aura's feedback read in two passes (rd_aura_box.c; [dev] aura_box =
+ * auto|on|off, ICO_RD_AURA_BOX; docs/port/WORK_BUFFERS.md "The aura's
+ * feedback read").
+ *   rd__aura_box_pick: the switch from the environment's word env (NULL,
+ *     "", "auto": the profile's def; 1/true/on/yes on; 0/false/off/no off;
+ *     another word: auto) (tests)
+ *   rd__aura_box_init: decided once after rd__profile_init, its line
+ *   rd__aura_box_on: in force (the device has the format and the modules)
+ *   rd__aura_box_force: tests: -1 the decision, 0 off, 1 on
+ *   rd__aura_box_profile_words: "aura box: two passes" or "...: one pass"
+ *   rd__aura_box_keys: the two keys (rows, sum) into out[n..], the count
+ *     after them; none while off or without the modules
+ *   rd__aura_box_draw (rd_replay.h): the draw itself
+ *   rd__aura_box_block: the 10 s line, when it drew or fell back
+ *   rd__aura_box_counts: since start: drawn in two passes, in one pass
+ *     while on (any reason)
+ *   rd__aura_box_shutdown: ROWBOX freed (rd_shutdown) */
+int rd__aura_box_pick(const char *env, int def);
+void rd__aura_box_init(void);
+bool rd__aura_box_on(void);
+void rd__aura_box_force(int mode);
+const char *rd__aura_box_profile_words(void);
+uint32_t rd__aura_box_keys(RdPipeKeyInt *out, uint32_t max, uint32_t n);
+void rd__aura_box_block(void);
+void rd__aura_box_counts(uint64_t *two, uint64_t *one);
+void rd__aura_box_shutdown(void);
+/* The pass area (rd_pass_area.c; [dev] pass_area = auto|on|off,
+ * ICO_RD_PASS_AREA; docs/port/WORK_BUFFERS.md "The pass area"): a render pass on
+ * a target with a depth whose draws are all 2D with boxes known before it
+ * begins gets a render area (RhiRenderPassDesc.area) of the 32 x 32 tiles
+ * (RD_PASS_AREA_TILE) they touch.
+ *   rd__pass_area_pick: the switch from the environment's word env (NULL,
+ *     "", "auto": the profile's def; 1/true/on/yes on; 0/false/off/no off;
+ *     another word: auto) (tests)
+ *   rd__pass_area_init: decided once after rd__profile_init, its line
+ *   rd__pass_area_on: in force; rd__pass_area_force: tests (-1, 0, 1)
+ *   rd__pass_area_profile_words: "pass area: on" or "pass area: off"
+ *   rd__pass_area_scan: the lists' commands' kinds and boxes before the walk
+ *     (the tests); rd_store_plan.c rd__store_plan_scan's one walk of the
+ *     lists takes its parts: rd__pass_area_scan_begin (false: no areas this
+ *     replay), rd__pass_area_scan_cmd for command ord under its state st
+ *     (state: a state command, rd__apply_state's answer),
+ *     rd__pass_area_scan_end with the commands' count
+ *   rd__pass_area_cmd: one command's kind under the state st (0 none, 1 a
+ *     box: *box the texels it can touch, w 0 none; 2 the whole target; 3
+ *     the end of any pass's commands) (tests)
+ *   rd__pass_area_of: the union of the boxes of a pass on target cid (rec
+ *     c) begun at command k, *end the command it ends before; false: no
+ *     area (the whole target); rd__pass_area_rect the same aligned to
+ *     tiles, false also when it spares no tile column or row
+ *   rd__pass_area_begin (rd_replay.c beginPass): p->area set or zeroed for
+ *     the pass about to begin (serial: its Replay.passSerial)
+ *   rd__pass_area_due (rd_replay.c's command loop): the open pass (serial)
+ *     has an area whose commands end before command ord: end it
+ *   rd__pass_area_counts: since start (passes, their tiles, their targets'
+ *     tiles, passes ended early) */
+#define RD_PASS_AREA_TILE 32u
+int rd__pass_area_pick(const char *env, int def);
+void rd__pass_area_init(void);
+bool rd__pass_area_on(void);
+void rd__pass_area_force(int mode);
+const char *rd__pass_area_profile_words(void);
+void rd__pass_area_scan(const RdFrame *f, int keep);
+bool rd__pass_area_scan_begin(const RdFrame *f, int keep);
+void rd__pass_area_scan_cmd(const RdFrame *f, const RdCmd *c, const RdStateBlock *st, bool state,
+                            uint32_t ord);
+void rd__pass_area_scan_end(uint32_t n);
+int rd__pass_area_cmd(const RdFrame *f, const RdCmd *c, const RdStateBlock *st, uint32_t ord,
+                      RhiRect *box);
+bool rd__pass_area_of(uint32_t cid, const RdTargetRec *c, uint32_t k, RhiRect *area, uint32_t *end);
+bool rd__pass_area_rect(uint32_t cid, const RdTargetRec *c, uint32_t k, RhiRect *area,
+                        uint32_t *end);
+void rd__pass_area_begin(RhiRenderPassDesc *p, const RdTargetRec *c, uint32_t cid, uint32_t serial,
+                         bool ms, bool storage);
+bool rd__pass_area_due(uint32_t ord, uint32_t serial);
+void rd__pass_area_counts(uint64_t *passes, uint64_t *tiles, uint64_t *targetTiles, uint64_t *ends);
+/* rd__pass_area_why: why a pass on target cid (rec c) begun at command k
+ * gets no area from the scan (rd.h RD_AREA_WHY_*: SCAN, BEGIN, the whole
+ * kinds, EMPTY, LARGE), -1 when it gets one (tests);
+ * rd__pass_area_why_counts: since start, the passes on a target with its
+ * own depth begun whole, by why (RD_AREA_WHY_COUNT entries) */
+int rd__pass_area_why(uint32_t cid, const RdTargetRec *c, uint32_t k);
+void rd__pass_area_why_counts(uint64_t why[RD_AREA_WHY_COUNT]);
+
+/* Passes cut (rd_pass_cut.c; docs/port/WORK_BUFFERS.md "Passes cut"),
+ * three switches, each [dev] <key> = auto|on|off (auto: RdProfile.passCut):
+ * RD_CUT_CARRY clear_carry (ICO_RD_CLEAR_CARRY), RD_CUT_SKIP clear_skip
+ * (ICO_RD_CLEAR_SKIP), RD_CUT_LAST last_store (ICO_RD_LAST_STORE).
+ *   rd__pass_cut_init: decided once after rd__profile_init, their lines;
+ *     every lazy clear forgotten (a new context)
+ *   rd__pass_cut_on / rd__pass_cut_force (tests: -1 the switch's own, 0, 1)
+ *   rd__pass_cut_scan: the lists read once before the walk (the tests);
+ *     rd__store_plan_scan's one walk takes its parts as the pass area's:
+ *     rd__pass_cut_scan_begin (false: nothing cut this replay),
+ *     rd__pass_cut_scan_cmd, rd__pass_cut_scan_end
+ * The clear carry (rd_replay.c endPassFor): rd__clear_carry_note when a
+ * pending clear of target id stays pending past a pass's end,
+ * rd__clear_taken when a pass took target id's pending clear as its load.
+ * The clear skip: rd__clear_skip_served (rd_const_read.c: the action now
+ * walked read source id as its clear's colour), rd__clear_skip (rd_replay.c
+ * flushClear: true when the pending clear of target id, colour col, is not
+ * recorded), rd__clear_skip_begin (rd_upload.c rd__clear_new_targets: the
+ * clears left unrecorded by an earlier replay recorded now where this one
+ * reads the target before clearing it), rd__clear_skip_readback (a read of
+ * target id: its clear recorded first, on its own list).
+ * The last store: rd__last_store_arm (rd_replay.c bindDrawEx, rd_crack_fill.c
+ * fillWork: the pass begun next is a draw's own on cid and did; 0, 0 after),
+ * rd__last_store_fog (rd_replay.c doFog: the fog in force now keeps the pass
+ * it begins to its end: the local read, no probe, no edge read due),
+ * rd__last_store_post (rd_fx_plan.c fxDraw: the post sprite drawn now
+ * records its draw into the pass its bindDraw begins and nothing more of
+ * the command; false after),
+ * rd__last_store_drop (rd_store_plan.c rd__store_plan_pass: the depth store
+ * of the pass begun now may be dropped), rd__last_store_end (rd_replay.c
+ * endPass, the walk's pass ending: the guard that it held its promise) */
+enum { RD_CUT_CARRY, RD_CUT_SKIP, RD_CUT_LAST, RD_CUT_COUNT };
+
+void rd__pass_cut_init(void);
+bool rd__pass_cut_on(int which);
+/* rd_shadow_merge.c: the shadow volumes drawn in the scene's open pass
+ * where it cleared the stencil (docs/port/WORK_BUFFERS.md, "The shadow
+ * volumes in the scene's pass").  _init at rd_init (the start line);
+ * _force the tests' switch (-1 the profile's); the scan notes the replay's
+ * shadow resets (rd_store_plan.c rd__store_plan_scan); _arm from beginPass
+ * after the pass area stores the stencil of a pass that cleared it and
+ * holds a later reset's depth; _take at the reset (blocked: why the open
+ * pass cannot take it, NULL none) draws the volumes in that pass;
+ * _color at each strip: the armed pass's colour target to draw into, 0 for
+ * the volumes' own pass */
+void rd__shadow_merge_init(void);
+bool rd__shadow_merge_on(void);
+void rd__shadow_merge_force(int mode);
+void rd__shadow_merge_scan_begin(void);
+void rd__shadow_merge_scan_reset(const RdStateBlock *st, uint32_t ord);
+void rd__shadow_merge_scan_end(void);
+void rd__shadow_merge_arm(RhiRenderPassDesc *p, uint32_t cid, uint32_t did, uint32_t serial,
+                          bool ms, bool storage);
+bool rd__shadow_merge_take(bool open, uint32_t serial, uint32_t passColor, uint32_t passDepth,
+                           const RdStateBlock *st, const char *blocked);
+uint32_t rd__shadow_merge_color(bool open, uint32_t serial, const RdStateBlock *st);
+/* the scan's every other command (rd_store_plan.c): which temporary
+ * targets a shadow window starts with its reset and nothing else touches
+ * before its resolve; rd__shadow_count_clear (rd_upload.c
+ * rd__clear_new_targets): 0 clear the new target as before, 1 leave it
+ * undrawn (such a count target: nothing reads it before its resolve, which
+ * writes or clears it or stands the reduced count for it), 2 clear it to
+ * the tests' 0x5A instead (ICO_RD_STORE_POISON=1) */
+void rd__shadow_merge_scan_cmd(const RdCmd *c, const RdStateBlock *st);
+int rd__shadow_count_clear(const RdTargetRec *t);
+void rd__pass_cut_force(int which, int mode);
+void rd__pass_cut_scan(const RdFrame *f, int keep);
+bool rd__pass_cut_scan_begin(const RdFrame *f, int keep);
+void rd__pass_cut_scan_cmd(const RdCmd *c, const RdStateBlock *st, bool state, uint32_t ord);
+void rd__pass_cut_scan_end(uint32_t n);
+void rd__clear_carry_note(uint32_t id);
+void rd__clear_taken(uint32_t id);
+void rd__clear_skip_served(uint32_t id);
+bool rd__clear_skip(uint32_t id, const RdTargetRec *t, const float col[4], bool depth);
+void rd__clear_skip_begin(void);
+void rd__clear_skip_readback(uint32_t id);
+void rd__last_store_arm(uint32_t cid, uint32_t did);
+void rd__last_store_fog(bool holds);
+void rd__last_store_post(bool holds);
+bool rd__last_store_drop(uint32_t did, uint32_t last, RhiLoadOp depthLoad, bool live,
+                         uint32_t anyTouch);
+void rd__last_store_end(void);
+/* rd__last_store_replay_end (rd_store_plan.c rd__store_plan_end): each
+ * depth whose last touch's pass kept its store this replay counted by why
+ * (RdPerfRecord.lastStoreWhy, rd.h RD_LAST_WHY_*);
+ * rd__last_store_why_counts: since start, the same (RD_LAST_WHY_COUNT
+ * entries) */
+void rd__last_store_replay_end(void);
+void rd__last_store_why_counts(uint64_t why[RD_LAST_WHY_COUNT]);
+/* rd_fog_path.c: false when the fog's edge read (rd__fog_edge_due) is
+ * surely not due at the next fog: its count is not at a multiple of
+ * RD_FOG_EDGE_EVERY (rd_pass_cut.c's promise for the fog's pass) */
+bool rd__fog_edge_may_be_due(void);
+/* The fades fold (rd_fades_fold.c, rd_replay.h): false under [dev]
+ * fades_fold = false (ICO_RD_FADES_FOLD=0, the A/B) or after a reduction
+ * did not take a planned fold */
+bool rd__fades_fold_on(void);
 
 /* rd_vuprepass_selftest's sabotage (ICO_RD_VU_PREPASS_SABOTAGE), while the
  * mode is not RD_VU_SABOTAGE_OFF: VERTEX the first mesh or grid command's
@@ -1764,10 +2268,12 @@ bool rd__pipe_key_equal(const RdPipeKeyInt *a, const RdPipeKeyInt *b);
  * (sprite_world_vs / sprite_ps, colour mask 0, the state's Z test without Z
  * write, stencil INCR_WRAP or, with decr, DECR_WRAP under write mask
  * RD_SHADOW_STENCIL_MASK, on a D32F_S8 depth target), and the resolve's
- * passes (blit_vs / blit_ps): pass k in 0..5 adds 4 << k to RGB where
- * stencil bit k is set, pass 6 writes A where the count is not 0. */
+ * passes (blit_vs / blit_ps): pass k in 0..5 adds step << k to RGB where
+ * stencil bit k is set (step 8: k in 0..4, bit 5 has no pass), pass 6
+ * writes A where the count is not 0 (step 8: its low five bits,
+ * RD_STENCIL_TEST_NONZERO5). */
 RdPipeKeyInt rd__shadow_volume_key(const RdStateBlock *s, RhiFormat colorFmt, int decr);
-RdPipeKeyInt rd__shadow_resolve_key(int pass);
+RdPipeKeyInt rd__shadow_resolve_key(int pass, uint32_t step);
 RdPipeKeyInt rd__shadow_reduce_key(void); /* box_reduce_ps: the count at the GS size */
 #define RD_SHADOW_RESOLVE_PASSES 7
 /* The count in one draw (RdProfile.shadowOne; rd_replay.c shadowCountOne):
@@ -1776,9 +2282,10 @@ RdPipeKeyInt rd__shadow_reduce_key(void); /* box_reduce_ps: the count at the GS 
 RdPipeKeyInt rd__shadow_count_key(void);
 /* The table shadow_count_ps reads the count's bytes from: texel m (0..63)
  * the RGBA the seven draws write for a stencil whose bits 0-5 hold m:
- * RGB 4 m, A 0x80 where m != 0, else 0 */
+ * RGB 4 m, A 0x80 where m != 0, else 0; under the step 8 RGB 8 (m mod 32),
+ * A 0x80 where m mod 32 != 0 (one table a step) */
 #define RD_SHADOW_TABLE_SIZE 64
-void rd__shadow_table_texel(uint32_t m, uint8_t rgba[4]);
+void rd__shadow_table_texel(uint32_t m, uint32_t step, uint8_t rgba[4]);
 /* frees the one draw's table (rd__shadow_shutdown) */
 void rd__shadow_one_shutdown(void);
 /* The count the shadow levels read after the resolve of the count target
@@ -1818,11 +2325,22 @@ int rd__fog_plan(const RdStateBlock *s, RhiFormat colorFmt, int path, RdDrawPass
  * with both fragment shaders, and the crack filler's two keys where its
  * shaders are made; appends to out[0..n). */
 uint32_t rd__enumerate_reachable_fog(RdPipeKeyInt *out, uint32_t max, uint32_t n);
-/* The crack filler's keys (rd_crack_fill.c), blit_vs into RGBA8: count 0
- * crack_fill_ps with the scene depth (D32F_S8) attached, its test ALWAYS with
- * writes (SV_Depth), no blend; count 2 crack_fill1_ps the same; count 1
- * crack_count_ps alone. */
-RdPipeKeyInt rd__crack_fill_key(int count);
+
+/* The crack filler's keys (rd_crack_fill.c), blit_vs into RGBA8 alone (no
+ * depth attached: the fill reads SCENE's depth as a texture and writes the
+ * colour only): count 0 crack_fill_ps, count 2 crack_fill1_ps, count 1
+ * crack_count_ps; no blend. */
+/* rd__crack_fill_key's kinds: the general fill, the count, the reach-1
+ * fill; RD_CRACK_KEY_RGB with a fill: its RGB alone (after the glow's
+ * alpha, rd_crack_fill.c) */
+enum {
+    RD_CRACK_KEY_FILL = 0,
+    RD_CRACK_KEY_COUNT = 1,
+    RD_CRACK_KEY_FILL1 = 2,
+    RD_CRACK_KEY_RGB = 4
+};
+
+RdPipeKeyInt rd__crack_fill_key(int kind);
 /* the MSAA epoch's resolve into SCENE (rd_replay.c msaaEnd): msaa_resolve_ps
  * into RGBA8 with D32F_S8 (depthOnly 0), depth_resolve_ps into D32F_S8 alone
  * (1); test ALWAYS with Z writes, in the fog's family and the start-up set */
@@ -2091,6 +2609,8 @@ enum {
     RD_SNAP_FADE,     /* either frame fully faded (the fade edge) */
     RD_SNAP_HISTORY,  /* targets recreated after prev (display options changed) */
     RD_SNAP_SIZE,     /* the scene size differs */
+    RD_SNAP_WALL,     /* the eye's path from prev to cur crossed the stage
+                       * (rd_camera_cut_wall, RdCamera.cut RD_CAMERA_CUT_WALL) */
     RD_SNAP_COUNT
 };
 
@@ -2270,6 +2790,12 @@ void rd__interp_set_reproject(bool on);
  * noted for it, so a present the clock did not time, the vsync lock's,
  * finds none).  For the alpha histogram and the tests. */
 double rd__present_clock_raw(void);
+/* The same value taken: NAN after it (rd_thread.c rd_present_post, which
+ * hands it to the render thread's rd_present) */
+double rd__present_clock_raw_take(void);
+/* F12's blended dump is armed (rd_dump_blended_arm): the present that
+ * takes it waits for its end (rd_thread.c) */
+bool rd__blended_dump_armed(void);
 
 /* The bins of the alpha histogram (rd_interp.c, the 10 s summary): alpha 0
  * split by the clock's raw value (below 0: clamped from below; anything
@@ -2296,8 +2822,13 @@ int rd__alpha_bin(float alpha, double raw);
 bool rd__grid_screen_st(uint8_t kind, const float (*m)[4], const double eye[3], float sx, float sy,
                         const float pos[4], float h, float out[2]);
 /* rd_last_present_info's record for rd_end_frame's present of f
- * (interpolation off; rd_interp.c) */
+ * (interpolation off; rd_present_info.c) */
 void rd__note_frame_present(const RdFrame *f);
+/* rd_last_present_info's record (rd_present_info.c): a present of cur at
+ * alpha (rd_present's, after its clamp), firstOfTick whether it is the
+ * tick's first; and the record forgotten (rd_present's reset) */
+void rd__present_info_note(const RdFrame *cur, uint32_t firstOfTick, float alpha);
+void rd__present_info_reset(void);
 const RdFrame *rd__interp_frame(const RdFrame *prev, const RdFrame *cur, float alpha,
                                 int firstOfTick, RdInterpStats *stats);
 void rd__interp_shutdown(void);
@@ -2340,13 +2871,15 @@ void rd__perf_reshown(void); /* rd_perf.c: the next replay is a re-shown present
  * presents skip the chain (the mask into WORK2, the reduction into WORK0,
  * the blur and the eye blur) and paste the copy.  rd__glow_hold edits f
  * (rd__interp_frame's frame, after the hash) and says what it did, one of
- * RD_GLOW_*; [dev] glow_redraw = true (ICO_RD_GLOW_REDRAW=1) draws the chain
- * at every present. */
+ * RD_GLOW_*; [dev] glow_redraw = true (ICO_RD_GLOW_REDRAW=1) and Glow between
+ * frames: Smooth (RdSettings.glowSmooth) draw the chain at every present; an
+ * explicit ICO_RD_GLOW_REDRAW wins over the row. */
 enum {
     RD_GLOW_HELD = 0, /* a later present: the chain skipped, the tick's glow pasted */
     RD_GLOW_FIRST,    /* a tick's first present: drawn, and kept */
     RD_GLOW_NONE,     /* the frame draws no glow */
     RD_GLOW_DEV,      /* a later present, the switch on: drawn */
+    RD_GLOW_SMOOTH,   /* a later present, Glow between frames: Smooth: drawn */
     RD_GLOW_NO_COPY,  /* a later present without this tick's copy: drawn */
     RD_GLOW_READ,     /* a later present whose other draws read the chain's buffers: drawn */
     RD_GLOW_COUNT
@@ -2371,6 +2904,10 @@ bool rd__interp_copy_at(int l, uint32_t at, uint32_t from, uint32_t to, uint32_t
  * back and writes the PNG (after the submit). */
 bool rd__capture_armed(void);
 void rd__capture_finish(void);
+/* A capture this present's list copied, or a state picture it dropped: its
+ * finish (rd__capture_finish) has work, so the submit waits for it
+ * (rd_submit.c) */
+bool rd__capture_pending(void);
 /* The thresholds (world units are the game's centimetres) */
 #define RD_INTERP_JUMP_WORLD 300.0f  /* an object's or bone's origin, per tick */
 #define RD_INTERP_JUMP_SCREEN 256.0f /* GS pixels: screen prims, shadows, grids, particles */
@@ -2423,7 +2960,10 @@ enum {
      * construction (the glow's mask); the result premultiplied for the
      * fixed-function ONE, ONE blender (RD_BP_PREMUL_ADD) */
     RD_FXF_ALPHA_ONLY = 16384,
-    RD_FXF_OUT_PREMUL = 32768
+    RD_FXF_OUT_PREMUL = 32768,
+    /* the reduction at scale 1: the fades fold's steps on its taps
+     * (rd_fades_fold.c, fx_sprite.hlsl fx_fold4) */
+    RD_FXF_FOLD = 65536
 };
 
 /* The steps at which fx_sprite_ps leaves the GS's own filter above 1x, in
@@ -2502,17 +3042,24 @@ typedef struct RdContext {
     RhiShader vsFallback[RD_VS_COUNT];
     bool vuFallbackPlain;
     char vuPlainWhy[160];
+    const char *vuPlainBrief; /* the summary's reason (RdVuSetChoice.brief) */
     /* the dynamic state in force (rd__vu_policy_init from
      * RhiLimits.dynamicDepth / dynamicBlend; rd__key_dynamic_normalise,
      * rd__set_pipeline) */
     bool dynDepth, dynBlend;
     /* the VU vertex pre-pass (rd_replay_vu.c rd__vu_prepass, rd__vu_prepass_init;
-     * docs/port/RENDER.md, "The vertex pre-pass"): on unless the settings
+     * docs/port/PIPELINES.md, "The vertex pre-pass"): on unless the settings
      * ([dev] vu_prepass = false, ICO_RD_VU_PREPASS=0) or the device
      * (RhiLimits.colorBytesPerPixel under the record's bytes) keep it off,
      * and why not */
     bool vuPrepass;
     char vuPrepassWhy[160];
+    /* the screen-prim triangles without the sprite planes builds (issue 161;
+     * rd_screen_planes.c rd__sprite_planes_init): the host's record that the
+     * device's driver stopped creating them ([dev] pipeline_skip) or
+     * ICO_RD_NO_SPRITE_PLANES=1; spritePlanesWhy says which */
+    bool spritePlanesOff;
+    char spritePlanesWhy[224];
     /* the pre-pass's batches (rd_replay_vu.c vuPrepassRun; docs/port/
      * VU1_PROGRAMS.md "The pre-pass's batches"): vuPreBatch one point draw
      * a run of entries with the same stage key, FrameCB and group 1, through
@@ -2554,6 +3101,10 @@ typedef struct RdContext {
      * ICO_RD_NO_DUAL or rd_set_no_dual) */
     RhiShader fsNoDual[RD_FS_COUNT];
     bool noDual;
+    /* 1x sheet text through font_sheet_ps instead of the CPU bake
+     * (ICO_RD_SHEET_SHADER=1, rd_core.c rd_init; rd__set_sheet_shader for
+     * tests): the A/B of the bake (rd__sheet_baked) */
+    bool sheetShader;
     /* the exact blend (rd_dst_read.c): the mode in force (RdBlendExact),
      * the modes the device has (bit 1 << mode), the _dstrov and _dstatt
      * twins of the gs_dual_out entries, and group 3's layout per mode (the
@@ -2562,6 +3113,18 @@ typedef struct RdContext {
     uint8_t dstModes;
     RhiShader fsDstRov[RD_FS_COUNT], fsDstAtt[RD_FS_COUNT];
     RhiBindGroupLayout layoutDstStorage, layoutDstAttach;
+    /* GS state as shader data (rd_uber.c): in force with the attachment
+     * read (rd__uber_on: dstMode RD_BLEND_EXACT_ATTACHMENT), set by
+     * rd__dst_init ([dev] uber; rd__uber_init), cleared by the blend's
+     * self-test under auto (rd__uber_off); uberDate: DATE reads the
+     * attachment's alpha (ICO_DF_DATE_DST), cleared by DATE's self-test
+     * when that fails (the snapshot then) or ICO_RD_UBER_DATE=0;
+     * uberPremul: the premultiplied adds and subtracts through the read
+     * too (ICO_RD_UBER_PREMUL=0 leaves them to the blender: the A/B
+     * against the attachment read's pictures, evidence/perf/uber-baseline.sh) */
+    bool uber;
+    bool uberDate;
+    bool uberPremul;
     /* group 2 of the passes' own reads by local read (RhiLimits.localRead
      * only): slot 1 an input attachment (the fog's depth, DATE's colour),
      * slot 2 a sampled texture (the fog's LUT; DATE's setup the dummy):
@@ -2580,12 +3143,20 @@ typedef struct RdContext {
     /* MSAA is requested but no way of reading the multisampled depth passed
      * the fog's self-test (rd__fog_aa_reconcile): rd__aa_mode gives Off */
     bool msaaBlocked;
+    /* the shadow count's one draw reads the stencil a texel a load
+     * (shadow_count_ps's g_mode.y 1) instead of four a gather: set by its
+     * self-test where the gathers' count differs from the seven draws'
+     * (rd_shadow_selftest.c); false, the gathers, until then */
+    bool shadowLoad;
     RhiSampler samplers[RD_SAMPLER_COUNT * RD_SAMPLER_SETS]; /* [set * 16 + index] */
     RhiTexture dummy;
     RhiState dummyState;
     RhiBuffer ring[RHI_FRAMES_IN_FLIGHT];
     uint8_t *ringMap[RHI_FRAMES_IN_FLIGHT];
     uint64_t ringCap[RHI_FRAMES_IN_FLIGHT];
+    /* the replays in a row whose need was under a quarter of the slot's ring
+     * (rd__ensure_ring: RD_RING_SHRINK_REPLAYS of them halve it) */
+    uint32_t ringSmall[RHI_FRAMES_IN_FLIGHT];
     uint32_t replayCounter;
     RdScratch scratch[RD_SCRATCH_COUNT];
     /* rd_present.c */
@@ -2766,6 +3337,11 @@ void rd__gpu_shutdown(void);
 /* Replays f (lists 0..12, or 11..12 with keep) from f->startState and, with
  * present, runs the presenter.  The replay state block ends as f->endState. */
 bool rd__replay_frame(const RdFrame *f, int keep, bool present);
+/* rd__replay_frame's body (rd_replay.c), on the calling thread; with the
+ * window's render thread rd__replay_frame posts it there and waits, and
+ * rd__replay_frame_async (rd_thread.h: rd_present's and rd_reshow.c's
+ * replays) posts it without waiting */
+bool rd__replay_frame_here(const RdFrame *f, int keep, bool present);
 /* The pass window (the loss bisect, rd_dump.c rd_loss_bisect;
  * docs/port/RENDER.md, "The loss bisect"): every replay numbers its passes
  * 1, 2, ... in the order they begin (the VU vertex pre-pass first when it
@@ -2893,6 +3469,8 @@ uint64_t rd__blur_snapshot_count(void);
  * off flags it as any other scaled pair (tests: the same frame both ways,
  * byte for byte). */
 void rd__set_a1x_gs_keep(bool on);
+/* its state (rd_fades_fold.c: the plan foresees the flag) */
+bool rd__a1x_gs_keep(void);
 
 /* rd_perf.c (rd.h RdPerfRecord): the record of the replay
  * being made.  rd__perf_begin starts it (the CPU phases are added to it by
@@ -2931,12 +3509,26 @@ enum {
  * pre-pass's record, the window */
 #define RD_PERF_ID_RECORD 0xFFFFFFF0u
 #define RD_PERF_ID_WINDOW 0xFFFFFFF1u
+/* ... and the aura's ROWBOX (rd_aura_box.c), a texture of its own */
+#define RD_PERF_ID_ROWBOX 0xFFFFFFF2u
+/* ... and the shadow count's passes at its GS size (rd_shadow_one.c, the
+ * reduction), named "shadow count" in the pass list */
+#define RD_PERF_ID_SHADOW_COUNT 0xFFFFFFF3u
 
 extern RdPerfRecord g_rdPerf;
+/* rd_perf.c's queues' lock, made before the render thread starts
+ * (rd_set_thread_host) */
+void rd__perf_lock_init(void);
 void rd__perf_reset(void); /* a new device: its counters start at 0 */
 void rd__perf_begin(const RdFrame *f, int keep, bool present);
 void rd__perf_collect_gpu(void);
 void rd__perf_end(void);
+/* The submit thread's times of replay's list (rd_submit_thread.h): its
+ * record's submit and present times, the record's CPU time with them, in
+ * the record still being made or the one pending in its frame slot;
+ * nothing once that record was queued.  On the thread that waited for the
+ * submit thread, the render thread idle or the caller */
+void rd__perf_submit_times(uint32_t replay, double submitMs, double presentMs);
 void rd__perf_stamp(RhiCommandList cl, uint32_t index);
 /* the walk's end (the vertex pre-pass and the lists recorded, the present
  * recorded): the slow walk line counts the pipelines and creations from
@@ -2960,6 +3552,9 @@ void rd__perf_readback_ms(double ms);
  * "Performance records". */
 void rd__perf_pass(RhiCommandList cl, int kind, uint32_t target, uint32_t w, uint32_t h, int post);
 void rd__perf_pass_end(RhiCommandList cl);
+/* the render area of the piece rd__perf_pass just opened (a timed replay:
+ * RdPerfPass.ax .. ah; rd_pass_area.c) */
+void rd__perf_pass_area(const RhiRect *area);
 /* [dev] perf_passes from ICO_RD_PERF_PASSES, logged once (rd_replay.c's
  * device start); rd__set_perf_passes sets it (tests, the replay tool) */
 void rd__perf_passes_init(void);
@@ -3056,6 +3651,9 @@ bool rd__last_present_box(uint32_t *outW, uint32_t *outH, RhiRect *box);
  * the box).  False before the first present */
 bool rd__last_present_reduce(uint32_t down[4], uint32_t win[4]);
 void rd__present_finish(void);
+/* rd__present_finish would show an image (the window's, acquired): the
+ * submit thread's job presents it (rd_submit_thread.c) */
+bool rd__present_will_show(void);
 void rd__present_shutdown(void);
 
 /* A uniform block in the ring and the group that reads it: the
@@ -3079,8 +3677,17 @@ typedef struct RdUniform {
  * deferred text (rd.h rd_deferred_text) when the present draws it deferred
  * (the Enhanced preset, a renderer registered, an output), which sets
  * g_rd.deferText for the replay (doScreen then skips the items' quads); the
- * items' prims are drawn before the overlay's, each batch in its region. */
+ * items' prims are drawn before the overlay's, each batch in its region.
+ * A picture the game thread hands to the render thread (rd_thread.c) has
+ * its two layers collected on the game thread first,
+ * rd__overlay_hand_over (the callbacks are UI code sharing the font's
+ * state with the game thread's own text); its replay's
+ * rd__overlay_collect copies them after the deferred text instead of
+ * calling the callbacks, and rd__overlay_hand_over_drop (the job's end,
+ * a refused post's own run) forgets a record no replay took. */
 void rd__overlay_collect(const RdFrame *f, int keep);
+void rd__overlay_hand_over(void);
+void rd__overlay_hand_over_drop(void);
 /* The same for a film's present (rd_video.c): the film's box on the output
  * (box43) is the picture's box, no CRT grid, no deferred text.
  * rd__overlay_film_record draws what it collected in a pass of its own on out
@@ -3361,6 +3968,9 @@ bool rd__stencil_ops(RdStencilWindow *w, uint32_t depth, bool whole, RhiLoadOp d
  * the camera probe): also starts a new epoch of the bind group caches
  * (rd_replay.c), since bind groups live one frame slot. */
 void rd__wait_frame(void);
+/* The bind group caches' next epoch alone (rd_thread.c's slot ahead, whose
+ * rhi_wait_frame recycled the slot their groups may live in) */
+void rd__bind_epoch_next(void);
 /* A frame of the renderer's own outside a replay (the films,
  * rd_video.c): rd__wait_frame, then the next slot of the upload ring (at
  * least ringBytes) as a replay takes it, so the ring's slot keeps pace
@@ -3389,7 +3999,9 @@ RdStencilWindow *rd__replay_stencil(void);
  * where no command from g_rdStoreOrd on touches the depth (counted in
  * RdPerfRecord.store*); rd__store_plan_end closes the replay (no plan
  * outside one); rd__store_plan_readback: target's depth is read after its
- * replays from now on (rd__read_target_depth) */
+ * replays from now on (rd__read_target_depth); rd__store_plan_kept: target's
+ * depth stores are kept from an earlier replay on (a read before its clear,
+ * a readback: the tests) */
 extern uint32_t g_rdStoreOrd;
 void rd__store_plan_scan(const RdFrame *f, int keep);
 void rd__store_plan_pass(const RdTargetRec *d, uint32_t did, RhiLoadOp *depthLoad,
@@ -3397,6 +4009,19 @@ void rd__store_plan_pass(const RdTargetRec *d, uint32_t did, RhiLoadOp *depthLoa
                          float *clearDepth, uint8_t *clearStencil);
 void rd__store_plan_end(void);
 void rd__store_plan_readback(uint32_t target);
+bool rd__store_plan_kept(uint32_t target);
+/* RdPerfRecord.storeWhy's words (RD_STORE_WHY_*), for the 10 s line */
+const char *rd__store_why_text(int why);
+/* The shadow count's colour (docs/port/WORK_BUFFERS.md "The shadow count's
+ * colour"): a pass on the count target c (the reset's colour) while the
+ * stencil window of the pass's depth is open, before the resolve: the
+ * reset's own pass (flushStencilClear) and the volumes' passes (beginPass).
+ * Under the plan (not [dev] store_plan = false), a temporary c and a
+ * colour a loaded (RHI_LOAD_LOAD): a's load and store go DONT_CARE (with
+ * ICO_RD_STORE_POISON=1 the load clears to 0x5A instead), counted in
+ * RdPerfRecord.storeColorDropped and shadowColorDropped.  A pending clear
+ * (CLEAR) and the seven draws' pass (CLEAR) keep theirs. */
+void rd__store_plan_count_color(const RdTargetRec *c, RhiColorAttachment *a);
 /* rd_replay.c helpers rd_upload.c shares: the alpha coverage a texture's
  * Enhanced mips keep, whether a target's passes begin readable, and
  * rd__stencil_ops with the depth copy's stencil load and store. */
@@ -3445,6 +4070,11 @@ bool rd__stencil_ops_packed(RdStencilWindow *w, uint32_t depth, bool whole, RhiL
  * and the first clear of the targets with a new texture. */
 uint64_t rd__estimate_ring(const RdFrame *f, int keep);
 bool rd__ensure_ring(uint64_t need);
+/* the shrink rule: a slot whose need stayed under a quarter of its ring for
+ * this many replays in a row is remade at half, never under the floor (the
+ * start size, 4 MB, is below it: the floor stops shrinking only) */
+#define RD_RING_SHRINK_REPLAYS 300u
+#define RD_RING_SHRINK_FLOOR (16ull << 20)
 void rd__upload_dirty_textures(void);
 void rd__upload_meshes(const RdFrame *f, int keep);
 void rd__clear_new_targets(void);
@@ -3534,6 +4164,11 @@ bool rd__read_present_depth(float *dst, size_t dstSize, uint32_t *w, uint32_t *h
  * loaded (rhi_injector_name); true runs it whenever RdSettings.effectsDepth
  * is on, as with a program (tests: lavapipe has no layer). */
 void rd__force_effects_depth(bool force);
+/* The present reads SCENE's depth (the effects depth runs: the setting on
+ * and an effects program loaded, or the tests' force): the store plan and
+ * the fades fold keep that depth for it.  [video] effects_depth alone
+ * (on by default) reads nothing without a program (never on Android). */
+bool rd__effects_depth_wanted(void);
 /* The photo capture's synchronous readback of an RHI texture (RGBA8 or BGRA8,
  * w x h, tightly packed), leaving it in COPY_SRC (*state follows) */
 bool rd__read_rhi_texture(RhiTexture t, RhiState *state, uint32_t w, uint32_t h, void *dst,
@@ -3560,12 +4195,14 @@ bool rd__read_texture(RdTex t, void *dst, size_t dstSize, uint32_t *w, uint32_t 
  * coverage of its top half, rd_dump.c sheetFromHalo); 12 the disc's region
  * slug after cullW (char[RD_DUMP_REGION_BYTES], NUL-padded: "pal", "jpn";
  * an older dump is "pal", RdDumpInfo.region); 13 RD_TARGET_WORK3_HELD, a
- * 19th fixed target (the glow held between ticks).
+ * 19th fixed target (the glow held between ticks); 14 RdFrame.hasTickCams
+ * and tickCams after the meshes (a blended present's frame, rd.h
+ * rd_dump_blended_arm).
  * rd__dump_frame writes this version; rd__load_frame reads 3 to it, and a
  * dump before 10 loads as the 4:3 frame (aspect 4/3, wExact 512, cullW 512).
  * A dump holds the picture as drawn at its width: a replay can crop it to a
  * narrower aspect, never widen it (rd_replay_tool). */
-#define RD_DUMP_VERSION 13u
+#define RD_DUMP_VERSION 14u
 #define RD_DUMP_REGION_BYTES 8
 bool rd__dump_frame(const RdFrame *f, const char *path);
 bool rd__load_frame(const char *path, RdFrame *out);
@@ -3695,7 +4332,30 @@ void rd__blur_smooth_counts(uint64_t *drawn, uint64_t *restarts, uint64_t *origi
 #define RD_BLUR_SMOOTH_PIPES 2
 #define RD_BLUR_SMOOTH_K_MAX 64u
 
-/* rd_crack_fill.c: the crack filler above 1x (issue 26; docs/port/RENDER.md,
+/* rd_blur_smooth.c: Options > Effects > Motion blur strength
+ * (RdSettings.motionBlurStrength; docs/port/RENDER_POST.md, "The motion
+ * blur's strength").  The motion blur's sprite takes
+ * FIX_eff = round(FIX x strength / 100) for the game's FIX, in both of
+ * Motion blur's ways: rd_blur_border.c rd__blur_post_sprite puts it in the
+ * state for the sprite's draw (its pipeline key and DrawCB), and Smooth's
+ * k-root takes it (rd__blur_smooth_sprite reads the state's FIX).  The
+ * trail keeps FIX_eff / 128 of itself a tick: at 50 % half the PS2's share.
+ * rd__blur_strength_pct     the percentage in force: 100 (the game's FIX)
+ *                           for a RdSettings value of 0 or 100 and more
+ * rd__blur_strength_fix     FIX_eff of FIX at pct (pure; FIX at 100)
+ * rd__blur_strength_note    rd__blur_post_sprite, for every motion blur
+ *                           sprite drawn at a lower FIX: the counts and the
+ *                           event line (a new FIX or a new strength, the
+ *                           first 8 then every 100th)
+ * rd__blur_strength_counts  since start: those sprites, the last one's FIX
+ *                           as the game recorded it and as drawn (tests)
+ * The 10 s summary's line rides on rd__blur_smooth_block. */
+uint32_t rd__blur_strength_pct(void);
+uint8_t rd__blur_strength_fix(uint32_t fix, uint32_t pct);
+void rd__blur_strength_note(uint32_t frame, uint8_t fix, uint8_t fixEff);
+void rd__blur_strength_counts(uint64_t *drawn, uint8_t *fix, uint8_t *fixEff);
+
+/* rd_crack_fill.c: the crack filler above 1x (issue 26; docs/port/RENDER_POST.md,
  * "Crack filling above 1x").  Before the fog of SCENE (rd_replay.c doFog,
  * rd_replay.h rd__crack_fill), under Enhanced with SCENE's scale above 1 on
  * an axis, a texel no draw covered (depth 0, the fog's table entry 0), or
@@ -3718,17 +4378,20 @@ void rd__blur_smooth_counts(uint64_t *drawn, uint64_t *restarts, uint64_t *origi
  * rd__crack_fill_counts    since rd_init: replays filled, replays counted,
  *                          the pixels those filled, the last and the
  *                          largest count, the fogged replays above 1x not
- *                          filled, the filled ones drawn inside the scene
- *                          pass with the local fog, the last fill's scale
- *                          and reach
+ *                          filled, the filled ones drawn after lists 4-6
+ *                          (of them in the aura's paste pass, after the
+ *                          glow's alpha), after the MSAA resolve, the last
+ *                          fill's scale and reach
  * rd__crack_fill_block     the 10 s summary's lines (rd_interp.c presentLog)
  * rd__crack_fill_reach     the reach on an axis at scale s: ceil(s / 2)
  *                          above 1, at most RD_CRACK_REACH_MAX, else 0
  * rd__crack_fill_shutdown  rd_shutdown: the count's target and buffer */
 typedef struct RdCrackCounts {
     uint64_t filled, counted, pixels, skipped;
-    uint64_t folded;    /* of the filled, drawn in the pass the local fog keeps */
-    uint64_t afterMsaa; /* of the filled, drawn on the MSAA resolve's picture */
+    uint64_t late;       /* of the filled, drawn after lists 4-6 (rd__crack_fill_late) */
+    uint64_t afterMsaa;  /* of the filled, drawn on the MSAA resolve's picture */
+    uint64_t pasted;     /* of the late, drawn first in the aura's paste pass */
+    uint64_t afterAlpha; /* of the late, RGB alone after the glow's alpha sprites */
     uint32_t last, max;
     float sx, sy;
     uint32_t rx, ry;
@@ -3739,6 +4402,10 @@ void rd__crack_fill_init(void);
 void rd__crack_fill_scene_made(void);
 void rd__crack_fill_set_enabled(bool on);
 void rd__crack_fill_force_general(bool on); /* tests: crack_fill_ps at a reach of 1 */
+/* tests: the fill's place pinned to the start of list 7 (1, as
+ * ICO_RD_CRACK_PLACE=7), where rd__crack_fill_place puts it (0), or as the
+ * environment says (-1) */
+void rd__crack_fill_set_place(int pinned);
 void rd__crack_fill_count_all(bool on);
 void rd__crack_fill_wait(void);
 void rd__crack_fill_counts(RdCrackCounts *out);

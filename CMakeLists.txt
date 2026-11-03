@@ -37,6 +37,7 @@ endif()
 include(cmake/IcoFlags.cmake)
 include(cmake/IcoSources.cmake)
 include(cmake/IcoExclusions.cmake)
+include(cmake/IcoStateSections.cmake)
 
 # ICO_HEADLESS=OFF (the default) is the windowed ico_pc: the seki layer
 # draws through port/render (ICO_RD) into an SDL3 window. ON is the headless
@@ -59,6 +60,31 @@ option(ICO_LINK_EXE "Link the ico_pc executable (fails while symbols are unresol
 option(ICO_RC_TOOLS "Compile the release candidates' tooling (rc packages only)" OFF)
 if(ICO_RC_TOOLS)
     add_compile_definitions(ICO_RC_TOOLS=1)
+endif()
+# ICO_STATE_FIXED_IMAGE: the program loads at the address it was linked at
+# (no address randomisation for the image itself), so a save state's code
+# and data pointers are the same in the next process and a load restores
+# the saved bytes as they are (docs/BUILDING.md, "Fixed image"). ON in the
+# linux-x64, linux-x64-clang, win-x64 and win-x64-clang presets (and those
+# inheriting them); Android, Apple and arm64 Linux keep their randomised
+# image and relocate (port/platform/state_reloc.h). Linux: the code is
+# compiled -fno-pie (targets that ask for position-independent code keep
+# it) and the programs link -no-pie; Windows (GNU ld and lld through the
+# mingw drivers): -Wl,--disable-dynamicbase. ICO_STATE_FIXED_IMAGE=1 in
+# every source, for the save state log.
+option(ICO_STATE_FIXED_IMAGE "Link the program at a fixed image address (save states restore without moving code pointers)" OFF)
+if(ICO_STATE_FIXED_IMAGE)
+    set(_ico_exe "$<STREQUAL:$<TARGET_PROPERTY:TYPE>,EXECUTABLE>")
+    if(WIN32)
+        add_link_options("$<${_ico_exe}:-Wl,--disable-dynamicbase>")
+    elseif(CMAKE_SYSTEM_NAME STREQUAL "Linux" AND NOT ANDROID)
+        add_compile_options(
+            "$<$<AND:$<COMPILE_LANGUAGE:C,CXX>,$<NOT:$<BOOL:$<TARGET_PROPERTY:POSITION_INDEPENDENT_CODE>>>,$<NOT:$<STREQUAL:$<TARGET_PROPERTY:TYPE>,SHARED_LIBRARY>>>:-fno-pie>")
+        add_link_options("$<${_ico_exe}:-no-pie>")
+    else()
+        message(FATAL_ERROR "ICO_STATE_FIXED_IMAGE is for the Linux and Windows PC builds")
+    endif()
+    add_compile_definitions(ICO_STATE_FIXED_IMAGE=1)
 endif()
 
 # The retail game ran with its asserts live (the reconstruction calls
@@ -206,6 +232,17 @@ add_library(ico_host_fs STATIC port/platform/host_fs.c)
 target_include_directories(ico_host_fs PUBLIC port/platform)
 target_compile_options(ico_host_fs PRIVATE ${ICO_SEMANTIC_OPTIONS} ${ICO_PORT_WARNINGS})
 target_link_libraries(ico_platform PUBLIC ico_host_fs)
+# ico_thread.c: the port's OS thread, mutex, condition and clock. Its own
+# library because the renderer's texture decode pool (port/render
+# rd_tex_decode.c) uses it and ico_render does not link ico_platform.
+# cpu_place.c beside it: the core a thread runs on, sampled by the submit
+# thread (port/render/rd_submit_thread.c) and the window's threads.
+find_package(Threads REQUIRED)
+add_library(ico_thread STATIC port/platform/ico_thread.c port/platform/cpu_place.c)
+target_include_directories(ico_thread PUBLIC port/platform PRIVATE "${ICO_COMPAT_DIR}")
+target_compile_options(ico_thread PRIVATE ${ICO_SEMANTIC_OPTIONS} ${ICO_PORT_WARNINGS})
+target_link_libraries(ico_thread PUBLIC Threads::Threads)
+target_link_libraries(ico_platform PUBLIC ico_thread)
 target_compile_definitions(ico_platform PRIVATE ${ICO_FPTRAP_DEFINITION})
 target_compile_options(ico_platform PRIVATE ${ICO_SEMANTIC_OPTIONS} ${ICO_PORT_WARNINGS})
 
@@ -216,6 +253,9 @@ foreach(lib ${ICO_GAME_OBJECT_LIBS})
 endforeach()
 add_library(ico_game STATIC ${ICO_GAME_OBJECTS})
 set_target_properties(ico_game PROPERTIES LINKER_LANGUAGE C)
+# the game's .data and .bss in sections of their own, for save states
+# (cmake/IcoStateSections.cmake, port/platform/game_data_range.h)
+ico_state_sections(ico_game ${ICO_GAME_OBJECT_LIBS})
 # the game code reads the region's index, ico_region (port/core)
 target_link_libraries(ico_game PUBLIC ico_region)
 
@@ -442,6 +482,22 @@ if(Python3_FOUND)
     endif()
 endif()
 
+# the game's .data/.bss ranges (save states; cmake/IcoStateSections.cmake): the
+# checker's own cases, and this build's program read with the toolchain's nm
+# (not run, so a cross build checks it too): the game's globals, its file
+# statics among them, inside the ranges and the port's outside
+if(Python3_FOUND)
+    add_test(NAME game_data_ranges_selftest
+             COMMAND "${Python3_EXECUTABLE}" -I "${CMAKE_SOURCE_DIR}/tools/check_game_data_ranges.py"
+                     --selftest)
+    if(TARGET ico_pc AND CMAKE_NM AND NOT APPLE AND NOT ANDROID)
+        add_test(NAME game_data_ranges_binary
+                 COMMAND "${Python3_EXECUTABLE}" -I
+                         "${CMAKE_SOURCE_DIR}/tools/check_game_data_ranges.py"
+                         --nm "${CMAKE_NM}" "$<TARGET_FILE:ico_pc>")
+    endif()
+endif()
+
 # On arm64 Android (and arm64 Linux) the movie decoder
 # (port/fmv, Ittiam libmpeg2) uses the library's own NEON routines, which are
 # assembly: the language is enabled here, in the top directory, as CMake
@@ -478,7 +534,9 @@ set(ICO_DEPS_DIR "${CMAKE_SOURCE_DIR}/tools/toolchain/deps" CACHE PATH
 # booleans, no any()/all(), no boolean select) and opcode envelope (no loop,
 # no dot, no logical-not-equal, no undef), every module within its size
 # budget (the sizes and the shape census printed), no array-typed values, no
-# local arrays in a vertex shader
+# local arrays in a vertex shader, every header at SPIR-V 1.0 (the Vulkan 1.0
+# target), no VU module reading an integer lane through a float load (intlane:
+# an OpBitcast of a float a buffer load produced; issues 163/164)
 if(Python3_FOUND AND EXISTS "${ICO_DEPS_DIR}/dxc/bin/dxc")
     add_test(NAME spirv_check COMMAND "${Python3_EXECUTABLE}" -I "${CMAKE_SOURCE_DIR}/tools/check_spirv.py" --sizes "${CMAKE_BINARY_DIR}/shaders")
 endif()
@@ -523,8 +581,14 @@ if(TARGET ico_pc AND NOT ICO_HEADLESS)
                             "configure with -DICO_HEADLESS=ON")
     endif()
     target_sources(ico_pc PRIVATE port/platform/window_host.c port/platform/window_switch.c
-                                  port/platform/window_video.c
-                                  port/platform/dump_zip.c)
+                                  port/platform/window_video.c port/platform/window_lines.c
+                                  port/platform/window_pipeline_skip.c
+                                  port/platform/window_pipe_finish.c
+                                  port/platform/window_present_fallback.c
+                                  port/platform/window_disc.c port/platform/window_blended.c
+                                  port/platform/window_present.c port/platform/render_thread.c
+                                  port/platform/window_sweep.c port/platform/dump_zip.c
+                                  port/platform/backup_host.c)
     if(ICO_RC_TOOLS AND ANDROID)
         # an rc build's Share a bug report: the files it offers (share_report.h)
         target_sources(ico_pc PRIVATE port/platform/share_report.c)

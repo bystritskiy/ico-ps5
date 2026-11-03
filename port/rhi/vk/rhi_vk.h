@@ -18,7 +18,8 @@ uint32_t rhi_vk_validation_error_count(void);
 
 /* For rhi_vk_test's cache cell: the drop vkr_pipeline_cache_init makes.
  * `path` is the cache file as rhi_set_pipeline_cache_path takes it; when its
- * name is pipelines<...>.vkcache every other pipelines*.vkcache and
+ * name is pipelines<...>.vkcache (the window's pipelines-<key>.vkcache,
+ * port/render/rd_cache_name.h) every other pipelines*.vkcache and
  * pipelines*.vkcache.tmp in its folder is removed, with one log line each.
  * Returns the number removed; the removed names, one per line, are copied to
  * `log` (when not NULL; logCap bytes). */
@@ -83,6 +84,18 @@ void vkr_test_pass_area_no_assert(bool on);
  * fence ring all in flight; 0 on the timeline path). */
 const char *vkr_test_sync_kind(void);
 uint32_t vkr_test_sync_recycle_waits(void);
+
+/* For the same cell (vk_device.c): the Vulkan version the device is used
+ * at (VK_API_VERSION_1_0 under ICO_VK_FAKE_API=1.0, issue 158), whether
+ * its render passes are VkRenderPass objects, and whether the UINT views
+ * carry their usage structure (Vulkan 1.1, or VK_KHR_maintenance2 on 1.0),
+ * and whether the extended queries reach the device (false under
+ * ICO_VK_FAKE_API=1.0bare: a 1.0 loader without
+ * VK_KHR_get_physical_device_properties2, review finding 5) */
+uint32_t vkr_test_api_version(void);
+bool vkr_test_legacy_passes(void);
+bool vkr_test_view_usage(void);
+bool vkr_test_props2(void);
 
 #ifdef __cplusplus
 }

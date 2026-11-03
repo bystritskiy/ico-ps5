@@ -159,9 +159,49 @@ typedef struct IcoDiagGpu {
     unsigned long long submitted, finished, waiting_for;
     double waiting_s, submitted_ago_s;
     unsigned int replay, frame;
+    /* the background pipeline set's compiles (rhi.h RhiGpuProgress
+       bgPipesDone, bgPipesLeft): returned since the start, begun and not
+       returned; the watchdog's pipeline limit reads them (gpu_hang.h
+       ico_pipe_note_creating, ico_pipe_stall_step) */
+    unsigned int bg_pipes_done, bg_pipes_left;
 } IcoDiagGpu;
 
 void ico_diag_set_gpu_hang(int (*progress)(IcoDiagGpu *out), void (*dump)(void));
+/* The GPU hang limit (gpu_hang.h, issue 123): the seconds one wait for a
+   submission the GPU has not finished (the progress above: waiting_for
+   above finished) may last before the run ends as the GPU hang above,
+   without waiting for the watchdog's limits; 0 (the default) off. The
+   host sets half the watchdog (ini watchdog=S: 15 s by default, at least
+   2 s, 0 with the watchdog off) before ico_diag_start, whose line names
+   it. The watchdog's thread polls the progress four times a second and
+   counts the wait's time as it counts its limits (not while paused, not
+   across a suspend), only while a limit is in force (ico_diag_start with
+   one not 0). At the limit the WATCHDOG line is "the GPU: submission V
+   not finished after W s (limit L s); the newest is S, the newest seen
+   finished D", the rest the GPU hang's above. Both ends run on the
+   watchdog's thread, once: the first wins. */
+void ico_diag_set_gpu_hang_limit(double seconds);
+/* The window's render thread's heartbeat (port/platform/render_thread.c,
+   which submits and presents the pictures the main thread records): beat
+   fills the picture in progress (*seq; 0 none) and the last one finished
+   (*done) without a lock, any thread, and returns 1 (0: no render thread).
+   The watchdog's thread counts one picture that does not finish as it
+   counts a wait for the GPU (gpu_hang.h; the same limit, not while an
+   effects program is loaded, whose first presents prepare its effects):
+   with the render thread inside the driver's present the main thread
+   waits for it, not for the GPU, so the backend's progress names no wait.
+   At the limit the WATCHDOG line is "the render thread: picture P has not
+   finished its submit and present after W s (limit L s); the last
+   finished D" and the end is the GPU hang's above (the dump, the loss
+   noted, the device loss's box), its report line "the graphics driver
+   stopped responding (the render thread's picture P has not finished
+   after a W s wait)". NULL: none. */
+void ico_diag_set_render_heartbeat(int (*beat)(unsigned long long *seq, unsigned long long *done));
+/* A sentence the GPU hang's box ends with on Android, or NULL/"" for none
+   (the window: the device's own Qualcomm driver names the Options route
+   to a Turnip driver package); called on the watchdog's thread at the
+   end, so it may only read state set before. */
+void ico_diag_set_gpu_hang_note(const char *(*note)(void));
 
 /* The main thread is inside a call that waits on the operating system and
    runs none of the game's code (the window's event pump, SDL_PollEvent):
@@ -500,12 +540,37 @@ void ico_diag_startup_activity_background(int background);
    count above 0), also ask the set to stop (ico_diag_low_memory_stop);
    the flag is set before the line is logged, from any thread. */
 void ico_diag_note_low_memory(int level);
-/* The start-up set's loop (rd.h rd_set_low_memory_fn), between two
-   batches: 1 when a low-memory signal asked the set to stop
+/* The start-up set's loop (rd.h rd_set_low_memory_fn): between two
+   batches, and under the careful policy (one thread, the cache written
+   each batch) before each pipeline: 1 when a low-memory signal asked the set to stop
    (ico_diag_note_low_memory), why holding the strongest level's name
    ("running critical", "running low"), else 0. A 1 marks the stop for
    ico_diag_startup_activity_budget_stop. Any thread. */
 int ico_diag_low_memory_stop(char *why, size_t size);
+/* The free-memory floor's driver class (memory_floor.h
+   ico_memory_floor_driver: vendor id and driver text, the window's
+   rhi_limits() before the start-up set): Qualcomm's own driver keeps 17 %
+   of total, at most 2048 MB above 8 GB; any other driver at most 512 MB
+   above 8 GB; until set, the cautious rule.  A stop at the floor on
+   another driver is for this start only
+   (ico_diag_startup_activity_budget_stop: "the next start makes the set
+   again"). */
+void ico_diag_set_memory_floor_driver(unsigned vendor_id, const char *driver_text);
+/* The class set (IcoMemoryFloorDriver) */
+int ico_diag_memory_floor_driver(void);
+/* 1 when the start-up set stopped at the free-memory floor and no
+   low-memory signal has come (the window's background finisher may run),
+   else 0 */
+int ico_diag_floor_stopped(void);
+/* The background finisher's check before each batch (port/render/rd.h
+   rd_pipelines_background_start): 2 when the system's low-memory signal
+   came ("running critical" at any time of the run, "running low" once a
+   pipeline was made; the finisher ends), 1 when MemAvailable is under the floor now (the batch
+   waits), else 0; why holding the words ("the system's low-memory signal
+   (running low)", "N MB available of T MB, floor F MB", "N MB available of
+   T MB").  Reads MemAvailable each call (Android; elsewhere 0). Any
+   thread. */
+int ico_diag_background_memory(char *why, size_t size);
 /* On the main thread (the start-up screen's progress, the window's pump):
    a low-memory line waiting from ico_diag_note_low_memory goes into the
    activity file while it records. Cheap when none waits. */
@@ -519,6 +584,17 @@ void ico_diag_set_pipelines_made(unsigned int n);
    before the batch starts (fsync), so it survives a device that froze and
    was rebooted. */
 const char *ico_diag_startup_activity_prev(void);
+/* Whether a run of this version ended at Android's pipeline creation limit
+   (10 s before the game starts, 30 s in play; review finding 2): the mark
+   "<activity file without .txt>-stall.txt" ("<version>\n<note>\n"), read
+   by ico_diag_startup_activity_begin, which logs it ("ico_pc: a run of
+   this version ended when the graphics driver did not return from creating
+   a pipeline (<note>): every start of this version takes the plain VU
+   vertex shaders ...") and deletes a mark of another version (logged too).
+   The window then takes the VU programs' plain entries on every Android
+   (rd_set_vu_plain_only), so a slow compiler cannot end the same pipeline
+   every run. */
+int ico_diag_startup_stall_end(void);
 /* This start's set is made under the careful policy (on != 0; the window,
    before ICO_DIAG_ACTIVITY_STARTUP): while the file records it holds the
    line "set: careful" after the note, so an end inside that set makes the
@@ -531,6 +607,12 @@ void ico_diag_startup_activity_careful(int on);
    only (ICO_DIAG_ACTIVITY_LAZY, its notes and exit saying "for this start
    only", the "set: careful" line kept), so a freeze in a later creation is
    named and counted while the next start tries the set again.
+   A set stopped at the free-memory floor on another driver than
+   Qualcomm's own (ico_diag_set_memory_floor_driver) is for this start only
+   too ("ico_pc: the start-up set stopped at the free-memory floor (<words>)
+   on another driver than Qualcomm's own; the next start makes the set
+   again"); the window then finishes the set in the background
+   (window_pipe_finish.c).
    A set stopped at the system's low-memory signal (issue 128;
    ico_diag_low_memory_stop answered 1) records the rest of the run as a
    lazy run that is not for this start only, with the line "set: stopped
@@ -696,6 +778,17 @@ void ico_diag_set_backend_trial(const char *backend);
    relaunch was not prepared: the window shows its box. blend_was_fixed:
    the run drew with the fixed-function blend (rd_blend_exact). */
 int ico_diag_device_lost_restart(int blend_was_fixed);
+/* Whether this run can start the program again when it ends (Windows,
+   Linux and macOS once ico_diag_prepare_relaunch prepared it; never
+   Android or iOS). */
+int ico_diag_can_restart(void);
+/* The program starts again when this run has ended, after the end-of-run
+   steps, with no restart step (ICO_STARTUP_RETRY empty; the new run's log
+   goes on after this one's lines), as after a device loss: Options >
+   Extras > Restore from a backup (backup_host.c), whose next start puts
+   the backup in place. 1 when it will, 0 when this run cannot
+   (ico_diag_can_restart). */
+int ico_diag_restart_at_exit(void);
 /* Removes ICO_STARTUP_RETRY from this process's environment once the
    window has read it, so nothing started from here inherits the step (the
    relaunch's own environment was captured without it at start-up). */
@@ -763,6 +856,15 @@ void ico_diag_set_symbols_path(const char *path);
 void ico_diag_set_symbols_fd(int fd, long long offset, long long length, int gzip,
                              const char *name);
 #endif
+
+/* The symbol file for another reader (the save states' table,
+   state_syms.h), read whole outside any report: 1 with its name, whether it
+   is gzip and its length in bytes (-1 unknown), or 0 when none is open.
+   _read reads up to size bytes from `at` without moving the report's own
+   read position (pread; Windows: ReadFile at an offset, and a report
+   rewinds before it reads): the bytes read, or -1. */
+int ico_diag_symbols_info(char *name, size_t n, int *gzip, long long *length);
+long long ico_diag_symbols_read(void *buf, size_t size, long long at);
 
 /* The first screenful's one line of what a report needs (the window,
    after the renderer's start and its self-tests): "ico_pc: summary:
@@ -880,5 +982,57 @@ void ico_host_thread_func(int id, void *func, int priority);
 /* common/src/kanbanBoot.c kanbanBootMain: its two step variables, logged
    when they change. */
 void ico_host_kanban_step(int boot_step, int mc_check_step);
+/* script/src/gflag.c gflagChk (write 0), gflagOn (1), gflagOff (2): an id
+   at or past the disc's flag count `count` (region.h
+   ico_region_gflag_count), the game's access going ahead: a rate-limited
+   line "gflag: flag <id> read|set|cleared past the disc's <count> flags
+   (from <caller>)", key "gflag: flag id past the disc's flags". */
+void ico_host_gflag_range(int id, int write, int count, void *caller);
+/* fumi/src/act-game.c ItemHold: Ico (girl 0) or Yorda (girl 1) took an
+   item of kind `kind` (sugipon item.h GetItemKind) in motion `motion`. A
+   rate-limited line "item: Ico|Yorda takes an item of kind K (motion M)",
+   key "item: an item taken" (the first 8, then every 100th). */
+void ico_host_item_held(int kind, int motion, int girl);
+/* fumi/src/act-game.c ACTItemWatchMotion_ntscaug6jun26, case 2: a mode-2
+   motion before its frame with no item held, where the 2001 builds read a
+   null item (the port keeps the later builds' guard). A rate-limited line
+   "item watch: a mode-2 motion M at frame A (item frame F) with no item
+   held: the null read skipped", key "item watch: null item skipped". */
+void ico_host_item_watch_null(int motion, float frame, float anim_frame);
+/* sugipon/src/torch.c LightTorchOff: a lit torch went out after burnTime
+   frames of its life (flags: the torch type, its layout word without bit
+   0, which says lit at the start). A rate-limited line "torch: a lit torch went out after N frames
+   (life L, type T)", key "torch: a torch went out" (the first 8, then every
+   100th): a torch that goes out after 1 frame with life 0 is the record
+   issue 160 found on the 2001 discs. */
+void ico_host_torch_out(int burnTime, int life, int flags);
+/* fumi/src/act-env.c ACTGetEnvironment_jun26: the June 2001 demo's
+   wall-reach field (the motion's host bits 24-25, where the other discs'
+   twins read it; v0.9.6 moved the read from bits 19-20) took case
+   field_case (0 the default reach of 60, -1 the wall's, 1 the reach of
+   150) at motion `motion`. A line the first time each case is taken in a
+   run, "env: the June 2001 demo's wall-reach field (host bits 24-25) took
+   case C first at motion M" (at most three a run; review finding 12). */
+void ico_host_env_wall_reach(int field_case, int motion);
+/* sugipon/src/torch.c, the chain reaction: an unlit torch (a held stick)
+   caught fire from a burning torch within reach. A rate-limited line
+   "torch: a torch caught fire from a burning one nearby (type T)", key
+   "torch: a torch caught fire". */
+void ico_host_torch_caught(int flags);
+/* sugipon/src/candle.c InitCandleGeo: a candle object asked for `asked`
+   flames (particle effect 4) and the particle system placed `placed`. A
+   rate-limited line "candle: N of M flames placed", key "candle: flames
+   placed". */
+void ico_host_candle_flames(int asked, int placed);
+/* common/src/StageManager.c stgmgrForceSwitch and
+   stgmgrForceSwitchWithFadeColor: a stage-switch request (cmd 0 without a
+   fade, 1 with one), the message queue holding `queued` untaken requests
+   before it, the stage of the request already in the single message when
+   it does. Lines "stage switch request: stage S, fade in F out G, cmd C,
+   by thread #N name" (the first 200, then every 10th) and, when queued is
+   not 0, "a second stage switch request while one is queued (stage A then
+   B, N queued)" (rate-limited). */
+void ico_host_stage_switch(int stage, float fade_in, float fade_out, int cmd, int queued,
+                           int queued_stage);
 
 #endif /* ICO_PLATFORM_DIAG_HOST_H */

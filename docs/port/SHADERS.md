@@ -17,7 +17,7 @@ interface that loads the blobs is [RHI.md](RHI.md).
 | `port/shaders/embed_shaders.py` | the manifest to `shaders_gen.c`/`.h`, with the blob checks |
 | `port/shaders/common.hlsli` | what every shader shares: FrameCB, DrawCB, the `DF_*` flags, sampling, outputs, the destination read, vertex helpers |
 | `port/shaders/gs_math.hlsli` | the GS integer arithmetic, scalar, valid HLSL and C |
-| `port/shaders/sheet_text.hlsli` | the sheet texel arithmetic of `font_sheet_ps`, mirrored on the CPU |
+| `port/shaders/sheet_text.hlsli` | the sheet texel arithmetic of `font_sheet_ps`, mirrored on the CPU (the tests' oracle and the renderer's bake at 1x and 2x) |
 | `port/shaders/vu_common.hlsli` | what the VU program shaders share ([VU1_PROGRAMS.md](VU1_PROGRAMS.md)) |
 | `port/shaders/shader_consts.h` | the C side of the byte layouts and constants |
 | `port/shaders/*.hlsl` | the families, below |
@@ -34,19 +34,26 @@ compiles the same entry with macros (DXC `-D`) under the key `<name><s>`.
 library holding `shaders_gen.c` with `shaders_gen.h` on its public include path
 (`cmake/IcoShaders.cmake`, header comment).
 
-**Flags.** SPIR-V: `-spirv -fspv-target-env=vulkan1.1` with `-fvk-b-shift 0`, `-fvk-t-shift 16`,
+**Flags.** SPIR-V: `-spirv -fspv-target-env=vulkan1.0` with `-fvk-b-shift 0`, `-fvk-t-shift 16`,
 `-fvk-s-shift 32`, `-fvk-u-shift 48` (all spaces), so a register number is the
 [RHI](ARCHITECTURE.md#terms) slot and the Vulkan binding is the slot plus 0, 16, 32 or 48. Both
 targets: `-O3 -WX -I port/shaders` (a shader warning fails the build; no `-Zi`, no debug info in the
 blobs) (`cmake/IcoShaders.cmake` (`ICO_DXC_SPIRV_FLAGS`, `ICO_DXC_COMMON_FLAGS`)).
 
-The SPIR-V target is Vulkan 1.1 (SPIR-V 1.3) so the blobs load on Vulkan 1.1 drivers. DXC 1.9.2609.5
-emits identical instruction streams at 1.1 and 1.2 for every shader class here (no 8/16-bit storage,
-wave operations, demote or memory model); only the module header version and each OpEntryPoint's
-interface list differ (SPIR-V 1.4 and later list every global, 1.3 only Input/Output). Nothing reads
-the header version: the table test checks the magic number only. Contingency: if a future shader
-needs SPIR-V 1.4 or later, add a second blob column (`spv11`, the 1.1-targeted blob) to the manifest
-and an `RhiLimits.spirvMax`, and pick the column at pipeline creation; do not raise the single target.
+The SPIR-V target is Vulkan 1.0 (SPIR-V 1.0) so the blobs load on Vulkan 1.0 drivers (Android 8,
+issue 158). The shaders use only Vulkan 1.0
+capabilities: `Shader`, `InputAttachment`, `SampleRateShading` and `ImageQuery`, the built-ins
+`Position`, `PointSize`, `VertexIndex`, `FragCoord`, `FragDepth` and `SampleId`, dual-source
+`Index`, `EarlyFragmentTests`, structured buffers as `Uniform` + `BufferBlock`, storage images
+with an explicit format, and the interlock pair through `SPV_EXT_fragment_shader_interlock` (no
+draw parameters, wave operations, 8/16-bit types, push or specialization constants, variable
+pointers, demote or memory model). DXC 1.9.2609.5 emits the same instruction stream at 1.0 as at
+1.1, so only the module header's version word differs: one set serves every Vulkan version.
+`tools/spirv_header_diff.py OLD NEW` compares two blob sets with that word masked (the check run
+when the target moved), and the `spirv_check` test (`tools/check_spirv.py`, gate `version`) holds
+every module's header to 1.0. Contingency: if a future shader needs a later SPIR-V, add a second
+blob column (the 1.0-targeted blob beside it) to the manifest and an `RhiLimits.spirvMax`, and
+pick the column at pipeline creation; do not raise the single target.
 
 **Outputs.** Each entry writes `<build>/shaders/<name>.spv` and, with `ICO_SHADERS_DXIL` on (the
 default), `<name>.dxil`. With Ninja or Makefiles a second DXC command writes a `-MF` dependency
@@ -82,17 +89,17 @@ each file's header comment):
 | `sprite.hlsl` | `sprite_ui_vs`, `sprite_world_vs`, `sprite_ps`, `sprite_texa_ps`, `date_snap_ps`, `sprite_aa1_*`, `sprite_stq_*`; the planes build: `sprite_plane_*_vs`, `sprite_stq_plane_*_vs`, `sprite_ps_planes`, `sprite_texa_ps_planes`, `sprite_stq_ps_planes` | screen-space prims in GS window coordinates: TEXA per texel before the filter, the DATE snapshot, PRIM.AA1 lines and triangles with a coverage attribute, perspective-correct STQ, and screen-prim triangles evaluated from their planes the same at every frame width |
 | `blit.hlsl` | `blit_vs`, `blit_ps`, `blit_depth_ps`, `box_reduce_ps`, `aa_reduce_ps`, `depth_resolve_ps`, `depth_upsample_ps`, `camera_probe_ps`, `crack_fill1_ps` (`CRACK_REACH_1`: the crack fill for a reach of 1 texel, [WORK_BUFFERS.md](WORK_BUFFERS.md)) | the present's box blit, the MSAA resolve's colour copy and the shadow count's resolve passes (`blit_ps`); the present's blit with the scene's depth (`blit_depth_ps`); the shadow count box-reduced to the GS size; the supersampled DISPLAY box-averaged; the MSAA depth resolved (smallest sample) and spread over samples; a test probe |
 | `blend_int.hlsl` | `blend_int_vs`, `blend_int_ps` | the GS integer blend between two RGBA8 UINT textures for feedback passes, no hardware blending |
-| `fx_sprite.hlsl` | `fx_rect_vs`, `fx_sprite_ps` and its `ICO_UINT_SRC` (`fx_sprite_u_ps`), `ICO_FX_FRAME` (`fx_frame_ps`) and `ICO_FX_DST_LOCAL` (`fx_local_ps`) builds, `fx_blur2_ps` | one GS sprite of `staticBlur.c`'s passes in the GS integer arithmetic (`port/render/rd_blur.c`): through the RGBA8_UINT views; the frame-size forms the open pass draws (the alpha alone, `FXF_ALPHA_ONLY`; the premultiplied term for the fixed-function add or subtract, `FXF_OUT_PREMUL`); the destination by local read (`port/render/rd_fx_plan.c`); two blur passes folded |
+| `fx_sprite.hlsl` | `fx_rect_vs`, `fx_sprite_ps` and its `ICO_UINT_SRC` (`fx_sprite_u_ps`), `ICO_FX_FRAME` (`fx_frame_ps`) and `ICO_FX_DST_LOCAL` (`fx_local_ps`) builds, `fx_blur2_ps`, `fx_aura_rows_ps` and `fx_aura_sum_ps` (`ICO_UINT_SRC`) | one GS sprite of `staticBlur.c`'s passes in the GS integer arithmetic (`port/render/rd_blur.c`): through the RGBA8_UINT views; the frame-size forms the open pass draws (the alpha alone, `FXF_ALPHA_ONLY`; the premultiplied term for the fixed-function add or subtract, `FXF_OUT_PREMUL`); the destination by local read (`port/render/rd_fx_plan.c`); two blur passes folded; the aura's read of SCENE into FEED128 above 1x in two passes, the box's row sums into ROWBOX (RGBA16_UINT, `fx_kernel_row`) then FEED128's column sum, the same bytes as `fx_sprite_ps` (`port/render/rd_aura_box.c`) |
 | `fog_lut.hlsl` | `fog_lut_ps` and its `FOG_BUFFER` (`fog_lut_buffer_ps`) and `FOG_MS` (`fog_lut_ms_ps`) builds | the depth fog: bits 16..23 of the 32-bit Z through the fog CLUT, from the depth, an R32 UINT copy of it, or per sample |
 | `raw_wrap.hlsl` | `wrap_acc_ps`, `wrap_resolve_ps` | COLCLAMP 0 prims (`darkVolume.c`): an RGBA16F accumulation, then the sum modulo 256 |
-| `font.hlsl` | `font_ps`, `font_sheet_ps` | R8 coverage textures (the port's font atlas) read as sprite_ps reads a texel; sheet text in the menu sheets' style |
+| `font.hlsl` | `font_ps`, `font_sheet_ps`, `font_sheet_baked_ps` | R8 coverage textures (the port's font atlas) read as sprite_ps reads a texel; sheet text in the menu sheets' style, rebuilt from the coverage (above 1x) or read from the texels the renderer baked (1x) |
 | `yuv.hlsl` | `yuv_vs`, `yuv_ps`, `yuv_field_ps` | the FMV picture, 4:2:0 planes to RGB with the [IPU](ARCHITECTURE.md#terms)'s conversion; a field deinterlaced at the picture's size (`port/render/rd_video.c`) |
 | `crt.hlsl` | `crt_vs`, `crt_bloom_ps`, `crt_blur_ps`, `crt_ps` | the CRT filter ([DISPLAY.md](DISPLAY.md)) |
 | `vu_prelit.hlsl` | `vu_prelit_vs`, `vu_prelit_pre_vs`, `vu_ps`, `vu_texa_ps`, `vu_probe_ps` | `normal_c` (codes 32, 34, 36); the pixel shader of every VU draw, through the main shaders and the programs' own entries alike (the planes as flat varyings); the tests' probe output |
 | `vu_lit.hlsl` | `vu_lit_vs`, `vu_lit_spec_vs`, `vu_reflect_vs` and their `_pre_vs` | `normal_l` (codes 32/36, 34, 38) |
 | `vu_skin.hlsl` | `vu_skin_vs`, `vu_skin_spec_vs`, `vu_skin_debug_vs` and their `_pre_vs` | `cluster`, skinned (codes 20, 22, 24) |
 | `vu_grid.hlsl` | `vu_grid_vs`, `vu_grid_lit_vs`, `vu_grid_spec_vs` and their `_pre_vs` | `mesh`, the procedural grids (codes 20, 22, 24) |
-| `vu_tri.hlsl` | `vu_main_vs`, `vu_tri_rule_pre_vs`, `vu_tri_tick_pre_vs`, `vu_tri_planes_pre_vs`, `vu_pre_ps` | the main vertex shader of every mesh program, the triangle pre-pass's record stages and the record targets' pixel shader ([RENDER.md](RENDER.md#the-vertex-and-triangle-pre-passes)) |
+| `vu_tri.hlsl` | `vu_main_vs`, `vu_tri_rule_pre_vs`, `vu_tri_tick_pre_vs`, `vu_tri_planes_pre_vs`, `vu_pre_ps` | the main vertex shader of every mesh program, the triangle pre-pass's record stages and the record targets' pixel shader ([RENDER.md](PIPELINES.md#the-vertex-and-triangle-pre-passes)) |
 | `vu_particle.hlsl` | `vu_particle_vs`, `vu_particle_pre_vs`, `vu_particle_main_vs` | `particle`, six vertices a particle, non-indexed; the sprite's record stage and main shader |
 | `common.hlsli`, `gs_math.hlsli`, `sheet_text.hlsli`, `vu_common.hlsli` | none | included headers, below |
 
@@ -108,20 +115,25 @@ triangle's or sprite's verdict and attribute planes as records the same way; `vu
 region bounds from VuCB, and output `VuVSOut` as the programs' own entries do (position, colour,
 STQ, plane distance and the planes as 28 flat floats: the main shaders read the planes' words from
 the record once a vertex, `vu_rec_planes`, where the planes hold), which `vu_ps` and `vu_texa_ps`
-take from either ([RENDER.md](RENDER.md#the-vertex-and-triangle-pre-passes)).
+take from either ([RENDER.md](PIPELINES.md#the-vertex-and-triangle-pre-passes)).
 
 **Variants.** The same entries are built again under defines (`port/shaders/CMakeLists.txt`):
 
 - `_nodual` (`ICO_NO_DUAL=1`): the entries that call `gs_dual_out` without the second output, for a
   device without dual-source blending: `sprite_ps`, `sprite_texa_ps`, `sprite_aa1_ps`,
-  `sprite_stq_ps`, the three fog builds, `font_ps`, `font_sheet_ps`, `vu_ps`, `vu_texa_ps`.
+  `sprite_stq_ps`, the three fog builds, `font_ps`, `font_sheet_ps`, `font_sheet_baked_ps`, `vu_ps`,
+  `vu_texa_ps`.
   [rd](ARCHITECTURE.md#terms) draws a lerp as two passes with them (`port/render/rd_pipeline.c`
   (`rd__expand_no_dual`)).
 - `_dstrov` (`ICO_DST_READ=1`) and `_dstatt` (`ICO_DST_READ=2`): the exact blend computed from the
   destination (`port/render/rd_dst_read.c`), for the sprite entries, `fog_lut_ps`,
   `fog_lut_buffer_ps`, the font entries and `vu_ps`, `vu_texa_ps`. `_dstrov` reads and writes the
   target as a rasterizer-ordered view; `_dstatt` reads the colour attachment in rasterization order
-  (Vulkan only; its DXIL is the ROV build, never used).
+  (Vulkan only; its DXIL is the ROV build, never used). `vu_np_ps` has a `_dstatt` twin alone, for
+  GS state as shader data at a fractional scale ([PIPELINES.md](PIPELINES.md#gs-state-as-data)).
+  In the `_dstatt` builds DATE reads the attachment's alpha under `DF_DATE_DST` (`GS_DATE_SNAP`,
+  `common.hlsli`), and `vu_ps`'s, `vu_texa_ps`'s and `vu_np_ps`'s give a fused pair's kick pixels
+  the ALPHA register `0x00` (`VU_RETURN`, `vu_common.hlsli`).
 - the planes build (`ICO_SPRITE_PLANES=1`): `sprite.hlsl` with the screen-prim triangles' planes in
   `SpriteVSOut` and `SpriteStqVSOut` (`SPRITE_PLANES`, six `nointerpolation float4`). The four
   plane vertex entries exist only in it, and `sprite_ps`, `sprite_texa_ps` and `sprite_stq_ps` are
@@ -130,7 +142,12 @@ take from either ([RENDER.md](RENDER.md#the-vertex-and-triangle-pre-passes)).
   other sprite entry is the plain build: the position, the colour and uv or stq, two input
   locations, the layout `font.hlsl`, `fog_lut.hlsl` (`FogPSIn`) and `raw_wrap.hlsl` (`WrapAccIn`)
   declare, since D3D12 refuses a pixel input the vertex shader does not write. A pass takes both
-  halves of the planes build together (`port/render/rd_screen_planes.c` (`rd__plane_pass`)).
+  halves of the planes build together (`port/render/rd_screen_planes.c` (`rd__plane_pass`)). A
+  device whose driver stopped creating them runs without the planes build (`[dev] pipeline_skip`,
+  issue 161): those passes take the plain build, which was byte-identical on every dump measured
+  (the title's and the boot's, 2 commands each, 0 of 18 targets differ); a level's difference is
+  possible in principle at a fractional scale, not seen
+  ([WORK_BUFFERS.md](WORK_BUFFERS.md#without-the-sprite-planes)).
 - the no-planes build (`ICO_VU_NO_PLANES=1`): `vu_ps` and `vu_texa_ps` built again as `vu_np_ps`
   and `vu_texa_np_ps`, each with its `_nodual` twin, for a target at a fractional scale
   (`port/render/rd_pixel_plan.c` (`rd__vu_pixel_fs`), [RENDER.md](RENDER.md#screen-planes)). Their
@@ -148,7 +165,7 @@ take from either ([RENDER.md](RENDER.md#the-vertex-and-triangle-pre-passes)).
   destination read of its own) and with `ICO_FX_DST_LOCAL=1` as `fx_local_ps` (the destination by
   `SubpassLoad` of the input attachment, `layoutLocal`: slot 1 the attachment, slot 2 the texture).
   Neither has a `_nodual` or destination-read twin: `fx_local_ps` is in `rd__fs_local_read`, and
-  an exact blend keeps the snapshot ([RENDER.md](RENDER.md#post-passes)).
+  an exact blend keeps the snapshot ([RENDER_POST.md](RENDER_POST.md#post-passes)).
 
 The replay looks entries up by the names in `s_vsNames` and `s_fsNames` (`port/render/rd_replay.c`).
 
@@ -168,7 +185,7 @@ The replay looks entries up by the names in `s_vsNames` and `s_fsNames` (`port/r
 5. Run `shaders_table`, `gs_math`, `shaders_pixel*`, `vu1*` (a VU entry), `rhi_d3d12_plan` (every
    vertex shader's DXIL inputs against its SPIR-V locations) and `rhi_d3d11_shader_plan`, and build
    `shaders_d3d11_check` (the entry under `ICO_D3D11`), then the render tests
-   ([TESTING.md](TESTING.md#portrendertest)).
+   ([TESTING_PROGRAMS.md](TESTING_PROGRAMS.md#portrendertest)).
 
 ## The binding scheme
 
@@ -179,8 +196,8 @@ number the RHI slot (`port/shaders/common.hlsli`, header comment; `port/rhi/rhi.
 | --- | --- | --- |
 | 0 | `b0` | FrameCB, once per frame |
 | 1 | `b1` | DrawCB, per draw or post pass (crt.hlsl's CrtCB takes the same slot) |
-| 1 | `b2`, `b3`, `t0`, `t4` | the VU programs' VuCB and VuBoneCB (bones, card bits), the VU vertex stream, and the pre-passes' record (`vu_rec_buf`, `StructuredBuffer<uint4>`, three planes); VuCB and the record are visible to the pixel stage too (`vu_ps` reads the planes) |
-| 1 | `t5` | the upload ring from the replay's VU base on (`vu_ring`, `StructuredBuffer<float4>`, vertex stage; `rd_replay_vu.c` `s_ringBase`, 256-aligned, after the uploads): the pre-pass's batch builds (`vu_X_batch_pre_vs`, `ICO_VU_PRE_BATCH`) read each entry's VuCB and VuBoneCB and the batch's table there, the table found through DrawCB's `aux0` ([VU1_PROGRAMS.md](VU1_PROGRAMS.md#the-pre-passs-batches)); the draw merge's builds (`vu_X_merge_vs`, `vu_X_merge_plain_vs`, `vu_merge_main_vs`, `ICO_VU_MERGE`) read each draw's VuCB and VuBoneCB and the run's table there, the table found through b2's `mark.w` ([VU1_PROGRAMS.md](VU1_PROGRAMS.md#the-draw-merge)); every VU group binds it (Direct3D 11's leave it unbound: no batch module and no merge there), the other builds do not read it |
+| 1 | `b2`, `b3`, `t0`, `t4` | the VU programs' VuCB and VuBoneCB (bones, card bits; `uint4 vu_bone[240]`), the VU vertex stream (`vu_stream`, `StructuredBuffer<uint4>`), and the pre-passes' record (`vu_rec_buf`, `StructuredBuffer<uint4>`, three planes), every one declared `uint4` so integer lanes are read as integers ([Integer lanes](#integer-lanes-never-through-a-float-load)); VuCB and the record are visible to the pixel stage too (`vu_ps` reads the planes) |
+| 1 | `t5` | the upload ring from the replay's VU base on (`vu_ring`, `StructuredBuffer<uint4>`, vertex stage; `rd_replay_vu.c` `s_ringBase`, 256-aligned, after the uploads): the pre-pass's batch builds (`vu_X_batch_pre_vs`, `ICO_VU_PRE_BATCH`) read each entry's VuCB and VuBoneCB and the batch's table there, the table found through DrawCB's `aux0` ([VU1_PROGRAMS.md](VU1_PROGRAMS.md#the-pre-passs-batches)); the draw merge's builds (`vu_X_merge_vs`, `vu_X_merge_plain_vs`, `vu_merge_main_vs`, `ICO_VU_MERGE`) read each draw's VuCB and VuBoneCB and the run's table there, the table found through b2's `mark.w` ([VU1_PROGRAMS.md](VU1_PROGRAMS.md#the-draw-merge)); every VU group binds it (Direct3D 11's leave it unbound only with both the pre-pass's batches and the merge off), the other builds do not read it |
 | 2 | `t1`..`t4`, `s1`..`s4` | textures and samplers |
 | 3 | `u0` | the destination read's target (`_dstrov`); `_dstatt` reads binding 16 of set 3 as an input attachment |
 
@@ -294,6 +311,51 @@ strip drawn at a scale of 1..`ICO_SHEET_SCALE_MAX` (4) keeps the 1x rim magnifie
 `port/shaders/shader_consts.h`, the sheet constants). What a sheet texture is: `port/render/rd.h`
 (`rd_create_texture_sheet`).
 
+**The 1x bake.** At scale 1 the rim and `sheet_texel` are the same for every pixel that reads a
+texel, so the renderer computes them once on the CPU when it uploads a sheet: `rd__sheet_bake_rect`
+(`port/render/rd_tex.c`) runs this file's arithmetic (the separable rim as `rd_sheet_rim` makes it,
+the Bayer threshold at the page texel, the same clamps and rounding) into an RGBA8 texture, `(grey,
+grey, grey, alpha)` a texel, with an apron of `SHEET_BAKE_AX` (7) texels across and `SHEET_BAKE_AY`
+(5) down round the page for the texels `font_sheet_ps` rebuilds outside it; the outermost apron
+texel is past the rim's reach, so it is every texel beyond. `font_sheet_baked_ps` reads the four
+texels around the sample, its read clamped to the texture, and blends them with `font_sheet_ps`'s
+float lerp and `floor(m + 0.5)`, so its output is `font_sheet_ps`'s at scale 1 byte for byte, for
+four loads where `font_sheet_ps` gathers a 14 x 10 coverage grid and runs the dilation per pixel
+(about 40 ms a picture of menu text on a Mali-G52 at 1x, issue 173; `font_sheet_ps_nodual` is the
+largest pixel shader). A change uploads the changed rectangle grown by the apron, a style change
+the whole page (`port/render/rd_upload.c` (`rd__upload_dirty_textures`)); `ICO_RD_SHEET_SHADER=1`
+(`[dev] sheet_shader = true`) draws every scale through `font_sheet_ps` instead, the A/B
+(`port/render/rd_core.c` (`rd_init`)).
+`ctest rd_sheet_bake` checks the bake against `sheet_ref.c` at every texel of pages of glyphs and
+words, and `rd_pixel` the two shaders' pictures byte for byte
+([UI.md](UI.md#the-menus-look) for the pages).
+
+**The 2x bake.** Above 1x the pixel's four strip texels come from font.hlsl `sheet_scaled`: the
+texel's own coverage, the rim levels of the sheet texels q0 and q0 + 1 around its centre (read at
+texel q s of the bottom half) blended bilinearly by g = (n - 2 s q0) / (2 s), then
+`sheet_texel_scaled`. Each texel's value again depends on the texel alone, so the renderer bakes
+pages of strip scale 2 the same way (`rd__sheet_bake_scaled_rect`, `port/render/rd_tex.c`, in
+integers): at s = 2 the weights are odd 4ths, the first lerp of two integer levels a multiple of
+1/4 and the second of 1/16, all within a float's 24 bits, so the shader's floats are those
+integers on any device and in any order of its operations (x (1 - a) + y a, x + a (y - x), a fused
+multiply-add), and `floor(v + 0.5)` of an exact value is the integer `(2 N + DD) / (2 DD)`.
+The baked texture covers both halves' rows ((w + 2 AX) x (h + 2 AY) for the w x h texture, coverage
+and rim), so `font_sheet_baked_ps`'s page size is `font_sheet_ps`'s texture size and the shader is
+the 1x one unchanged; past the apron every texel is the blank one (no coverage, the four rims 0:
+the rim level's grey, alpha 0). A changed rectangle bakes again with the texels that read it
+(`rd__sheet_bake_grow`: 2 s round the coverage rows, and the top-half rows 2 s round a changed rim
+row). s = 4 is exact the same way (odd 8ths) but not baked: its pages are 4096 x 2048, 34 MB baked,
+a 4K desktop's; s = 3 blends by 6ths, which round, and stays the shader's. The phone at Resolution
+Auto or 2x has a scene 2.1 times the PS2's height, so its menus' strips are at s = 2
+(`port/ui/menu_font.c` (`mfScale`)): the pause menu's and the Options pages' words, which the
+PowerVR phone's 10 s lines show as list 11 at 5.4 to 9.6 ms a picture there (its pass timing: list
+11 with the menus' 7 or 8 draws 9.3 to 10.0 ms, with the fades' 2 to 4 draws 1.0 to 3.0 ms;
+[WORK_BUFFERS.md](WORK_BUFFERS.md#the-menus-on-the-phone)), drop from a gather, nine loads and
+about sixteen integer divisions a pixel to four loads. `ctest rd_sheet_bake` checks the 2x and 4x
+bake at every texel (both halves and the apron) against a float transcription of `sheet_scaled` in
+both lerp forms and against `sheet_ref.c`, and `rd_pixel` the 2x frame through both shaders byte for
+byte.
+
 ## Bounded loops
 
 No vertex shader has a loop ([The envelope](#the-envelope)). Every loop in the pixel shaders stops
@@ -315,6 +377,20 @@ constant that valid inputs never reach, so every picture is unchanged:
 
 No shader waits on memory, spins on an atomic or uses recursion; the one ordered section is
 `gs_dst_out`'s (above).
+
+## Float to integer
+
+`vu_ftoi` (`port/shaders/vu_common.hlsli`; `vu_ftoi4` is it of `x * 16`, the VU's `ftoi0` and
+`ftoi4`) truncates and saturates: a value at or above 2^31 gives `0x7FFFFFFF`, one below -2^31 and a
+NaN `0x80000000`, the conversion `OpConvertFToS` only for a value in range. Its last select is
+`x >= -2^31 ? r : 0x80000000`, an ordered compare, so a NaN fails it and takes the saturated value
+instead of the conversion's: SPIR-V leaves the conversion of a NaN undefined, and the compilers
+differ (LLVM's, lavapipe on x86-64, gives `0x80000000`; Mesa's ir3 on Turnip most likely 0, a GS
+position on the frame; issue 163). A saturated X, Y or Z fails `vu_gs_ok`, so such a corner has no
+GS position. Every number converts as it did, -2^31 itself exactly to `0x80000000`. The CPU mirror
+(`port/math/ps2float.h` (`ps2_ftoi`), through `vu1_ref`) saturates a NaN by its sign bit, also a
+saturated value. The probe layout's position (`vu_probe_out`) is `precise` like the drawing
+positions.
 
 ## Integer forms
 
@@ -356,6 +432,57 @@ the code and a CPU sweep against the plain operator in `gs_math_test`:
 - **A divide by a per-draw float that is often 1** is skipped in a branch when it is 1
   (`fx_sprite_ps`'s coverage, `fp / ts` at scale 1): the reciprocal of 1.0 is 1.0 and `x * 1.0`
   is `x`.
+
+## Integer lanes: never through a float load
+
+The VU kept integers in its float registers, and the port's buffers mix the two the same way: the
+cluster's weight qword carries two bone addresses (`bone * 4 + 16`, 16..252) beside two weights
+(`port/shaders/vu_skin.hlsl`), the mark bytes follow a mesh's vertices in the stream
+(`vu_kick_marks`), the card bits follow the bones in VuBoneCB (`vu_strip_card`), and the pre-pass
+batches' and the draw merge's tables and each entry's VuCB `uint4` vectors (`vu_draw`, `vu_batch`,
+`vu_strip`, `vu_mark`, `vu_rec`, `vu_tri`) lie in the upload ring (`vu_ring`). Read through a
+`float4` load, those words are floats whose bits are denormals (16 is 2.2e-44, 252 is 3.5e-43; a
+table index or a flags word is one too) until `asuint` turns them back. Vulkan leaves fp32 denormal
+handling to the implementation (`VK_KHR_shader_float_controls`: `shaderDenormFlushToZeroFloat32`,
+`shaderDenormPreserveFloat32`), and a driver's compiler may move a loaded float through a path that
+flushes it before the bitcast: then the address, mark, table index or flags word reads 0. A driver
+may flush them (the Mali-G52 of issue 164 is the suspected case; its float-controls properties are
+not in the reporter's log); lavapipe (LLVM) keeps them, which is why every replay on the build host
+was clean while a Mali-G52 drew merged runs as giant polygons and stripes (issue 164: the merge
+builds were the only path reading the ring's tables and records through float loads, the draws alone
+through VuCB's typed `uint4` fields drew right). A skinned vertex whose bone address reads 0 takes
+the last bone slot's matrix (`vu_bone_mat` clamps `0 - 16` to 236), a vertex thrown across the
+picture: the shape of issue 163's sliver, which reads its addresses through `asuint(wt.x)` (not
+proven on the device: one vertex a frame is odd for a flush that does not depend on the data).
+
+So every buffer a VU shader reads words from is declared `uint4`: `vu_stream` (t0) and `vu_ring`
+(t5) as `StructuredBuffer<uint4>`, VuBoneCB's `vu_bone` as `uint4[240]`
+(`port/shaders/vu_common.hlsli`, "Integer lanes"). An integer lane is read as loaded
+(`vu_stream_u`, `VU_BONE_BITS`, the tables and VuCB vectors straight from `vu_ring`); a float lane
+through `asfloat` (`vu_stream_f`, `VU_MEM`, `VU_TICK`, `VU_BONE`, `vu_lo`, `vu_hi`). An `OpBitcast`
+from an integer to a float is free and keeps the bits; no integer lane passes through a float value.
+The particle's alpha test (`(bits & 0x7F800000) == 0`, a zero or denormal alpha skips the sprite)
+reads the bits as loaded too. The buffers' bytes are unchanged (the CPU writes the same words:
+`port/render/rd_replay_vu.c`, `port/render/rd_mesh.c`), and on a device that keeps denormals every
+word computed is the same, so the pictures are byte-identical there. The `asfloat` of the float
+lanes costs up to 316 words a module (`vu_lit_merge_vs` 52,266), the record stages and main
+shaders are smaller for it (a bitcast less per table read), and the pixel modules are the same word
+for word.
+
+The values passed from the vertex to the pixel stage are floats with float meaning: `VuVSOut.r.w`,
+the fused scissor pair's mark, is 1.0 or 0.0 on a `nointerpolation` varying, and the no-planes
+twins' mark is the plane distance -1.0 (`vu_fused_out`); the record's words go between stages as
+`nointerpolation uint4` (`VuPreOut`). The 2D vertex shaders read their integer inputs through
+integer vertex formats (`port/render/rd_pipeline.c` `pipelineDesc`: `RHI_VTX_U16x2_UINT`,
+`RHI_VTX_U32x1`, `RHI_VTX_U8x4_UINT` into `uint` inputs of `sprite.hlsl`).
+
+`tools/check_spirv.py`'s `intlane` gate holds every `vu_*` module to it: no `OpBitcast` of a float
+scalar or vector that an `OpLoad` of a float type produced from a storage or uniform buffer,
+directly or through `OpCompositeExtract`, `OpVectorShuffle`, `OpCopyObject`,
+`OpCompositeConstruct`, `OpCompositeInsert`, `OpPhi` or `OpSelect`. Over the same shaders with
+those lanes read through `float4` loads it reports 84 findings in 56 modules (the ring's tables
+and VuCB vectors, the stream's bone addresses, marks and particle alpha, VuBoneCB's card bits);
+over the current shaders, none.
 
 ## The envelope
 
@@ -421,7 +548,7 @@ plain variant ([The variants](#the-variants)) and `PS_BUDGET` (78,560, the large
 each module's words, instructions, basic blocks, phis, loops, dot products, vector comparisons,
 boolean selects and `any()`. A phone's driver compiles the start-up set in a time about
 proportional to the modules' size (the renderer logs the largest at start and the compile time per
-vertex shader after the set, [RENDER.md](RENDER.md#pipelines)).
+vertex shader after the set, [RENDER.md](PIPELINES.md)).
 
 | module | words | instructions | blocks | phis |
 | --- | --- | --- | --- | --- |
@@ -470,9 +597,46 @@ as it reads, and the plain one, `vu_X_plain_vs`, the same entry compiled with `I
 (`port/shaders/CMakeLists.txt`, the ten mesh entries only), which leaves out the card test's step
 of the region rule (`vu_region_rule_cut`'s `VU_F_EXTENDED` branch) and the two tick cameras
 (`vu_tick_shown`). The renderer takes the plain ones for the fallback on a device of the table and
-the extended ones everywhere else, once a run ([RENDER.md](RENDER.md#the-fallback-entries));
+under Mesa's Turnip driver, and the extended ones everywhere else, once a run
+([RENDER.md](PIPELINES.md#the-fallback-entries));
 `vu_particle_vs` has the one build. The cut against the camera's picture stays in
 both: at 4:3 a triangle wholly beside the picture is drawn, clipped, as in the extended one.
+
+The start-up line names the set and why, first (`rd_pipeline.c` `rd__vu_policy_init`, the choice
+`rd__vu_set_choose`): `rd: VU shaders: extended set (no device-table row, no Turnip driver, no lost
+start, no [dev] setting asks for the plain one): the program entries (largest vu_lit_vs <words>
+words) and the mesh and grid draws' merge builds of the same set; the record path's modules ...`,
+or `plain set by the device table on this device (<row's reason>)`, `plain set (Turnip driver: the
+extended set's clipped triangles showed a stray vertex there, issue 163; [dev] vu_set = extended
+asks for the extended one)`, `plain set after a lost start (<the host's reason>)`, `plain set by
+[dev] (vu_set = plain: ICO_RD_VU_SET=plain or ICO_RD_VU_PLAIN=1)`, `extended set by [dev] (vu_set
+= extended, ICO_RD_VU_SET=extended or ICO_RD_VU_EXTENDED=1)`. `[dev] vu_set = auto|plain|extended`
+(CONFIG.md) is the switch a player's device takes, as the table's row would: the A/B of the two
+sets' vertex cost on a device without a row (the PowerVR phone draws the extended set). The draw merge's own line
+(`rd: VU merge: ...`) follows; with the merge on, its builds (`vu_X_merge_vs` or
+`vu_X_merge_plain_vs`) are what the mesh and grid draws run.
+
+What the plain set hides (issues 163 and 164): a triangle that fails the region test and reaches
+into the picture is dropped by the plain set (`VU_RULE_DROP`), as on the PS2, and drawn clipped by
+the extended one (`VU_RULE_STRIP`) unless it is a card. So a vertex placed far off the screen, in
+front of the eye, by anything the two sets share (the program's arithmetic, the stream, VuCB,
+VuBoneCB) is invisible through the plain set and drawn as a long sliver through the extended one;
+a clean picture through the plain set does not place a fault in the extended-only code. The
+Turnip rule rests on this: issue 163's tablet (Turnip on an Adreno 740) drew such a sliver from
+Ico's leg in a picture between two ticks that lavapipe draws clean from the same two dumps, so
+under Turnip the fallback takes the plain set, which hides the vertex as the stock driver's row
+does; it does not remove whatever placed it. What Turnip gives up is the card test (a wide picture's edge at
+the old 4:3 border may open) and the tick cameras' re-test (the pictures between two ticks take the
+blended camera's rule alone) on the fallback's draws; the record path's modules, which a tile-based
+GPU runs only with `[dev] vu_prepass = true`, keep both. Turnip is no row of the device table, which
+matches Qualcomm's own driver alone: the rule is the renderer's (`rd__driver_is_turnip`, the test
+the device profile's Turnip class makes, `port/render/rd_profile.c`), and the summary line's VU
+shaders read `one set, fallback plain (Turnip driver, issue 163)` (the table's row `(Adreno 740,
+issue 107)`; `port/render/rd_core.c` (`rd_summary_text`)). `[dev] vu_set = extended`
+(`ICO_RD_VU_EXTENDED=1`) gives the extended set back, for a comparison. The card and tick steps only choose
+drop or clip; they never move a vertex. The VU vertex modules hold no Function or Private
+variable and no `OpUndef` (`tools/spirv_poison.py --list`, every `vu_*_vs` of the build: none), so
+a value read before it is written is not in the SPIR-V the drivers get.
 
 | module | plain words | instructions | blocks | extended words | instructions | blocks | the set that built on the Adreno 740 (words) |
 | --- | --- | --- | --- | --- | --- | --- | --- |
@@ -519,8 +683,8 @@ record stages in place of the program entries, none over 16,515 words.
 The draw merge's builds (`ICO_VU_MERGE`: `vu_X_merge_vs` and `vu_X_merge_plain_vs` of the seven
 mesh and grid programs but the skinned ones, `vu_merge_main_vs`;
 [VU1_PROGRAMS.md](VU1_PROGRAMS.md#the-draw-merge)) are the same entries reading VuCB and VuBoneCB
-from t5 through a four-step search, about 500 words above each: `vu_lit_merge_vs` 51,950 of
-`VS_BUDGET`, `vu_lit_merge_plain_vs` 23,904 and `vu_merge_main_vs` 6,827 of the plain budget (a
+from t5 through a four-step search, about 500 words above each: `vu_lit_merge_vs` 52,266 of
+`VS_BUDGET`, `vu_lit_merge_plain_vs` 24,124 and `vu_merge_main_vs` 6,755 of the plain budget (a
 `_merge_plain_vs` and a `_main_vs` are held to it), none with a finding. With the merge on (every
 device but Direct3D 11) a device compiles them in place of the plain builds of the same entries,
 whose modules the merge leaves unchanged word for word (`VU_MERGE_ENTRY(vid)` is `vid` there).
@@ -576,7 +740,8 @@ nothing. Warnings do not fail the compile; the first warning text is logged once
 hit skips the compile) and written after (`<path>.<n>.tmp` renamed over the file, so workers that
 compile the same key at once leave one whole file). The key is FNV-1a 64 over the entry, the stage,
 the file name, the macros, every embedded source's name and text in the table's order, the
-compiler's file version and the program's version, each field length-prefixed
+compiler's file version and the cache folder's key (the shader set's, `pipelines-<key>.d3d11`,
+[RHI.md](RHI.md#direct3d-11)), each field length-prefixed
 (`d3d11_shader_cache_key`); FNV, not xxh3, because `port/rhi` does not depend on `port/render`.
 The file:
 
@@ -645,9 +810,10 @@ same binding: one unit, bound once. The vertex inputs keep their SPIR-V `locatio
 
 **What GLSL cannot express.** An input attachment (SPIR-V `OpTypeImage` with Dim SubpassData) has
 no GLSL, so the script writes an empty file for such a module and `embed_shaders.py` reads an empty
-file as none (glsl NULL, glsl_len 0). That is 17 entries: the `_dstatt` builds of the sprite, texa,
-aa1, stq, font, font_sheet, fog_lut, fog_lut_buffer, vu and vu_texa pixel shaders (and the planes
-variants), `fog_lut_local_ps`, `fog_lut_local_ps_nodual`, `date_stencil_ps` and `fx_local_ps`. The
+file as none (glsl NULL, glsl_len 0). That is 19 entries: the `_dstatt` builds of the sprite, texa,
+aa1, stq, font, font_sheet, font_sheet_baked, fog_lut, fog_lut_buffer, vu, vu_texa and vu_np pixel
+shaders (and the planes variants), `fog_lut_local_ps`, `fog_lut_local_ps_nodual`, `date_stencil_ps` and
+`fx_local_ps`. The
 `_dstrov` builds (a storage image under fragment-shader interlock) translate.
 A backend without fragment-shader interlock has no blend path from these modules (see the
 extensions below).

@@ -204,6 +204,31 @@ bool rd_vu_mesh_replaced(RdMesh m);
  * pinned frame.  Recording only, no device needed. */
 void rd_vu_mesh_retire(bool (*pred)(uint64_t hash, bool replaced, void *user), void *user);
 
+/* Save states (port/game/state_host.c).  A load brings back packets whose
+ * mesh ids (PacHeader.pad9C) were handed out by the saving run, which may
+ * name meshes of this run.  rd_vu_mesh_gen_high: the highest generation any
+ * slot has had (a save stores it).  rd_drop_vu_meshes: every live VU mesh
+ * retired (rd_vu_mesh_retire with no predicate) and every slot's next
+ * generation put above savedGenHigh and this run's highest, so no id the
+ * saving run made names a mesh made after the load (16-bit generations:
+ * 65535 of them before a wrap).  Recording only, no device needed. */
+uint32_t rd_vu_mesh_gen_high(void);
+void rd_drop_vu_meshes(uint32_t savedGenHigh);
+
+/* The fields of the game's memory a mesh id was written into (Packet.c
+ * writes each packet's into PacHeader.pad9C): rd_vu_mesh_note_field records
+ * the 4-byte field at `field` and the id written, the latest per field, for
+ * the life of the process (a load keeps the list: the restored packets
+ * hold ids this list knows).  rd_vu_mesh_each_field calls fn for every
+ * field inside [lo, hi) (only those are read: a field elsewhere may be
+ * freed memory) that still holds the id last noted for it: a save state's hash of
+ * the game's memory leaves those out (port/game/state_host.c dev_hash), a
+ * host handle two runs of the same play hold differently.  Returns the
+ * fields reported.  A full table stops noting (one log line). */
+void rd_vu_mesh_note_field(void *field, uint32_t id);
+size_t rd_vu_mesh_each_field(const void *lo, const void *hi,
+                             void (*fn)(const void *field, void *user), void *user);
+
 /* --------------------------------------------------------- per draw */
 
 /* VU1 data memory 0..35 as the program reads it: IcoVuCB.mem, the slot map

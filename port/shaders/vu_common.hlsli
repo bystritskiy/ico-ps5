@@ -6,9 +6,10 @@
 //
 // Bindings (group 1, next to DrawCB at b1):
 //   t0  vu_stream  the vertex quadwords as Packet.c / Primitive.c built them
-//                  for the VIF UNPACK (float4 each; the cluster weight qword
-//                  keeps its two int VU addresses as raw bits); static meshes
-//                  without the batches' GIF tags (rd_mesh.h)
+//                  for the VIF UNPACK (the cluster weight qword keeps its two
+//                  int VU addresses as raw bits; the mark bytes after the
+//                  vertices); static meshes without the batches' GIF tags
+//                  (rd_mesh.h).  Read as uint4 (Integer lanes, below)
 //   b2  VuCB       the VU1 data memory 0..35 the program reads (see below)
 //   b3  VuBoneCB   cluster: VU memory 16..255, the bones; every mesh
 //                  program: the card bits after them (vu_strip_card)
@@ -71,6 +72,20 @@
 // such a draw, and for every draw on a device that refuses the extended
 // one (rd_pipeline.c rd__vu_plain_only); the plain modules are about half
 // the extended ones' size (tools/check_spirv.py VS_PLAIN_BUDGET).
+//
+// Integer lanes (issues 163, 164; docs/port/SHADERS.md, "Integer lanes:
+// never through a float load"): the VU kept integers in float registers
+// (the cluster's bone addresses 16..252 in the weight qword) and the port's
+// tables, records, mark bytes and card bits share the buffers with the
+// floats.  As floats those bits are denormals (16 is 2.2e-44), and Vulkan
+// leaves fp32 denormals to the implementation (shaderDenormFlushToZero /
+// shaderDenormPreserve): a driver that moves a loaded float through a
+// flushing path reads 0 (the suspected cause of issue 164 on a Mali-G52).  So every
+// buffer the VU shaders read words from is declared uint4 (vu_stream,
+// vu_ring, VuBoneCB's vu_bone) and only the float lanes are asfloat()ed
+// (vu_stream_f, VU_MEM, VU_TICK, VU_BONE): an integer lane never passes
+// through a float value.  tools/check_spirv.py's intlane gate fails a VU
+// module with an OpBitcast of a float a buffer load produced.
 #ifndef ICO_VU_COMMON_HLSLI
 #define ICO_VU_COMMON_HLSLI
 
@@ -139,17 +154,21 @@ cbuffer VuCB : ICO_REG(b2, 1)
 
 // VU memory 16..255: the cluster program's bones (vu_skin.hlsl), and for
 // every mesh program the card bits from qword vu_strip.w (vu_strip_card;
-// rd_replay_vu.c doVuDraw puts them after the bones a skinned mesh reads)
+// rd_replay_vu.c doVuDraw puts them after the bones a skinned mesh reads).
+// uint4: the card bits are integers (Integer lanes, above); the bones are
+// read through VU_BONE's asfloat
 cbuffer VuBoneCB : ICO_REG(b3, 1)
 {
-    float4 vu_bone[240];
+    uint4 vu_bone[240];
 };
 
 // The arrays' elements, read one at a time (the batch build below reads
-// them from vu_ring)
+// them from vu_ring); VU_BONE_BITS a qword of VuBoneCB as integers (the
+// card bits)
 #define VU_MEM(i) vu_mem[i]
 #define VU_TICK(i) vu_ticks[i]
-#define VU_BONE(i) vu_bone[i]
+#define VU_BONE(i) asfloat(vu_bone[i])
+#define VU_BONE_BITS(i) vu_bone[i]
 // a pre-pass entry's vertex: SV_VertexID itself (the batch build's
 // vu_pre_batch_entry finds its entry first)
 #define VU_PRE_ENTRY(vid) (vid)
@@ -163,20 +182,23 @@ cbuffer VuBoneCB : ICO_REG(b3, 1)
 // for a run of entries with the same pipeline, FrameCB and group 1.  Each
 // entry's VuCB and VuBoneCB lie in the upload ring where the cbuffer build
 // binds them (cbCopy), read here through vu_ring, the ring from the
-// replay's VU work on (t5), at the float4 indices the batch's table gives.  The table is a run
-// of uint4 in the ring too, from float4 g_aux0.x of the batch's DrawCB,
+// replay's VU work on (t5), at the qword indices the batch's table gives.  The table is a run
+// of uint4 in the ring too, from qword g_aux0.x of the batch's DrawCB,
 // g_aux0.y entries (at most VU_PRE_BATCH_MAX), one an entry in the order of
 // the draw's vertices:
 //   x the entry's first SV_VertexID in the draw (entry 0: 0)
-//   y its VuCB's first float4 in vu_ring
-//   z its VuBoneCB's first float4
+//   y its VuCB's first qword in vu_ring
+//   z its VuBoneCB's first qword
 //   w 0
 // vu_pre_batch_entry finds a vertex's entry (a fixed binary search over x:
 // six steps, no loop) and loads its VuCB's vectors into the statics below,
 // which the functions read under the cbuffer's names; vu_mem, vu_ticks and
 // vu_bone are read an element at a time (VU_MEM, VU_TICK, VU_BONE).  The
 // same bytes the cbuffers would hold: every word computed is the same.
-StructuredBuffer<float4> vu_ring : ICO_REG(t5, 1);
+// uint4 (Integer lanes, above): the tables and VuCB's uint4 vectors are
+// read as integers, the float vectors (vu_mem, vu_ticks, vu_lo, vu_hi, the
+// bones) through asfloat.
+StructuredBuffer<uint4> vu_ring : ICO_REG(t5, 1);
 static uint4 vu_draw;
 static uint4 vu_batch;
 static uint4 vu_strip;
@@ -185,14 +207,15 @@ static uint4 vu_rec;
 static float4 vu_lo;
 static float4 vu_hi;
 static uint4 vu_tri;
-// the entry's VuCB and VuBoneCB: their first float4 in vu_ring
+// the entry's VuCB and VuBoneCB: their first qword in vu_ring
 static uint vu_pre_v;
 static uint vu_pre_b;
-// IcoVuCB's float4 indices (shader_consts.h): mem 0..35, draw 36, batch
+// IcoVuCB's qword indices (shader_consts.h): mem 0..35, draw 36, batch
 // 37, strip 38, ticks 39..46, mark 47, rec 48, lo 49, hi 50, tri 51
-#define VU_MEM(i) vu_ring[vu_pre_v + (i)]
-#define VU_TICK(i) vu_ring[vu_pre_v + 39u + (i)]
-#define VU_BONE(i) vu_ring[vu_pre_b + (i)]
+#define VU_MEM(i) asfloat(vu_ring[vu_pre_v + (i)])
+#define VU_TICK(i) asfloat(vu_ring[vu_pre_v + 39u + (i)])
+#define VU_BONE(i) asfloat(vu_ring[vu_pre_b + (i)])
+#define VU_BONE_BITS(i) vu_ring[vu_pre_b + (i)]
 #ifdef ICO_VU_PRE_BATCH
 #define VU_PRE_BATCH_MAX 64u
 #define VU_PRE_ENTRY(vid) vu_pre_batch_entry(vid)
@@ -204,7 +227,7 @@ uint vu_pre_batch_step(uint e, uint s, uint vid)
 {
     uint m = e + s;
     uint r = e;
-    if (m < g_aux0.y && vid >= asuint(vu_ring[g_aux0.x + m].x)) {
+    if (m < g_aux0.y && vid >= vu_ring[g_aux0.x + m].x) {
         r = m;
     }
     return r;
@@ -220,17 +243,17 @@ uint vu_pre_batch_entry(uint vid)
     e = vu_pre_batch_step(e, 4u, vid);
     e = vu_pre_batch_step(e, 2u, vid);
     e = vu_pre_batch_step(e, 1u, vid);
-    uint4 t = asuint(vu_ring[g_aux0.x + e]);
+    uint4 t = vu_ring[g_aux0.x + e];
     vu_pre_v = t.y;
     vu_pre_b = t.z;
-    vu_draw = asuint(vu_ring[t.y + 36u]);
-    vu_batch = asuint(vu_ring[t.y + 37u]);
-    vu_strip = asuint(vu_ring[t.y + 38u]);
-    vu_mark = asuint(vu_ring[t.y + 47u]);
-    vu_rec = asuint(vu_ring[t.y + 48u]);
-    vu_lo = vu_ring[t.y + 49u];
-    vu_hi = vu_ring[t.y + 50u];
-    vu_tri = asuint(vu_ring[t.y + 51u]);
+    vu_draw = vu_ring[t.y + 36u];
+    vu_batch = vu_ring[t.y + 37u];
+    vu_strip = vu_ring[t.y + 38u];
+    vu_mark = vu_ring[t.y + 47u];
+    vu_rec = vu_ring[t.y + 48u];
+    vu_lo = asfloat(vu_ring[t.y + 49u]);
+    vu_hi = asfloat(vu_ring[t.y + 50u]);
+    vu_tri = vu_ring[t.y + 51u];
     return vid - t.x;
 }
 #else
@@ -240,14 +263,14 @@ uint vu_pre_batch_entry(uint vid)
 // vuDraw, vuRunFlush): consecutive draws with the same pipeline, groups,
 // DrawCB, FrameCB and scissor are one indexed draw.  Each draw's VuCB and
 // VuBoneCB lie in the upload ring as the cbuffer build binds them, read
-// through vu_ring (t5) at the float4 indices of the run's table, a run of
-// uint4 in vu_ring from float4 vu_merge_head.w (the lane IcoVuCB.mark[3],
+// through vu_ring (t5) at the qword indices of the run's table, a run of
+// uint4 in vu_ring from qword vu_merge_head.w (the lane IcoVuCB.mark[3],
 // which nothing else reads, of the VuCB bound at b2: the run's first
 // draw's), one a draw in the order of the index list, at most
 // VU_MERGE_MAX:
 //   x the draw's first rebased index value (draw 0: the table's draws)
-//   y its VuCB's first float4 in vu_ring
-//   z its VuBoneCB's first float4
+//   y its VuCB's first qword in vu_ring
+//   z its VuBoneCB's first qword
 //   w what its values were raised by (draw 0: 0; the index value less w is
 //     the draw's own, kick * 4 + corner, mod 2^32)
 // A draw alone is a table of one.  vu_merge_entry finds an index value's
@@ -269,7 +292,7 @@ uint vu_merge_step(uint e, uint s, uint vid, uint tab, uint n)
 {
     uint m = e + s;
     uint r = e;
-    if (m < n && vid >= asuint(vu_ring[tab + m].x)) {
+    if (m < n && vid >= vu_ring[tab + m].x) {
         r = m;
     }
     return r;
@@ -280,28 +303,41 @@ uint vu_merge_step(uint e, uint s, uint vid, uint tab, uint n)
 uint vu_merge_entry(uint vid)
 {
     uint tab = vu_merge_head.w;
-    uint n = asuint(vu_ring[tab].x);
+    uint n = vu_ring[tab].x;
     uint e = vu_merge_step(0u, 8u, vid, tab, n);
     e = vu_merge_step(e, 4u, vid, tab, n);
     e = vu_merge_step(e, 2u, vid, tab, n);
     e = vu_merge_step(e, 1u, vid, tab, n);
-    uint4 t = asuint(vu_ring[tab + e]);
+    uint4 t = vu_ring[tab + e];
     vu_pre_v = t.y;
     vu_pre_b = t.z;
-    vu_draw = asuint(vu_ring[t.y + 36u]);
-    vu_batch = asuint(vu_ring[t.y + 37u]);
-    vu_strip = asuint(vu_ring[t.y + 38u]);
-    vu_mark = asuint(vu_ring[t.y + 47u]);
-    vu_rec = asuint(vu_ring[t.y + 48u]);
-    vu_lo = vu_ring[t.y + 49u];
-    vu_hi = vu_ring[t.y + 50u];
-    vu_tri = asuint(vu_ring[t.y + 51u]);
+    vu_draw = vu_ring[t.y + 36u];
+    vu_batch = vu_ring[t.y + 37u];
+    vu_strip = vu_ring[t.y + 38u];
+    vu_mark = vu_ring[t.y + 47u];
+    vu_rec = vu_ring[t.y + 48u];
+    vu_lo = asfloat(vu_ring[t.y + 49u]);
+    vu_hi = asfloat(vu_ring[t.y + 50u]);
+    vu_tri = vu_ring[t.y + 51u];
     return vid - t.w;
 }
 #endif
 #endif
 
-StructuredBuffer<float4> vu_stream : ICO_REG(t0, 1);
+// uint4 (Integer lanes, above): vu_stream_f a qword of float lanes,
+// vu_stream_u one with an integer lane (the weight qword's addresses, the
+// mark bytes)
+StructuredBuffer<uint4> vu_stream : ICO_REG(t0, 1);
+
+float4 vu_stream_f(uint qw)
+{
+    return asfloat(vu_stream[qw]);
+}
+
+uint4 vu_stream_u(uint qw)
+{
+    return vu_stream[qw];
+}
 
 // vu_draw.z
 #define VU_CLIP_MASK 3u
@@ -383,7 +419,7 @@ uint vu_kick_marks(uint kick)
 {
     uint m = vu_mark.y;
     if (vu_mark.z != 0u) {
-        uint4 q = asuint(vu_stream[vu_draw.x + vu_mark.x + min(kick >> 4, vu_mark.z - 1u)]);
+        uint4 q = vu_stream_u(vu_draw.x + vu_mark.x + min(kick >> 4, vu_mark.z - 1u));
         uint s = (kick >> 2) & 3u;
         uint word = q.x;
         word = s == 1u ? q.y : word;
@@ -424,11 +460,19 @@ float4 vu_matm(uint at, float4 v, float w)
 
 // ftoi0 / ftoi4: truncation, saturating at +-2^31 like the VU (?: between
 // numbers: the conversion of a value out of range is never the one taken).
+// A NaN takes 0x80000000, which vu_gs_ok rejects: OpConvertFToS of a NaN is
+// undefined, and the compilers differ (LLVM's, lavapipe on x86-64, gives
+// 0x80000000; Mesa's ir3 on Turnip most likely 0, a GS position on the
+// frame: issue 163), so the last select's ordered compare, which a NaN
+// fails, picks the value instead of the conversion. Every number takes what
+// it took before: -2^31 itself converts to 0x80000000 exactly. The CPU
+// mirror (vu1_ref, ps2_ftoi) saturates a NaN by its sign bit; both are
+// saturated values, so both drop the corner.
 int vu_ftoi(float x)
 {
     int r = (int)x;
     r = x >= 2147483648.0 ? 0x7FFFFFFF : r;
-    r = x <= -2147483648.0 ? (int)0x80000000u : r;
+    r = x >= -2147483648.0 ? r : (int)0x80000000u;
     return r;
 }
 
@@ -1289,7 +1333,7 @@ VuVSOut vu_pixel_attrs(VuVSOut i)
 // and STs do; a link's triangles are a few pixels long.
 float vu_plane_distance(uint v)
 {
-    float4 p = vu_stream[vu_vertex_qw(v)];
+    float4 p = vu_stream_f(vu_vertex_qw(v));
     uint axis = (vu_batch.z & 3u) - 1u;
     float c = axis == 0u ? p.x : (axis == 1u ? p.y : p.z);
     precise float d = ((vu_batch.z & 4u) != 0u ? -c : c) + asfloat(vu_batch.w);
@@ -1542,7 +1586,7 @@ bool vu_strip_card(uint kick)
     if (i >= vu_strip.z) {
         return false;
     }
-    uint4 q = asuint(VU_BONE(min(vu_strip.w + (i >> 6), 239u)));
+    uint4 q = VU_BONE_BITS(min(vu_strip.w + (i >> 6), 239u));
     uint s = (i >> 4) & 3u;
     uint word = q.x;
     word = s == 1u ? q.y : word;
@@ -1703,17 +1747,21 @@ VuVSOut vu_probe_out(uint vid, uint value)
     VuVSOut o = vu_out_init();
     uint cell = vid / 3u;
     uint corner = vid % 3u;
-    float2 px = float2(float(cell % VU_PROBE_FIELDS), float(cell / VU_PROBE_FIELDS));
+    // precise as the drawing positions are: no driver fuses the scale and
+    // the offset into a different rounding, so the probe's pixel is the
+    // same on every device
+    precise float2 px = float2(float(cell % VU_PROBE_FIELDS), float(cell / VU_PROBE_FIELDS));
     px.x += corner == 1u ? 1.5 : 0.0;
     px.y += corner == 2u ? 1.5 : 0.0;
     // texel px of the target (under the exact viewport the target is the
     // share g_misc.zw of it about its centre: common.hlsli fullscreen_triangle)
+    precise float4 pos =
+        float4(px.x * g_target.z * 2.0 - 1.0, 1.0 - px.y * g_target.w * 2.0, 0.5, 1.0);
     if (g_vp.x != 0.0) {
-        o.pos = float4((px.x + g_vpo.x) * g_vp.x - g_misc.z, g_misc.w - (px.y + g_vpo.y) * g_vp.y,
-                       0.5, 1.0);
-    } else {
-        o.pos = float4(px.x * g_target.z * 2.0 - 1.0, 1.0 - px.y * g_target.w * 2.0, 0.5, 1.0);
+        pos = float4((px.x + g_vpo.x) * g_vp.x - g_misc.z, g_misc.w - (px.y + g_vpo.y) * g_vp.y,
+                     0.5, 1.0);
     }
+    o.pos = pos;
     o.col = float4(float(value & 0xFFFFu), float(value >> 16), 0.0, 0.0);
     return o;
 }
@@ -1798,7 +1846,7 @@ VuVSOut vu_mesh_out(VuVtx a, VuVtx b, VuVtx c, uint kick, uint corner, uint mark
 }
 
 // ------------------------------------------------- the vertex pre-pass
-// A vertex's record (docs/port/RENDER.md, "The vertex pre-pass"): twelve
+// A vertex's record (docs/port/PIPELINES.md, "The vertex pre-pass"): twelve
 // words in three planes of RGBA32_UINT texels, its VuVtx as computed, the
 // floats as their bits: plane 0 h; plane 1 p.x, p.y, GS Z, RGBA (a byte a
 // channel, R lowest); plane 2 S, T, Q and the flags (bit 0 inside, bit 1
@@ -2067,12 +2115,15 @@ float4 vu_texture_function_f(float4 tex, float4 col, uint flags)
 #if ICO_DST_MODE == 0
 // gs_dual_out on the integers above: the same c0 and c1, float for float
 // (c0 = the byte / 255, c1 = the factor / 128).  The alpha's MSB tests (PABE,
-// FBA) on the integer itself.  The no-planes twins with dual-source
-// blending (vu_np_ps, vu_texa_np_ps) take one more argument, fused: not 0
-// on a fused pair's kick pixel (VU_RETURN), which is written as the PABE
-// pixel whose As has its MSB clear is (vu_dual_out_fused's rule); every
-// other build has the function as it was.
-#if defined(ICO_VU_NO_PLANES) && !defined(ICO_NO_DUAL)
+// FBA) on the integer itself.  The no-planes twins (vu_np_ps,
+// vu_texa_np_ps) and the two-pass builds without dual-source blending
+// (ICO_NO_DUAL) take one more argument, fused: not 0 on a fused pair's kick
+// pixel (VU_RETURN), which is written as the PABE pixel whose As has its
+// MSB clear is (vu_dual_out_fused's rule): in the two-pass builds the colour
+// pass's factor 1.0 for the lerps and 0 for Cd*FIX + Cs, so the blender
+// stores Cs, and the alpha pass's As (FBA's MSB on it) as for every pixel;
+// the planes build with dual-source blending has the function as it was.
+#if defined(ICO_VU_NO_PLANES) || defined(ICO_NO_DUAL)
 #define VU_FUSED_ARG , float fused
 #define VU_FUSED_OR fused != 0.0 ||
 #else
@@ -2134,14 +2185,17 @@ DualOut vu_dual_out_f(float4 col, uint flags, uint fix VU_FUSED_ARG)
 }
 
 // the entry's output (i its input): the fixed-function blend's c0 and c1;
-// a fused pair's kick pixel unblended (vu_dual_out_fused) in the builds
-// with dual-source blending, the only ones a fused pair draws with (without
-// it a cut is two passes, which rd_replay_vu.c never fuses): marked by
-// VuVSOut.r.w with the planes, by a negative plane in the no-planes twins
-// (vu_fused_out; a twin never draws a clip plane's draw, and under one a
-// negative plane's pixel is discarded before this)
-#ifdef ICO_NO_DUAL
-#define VU_RETURN(col, i) return vu_dual_out_f(col, g_mode.x, g_blend.y)
+// a fused pair's kick pixel unblended (vu_dual_out_fused, or vu_dual_out_f's
+// fused argument), with dual-source blending and without it (a cut is then
+// a colour pass and an alpha pass, which rd_replay_vu.c fuses as a pair:
+// vuFuseVerdict, vuNoDualJoin): marked by VuVSOut.r.w with the planes, by a
+// negative plane in the no-planes twins (vu_fused_out; a twin never draws a
+// clip plane's draw, and under one a negative plane's pixel is discarded
+// before this)
+#if defined(ICO_NO_DUAL) && defined(ICO_VU_NO_PLANES)
+#define VU_RETURN(col, i) return vu_dual_out_f(col, g_mode.x, g_blend.y, i.plane < 0.0 ? 1.0 : 0.0)
+#elif defined(ICO_NO_DUAL)
+#define VU_RETURN(col, i) return vu_dual_out_f(col, g_mode.x, g_blend.y, i.r.w)
 #elif defined(ICO_VU_NO_PLANES)
 #define VU_RETURN(col, i) return vu_dual_out_f(col, g_mode.x, g_blend.y, i.plane < 0.0 ? 1.0 : 0.0)
 #else
@@ -2172,9 +2226,23 @@ DualOut vu_dual_out_fused(float4 col, uint flags, uint fix, float fused)
 
 #define VU_RETURN(col, i) return vu_dual_out_fused(col, g_mode.x, g_blend.y, i.r.w)
 #endif
+#elif ICO_DST_MODE == 2
+// the attachment read's builds blend in the shader (gs_dst_pixel_reg), on
+// the integers; a fused pair's kick pixel (GS state as shader data: the
+// pair under the cut's pipeline, port/render/rd_replay_vu.c
+// vuFuseVerdict; marked as above, VuVSOut.r.w or the no-planes twin's
+// negative plane) takes the ALPHA register 0x00, (Cs - Cs) * As >> 7 + Cs:
+// Cs, the alpha As (FBA's MSB on it) and the mask as every pixel's, which
+// is what the kick's own pass (no GS blending: RdDrawPass.csOnly, the
+// register 0x00) stores, byte for byte
+#ifdef ICO_VU_NO_PLANES
+#define VU_RETURN(col, i) return gs_dst_out_reg(uint4(col), i.plane < 0.0 ? 0u : g_blend.x)
 #else
-// the destination-read builds blend in the shader (gs_dst_pixel), on the
-// integers (a fused pair has no destination read)
+#define VU_RETURN(col, i) return gs_dst_out_reg(uint4(col), i.r.w != 0.0 ? 0u : g_blend.x)
+#endif
+#else
+// the storage read's builds blend in the shader (gs_dst_pixel), on the
+// integers (a fused pair has no storage read)
 #define VU_RETURN(col, i) GS_RETURN(uint4(col), i.pos)
 #endif
 
@@ -2218,7 +2286,7 @@ void vu_pixel_tests(VuPSIn i)
         GS_DISCARD;
     }
     if ((g_mode.x & DF_DATE) != 0u) {
-        if (gs_date_discard(g_mode.x, g_dateSnap.Load(int3(int2(i.pos.xy), 0)))) {
+        if (gs_date_discard(g_mode.x, GS_DATE_SNAP(g_dateSnap, int2(i.pos.xy)))) {
             GS_DISCARD;
         }
     }

@@ -73,7 +73,9 @@ static double now_s(void)
 #ifdef ICO_PS5
     clock_gettime(CLOCK_MONOTONIC, &ts);
 #else
-    timespec_get(&ts, TIME_UTC);
+    /* clock_gettime, not timespec_get (bionic API 29): Android 8 (API 26,
+       issue 158) has it; the same clock as TIME_UTC */
+    clock_gettime(CLOCK_REALTIME, &ts);
 #endif
     return (double)ts.tv_sec + (double)ts.tv_nsec * 1e-9;
 #endif

@@ -32,11 +32,13 @@
 #include "modelpack.h" /* the model pack switch */
 #include "rd_mesh.h"
 #include "rd_tex.h"
+#include "rd_tex_decode.h"
 #include "texpack.h"
 
 RdContext g_rd;
 
 static RdHostCall s_hostCall;
+static RdReplayGate s_replayGate; /* rd_set_replay_gate: Frame rate Original's late skip */
 
 double rd__now_ms(void)
 {
@@ -57,13 +59,41 @@ void rd_set_host_call(RdHostCall call)
     s_hostCall = call;
 }
 
-void rd__on_host(void (*fn)(void *arg), void *arg)
+void rd_set_replay_gate(RdReplayGate gate)
+{
+    s_replayGate = gate;
+}
+
+/* fn(arg) on the host stack of the calling thread (rd_set_host_call) */
+static void onHostStack(void (*fn)(void *arg), void *arg)
 {
     if (s_hostCall) {
         s_hostCall(fn, arg);
     } else {
         fn(arg);
     }
+}
+
+void rd__on_host(void (*fn)(void *arg), void *arg)
+{
+    /* the window's render thread runs it between pictures, the game thread
+     * waiting (rd_thread.h); parked or without it, as before */
+    if (rd__render_call(fn, arg)) {
+        return;
+    }
+    onHostStack(fn, arg);
+}
+
+/* fn(arg) on the game thread's host stack with the render thread idle, never
+ * on the render thread: a call whose progress pumps the window's events
+ * (SDL's event calls are the main thread's), as a display change's
+ * pipelines do (rd_set_display_progress); its RHI calls wait for the render
+ * thread through the call guard, and the pictures its screen presents are
+ * posted there as any of the game thread's */
+static void onGameHost(void (*fn)(void *arg), void *arg)
+{
+    (void)rd_thread_drain();
+    onHostStack(fn, arg);
 }
 
 /* false in the game: a stub command is logged once and skipped; the tests
@@ -102,12 +132,14 @@ void rd_summary_text(char *out, size_t size)
     }
     snprintf(out, size,
              "blend %s; profile %s; index values dense (marks in the stream); fog %s; VU shaders "
-             "%s%s; VU pre-pass %s%s; VU merge %s; VU fuse %s; constant reads %s; pipelines %s "
-             "(pool %d, cache %d)",
+             "%s%s%s%s; VU pre-pass %s%s; VU merge %s; VU fuse %s; constant reads %s; fades "
+             "fold %s; pipelines %s (pool %d, cache %d); menu text %s",
              g_rdSumBlend[0] ? g_rdSumBlend : "(self-test not reached)",
              rd__profile_text()[0] ? rd__profile_text() : "(not decided)",
              g_rdSumFog[0] ? g_rdSumFog : "(self-test not reached)",
-             g_rd.vuFallbackPlain ? "one set, fallback plain (issue 107)" : "one set", split,
+             g_rd.vuFallbackPlain ? "one set, fallback plain (" : "one set",
+             g_rd.vuFallbackPlain && g_rd.vuPlainBrief ? g_rd.vuPlainBrief : "",
+             g_rd.vuFallbackPlain ? ")" : "", split,
              g_rdSumPrepass[0] ? g_rdSumPrepass : "(self-test not reached)",
              /* the pre-pass's batches (rd_replay_vu.c vuPrepassRun) */
              !g_rd.vuPrepass   ? ""
@@ -116,12 +148,15 @@ void rd_summary_text(char *out, size_t size)
              rd__vu_merge_text(), /* the draw merge (rd_replay_vu.c vuMergeInit) */
              rd__vu_fuse_text(),  /* the fused scissor pair (rd_replay_vu.c vuMergeInit) */
              rd__const_reads_on() ? "on" : "off", /* rd_const_read.c */
+             rd__fades_fold_on() ? "on" : "off",  /* rd_fades_fold.c */
              careful && rd__pipelines_lazy_on()
                  ? "the careful start-up set, stopped at its budget (the rest on first use)"
              : rd__pipelines_lazy_on() ? "on first use (no start-up set)"
              : careful                 ? "the careful start-up set"
                                        : "the start-up set",
-             RHI_PIPELINE_POOL_MAX, RD_PIPELINE_CACHE_MAX);
+             RHI_PIPELINE_POOL_MAX, RD_PIPELINE_CACHE_MAX,
+             /* the sheets of scale 1 and 2 (rd_tex.c rd__sheet_baked) */
+             g_rd.sheetShader ? "shader" : "baked at 1x and 2x (the shader above)");
 }
 
 /* ------------------------------------------------ the VU index spans
@@ -448,6 +483,7 @@ bool rd__apply_state(RdStateBlock *s, const RdCmd *c)
 
 void rd__frame_reset(RdFrame *f)
 {
+    rd__texlock_wait(); /* the render thread's reads of a picture ended (rd_thread.h) */
     for (int l = 0; l < RD_LIST_COUNT; l++) {
         f->lists[l].count = 0;
     }
@@ -508,6 +544,10 @@ uint32_t rd__frame_payload(RdFrame *f, const void *data, uint32_t size)
         }
         f->payload = p;
         f->payloadCap = cap;
+    }
+    /* the alignment gap zeroed: the frame is dumped and hashed whole */
+    if (off > f->payloadSize) {
+        memset(f->payload + f->payloadSize, 0, off - f->payloadSize);
     }
     if (data && size) {
         memcpy(f->payload + off, data, size);
@@ -815,6 +855,10 @@ const char *rd_perf_target_name(int code)
         return "window";
     case RD_PERF_TARGET_RECORD:
         return "record";
+    case RD_PERF_TARGET_ROWBOX:
+        return "ROWBOX";
+    case RD_PERF_TARGET_SHADOW_COUNT:
+        return "count"; /* the label "shadow" (rd_perf_pass_label): "shadow count" */
     default:
         return code >= 0 && code < RD_TARGET_COUNT ? s_targetNames[code] : "none";
     }
@@ -949,9 +993,7 @@ RhiTexture rd__depth_copy_take(RhiCommandList cl, RdTargetRec *t, RdDepthCopy *c
 
 void rd__depth_copy_free(RdDepthCopy *copy)
 {
-    if (copy->tex.id) {
-        rhi_destroy_texture(copy->tex);
-    }
+    rd__retire_texture(copy->tex);
     memset(copy, 0, sizeof(*copy));
 }
 
@@ -965,15 +1007,10 @@ void rd__target_destroy_gpu(RdTargetRec *t)
     if (!g_rd.hasDevice) {
         return;
     }
-    if (t->color.id) {
-        rhi_destroy_texture(t->color);
-    }
-    if (t->depth.id) {
-        rhi_destroy_texture(t->depth);
-    }
-    if (t->snap.id) {
-        rhi_destroy_texture(t->snap);
-    }
+    /* on the game thread with the render thread on, at its next job */
+    rd__retire_texture(t->color);
+    rd__retire_texture(t->depth);
+    rd__retire_texture(t->snap);
     t->color = t->depth = t->snap = (RhiTexture){0};
 }
 
@@ -1126,6 +1163,7 @@ uint32_t rd__temp_target_alloc(uint32_t w, uint32_t h, int withDepth, int keepAc
 
 uint32_t rd__temp_target_alloc_ex(uint32_t w, uint32_t h, int withDepth, int keepAcross, int block)
 {
+    rd__texlock_wait();
     RdTargetRec want;
     memset(&want, 0, sizeof(want));
     want.w = w ? w : 1;
@@ -1177,17 +1215,18 @@ uint32_t rd__temp_target_alloc_ex(uint32_t w, uint32_t h, int withDepth, int kee
         t->dstUsage = keep.dstUsage; /* the texture's (rd__target_create_gpu) */
         t->snap = keep.snap;
         t->snapState = keep.snapState;
-        g_rd.stats.tempReused++;
+        rd__stats_here()->tempReused++;
     } else if (!rd__target_create_gpu(t, "temp target")) {
         rd__note_target_pressure(t); /* the shadow count, a screen-size alias */
     }
     t->clearPending = 1;
-    g_rd.stats.tempTargets++;
+    rd__stats_here()->tempTargets++;
     return (t->gen << 16) | (uint32_t)(pick + 1);
 }
 
 void rd__temp_target_free(uint32_t id)
 {
+    rd__texlock_wait();
     RdTargetRec *t = rd__target_rec(id);
     if (!t || t->named) {
         return;
@@ -1226,13 +1265,14 @@ void rd__temp_target_free(uint32_t id)
         t->snap = keep.snap;
         t->snapState = keep.snapState;
     }
-    if (g_rd.stats.tempTargets) {
-        g_rd.stats.tempTargets--;
+    if (rd__stats_here()->tempTargets) {
+        rd__stats_here()->tempTargets--;
     }
 }
 
 void rd__temp_target_pool_clear(void)
 {
+    rd__texlock_wait();
     for (int i = RD_TARGET_COUNT; i < RD_MAX_TARGETS; i++) {
         RdTargetRec *t = &g_rd.targets[i];
         if (!t->live && t->parked) {
@@ -1340,6 +1380,7 @@ static uint32_t s_texGenFloor;
 
 static uint32_t texAlloc(void)
 {
+    rd__texlock_wait();
     for (uint32_t i = 0; i < RD_MAX_TEXTURES; i++) {
         RdTexRec *t = &g_rd.textures[i];
         if (!t->live) {
@@ -1465,6 +1506,7 @@ RdTex rd_create_texture(uint32_t w, uint32_t h, const void *rgba8, RdTexA texaMo
 
 void rd_update_texture(RdTex tex, const void *rgba8)
 {
+    rd__texlock_wait();
     RdTexRec *t = rd__tex_rec(tex.id);
     if (!t || t->kind != RD_TEXKIND_IMAGE || !rgba8 || !t->pixels) {
         return; /* a pack replacement has no CPU texels to update */
@@ -1480,6 +1522,19 @@ void rd_update_texture(RdTex tex, const void *rgba8)
     g_rd.texFullUpdates++;
 }
 
+bool rd__tex_take_pixels(RdTex tex, uint8_t *px)
+{
+    rd__texlock_wait();
+    RdTexRec *t = rd__tex_rec(tex.id);
+    if (!t || t->kind != RD_TEXKIND_IMAGE || t->replacement || t->format != RD_TEXEL_RGBA8 || !px) {
+        return false;
+    }
+    free(t->pixels);
+    t->pixels = px;
+    texDirtyAll(t);
+    return true;
+}
+
 size_t rd__gs_chain_bytes(uint32_t w, uint32_t h, uint32_t levels)
 {
     size_t n = 0;
@@ -1493,6 +1548,7 @@ size_t rd__gs_chain_bytes(uint32_t w, uint32_t h, uint32_t levels)
 
 void rd__tex_set_levels(RdTex tex, const uint8_t *chain, uint32_t levels)
 {
+    rd__texlock_wait();
     RdTexRec *t = rd__tex_rec(tex.id);
     if (!t || t->kind != RD_TEXKIND_IMAGE || t->replacement || t->format != RD_TEXEL_RGBA8) {
         return;
@@ -1532,6 +1588,7 @@ void rd__tex_set_levels(RdTex tex, const uint8_t *chain, uint32_t levels)
 void rd_update_texture_rect(RdTex tex, uint32_t x, uint32_t y, uint32_t w, uint32_t h,
                             const void *px)
 {
+    rd__texlock_wait();
     RdTexRec *t = rd__tex_rec(tex.id);
     if (!t || t->kind != RD_TEXKIND_IMAGE || !px || !t->pixels || x >= t->w || y >= t->h || !w ||
         !h) {
@@ -1571,6 +1628,7 @@ void rd_update_texture_rect(RdTex tex, uint32_t x, uint32_t y, uint32_t w, uint3
 
 void rd_destroy_texture(RdTex tex)
 {
+    rd__texlock_wait();
     RdTexRec *t = rd__tex_rec(tex.id);
     if (!t) {
         return;
@@ -1582,7 +1640,7 @@ void rd_destroy_texture(RdTex tex)
         }
     }
     if (t->rhi.id && g_rd.hasDevice) {
-        rhi_destroy_texture(t->rhi);
+        rd__retire_texture(t->rhi); /* after the render thread's submit that may use it */
     }
     if (t->dirty && g_rd.texDirtyCount) {
         g_rd.texDirtyCount--;
@@ -1597,6 +1655,7 @@ void rd_destroy_texture(RdTex tex)
 
 RdTex rd_target_texture(RdTarget target, RdTexView view)
 {
+    rd__texlock_wait();
     RdTargetRec *tr = rd__target_rec(target.id);
     if (!tr || (unsigned)view > RD_VIEW_DEPTH) {
         return (RdTex){0};
@@ -1650,6 +1709,7 @@ bool rd__init_record_only(uint32_t gsW, uint32_t gsH)
     }
     rd__apply_display();
     createNamedTargets();
+    rdtex__decode_init(0); /* the decode pool's size: off unless asked */
     return true;
 }
 
@@ -1687,6 +1747,19 @@ static void readDumpConfig(void)
     }
 }
 
+/* the line for Motion blur strength (rd_init below 100 %, a change) */
+static void logMotionBlurStrength(const char *when)
+{
+    const uint32_t pct = rd__blur_strength_pct();
+    if (pct >= 100u) {
+        rd__log("motion blur: strength 100 %% (the game's own FIX)%s", when);
+        return;
+    }
+    rd__log("motion blur: strength %u %% (the game's FIX scaled by %u / 100 and rounded, in "
+            "Original and Smooth alike: FIX 32 drawn as %u, a shorter trail)%s",
+            (unsigned)pct, (unsigned)pct, (unsigned)rd__blur_strength_fix(32u, pct), when);
+}
+
 /* the line for the motion blur's way (rd_init, a change) */
 static void logMotionBlur(const char *when)
 {
@@ -1695,6 +1768,17 @@ static void logMotionBlur(const char *when)
                 ? "the trail moved on at every present from an accumulator of the scenes, the "
                   "game's FIX spread over the presents of a tick"
                 : "the game's own: the trail moved on once a tick",
+            when);
+}
+
+/* the line for the glow between ticks' way (rd_init, a change); the
+ * environment switch ([dev] glow_redraw) over the row is named in the 10 s
+ * line (rd_glow_hold.c) */
+static void logGlowBetween(const char *when)
+{
+    rd__log("glow between ticks: %s%s",
+            g_rd.settings.glowSmooth ? "drawn at every present (Glow between frames: Smooth)"
+                                     : "held (the tick's first present's)",
             when);
 }
 
@@ -1717,12 +1801,33 @@ bool rd_init(uint32_t gsWidth, uint32_t gsHeight, const RdSettings *settings, vo
     g_rd.hasDevice = true;
     g_rd.windowed = sdlWindow != NULL; /* the game: the desktop's local reads (rd_profile.c) */
     rd__profile_init();                /* the device profile (rd_profile.c) */
+    rd__aura_box_init();               /* the aura's read in two passes (rd_aura_box.c) */
+    rd__pass_area_init();              /* the passes' render areas (rd_pass_area.c) */
+    rd__pass_cut_init();               /* the passes cut (rd_pass_cut.c) */
+    rd__shadow_merge_init();           /* the volumes in the scene's pass (rd_shadow_merge.c) */
+    rd__sprite_planes_init();          /* issue 161: the planes builds off (rd_screen_planes.c) */
     /* the two-pass blend without dual-source blending (a
      * device without dualSrcBlend; ICO_RD_NO_DUAL=1 forces it for tests) */
     const char *noDual = getenv("ICO_RD_NO_DUAL");
     g_rd.noDual = !rhi_limits()->dualSourceBlend || (noDual && noDual[0] && noDual[0] != '0');
     if (g_rd.noDual) {
         rd__log("blend: two-pass fallback (no dualSrcBlend)");
+    }
+    /* the menu text's texels baked on the CPU at strip scales 1 and 2
+     * (rd_tex.c rd__sheet_baked; issue 173 at 1x, the phone's menus at 2x);
+     * ICO_RD_SHEET_SHADER=1 ([dev] sheet_shader) draws them through
+     * font_sheet_ps, as scales 3 and 4 are drawn (the A/B) */
+    {
+        const char *sheet = getenv("ICO_RD_SHEET_SHADER");
+        g_rd.sheetShader = sheet != NULL && strcmp(sheet, "1") == 0;
+        if (g_rd.sheetShader) {
+            rd__log("text: menu text through the sheet shader at every scale ([dev] sheet_shader "
+                    "= true, ICO_RD_SHEET_SHADER=1)");
+        } else {
+            rd__log("text: menu text baked on the CPU at 1x and 2x (RGBA8 pages, four reads a "
+                    "pixel; the sheet shader at 3x and 4x; [dev] sheet_shader = true draws every "
+                    "scale through it)");
+        }
     }
     /* the VU draws' index values carry nothing but the kick and corner, the
      * triangles' marks are bytes in the stream (shader_consts.h
@@ -1762,9 +1867,17 @@ bool rd_init(uint32_t gsWidth, uint32_t gsHeight, const RdSettings *settings, vo
     if (g_rd.settings.motionBlurSmooth) {
         logMotionBlur(""); /* made at its first sprite (rd_blur_smooth.c) */
     }
+    if (rd__blur_strength_pct() < 100u) {
+        logMotionBlurStrength("");
+    }
+    if (g_rd.settings.glowSmooth) {
+        logGlowBetween("");
+    }
     rd__crack_fill_init(); /* its line once SCENE is made */
     createNamedTargets();
     readDumpConfig();
+    rdtex__decode_init(g_rd.windowed); /* the texture decode pool (rd_tex_decode.h) */
+    rd__thread_local_resume();         /* the tools' render thread, when asked (rd_thread.h) */
     return true;
 }
 
@@ -1773,6 +1886,10 @@ void rd_shutdown(void)
     if (!g_rd.inited) {
         return;
     }
+    rd__thread_local_pause(); /* the tools' render thread ends first */
+    /* the decodes in flight into their textures, the pool's threads
+       stopped, before the textures go */
+    rdtex__decode_shutdown();
     if (g_rd.hasDevice) {
         rhi_wait_idle();
     }
@@ -1803,6 +1920,7 @@ void rd_shutdown(void)
         rd_video_shutdown(); /* the FMV path's objects (rd_video.c), before the device */
         rd__present_shutdown();
         rd__crack_fill_shutdown(); /* the crack filler's count target and buffer */
+        rd__aura_box_shutdown();   /* the aura's ROWBOX (rd_aura_box.c) */
         rd__gpu_shutdown();
     }
     rd__pipeline_cache_clear();
@@ -1885,9 +2003,10 @@ void rd_resume_frame(void)
     g_rd.discardOpen = true;
 }
 
-/* A display change's pipelines (rd__display_pipelines), on the host stack
- * as the driver's compiles need; arg non-NULL: the targets were made again
- * (the line even when nothing was missing) */
+/* A display change's pipelines (rd__display_pipelines), on the game
+ * thread's host stack as the driver's compiles need (onGameHost: the
+ * progress screen pumps the window's events); arg non-NULL: the targets
+ * were made again (the line even when nothing was missing) */
 static void displayPipelines(void *arg)
 {
     rd__display_pipelines(arg != NULL);
@@ -1901,6 +2020,7 @@ static void fogSceneRemade(void *arg)
 
 void rd_reset_scene(uint32_t gsWidth, uint32_t gsHeight)
 {
+    (void)rd_thread_drain(); /* the render thread idle while the scene's size changes */
     if (!g_rd.inited) {
         return;
     }
@@ -1926,12 +2046,13 @@ void rd_reset_scene(uint32_t gsWidth, uint32_t gsHeight)
         /* the scale the new width gives (aspect auto at the window's
            resolution): the pipelines it reaches, before a replay draws at
            it (rd__display_pipelines; a line only when it made some) */
-        rd__on_host(displayPipelines, NULL);
+        onGameHost(displayPipelines, NULL);
     }
 }
 
 void rd_set_settings(const RdSettings *settings)
 {
+    rd__texlock_wait();
     if (settings) {
         g_rd.pendingSettings = *settings;
         g_rd.settingsPending = true;
@@ -2056,6 +2177,7 @@ int rd_scene_scale_lowered(void)
 
 void rd_set_mirror(int on)
 {
+    rd__texlock_wait();
     if (g_rd.mirrorRun != (on != 0)) {
         rd__log("mirror mode %s (frame %u)", on ? "on" : "off", g_rd.frameCounter);
     }
@@ -2159,8 +2281,8 @@ static void logDerived(void)
     const float sx = g_rd.sceneSx, sy = g_rd.sceneSy;
     const bool whole = sx == (float)(int)sx && sy == (float)(int)sy;
     const bool enhanced = g_rd.settings.preset == RD_PRESET_ENHANCED;
-    const bool dropped =
-        g_rd.profile.vuPlanesFrac && enhanced && !whole && g_rd.dstMode == RD_BLEND_EXACT_OFF;
+    const bool dropped = g_rd.profile.vuPlanesFrac && enhanced && !whole &&
+                         (g_rd.dstMode == RD_BLEND_EXACT_OFF || rd__uber_np());
     rd__log("display change: derived: preset %s, frame %u GS wide, scene %gx%g (%s), VU planes "
             "%s, VU region rule %s, texture filter %u, VU pre-pass %s, fog path %u (the crack "
             "fill's own line says its state); profile %s",
@@ -2181,6 +2303,9 @@ typedef struct ReplayCall {
 static void replayOnHost(void *arg)
 {
     const ReplayCall *c = (const ReplayCall *)arg;
+    if (s_replayGate != NULL && !s_replayGate(c->keep)) {
+        return; /* the window's late skip: the last picture stays */
+    }
     rd__note_frame_present(c->f); /* rd_last_present_info, as rd_present notes its own */
     rd__blur_smooth_arm(1, 1);    /* Motion blur: Smooth at one present a tick */
     rd__replay_frame(c->f, c->keep, true);
@@ -2188,6 +2313,7 @@ static void replayOnHost(void *arg)
 
 void rd_begin_frame(void)
 {
+    rd__texlock_wait();
     if (!g_rd.inited) {
         return;
     }
@@ -2202,6 +2328,8 @@ void rd_begin_frame(void)
     }
     bool recreated = false;
     if (g_rd.settingsPending) {
+        /* the render thread idle: its present's end reads the settings too */
+        (void)rd_thread_drain();
         /* the texture pack switched off: the originals back (once
          * per edge; rd_tex.h rdtex_revert_replacements) */
         const bool packOff = g_rd.settings.texturePack && !g_rd.pendingSettings.texturePack;
@@ -2211,6 +2339,8 @@ void rd_begin_frame(void)
         const bool waterChanged = g_rd.settings.waterSharp != g_rd.pendingSettings.waterSharp;
         const bool blurChanged =
             g_rd.settings.motionBlurSmooth != g_rd.pendingSettings.motionBlurSmooth;
+        const bool glowChanged = g_rd.settings.glowSmooth != g_rd.pendingSettings.glowSmooth;
+        const uint32_t strengthWas = rd__blur_strength_pct();
         const bool presetChanged = g_rd.settings.preset != g_rd.pendingSettings.preset;
         g_rd.settings = g_rd.pendingSettings;
         g_rd.settingsPending = false;
@@ -2227,6 +2357,12 @@ void rd_begin_frame(void)
             /* the blocks made from this frame on (rd__target_scale_of) */
             rd__log("water reflections: %s", g_rd.settings.waterSharp ? "sharp (the scene's scale)"
                                                                       : "original (their GS size)");
+        }
+        if (glowChanged) {
+            logGlowBetween(", from the next present");
+        }
+        if (rd__blur_strength_pct() != strengthWas) {
+            logMotionBlurStrength(", from the next present");
         }
         if (blurChanged) {
             logMotionBlur(", from the next present");
@@ -2259,7 +2395,7 @@ void rd_begin_frame(void)
         }
         if (g_rd.hasDevice) {
             static char recreatedMark;
-            rd__on_host(displayPipelines, recreated ? (void *)&recreatedMark : NULL);
+            onGameHost(displayPipelines, recreated ? (void *)&recreatedMark : NULL);
         }
     }
     /* A scene-sized texture made since the last frame did not fit
@@ -2277,7 +2413,7 @@ void rd_begin_frame(void)
             g_rd.sceneSy = ny;
             g_rd.sceneFellBack = true;
             rd__on_host(recreateTargets, NULL);
-            rd__on_host(displayPipelines, NULL); /* 3x halved is 1.5x: the twins */
+            onGameHost(displayPipelines, NULL); /* 3x halved is 1.5x: the twins */
             g_rd.interpFloor = g_rd.frameCounter + 1;
         }
     }
@@ -2306,19 +2442,76 @@ void rd_begin_frame(void)
     recordDefaults();
 }
 
+/* ICO_RD_DUMP_EVERY's dumps of frame f (rd_end_frame): with the
+ * interpolation's half-way frame, built where rd_present builds its own (on
+ * the window's render thread, rd__render_call; its state is that thread's) */
+static void dumpEvery(void *arg)
+{
+    const RdFrame *f = arg;
+    char path[600];
+    snprintf(path, sizeof(path), "%s/rd-%05u.rddump", s_dumpDir, f->number);
+    if (rd__dump_frame(f, path)) {
+        rd__log("frame %u dumped to %s", f->number, path);
+    }
+    if (s_dumpInterp) {
+        RdInterpStats st;
+        /* the previous frame too (rd-NNNNN-prev.rddump), so a
+         * half-way dump can be checked against both its ticks */
+        const RdFrame *pv = rd__prev_frame();
+        snprintf(path, sizeof(path), "%s/rd-%05u-prev.rddump", s_dumpDir, f->number);
+        if (pv && pv->closed && pv->number + 1 == f->number) {
+            (void)rd__dump_frame(pv, path);
+        }
+        const RdFrame *i = rd__interp_frame(pv, f, 0.5f, 1, &st);
+        snprintf(path, sizeof(path), "%s/rd-%05u-i50.rddump", s_dumpDir, f->number);
+        if (i && rd__dump_frame(i, path)) {
+            rd__log("frame %u interpolated half way (snap %u, %u keyed draws: %u blended, "
+                    "%u unmatched, %u mismatched, %u jumped; %u mesh streams kept or "
+                    "blended; %u blended as rotations; %u VU draws through the blended "
+                    "camera, %u of them the tick's) dumped to %s",
+                    f->number, st.snap, st.keyed, st.lerped, st.missing, st.mismatch, st.jump,
+                    st.morph, st.rotated, st.rebased, st.rebasedCur, path);
+        }
+    }
+}
+
+/* rd_frame_close_take's sums (the game thread's) */
+static struct {
+    unsigned n;
+    double sumMs, maxMs;
+} s_close;
+
+void rd_frame_close_take(unsigned *closes, double *meanMs, double *maxMs)
+{
+    *closes = s_close.n;
+    *meanMs = s_close.n ? s_close.sumMs / s_close.n : 0.0;
+    *maxMs = s_close.maxMs;
+    memset(&s_close, 0, sizeof(s_close));
+}
+
+static void closeNote(double ms)
+{
+    s_close.n++;
+    s_close.sumMs += ms;
+    s_close.maxMs = ms > s_close.maxMs ? ms : s_close.maxMs;
+}
+
 void rd_end_frame(int keep)
 {
+    rd__texlock_wait();
     RdFrame *f = rd__rec_frame();
     if (!f) {
         return;
     }
+    const double closeAt = rd__now_ms(); /* after the wait for a picture's reads */
     if (g_rd.discardOpen) {
         rd_discard_frame(); /* rd_resume_frame's: no picture */
         return;
     }
     f->keep = keep ? 1 : 0;
     if (f->cut) {
-        f->camera.cut = 1;
+        /* a plain cut, the camera's or the frame's, wins over a wall's */
+        f->camera.cut = f->cut == RD_CAMERA_CUT_WALL && f->camera.cut != 1 ? RD_CAMERA_CUT_WALL : 1;
     }
     f->camera.freeCamera = f->freeCamera ? 1 : 0;
     rd__frame_head_resolve(f, f->keep); /* the flip's head in the first replayed list */
@@ -2331,6 +2524,7 @@ void rd_end_frame(int keep)
     g_rd.recIndex = -1;
     g_rd.stats.bytesPayload = f->payloadSize;
     g_rd.videoShown = 0;
+    closeNote(rd__now_ms() - closeAt);
     /* with interpolation on (either preset) the host presents (rd_present);
      * with it off the frame is replayed and presented once here */
     if (g_rd.hasDevice && !rd_interpolation_active()) {
@@ -2338,30 +2532,8 @@ void rd_end_frame(int keep)
         rd__on_host(replayOnHost, &c);
     }
     if (s_dumpEvery && f->number % s_dumpEvery == 0 && f->number >= s_dumpFrom) {
-        char path[600];
-        snprintf(path, sizeof(path), "%s/rd-%05u.rddump", s_dumpDir, f->number);
-        if (rd__dump_frame(f, path)) {
-            rd__log("frame %u dumped to %s", f->number, path);
-        }
-        if (s_dumpInterp) {
-            RdInterpStats st;
-            /* the previous frame too (rd-NNNNN-prev.rddump), so a
-             * half-way dump can be checked against both its ticks */
-            const RdFrame *pv = rd__prev_frame();
-            snprintf(path, sizeof(path), "%s/rd-%05u-prev.rddump", s_dumpDir, f->number);
-            if (pv && pv->closed && pv->number + 1 == f->number) {
-                (void)rd__dump_frame(pv, path);
-            }
-            const RdFrame *i = rd__interp_frame(pv, f, 0.5f, 1, &st);
-            snprintf(path, sizeof(path), "%s/rd-%05u-i50.rddump", s_dumpDir, f->number);
-            if (i && rd__dump_frame(i, path)) {
-                rd__log("frame %u interpolated half way (snap %u, %u keyed draws: %u blended, "
-                        "%u unmatched, %u mismatched, %u jumped; %u mesh streams kept or "
-                        "blended; %u blended as rotations; %u VU draws through the blended "
-                        "camera, %u of them the tick's) dumped to %s",
-                        f->number, st.snap, st.keyed, st.lerped, st.missing, st.mismatch, st.jump,
-                        st.morph, st.rotated, st.rebased, st.rebasedCur, path);
-            }
+        if (!rd__render_call(dumpEvery, f)) {
+            dumpEvery(f);
         }
     }
 }
@@ -2400,6 +2572,14 @@ void rd_camera_cut(void)
         f->cut = 1;
     } else {
         g_rd.cutPending = 1;
+    }
+}
+
+void rd_camera_cut_wall(void)
+{
+    RdFrame *f = rd__rec_frame();
+    if (f && f->cut == 0) {
+        f->cut = RD_CAMERA_CUT_WALL;
     }
 }
 
@@ -2777,7 +2957,7 @@ void rd_screen_prims(RdPrim type, const RdScreenVtx *v, uint32_t count, RdSpace 
         c->f[1] = st[1];
     }
     setKey(c, key);
-    g_rd.stats.draws++;
+    rd__stats_here()->draws++;
 }
 
 /* ---------------------------------------------------------- deferred text */
@@ -2859,7 +3039,7 @@ static RdCmd *pushStub(uint8_t type, RdKey key, const void *const *parts, const 
     c->u[1] = off;
     c->u[2] = total;
     setKey(c, key);
-    g_rd.stats.draws++;
+    rd__stats_here()->draws++;
     return c;
 }
 
@@ -2899,11 +3079,17 @@ bool rd_dump_prev_frame(const char *path)
     return f && p && p->closed && p->number + 1 == f->number ? rd__dump_frame(p, path) : false;
 }
 
-bool rd_read_display(void *dst, uint32_t *w, uint32_t *h)
+static bool readDisplayHere(void *dst, uint32_t *w, uint32_t *h)
 {
     RdTargetRec *t = rd__target_rec(RD_TARGET_DISPLAY + 1);
-    if (!t || !dst) {
+    if (!t) {
         return false;
+    }
+    if (!dst) {
+        /* the buffer a read needs (the guard columns still in) */
+        *w = t->tw;
+        *h = t->th;
+        return true;
     }
     if (!rd__read_target(rd_target(RD_TARGET_DISPLAY), dst, (size_t)t->tw * t->th * 4, w, h)) {
         return false;
@@ -2921,8 +3107,37 @@ bool rd_read_display(void *dst, uint32_t *w, uint32_t *h)
     return true;
 }
 
+typedef struct ReadDisplay {
+    void *dst;
+    uint32_t *w, *h;
+    bool ok;
+} ReadDisplay;
+
+static void readDisplayJob(void *arg)
+{
+    ReadDisplay *r = arg;
+    r->ok = readDisplayHere(r->dst, r->w, r->h);
+}
+
+bool rd_read_display(void *dst, uint32_t *w, uint32_t *h)
+{
+    /* the readback on the render thread between pictures (its device and
+     * DISPLAY's state are its own there) */
+    ReadDisplay r = {dst, w, h, false};
+    if (rd__render_call(readDisplayJob, &r)) {
+        return r.ok;
+    }
+    return readDisplayHere(dst, w, h);
+}
+
 const RdStats *rd_get_stats(void)
 {
-    g_rd.stats.pipelines = rd__pipeline_count();
-    return &g_rd.stats;
+    /* the game thread's view with the render thread on: the record's counts
+     * and the replays' as its last reads left them (rd_thread.h) */
+    if (rd_thread_host_on() && !rd_thread_on_render()) {
+        return rd__thread_stats();
+    }
+    RdStats *s = rd__stats_here();
+    s->pipelines = rd__pipeline_count();
+    return s;
 }

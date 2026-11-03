@@ -64,6 +64,7 @@
 #include "rd_internal.h"
 #include "rd_passring.h"
 #include "rd_replay.h"
+#include "rd_submit.h"
 #include "rd_mesh.h"
 #include "rd_tex.h"
 #include "shader_consts.h"
@@ -94,15 +95,16 @@ const char *rd__vs_name(uint8_t vs)
 static const char *const s_fsNames[RD_FS_COUNT] = {
     "sprite_ps" /* indexed by RD_FS_* */, "blit_ps", "blend_int_ps", "date_snap_ps",
     "camera_probe_ps", "vu_ps", "fog_lut_ps", "fx_sprite_ps", "wrap_acc_ps", "wrap_resolve_ps",
-    "font_ps", "font_sheet_ps", "sprite_aa1_ps", "box_reduce_ps", "sprite_stq_ps", "crt_bloom_ps",
-    "crt_blur_ps", "crt_ps", "sprite_texa_ps", "vu_texa_ps", "blit_depth_ps", "fog_lut_buffer_ps",
-    "aa_reduce_ps", "fog_lut_ms_ps", "depth_resolve_ps", "depth_upsample_ps", "msaa_resolve_ps",
-    "vu_pre_ps",
+    "font_ps", "font_sheet_ps", "font_sheet_baked_ps", "sprite_aa1_ps", "box_reduce_ps",
+    "sprite_stq_ps", "crt_bloom_ps", "crt_blur_ps", "crt_ps", "sprite_texa_ps", "vu_texa_ps",
+    "blit_depth_ps", "fog_lut_buffer_ps", "aa_reduce_ps", "fog_lut_ms_ps", "depth_resolve_ps",
+    "depth_upsample_ps", "msaa_resolve_ps", "vu_pre_ps",
     /* RD_FS_OPTIONAL_FIRST on */
     "sprite_ps_planes", "sprite_texa_ps_planes", "sprite_stq_ps_planes", "fog_lut_local_ps",
     "fx_sprite_u_ps", "fx_blur2_ps", "date_clear_ps", "date_stencil_ps", "vu_np_ps",
     "vu_texa_np_ps", "fx_frame_ps", "fx_local_ps", "fx_acc_ps", "fx_acc_resolve_ps",
-    "crack_fill_ps", "crack_count_ps", "shadow_count_ps", "crack_fill1_ps"};
+    "crack_fill_ps", "crack_count_ps", "shadow_count_ps", "crack_fill1_ps", "fx_aura_rows_ps",
+    "fx_aura_sum_ps"};
 
 const char *rd__fs_name(uint8_t fs)
 {
@@ -339,17 +341,7 @@ bool rd__gpu_init(void *sdlWindow)
          * twins always are (rd_set_no_dual) */
         /* the exact blend's twins (rd_dst_read.c), for the opted-in
          * destination read alone; their absence only leaves the mode out */
-        if (rd__fs_has_dst((uint8_t)i)) {
-            char name[64];
-            if (dstStorage) {
-                snprintf(name, sizeof(name), "%s_dstrov", s_fsNames[i]);
-                g_rd.fsDstRov[i] = rd__make_shader(name);
-            }
-            if (dstAttach) {
-                snprintf(name, sizeof(name), "%s_dstatt", s_fsNames[i]);
-                g_rd.fsDstAtt[i] = rd__make_shader(name);
-            }
-        }
+        rd__make_dst_twins((uint8_t)i, s_fsNames[i], dstStorage, dstAttach);
         if (rd__fs_has_no_dual((uint8_t)i)) {
             char name[64];
             snprintf(name, sizeof(name), "%s_nodual", s_fsNames[i]);
@@ -511,23 +503,10 @@ static const void *passPush(RdPassKind kind, uint32_t color, uint32_t cw, uint32
     return m;
 }
 
-static void drawCmd(RhiCommandList cl, uint32_t vertexCount, uint32_t firstVertex,
-                    uint32_t instanceCount)
-{
-    if (g_rdWin.first && !rd__win_take()) {
-        return;
-    }
-    rhi_cmd_draw(cl, vertexCount, firstVertex, instanceCount);
-}
-
-static void drawIndexedCmd(RhiCommandList cl, uint32_t indexCount, uint32_t firstIndex,
-                           int32_t vertexOffset, uint32_t instanceCount)
-{
-    if (g_rdWin.first && !rd__win_take()) {
-        return;
-    }
-    rhi_cmd_draw_indexed(cl, indexCount, firstIndex, vertexOffset, instanceCount);
-}
+/* every GPU draw through rd_occlusion.c: the pass window's take and the
+ * occlusion measurement */
+#define drawCmd rd__replay_draw
+#define drawIndexedCmd rd__replay_draw_indexed
 
 static void copyCmd(RhiCommandList cl, RhiTexture src, RhiRect srcRegion, RhiTexture dst,
                     int32_t dstX, int32_t dstY)
@@ -704,7 +683,19 @@ static uint32_t s_bindEpoch = 1;
 
 void rd__wait_frame(void)
 {
-    rhi_wait_frame();
+    if (rd__slot_ahead_take()) {
+        rd__submit_drain_kept(); /* the slot waited for ahead (rd_thread.h) */
+    } else {
+        rd__thread_phase(RD_READ_FENCE);
+        rd__submit_drain(); /* the last replay's submit, before its slot's fence (rd_submit.h) */
+        rhi_wait_frame();
+    }
+    rd__thread_phase(RD_READ_UPLOAD);
+    s_bindEpoch++;
+}
+
+void rd__bind_epoch_next(void)
+{
     s_bindEpoch++;
 }
 
@@ -1155,6 +1146,7 @@ static void endPass(Replay *r)
     flushScreenRun(r);      /* the run's draw goes before anything after it */
     rd__replay_vu_flush(r); /* and the VU draw merge's (never both open) */
     if (r->passOpen) {
+        rd__last_store_end(); /* a dropped store's promise kept (rd_pass_cut.c) */
         rhi_cmd_end_render_pass(s_cl);
         r->passOpen = 0;
         /* a storage pass's target goes back to its attachment state, so a
@@ -1170,6 +1162,26 @@ static void endPass(Replay *r)
      * another pass): a pending clear goes first, unless beginPass took it */
     flushClear();
     flushStencilClear(); /* and a pending shadow reset (never both pending) */
+}
+
+/* endPass before texture tex is made readable outside a pass: a pending
+ * clear of another target stays pending for the next pass on its target
+ * to take as its load op (rd_pass_cut.c, the clear carry) */
+static void endPassFor(Replay *r, uint32_t tex)
+{
+    if (!s_pend.p.target || tex == s_pend.colorTex || tex == s_pend.depthTex ||
+        s_stencil.depthTex || s_ms.want > 1u || !rd__pass_cut_on(RD_CUT_CARRY)) {
+        endPass(r);
+        return;
+    }
+    const RdPendingClear p = s_pend.p;
+    const uint32_t colorTex = s_pend.colorTex, depthTex = s_pend.depthTex;
+    s_pend.p.target = 0;
+    endPass(r);
+    s_pend.p = p;
+    s_pend.colorTex = colorTex;
+    s_pend.depthTex = depthTex;
+    rd__clear_carry_note(p.target);
 }
 
 bool rd__take_pending_clear(const RdPendingClear *p, uint32_t cid, uint32_t did,
@@ -1216,6 +1228,7 @@ static void flushStencilClear(void)
     p.color[0].texture = tc->color;
     p.color[0].load = RHI_LOAD_LOAD;
     p.color[0].readable = readable;
+    rd__store_plan_count_color(tc, &p.color[0]); /* nothing reads it */
     p.colorCount = 1;
     p.depth.texture = td->depth;
     p.depth.readable = depthRead;
@@ -1243,31 +1256,16 @@ static void flushClear(void)
     s_pend.p.target = 0;
     s_pend.colorTex = s_pend.depthTex = 0;
     RdTargetRec *t = rd__target_rec(p.target);
-    if (!t || !r) {
-        return;
+    if (!t || !r || rd__clear_skip(p.target, t, p.color, p.depth != 0)) {
+        return; /* rd_pass_cut.c: a clear nothing reads, drawn later if read */
     }
     beginPass(r, t, p.depth ? t : NULL, p.target, p.depth ? p.target : 0, RHI_LOAD_CLEAR, p.color,
               RHI_LOAD_CLEAR, p.clearDepth, false);
     endPass(r);
 }
 
-/* the exact blend's attachment read: every pass on an RGBA8 target made
- * for it is begun readable (outside the MSAA epoch) */
-static bool exactReadable(const RdTargetRec *c)
-{
-    return g_rd.dstMode == RD_BLEND_EXACT_ATTACHMENT && (c->dstUsage & RD_DST_USAGE_ATTACHMENT) &&
-           c->format == RHI_FMT_RGBA8_UNORM;
-}
-
-/* readable: the exact blend's attachment read, or DATE through the stencil
- * bit (RdProfile.dateStencil: its setup reads the alpha, rd__replay_date_take),
- * on an RGBA8 target made for it (rd_core.c: the scene class) */
-bool rd__pass_wants_readable(const RdTargetRec *c)
-{
-    return exactReadable(c) ||
-           (g_rd.profile.dateStencil && (c->dstUsage & RD_DST_USAGE_LOCAL_DATE) &&
-            c->format == RHI_FMT_RGBA8_UNORM);
-}
+/* the passes begun readable: rd_uber.c rd__exact_readable, rd__pass_wants_readable */
+#define exactReadable rd__exact_readable
 
 /* The depth begun readable (RhiDepthAttachment.readable, the texture in
  * RHI_STATE_RENDER_TARGET_READ): every pass on a target with its own depth,
@@ -1295,17 +1293,20 @@ static void beginPass(Replay *r, RdTargetRec *c, RdTargetRec *d, uint32_t cid, u
      * storage pass has no colour attachment and the exact blend's readable
      * one does not read the attachment a load op cleared (rd_dst_read.c):
      * their clear is a pass of its own (endPass below records it).  DATE's
-     * stencil setup reads the attachment after a barrier that holds the
-     * load op's write (vk_cmd.c rhi_cmd_local_read_barrier), so its
+     * stencil setup and GS state as shader data (rd_uber.c: a COLOR
+     * barrier after the pass begins) read it after a barrier that holds
+     * the load op's write (vk_cmd.c rhi_cmd_local_read_barrier), so their
      * readable passes take the clear */
     float pendColor[4];
-    if (s_pend.p.target && !storage && !(wantReadable && exactReadable(c)) &&
+    const bool uber = rd__uber_on();
+    if (s_pend.p.target && !storage && !(wantReadable && exactReadable(c) && !uber) &&
         rd__take_pending_clear(&s_pend.p, cid, d ? did : 0, &colorLoad, &depthLoad)) {
         memcpy(pendColor, s_pend.p.color, sizeof(pendColor));
         clear = pendColor;
         if (s_pend.p.depth) {
             clearDepth = s_pend.p.clearDepth;
         }
+        rd__clear_taken(cid); /* rd_pass_cut.c */
         s_pend.p.target = 0;
         s_pend.colorTex = s_pend.depthTex = 0;
     }
@@ -1361,6 +1362,9 @@ static void beginPass(Replay *r, RdTargetRec *c, RdTargetRec *d, uint32_t cid, u
     if (clear) {
         memcpy(p.color[0].clear, clear, sizeof(p.color[0].clear));
     }
+    if (cid == s_stencil.color && d && rd__stencil_live(&s_stencil.w, d->depth.id)) {
+        rd__store_plan_count_color(c, &p.color[0]); /* the shadow count's colour */
+    }
     /* a storage pass: the target is the shaders' storage texture, no
      * attachment (its contents are kept: they are the texture's) */
     p.colorCount = storage ? 0u : 1u;
@@ -1377,7 +1381,12 @@ static void beginPass(Replay *r, RdTargetRec *c, RdTargetRec *d, uint32_t cid, u
     p.width = c->tw;
     p.height = c->th;
     rd__perf_pass(s_cl, RD_PERF_PASS_RENDER, cid, c->tw, c->th, r->perfPost);
+    rd__pass_area_begin(&p, c, cid, r->passSerial + 1u, ms, storage); /* rd_pass_area.c */
+    rd__shadow_merge_arm(&p, cid, d ? did : 0u, r->passSerial + 1u, ms, storage);
     rhi_cmd_begin_render_pass(s_cl, &p);
+    if (uber && readable && colorLoad == RHI_LOAD_CLEAR) {
+        rhi_cmd_local_read_barrier(s_cl, RHI_LOCAL_READ_COLOR); /* the clear, then reads */
+    }
     rhi_cmd_checkpoint(s_cl, passPush(RD_PASSK_PASS, cid, c->tw, c->th, d ? did : 0, d ? d->tw : 0,
                                       d ? d->th : 0, storage, r->perfPost));
     setViewport(c->tw, c->th);
@@ -2333,7 +2342,7 @@ static RhiTexture resolveTexture(Replay *r, RdTargetRec *drawTarget, uint32_t dr
         return src->snap;
     }
     if (src->colorState != RHI_STATE_SHADER_READ) {
-        endPass(r);
+        endPassFor(r, src->color.id);
         rd__transition(s_cl, src->color, &src->colorState, RHI_STATE_SHADER_READ);
     }
     return src->color;
@@ -2470,67 +2479,10 @@ float rd__region_scale(const RdTargetRec *tc)
     return (float)ICO_FRAME_BASE_W / (float)g_rd.gsW;
 }
 
-/* GS pixels x0..x1, y0..y1 (inclusive, after XYOFFSET) of target tc in its
- * texels: the UI flip when mirror (GS pixel p is target pixel w - 1 - p),
- * clipped to the target, then the texel scale: GS pixels x0..x1 cover texels
- * floor(x0 * sx) .. ceil((x1 + 1) * sx) - 1.  A draw's box may start
- * outside (its vertices off the target's edge).  False when nothing is
- * left. */
-static bool gsRectToTexels(const RdTargetRec *tc, int32_t x0, int32_t y0, int32_t x1, int32_t y1,
-                           int mirror, RhiRect *out)
-{
-    if (mirror) {
-        const int32_t a = (int32_t)tc->w - 1 - x1, b = (int32_t)tc->w - 1 - x0;
-        x0 = a;
-        x1 = b;
-    }
-    x0 = x0 < 0 ? 0 : x0;
-    y0 = y0 < 0 ? 0 : y0;
-    x1 = x1 >= (int32_t)tc->w ? (int32_t)tc->w - 1 : x1;
-    y1 = y1 >= (int32_t)tc->h ? (int32_t)tc->h - 1 : y1;
-    if (x1 < x0 || y1 < y0) {
-        return false;
-    }
-    if (tc->sx != 1.0f || tc->sy != 1.0f) {
-        int32_t a = (int32_t)((float)x0 * tc->sx), b = (int32_t)((float)y0 * tc->sy);
-        int32_t c = (int32_t)((float)(x1 + 1) * tc->sx + 0.999f) - 1;
-        int32_t d = (int32_t)((float)(y1 + 1) * tc->sy + 0.999f) - 1;
-        if (tc->ox > 0.0f) {
-            /* Full pixel: the frame's columns from ox texels in
-             * (rd__gs_texel_x); the GS pixels outside the window clip */
-            a = (int32_t)floorf(rd__gs_texel_x(tc, (float)x0));
-            c = (int32_t)ceilf(rd__gs_texel_x(tc, (float)(x1 + 1)) - 0.001f) - 1;
-            a = a < 0 ? 0 : a;
-            if (c < a) {
-                return false;
-            }
-        }
-        x0 = a;
-        y0 = b;
-        x1 = c >= (int32_t)tc->tw ? (int32_t)tc->tw - 1 : c;
-        y1 = d >= (int32_t)tc->th ? (int32_t)tc->th - 1 : d;
-        if (x1 < x0) {
-            return false;
-        }
-    }
-    *out = (RhiRect){x0, y0, (uint32_t)(x1 - x0 + 1), (uint32_t)(y1 - y0 + 1)};
-    return true;
-}
-
-/* the scissor (SCISSOR_1, inclusive GS pixels) in texels, clipped to the
- * target first; a flipped UI draw clips where its scissor lands after the
- * flip. */
-static bool scissorTexels(const RdTargetRec *tc, const RdStateBlock *st, int mirror, RhiRect *sc)
-{
-    int32_t x0 = st->scissor[0] < 0 ? 0 : st->scissor[0];
-    int32_t y0 = st->scissor[1] < 0 ? 0 : st->scissor[1];
-    int32_t x1 = st->scissor[2] >= (int32_t)tc->w ? (int32_t)tc->w - 1 : st->scissor[2];
-    int32_t y1 = st->scissor[3] >= (int32_t)tc->h ? (int32_t)tc->h - 1 : st->scissor[3];
-    if (x1 < x0 || y1 < y0) {
-        return false;
-    }
-    return gsRectToTexels(tc, x0, y0, x1, y1, mirror, sc);
-}
+/* GS pixels to texels, and the scissor in texels: rd_pass_area.c
+ * (rd__gs_rect_texels, rd__scissor_texels; rd__screen_area is there too) */
+#define gsRectToTexels rd__gs_rect_texels
+#define scissorTexels rd__scissor_texels
 
 /* the scissor of the draw being bound, in texels */
 static bool scissorRect(const Replay *r, const RdTargetRec *tc, RhiRect *sc)
@@ -2556,41 +2508,6 @@ static bool rectHolds(RhiRect outer, RhiRect inner)
     return inner.x >= outer.x && inner.y >= outer.y &&
            (int64_t)inner.x + inner.w <= (int64_t)outer.x + outer.w &&
            (int64_t)inner.y + inner.h <= (int64_t)outer.y + outer.h;
-}
-
-/* Every fragment of a screen-prim command lies in its vertices' bounding
- * box give or take a pixel: sprite corners snapped up to whole pixels
- * (snapAxis), points drawn as one-pixel quads, lines reaching the pixels
- * next to them, the mirror's sixteenth of a texel and the half-line offset
- * of a field target; AA1 adds a one-pixel fringe outside every edge
- * (aa1Fringe).  The pad covers all of them, and convVtx's clamp to the
- * 12.4 range is applied to the box as to the vertices. */
-bool rd__screen_area(const RdTargetRec *tc, const RdStateBlock *st, const RdScreenVtx *v,
-                     uint32_t n, int mirror, int aa1, RhiRect *area)
-{
-    if (!tc || n == 0) {
-        return false;
-    }
-    int32_t lx = v[0].x, hx = v[0].x, ly = v[0].y, hy = v[0].y;
-    for (uint32_t i = 1; i < n; i++) {
-        lx = v[i].x < lx ? v[i].x : lx;
-        hx = v[i].x > hx ? v[i].x : hx;
-        ly = v[i].y < ly ? v[i].y : ly;
-        hy = v[i].y > hy ? v[i].y : hy;
-    }
-    lx = lx < 0 ? 0 : (lx > 0xFFFF ? 0xFFFF : lx);
-    hx = hx < 0 ? 0 : (hx > 0xFFFF ? 0xFFFF : hx);
-    ly = ly < 0 ? 0 : (ly > 0xFFFF ? 0xFFFF : ly);
-    hy = hy < 0 ? 0 : (hy > 0xFFFF ? 0xFFFF : hy);
-    const int32_t pad = aa1 ? 3 : 2;
-    const int32_t ox = 2048 - (int32_t)(st->gsW >> 1), oy = 2048 - (int32_t)(st->gsH >> 1);
-    RhiRect box, sc;
-    if (!gsRectToTexels(tc, floorDiv16(lx) - ox - pad, floorDiv16(ly) - oy - pad,
-                        -floorDiv16(-hx) - ox + pad, -floorDiv16(-hy) - oy + pad, mirror, &box) ||
-        !scissorTexels(tc, st, mirror, &sc)) {
-        return false;
-    }
-    return rectMeet(box, sc, area);
 }
 
 bool rd__date_retake(uint32_t heldFor, uint32_t heldSerial, const RhiRect *held, uint32_t tcId,
@@ -2821,8 +2738,12 @@ static bool prepareDrawEx(Replay *r, DrawSetup *ds, const RhiRect *dateArea, boo
         td = NULL;
     }
     ds->dateTex = g_rd.dummy;
+    r->dateDstNow = 0;
     if (r->st.ds.test.date != RD_DATE_OFF) {
-        if (dateStencil && dateStencilFor(ds->tc, td)) {
+        if (dateStencil && rd__uber_date(ds->tc, s_ms.active || (s_ms.want > 1u && !s_ms.ended))) {
+            r->dateDstNow = 1; /* rd_uber.c: the shader reads the alpha */
+            g_rdPerf.dateDstDraws++;
+        } else if (dateStencil && dateStencilFor(ds->tc, td)) {
             ds->dateStencil = 1;
             ds->dateWantAll = dateArea == NULL;
             ds->dateWant = dateArea ? *dateArea : (RhiRect){0, 0, ds->tc->tw, ds->tc->th};
@@ -2948,8 +2869,10 @@ static RhiBindGroup bindDrawEx(Replay *r, const DrawSetup *ds, RhiRect *scOut, u
      * the fog); every other draw needs the colour attachment */
     if (!r->passOpen || r->passColor != r->st.color || r->passDepth != ds->tdId ||
         (r->passStorage && !keepStorage) || (ds->dateStencil && !r->passReadable)) {
+        rd__last_store_arm(r->st.color, ds->tdId); /* a draw's own pass (rd_pass_cut.c) */
         beginPass(r, tc, ds->tdId ? rd__target_rec(ds->tdId) : NULL, r->st.color, ds->tdId,
                   RHI_LOAD_LOAD, NULL, RHI_LOAD_LOAD, 0.0f, false);
+        rd__last_store_arm(0, 0);
     }
     if (ds->dateStencil && !rd__replay_date_take(r, ds)) {
         return (RhiBindGroup){0}; /* the bit could not be written: nothing drawn */
@@ -3333,6 +3256,7 @@ static void flushScreenRun(Replay *r)
     if (!q->count) {
         return;
     }
+    g_rdDrawOwner = q->ord + 1u; /* the command that opened the run draws it */
     const uint64_t bytes = (uint64_t)q->count * q->stride;
     const uint64_t off = rd__ring_alloc(bytes, 16);
     if (off != ~0ull) {
@@ -3359,7 +3283,7 @@ static void flushScreenRun(Replay *r)
         }
         g_rdPerf.screenDraws++; /* one draw of the run, however many passes */
     }
-    q->count = 0;
+    q->count = g_rdDrawOwner = 0;
     if (r->perfPending) {
         r->perfPending = 0;
         rd__perf_post(s_cl, r->perfPendingPost);
@@ -3551,9 +3475,9 @@ static RdUniform msaaFrame(const Replay *r, const DrawSetup *ds)
 static void doScreen(Replay *r, const RdFrame *f, const RdCmd *c)
 {
     DrawSetup ds;
-    if (g_rd.deferText && c->b[3] == RD_SCREEN_TEXT_QUADS) {
-        flushScreenRun(r); /* a skipped text item ends the run */
-        return;            /* the item is drawn on the output instead */
+    if ((g_rd.deferText && c->b[3] == RD_SCREEN_TEXT_QUADS) || rd__fades_fold_skip(g_rdStoreOrd)) {
+        flushScreenRun(r); /* a skipped text item (a folded fade) ends the run */
+        return;            /* the item is drawn on the output (the reduction) instead */
     }
     if (rd__wrap_applies(&r->st)) {
         flushScreenRun(r);
@@ -3655,21 +3579,28 @@ static void doScreen(Replay *r, const RdFrame *f, const RdCmd *c)
         }
     }
     uint32_t nDraw = nv, nFirst = nv, nPrim = 0;
-    int split = 0, aa1Date = 0; /* aa1Date: under DATE, primitive by primitive (aa1DatePlan) */
+    /* aa1Date: under DATE, primitive by primitive (aa1DatePlan); aa1Order:
+     * DATE through the colour read, a split draw triangle by triangle
+     * (aa1OrderPlan) */
+    int split = 0, aa1Date = 0, aa1Order = 0;
     IcoSpriteAa1Vertex *ax = NULL;
     uint32_t *ends = NULL;
     if (aa1) {
         for (int i = 0; i < np; i++) {
             split |= topo == RD_PRIM_TRIANGLES && dp[i].key.gs.zwrite == RD_ZWRITE_ON;
-            aa1Date |= r->st.ds.test.date != RD_DATE_OFF && (dp[i].key.gs.colorMask & 8);
+            const int date = r->st.ds.test.date != RD_DATE_OFF && (dp[i].key.gs.colorMask & 8);
+            aa1Date |= date && !r->dateDstNow;
+            aa1Order |= date && r->dateDstNow;
         }
+        aa1Order &= split; /* one draw in the command's order is the GS's already */
         ax = axScratch((uint64_t)nv * 7);
-        ends = aa1Date ? aa1Ends(nv) : NULL;
-        aa1Date = ends != NULL;
+        ends = aa1Date || aa1Order ? aa1Ends(nv) : NULL;
+        aa1Date = aa1Date && ends != NULL;
+        aa1Order = aa1Order && ends != NULL;
         if (!ax) {
             return;
         }
-        nDraw = aa1Expand(out, nv, topo, split && !aa1Date, ax, &nFirst, ends, &nPrim);
+        nDraw = aa1Expand(out, nv, topo, split && !aa1Date && !aa1Order, ax, &nFirst, ends, &nPrim);
         if (nDraw == 0) {
             return;
         }
@@ -3690,7 +3621,7 @@ static void doScreen(Replay *r, const RdFrame *f, const RdCmd *c)
      * interior and fringes are two draws, which do not join a run: merged,
      * the second pass of one command would follow the first pass of the
      * next) */
-    if (np == 1 && !aa1Date && (!aa1 || nFirst == nDraw || nFirst == 0)) {
+    if (np == 1 && !aa1Date && !aa1Order && (!aa1 || nFirst == nDraw || nFirst == 0)) {
         RdDrawPass one = dp[0];
         if (aa1 && nFirst == 0) {
             /* AA1 lines: all fringe, drawn with Z write off */
@@ -3742,6 +3673,7 @@ static void doScreen(Replay *r, const RdFrame *f, const RdCmd *c)
             nr.passSerial = r->passSerial;
             nr.dateSerial = r->dateSerial;
             nr.dateFor = r->dateFor;
+            nr.ord = g_rdStoreOrd;
             memcpy(&nr.st, &r->st, sizeof(nr.st));
             r->run = nr;
         }
@@ -3768,8 +3700,9 @@ static void doScreen(Replay *r, const RdFrame *f, const RdCmd *c)
 
 immediate:
     flushScreenRun(r);
-    if (aa1Date && !aa1DatePlan(r, dp, np, &ds, dateAt, topo == RD_PRIM_LINES)) {
-        aa1Date = 0; /* drawn as before: the triangles, then their fringes */
+    if ((aa1Date && !aa1DatePlan(r, dp, np, &ds, dateAt, topo == RD_PRIM_LINES)) ||
+        (aa1Order && !aa1OrderPlan(r, dp, np, &ds))) {
+        aa1Date = aa1Order = 0; /* drawn as before: the triangles, then their fringes */
         nDraw = aa1Expand(out, nv, topo, split, ax, &nFirst, NULL, NULL);
     }
     const uint64_t drawOff = rd__ring_alloc((uint64_t)nDraw * stride, 16);
@@ -3780,9 +3713,10 @@ immediate:
     r->sc = nr.sc; /* a pass begun again for the exact blend takes it back */
     rhi_cmd_set_scissor(s_cl, &nr.sc);
     rhi_cmd_set_vertex_buffer(s_cl, 0, g_rd.ring[s_slot], drawOff);
-    if (aa1Date) {
+    if (aa1Date || aa1Order) {
         g_rdPerf.screenCmds++;
-        g_rdPerf.screenDraws += aa1DateDraw(r, nr.g2, ends, nPrim);
+        g_rdPerf.screenDraws +=
+            aa1Date ? aa1DateDraw(r, nr.g2, ends, nPrim) : aa1OrderDraw(r, nr.g2, ends, nPrim);
         for (int i = 0; i < np; i++) {
             r->writeSerial += (dp[i].key.gs.colorMask & 8) != 0;
         }
@@ -4069,7 +4003,7 @@ static RhiPipeline wrapPipeline(int resolve, uint8_t vs, uint8_t prim, RhiFormat
     s_wrapPipes[s_wrapPipeCount].key = key;
     s_wrapPipes[s_wrapPipeCount].pipe = p;
     s_wrapPipeCount++;
-    g_rd.stats.pipelineCreates++;
+    rd__stats_here()->pipelineCreates++;
     return p;
 }
 
@@ -4395,9 +4329,20 @@ static void doShadowReset(Replay *r)
     if (!tc) {
         return;
     }
-    endPass(r);
     s_shadowRedFor = 0; /* a new count starts */
     s_shadowCountFor = 0;
+    /* the volumes in the scene's open pass, whose stencil is the reset's
+     * (rd_shadow_merge.c): no pass of their own, nothing pending */
+    if (rd__shadow_merge_take(r->passOpen, r->passSerial, r->passColor, r->passDepth, &r->st,
+                              s_pend.p.target || s_stencil.depthTex    ? "a clear or reset pending"
+                              : r->passStorage || g_rd.passSamples > 1 ? "a storage or MSAA pass"
+                                                                       : NULL)) {
+        rd__stencil_open(&s_stencil.w, td->depth.id);
+        s_stencil.color = r->st.color;
+        s_stencil.depth = r->st.depth;
+        return;
+    }
+    endPass(r);
     /* The stencil clear is not recorded yet: the next pass on the depth
      * takes it as its stencil load op (beginPass), else it is recorded as
      * its own pass (flushStencilClear) at the next endPass or transition
@@ -4416,7 +4361,7 @@ static void doShadowReset(Replay *r)
 
 /* RDC_SHADOW_STRIP: rd_shadow_tris's two triangle lists, or rd_shadow_strip's
  * float strip with one sign. */
-static void doShadowStrip(Replay *r, const RdFrame *f, const RdCmd *c)
+static void doShadowStripIn(Replay *r, const RdFrame *f, const RdCmd *c)
 {
     RdTargetRec *td;
     if (!shadowTargets(r, &td)) {
@@ -4487,10 +4432,21 @@ static void doShadowStrip(Replay *r, const RdFrame *f, const RdCmd *c)
             rhi_cmd_set_bind_group(s_cl, 2, g2);
             rhi_cmd_set_stencil_ref(s_cl, 0);
             drawCmd(s_cl, count[decr], first, 1);
-            g_rd.stats.draws++;
+            rd__stats_here()->draws++;
         }
         first += count[decr];
     }
+}
+
+/* in the scene's open pass when the reset was taken there (rd_shadow_merge.c):
+ * the strip drawn on its colour target, which it never writes */
+static void doShadowStrip(Replay *r, const RdFrame *f, const RdCmd *c)
+{
+    const uint32_t keep = r->st.color,
+                   in = rd__shadow_merge_color(r->passOpen, r->passSerial, &r->st);
+    r->st.color = in ? in : keep;
+    doShadowStripIn(r, f, c);
+    r->st.color = keep;
 }
 
 void rd__shadow_shutdown(void)
@@ -4536,7 +4492,7 @@ static void shadowReduce(Replay *r, RdTargetRec *tc)
 {
     s_shadowRedFor = 0;
     RdPipeKeyInt k = rd__shadow_reduce_key(); /* RGBA8, like the count */
-    RhiPipeline pipe = rd__get_pipeline(&k);
+    RhiPipeline pipe = rd__get_pipeline_held(&k);
     if (!shadowRedMake(tc) || !pipe.id) {
         return;
     }
@@ -4550,8 +4506,12 @@ static void shadowReduce(Replay *r, RdTargetRec *tc)
     p.colorCount = 1;
     p.width = tc->w;
     p.height = tc->h;
-    rd__perf_pass(s_cl, RD_PERF_PASS_RENDER, 0, tc->w, tc->h, r->perfPost);
+    rd__perf_pass(s_cl, RD_PERF_PASS_RENDER, RD_PERF_ID_SHADOW_COUNT, tc->w, tc->h, r->perfPost);
     rhi_cmd_begin_render_pass(s_cl, &p);
+    /* the ring as the one draw's */
+    rhi_cmd_checkpoint(s_cl,
+                       passPush(RD_PASSK_PASS, r->st.color, tc->w, tc->h, 0, 0, 0, 0, r->perfPost));
+    (void)rd__get_pipeline(&k);
     setViewport(tc->w, tc->h);
     const RhiRect all = {0, 0, tc->w, tc->h};
     rhi_cmd_set_scissor(s_cl, &all);
@@ -4573,7 +4533,7 @@ static void shadowReduce(Replay *r, RdTargetRec *tc)
 /* The count in one draw (rd_shadow_one.c): into the count target at
  * scale 1, else into s_shadowRed (the scaled target is left undrawn: the
  * levels read s_shadowRed, resolveTexture).  False: the seven draws run. */
-static bool shadowCountOne(Replay *r, RdTargetRec *tc, RdTargetRec *td)
+static bool shadowCountOne(Replay *r, RdTargetRec *tc, RdTargetRec *td, uint32_t step)
 {
     const bool scaled = tc->tw != tc->w || tc->th != tc->h;
     if (scaled && !shadowRedMake(tc)) {
@@ -4581,7 +4541,7 @@ static bool shadowCountOne(Replay *r, RdTargetRec *tc, RdTargetRec *td)
     }
     IcoDrawCB cb;
     rd__shadow_reduce_cb(tc, &cb);
-    if (!rd__shadow_one_draw(r, tc, td, scaled ? s_shadowRed : tc->color,
+    if (!rd__shadow_one_draw(r, tc, td, step, scaled ? s_shadowRed : tc->color,
                              scaled ? &s_shadowRedState : &tc->colorState, &cb)) {
         return false;
     }
@@ -4592,7 +4552,7 @@ static bool shadowCountOne(Replay *r, RdTargetRec *tc, RdTargetRec *td)
     return true;
 }
 
-static void doShadowResolve(Replay *r)
+static void doShadowResolve(Replay *r, const RdCmd *c)
 {
     RdTargetRec *td;
     RdTargetRec *tc = shadowTargets(r, &td);
@@ -4600,7 +4560,8 @@ static void doShadowResolve(Replay *r)
         return;
     }
     s_shadowRedFor = 0;
-    if (g_rd.profile.shadowOne && shadowCountOne(r, tc, td)) {
+    const uint32_t step = rd__shadow_step(c); /* rd_shadow.c "The step" */
+    if (g_rd.profile.shadowOne && shadowCountOne(r, tc, td, step)) {
         rd__stencil_close(&s_stencil.w, td->depth.id);
         s_shadowCountFor = r->st.color;
         return;
@@ -4615,25 +4576,21 @@ static void doShadowResolve(Replay *r)
     RhiBindGroup g2 = rd__tex_group(g_rd.dummy, rd__sampler(RD_FILTER_NEAREST, RD_FILTER_NEAREST,
                                                             RD_WRAP_CLAMP, RD_WRAP_CLAMP));
     for (int pass = 0; pass < RD_SHADOW_RESOLVE_PASSES; pass++) {
-        const RdPipeKeyInt k = rd__shadow_resolve_key(pass);
+        RdPipeKeyInt k;
+        IcoDrawCB cb;
+        uint8_t ref;
+        if (!rd__shadow_resolve_pass(step, pass, &k, &cb, &ref)) {
+            continue;
+        }
         RhiPipeline p = rd__get_pipeline(&k);
         if (!p.id) {
             continue;
         }
-        IcoDrawCB cb;
-        memset(&cb, 0, sizeof(cb));
-        if (pass < 6) {
-            cb.col[0] = cb.col[1] = cb.col[2] = 4u << pass;
-        } else {
-            cb.col[3] = 0x80;
-        }
-        cb.uvRect[2] = cb.uvRect[3] = 1.0f;
-        cb.tex[0] = cb.tex[1] = cb.tex[2] = cb.tex[3] = 1.0f;
         rd__set_pipeline(s_cl, p, &k);
         rd__bind_uniform(s_cl, 0, g0);
         rd__bind_uniform(s_cl, 1, rd__draw_group(&cb));
         rhi_cmd_set_bind_group(s_cl, 2, g2);
-        rhi_cmd_set_stencil_ref(s_cl, pass < 6 ? (uint8_t)(1u << pass) : 0);
+        rhi_cmd_set_stencil_ref(s_cl, ref);
         drawCmd(s_cl, 3, 0, 1);
     }
     endPass(r);
@@ -4813,6 +4770,8 @@ static void doFog(Replay *r, const RdFrame *f, const RdCmd *c)
     RdDrawPass pl[2], dp[8];
     const int buffer = g_rd.fogPath == RD_FOG_BUFFER;
     const bool local = fogLocalFor(r, zid, tz, tc);
+    /* its pass kept to the end of the fog: no probe, no edge read (rd_pass_cut.c) */
+    rd__last_store_fog(local && !rd__fog_probe_wanted() && !rd__fog_edge_may_be_due());
     const int npl = rd__fog_plan(
         &r->st, tc->format, local ? RD_FOG_LOCAL : (buffer ? RD_FOG_BUFFER : RD_FOG_INPLACE), pl);
     if (npl == 0) {
@@ -4855,15 +4814,13 @@ static void doFog(Replay *r, const RdFrame *f, const RdCmd *c)
             return;
         }
     }
-    /* above 1x the pixels no draw covered between drawn ones (rd_crack_fill.c);
-     * not while the MSAA epoch is open (its snapshot of SCENE would close
-     * it ahead of the per-sample fog below), on the resolved picture once
-     * it closed (in gameplay at the shadow count's pass, list 3) */
-    rd__crack_fill(r, tc, tz, &s_fogDepth,
+    /* above 1x the pixels no draw covered between drawn ones: armed here,
+     * drawn after lists 4-6 (rd_crack_fill.c); not while the MSAA epoch is
+     * open, on the resolved picture once it closed (list 3's shadow count) */
+    rd__crack_fill(r, tc, tz,
                    s_ms.active  ? RD_CRACK_MSAA_OPEN
                    : s_ms.ended ? RD_CRACK_MSAA_RESOLVED
-                                : RD_CRACK_MSAA_NONE,
-                   local);
+                                : RD_CRACK_MSAA_NONE);
     /* the GS's BITBLT of the Z buffer to 0x2800: the depth in place, its
      * copy, its words or the pass's own depth attachment (g_rd.fogPath);
      * the pass below binds the colour target alone but on the local read,
@@ -5041,7 +4998,7 @@ static void doFog(Replay *r, const RdFrame *f, const RdCmd *c)
         dstBind(r, &dp[i].key);
         drawCmd(s_cl, nv, 0, 1);
         if (!rd__no_dual_second(dp, i)) {
-            g_rd.stats.draws++;
+            rd__stats_here()->draws++;
             if (local) {
                 g_rdPerf.fogLocalDraws++;
             }
@@ -5367,6 +5324,11 @@ void rd__set_a1x_gs_keep(bool on)
     s_a1xGsKeep = on;
 }
 
+bool rd__a1x_gs_keep(void)
+{
+    return s_a1xGsKeep;
+}
+
 /* Above 1x (fx_sprite.hlsl FXF_ABOVE1X): a sprite sampling target src into
  * tc when a scaled target is involved (either target's scale not 1, the
  * predicate rd__blur_screen_fallback takes): the steps, src texels per tc
@@ -5576,8 +5538,9 @@ static void doBlurSpriteDraw(Replay *r, const RdFrame *f, const RdCmd *c)
     float uv[4];
     rd__blur_uv_rect(c->b[0], &p, uv); /* the reduction's UVs under the mirror */
     /* above 1x: a target source and a scaled target (blurAbove1xSteps) */
-    const uint32_t steps =
-        textured ? blurAbove1xSteps(tc, src, p.uv, p.rect, d->magFilter == RD_FILTER_LINEAR) : 0;
+    const uint32_t steps = rd__aura_kernel_steps(
+        tc, src,
+        textured ? blurAbove1xSteps(tc, src, p.uv, p.rect, d->magFilter == RD_FILTER_LINEAR) : 0);
     /* the frame-size post sprites' plan (rd_fx_plan.c): drawn without the snapshot */
     if (rd__fx_plan_draw(r, &(RdFxDraw){f, c, &p, d, tc, td, src, srcTex, &key, uv, tw, th, tfmt,
                                         steps, useDepth, textured, dstRead, selfSample})) {
@@ -5602,7 +5565,7 @@ static void doBlurSpriteDraw(Replay *r, const RdFrame *f, const RdCmd *c)
             srcTex = tc->snap;
         } else {
             if (src->colorState != RHI_STATE_SHADER_READ) {
-                endPass(r);
+                endPassFor(r, src->color.id);
                 rd__transition(s_cl, src->color, &src->colorState, RHI_STATE_SHADER_READ);
             }
             srcTex = src->color;
@@ -5620,39 +5583,11 @@ static void doBlurSpriteDraw(Replay *r, const RdFrame *f, const RdCmd *c)
             ? rd__blur_key(&r->st, tc->format, td ? RHI_FMT_D32F_S8 : RHI_FMT_UNKNOWN, &useDepth, 1)
             : key;
 
-    DrawSetup ds;
-    memset(&ds, 0, sizeof(ds));
-    ds.tc = tc;
-    ds.tdId = useDepth ? r->st.depth : 0;
-    ds.depthFmt = useDepth ? RHI_FMT_D32F_S8 : RHI_FMT_UNKNOWN;
-    ds.tex = srcTex;
-    ds.dateTex = dstRead ? tc->snap : g_rd.dummy;
-    ds.tw = tw;
-    ds.th = th;
-    ds.textured = textured;
-    ds.screenCopy = 1; /* a post sprite: target texels onto screen pixels */
-    if (useUint) {
-        ds.tex = ds.dateTex = g_rd.dummy; /* bindDraw's group unused: the UINT one */
-    }
-    RhiBindGroup g2 = bindDraw(r, &ds);
-    if (g2.id && useUint) {
-        const RhiTexture t1 = textured ? srcTex : tc->snap;
-        g2 = blurUintGroup(t1, dstRead ? tc->snap : t1);
-    }
-    if (!g2.id) {
-        return;
-    }
-    RhiPipeline pipe = rd__get_pipeline(&pkey);
-    if (!pipe.id) {
-        return;
-    }
-
     IcoDrawCB cb;
     memset(&cb, 0, sizeof(cb));
     uint32_t fl = blurFlags(d, p.lines, textured, dstRead);
     if (steps) {
         fl |= RD_FXF_ABOVE1X;
-        g_rd.above1xDraws++;
     }
     memcpy(cb.col, (const uint32_t[4]){p.rgba[0], p.rgba[1], p.rgba[2], p.rgba[3]}, sizeof(cb.col));
     cb.mode[0] = fl;
@@ -5677,15 +5612,45 @@ static void doBlurSpriteDraw(Replay *r, const RdFrame *f, const RdCmd *c)
     cb.scale[3] = (float)steps; /* below 2^24: exact */
     memcpy(cb.param, p.rect, sizeof(cb.param));
     blurAux1(&cb);
+    DrawSetup ds;
+    memset(&ds, 0, sizeof(ds));
+    ds.tc = tc;
+    ds.tdId = useDepth ? r->st.depth : 0;
+    ds.depthFmt = useDepth ? RHI_FMT_D32F_S8 : RHI_FMT_UNKNOWN;
+    ds.tex = srcTex;
+    ds.dateTex = dstRead ? tc->snap : g_rd.dummy;
+    ds.tw = tw;
+    ds.th = th;
+    ds.textured = textured;
+    ds.screenCopy = 1; /* a post sprite: target texels onto screen pixels */
     if (useUint) {
-        g_rdPerf.uintDraws++;
+        ds.tex = ds.dateTex = g_rd.dummy; /* bindDraw's group unused: the UINT one */
     }
+    /* the aura's read of SCENE in two passes (rd_aura_box.c) */
+    if (steps && rd__aura_box_draw(r, &ds, &key, &cb, src, srcTex, steps, dstRead || selfSample)) {
+        return;
+    }
+    RhiBindGroup g2 = bindDraw(r, &ds);
+    if (g2.id && useUint) {
+        const RhiTexture t1 = textured ? srcTex : tc->snap;
+        g2 = blurUintGroup(t1, dstRead ? tc->snap : t1);
+    }
+    if (!g2.id) {
+        return;
+    }
+    RhiPipeline pipe = rd__get_pipeline(&pkey);
+    if (!pipe.id) {
+        return;
+    }
+    g_rd.above1xDraws += steps != 0;
+    rd__fades_fold_fx(&cb, c->b[0], src); /* rd_fades_fold.c (never the aura's) */
+    g_rdPerf.uintDraws += useUint != 0;
     rd__set_pipeline(s_cl, pipe, &pkey);
     rd__bind_uniform(s_cl, 0, r->frameBG);
     rd__bind_uniform(s_cl, 1, rd__draw_group(&cb));
     rhi_cmd_set_bind_group(s_cl, 2, g2);
     drawCmd(s_cl, 3, 0, 1);
-    g_rd.stats.draws++;
+    rd__stats_here()->draws++;
     if (key.gs.colorMask & 8) {
         r->writeSerial++;
     }
@@ -5747,9 +5712,9 @@ static double s_replayMaxMs;
 
 static uint32_t s_replayCount;
 
-bool rd__replay_frame(const RdFrame *f, int keep, bool present)
+bool rd__replay_frame_here(const RdFrame *f, int keep, bool present)
 {
-    const double t0 = rd__now_ms();
+    const double t0 = rd__now_ms(), made0 = rd__pipeline_create_ms();
     rd__perf_begin(f, keep, present);
     const bool ok = replayFrame(f, keep, present);
     rd__blur_smooth_replay_end(keep); /* the trail ends where no sprite drew */
@@ -5760,6 +5725,11 @@ bool rd__replay_frame(const RdFrame *f, int keep, bool present)
         s_replayMaxMs = ms;
     }
     s_replayCount++;
+    if (present) {
+        /* the stopped set's background batch (rd_pipeline.c), after the
+           picture: its time less the pipelines made in it */
+        rd__submit_pipe_tick(ms - (rd__pipeline_create_ms() - made0)); /* rd_submit.h */
+    }
     return ok;
 }
 
@@ -5788,7 +5758,8 @@ static bool replayFrame(const RdFrame *f, int keep, bool present)
          * ends at the last replay submitted (rd_passring.h) */
         return false;
     }
-    rd__perf_collect_gpu(); /* the timestamps of the slot just recycled */
+    rd__perf_collect_gpu();  /* the timestamps of the slot just recycled */
+    rd__vu_merge_fallback(); /* PC port: a refused merge build (rd_replay_vu.c) */
     g_rdPerf.waitMs = (t1 = rd__now_ms()) - t;
     t = t1;
     s_slot = g_rd.replayCounter % RHI_FRAMES_IN_FLIGHT;
@@ -5840,6 +5811,7 @@ static bool replayFrame(const RdFrame *f, int keep, bool present)
     t = t1;
     const double bind0 = g_rdPerf.bindMs;
     /* the walk from here: the vertex pre-pass, then the lists */
+    rd__thread_phase(RD_READ_WALK);
     rd__perf_stamp(s_cl, RD_PERF_TS_PREPASS);
     rd__vu_prepass(f, keep); /* each mesh and grid vertex once (rd_replay_vu.c) */
     rd__perf_stamp(s_cl, RD_PERF_TS_LISTS);
@@ -5864,7 +5836,11 @@ static bool replayFrame(const RdFrame *f, int keep, bool present)
         for (uint32_t i = 0; i < list->count; i++) {
             const RdCmd *c = &list->cmds[i];
             g_rdStoreOrd = planBase + i;
+            if (r.passOpen && rd__pass_area_due(g_rdStoreOrd, r.passSerial)) {
+                endPass(&r); /* past the open pass's area commands (rd_pass_area.c) */
+            }
             rd__replay_fold_at(i);
+            rd__crack_fill_at(&r, f, c, l, s_ms.active); /* armed by the fog (rd_crack_fill.c) */
             if (g_rdWin.first) {
                 /* the draw note's place (rd__replay_set_window_draws) */
                 g_rdWin.list = (int8_t)l;
@@ -5926,7 +5902,7 @@ static bool replayFrame(const RdFrame *f, int keep, bool present)
                 doShadowStrip(&r, f, c);
                 break;
             case RDC_SHADOW_RESOLVE:
-                doShadowResolve(&r);
+                doShadowResolve(&r, c);
                 break;
             case RDC_POST_STUB:
                 if (c->b[0] == RD_POST_FOG) {
@@ -5965,6 +5941,9 @@ static bool replayFrame(const RdFrame *f, int keep, bool present)
             break;
         }
     }
+    if (!g_rdWin.stop) {
+        rd__crack_fill_late(&r, s_ms.active); /* held to the end */
+    }
     msaaEnd(&r,
             RD_MSAA_CLOSE_END); /* an epoch still open: SCENE resolved before anything reads it */
     endPass(&r);
@@ -5972,32 +5951,8 @@ static bool replayFrame(const RdFrame *f, int keep, bool present)
     s_ms.r = NULL;
     rd__diag_frame(f, s_ms.want);
     s_vpExact = false; /* the present sets its own viewports */
-    if (doPresent) {
-        uint32_t sw = 0, sh = 0; /* the pass ring's present entry: DISPLAY onto the window */
-        rhi_swapchain_size(&sw, &sh);
-        const RdTargetRec *dt = rd__target_rec(RD_TARGET_DISPLAY + 1);
-        rhi_cmd_checkpoint(s_cl,
-                           rd__passring_push(RD_PASSK_PRESENT, RD_TARGET_DISPLAY + 1,
-                                             dt ? dt->tw : 0, dt ? dt->th : 0, 0, sw, sh, 0, -1));
-        rd__perf_pass(s_cl, RD_PERF_PASS_PRESENT, RD_PERF_ID_WINDOW, sw, sh, -1);
-        rd__present_record(s_cl);
-        rd__perf_stamp(s_cl, RD_PERF_TS_PRESENT);
-    }
-    rd__perf_pass_end(s_cl); /* the last piece's end (rd_perf.c) */
-    g_rdPerf.walkMs = (t1 = rd__now_ms()) - t - (g_rdPerf.bindMs - bind0);
-    rd__perf_walk_end(); /* the walk's pipelines and creations end here */
-    t = t1;
-    rhi_end_commands(s_cl);
-    rhi_submit(s_cl);
-    g_rdPerf.submitMs = (t1 = rd__now_ms()) - t;
-    t = t1;
-    if (doPresent) {
-        rd__present_finish();
-        rd__capture_finish(); /* a capture this present copied */
-    }
-    g_rdPerf.presentMs = rd__now_ms() - t;
-    g_rd.stats.pipelines = rd__pipeline_count();
-    g_rd.deferText = false;
+    rd__stats_here()->pipelines = rd__pipeline_count();
+    rd__submit_frame(s_cl, doPresent, t, bind0); /* the present's pass, the submit, the present */
     return true;
 }
 
@@ -6051,8 +6006,8 @@ bool rd__read_texture(RdTex tex, void *dst, size_t dstSize, uint32_t *w, uint32_
 {
     RdTexRec *t = rd__tex_rec(tex.id);
     if (!g_rd.hasDevice || !t || t->kind != RD_TEXKIND_IMAGE || !t->rhi.id ||
-        t->state == RHI_STATE_UNDEFINED || rd__texel_is_block(t->format)) {
-        return false; /* a pack's BC replacement has no texels to read back */
+        t->state == RHI_STATE_UNDEFINED || rd__texel_is_block(t->format) || t->sheetBaked) {
+        return false; /* no texels to read back: a BC replacement, a baked sheet */
     }
     if (w) {
         *w = t->w;
@@ -6086,6 +6041,7 @@ bool rd__read_target(RdTarget target, void *dst, size_t dstSize, uint32_t *w, ui
     if (h) {
         *h = t->th;
     }
+    rd__clear_skip_readback(target.id); /* a clear not drawn, drawn first (rd_pass_cut.c) */
     return readTexture(t->color, &t->colorState, t->tw, t->th, dst, dstSize);
 }
 
@@ -6244,22 +6200,10 @@ uint32_t rd__replay_bind_epoch(void)
     return s_bindEpoch;
 }
 
-void rd__replay_draw(RhiCommandList cl, uint32_t vertexCount, uint32_t firstVertex,
-                     uint32_t instanceCount)
-{
-    drawCmd(cl, vertexCount, firstVertex, instanceCount);
-}
-
 const void *rd__replay_pass_push(RdPassKind kind, uint32_t color, uint32_t cw, uint32_t ch,
                                  uint32_t depth, uint32_t dw, uint32_t dh, int storage, int post)
 {
     return passPush(kind, color, cw, ch, depth, dw, dh, storage, post);
-}
-
-void rd__replay_draw_indexed(RhiCommandList cl, uint32_t indexCount, uint32_t firstIndex,
-                             int32_t vertexOffset, uint32_t instanceCount)
-{
-    drawIndexedCmd(cl, indexCount, firstIndex, vertexOffset, instanceCount);
 }
 
 void rd__replay_dst_bind(Replay *r, const RdPipeKeyInt *k)
@@ -6304,6 +6248,11 @@ void rd__replay_flush_run(Replay *r)
 void rd__replay_end_pass(Replay *r)
 {
     endPass(r);
+}
+
+void rd__replay_end_pass_for(Replay *r, uint32_t tex)
+{
+    endPassFor(r, tex);
 }
 
 RhiBindGroup rd__replay_bind_draw(Replay *r, const DrawSetup *ds)

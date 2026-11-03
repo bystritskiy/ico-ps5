@@ -149,6 +149,9 @@ uint64_t rd__estimate_ring(const RdFrame *f, int keep)
 
 uint64_t rd__texture_ring_bytes(void)
 {
+    /* the decodes in flight into their textures first: their dirty
+       rectangles are what the ring holds (rd_tex_decode.h) */
+    rdtex_settle();
     const uint64_t pitchA = rhi_limits()->copyRowPitchAlign;
     uint64_t total = 0;
     const bool walk = g_rd.texDirtyCount != 0 || g_rd.texLevelsFilter != (int)g_rd.filterUpgrade;
@@ -161,9 +164,11 @@ uint64_t rd__texture_ring_bytes(void)
             continue;
         }
         if (t->live && t->kind == RD_TEXKIND_IMAGE && (t->dirty || t->mipLevels != texLevels(t))) {
+            /* the device's texels: a baked sheet's RGBA8 page and apron */
             uint64_t pitch =
-                ((uint64_t)t->w * rd__texel_bytes(t->format) + pitchA - 1) / pitchA * pitchA;
-            uint64_t one = pitch * t->h + rhi_limits()->copyOffsetAlign;
+                ((uint64_t)rd__tex_device_w(t) * rd__tex_device_bytes(t) + pitchA - 1) / pitchA *
+                pitchA;
+            uint64_t one = pitch * rd__tex_device_h(t) + rhi_limits()->copyOffsetAlign;
             /* a mip chain adds at most the base again (with the
              * padding of every level) */
             total +=
@@ -206,16 +211,38 @@ static bool newRing(uint64_t cap)
    window) the old ring stays and the next frame that fits draws */
 bool rd__ensure_ring(uint64_t need)
 {
-    if (g_rd.ringCap[rd__ring_slot()] >= need) {
+    const uint32_t slot = rd__ring_slot();
+    const uint64_t have = g_rd.ringCap[slot];
+
+    if (have >= need) {
+        /* a ring that grew for a stage change's burst (68 MB needed, 128 MB
+           held) stays in video memory for good, which a 1 GB card pays for
+           in fence waits (issue 126): after RD_RING_SHRINK_REPLAYS replays
+           in a row of this slot needing under a quarter of it, it is
+           remade at half (newRing's deferred destroy covers the old one's
+           frames in flight) */
+        if (need >= have / 4u) {
+            g_rd.ringSmall[slot] = 0;
+        } else if (++g_rd.ringSmall[slot] >= RD_RING_SHRINK_REPLAYS) {
+            g_rd.ringSmall[slot] = 0;
+            if (have / 2u >= RD_RING_SHRINK_FLOOR && newRing(have / 2u)) {
+                rd__log("the upload ring of frame slot %d shrinks to %llu MB (needed under %llu "
+                        "MB for %u replays)",
+                        (int)slot, (unsigned long long)(g_rd.ringCap[slot] >> 20),
+                        (unsigned long long)((have / 4u) >> 20), RD_RING_SHRINK_REPLAYS);
+            }
+        }
         return true;
     }
+    g_rd.ringSmall[slot] = 0;
     uint64_t cap = g_rd.ringCap[rd__ring_slot()] ? g_rd.ringCap[rd__ring_slot()] : 4u << 20;
     while (cap < need) {
         cap *= 2;
     }
     /* a frame that uploads many pack replacements at once (a
-       stage change) can need a ring of hundreds of MB; the ring never
-       shrinks, so its large sizes are named in the log */
+       stage change) can need a ring of hundreds of MB; the large sizes are
+       named in the log, and the ring shrinks again when the need stays low
+       (above) */
     const uint64_t exact = (need + (1u << 20) - 1) & ~(uint64_t)((1u << 20) - 1);
     if (!newRing(cap) && !(exact < cap && newRing(exact))) {
         rd__log("the upload ring of frame slot %d could not grow to %llu MB (this frame needs "
@@ -434,6 +461,7 @@ static int uploadReplacement(RdTexRec *t)
 
 void rd__upload_dirty_textures(void)
 {
+    rdtex_settle(); /* no texture is uploaded before its decode is in it */
     const uint32_t pitchA = rhi_limits()->copyRowPitchAlign;
     const uint32_t offA = rhi_limits()->copyOffsetAlign;
     /* a full ring gives ~0, whose write would land past the map: the
@@ -467,15 +495,19 @@ void rd__upload_dirty_textures(void)
             if (t->dirty && uploadReplacement(t)) {
                 t->dirty = 0;
                 stillDirty--;
-                g_rd.stats.textureUploads++;
+                rd__stats_here()->textureUploads++;
                 g_rdPerf.textureUploads++;
             }
             continue;
         }
         const uint8_t levels = texLevels(t);
-        if (t->rhi.id && t->mipLevels != levels) {
-            /* the filter option changed: a new texture with the new
-             * level count (the old one is destroyed after the frames in
+        /* a sheet's texels baked at 1x and 2x (rd__sheet_baked), its
+         * coverage at 3x and 4x */
+        const uint8_t baked = (uint8_t)rd__sheet_baked(t);
+        if (t->rhi.id && (t->mipLevels != levels || t->sheetBaked != baked)) {
+            /* the filter option changed, or a sheet's layout (its scale,
+             * ICO_RD_SHEET_SHADER): a new texture with the new level count
+             * or layout (the old one is destroyed after the frames in
              * flight, rhi_destroy_texture) */
             rhi_destroy_texture(t->rhi);
             t->rhi = (RhiTexture){0};
@@ -487,14 +519,16 @@ void rd__upload_dirty_textures(void)
         }
         /* the format's bytes per texel; the changed rectangle only, unless
          * the RHI texture is new or has a mip chain to rebuild */
-        const uint32_t bpp = rd__texel_bytes(t->format);
+        const uint32_t bpp = rd__tex_device_bytes(t);
+        const uint32_t dw = rd__tex_device_w(t), dh = rd__tex_device_h(t);
         int whole = levels > 1;
         if (!t->rhi.id) {
-            t->rhi = rhi_create_texture(
-                &(RhiTextureDesc){t->w, t->h, levels, rd__texel_rhi_format(t->format),
-                                  RHI_TEX_SAMPLED | RHI_TEX_COPY_DST, "rd texture", 0});
+            t->rhi = rhi_create_texture(&(RhiTextureDesc){dw, dh, levels, rd__tex_rhi_format(t),
+                                                          RHI_TEX_SAMPLED | RHI_TEX_COPY_DST,
+                                                          "rd texture", 0});
             t->state = RHI_STATE_UNDEFINED;
             t->mipLevels = levels;
+            t->sheetBaked = baked;
             if (!t->rhi.id) {
                 rdtex_text_upload_failed(t->name, t->w, t->h, t->format,
                                          "the graphics card refused the texture");
@@ -502,13 +536,21 @@ void rd__upload_dirty_textures(void)
             }
             whole = 1;
         }
-        uint32_t rx = 0, ry = 0, rw = t->w, rh = t->h;
+        /* the rectangle in the device texture's texels */
+        uint32_t rx = 0, ry = 0, rw = dw, rh = dh;
         if (!whole && t->dirtyX1 > t->dirtyX0 && t->dirtyY1 > t->dirtyY0 && t->dirtyX1 <= t->w &&
             t->dirtyY1 <= t->h) {
             rx = t->dirtyX0;
             ry = t->dirtyY0;
             rw = t->dirtyX1 - t->dirtyX0;
             rh = t->dirtyY1 - t->dirtyY0;
+            if (baked) {
+                /* every texel that reads a changed one (rd_tex.c
+                 * rd__sheet_bake_grow: at 1x the rim's reach and one, above
+                 * it the rims' sheet texels), in the page and its apron;
+                 * the page's (x, y) is the device's (x + AX, y + AY) */
+                rd__sheet_bake_grow(t, dw, dh, &rx, &ry, &rw, &rh);
+            }
         }
         const uint32_t pitch = (rw * bpp + pitchA - 1) / pitchA * pitchA;
         uint64_t off = rd__ring_alloc((uint64_t)pitch * rh, offA);
@@ -516,9 +558,22 @@ void rd__upload_dirty_textures(void)
             rdtex_text_upload_failed(t->name, t->w, t->h, t->format, "no room in the upload ring");
             continue;
         }
-        for (uint32_t y = 0; y < rh; y++) {
-            memcpy(g_rd.ringMap[rd__ring_slot()] + off + (uint64_t)y * pitch,
-                   t->pixels + ((size_t)(ry + y) * t->w + rx) * bpp, (size_t)rw * bpp);
+        if (baked) {
+            /* the finished texels (rd_tex.c rd__sheet_bake_rect at 1x,
+             * rd__sheet_bake_scaled_rect above), in the page's
+             * coordinates */
+            if (!rd__sheet_bake_texels(t, (int32_t)rx - ICO_SHEET_BAKE_AX,
+                                       (int32_t)ry - ICO_SHEET_BAKE_AY, (int32_t)rw, (int32_t)rh,
+                                       g_rd.ringMap[rd__ring_slot()] + off, pitch)) {
+                rdtex_text_upload_failed(t->name, t->w, t->h, t->format,
+                                         "no memory to bake the menu text");
+                continue;
+            }
+        } else {
+            for (uint32_t y = 0; y < rh; y++) {
+                memcpy(g_rd.ringMap[rd__ring_slot()] + off + (uint64_t)y * pitch,
+                       t->pixels + ((size_t)(ry + y) * t->w + rx) * bpp, (size_t)rw * bpp);
+            }
         }
         rd__transition(rd__replay_cl(), t->rhi, &t->state, RHI_STATE_COPY_DST);
         rhi_cmd_copy_buffer_to_texture(rd__replay_cl(), g_rd.ring[rd__ring_slot()], off, pitch,
@@ -541,7 +596,7 @@ void rd__upload_dirty_textures(void)
         t->dirty = 0;
         t->dirtyX0 = t->dirtyY0 = t->dirtyX1 = t->dirtyY1 = 0;
         stillDirty--;
-        g_rd.stats.textureUploads++;
+        rd__stats_here()->textureUploads++;
         g_rdPerf.textureUploads++;
         /* a texture uploaded on 60 replays in a row is named once */
         t->uploadStreak = t->lastUpload + 2 >= g_rd.replayCounter ? t->uploadStreak + 1 : 0;
@@ -627,6 +682,7 @@ static void workClear(void);
 
 void rd__clear_new_targets(void)
 {
+    rd__clear_skip_begin(); /* a clear an earlier replay left undrawn (rd_pass_cut.c) */
     int named = 0;
     for (int i = 0; i < RD_MAX_TARGETS; i++) {
         RdTargetRec *t = &g_rd.targets[i];
@@ -634,6 +690,12 @@ void rd__clear_new_targets(void)
             continue;
         }
         t->clearPending = 0;
+        /* a shadow count target nothing reads before its resolve: left
+         * undrawn (rd_shadow_merge.c; the tests' poison clears it to 0x5A) */
+        const int cnt = i >= RD_TARGET_COUNT ? rd__shadow_count_clear(t) : 0;
+        if (cnt == 1) {
+            continue;
+        }
         /* in the state the target's passes take (rd_replay.c beginPass): no transition
          * back and forth between this pass and the next */
         const bool readable = rd__pass_wants_readable(t);
@@ -644,6 +706,10 @@ void rd__clear_new_targets(void)
         p.color[0].texture = t->color;
         p.color[0].load = RHI_LOAD_CLEAR;
         p.color[0].readable = readable;
+        if (cnt == 2) {
+            p.color[0].clear[0] = p.color[0].clear[1] = p.color[0].clear[2] = p.color[0].clear[3] =
+                90.0f / 255.0f; /* 0x5A */
+        }
         p.colorCount = 1;
         if (t->withDepth && t->depth.id) {
             rd__transition(rd__replay_cl(), t->depth, &t->depthState, RHI_STATE_DEPTH_WRITE);

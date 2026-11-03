@@ -55,10 +55,12 @@ take a few minutes. After a few seconds the screen also says about how
 much time is left, worked out from how fast the count has gone so far, so
 it is only a rough guess. The game keeps working meanwhile: leave it open
 until the count is done. On a phone the screen also says that this happens
-once after an update: the first start after an update prepares the
-graphics from nothing, because what was prepared before the update is
-thrown away. The game keeps what it prepares now, and later starts skip this
-screen or show it only for a moment. If you close the game while
+once after an update that changes the graphics: the first start after
+such an update prepares the graphics from nothing, because what was
+prepared for the old graphics is thrown away. An update that leaves the
+graphics as they were keeps what was prepared, and the screen shows only
+for a moment. The game keeps what it prepares now, and later starts skip
+this screen or show it only for a moment. If you close the game while
 it says this, the next start shows it again. If the game closes by itself
 on this screen, see [The game closes by itself](#the-game-closes-by-itself).
 
@@ -100,15 +102,31 @@ log of the start after it: they say what was being prepared and how much
 memory the game was using.
 
 On a phone or a handheld the system tells the game when the device itself
-runs low on memory. If it says so while the game prepares its graphics,
-the game stops preparing, goes on to the title and prepares the rest the
-first time the game needs it. The next start then skips **Preparing
-graphics** and goes straight to the title; the first minutes of play can
-pause for a moment here and there while graphics are prepared. Apps left
-open in the background hold memory too: close them before you start the
-game. A new version of the game tries preparing everything at the start
-again. The log says how much memory the device had left each time the
-system asked the game to free some.
+runs low on memory, and the game also checks how much memory the device has
+free. On a phone or handheld using Qualcomm's own graphics driver (most
+Snapdragon devices without a Turnip driver package) it stops when less than
+about 17 % of the device's memory is free (never
+asking for more than 2 GB free on a device with more than 8 GB); on every
+other phone it stops only when less than about 512 MB is free on a device
+with more than 8 GB (17 % on smaller ones), which is what preparing the
+graphics needs with room to spare. `pipeline_memory_floor_mb` under `[dev]`
+in `config.toml` sets that in MB, 0 turns the check off.
+
+If the free memory runs short while the game prepares its graphics, the
+game stops preparing and goes on to the title. On most phones it then
+finishes preparing quietly in the background while you play, a little at a
+time, and waits whenever the game is busy, so the first new rooms do not
+freeze for seconds; the next start prepares everything at the start again.
+On a device using Qualcomm's own graphics driver (above), on one whose
+graphics driver the game cannot tell, and whenever the system itself said it
+was low on memory, the game prepares the rest the first time the game needs
+it instead: the next start then skips **Preparing graphics** and goes
+straight to the title, and the first minutes of play can pause for a moment
+here and there while graphics are prepared. Apps left open in the
+background hold memory too: close them before you start the game. A new
+version of the game tries preparing everything at the start again. The log
+says how much memory the device had left each time the system asked the
+game to free some, and how far the preparing in the background got.
 
 If the whole phone or handheld freezes on **Preparing graphics** and you
 have to restart it, restart the device and start the game again: the game
@@ -120,9 +138,35 @@ and writes it into `config.toml`. If it keeps freezing, send the log from
 the start after the freeze: it lists how long each group of graphics took
 to prepare before the freeze and how much memory the game was using.
 
+On a phone or a handheld, if the graphics driver stops answering while
+the game prepares a piece of graphics, the game now closes itself after
+about 10 seconds with a message that says so, instead of waiting until
+the device closes it or freezes. Start it again. When the piece it stopped
+on is one of the shapes the game can draw another way, the next start
+shows a message that says so, and from then on the game draws those shapes
+the other way on that device and never prepares the piece again. The
+other way can make a few of those shapes' colours a shade different. It
+writes this into `config.toml` as a `pipeline_skip` line under `[dev]`,
+which names the device and its graphics driver: after an update of the
+graphics driver the game tries the usual way again. To try it yourself
+before that, set the line to `pipeline_skip = ""` or delete it.
+
 If your `config.toml` has a line `vu_plain_only = true` or
-`vu_extended = true`, the game ignores it: every device now prepares the
-same 3D graphics. You can delete the line.
+`vu_extended = true`, the game ignores it: the game picks the 3D graphics
+for each device itself. You can delete the line.
+
+If you had to restart the phone by force while an update was installing or
+while the game was on **Preparing graphics** for the first time after it,
+the game may then refuse to open and show a box titled "SDL Error" saying a
+library "has bad ELF magic". The restart cut the update's files short, so
+the installed copy of the game is damaged. The game did not cause this and
+cannot repair it: the forced restart came before the phone had finished
+writing the update. Your saves and settings are not what is damaged. To fix it, uninstall the game and install the same
+download again. Uninstalling also deletes the game's folder with your
+saves, so first copy the `memcard` folder to a computer
+([where it is](ANDROID.md#where-your-files-are)). Before you install an
+update, close the other apps: after every update the game prepares its
+graphics in full once, and that needs the memory.
 
 ## The screen stays black
 
@@ -133,10 +177,17 @@ updating the graphics driver usually fixes it.
 
 **A black screen that never changes.** If the picture freezes or stays
 black and nothing changes, the graphics driver may have stopped
-responding without saying so. Wait: after about a minute the game closes
-by itself. Windows, Linux and Android show a message ("The graphics card stopped
-responding while the game was drawing", on a phone "The graphics driver
-stopped responding while the game was drawing"). Your last save is kept. Start the game
+responding without saying so. Wait: the game closes by itself, after
+about 15 seconds when it draws with Vulkan (always on a phone) and after
+about a minute with the other Graphics API choices. Windows, Linux and
+Android show a message ("The graphics card stopped responding while the
+game was drawing", on a phone "The graphics driver stopped responding while
+the game was drawing"). Your last save is kept. On a phone that uses its own
+Qualcomm (Adreno) driver, the message ends by pointing at **Options >
+Graphics driver > Add a driver**: a Turnip driver package often runs the
+game without the stop (see
+["ICO could not start the game's graphics with this phone's driver"](#error-messages)
+for where to get one and how to add it). Start the game
 again: the game treats this like any other time the graphics stop (see
 [The game closes by itself](#the-game-closes-by-itself) and the messages
 under [Error messages](#error-messages)): it keeps a copy of the picture
@@ -171,6 +222,22 @@ have started the game again since, it is `ico-pc-previous.log`) with a
 the moments the sound could not keep up. A short click when you go from one
 area to the next is the game stopping its sounds all at once, as it does on
 the PlayStation 2; the log writes down how loud each one was.
+
+## The sound cuts out or the game pauses briefly during loads
+
+The game reads its data and writes your saves where you put them. If that
+is a network drive, a USB stick or another slow drive, a load can take a
+fraction of a second or more, the game stops for that long, and the sound
+can cut out while it does. Open `ico-pc.log` (see [the log
+file](#the-log-file)) and look at the lines that start with `ico_pc: game
+data` and `ico_pc: user folder`: they say "on a network drive" or "on a
+removable drive" when that is where the folder is, and a line right after
+says so again. The `summary` line near the top ends with the same
+information ("drives: data fixed, user network"). Copy the game to a drive
+inside the computer and start it from there. In
+[portable mode](PORTABLE_MODE.md#keep-everything-in-one-folder) the saves
+sit beside the game, so a game on a network drive has its saves there too:
+turn portable mode off to keep the saves on the computer.
 
 ## No sound on Linux
 
@@ -224,6 +291,55 @@ other graphics settings to find what helps, say which ones: the log
 records each change you make to them. If it is slow only at one place or
 after one change, say where or which, and send one run that is slow and, if
 you can, one at Resolution 1x for comparison.
+
+## The picture freezes, flickers or the game closes during play
+
+The pictures are drawn and shown by a thread of their own, beside the
+game. If the picture stops moving, flickers or shows something out of
+place, or the game closes during play, and turning the game's own options
+back does not help, try it with everything on one thread: close the game,
+open `config.toml` from the folder with your saves
+([where that is](PORTABLE_MODE.md#where-your-saves-are)) in a text editor
+and add these two lines at the end (if the file already has a `[dev]`
+line, add only the second line under it):
+
+```toml
+[dev]
+render_thread = "off"
+```
+
+If that helps, send the log of a start with the problem and of one
+without it ([the log file](#the-log-file)): its line starting with
+`window: render thread:` says which way the game ran. To go back, delete
+the line.
+
+If the problem is in what is drawn (an object with the wrong picture on
+it, the wrong colours, or a shape that is missing) and it stays with the
+render thread off, try `bind_cache = false` under the same `[dev]` line
+instead: the game then gives the graphics card every drawing setting
+again before each step, rather than only the ones that changed. If that
+helps, say so in the report; the log's line starting with `bind cache:`
+says which way the game ran. To go back, delete the line.
+
+## The game runs on the slower graphics card of a laptop
+
+Many laptops have two graphics cards: a fast one and a power-saving one built into the processor.
+The game picks the fast one by itself. If it uses the slower one anyway, or you want the other
+one, open Options > Graphics and pick it in the **Graphics card** row, then Apply and Keep. The
+graphics setting for each app in Windows (Settings > System > Display > Graphics) and the NVIDIA
+or AMD control panel do not change the card the game uses; the row does. The line with
+`devices:` near the top of `logs/ico-pc.log` names every card the game found and the one it
+picked ([Choosing the graphics card](OPTIONS.md#choosing-the-graphics-card)).
+
+## The game stutters on Windows and the log says the video memory is near its budget
+
+On Windows, the lines that start with `window: memory:` in the log end with the video memory the
+game uses and the budget Windows gives it, for example "video memory 870 MB of a budget of 920
+MB". If the log also has a line that says the driver may be paging, the graphics card has run out
+of memory and is swapping to the computer's own memory, which makes the game stop for a moment.
+Lower **Resolution** in Options, and close other programs that use the graphics card (a browser
+with many tabs, other games). Cards with 1 GB of memory are the ones that run into this at 2x or
+higher.
 
 ## White lines along walls while the camera moves
 
@@ -343,6 +459,27 @@ they were, and say in the report which one changed the water: set
 writes when you press F12 says what the water was drawn with, so press F12
 once for each try.
 
+## The game asks for the disc image again
+
+The game only needs your disc image the first time. If it asks again, and the
+box lists two folders it looked in for your game data, the new program is not
+seeing the folder the old one used. That happens when you moved to a new
+version and the old one kept its data in a folder named `userdata` beside the
+program (the portable download), or in your user folder
+([where that is](PORTABLE_MODE.md#where-your-saves-are)) while the new one
+looks elsewhere.
+
+- Copy the old `userdata` folder next to the new program (on Windows, into
+  the `x64` folder, beside `ico_pc_x64.exe`), or extract the new version over
+  the old folder, and start again. Your saves, save states and settings are
+  in it.
+- If you do not have the old folder any more, choose your disc image in the
+  window that opens: the game sets itself up again from it. Saves you had
+  are gone with the old folder unless you kept a copy of its `memcard`
+  folder.
+
+More in [moving to a new version](FAQ.md#moving-to-a-new-version).
+
 ## Error messages
 
 When the game finds a problem it cannot get past, it shows a message box
@@ -350,7 +487,10 @@ and closes, and the same text is in the log. Here is what the common ones
 mean.
 
 **"No ICO disc image was found or chosen."** The game needs your disc
-image the first time. Start it again and choose the file, or put the image
+image the first time. If you played a previous version, the box says which
+two folders it looked in for your game data: see
+[the game asks for the disc image again](#the-game-asks-for-the-disc-image-again).
+Otherwise start it again and choose the file, or put the image
 beside the program named `Ico_PAL.iso` for the European disc,
 `Ico_JPN.iso` for the Japanese disc, `Ico_KOR.iso` for the Korean disc,
 `Ico_USA.iso` for the North American disc, `Ico_CN.iso` for the Asian disc,
@@ -387,7 +527,7 @@ disc image once more.
 
 **"Could not open the game window."** (on a computer) or **"Could not start the
 game's graphics."** (on a phone) Your graphics driver or graphics chip does
-not support Vulkan 1.1 or later, the way the game talks to the graphics. Updating
+not support Vulkan 1.0 or later, the way the game talks to the graphics. Updating
 the graphics driver usually fixes it. On a phone, install the latest
 system update. The lines in the log that mention Vulkan say what is
 missing. If you added `backend=d3d12` to `ico-pc.ini` on Windows, delete
@@ -500,7 +640,12 @@ left off if it was not finished, and the game then starts as usual.
 
 **"The graphics driver stopped responding while the game was drawing ..."**
 (on a phone) The phone's graphics driver failed while drawing a picture,
-and the game has to close; your last save is kept. Start the game again.
+and the game has to close; your last save is kept. When the driver stops
+without saying so, the game notices within about 15 seconds of a still
+picture and shows this message. On a phone with a Qualcomm Snapdragon chip
+that uses its own graphics driver, the message ends with the other route:
+a Turnip driver package, chosen under **Options > Graphics driver > Add a
+driver** and used from the next start (see the driver note above). Start the game again.
 That start has the graphics driver check every read it makes, for that
 start only, which can keep it from stopping (the game may run a little
 slower). If the graphics driver stops again in that start or in the one
@@ -620,6 +765,69 @@ PlayStation controllers and most others still work; some older wheels,
 flight sticks and plain USB pads are found only that way and stop working.
 Play as before and send the log either way: it says whether the long waits
 stopped. If a controller of yours stops working, delete the line.
+
+## A save state will not load or save
+
+The game says why on the screen. In the Save states list, a slot that cannot
+be loaded is greyed and the line under the cards gives the reason:
+
+- **Saved by another version of the game.** A state only works in the exact
+  version that saved it. Go back to that version to use it, or save a new
+  one.
+- **Saved from another disc.** Each disc has its own four slots. Start the
+  game from the disc the state was saved on.
+- **A gameplay setting differs.** The message names the setting and the value
+  it had when you saved. Put the setting back (a few, such as Analogue stick
+  fix, Skip the opening and the Game variants, change how the game plays),
+  and the state loads.
+- **The state could not be restored; the game goes on.** The file is damaged,
+  or the game found something wrong in it. Your game carries on as it was.
+  Try another slot.
+- **Pause the game to save a state.** Saving only works from the pause menu.
+- **Not now: the game is loading or saving.** Wait a moment and try again
+  (for example while a room changes, the memory card is working or a movie
+  plays).
+- **The state could not be saved.** The folder is full or cannot be written.
+  Free some space and try again.
+- **Save states are off on this build.** The game cannot use them on
+  your device.
+
+If a state fails to load for any other reason, send a
+[problem report](#send-a-problem-report): the log has lines that start with
+`state:` that say what happened.
+
+## A backup will not save or restore
+
+Options > Extras > Back up your data and Restore from a backup say why in a
+message:
+
+- **Not now: the game is saving.** The memory card or a save state was being
+  written. Wait a moment and try again.
+- **There is nothing to back up yet.** The game has no memory card save, save
+  state or settings file yet.
+- **The data could not be written.** The place you chose is full, read-only or
+  gone (a USB stick taken out). Free some space or choose another place. When
+  restoring, the device itself is short of space.
+- **This file is not a backup made by this game.** Choose the `.zip` that
+  Back up your data saved. A zip you made yourself, or one that was unpacked
+  and packed again, is not taken.
+- **This backup was made by a newer version.** Update the game, then restore
+  it.
+- **This backup is damaged** or **holds files outside the game's own
+  folders.** The file changed after it was saved (a download that did not
+  finish, or a program that edited it). Use another copy.
+- **The backup could not be put in place** (a box when the game starts after a
+  restore). Something kept a file or folder busy, for example a file manager
+  or a cloud program that was syncing the game's folder. Your data is exactly
+  as it was. Close that program and restore again. If the box also says that
+  some of your data could not be put back, it names each such folder or file
+  and the copy beside it that holds your own data, such as
+  `memcard.old-1793530000` next to `memcard` in the game's user folder: close
+  the game, delete the folder or file it named (if it is there) and rename the
+  copy back to that name.
+
+The log has lines that start with `backup:` that say what happened, and a
+[problem report](#send-a-problem-report) carries them.
 
 ## Texture packs and model packs
 

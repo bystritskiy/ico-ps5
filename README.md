@@ -47,8 +47,9 @@ the PS2's unless you choose Original. The mouse camera starts on.
   - a Steam Deck;
   - a 64-bit ARM Linux handheld or board with an up-to-date graphics
     driver;
-  - or a 64-bit Android phone or tablet with Android 10 or later, usually
-    one from 2022 or newer. [More about Android](docs/ANDROID.md);
+  - or a 64-bit Android phone or tablet with Android 8 or later and
+    Vulkan 1.0 graphics, usually one from 2017 or newer.
+    [More about Android](docs/ANDROID.md);
   - or an iPhone (iOS 15 or newer) or an Apple-silicon Mac (macOS 12 or
     newer); see [Supported platforms](#supported-platforms).
 - **About 1 GB of free space** for the game's files, which the first start
@@ -62,7 +63,7 @@ the PS2's unless you choose Original. The mouse camera starts on.
 | Linux PC, 64-bit x86: Debian 13, Ubuntu 24.04 or newer | `-linux-x86_64.AppImage`, or `-linux.tar.gz` (or `-linux-portable.tar.gz`) | Built and checked by the automatic tests for every release. Draws with Vulkan, or OpenGL if your graphics driver has no Vulkan ([how](docs/OPTIONS.md#choosing-the-renderer)); OpenGL has only been checked on a software renderer. |
 | Steam Deck | `-linux-x86_64.AppImage` or `-linux.tar.gz` | Supported; [Steam Deck tips](docs/TROUBLESHOOTING.md#steam-deck). |
 | Linux handheld or board, 64-bit ARM: Debian 13, Ubuntu 24.04 or newer | `-linux-aarch64.AppImage`, or `-linux-arm64.tar.gz` (or `-linux-arm64-portable.tar.gz`) | Built for every release. |
-| Android phone or tablet, 64-bit, Android 10 or newer (usually 2022 or newer) | `-android.apk` | Supported. It can be slower than on a PC. [The Android guide](docs/ANDROID.md). |
+| Android phone or tablet, 64-bit, Android 8 or newer with Vulkan 1.0 graphics (usually 2017 or newer) | `-android.apk` | Supported. It can be slower than on a PC. Graphics driver packages need Android 9 or newer. [The Android guide](docs/ANDROID.md). |
 | iPhone, iOS 15 or newer, through [LiveContainer](https://github.com/LiveContainer/LiveContainer) | `-ios-unsigned.ipa` | The maintainer has no Apple device, so these builds are not tested here; problem reports are welcome. |
 | Apple-silicon Mac, macOS 12 or newer | `-macos-arm64.dmg` (or `-macos-arm64.zip`) | Not tested by the maintainer either. The first time, right-click **ICO** and choose **Open** ([how](#mac)). |
 
@@ -75,6 +76,11 @@ plays all seven.
 The easy way: the [download page](https://nathanialf.github.io/ico-pc/)
 picks the right file for your device. Or download the file for your device
 from the [releases page](https://github.com/nathanialf/ico-pc/releases).
+
+Moving up from a previous version: the plain download finds your saves by
+itself; the portable download keeps them in its own `userdata` folder, so copy
+that folder next to the new program
+([how](docs/FAQ.md#moving-to-a-new-version)).
 
 ### Windows
 
@@ -328,8 +334,11 @@ The title screen has an **Options** line and a **Quit to desktop** line
 **Mirror mode** and **New Game+** ([more about them](docs/OPTIONS.md#starting-a-new-game));
 the language and 50/60 Hz questions the European PS2 disc asks at first
 start live in Options instead, and the language can change in the middle of
-a game; the
-ending credits have one more heading and name, for this project; and the
+a game; the language list also has Russian and Brazilian Portuguese,
+players' translations of the menus and subtitles drawn as text over the
+English game; the
+ending credits also name this project, its translators, its contributors
+and its special thanks; and the
 pause menu shows your journey's numbers. Everything else is meant to match
 the PS2: if the picture or the timing is different from the console, that
 is a bug worth reporting. The full list of differences, written for people
@@ -344,12 +353,29 @@ contributors: [`docs/port/ARCHITECTURE.md`](https://github.com/nathanialf/ico-pc
 
 ## Special thanks
 
-- Sad Origami, for the [ICO PAL HD texture pack](https://ko-fi.com/s/7c0e3e044f),
-  for the support and blessing to test the port with it, and for
-  suggesting the download page.
+### Translation
+
+- bob-ttz and cobra838, for the Russian translation.
+- Igor Chagas (ichagas7), for the Brazilian Portuguese translation, with corrections by cobra838.
+
+Options > Language > Русский (bob-ttz) plays the game with bob-ttz's
+Russian menus and subtitles, and Options > Language > Русский (cobra838) with
+cobra838's own Russian translation of them, and Options > Language > Português (Brasil) (ichagas7)
+with Igor Chagas's Brazilian Portuguese ones (with corrections by cobra838). To translate the game into your language, see
+[Translating the game](docs/TRANSLATING.md).
+
+### Contributors
+
 - katsifolis, for the iOS support (through LiveContainer).
 - braito4, for the Apple-silicon macOS app.
 - neetgon, for the second player's gamepad.
+- KClough, for the arm64 Linux build.
+
+### Special thanks
+
+- Sad Origami, for the [ICO PAL HD texture pack](https://ko-fi.com/s/7c0e3e044f),
+  for the support and blessing to test the port with it, and for
+  suggesting the download page.
 
 ## Legal and licence
 

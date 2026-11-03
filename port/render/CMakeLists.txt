@@ -36,6 +36,9 @@ endif()
 add_library(ico_texpack_name STATIC texpack_name.c xxh3.c)
 target_include_directories(ico_texpack_name PUBLIC "${CMAKE_CURRENT_SOURCE_DIR}")
 target_compile_options(ico_texpack_name PRIVATE ${ICO_SEMANTIC_OPTIONS} ${ICO_PORT_WARNINGS})
+# the save state's build id and the simulation keys' hash are XXH3-64 too
+# (port/platform/state_file.c, sim_keys.c)
+target_link_libraries(ico_platform PUBLIC ico_texpack_name)
 
 # texpack_name_test: XXH3 against xxHash's sanity vectors, the block
 # swizzles against PCSX2's column writes, the CLUT orders, the expanded
@@ -75,6 +78,46 @@ add_executable(rd_bisect_plan_test test/rd_bisect_plan_test.c)
 target_compile_options(rd_bisect_plan_test PRIVATE ${ICO_SEMANTIC_OPTIONS} ${ICO_PORT_WARNINGS})
 target_link_libraries(rd_bisect_plan_test PRIVATE ico_bisect_plan)
 
+# ico_cache_name: the Vulkan pipeline cache file's name from the shader set
+# and the pipeline format, not the build (rd_cache_name.h).  Pure C on
+# ico_texpack_name's XXH3-64, built in every configuration; ico_render walks
+# its own shader table through it (rd_pipeline.c rd_pipeline_cache_file).
+add_library(ico_cache_name STATIC rd_cache_name.c)
+target_include_directories(ico_cache_name PUBLIC "${CMAKE_CURRENT_SOURCE_DIR}")
+target_compile_options(ico_cache_name PRIVATE ${ICO_SEMANTIC_OPTIONS} ${ICO_PORT_WARNINGS})
+target_link_libraries(ico_cache_name PUBLIC ico_texpack_name)
+
+# rd_cache_name_test: the same modules give the same name whatever the build,
+# one byte, a length, a name, a stage, the order or the format changed gives
+# another, the name's form and its buffer (CPU only)
+add_executable(rd_cache_name_test test/rd_cache_name_test.c)
+target_compile_options(rd_cache_name_test PRIVATE ${ICO_SEMANTIC_OPTIONS} ${ICO_PORT_WARNINGS})
+target_link_libraries(rd_cache_name_test PRIVATE ico_cache_name)
+
+# ico_pipe_finish: the background finisher's choices (rd_pipe_finish.h: the
+# next batch of the stopped start-up set, what the finisher does after a
+# picture).  Pure C, built in every configuration; ico_render keeps the keys
+# and the pipelines (rd_pipeline.c rd_pipelines_background_start).
+add_library(ico_pipe_finish STATIC rd_pipe_finish.c)
+target_include_directories(ico_pipe_finish PUBLIC "${CMAKE_CURRENT_SOURCE_DIR}")
+target_compile_options(ico_pipe_finish PRIVATE ${ICO_SEMANTIC_OPTIONS} ${ICO_PORT_WARNINGS})
+
+# rd_pipe_finish_test: the stopped set's remaining keys in its order, a
+# batch of one destination-read kind, each key once; the steps after a
+# picture (a batch in flight, the signal, the holds, the floor, the end)
+add_executable(rd_pipe_finish_test test/rd_pipe_finish_test.c)
+target_compile_options(rd_pipe_finish_test PRIVATE ${ICO_SEMANTIC_OPTIONS} ${ICO_PORT_WARNINGS})
+target_link_libraries(rd_pipe_finish_test PRIVATE ico_pipe_finish)
+
+# rd_submit_queue_test: the submit thread's queue (rd_submit_queue.h): jobs
+# in order, at most RD_SUBMIT_DEPTH queued and running, the running job
+# counted until it finishes, the finished times taken oldest first (the
+# oldest dropped past the depth), the present time taken once, the waits
+# and the block's means (CPU only)
+add_executable(rd_submit_queue_test test/rd_submit_queue_test.c rd_submit_queue.c)
+target_include_directories(rd_submit_queue_test PRIVATE "${CMAKE_CURRENT_SOURCE_DIR}")
+target_compile_options(rd_submit_queue_test PRIVATE ${ICO_SEMANTIC_OPTIONS} ${ICO_PORT_WARNINGS})
+
 # ico_gltf: glTF 2.0 for model packs (gltf.h), the dump's
 # .gltf + .bin writer and the .gltf/.glb reader.  CPU only, built in every
 # configuration: JSON through ico_json, files through host_fs (UTF-8 paths).
@@ -106,6 +149,9 @@ if(ICO_RUN_TESTS)
         CACHE PATH "A PCSX2 texture pack's replacements folder for the texture pack tests")
     add_test(NAME texpack_name COMMAND texpack_name_test)
     add_test(NAME rd_bisect_plan COMMAND rd_bisect_plan_test)
+    add_test(NAME rd_cache_name COMMAND rd_cache_name_test)
+    add_test(NAME rd_pipe_finish COMMAND rd_pipe_finish_test)
+    add_test(NAME rd_submit_queue COMMAND rd_submit_queue_test)
     add_test(NAME gltf COMMAND gltf_test "${CMAKE_CURRENT_BINARY_DIR}")
     add_test(NAME texpack_disc COMMAND texpack_disc_test "${ICO_DISC_IMAGE}" "${ICO_TEXPACK_DIR}"
              WORKING_DIRECTORY "${CMAKE_CURRENT_BINARY_DIR}")
@@ -120,6 +166,11 @@ endif()
 
 add_library(ico_render STATIC
     rd_alpha_plan.c # the alpha/blend planner: the passes a draw's alpha range can need
+    rd_aura_kernel.c # [dev] aura_kernel = gs: the aura's feedback read with the GS's taps (a measurement)
+    rd_aura_box.c # the aura's feedback read in two passes, the same bytes ([dev] aura_box)
+    rd_pass_area.c # the passes' render areas: the tiles their 2D draws touch ([dev] pass_area)
+    rd_pass_cut.c # passes cut: a clear carried, a clear nothing reads, the last touch's store ([dev] clear_carry, clear_skip, last_store)
+    rd_shadow_merge.c # the shadow volumes drawn in the scene's open pass (tile-based GPUs; ICO_RD_SHADOW_MERGE the tests')
     rd_blend_selftest.c # the exact blend's start-up check on the device (issue 89)
     rd_blur.c # staticBlur.c's sprites
     rd_blur_border.c # the post sprites' replay: the reduction's open border, its outer columns
@@ -131,15 +182,18 @@ add_library(ico_render STATIC
     rd_date_selftest.c # DATE through the stencil bit: the start-up check on the device
     rd_dst_read.c # the exact GS blend: the destination read
     rd_dump.c
+    rd_fades_fold.c # list 11's last full-frame lerp sprites applied by the reduction
     rd_fog_path.c # how the fog reads the depth: the paths, the probe, the self-test
     rd_frame.c
     rd_fx_plan.c # the frame-size post sprites' plan: fixed-function forms, local read
     rd_interp.c # interpolation between the retained frames
+    rd_interp_mesh.c # the interpolation's reads of a mesh's stream, kept while it is unchanged
     rd_reshow.c # a between-tick picture the same as the last rendered one's is shown again
     rd_glow_hold.c # the between-tick presents paste the glow of the tick's first present
     rd_join.c
     rd_local_probe.c # the desktop's local reads: the start-up cost probe
     rd_mesh.c
+    rd_occlusion.c # the replay's GPU draw issue and the hidden-draw measurement around it
     rd_msaa.c # the MSAA epoch's resolve pass (the covered-majority rule) and its close line
     rd_passring.c # the last passes recorded, for the device-loss report
     rd_profile.c # the device profile: what this device class gets 
@@ -153,6 +207,7 @@ add_library(ico_render STATIC
     rd_png.c
     rd_post.c
     rd_present.c
+    rd_present_info.c # rd_last_present_info's record: what the last present drew
     rd_replay.c
     rd_replay_tiler.c # the replay's tiler passes: DATE through the stencil bit, the blur fold
     rd_replay_vu.c # the replay's VU draws
@@ -164,7 +219,13 @@ add_library(ico_render STATIC
     rd_shadow_one.c # the shadow count resolved in one draw from the stencil view
     rd_shadow_selftest.c # the shadow count's one draw: the start-up check on the device
     rd_store_plan.c # the depth stores and loads a replay drops: no later pass touches the depth
+    rd_submit.c # a replay's end: the present's pass, the submit and the present
+    rd_submit_queue.c # the submit thread's queue (pure)
+    rd_submit_thread.c # the pictures' submit and present on a thread of their own
+    rd_thread.c # the renderer on the window's render thread: the hand-over, the retire list
     rd_tex.c
+    rd_uber.c # GS state as shader data where the device orders the colour read
+    rd_tex_decode.c # the texture decode pool: rdtex_store's decodes off the game thread
     rd_water.c # block targets, aliases, camera scopes
     rd_video.c # the FMV picture (port/fmv/rd_video.h)
     texpack_dds.c # texture packs: the DDS and PNG loaders (texpack.h)
@@ -175,7 +236,10 @@ target_include_directories(ico_render
     PUBLIC "${CMAKE_CURRENT_SOURCE_DIR}"
     PRIVATE "${CMAKE_SOURCE_DIR}/port/shaders")
 target_compile_options(ico_render PRIVATE ${ICO_SEMANTIC_OPTIONS} ${ICO_PORT_WARNINGS})
-target_link_libraries(ico_render PUBLIC ico_rhi_vk ico_shaders ico_vu1_ref ico_texpack_name)
+target_link_libraries(ico_render PUBLIC ico_rhi_vk ico_shaders ico_vu1_ref ico_texpack_name
+                      ico_cache_name ico_pipe_finish)
+# rd_tex_decode.c: the decode pool's threads (port/platform/ico_thread.h)
+target_link_libraries(ico_render PUBLIC ico_thread)
 # texpack.c, modelpack.c: the selected disc's pack folder (port/core)
 target_link_libraries(ico_render PUBLIC ico_region)
 # texture packs: texpack_png.c inflates with miniz's tinfl
@@ -225,6 +289,19 @@ add_executable(rd_state_test test/rd_state_test.c)
 target_compile_options(rd_state_test PRIVATE ${ICO_SEMANTIC_OPTIONS} ${ICO_PORT_WARNINGS})
 target_include_directories(rd_state_test PRIVATE "${CMAKE_SOURCE_DIR}/port/shaders")
 target_link_libraries(rd_state_test PRIVATE ico_render)
+
+# rd_sheet_bake_test: the 1x sheet texels baked on the CPU (rd_tex.c
+# rd__sheet_bake_rect) against font_sheet_ps's CPU reference (ico_sheet_ref)
+# at every texel of the page and its apron: every glyph of the fonts' Latin,
+# punctuation and symbol ranges and the font corpus's lines rasterised at 1x
+# (font.c ui__sheet_raster_line; port/ui adds ico_ui_font_rd's objects and
+# port/ui's headers) on pages packed with menu_font.c's gaps, the light inks'
+# levels, the faint rim and the plain style with the dither on and off, the
+# grown rectangle of a change, ink on the page's edges (CPU only)
+add_executable(rd_sheet_bake_test test/rd_sheet_bake_test.c)
+target_include_directories(rd_sheet_bake_test PRIVATE "${CMAKE_SOURCE_DIR}/port/shaders")
+target_compile_options(rd_sheet_bake_test PRIVATE ${ICO_SEMANTIC_OPTIONS} ${ICO_PORT_WARNINGS})
+target_link_libraries(rd_sheet_bake_test PRIVATE ico_render ico_sheet_ref)
 
 # rd_pixel_test: GS sprite rasterisation, reduction against a CPU reference,
 # blend_int feedback over 100 frames, dump -> load -> replay, pipeline count
@@ -286,15 +363,26 @@ target_compile_options(rd_tex_test PRIVATE ${ICO_SEMANTIC_OPTIONS} ${ICO_GAME_LA
                        ${ICO_GAME_WARNINGS})
 target_link_libraries(rd_tex_test PRIVATE ico_render ico_math ico_options)
 
+# rd_tex_pool_test: the texture decode pool (rd_tex_decode.h) against the
+# game thread's decode: 200 textures of every format and TEXA mode, their
+# levels, updates queued behind their creates, the bounded queue's fallback,
+# byte for byte; on a device (77 without one) the uploads' alpha scans
+add_executable(rd_tex_pool_test test/rd_tex_pool_test.c)
+target_include_directories(rd_tex_pool_test PRIVATE "${CMAKE_SOURCE_DIR}/port/rhi")
+target_compile_options(rd_tex_pool_test PRIVATE ${ICO_SEMANTIC_OPTIONS} ${ICO_PORT_WARNINGS})
+target_link_libraries(rd_tex_pool_test PRIVATE ico_render)
+
 # rd_gsbase_test: GsBase.c's host path with the 2D layer
 # (GifPacket.c, DisplayList.c, DmaPacket.c) as the window build has them,
 # the rest of the game stubbed: frame lifecycle, field parity, camera
 # packing, Z scale and the post passes against CPU references; with
 # port/game/photo_view.c, photo mode's camera in the game's
-# matrices (photo_mode.c from ico_options).
+# matrices (photo_mode.c from ico_options), and port/game/eye_trail.c, whose
+# session line its leave writes.
 add_executable(rd_gsbase_test test/rd_gsbase_test.c
     "${CMAKE_SOURCE_DIR}/ico2/seki/src/GsBase.c"
     "${CMAKE_SOURCE_DIR}/port/game/photo_view.c"
+    "${CMAKE_SOURCE_DIR}/port/game/eye_trail.c"
     "${CMAKE_SOURCE_DIR}/ico2/seki/src/GifPacket.c"
     "${CMAKE_SOURCE_DIR}/ico2/seki/src/DisplayList.c"
     "${CMAKE_SOURCE_DIR}/ico2/seki/src/DmaPacket.c"
@@ -425,12 +513,15 @@ target_compile_options(rd_perf_test PRIVATE ${ICO_SEMANTIC_OPTIONS} ${ICO_PORT_W
 target_include_directories(rd_perf_test PRIVATE "${CMAKE_SOURCE_DIR}/port/rhi")
 target_link_libraries(rd_perf_test PRIVATE ico_render)
 
-# rd_alpha_plan_test, rd_fx_frame_test, rd_vu_frac_test: the pixel diet's
-# planners (rd_alpha_plan.c, rd_fx_plan.c, rd_pixel_plan.c), CPU only: the
-# alpha range's truth table and the blend identities, the frame-size fold and
-# the premultiplied identity, the planes rule's truth table and the VS->PS
-# prefix match.
-foreach(_t rd_alpha_plan rd_fx_frame rd_vu_frac)
+# rd_alpha_plan_test, rd_fx_frame_test, rd_vu_frac_test, rd_fades_fold_test:
+# the pixel diet's planners (rd_alpha_plan.c, rd_fx_plan.c, rd_pixel_plan.c,
+# rd_fades_fold.c), CPU only: the alpha range's truth table and the blend
+# identities, the frame-size fold and the premultiplied identity, the planes
+# rule's truth table and the VS->PS prefix match, and the sprite planes' skip
+# (issue 161); the fades fold's step against the GS blend, its bar rows and
+# its plan on recorded frames (the fade, the letterbox, the brightness, and
+# the frames it leaves alone).
+foreach(_t rd_alpha_plan rd_fx_frame rd_vu_frac rd_fades_fold)
     add_executable(${_t}_test test/${_t}_test.c)
     target_compile_options(${_t}_test PRIVATE ${ICO_SEMANTIC_OPTIONS} ${ICO_PORT_WARNINGS})
     target_include_directories(${_t}_test PRIVATE "${CMAKE_SOURCE_DIR}/port/rhi"
@@ -554,6 +645,28 @@ add_executable(rd_fog_selftest_test test/rd_fog_selftest_test.c)
 target_compile_options(rd_fog_selftest_test PRIVATE ${ICO_SEMANTIC_OPTIONS} ${ICO_PORT_WARNINGS})
 target_include_directories(rd_fog_selftest_test PRIVATE "${CMAKE_SOURCE_DIR}/port/rhi")
 target_link_libraries(rd_fog_selftest_test PRIVATE ico_render)
+
+# rd_store_plan_test: the store plan's keep (rd_store_plan.c): the start's
+# self-tests keep no depth (the shadow count's frame reads SCENE's depth with
+# no clear of its own), a fresh target read before the frame's clear is not
+# kept and the next frame drops its store, a frame reading the depth the
+# replay before left keeps it from then on.
+add_executable(rd_store_plan_test test/rd_store_plan_test.c)
+target_compile_options(rd_store_plan_test PRIVATE ${ICO_SEMANTIC_OPTIONS} ${ICO_PORT_WARNINGS})
+target_include_directories(rd_store_plan_test PRIVATE "${CMAKE_SOURCE_DIR}/port/rhi")
+target_link_libraries(rd_store_plan_test PRIVATE ico_render)
+
+# rd_pass_cut_test: the passes cut (rd_pass_cut.c), each on against off on
+# frames built here: a clear carried into the next pass (one pass fewer, the
+# same bytes), the clear skip's decision and its lazy clear (drawn on a read
+# and at a later replay that draws on the target first, forgotten after one
+# that clears it), the depth store of the pass holding the last touch
+# dropped (the same bytes under the poison) and kept where a command the cut
+# does not take lies between.
+add_executable(rd_pass_cut_test test/rd_pass_cut_test.c)
+target_compile_options(rd_pass_cut_test PRIVATE ${ICO_SEMANTIC_OPTIONS} ${ICO_PORT_WARNINGS})
+target_include_directories(rd_pass_cut_test PRIVATE "${CMAKE_SOURCE_DIR}/port/rhi")
+target_link_libraries(rd_pass_cut_test PRIVATE ico_render)
 
 # rd_local_probe_test: the desktop's local-read probe's verdict
 # (rd_local_probe.c rd__local_probe_keep) on synthetic times, no device.
@@ -779,8 +892,9 @@ target_include_directories(rd_stream_audit_test PRIVATE ../platform
 target_link_libraries(rd_stream_audit_test PRIVATE ico_render ico_vu1_ref ico_miniz ico_host_fs)
 
 # Windows: SDL3.dll beside the programs
-ico_copy_sdl3_dll(texpack_test texpack_e2e_test texpack_export_test rd_replay_tool rd_state_test rd_pixel_test
-                  rd_layout_test rd_tex_test rd_gsbase_test rd_mesh_test modelpack_test
+ico_copy_sdl3_dll(texpack_test texpack_e2e_test texpack_export_test rd_replay_tool rd_state_test
+                  rd_sheet_bake_test rd_pixel_test
+                  rd_layout_test rd_tex_test rd_tex_pool_test rd_gsbase_test rd_mesh_test modelpack_test
                   rd_shadow_test rd_fog_test rd_fog_selftest_test rd_blend_selftest_test
                   rd_vuprepass_selftest_test rd_blur_test rd_water_test rd_raw_test rd_debug_test
                   rd_present_test rd_filter_test rd_interp_test rd_still_test rd_mirror_test rd_msaa_test rd_mip_test
@@ -791,6 +905,9 @@ ico_copy_sdl3_dll(texpack_test texpack_e2e_test texpack_export_test rd_replay_to
 
 if(ICO_RUN_TESTS)
     add_test(NAME rd_state COMMAND rd_state_test "${CMAKE_CURRENT_BINARY_DIR}")
+    add_test(NAME rd_sheet_bake
+             COMMAND rd_sheet_bake_test "${CMAKE_SOURCE_DIR}/port/ui/test/font_corpus")
+    set_tests_properties(rd_sheet_bake PROPERTIES TIMEOUT 900)
     add_test(NAME rd_pixel COMMAND rd_pixel_test "${CMAKE_CURRENT_BINARY_DIR}")
     add_test(NAME rd_native COMMAND rd_native_test)
     set_tests_properties(rd_native PROPERTIES SKIP_RETURN_CODE 77 TIMEOUT 1500)
@@ -819,6 +936,8 @@ if(ICO_RUN_TESTS)
     set_tests_properties(texpack_export_disc PROPERTIES SKIP_RETURN_CODE 77
                          FIXTURES_REQUIRED texpack_names)
     set_tests_properties(rd_tex PROPERTIES SKIP_RETURN_CODE 77)
+    add_test(NAME rd_tex_pool COMMAND rd_tex_pool_test)
+    set_tests_properties(rd_tex_pool PROPERTIES SKIP_RETURN_CODE 77)
     add_test(NAME rd_gsbase COMMAND rd_gsbase_test)
     set_tests_properties(rd_gsbase PROPERTIES SKIP_RETURN_CODE 77)
     add_test(NAME gsb_cull COMMAND gsb_cull_test)
@@ -928,7 +1047,8 @@ if(ICO_RUN_TESTS)
                                                              FIXTURES_REQUIRED rd_dump TIMEOUT 600)
     # every pipeline a replay asks for is in the start-up set (rd_replay_tool --keys): each
     # dump of ICO_DUMPS at 1x, --enhanced 2x and --enhanced 2340x1080, on the fake phone
-    # limits and with the tile-based GPU's paths forced; skips without ICO_DUMPS or a device.
+    # limits, with the tile-based GPU's paths forced and under GS state as shader data
+    # (ICO_RD_UBER=on, the same paths); skips without ICO_DUMPS or a device.
     # The union of the asked keys is left in rd_replay_tool_keys/keys-<config>-<size>.txt
     add_test(NAME rd_replay_tool_keys
              COMMAND "${CMAKE_COMMAND}" -DTOOL=$<TARGET_FILE:rd_replay_tool>
@@ -988,7 +1108,7 @@ if(ICO_RUN_TESTS)
     set_tests_properties(rd_perf PROPERTIES SKIP_RETURN_CODE 77)
     add_test(NAME rd_display_change COMMAND rd_display_change_test)
     set_tests_properties(rd_display_change PROPERTIES SKIP_RETURN_CODE 77)
-    foreach(_t rd_alpha_plan rd_fx_frame rd_vu_frac)
+    foreach(_t rd_alpha_plan rd_fx_frame rd_vu_frac rd_fades_fold)
         add_test(NAME ${_t} COMMAND ${_t}_test)
         set_tests_properties(${_t} PROPERTIES SKIP_RETURN_CODE 77)
     endforeach()
@@ -1011,7 +1131,7 @@ if(ICO_RUN_TESTS)
     endif()
     if(_env)
         set_tests_properties(rd_water PROPERTIES ENVIRONMENT "${_env}")
-        set_tests_properties(rd_pixel rd_replay_tool rd_layout rd_tex rd_gsbase ${rd_mesh_SHARDS} modelpack
+        set_tests_properties(rd_pixel rd_replay_tool rd_layout rd_tex rd_tex_pool rd_gsbase ${rd_mesh_SHARDS} modelpack
                              rd_shadow rd_shadow_edges rd_fog rd_raw rd_debug rd_present rd_crt rd_interp rd_mirror rd_msaa rd_perf rd_display_change rd_native PROPERTIES ENVIRONMENT
                                                                            "${_env}")
         set_tests_properties(${rd_blur_SHARDS} PROPERTIES ENVIRONMENT "${_env}")
@@ -1097,7 +1217,7 @@ if(ICO_RUN_TESTS)
     # replay tool's --no-crack-fill and --stats line on rd_pixel's dump
     set(_crk "${CMAKE_CURRENT_SOURCE_DIR}/test/rd_crack.cmake")
     set(_crk_on "rd: crack fill: on above 1x \\(scale")
-    set(_crk_tail "texels: a run of texels no draw covered, or drawn over 1/64 of the depth behind both its ends, with a texel in front at each end takes the nearer end\\). \\[dev\\] crack_fill = false turns it off")
+    set(_crk_tail "texels: a run of texels no draw covered, or drawn over 1/64 of the depth behind both its ends, with a texel in front at each end takes the nearer end's colour after lists 4-6\\). \\[dev\\] crack_fill = false turns it off")
     set(_crk_one "rd: crack fill: the reach-1 shader \\(crack_fill1_ps: the four neighbours first\\) \\(scale 2x2, reach 1x1 texels\\)")
     foreach(_c "2|2x2, reach 1x1" "4|4x4, reach 2x2" "frac|2.81[23]x2.411, reach 2x2")
         string(REPLACE "|" ";" _cl "${_c}")
@@ -1172,10 +1292,11 @@ if(ICO_RUN_TESTS)
     # device profile): the filler on by default as on every class, the old
     # "off on this tile-based GPU until measured" line denied; [dev]
     # crack_fill = true (ICO_RD_CRACK_FILL=1) the same.  rd_crack_tiler_fold
-    # (rd_crack_test 2 fold, 77 without local read): on the fog's local read
-    # the fill is drawn in the scene pass the fog keeps (one pass more than
-    # without the filler, not two; the fog by the local read in the same
-    # replay) and SCENE equals the depth copy path's byte for byte; _mali
+    # (rd_crack_test 2 fold, 77 without local read; the old fold's name): on
+    # the fog's local read the fog draws in the scene pass and the fill after
+    # lists 4-6 (one pass more than without the filler, the fill's own; the
+    # fog by the local read in the same replay) and SCENE equals the depth
+    # copy path's byte for byte; _mali
     # the same under a phone GPU's limits (ICO_VK_FAKE_LIMITS=mali, the fog's
     # local read by ICO_RD_FOG_PATH=local on the desktop row)
     set(_crk_old_off "rd: crack fill: off on this tile-based GPU")
@@ -1190,8 +1311,8 @@ if(ICO_RUN_TESTS)
     foreach(_v tiler_fold tiler_fold_mali)
         add_test(NAME rd_crack_${_v}
                  COMMAND "${CMAKE_COMMAND}" -DTOOL=$<TARGET_FILE:rd_crack_test> "-DARGS=2|fold"
-                         "-DEXPECT=${_crk_on} 2x2, reach 1x1 ${_crk_tail} \\(drawn inside the scene pass with the local fog\\)"
-                         -P "${_crk}")
+                         "-DEXPECT=${_crk_on} 2x2, reach 1x1 ${_crk_tail}"
+                         "-DDENY=drawn inside the scene pass with the local fog" -P "${_crk}")
     endforeach()
     set_tests_properties(rd_crack_tiler rd_crack_tiler_fold PROPERTIES SKIP_REGULAR_EXPRESSION "SKIP:"
                                                    ENVIRONMENT "${_env};ICO_VK_FAKE_LIMITS=moltenvk")
@@ -1199,6 +1320,25 @@ if(ICO_RUN_TESTS)
                                                       ENVIRONMENT "${_env};ICO_VK_FAKE_LIMITS=moltenvk;ICO_RD_CRACK_FILL=1")
     set_tests_properties(rd_crack_tiler_fold_mali PROPERTIES SKIP_REGULAR_EXPRESSION "SKIP:"
                                                              ENVIRONMENT "${_env};ICO_VK_FAKE_LIMITS=mali;ICO_RD_FOG_PATH=local")
+    # the fill's place (rd_crack_fill.c rd__crack_fill_place) on the tile
+    # class's fakes: rd_crack_glow after the glow's cleanUpFB (its two
+    # sprites of SCENE's alpha alone stay in the fog's pass, the fill writes
+    # RGB alone after them), rd_crack_aura the first draw of the aura's
+    # paste pass; each against the same frame with the place pinned to the
+    # start of list 7: SCENE's bytes the same, two (glow) or one (aura)
+    # render passes fewer; the once lines matched
+    add_test(NAME rd_crack_glow
+             COMMAND "${CMAKE_COMMAND}" -DTOOL=$<TARGET_FILE:rd_crack_test> "-DARGS=2|glow"
+                     "-DEXPECT=${_crk_on} 2x2, reach 1x1 ${_crk_tail}"
+                     "-DEXPECT2=rd: crack fill: drawn after the glow's sprites that write SCENE's alpha alone"
+                     -P "${_crk}")
+    add_test(NAME rd_crack_aura
+             COMMAND "${CMAKE_COMMAND}" -DTOOL=$<TARGET_FILE:rd_crack_test> "-DARGS=2|aura"
+                     "-DEXPECT=${_crk_on} 2x2, reach 1x1 ${_crk_tail}"
+                     "-DEXPECT2=rd: crack fill: drawn as the first draw of the aura's paste pass on SCENE"
+                     "-DDENY=rd: crack fill: the aura's paste cannot take the fill" -P "${_crk}")
+    set_tests_properties(rd_crack_glow rd_crack_aura PROPERTIES SKIP_REGULAR_EXPRESSION "SKIP:"
+                         ENVIRONMENT "${_env};ICO_VK_FAKE_LIMITS=moltenvk")
     add_test(NAME rd_replay_tool_crack
              COMMAND "${CMAKE_COMMAND}" -DTOOL=$<TARGET_FILE:rd_replay_tool>
                      "-DARGS=${CMAKE_CURRENT_BINARY_DIR}/rd_pixel_frame.rddump|${CMAKE_CURRENT_BINARY_DIR}/rd_replay_tool_crack.png|--enhanced|--resolution|2x|--stats|--no-crack-fill"
@@ -1223,7 +1363,7 @@ if(ICO_RUN_TESTS)
                          "-DNEED_FILE=${_crk_room}"
                          "-DNEED=rd: msaa: ${_s} samples"
                          "-DEXPECT=${_crk_on} 2x2, reach 1x1 ${_crk_tail} \\(drawn after the MSAA resolve\\)"
-                         "-DEXPECT2=stats: crack fill on: 1 passes, [1-9][0-9]* pixels filled \\(1 replays counted; scale 2x2, reach 1x1 texels; 0 fogged replays above 1x not filled; 0 fills inside the scene pass with the local fog; 1 fills after the MSAA resolve\\)"
+                         "-DEXPECT2=stats: crack fill on: 1 passes, [1-9][0-9]* pixels filled \\(1 replays counted; scale 2x2, reach 1x1 texels; 0 fogged replays above 1x not filled; 1 fills after lists 4-6; 1 fills after the MSAA resolve; 0 fills in the aura's paste pass; 0 fills after the glow's alpha\\)"
                          "-DDENY=rd: crack fill: not drawn on SCENE" -P "${_crk}")
         set_tests_properties(rd_crack_resolved_msaa${_s} PROPERTIES SKIP_REGULAR_EXPRESSION "SKIP:"
                                                                      TIMEOUT 600)
@@ -1273,9 +1413,14 @@ if(ICO_RUN_TESTS)
                      "-DEXPECT=Full pixel on, border mask off: [0-9]+ render-target reads clamped, 0 block reads kept on REPEAT"
                      -DSHA=613d1be7e8d7c1437ffa90c237eed6dfb7db2995e39a708270403afee18e1d28
                      ${_rip_py} -P "${_rip}")
+    # the pinned SHA-256s are of the pictures without the fades fold: above 1x the
+    # brightness step folded into the reduction (GPUROUND) moves the ripple frame's
+    # pixels by one level (591,187 of them on v83439), inside the fold's bound, which
+    # rd_fades_fold_ab tests; these tests pin the water's exact bytes
     set_tests_properties(rd_replay_tool_ripple rd_replay_tool_ripple_447 rd_replay_tool_ripple_436
                          rd_replay_tool_mirror_floor
-                         PROPERTIES SKIP_REGULAR_EXPRESSION "SKIP:" TIMEOUT 600)
+                         PROPERTIES SKIP_REGULAR_EXPRESSION "SKIP:" TIMEOUT 600
+                                    ENVIRONMENT "ICO_RD_FADES_FOLD=0")
     # the still re-present (rd_reshow.c): a corpus dump as its own tick before
     # (nothing moves), 4 presents at Enhanced 4:3 2x at 1280x960: presents
     # 1..3 shown again, all 4 pictures byte for byte the ones rendered with
@@ -1308,6 +1453,30 @@ if(ICO_RUN_TESTS)
                      -P "${CMAKE_CURRENT_SOURCE_DIR}/test/rd_replay_tool_glow_hold.cmake")
     set_tests_properties(rd_replay_tool_glow_hold PROPERTIES SKIP_REGULAR_EXPRESSION "SKIP:"
                                                              TIMEOUT 900)
+    # the blended present's frame F12 saves (rd.h rd_dump_blended_arm),
+    # written by --save-blended from --interp T PREV, replayed on its own:
+    # SCENE and the presented picture byte for byte the --interp run's, and
+    # the same --interp run with the interpolation and the replays on the
+    # render thread (--render-thread sync and on: the picture and the saved
+    # frame byte for byte the main thread's).
+    # rd-01076 then rd-01077 at alpha 0.5, Enhanced 4:3 2x; the issue 163
+    # pair (the tablet's tick and the tick before) at its present's alpha
+    # 0.999000013 (the lavapipe A/B; Not Run without the dumps)
+    add_test(NAME rd_replay_tool_save_blended
+             COMMAND "${CMAKE_COMMAND}" -DTOOL=$<TARGET_FILE:rd_replay_tool>
+                     "-DPREV=${_gh}/rd-01076.rddump" "-DCUR=${_gh}/rd-01077.rddump" -DT=0.5
+                     "-DOUT=${CMAKE_CURRENT_BINARY_DIR}/rd_replay_tool_save_blended"
+                     "-DARGS=--enhanced|--aspect|4:3|--resolution|2x" "-DRT=sync|on"
+                     -P "${CMAKE_CURRENT_SOURCE_DIR}/test/rd_replay_tool_save_blended.cmake")
+    set(_sb163 "${CMAKE_SOURCE_DIR}/build-host/tmp/v097/evidence/163/frame/frame-20261031-211530-v10103")
+    add_test(NAME rd_replay_tool_save_blended_163
+             COMMAND "${CMAKE_COMMAND}" -DTOOL=$<TARGET_FILE:rd_replay_tool>
+                     "-DPREV=${_sb163}-prev.rddump" "-DCUR=${_sb163}.rddump" -DT=0.999000013
+                     "-DOUT=${CMAKE_CURRENT_BINARY_DIR}/rd_replay_tool_save_blended_163"
+                     "-DARGS=--resolution|2x|--full-height|--full-pixel" "-DRT=sync|on"
+                     -P "${CMAKE_CURRENT_SOURCE_DIR}/test/rd_replay_tool_save_blended.cmake")
+    set_tests_properties(rd_replay_tool_save_blended rd_replay_tool_save_blended_163
+                         PROPERTIES SKIP_REGULAR_EXPRESSION "SKIP:" TIMEOUT 900)
     # the fog on the depth's words copied out through a buffer
     # (ICO_RD_FOG_PATH=buffer, rd_fog_path.c: the fallback of a device whose
     # depth reads fail), on D32S8 and on D24S8 (the top byte masked off):
@@ -1414,11 +1583,34 @@ if(ICO_RUN_TESTS)
              COMMAND "${CMAKE_COMMAND}" -DTOOL=$<TARGET_FILE:rd_blend_selftest_test> -DMODE=storage
                      "-DNAME=exact \\(interlock\\)"
                      "-DRESULTS=storage (ok|fail) [0-9]+, ${_bst_kept}" -P "${_bst}")
+    # GS state as shader data (rd_uber.c, ICO_RD_UBER=on: lavapipe orders the
+    # attachment read): the attachment read taken for it and checked (the
+    # intra-draw overlap cell among the samples), kept; read white
+    # (ICO_RD_BLEND_SABOTAGE=attachment) it stays, [dev] uber = on keeping
+    # it, the failure logged; ICO_RD_BLEND=fixed (the start-up retry's)
+    # turns it off: the fixed-function blend
+    set(_bst_uber "fixed-function ok [0-2], GS state as shader data")
+    add_test(NAME rd_blend_selftest_uber
+             COMMAND "${CMAKE_COMMAND}" -DTOOL=$<TARGET_FILE:rd_blend_selftest_test> -DMODE=attachment
+                     "-DNAME=${_bst_att}" "-DRESULTS=attachment ok [01], ${_bst_uber}"
+                     "-DEXTRA=rd: pipelines: GS state as shader data: on \\(raster-order read, \\[dev\\] uber = on\\)"
+                     "-DEXTRA2=rd: profile: [^\n]*. GS state as shader data \\(raster-order read\\)"
+                     -P "${_bst}")
+    add_test(NAME rd_blend_selftest_uber_sabotage
+             COMMAND "${CMAKE_COMMAND}" -DTOOL=$<TARGET_FILE:rd_blend_selftest_test> -DMODE=attachment
+                     "-DNAME=${_bst_att}" "-DRESULTS=attachment fail [0-9]+, ${_bst_uber}"
+                     "-DFAIL=attachment fail [0-9]+" -P "${_bst}")
+    add_test(NAME rd_blend_selftest_uber_blend_fixed
+             COMMAND "${CMAKE_COMMAND}" -DTOOL=$<TARGET_FILE:rd_blend_selftest_test> -DMODE=fixed
+                     "-DNAME=${_bst_fix}" "-DRESULTS=${_bst_ok}"
+                     "-DEXTRA=rd: pipelines: GS state as shader data: off \\(\\[dev\\] blend = fixed\\)"
+                     -P "${_bst}")
     set(_bst_tests rd_blend_selftest rd_blend_selftest_sabotage rd_blend_selftest_adreno
                    rd_blend_selftest_adreno_forced rd_blend_selftest_no_dst
                    rd_blend_selftest_blend_attachment rd_blend_selftest_blend_exact
                    rd_blend_selftest_blend_storage rd_blend_selftest_blend_fixed
-                   rd_blend_selftest_moltenvk_storage)
+                   rd_blend_selftest_moltenvk_storage rd_blend_selftest_uber
+                   rd_blend_selftest_uber_sabotage rd_blend_selftest_uber_blend_fixed)
     set_tests_properties(${_bst_tests} PROPERTIES SKIP_REGULAR_EXPRESSION "SKIP:")
     set_tests_properties(rd_blend_selftest PROPERTIES ENVIRONMENT "${_bst_env}")
     set_tests_properties(rd_blend_selftest_sabotage
@@ -1437,6 +1629,12 @@ if(ICO_RUN_TESTS)
     set_tests_properties(rd_blend_selftest_blend_fixed PROPERTIES ENVIRONMENT "${_bst_env};ICO_RD_BLEND=fixed")
     set_tests_properties(rd_blend_selftest_moltenvk_storage
                          PROPERTIES ENVIRONMENT "${_bst_env_mvk};ICO_RD_BLEND=storage")
+    set_tests_properties(rd_blend_selftest_uber PROPERTIES ENVIRONMENT "${_bst_env};ICO_RD_UBER=on")
+    set_tests_properties(rd_blend_selftest_uber_sabotage
+                         PROPERTIES ENVIRONMENT
+                                    "${_bst_env};ICO_RD_UBER=on;ICO_RD_BLEND_SABOTAGE=attachment")
+    set_tests_properties(rd_blend_selftest_uber_blend_fixed
+                         PROPERTIES ENVIRONMENT "${_bst_env};ICO_RD_UBER=on;ICO_RD_BLEND=fixed")
     # the VU vertex pre-pass's self-test (rd_vuprepass_selftest.c): on
     # lavapipe the pre-pass draws the self-test's meshes byte for byte as
     # the programs' entries do and stays on, in the extended variant (a wide
@@ -1686,6 +1884,60 @@ if(ICO_RUN_TESTS)
     if(_env)
         set_tests_properties(rd_vumerge_ab PROPERTIES ENVIRONMENT "${_env}")
     endif()
+    # rd_vumerge_mali (test/rd_vumerge_mali.cmake, issue 164): the dumps of
+    # the machine-local list tools/vumerge_mali_dumps.txt (the Mali-G52
+    # reporter's frame, /primary/dev/ico-dumps/164/, the phone frames and a
+    # capture) on the plain device and under a phone GPU's limits without
+    # dual-source blending (ICO_VK_FAKE_LIMITS=mali ICO_VK_FAKE_NO_DUAL=1:
+    # every lerp draw two passes), under ICO_RD_BLEND=fixed: every named
+    # target byte for byte, the draw merge's figures and the fused pairs the
+    # plain device's (826 draws merged into 87 on the 164 frame); label
+    # mali; SKIP as rd_vustage_ab
+    file(MAKE_DIRECTORY "${CMAKE_CURRENT_BINARY_DIR}/vumerge_mali")
+    add_test(NAME rd_vumerge_mali
+             COMMAND "${CMAKE_COMMAND}" -DTOOL=$<TARGET_FILE:rd_replay_tool>
+                     "-DLIST=${CMAKE_SOURCE_DIR}/tools/vumerge_mali_dumps.txt"
+                     "-DOUT=${CMAKE_CURRENT_BINARY_DIR}/vumerge_mali"
+                     -P "${CMAKE_CURRENT_SOURCE_DIR}/test/rd_vumerge_mali.cmake")
+    set_tests_properties(rd_vumerge_mali PROPERTIES SKIP_REGULAR_EXPRESSION "SKIP:" TIMEOUT 1800
+                                                     LABELS mali)
+    if(_env)
+        set_tests_properties(rd_vumerge_mali PROPERTIES ENVIRONMENT "${_env}")
+    endif()
+    # rd_occlusion_tool (test/rd_occlusion_tool.cmake, docs/port/RENDER.md
+    # "Culling"): rd_replay_tool --occlusion on the first dump of the
+    # machine-local list tools/occlusion_corpus.txt here, at Original 4:3 1x:
+    # the hidden-draw line's shape and its --nop spec, then the plain replay
+    # and the replay with the hidden commands NOPs, DISPLAY and PRESENT byte
+    # for byte under ICO_RD_BLEND=fixed; SKIP without the list, a dump or a
+    # device
+    add_test(NAME rd_occlusion_tool
+             COMMAND "${CMAKE_COMMAND}" -DTOOL=$<TARGET_FILE:rd_replay_tool>
+                     "-DLIST=${CMAKE_SOURCE_DIR}/tools/occlusion_corpus.txt"
+                     "-DOUT=${CMAKE_CURRENT_BINARY_DIR}/occlusion_tool"
+                     -P "${CMAKE_CURRENT_SOURCE_DIR}/test/rd_occlusion_tool.cmake")
+    set_tests_properties(rd_occlusion_tool PROPERTIES SKIP_REGULAR_EXPRESSION "SKIP:" TIMEOUT 1800)
+    if(_env)
+        set_tests_properties(rd_occlusion_tool PROPERTIES ENVIRONMENT "${_env}")
+    endif()
+    # rd_noplanes_ab (test/rd_noplanes_ab.cmake, issue 161): the dumps of the
+    # machine-local list tools/noplanes_dumps.txt (the title and the boot,
+    # each drawing one screen-prim triangle key with planes, and a capture
+    # that draws none) with the sprite planes builds and without them
+    # (ICO_RD_NO_SPRITE_PLANES=1, the fallback [dev] pipeline_skip turns on):
+    # every target byte for byte on all four, the title's and the boot's 2
+    # commands each through the plain builds (none on the capture); SKIP as
+    # rd_vustage_ab
+    file(MAKE_DIRECTORY "${CMAKE_CURRENT_BINARY_DIR}/noplanes_ab")
+    add_test(NAME rd_noplanes_ab
+             COMMAND "${CMAKE_COMMAND}" -DTOOL=$<TARGET_FILE:rd_replay_tool>
+                     "-DLIST=${CMAKE_SOURCE_DIR}/tools/noplanes_dumps.txt"
+                     "-DOUT=${CMAKE_CURRENT_BINARY_DIR}/noplanes_ab"
+                     -P "${CMAKE_CURRENT_SOURCE_DIR}/test/rd_noplanes_ab.cmake")
+    set_tests_properties(rd_noplanes_ab PROPERTIES SKIP_REGULAR_EXPRESSION "SKIP:" TIMEOUT 1800)
+    if(_env)
+        set_tests_properties(rd_noplanes_ab PROPERTIES ENVIRONMENT "${_env}")
+    endif()
     # rd_vufuse_ab (test/rd_vufuse_ab.cmake): the same dumps and the phone's
     # frames (tools/vufuse_dumps.txt) with code 36's kicks under their own
     # pipelines (ICO_RD_VU_FUSE=0) and with the fused scissor pair
@@ -1707,6 +1959,97 @@ if(ICO_RUN_TESTS)
     if(_env)
         set_tests_properties(rd_vufuse_ab PROPERTIES ENVIRONMENT "${_env}")
     endif()
+    # the same two A/Bs and rd_vustage_ab on the frames rd_pixel leaves
+    # behind (every machine has them; CI's Direct3D 11 job runs them on WARP,
+    # tools/ci_d3d11_warp.sh, where the pre-pass's record is copied by the
+    # backend's compute shader since v0.10.0):
+    # rd_pixel_vu.rddump (64 code-32 draws of one prelit mesh under one state,
+    # a matrix each: the merge joins them), rd_pixel_vu36.rddump (a code-36
+    # strip, its first triangle cut, its second kicked: a fused pair's
+    # candidate) and rd_pixel_frame.rddump (no VU draw: both runs the same).
+    # The 16:9 and phone settings skip for these 4:3 frames by design
+    set(_vu_pixel_list "${CMAKE_CURRENT_BINARY_DIR}/rd_pixel_vu_dumps.txt")
+    file(WRITE "${_vu_pixel_list}" "rd_pixel_vu.rddump\nrd_pixel_vu36.rddump\nrd_pixel_frame.rddump\n")
+    file(MAKE_DIRECTORY "${CMAKE_CURRENT_BINARY_DIR}/vumerge_ab_pixel"
+         "${CMAKE_CURRENT_BINARY_DIR}/vufuse_ab_pixel" "${CMAKE_CURRENT_BINARY_DIR}/vustage_ab_pixel")
+    add_test(NAME rd_vustage_ab_pixel
+             COMMAND "${CMAKE_COMMAND}" -DTOOL=$<TARGET_FILE:rd_replay_tool>
+                     "-DLIST=${_vu_pixel_list}"
+                     "-DOUT=${CMAKE_CURRENT_BINARY_DIR}/vustage_ab_pixel"
+                     -P "${CMAKE_CURRENT_SOURCE_DIR}/test/rd_vustage_ab.cmake")
+    set_tests_properties(rd_vustage_ab_pixel PROPERTIES SKIP_REGULAR_EXPRESSION "SKIP:"
+                                                         FIXTURES_REQUIRED rd_dump TIMEOUT 600)
+    add_test(NAME rd_vumerge_ab_pixel
+             COMMAND "${CMAKE_COMMAND}" -DTOOL=$<TARGET_FILE:rd_replay_tool>
+                     "-DLIST=${_vu_pixel_list}"
+                     "-DOUT=${CMAKE_CURRENT_BINARY_DIR}/vumerge_ab_pixel"
+                     -P "${CMAKE_CURRENT_SOURCE_DIR}/test/rd_vumerge_ab.cmake")
+    set_tests_properties(rd_vumerge_ab_pixel PROPERTIES SKIP_REGULAR_EXPRESSION "SKIP:"
+                                                         FIXTURES_REQUIRED rd_dump TIMEOUT 600)
+    add_test(NAME rd_vufuse_ab_pixel
+             COMMAND "${CMAKE_COMMAND}" -DTOOL=$<TARGET_FILE:rd_replay_tool>
+                     "-DLIST=${_vu_pixel_list}" "-DEXTRA="
+                     "-DOUT=${CMAKE_CURRENT_BINARY_DIR}/vufuse_ab_pixel"
+                     -P "${CMAKE_CURRENT_SOURCE_DIR}/test/rd_vufuse_ab.cmake")
+    set_tests_properties(rd_vufuse_ab_pixel PROPERTIES SKIP_REGULAR_EXPRESSION "SKIP:"
+                                                        FIXTURES_REQUIRED rd_dump TIMEOUT 600)
+    # the merge and the fuse under GS state as shader data (rd_uber.c,
+    # ICO_RD_UBER=on: lavapipe orders the attachment read): the VU draws
+    # through the colour read, merged and fused, byte for byte as one GPU
+    # draw a draw and as the kicks apart; on rd_pixel's frames and on the
+    # corpus lists (SKIP without them)
+    file(MAKE_DIRECTORY "${CMAKE_CURRENT_BINARY_DIR}/vumerge_ab_pixel_uber"
+         "${CMAKE_CURRENT_BINARY_DIR}/vufuse_ab_pixel_uber"
+         "${CMAKE_CURRENT_BINARY_DIR}/vumerge_ab_uber" "${CMAKE_CURRENT_BINARY_DIR}/vufuse_ab_uber")
+    add_test(NAME rd_vumerge_ab_pixel_uber
+             COMMAND "${CMAKE_COMMAND}" -DTOOL=$<TARGET_FILE:rd_replay_tool>
+                     "-DLIST=${_vu_pixel_list}" "-DBLEND_ENV=ICO_RD_UBER=on"
+                     "-DOUT=${CMAKE_CURRENT_BINARY_DIR}/vumerge_ab_pixel_uber"
+                     -P "${CMAKE_CURRENT_SOURCE_DIR}/test/rd_vumerge_ab.cmake")
+    add_test(NAME rd_vufuse_ab_pixel_uber
+             COMMAND "${CMAKE_COMMAND}" -DTOOL=$<TARGET_FILE:rd_replay_tool>
+                     "-DLIST=${_vu_pixel_list}" "-DEXTRA=" "-DBLEND_ENV=ICO_RD_UBER=on"
+                     "-DOUT=${CMAKE_CURRENT_BINARY_DIR}/vufuse_ab_pixel_uber"
+                     -P "${CMAKE_CURRENT_SOURCE_DIR}/test/rd_vufuse_ab.cmake")
+    set_tests_properties(rd_vumerge_ab_pixel_uber rd_vufuse_ab_pixel_uber
+                         PROPERTIES SKIP_REGULAR_EXPRESSION "SKIP:" FIXTURES_REQUIRED rd_dump
+                                    TIMEOUT 600)
+    add_test(NAME rd_vumerge_ab_uber
+             COMMAND "${CMAKE_COMMAND}" -DTOOL=$<TARGET_FILE:rd_replay_tool>
+                     "-DLIST=${CMAKE_SOURCE_DIR}/tools/vustage_dumps.txt"
+                     "-DBLEND_ENV=ICO_RD_UBER=on"
+                     "-DOUT=${CMAKE_CURRENT_BINARY_DIR}/vumerge_ab_uber"
+                     -P "${CMAKE_CURRENT_SOURCE_DIR}/test/rd_vumerge_ab.cmake")
+    add_test(NAME rd_vufuse_ab_uber
+             COMMAND "${CMAKE_COMMAND}" -DTOOL=$<TARGET_FILE:rd_replay_tool>
+                     "-DLIST=${CMAKE_SOURCE_DIR}/tools/vustage_dumps.txt"
+                     "-DEXTRA=${CMAKE_SOURCE_DIR}/tools/vufuse_dumps.txt"
+                     "-DBLEND_ENV=ICO_RD_UBER=on"
+                     "-DOUT=${CMAKE_CURRENT_BINARY_DIR}/vufuse_ab_uber"
+                     -P "${CMAKE_CURRENT_SOURCE_DIR}/test/rd_vufuse_ab.cmake")
+    set_tests_properties(rd_vumerge_ab_uber PROPERTIES SKIP_REGULAR_EXPRESSION "SKIP:"
+                                                       TIMEOUT 3600)
+    set_tests_properties(rd_vufuse_ab_uber PROPERTIES SKIP_REGULAR_EXPRESSION "SKIP:"
+                                                      TIMEOUT 5400)
+    if(_env)
+        set_tests_properties(rd_vumerge_ab_pixel_uber rd_vufuse_ab_pixel_uber rd_vumerge_ab_uber
+                             rd_vufuse_ab_uber PROPERTIES ENVIRONMENT "${_env}")
+    endif()
+    # rd_vumerge_fallback (test/rd_vumerge_fallback.cmake): a merge build the
+    # driver refuses (faked: ICO_RD_FAKE_MERGE_FAIL=1) turns the merge off from
+    # the next replay, logged once, and the later replays draw what
+    # ICO_RD_VU_MERGE=0 draws (rd_replay_vu.c rd__vu_merge_fallback)
+    add_test(NAME rd_vumerge_fallback
+             COMMAND "${CMAKE_COMMAND}" -DTOOL=$<TARGET_FILE:rd_replay_tool>
+                     "-DDUMP=${CMAKE_CURRENT_BINARY_DIR}/rd_pixel_vu.rddump"
+                     "-DOUT=${CMAKE_CURRENT_BINARY_DIR}/vumerge_fallback"
+                     -P "${CMAKE_CURRENT_SOURCE_DIR}/test/rd_vumerge_fallback.cmake")
+    set_tests_properties(rd_vumerge_fallback PROPERTIES SKIP_REGULAR_EXPRESSION "SKIP:"
+                                                         FIXTURES_REQUIRED rd_dump TIMEOUT 300)
+    if(_env)
+        set_tests_properties(rd_vumerge_ab_pixel rd_vufuse_ab_pixel rd_vustage_ab_pixel
+                             rd_vumerge_fallback PROPERTIES ENVIRONMENT "${_env}")
+    endif()
     # rd_store_plan_ab (test/rd_store_plan_ab.cmake): the same dumps and the
     # phone's frame with every depth store kept (ICO_RD_STORE_PLAN=0), with the
     # store plan (rd_store_plan.c) and with every depth store dropped
@@ -1727,6 +2070,23 @@ if(ICO_RUN_TESTS)
     if(_env)
         set_tests_properties(rd_store_plan_ab PROPERTIES ENVIRONMENT "${_env}")
     endif()
+    # rd_thread_ab (test/rd_thread_ab.cmake): the same dumps through
+    # rd_replay_tool --render-thread off, sync and on (the replays, the
+    # interpolation and the renderer's calls on a thread of their own,
+    # rd_thread.h), at Original and Enhanced 2x and, for the F12 zips, the
+    # blended present at 0.5: every target's PNG byte for byte; SKIP as
+    # rd_vustage_ab
+    file(MAKE_DIRECTORY "${CMAKE_CURRENT_BINARY_DIR}/thread_ab")
+    add_test(NAME rd_thread_ab
+             COMMAND "${CMAKE_COMMAND}" -DTOOL=$<TARGET_FILE:rd_replay_tool>
+                     "-DLIST=${CMAKE_SOURCE_DIR}/tools/vustage_dumps.txt"
+                     "-DEXTRA=${CMAKE_SOURCE_DIR}/tools/vufuse_dumps.txt"
+                     "-DOUT=${CMAKE_CURRENT_BINARY_DIR}/thread_ab"
+                     -P "${CMAKE_CURRENT_SOURCE_DIR}/test/rd_thread_ab.cmake")
+    set_tests_properties(rd_thread_ab PROPERTIES SKIP_REGULAR_EXPRESSION "SKIP:" TIMEOUT 3600)
+    if(_env)
+        set_tests_properties(rd_thread_ab PROPERTIES ENVIRONMENT "${_env}")
+    endif()
     # rd_constant_reads_ab (test/rd_constant_reads_ab.cmake): the same dumps
     # and the phone's frames (tools/constant_reads_dumps.txt) with every post
     # sprite reading its source (ICO_RD_CONSTANT_READS=0) and with a source
@@ -1746,6 +2106,155 @@ if(ICO_RUN_TESTS)
                          TIMEOUT 3600)
     if(_env)
         set_tests_properties(rd_constant_reads_ab PROPERTIES ENVIRONMENT "${_env}")
+    endif()
+    # rd_fades_fold_ab (test/rd_fades_fold_ab.cmake): the fade dumps
+    # (tools/fades_fold_dumps.txt) and, with ICO_BOOT_DUMP_DIR, the start-up's
+    # frames 115 to 123, with list 11's last full-frame lerp sprites drawn
+    # into SCENE (ICO_RD_FADES_FOLD=0, the tests' way) and applied by the
+    # reduction (rd_fades_fold.c, the default on every device), under
+    # ICO_RD_BLEND=attachment and fixed, at Original, Enhanced 2x and the
+    # phone's Resolution Auto: every target but SCENE byte for byte under the
+    # exact blend at Original, within two levels elsewhere
+    # (counted, port/render/test/png_level_diff.py); SKIP as rd_vustage_ab
+    if(Python3_FOUND)
+        file(MAKE_DIRECTORY "${CMAKE_CURRENT_BINARY_DIR}/fades_fold_ab")
+        add_test(NAME rd_fades_fold_ab
+                 COMMAND "${CMAKE_COMMAND}" -DTOOL=$<TARGET_FILE:rd_replay_tool>
+                         "-DLIST=${CMAKE_SOURCE_DIR}/tools/fades_fold_dumps.txt"
+                         "-DBOOT=${ICO_BOOT_DUMP_DIR}" "-DPY=${Python3_EXECUTABLE}"
+                         "-DDIFF=${CMAKE_CURRENT_SOURCE_DIR}/test/png_level_diff.py"
+                         "-DOUT=${CMAKE_CURRENT_BINARY_DIR}/fades_fold_ab"
+                         -P "${CMAKE_CURRENT_SOURCE_DIR}/test/rd_fades_fold_ab.cmake")
+        set_tests_properties(rd_fades_fold_ab PROPERTIES SKIP_REGULAR_EXPRESSION "SKIP:"
+                             TIMEOUT 3600)
+        if(_env)
+            set_tests_properties(rd_fades_fold_ab PROPERTIES ENVIRONMENT "${_env}")
+        endif()
+    endif()
+    # rd_crack_late_ab (test/rd_crack_late_ab.cmake): the dumps and baselines of
+    # tools/crack_late_dumps.txt (machine-local: the gate's Enhanced 2x pass
+    # dumps and the PowerVR phone's frames at its Resolution Auto, made by the
+    # build that drew the crack fill before the fog) replayed with the fill
+    # after lists 4-6 (rd_crack_fill.c): every target within the measured bound
+    # (DIVERGENCES.md VD-20), the fill drawn once after lists 4-6, at the
+    # phone's setting one copy fewer and no pass more; SKIP as rd_vustage_ab
+    if(Python3_FOUND)
+        file(MAKE_DIRECTORY "${CMAKE_CURRENT_BINARY_DIR}/crack_late_ab")
+        add_test(NAME rd_crack_late_ab
+                 COMMAND "${CMAKE_COMMAND}" -DTOOL=$<TARGET_FILE:rd_replay_tool>
+                         "-DLIST=${CMAKE_SOURCE_DIR}/tools/crack_late_dumps.txt"
+                         "-DPY=${Python3_EXECUTABLE}"
+                         "-DDIFF=${CMAKE_CURRENT_SOURCE_DIR}/test/png_level_diff.py"
+                         "-DOUT=${CMAKE_CURRENT_BINARY_DIR}/crack_late_ab"
+                         -P "${CMAKE_CURRENT_SOURCE_DIR}/test/rd_crack_late_ab.cmake")
+        set_tests_properties(rd_crack_late_ab PROPERTIES SKIP_REGULAR_EXPRESSION "SKIP:"
+                             TIMEOUT 3600)
+        if(_env)
+            set_tests_properties(rd_crack_late_ab PROPERTIES ENVIRONMENT "${_env}")
+        endif()
+    endif()
+    # rd_aura_box_ab (test/rd_aura_box_ab.cmake): the dumps of
+    # tools/aura_box_dumps.txt (vustage_dumps.txt's and the PowerVR phone's
+    # three F12 frames) with the aura's read of the picture into FEED128 in
+    # one pass (ICO_RD_AURA_BOX=0) and in two (=1, rd_aura_box.c), under
+    # ICO_RD_BLEND=fixed at the phone's Resolution Auto and Enhanced 2x 4:3:
+    # every target byte for byte, one pass and one draw more a read in two
+    # passes; SKIP as rd_vustage_ab
+    file(MAKE_DIRECTORY "${CMAKE_CURRENT_BINARY_DIR}/aura_box_ab")
+    add_test(NAME rd_aura_box_ab
+             COMMAND "${CMAKE_COMMAND}" -DTOOL=$<TARGET_FILE:rd_replay_tool>
+                     "-DLIST=${CMAKE_SOURCE_DIR}/tools/aura_box_dumps.txt"
+                     "-DOUT=${CMAKE_CURRENT_BINARY_DIR}/aura_box_ab"
+                     -P "${CMAKE_CURRENT_SOURCE_DIR}/test/rd_aura_box_ab.cmake")
+    set_tests_properties(rd_aura_box_ab PROPERTIES SKIP_REGULAR_EXPRESSION "SKIP:" TIMEOUT 3600)
+    if(_env)
+        set_tests_properties(rd_aura_box_ab PROPERTIES ENVIRONMENT "${_env}")
+    endif()
+    # rd_shadow_merge_ab (test/rd_shadow_merge_ab.cmake): the dumps of
+    # tools/shadow_merge_dumps.txt (vustage_dumps.txt's, the PowerVR phone's
+    # F12 frames and the heavy stage 6 room of 2026-11-02) with the shadow volumes in a pass
+    # of their own (ICO_RD_SHADOW_MERGE=0) and in the scene's open pass (=1,
+    # rd_shadow_merge.c), under ICO_RD_BLEND=fixed and ICO_RD_STORE_POISON=1
+    # at the phone's Resolution Auto (the MoltenVK fakes) and Enhanced 2x
+    # 4:3: every target byte for byte, the same draws, one pass fewer a reset
+    # taken, some reset taken; SKIP as rd_vustage_ab
+    file(MAKE_DIRECTORY "${CMAKE_CURRENT_BINARY_DIR}/shadow_merge_ab")
+    add_test(NAME rd_shadow_merge_ab
+             COMMAND "${CMAKE_COMMAND}" -DTOOL=$<TARGET_FILE:rd_replay_tool>
+                     "-DLIST=${CMAKE_SOURCE_DIR}/tools/shadow_merge_dumps.txt"
+                     "-DOUT=${CMAKE_CURRENT_BINARY_DIR}/shadow_merge_ab"
+                     -P "${CMAKE_CURRENT_SOURCE_DIR}/test/rd_shadow_merge_ab.cmake")
+    set_tests_properties(rd_shadow_merge_ab PROPERTIES SKIP_REGULAR_EXPRESSION "SKIP:"
+                         TIMEOUT 3600)
+    if(_env)
+        set_tests_properties(rd_shadow_merge_ab PROPERTIES ENVIRONMENT "${_env}")
+    endif()
+    # rd_pass_area_ab (test/rd_pass_area_ab.cmake): the dumps of
+    # tools/pass_area_dumps.txt (vustage_dumps.txt's, the PowerVR phone's
+    # three F12 frames and its rc3 frame) with the passes' render areas off
+    # (ICO_RD_PASS_AREA=0) and on (=1, rd_pass_area.c), under
+    # ICO_RD_BLEND=fixed at the phone's Resolution Auto and Enhanced 2x 4:3:
+    # every target byte for byte (lavapipe clips to the area, so a wrong
+    # area would show), the same passes and draws but for the passes ended
+    # early, and some pass with an area on the phone's frames; SKIP as
+    # rd_vustage_ab
+    file(MAKE_DIRECTORY "${CMAKE_CURRENT_BINARY_DIR}/pass_area_ab")
+    add_test(NAME rd_pass_area_ab
+             COMMAND "${CMAKE_COMMAND}" -DTOOL=$<TARGET_FILE:rd_replay_tool>
+                     "-DLIST=${CMAKE_SOURCE_DIR}/tools/pass_area_dumps.txt"
+                     "-DOUT=${CMAKE_CURRENT_BINARY_DIR}/pass_area_ab"
+                     -P "${CMAKE_CURRENT_SOURCE_DIR}/test/rd_pass_area_ab.cmake")
+    set_tests_properties(rd_pass_area_ab PROPERTIES SKIP_REGULAR_EXPRESSION "SKIP:" TIMEOUT 3600)
+    if(_env)
+        set_tests_properties(rd_pass_area_ab PROPERTIES ENVIRONMENT "${_env}")
+    endif()
+    # rd_glow_cheap_ab (test/rd_glow_cheap_ab.cmake): the glow dumps of
+    # tools/glow_cheap_dumps.txt against the pass dumps the build before the
+    # glow's cheaper passes stored (machine-local: the phone's profile under
+    # build-host/tmp/v098/evidence/glow/pd-phone, Original and Enhanced 2x 4:3
+    # under build-host/tmp/v095/after/w3/pd): every target within 0 levels,
+    # at least two glow passes fewer at the phone's setting (WORK2's fill in
+    # the mask's pass, cleanUpFB in the fog's), none more elsewhere (counted
+    # in a replay without the crack fill where it is drawn: it ends the fog's
+    # pass before the glow); the frames the crack fill changed against their
+    # refreshed pictures (build-host/tmp/v098/evidence/glow/pd-w15); SKIP
+    # without the dumps or their baselines
+    if(Python3_FOUND)
+        file(MAKE_DIRECTORY "${CMAKE_CURRENT_BINARY_DIR}/glow_cheap_ab")
+        add_test(NAME rd_glow_cheap_ab
+                 COMMAND "${CMAKE_COMMAND}" -DTOOL=$<TARGET_FILE:rd_replay_tool>
+                         "-DLIST=${CMAKE_SOURCE_DIR}/tools/glow_cheap_dumps.txt"
+                         "-DBASE_PHONE=${CMAKE_SOURCE_DIR}/build-host/tmp/v098/evidence/glow/pd-phone"
+                         "-DBASE_DESK=${CMAKE_SOURCE_DIR}/build-host/tmp/v095/after/w3/pd"
+                         "-DBASE_REFRESH=${CMAKE_SOURCE_DIR}/build-host/tmp/v098/evidence/glow/pd-w15"
+                         "-DPY=${Python3_EXECUTABLE}"
+                         "-DDIFF=${CMAKE_CURRENT_SOURCE_DIR}/test/png_level_diff.py"
+                         "-DOUT=${CMAKE_CURRENT_BINARY_DIR}/glow_cheap_ab"
+                         -P "${CMAKE_CURRENT_SOURCE_DIR}/test/rd_glow_cheap_ab.cmake")
+        set_tests_properties(rd_glow_cheap_ab PROPERTIES SKIP_REGULAR_EXPRESSION "SKIP:"
+                             TIMEOUT 3600)
+        if(_env)
+            set_tests_properties(rd_glow_cheap_ab PROPERTIES ENVIRONMENT "${_env}")
+        endif()
+    endif()
+    # rd_pass_cut_ab (test/rd_pass_cut_ab.cmake): the dumps of
+    # tools/pass_cut_dumps.txt with every pass cut off and each on alone and
+    # all on (rd_pass_cut.c: ICO_RD_CLEAR_CARRY, ICO_RD_CLEAR_SKIP,
+    # ICO_RD_LAST_STORE), under ICO_RD_BLEND=fixed, the store plan and its
+    # poison, at the phone's Resolution Auto with its paths and Enhanced 2x
+    # 4:3: every target and the present byte for byte, the passes fewer by
+    # the clears carried and skipped, the depth stores dropped more by those
+    # at the last touch, and each cut cutting something on the phone's
+    # frames; SKIP as rd_vustage_ab
+    file(MAKE_DIRECTORY "${CMAKE_CURRENT_BINARY_DIR}/pass_cut_ab")
+    add_test(NAME rd_pass_cut_ab
+             COMMAND "${CMAKE_COMMAND}" -DTOOL=$<TARGET_FILE:rd_replay_tool>
+                     "-DLIST=${CMAKE_SOURCE_DIR}/tools/pass_cut_dumps.txt"
+                     "-DOUT=${CMAKE_CURRENT_BINARY_DIR}/pass_cut_ab"
+                     -P "${CMAKE_CURRENT_SOURCE_DIR}/test/rd_pass_cut_ab.cmake")
+    set_tests_properties(rd_pass_cut_ab PROPERTIES SKIP_REGULAR_EXPRESSION "SKIP:" TIMEOUT 3600)
+    if(_env)
+        set_tests_properties(rd_pass_cut_ab PROPERTIES ENVIRONMENT "${_env}")
     endif()
 endif()
 # The blend policy (rd_dst_read.c)
@@ -1778,6 +2287,19 @@ if(ICO_RUN_TESTS)
                          rd_crt_attachment rd_perf_attachment
                          PROPERTIES SKIP_RETURN_CODE 77 WORKING_DIRECTORY "${_bat}"
                                     ENVIRONMENT "${_env_blend_attachment}")
+    # GS state as shader data (rd_uber.c) on lavapipe, which orders the
+    # attachment read (ICO_RD_UBER=on: auto takes it on tile-based GPUs
+    # only): rd_pixel's cases and expectations as under the attachment read
+    # (its exact-mode matrix leaves out and counts the cells the colour read
+    # draws its own way: the premultiplied subtracts' floor and DATE per
+    # primitive; testUberSubtractOracle holds the subtracts to the GS's
+    # arithmetic, testDateStencil checks the per-primitive DATE)
+    set(_env_uber ${_env} "ICO_RD_UBER=on")
+    set(_bub "${CMAKE_CURRENT_BINARY_DIR}/uber")
+    file(MAKE_DIRECTORY "${_bub}")
+    add_test(NAME rd_pixel_uber COMMAND rd_pixel_test "${_bub}")
+    set_tests_properties(rd_pixel_uber PROPERTIES SKIP_RETURN_CODE 77 WORKING_DIRECTORY "${_bub}"
+                                                  ENVIRONMENT "${_env_uber}")
 endif()
 
 # The tiler passes (rd_replay.c: the fog's local read, DATE through
@@ -1807,14 +2329,30 @@ if(ICO_RUN_TESTS)
     set(_env_date_stencil ${_env} "ICO_RD_DATE_PATH=stencil")
     add_test(NAME rd_date_selftest
              COMMAND "${CMAKE_COMMAND}" -DTOOL=$<TARGET_FILE:rd_fog_selftest_test> -DPATH=stencil
-                     "-DRESULTS=stencil ok 4, snapshot ok 4"
+                     "-DRESULTS=stencil ok 5, snapshot ok 5"
                      -P "${CMAKE_CURRENT_SOURCE_DIR}/test/rd_date_selftest.cmake")
     set_tests_properties(rd_date_selftest PROPERTIES SKIP_REGULAR_EXPRESSION "SKIP:"
                                                      ENVIRONMENT "${_env_date_stencil}")
+    # DATE under GS state as shader data (rd_uber.c, ICO_RD_UBER=on): the
+    # colour read's per-primitive DATE first (its fifth sample the GS's:
+    # the second sprite fails over the first), then the stencil bit and the
+    # snapshot with it held off (their fifth sample the alpha before the
+    # draw); the path stays the colour read
+    add_test(NAME rd_date_selftest_uber
+             COMMAND "${CMAKE_COMMAND}" -DTOOL=$<TARGET_FILE:rd_fog_selftest_test>
+                     "-DPATH=colour read"
+                     "-DRESULTS=colour read ok 5, stencil ok 5, snapshot ok 5"
+                     "-DEXTRA=pipelines: GS state as shader data: on \\(raster-order read, \\[dev\\] uber = on\\)"
+                     -P "${CMAKE_CURRENT_SOURCE_DIR}/test/rd_date_selftest.cmake")
+    set_tests_properties(rd_date_selftest_uber
+                         PROPERTIES SKIP_REGULAR_EXPRESSION "SKIP:"
+                                    ENVIRONMENT "${_env_date_stencil};ICO_RD_UBER=on")
     # the shadow count's self-test (rd_shadow_selftest.c): the one draw
     # equal to the seven draws byte for byte at both scene sizes of the
     # tool (a wide scene at scale 2 with Full pixel's left-out texels, then
-    # another size), every band centre the count's colour; sabotaged (the
+    # another size), every band centre the count's colour, and the line that
+    # says how the stencil is read (four texels a gather, or a texel a load
+    # where the gathers' count differs); sabotaged (the
     # one draw's table wrong at m = 1), the one draw differs, the profile's
     # flag goes off and the seven draws resolve the count (no second line:
     # nothing to check then); [dev] shadow_one = false, no self-test and the
@@ -1824,6 +2362,7 @@ if(ICO_RUN_TESTS)
                      "-DPATH=one draw"
                      "-DRESULTS=equal to the seven draws over [0-9]+x[0-9]+, 142 band centres ok"
                      "-DEXTRA=profile: .*shadow count one draw"
+                     "-DEXTRA2=shadow count: the stencil read (four texels a gather, equal to the seven draws byte for byte|a texel a load, as the gathers' count)"
                      -P "${CMAKE_CURRENT_SOURCE_DIR}/test/rd_shadow_selftest.cmake")
     set_tests_properties(rd_shadow_selftest PROPERTIES SKIP_REGULAR_EXPRESSION "SKIP:"
                                                        ENVIRONMENT "${_env}")
@@ -1837,6 +2376,14 @@ if(ICO_RUN_TESTS)
     set_tests_properties(rd_shadow_selftest_sabotage
                          PROPERTIES SKIP_REGULAR_EXPRESSION "SKIP:"
                                     ENVIRONMENT "${_env};ICO_RD_SHADOW_SABOTAGE=1")
+    # the store plan's keep (rd_store_plan_test.c; rd_store_plan_ab below
+    # holds the drops byte for byte over the corpus)
+    add_test(NAME rd_store_plan COMMAND rd_store_plan_test)
+    set_tests_properties(rd_store_plan PROPERTIES SKIP_RETURN_CODE 77 ENVIRONMENT "${_env}")
+    # the passes cut (rd_pass_cut_test.c; rd_pass_cut_ab holds them byte for
+    # byte over the corpus)
+    add_test(NAME rd_pass_cut COMMAND rd_pass_cut_test)
+    set_tests_properties(rd_pass_cut PROPERTIES SKIP_RETURN_CODE 77 ENVIRONMENT "${_env}")
 endif()
 
 # The desktop's local reads and their start-up cost probe (rd_local_probe.c):
@@ -1884,7 +2431,7 @@ endif()
 if(ICO_RUN_TESTS)
     add_test(NAME rd_date_selftest_sabotage
              COMMAND "${CMAKE_COMMAND}" -DTOOL=$<TARGET_FILE:rd_fog_selftest_test> -DPATH=snapshot
-                     "-DRESULTS=stencil fail [1-4] at sample [0-3]: [0-9A-F]+ for [0-9A-F]+, snapshot ok 4"
+                     "-DRESULTS=stencil fail [1-5] at sample [0-4]: [0-9A-F]+ for [0-9A-F]+, snapshot ok 5"
                      "-DEXTRA=profile: DATE stencil off \\(self-test\\)"
                      "-DEXTRA2=DATE: ICO_RD_DATE_SABOTAGE: "
                      -P "${CMAKE_CURRENT_SOURCE_DIR}/test/rd_date_selftest.cmake")
@@ -1971,6 +2518,103 @@ if(ICO_RUN_TESTS)
 endif()
 # VK11 end
 
+# VK11S (issue 145): the Adreno combination.  A phone's Vulkan 1.1 driver
+# (Android 11, an Adreno 618) has the fence ring and VkRenderPass objects of the
+# VK11 block AND all-static pipelines (tilerDevice forces them on Android,
+# vk_device.c); the VK11 twins above still offer VK_EXT_extended_dynamic_state
+# on lavapipe, so that stack was never run.  ICO_VK_FAKE_API=1.1 with
+# ICO_VK_FAKE_NO_DYNAMIC=1 is it.  The same shards as VK11, own folder vk11s/,
+# the Vulkan runs' expectations byte for byte (neither switch changes a pixel);
+# rd_perf_vk11s's counts are rd_perf's.  Label vk11: ctest -j1 -L vk11.
+if(ICO_RUN_TESTS)
+    set(_env_vk11s ${_env} "ICO_VK_FAKE_API=1.1" "ICO_VK_FAKE_NO_DYNAMIC=1")
+    set(_v11s "${CMAKE_CURRENT_BINARY_DIR}/vk11s")
+    file(MAKE_DIRECTORY "${_v11s}")
+    add_test(NAME rd_pixel_vk11s COMMAND rd_pixel_test "${_v11s}")
+    add_test(NAME rd_present_vk11s COMMAND rd_present_test "${_v11s}")
+    add_test(NAME rd_crt_vk11s COMMAND rd_crt_test "${_v11s}")
+    add_test(NAME rd_debug_vk11s COMMAND rd_debug_test "${_v11s}")
+    add_test(NAME rd_raw_vk11s COMMAND rd_raw_test)
+    add_test(NAME rd_fog_vk11s COMMAND rd_fog_test)
+    add_test(NAME rd_shadow_vk11s COMMAND rd_shadow_test)
+    add_test(NAME rd_interp_vk11s COMMAND rd_interp_test)
+    add_test(NAME rd_msaa_vk11s COMMAND rd_msaa_test)
+    add_test(NAME rd_perf_vk11s COMMAND rd_perf_test)
+    set(_vk11s_tests rd_pixel_vk11s rd_present_vk11s rd_crt_vk11s rd_debug_vk11s rd_raw_vk11s
+                     rd_fog_vk11s rd_shadow_vk11s rd_interp_vk11s rd_msaa_vk11s rd_perf_vk11s)
+    foreach(_k RANGE 1 4)
+        add_test(NAME rd_mesh_vk11s.${_k}of4 COMMAND rd_mesh_test "${ICO_DISC_IMAGE}" --shard ${_k}/4)
+        list(APPEND _vk11s_tests rd_mesh_vk11s.${_k}of4)
+    endforeach()
+    set_tests_properties(${_vk11s_tests}
+                         PROPERTIES SKIP_RETURN_CODE 77 WORKING_DIRECTORY "${_v11s}"
+                                    ENVIRONMENT "${_env_vk11s}")
+    foreach(_t ${_vk11s_tests})
+        get_test_property(${_t} LABELS _labels)
+        set_tests_properties(${_t} PROPERTIES LABELS "${_labels};vk11")
+    endforeach()
+endif()
+# VK11S end
+# VK10: the render tests on a Vulkan 1.0 driver (ICO_VK_FAKE_API=1.0,
+# port/rhi/vk/vk_device.c; issue 158, Android 8): the instance created at
+# Vulkan 1.0 with VK_KHR_get_physical_device_properties2 (the KHR queries),
+# the device at 1.0 with VK_KHR_maintenance1 and VK_KHR_maintenance2, the
+# core 1.1 entry points cleared (a core 1.1 call left unguarded stops the
+# run), and what =1.1 hides hidden (the fence ring, VkRenderPass objects, no
+# local read, driver properties or image format list); with
+# ICO_VK_FAKE_NO_DYNAMIC=1 every pipeline state static, as on Android (the
+# combination an Android 8 phone runs).  The expectations are the Vulkan
+# runs' own, byte for byte; rd_perf_vk10's pass and barrier counts are
+# rd_perf's.  Label vk10: ctest -j1 -L vk10 (with port/rhi's rhi_vk_vk10 and
+# rhi_vk_swapchain_vk10).
+if(ICO_RUN_TESTS)
+    set(_env_vk10 ${_env} "ICO_VK_FAKE_API=1.0" "ICO_VK_FAKE_NO_DYNAMIC=1")
+    set(_v10 "${CMAKE_CURRENT_BINARY_DIR}/vk10")
+    file(MAKE_DIRECTORY "${_v10}")
+    add_test(NAME rd_pixel_vk10 COMMAND rd_pixel_test "${_v10}")
+    add_test(NAME rd_present_vk10 COMMAND rd_present_test "${_v10}")
+    add_test(NAME rd_crt_vk10 COMMAND rd_crt_test "${_v10}")
+    add_test(NAME rd_debug_vk10 COMMAND rd_debug_test "${_v10}")
+    add_test(NAME rd_raw_vk10 COMMAND rd_raw_test)
+    add_test(NAME rd_fog_vk10 COMMAND rd_fog_test)
+    add_test(NAME rd_shadow_vk10 COMMAND rd_shadow_test)
+    add_test(NAME rd_interp_vk10 COMMAND rd_interp_test)
+    add_test(NAME rd_msaa_vk10 COMMAND rd_msaa_test)
+    add_test(NAME rd_perf_vk10 COMMAND rd_perf_test)
+    set(_vk10_tests rd_pixel_vk10 rd_present_vk10 rd_crt_vk10 rd_debug_vk10 rd_raw_vk10
+                    rd_fog_vk10 rd_shadow_vk10 rd_interp_vk10 rd_msaa_vk10 rd_perf_vk10)
+    # rd_mesh's four shards (the disc's models; 77 without the disc image)
+    foreach(_k RANGE 1 4)
+        add_test(NAME rd_mesh_vk10.${_k}of4 COMMAND rd_mesh_test "${ICO_DISC_IMAGE}" --shard ${_k}/4)
+        list(APPEND _vk10_tests rd_mesh_vk10.${_k}of4)
+    endforeach()
+    set_tests_properties(${_vk10_tests}
+                         PROPERTIES SKIP_RETURN_CODE 77 WORKING_DIRECTORY "${_v10}"
+                                    ENVIRONMENT "${_env_vk10}")
+    foreach(_t ${_vk10_tests})
+        get_test_property(${_t} LABELS _labels)
+        set_tests_properties(${_t} PROPERTIES LABELS "${_labels};vk10")
+    endforeach()
+    # the same with the D32F attachment bit hidden (ICO_VK_FAKE_NO_D32F_ATTACHMENT,
+    # an Adreno 505 on a 1.0.61 driver): the start-up set without the effects
+    # depth's two keys, the effects depth not drawn; the picture tests' own
+    # expectations
+    file(MAKE_DIRECTORY "${CMAKE_CURRENT_BINARY_DIR}/vk10nod32f")
+    set(_vk10n "${CMAKE_CURRENT_BINARY_DIR}/vk10nod32f")
+    add_test(NAME rd_pixel_vk10_nod32f COMMAND rd_pixel_test "${_vk10n}")
+    add_test(NAME rd_present_vk10_nod32f COMMAND rd_present_test "${_vk10n}")
+    add_test(NAME rd_interp_vk10_nod32f COMMAND rd_interp_test)
+    set(_vk10n_tests rd_pixel_vk10_nod32f rd_present_vk10_nod32f rd_interp_vk10_nod32f)
+    set_tests_properties(${_vk10n_tests}
+                         PROPERTIES SKIP_RETURN_CODE 77 WORKING_DIRECTORY "${_vk10n}"
+                                    ENVIRONMENT "${_env_vk10};ICO_VK_FAKE_NO_D32F_ATTACHMENT=1")
+    foreach(_t ${_vk10n_tests})
+        get_test_property(${_t} LABELS _labels)
+        set_tests_properties(${_t} PROPERTIES LABELS "${_labels};vk10")
+    endforeach()
+endif()
+# VK10 end
+
 # ---- The render suite a second time, on the OpenGL backend (issue 126) ----
 # ico_rhi_vk links every backend and rhi_backend.c takes ICO_RHI_BACKEND from the
 # environment as the default one, so the same test programs run on OpenGL with no
@@ -1986,15 +2630,17 @@ endif()
 # Not twinned:
 #  * a test whose environment holds a Vulkan fake (ICO_VK_FAKE_*, ICO_VK_ATTACHMENT_READ),
 #    which OpenGL ignores: *_mali, *_minlimits, *_d24s8, *_static, rd_crack_d24s8,
-#    rd_crack_tiler(_on, _fold, _fold_mali), rd_blend_selftest*, rd_date_selftest_sabotage,
+#    rd_crack_tiler(_on, _fold, _fold_mali), rd_crack_glow, rd_crack_aura, rd_blend_selftest*,
+#    rd_date_selftest_sabotage,
 #    rd_fog_selftest_local_sabotage (ico_rd_gl_twin skips these by itself)
 #  * the tests that start the game (model_viewer_headless, gallery_sweep,
-#    credits_headless) or work on the replay tool's files (rd_replay_tool*,
+#    credits_headless, state_roundtrip_headless(_settings)) or work on the replay tool's files (rd_replay_tool*,
 #    rd_crack's replay, rd_fog_depth_copy_dump*, rd_vustage_ab, rd_vubatch_ab, rd_vumerge_ab,
-#    rd_vufuse_ab, rd_store_plan_ab, rd_constant_reads_ab,
+#    rd_vufuse_ab, rd_store_plan_ab, rd_constant_reads_ab, rd_fades_fold_ab, rd_thread_ab,
 #    the native frame gates, coverage_corpus; tools/native_frame_check.py compare runs the dumps
 #    on both backends)
-#  * tests with no device (rd_alpha_plan, rd_fx_frame, rd_vu_frac, rd_mip, rd_passring,
+#  * tests with no device (rd_alpha_plan, rd_fx_frame, rd_vu_frac, rd_fades_fold, rd_mip,
+#    rd_passring,
 #    rd_filter, rd_bisect_plan, rd_stream_audit, fog_lut*, gsb_cull*, texpack*, gltf)
 #
 # ICO_RD_GL_TOLERANCE: "<test>_gl|<VARIABLE>=<value>" entries add a variable to one

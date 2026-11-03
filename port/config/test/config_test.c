@@ -451,6 +451,12 @@ static void test_first_run(void)
     /* the motion blur's way: Original, written with the file */
     CHECK_STR(ico_config_get_string("video.effect_motion_blur_mode", "?"), "original");
     CHECK(text != NULL && strstr(text, "effect_motion_blur_mode = \"original\"") != NULL);
+    /* Motion blur strength (issue 181): 100, the game's own */
+    CHECK(ico_config_get_int("video.effect_motion_blur_strength", 0) == 100);
+    CHECK(text != NULL && strstr(text, "effect_motion_blur_strength = 100\n") != NULL);
+    /* the glow's way between frames: Original, written with the file */
+    CHECK_STR(ico_config_get_string("video.effect_glow_mode", "?"), "original");
+    CHECK(text != NULL && strstr(text, "effect_glow_mode = \"original\"") != NULL);
     CHECK(ico_config_get_bool("video.effect_fog", 0) == 1);
     /* the Frame rate counter: Off, written with the file */
     CHECK(ico_config_get_bool("video.show_fps", 1) == 0);
@@ -471,13 +477,21 @@ static void test_first_run(void)
     CHECK_STR(ico_config_get_string("audio.output", "?"), "auto");
     CHECK_STR(ico_config_get_string("audio.device", "?"), "");
     CHECK_STR(ico_config_get_string("game.language", "?"), "auto");
+    /* no community translation: the game's own text */
+    CHECK_STR(ico_config_get_string("game.text_language", "?"), "");
+    CHECK(text != NULL && strstr(text, "text_language = \"\"") != NULL);
     CHECK(ico_config_get_bool("gameplay.natural_chains", 1) == 0); /* Natural chains, off */
     CHECK(ico_config_get_bool("gameplay.skip_opening", 1) == 0);   /* Skip the opening, off */
     CHECK(text != NULL && strstr(text, "skip_opening = false") != NULL);
+    /* Second memory card, off: port 1 empty, as the original */
+    CHECK(ico_config_get_bool("gameplay.second_memory_card", 1) == 0);
+    CHECK(text != NULL && strstr(text, "second_memory_card = false") != NULL);
     CHECK_STR(ico_config_get_string("gameplay.hold_type", "?"), "disc"); /* the disc's own */
     CHECK(text != NULL && strstr(text, "hold_type = \"disc\"") != NULL);
     CHECK_STR(ico_config_get_string("gameplay.pit_time", "?"), "original");
     CHECK(text != NULL && strstr(text, "pit_time = \"original\"") != NULL);
+    CHECK_STR(ico_config_get_string("gameplay.shadow_speed", "?"), "original");
+    CHECK(text != NULL && strstr(text, "shadow_speed = \"original\"") != NULL);
     CHECK(ico_config_get_string("gameplay.hold_type_chosen", NULL) == NULL); /* not chosen */
     /* the game variants: every line the game as shipped; the barrier's
        number is left out (the disc's own) */

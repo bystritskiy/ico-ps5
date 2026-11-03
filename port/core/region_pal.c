@@ -22,6 +22,11 @@ const IcoRegionInfo ico_region_info_pal = {
     .mc_save_dir = "BESCES-50760ico", /* ico2/fumi/ios/mcard.c:36 */
     .mc_product_size = 0x1F0,         /* typedef.h:1441, layout_asserts.c:1039 */
 
+    /* IosMcPreviewInfo's words (layout_action.c): stage, cleared, play time
+       (la_playtime_count's [2]), sofa (la_save_processing's [3]) */
+    .mc_preview_play = 2,
+    .mc_preview_sofa = 3,
+
     .has_50hz_row = 1,
     .has_game_language = 1,
     /* has_film_effect: la_game_option: screenModeItem_pal, screenModeAnim_pal
@@ -61,6 +66,7 @@ const IcoRegionInfo ico_region_info_pal = {
     .layout_play = 54,           /* ui_mouse.c:31, mouse_look.h:37 */
     .layout_scene = 55,          /* ui_mouse.c:32, mouse_look.h:38, credits.c:66 */
     .layout_mc_files = 14,       /* ui_mouse.c:35, layout_action.c:1024 */
+    .layout_load_files = 19,     /* texLayout[19] la_mc_load_file_select, its link 14 */
     .layout_load = 25,           /* gamestate.c:217 */
     .layout_save_complete = 41,  /* gamestate.c:218 */
 
