@@ -433,7 +433,7 @@ static void pick_watch(void)
     }
 }
 
-#else
+#elif !defined(ICO_PS5)
 
 static void SDLCALL dialog_answer(void *user, const char *const *files, int filter)
 {
@@ -474,6 +474,9 @@ static void open_dialog(void)
             answer(gen, NULL, why);
         }
     }
+#elif defined(ICO_PS5)
+    /* The offscreen SDL backend has no system file picker. */
+    answer(gen, ICO_PS5_DATA_DIR "/ico-backup.zip", NULL);
 #else
     {
         int count = 0;
