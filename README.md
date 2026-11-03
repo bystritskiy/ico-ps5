@@ -1,4 +1,13 @@
-> **PS5:** Native port and build instructions: [port/ps5/README.md](port/ps5/README.md). First build; console validation pending.
+# ICO for PS5
+
+An unofficial native PS5 port of [nathanialf/ico-pc](https://github.com/nathanialf/ico-pc), based on v0.10.0. The game runs from your own PlayStation 2 disc data. The port includes DualSense support and the bob-ttz and cobra838 Russian translations.
+
+**Install** the ZIP from [Releases](https://github.com/bystritskiy/ico-ps5/releases) by extracting its `PPSA99031` folder under `/data/homebrew/`. For the European disc, put your image at `/data/ico/PPSA99031/Ico_PAL.iso`, then launch ICO. Allow about 1 GB for the first import. Existing players can keep their imported archive, settings and memory cards in that same data directory.
+
+[Other disc regions and formats, USB import and build instructions](port/ps5/README.md) · [Third-party notices](port/ps5/NOTICE.md)
+
+## Upstream project
+
 
 # ico-pc
 
