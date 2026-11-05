@@ -1,3 +1,6 @@
+> [!WARNING]
+> **Early development test build.** This PS5 port is experimental and is not a stable release. Expect bugs, crashes and incomplete features.
+
 # ICO for PS5
 
 An unofficial native PS5 port of [nathanialf/ico-pc](https://github.com/nathanialf/ico-pc), based on v0.10.0. The game runs from your own PlayStation 2 disc data. The port includes DualSense support and the bob-ttz and cobra838 Russian translations.
