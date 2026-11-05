@@ -24,6 +24,10 @@
 > This project does not include or distribute copyrighted game files. Use a dump of your own original disc.
 > Please do not request or share game downloads here.
 
+> [!CAUTION]
+> **We do not support piracy.**
+> Please do not use this project with pirated copies of the game.
+
 ## What it is
 
 An unofficial PS5 port of [nathanialf/ico-pc](https://github.com/nathanialf/ico-pc), based on
