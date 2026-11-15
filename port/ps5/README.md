@@ -62,9 +62,9 @@ title ID для CMake (`ICO_PS5_DATA_DIR`) и упаковщика.
 
 ```sh
 python3 tools/setup-ps5.py \
-  --runtime-cache ../rePOP-ps5/build/deps/PS5_Vulkan \
-  --compiler-rt ../rePOP-ps5/build/deps/compiler-rt/libclang_rt.builtins-x86_64.a \
-  --dxc-archive ../rePOP-ps5/build/deps/dxc/dxc.tar.gz --build-images
+  --runtime-cache ../../2-published/rePOP-ps5/build/deps/PS5_Vulkan \
+  --compiler-rt ../../2-published/rePOP-ps5/build/deps/compiler-rt/libclang_rt.builtins-x86_64.a \
+  --dxc-archive ../../2-published/rePOP-ps5/build/deps/dxc/dxc.tar.gz --build-images
 python3 tools/build-ps5.py
 ```
 
