@@ -22,6 +22,10 @@
   <a href="#reporting-a-bug">Report a bug</a>
 </p>
 
+> [!WARNING]
+> **Early development build.** This PS5 port is experimental. Expect bugs, crashes and missing
+> features.
+
 > [!IMPORTANT]
 > **Bring your own game.**
 > This project does not include or distribute copyrighted game files. Use an image of your own
@@ -143,11 +147,17 @@ Everything the app writes is in `/data/ico/PPSA99031/`: the game archive, settin
 caches and `logs/`. **Options > Extras** backs them up to `ico-backup.zip` in the same folder. The
 app folder holds only the program, its artwork and its licences.
 
+## Known issues
+
+The whole game has not been played through on a PS5 yet: stability and parity with ico-pc past the
+opening are not established. What was checked is in [port/ps5/VALIDATION.md](port/ps5/VALIDATION.md).
+ico-pc's Windows, Linux, Android and Apple instructions in [docs/](docs/) don't apply to this app.
+
 ## Reporting a bug
 
-Open an [issue](../../issues), say what you were doing, what you expected and what happened, and
-attach `/data/ico/PPSA99031/logs/ico-pc.log` and `last-run.txt` from the console. **Never attach
-game files or disc images.**
+Open an [issue](../../issues) with the app version, your firmware and disc, what you were doing,
+what you expected and what happened, and attach `ico-pc.log` and `last-run.txt` from
+`/data/ico/PPSA99031/logs/`. **Never attach game files or disc images.**
 
 ## For developers
 
@@ -166,7 +176,7 @@ What was checked on a console is in [port/ps5/VALIDATION.md](port/ps5/VALIDATION
 ## Credits
 
 - **[nathanialf/ico-pc](https://github.com/nathanialf/ico-pc)** and its contributors: the
-  recompilation this port is built on.
+  recompilation this port is built on, from the [ICO source reconstruction](https://github.com/nathanialf/ico).
 - Translations: bob-ttz and cobra838 (Russian), ichagas7 (Brazilian Portuguese).
 - [PS5_Vulkan](https://github.com/mihawk-99/PS5_Vulkan),
   [PS5_Mesa](https://github.com/mihawk-99/PS5_Mesa) (RADV) and
