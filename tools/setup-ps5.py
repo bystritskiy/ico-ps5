@@ -62,7 +62,9 @@ def main():
  import shlex
  wrapper.write_text('#!/bin/sh\nexec docker run --rm --platform linux/amd64 -v '+shlex.quote(str(ROOT)+':'+str(ROOT))+' -w "$PWD" ico-ps5-dxc:local "$@"\n');wrapper.chmod(0o755)
  if a.build_images:
-  run(['docker','build','-t','ico-ps5-dxc:local',dxc])
+  # Without an attestation manifest: Docker Desktop's containerd store then
+  # finds the amd64 image for the wrapper's --platform linux/amd64.
+  run(['docker','build','--provenance=false','-t','ico-ps5-dxc:local',dxc])
   run(['docker','build','-t','ico-ps5-builder:local','-f',ROOT/'port/ps5/Dockerfile.builder',ROOT/'port/ps5'])
  n=vk/'tooling/native';tool=ROOT/'build/ps5/ps5-native-tool';tool.parent.mkdir(parents=True,exist_ok=True)
  run([a.llvm_bin/'clang++','-std=c++20','-O2',n/'native_app_builder.cpp',n/'self_container.cpp',n/'elf_object.cpp',n/'sce_module_writer.cpp','-lz','-o',tool])
