@@ -196,7 +196,7 @@ is compiled there with `ICO_RD` (`port/fmv/CMakeLists.txt`), and without either 
   the area on one side is fitted into the box on that side, not cut (`port/render/rd_video.c`,
   header comment, `drawPicture`). The box stays 4:3 whatever the display options.
 - **Colour conversion**: one pass converts the decoder's 4:2:0 planes with the IPU's CSC in
-  `yuv.hlsl`: ITU-R BT.601 limited range, coefficients in 1/64 units, Y below 16 clamped, chroma
+  `yuv.hlsl`: ITU-R BT.601 limited range, coefficients in 1/64 units (149, 204, -104, -50 and 258, written as signed decimals in `yuv.hlsl`: the IPU's hex 0x95, 0xCC, -0x68, -0x32, 0x102 would be read as unsigned by FXC, the Direct3D 11 backend's compiler, and every negative chroma term would saturate, a purple movie), Y below 16 clamped, chroma
   taken per 2 x 2 luma block without interpolation, each channel rounded and clamped. The constants
   are PCSX2's IPU model (behaviour, not code). Scaling to the output is bilinear between converted
   samples, so at 1:1 the output is the IPU's value (`port/shaders/yuv.hlsl`, header comment).
@@ -260,6 +260,29 @@ a gamepad's Start, then the key bound to Start, then a one-vsync tap of each. It
 Start edge reaches the poll within a vsync of the press for every source, exactly once per press,
 that the held button shows in `pad[0].now`, and that `ico_input_start_source` names the source for
 the skip's log line (`port/platform/test/movie_pad_test.c`, header comment).
+
+## The European disc's second attract film
+
+`pal_advertise576.pss` is the European disc's third movie row (`movieFile` row 3, stage 59
+`memoryPAL576`). The title's attract switches to stage 58 or 57 only (`ico2/script/src/op.c`,
+mode 2), so no play path reaches it; Options > Extras > Unused content > Attract movie (576 lines)
+starts it from the title on the European disc (`port/game/unused_live.c` (`beginMovie`)). It is a
+stage switch to `ico_region_stage(59)` with `mpegPlayReturnStage` the title, as op.c's mode 2
+makes it, so Main's movie path plays it: `movie_init`, `movie_proc(movie_abort_check)` (Start
+skips), then `ACTGame_SetActors_Debug(mpegPlayReturnStage, 1)` and the switch back to the title
+(`ico2/common/src/main.c`); the port adds no movie code.
+
+The "576" is the film's own encode, not a mode: `main.c` passes 576 lines to `movie_init` in 50 Hz
+and 480 in 60 Hz for every PAL movie. `movie.c` reads the picture size from the stream, not from
+`movie_init`'s arguments: the picture is kept at its decoded size and the log says it once, `fmv:
+picture 720 x 576 in a 720 x 480 area` in 60 Hz mode. `rd_video.c` (`drawPicture`) fits a picture
+larger than the display area, so the 60 Hz run shows all 576 lines scaled into the 4:3 box (a
+1.2 x taller picture is not cut), and in 50 Hz mode the area and the picture agree. The size is
+read from the code only, no run (`port/fmv/movie.c` (`keep_frame`); `port/render/rd_video.c`
+(`drawPicture`)).
+
+`unused_movie_test` (`port/game/test/unused_movie_test.c`) covers the start and the return over
+stubs of the game.
 
 ## Tests
 

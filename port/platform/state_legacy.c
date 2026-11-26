@@ -1,0 +1,481 @@
+/*
+ * port/platform/state_legacy.c
+ *
+ * Legacy tables (state_legacy.h): the index, the files, inflated.
+ */
+#include "state_legacy.h"
+
+#include <stdio.h>
+#include <stdlib.h>
+#include <string.h>
+
+#include "miniz.h"
+#include "state_syms.h"
+
+static void say(char *why, size_t n, const char *s)
+{
+    if (why != NULL && n > 0) {
+        snprintf(why, n, "%s", s);
+    }
+}
+
+/* the next line of [p, end): its bounds, NUL-free; returns the line after */
+static const char *line_of(const char *p, const char *end, const char **le)
+{
+    const char *nl = (const char *)memchr(p, '\n', (size_t)(end - p));
+
+    *le = nl != NULL ? nl : end;
+    return nl != NULL ? nl + 1 : end;
+}
+
+int ico_legacy_find(IcoLegacyRead rd, void *user, const char *platform, const char *commit,
+                    char *name, size_t n)
+{
+    void *data = NULL;
+    size_t len = 0;
+    const char *p, *end;
+    int found = 0;
+
+    char err[160];
+
+    err[0] = '\0';
+    if (rd == NULL || rd(user, "index.txt", &data, &len, err, sizeof err) != 0) {
+        return -1;
+    }
+    p = (const char *)data;
+    end = p + len;
+    while (p < end && !found) {
+        const char *le;
+        const char *next = line_of(p, end, &le);
+        char l[256], plat[64], kind[16], nm[64], cm[96];
+
+        if (le - p > 0 && le - p < (long)sizeof l && p[0] != '#') {
+            memcpy(l, p, (size_t)(le - p));
+            l[le - p] = '\0';
+            if (sscanf(l, "%63s %15s %63s %95s", plat, kind, nm, cm) == 4 &&
+                strcmp(plat, platform) == 0 && strcmp(cm, commit) == 0) {
+                snprintf(name, n, "%s", nm);
+                found = 1;
+            }
+        }
+        p = next;
+    }
+    free(data);
+    return found;
+}
+
+static void *inflate_raw(const void *z, size_t n, size_t *out_n)
+{
+    return tinfl_decompress_mem_to_heap(z, n, out_n, 0);
+}
+
+/* the table's file: 0, or -1 with why naming the file and the reader's
+   reason */
+static int read_file(IcoLegacyRead rd, void *user, const char *dir, const char *file, void **data,
+                     size_t *n, char *why, size_t why_n)
+{
+    char path[160], err[160];
+
+    snprintf(path, sizeof path, "%.63s/%.63s", dir, file);
+    err[0] = '\0';
+    *data = NULL;
+    *n = 0;
+    if (rd(user, path, data, n, err, sizeof err) != 0) {
+        if (why != NULL && why_n > 0) {
+            snprintf(why, why_n, "cannot read %.130s: %.150s", path,
+                     err[0] != '\0' ? err : "the reader gave no reason");
+        }
+        return -1;
+    }
+    return 0;
+}
+
+static uint32_t get32(const uint8_t *p)
+{
+    return (uint32_t)p[0] | (uint32_t)p[1] << 8 | (uint32_t)p[2] << 16 | (uint32_t)p[3] << 24;
+}
+
+IcoLegacyTable *ico_legacy_load(IcoLegacyRead rd, void *user, const char *name, char *why,
+                                size_t why_n)
+{
+    IcoLegacyTable *t = (IcoLegacyTable *)calloc(1, sizeof *t);
+    void *man = NULL, *gz = NULL, *sec = NULL, *idx = NULL, *runs = NULL;
+    size_t man_n = 0, gz_n = 0, sec_n = 0, idx_n = 0, runs_n = 0, text_n = 0, files = 0;
+    long text_index = 1; /* a manifest without the line: the first format */
+    int carry_listed = 0;
+    char *syms = NULL;
+    size_t syms_n = 0, i, k, at;
+    const char *p, *end;
+
+    if (t == NULL) {
+        say(why, why_n, "no memory");
+        return NULL;
+    }
+    snprintf(t->name, sizeof t->name, "%s", name);
+    t->verify_rules = 1; /* a manifest without the line: a format 2 record's rules */
+    t->record = 2;
+    if (read_file(rd, user, name, "manifest.txt", &man, &man_n, why, why_n) != 0) {
+        goto fail;
+    }
+    p = (const char *)man;
+    end = p + man_n;
+    while (p < end) {
+        const char *le;
+        const char *next = line_of(p, end, &le);
+        char l[256];
+
+        if (le - p > 0 && le - p < (long)sizeof l) {
+            memcpy(l, p, (size_t)(le - p));
+            l[le - p] = '\0';
+            if (strncmp(l, "commit ", 7) == 0) {
+                snprintf(t->commit, sizeof t->commit, "%.95s", l + 7);
+            } else if (strcmp(l, "kind rc") == 0) {
+                t->rc = 1;
+            } else if (strncmp(l, "texts ", 6) == 0) {
+                unsigned long long a = 0, b = 0;
+
+                if (sscanf(l + 6, "%llu %llu", &a, &b) == 2) {
+                    t->n_run = (size_t)a;
+                    text_n = (size_t)b;
+                }
+            } else if (strncmp(l, "text_index ", 11) == 0) {
+                text_index = strtol(l + 11, NULL, 10);
+            } else if (strncmp(l, "text_files ", 11) == 0) {
+                files = (size_t)strtoul(l + 11, NULL, 10);
+            } else if (strncmp(l, "hash_rules ", 11) == 0) {
+                t->hash_rules = (int)strtol(l + 11, NULL, 10);
+            } else if (strncmp(l, "hash_verify_rules ", 18) == 0) {
+                t->verify_rules = (int)strtol(l + 18, NULL, 10);
+            } else if (strncmp(l, "record ", 7) == 0) {
+                t->record = (int)strtol(l + 7, NULL, 10);
+            } else if (strncmp(l, "file carry.z ", 13) == 0) {
+                carry_listed = 1;
+            }
+        }
+        p = next;
+    }
+    if (t->commit[0] == '\0' || (t->record != 2 && t->record != 3) ||
+        (t->record == 2 && (files == 0 || files > 64 || t->n_run == 0)) || t->verify_rules < 1 ||
+        t->verify_rules >= t->hash_rules) {
+        say(why, why_n, "its manifest is damaged");
+        goto fail;
+    }
+    if (t->record == 3) {
+        t->n_run = 0;
+        goto hashes; /* a format 3 record names its own words: the code hashes alone */
+    }
+    if (text_index != ICO_LEGACY_TEXT_INDEX) {
+        if (why != NULL && why_n > 0) {
+            snprintf(why, why_n,
+                     "its text index is of format %ld, not %d (its runs do not say where a "
+                     "literal starts): the table must be rebuilt",
+                     text_index, ICO_LEGACY_TEXT_INDEX);
+        }
+        goto fail;
+    }
+    if (read_file(rd, user, name, ICO_LEGACY_SYMS, &gz, &gz_n, why, why_n) != 0 ||
+        read_file(rd, user, name, "sections.txt", &sec, &sec_n, why, why_n) != 0) {
+        goto fail;
+    }
+    syms = ico_symtab_gunzip(gz, gz_n, &syms_n);
+    if (syms == NULL) {
+        say(why, why_n, "its symbol file " ICO_LEGACY_SYMS " does not inflate");
+        goto fail;
+    }
+    t->syms = (char *)malloc(syms_n + sec_n + 2);
+    if (t->syms == NULL) {
+        say(why, why_n, "no memory");
+        goto fail;
+    }
+    memcpy(t->syms, syms, syms_n);
+    t->syms_n = syms_n;
+    if (syms_n > 0 && syms[syms_n - 1] != '\n') {
+        t->syms[t->syms_n++] = '\n';
+    }
+    memcpy(t->syms + t->syms_n, sec, sec_n);
+    t->syms_n += sec_n;
+    /* .rodata's line */
+    p = (const char *)sec;
+    end = p + sec_n;
+    while (p < end) {
+        const char *le;
+        const char *next = line_of(p, end, &le);
+        char l[256], nm[64], fl[16];
+        unsigned long long a = 0, s = 0;
+
+        if (le - p > 0 && le - p < (long)sizeof l) {
+            memcpy(l, p, (size_t)(le - p));
+            l[le - p] = '\0';
+            if (sscanf(l, "section %llx %llx %15s %63s", &a, &s, fl, nm) == 4 &&
+                strcmp(nm, ".rodata") == 0) {
+                t->ro_lo = a;
+                t->ro_hi = a + s;
+            }
+        }
+        p = next;
+    }
+    if (t->ro_hi <= t->ro_lo || t->ro_hi - t->ro_lo > (256u << 20)) {
+        say(why, why_n, "its sections name no .rodata");
+        goto fail;
+    }
+    if (read_file(rd, user, name, "texts.idx", &idx, &idx_n, why, why_n) != 0) {
+        goto fail;
+    }
+    if ((runs = inflate_raw(idx, idx_n, &runs_n)) == NULL || runs_n != t->n_run * 8) {
+        say(why, why_n, "its text index texts.idx is damaged");
+        goto fail;
+    }
+    t->run = (uint32_t *)malloc(t->n_run * 2 * sizeof *t->run);
+    t->lstart = (uint8_t *)malloc(t->n_run);
+    t->ro = (uint8_t *)calloc(1, (size_t)(t->ro_hi - t->ro_lo));
+    if (t->run == NULL || t->lstart == NULL || t->ro == NULL) {
+        say(why, why_n, "no memory");
+        goto fail;
+    }
+    for (i = 0; i < t->n_run; i++) {
+        t->run[2 * i] = get32((const uint8_t *)runs + 8 * i);
+        t->run[2 * i + 1] = get32((const uint8_t *)runs + 8 * i + 4);
+        t->lstart[i] = (t->run[2 * i + 1] & ICO_LEGACY_LSTART) != 0;
+        t->run[2 * i + 1] &= ~ICO_LEGACY_LSTART;
+        if (t->run[2 * i] < t->ro_lo || (uint64_t)t->run[2 * i] + t->run[2 * i + 1] > t->ro_hi ||
+            (i > 0 && t->run[2 * i] < (uint64_t)t->run[2 * i - 2] + t->run[2 * i - 1])) {
+            say(why, why_n, "its text index is out of order");
+            goto fail;
+        }
+    }
+    /* the runs' bytes, in order, across the files */
+    i = 0;  /* the run */
+    at = 0; /* bytes of run i placed */
+    for (k = 0; k < files; k++) {
+        char file[32];
+        void *z = NULL, *b = NULL;
+        size_t z_n = 0, b_n = 0, j = 0;
+
+        snprintf(file, sizeof file, "texts.%u.z", (unsigned)k);
+        if (read_file(rd, user, name, file, &z, &z_n, why, why_n) != 0) {
+            goto fail;
+        }
+        if ((b = inflate_raw(z, z_n, &b_n)) == NULL) {
+            free(z);
+            if (why != NULL && why_n > 0) {
+                snprintf(why, why_n, "its text file %s does not inflate", file);
+            }
+            goto fail;
+        }
+        free(z);
+        while (j < b_n && i < t->n_run) {
+            const size_t want = t->run[2 * i + 1] - at;
+            const size_t take = want < b_n - j ? want : b_n - j;
+
+            memcpy(t->ro + (t->run[2 * i] - t->ro_lo) + at, (const uint8_t *)b + j, take);
+            j += take;
+            at += take;
+            text_n -= take < text_n ? take : text_n;
+            if (at == t->run[2 * i + 1]) {
+                i++;
+                at = 0;
+            }
+        }
+        free(b);
+        if (j != b_n) {
+            say(why, why_n, "the text files hold more than the index");
+            goto fail;
+        }
+    }
+    if (i != t->n_run || text_n != 0) {
+        say(why, why_n, "the text files hold less than the index");
+        goto fail;
+    }
+hashes:
+    {
+        void *hz = NULL, *hb = NULL;
+        size_t hz_n = 0, hb_n = 0, j;
+
+        if (read_file(rd, user, name, "hashes.z", &hz, &hz_n, why, why_n) != 0) {
+            goto fail;
+        }
+        if ((hb = inflate_raw(hz, hz_n, &hb_n)) == NULL || hb_n % 20 != 0 || hb_n == 0) {
+            free(hz);
+            free(hb);
+            say(why, why_n, "its code hashes hashes.z are damaged");
+            goto fail;
+        }
+        free(hz);
+        t->n_hash = hb_n / 20;
+        t->hash = (uint64_t *)malloc(t->n_hash * 3 * sizeof *t->hash);
+        if (t->hash == NULL) {
+            free(hb);
+            say(why, why_n, "no memory");
+            goto fail;
+        }
+        for (j = 0; j < t->n_hash; j++) {
+            const uint8_t *e = (const uint8_t *)hb + 20 * j;
+
+            t->hash[3 * j] = get32(e);
+            t->hash[3 * j + 1] = (uint64_t)get32(e + 4) | (uint64_t)get32(e + 8) << 32;
+            t->hash[3 * j + 2] = (uint64_t)get32(e + 12) | (uint64_t)get32(e + 16) << 32;
+        }
+        free(hb);
+    }
+    if (carry_listed) {
+        /* the ADRPs' verdicts (state_legacy.h carry.z) */
+        void *cz = NULL, *cb = NULL;
+        size_t cz_n = 0, cb_n = 0, j, at = 0, bits = 0;
+
+        if (read_file(rd, user, name, "carry.z", &cz, &cz_n, why, why_n) != 0) {
+            goto fail;
+        }
+        cb = inflate_raw(cz, cz_n, &cb_n);
+        free(cz);
+        t->carry_at = (uint32_t *)malloc((t->n_hash ? t->n_hash : 1) * sizeof *t->carry_at);
+        t->carry_n = (uint16_t *)malloc((t->n_hash ? t->n_hash : 1) * sizeof *t->carry_n);
+        t->carry = (uint8_t *)malloc(cb_n ? cb_n : 1);
+        if (cb == NULL || t->carry_at == NULL || t->carry_n == NULL || t->carry == NULL) {
+            free(cb);
+            say(why, why_n, "its ADRPs' verdicts carry.z are damaged");
+            goto fail;
+        }
+        for (j = 0; j < t->n_hash; j++) {
+            uint16_t c;
+
+            if (at + 2 > cb_n) {
+                break;
+            }
+            c = (uint16_t)(((const uint8_t *)cb)[at] | ((const uint8_t *)cb)[at + 1] << 8);
+            at += 2;
+            t->carry_n[j] = c;
+            t->carry_at[j] = (uint32_t)bits;
+            if (c != ICO_LEGACY_UNJUDGED) {
+                const size_t nb = ((size_t)c + 7u) / 8u;
+
+                if (at + nb > cb_n) {
+                    break;
+                }
+                memcpy(t->carry + bits / 8u, (const uint8_t *)cb + at, nb);
+                at += nb;
+                bits += nb * 8u;
+            }
+        }
+        free(cb);
+        if (j != t->n_hash || at != cb_n) {
+            say(why, why_n, "its ADRPs' verdicts carry.z do not hold a row per code hash");
+            goto fail;
+        }
+    }
+    free(man);
+    free(gz);
+    free(sec);
+    free(idx);
+    free(runs);
+    free(syms);
+    say(why, why_n, "");
+    return t;
+fail:
+    free(man);
+    free(gz);
+    free(sec);
+    free(idx);
+    free(runs);
+    free(syms);
+    ico_legacy_free(t);
+    return NULL;
+}
+
+void ico_legacy_free(IcoLegacyTable *t)
+{
+    if (t == NULL) {
+        return;
+    }
+    free(t->syms);
+    free(t->ro);
+    free(t->run);
+    free(t->lstart);
+    free(t->hash);
+    free(t->carry);
+    free(t->carry_at);
+    free(t->carry_n);
+    free(t);
+}
+
+int ico_legacy_carried(const IcoLegacyTable *t, uint64_t off, uint32_t ord, uint32_t all)
+{
+    size_t lo = 0, hi;
+    uint32_t bit;
+
+    if (t == NULL || t->carry == NULL) {
+        return -1;
+    }
+    hi = t->n_hash;
+    while (lo < hi) {
+        const size_t mid = lo + (hi - lo) / 2;
+
+        if (t->hash[3 * mid] < off) {
+            lo = mid + 1;
+        } else {
+            hi = mid;
+        }
+    }
+    if (lo >= t->n_hash || t->hash[3 * lo] != off || t->carry_n[lo] == ICO_LEGACY_UNJUDGED ||
+        t->carry_n[lo] != all || ord >= all) {
+        return -1;
+    }
+    bit = t->carry_at[lo] + ord;
+    return (t->carry[bit / 8u] >> (bit % 8u)) & 1u;
+}
+
+IcoSymTab *ico_legacy_symtab(const IcoLegacyTable *t, const IcoSymTabEnv *env, char *why,
+                             size_t why_n)
+{
+    const char *k = " T ico_diag_init\n";
+    const char *hit = NULL, *p = t->syms, *end = t->syms + t->syms_n;
+    unsigned long long a = 0;
+    IcoSymTabEnv e = *env;
+
+    while (p < end) {
+        const char *q = (const char *)memchr(p, ' ', (size_t)(end - p));
+
+        if (q == NULL) {
+            break;
+        }
+        if ((size_t)(end - q) >= strlen(k) && memcmp(q, k, strlen(k)) == 0) {
+            hit = q;
+            break;
+        }
+        p = q + 1;
+    }
+    if (hit == NULL) {
+        say(why, why_n, "its symbol file names no ico_diag_init");
+        return NULL;
+    }
+    for (p = hit; p > t->syms && p[-1] != '\n'; p--) {}
+    if (sscanf(p, "%llx", &a) != 1) {
+        say(why, why_n, "its symbol file is damaged");
+        return NULL;
+    }
+    e.anchor = "ico_diag_init";
+    e.anchor_addr = env->image_lo + (uint64_t)a;
+    e.check = NULL;
+    return ico_symtab_parse(t->syms, t->syms_n, &e, why, why_n);
+}
+
+int ico_legacy_run(const IcoLegacyTable *t, uint64_t off, uint64_t *lo, uint64_t *hi, int *lstart)
+{
+    size_t a = 0, b = t->n_run;
+
+    while (a < b) {
+        const size_t mid = a + (b - a) / 2;
+
+        if (t->run[2 * mid] <= off) {
+            a = mid + 1;
+        } else {
+            b = mid;
+        }
+    }
+    if (a > 0 && off - t->run[2 * (a - 1)] < t->run[2 * (a - 1) + 1]) {
+        *lo = t->run[2 * (a - 1)];
+        *hi = (uint64_t)t->run[2 * (a - 1)] + t->run[2 * (a - 1) + 1];
+        *lstart = t->lstart != NULL && t->lstart[a - 1] != 0;
+        return 1;
+    }
+    return 0;
+}

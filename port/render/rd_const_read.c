@@ -45,6 +45,12 @@
  * sampling its own target.  A sprite drawn into the noted target ends the
  * note.
  *
+ * A planned source (rd_glow_light.c rd__glow_light_src): the glow's light
+ * plan draws the first blur pass into WORK1 and the sun's shrink with the
+ * colour WORK0 and WORK3 hold in the chain it does not draw (RGB 0), on
+ * every class and whatever [dev] constant_reads says (the plan's bytes
+ * depend on it); not counted.
+ *
  * Counters (RdPerfRecord.constReads, constKept): the sprites drawn this
  * way, and those reading another target that were not (the source drawn
  * since its clear, or not cleared in this replay).  [dev] constant_reads =
@@ -66,6 +72,23 @@ static struct {
     uint32_t id, tex;
     uint8_t rgba[4];
 } s_held;
+
+/* the last sprite drawn in a cleared source's colour: its target and the
+ * action it was (rd__const_took, rd_aura_paste.c's chain) */
+static struct {
+    uint32_t replay, actions, id;
+} s_took;
+
+uint32_t rd__const_actions(void)
+{
+    return s_actionsReplay == g_rd.replayCounter ? s_actions : 0u;
+}
+
+bool rd__const_took(uint32_t tcId)
+{
+    return s_took.replay == g_rd.replayCounter && s_actionsReplay == g_rd.replayCounter &&
+           s_took.actions == s_actions && s_took.id == tcId && tcId != 0;
+}
 
 bool rd__const_reads_on(void)
 {
@@ -108,7 +131,7 @@ void rd__const_note_clear(uint32_t id, const RdTargetRec *t, const float col[4])
 
 /* fx_sprite.hlsl fx_tfx of texel t and RGBAQ col under the sprite's flags
  * (TFX in bits 1..2, TCC), into out */
-static void constTfx(const uint8_t t[4], const uint8_t col[4], uint32_t flags, uint8_t out[4])
+void rd__const_tfx(const uint8_t t[4], const uint8_t col[4], uint32_t flags, uint8_t out[4])
 {
     const uint32_t tfx = (flags >> RD_FXF_TFX_SHIFT) & 3u;
     const bool tcc = (flags & RD_FXF_TCC) != 0u;
@@ -148,6 +171,15 @@ static void constTfx(const uint8_t t[4], const uint8_t col[4], uint32_t flags, u
 bool rd__const_read(const RdTargetRec *tc, uint32_t tcId, const RdTargetRec *src, uint32_t srcId,
                     const RdDrawState *d, RdPostRec *p, uint32_t tfmt)
 {
+    uint8_t planned[4];
+    if (src && src != tc && tfmt == RD_TEXSRC_RGBA32 && rd__glow_light_src(srcId, planned)) {
+        /* the glow's light plan: the source's colour in the chain it left
+           undrawn (rd_glow_light.c) */
+        uint8_t col[4];
+        rd__const_tfx(planned, p->rgba, rd__replay_blur_flags(d, p->lines, 1, 0), col);
+        memcpy(p->rgba, col, sizeof(col));
+        return true;
+    }
     const bool held = s_held.valid && s_held.replay == g_rd.replayCounter &&
                       s_actionsReplay == g_rd.replayCounter && s_held.actions + 1u == s_actions &&
                       s_held.id == srcId && src && s_held.tex == src->color.id;
@@ -163,7 +195,7 @@ bool rd__const_read(const RdTargetRec *tc, uint32_t tcId, const RdTargetRec *src
     }
     const uint32_t flags = rd__replay_blur_flags(d, p->lines, 1, 0);
     uint8_t col[4];
-    constTfx(s_held.rgba, p->rgba, flags, col);
+    rd__const_tfx(s_held.rgba, p->rgba, flags, col);
     static bool logged;
     if (!logged) {
         logged = true;
@@ -175,6 +207,9 @@ bool rd__const_read(const RdTargetRec *tc, uint32_t tcId, const RdTargetRec *src
     }
     memcpy(p->rgba, col, sizeof(col));
     g_rdPerf.constReads++;
+    s_took.replay = g_rd.replayCounter;
+    s_took.actions = s_actions;
+    s_took.id = tcId;
     rd__clear_skip_served(srcId); /* the source not read: its clear may go (rd_pass_cut.c) */
     return true;
 }

@@ -30,9 +30,32 @@
  *            limit; a background compile that does not return for 30 s
  *            is, at 30 s; a first-use creation that does not return is,
  *            whatever the background set does after its batch; the time
- *            not counted, or the limit off, never stalls.
+ *            not counted, or the limit off, never stalls;
+ *   188      issue 188: the limit before the game starts is 10 s, 60 s
+ *            on a driver whose compiles run one at a time, 30 s in play
+ *            on both (ico_pipe_stall_limit_s); the heartbeat's memory rule
+ *            (ico_pipe_mem_moving: 2 MB or more of growth, an unknown
+ *            reading never) over the issue 188 phone's heartbeats (147,
+ *            251, 275, 296, 295, 293 MB at 4 to 14 s, a creation in
+ *            progress from 4 s): the limit counts from the heartbeat after
+ *            the last growth (12 s), so 10 s fires at 21.75 s, not 14 s,
+ *            and 60 s at 71.75 s; the words of
+ *            the next start (ico_pipe_stall_next_differs): inside the
+ *            self-tests or on a lazy run the same way, unless the note
+ *            names a family the renderer can leave out or a VU shader
+ *            before the plain ones are in force; the set of a full or
+ *            careful run another way;
+ *   memcap   review 2 S1, the memory rule's cap (ico_pipe_mem_hold): a
+ *            creation whose memory grows 4 MB at every heartbeat is held
+ *            for three times the limit, then the limit fires (10, 60 and
+ *            30 s); with the free memory under the floor or a low-memory
+ *            level from 20 s nothing holds from there and the limit fires
+ *            at 20 s plus the limit; a new creation (the note changed)
+ *            starts its own hold; the limit off never fires; no hold
+ *            without a creation, without growth, or with memory low.
  */
 #include <stdio.h>
+#include <string.h>
 #include "gpu_hang.h"
 
 static int failures;
@@ -85,6 +108,54 @@ static void testStep(void)
     CHECK(w.fired && w.counted_s >= 15.0);
     /* once: the wait going on fires no more */
     CHECK(pollFor(&w, 15.0, 263, 262, 10.0, 1, NULL) == 0);
+}
+
+/* The reset stop (issue 215): a wait with the kernel driver resetting the
+   GPU under it ends at 1 s and 3 resets; a recovered stall, a wait without
+   resets and an unreadable count never do */
+static void testResetStop(void)
+{
+    IcoGpuResetWatch w = {0};
+    int i;
+    /* the handheld's second run: three stalls of about 350 ms, one reset
+       each, each on its own submission that then finishes: no stop */
+    CHECK(ico_gpu_reset_step(&w, 380, 379, 0.25, 1, 278) == 0);
+    CHECK(ico_gpu_reset_step(&w, 380, 379, 0.25, 1, 279) == 0);
+    CHECK(ico_gpu_reset_step(&w, 0, 380, 0.25, 1, 279) == 0);
+    CHECK(w.counted_s == 0.0);
+    /* the endless wait: submission 403, a reset every 350 ms */
+    CHECK(ico_gpu_reset_step(&w, 403, 401, 0.25, 1, 280) == 0); /* first seen */
+    CHECK(ico_gpu_reset_step(&w, 403, 401, 0.25, 1, 280) == 0);
+    CHECK(ico_gpu_reset_step(&w, 403, 401, 0.25, 1, 281) == 0);
+    CHECK(ico_gpu_reset_step(&w, 403, 401, 0.25, 1, 283) == 0); /* 3 resets, 0.75 s */
+    CHECK(ico_gpu_reset_step(&w, 403, 401, 0.25, 1, 283) == 1); /* 1.0 s */
+    CHECK(w.fired && w.resets0 == 280);
+    CHECK(ico_gpu_reset_step(&w, 403, 401, 0.25, 1, 290) == 0); /* once */
+    /* a long wait with one reset, or none: the 15 s limit's, not this one's */
+    memset(&w, 0, sizeof w);
+    for (i = 0; i < 80; i++) {
+        CHECK(ico_gpu_reset_step(&w, 500, 499, 0.25, 1, i < 10 ? 40 : i < 40 ? 41 : 42) == 0);
+    }
+    /* the third reset arrives late: the stop then */
+    CHECK(ico_gpu_reset_step(&w, 500, 499, 0.25, 1, 43) == 1);
+    /* the count not readable (the issue 123 tablet), at any poll */
+    memset(&w, 0, sizeof w);
+    for (i = 0; i < 80; i++) {
+        CHECK(ico_gpu_reset_step(&w, 500, 499, 0.25, 1, -1) == 0);
+    }
+    /* time not counted (in the background, a suspend gap) is not waited time */
+    memset(&w, 0, sizeof w);
+    CHECK(ico_gpu_reset_step(&w, 600, 599, 0.25, 1, 10) == 0);
+    for (i = 0; i < 20; i++) {
+        CHECK(ico_gpu_reset_step(&w, 600, 599, 0.25, 0, 30) == 0);
+    }
+    CHECK(w.counted_s == 0.0);
+    /* a count that went down starts the wait's figure again */
+    CHECK(ico_gpu_reset_step(&w, 600, 599, 0.25, 1, 3) == 0);
+    CHECK(w.resets0 == 3 && w.counted_s == 0.0);
+    /* another submission's wait starts again */
+    CHECK(ico_gpu_reset_step(&w, 601, 599, 0.25, 1, 9) == 0);
+    CHECK(w.resets0 == 9);
 }
 
 static void testFinished(void)
@@ -274,17 +345,137 @@ static void testStall(void)
     CHECK(stallFor(&p, &t, BG_NOTE, 9, &done, stuck, 1, 120.0, 1, 0, 30.0, NULL) == 0);
 }
 
+static void test188(void)
+{
+    CHECK(ico_pipe_stall_limit_s(0, 0) == 10.0);
+    CHECK(ico_pipe_stall_limit_s(0, 1) == 60.0);
+    CHECK(ico_pipe_stall_limit_s(1, 0) == 30.0);
+    CHECK(ico_pipe_stall_limit_s(1, 1) == 30.0);
+
+    CHECK(ico_pipe_mem_moving(147L * 1024, 251L * 1024));
+    CHECK(ico_pipe_mem_moving(1000, 1000 + ICO_PIPE_MEM_MOVING_KB));
+    CHECK(!ico_pipe_mem_moving(1000, 1000 + ICO_PIPE_MEM_MOVING_KB - 1));
+    CHECK(!ico_pipe_mem_moving(296L * 1024, 295L * 1024));
+    CHECK(!ico_pipe_mem_moving(-1, 251L * 1024));
+    CHECK(!ico_pipe_mem_moving(251L * 1024, -1));
+
+    /* the issue 188 log's heartbeats, 2 s apart: 147 MB at 4 s, 251, 275
+       and 296 MB at 6, 8 and 10 s, 295 and 293 MB at 12 and 14 s; a
+       creation in progress from 4 s; polled every 250 ms, each heartbeat's
+       verdict held until the next */
+    static const long kMb[] = {147, 147, 147, 251, 275, 296, 295, 293};
+    for (int serial = 0; serial < 2; serial++) {
+        const double lim = ico_pipe_stall_limit_s(0, serial);
+        IcoPipeStallWatch w = {0};
+        long prev = -1;
+        int moving = 0;
+        double firedAt = -1.0;
+        for (int q = 0; q <= 90 * 4 && firedAt < 0.0; q++) {
+            const double t = q * 0.25;
+            if (q % 8 == 0) {
+                const int beat = q / 8;
+                const long mb = kMb[beat < 8 ? beat : 7];
+                moving = ico_pipe_mem_moving(prev, mb * 1024);
+                prev = mb * 1024;
+            }
+            const int creating = t >= 4.0;
+            const int hold = ico_pipe_mem_hold(&w, t, creating, moving, 1, 0, lim);
+            const double st = ico_pipe_stall_step(&w, t, creating, !hold, 1, 7, 0, 0);
+            if (st >= lim) {
+                firedAt = t;
+            }
+        }
+        printf("  issue 188: limit %.0f s fired at %.2f s\n", lim, firedAt);
+        /* the 10 s heartbeat's growth holds the count until the 12 s one:
+           the last poll not counted is 11.75 s */
+        CHECK(firedAt == 11.75 + lim);
+    }
+
+    CHECK(!ico_pipe_stall_next_differs(1, 0, 0, 0, 0)); /* issue 188 */
+    CHECK(!ico_pipe_stall_next_differs(0, 1, 0, 0, 0));
+    CHECK(!ico_pipe_stall_next_differs(1, 1, 0, 1, 1));
+    CHECK(ico_pipe_stall_next_differs(0, 0, 0, 0, 0));
+    CHECK(ico_pipe_stall_next_differs(1, 0, 1, 0, 0));
+    CHECK(ico_pipe_stall_next_differs(0, 1, 0, 1, 0));
+    CHECK(ico_pipe_stall_next_differs(1, 1, 0, 1, 0));
+}
+
+/* review 2 S1: a creation whose memory moves at every heartbeat (4 MB
+   each, 2 s apart, polled every 250 ms from 100 s) */
+static double memCapFiredAt(double lim, int memoryLowFrom, int on, unsigned seqChangeAt)
+{
+    IcoPipeStallWatch w = {0};
+    long kb = 100L * 1024;
+    int moving = 0;
+    unsigned seq = 7;
+    for (int q = 0; q <= 400 * 4; q++) {
+        const double t = 100.0 + q * 0.25;
+        if (q % 8 == 0) {
+            const long prev = q == 0 ? -1 : kb;
+            kb += 4L * 1024;
+            moving = ico_pipe_mem_moving(prev, kb);
+        }
+        if (seqChangeAt != 0 && (unsigned)q == seqChangeAt) {
+            seq++; /* a new note: another creation */
+        }
+        const int low = memoryLowFrom >= 0 && q >= memoryLowFrom;
+        const int hold = ico_pipe_mem_hold(&w, t, 1, moving, on, low, lim);
+        const double st = ico_pipe_stall_step(&w, t, 1, !hold, on, seq, 0, 0);
+        if (st >= lim) {
+            return t - 100.0;
+        }
+    }
+    return -1.0;
+}
+
+static void testMemCap(void)
+{
+    static const double kLim[] = {ICO_PIPE_STALL_START_S, ICO_PIPE_STALL_START_SERIAL_S,
+                                  ICO_PIPE_STALL_PLAY_S};
+    for (int i = 0; i < 3; i++) {
+        const double lim = kLim[i];
+        const double cap = ICO_PIPE_MEM_HOLD_LIMITS * lim;
+        /* growing all along: held for the cap (from the first growth at
+           2 s), then the limit: it fires, by four times the limit and a
+           heartbeat */
+        const double at = memCapFiredAt(lim, -1, 1, 0);
+        printf("  memory moving at every heartbeat: limit %.0f s fired at %.2f s\n", lim, at);
+        CHECK(at >= 2.0 + cap + lim - 0.5 && at <= 2.0 + cap + lim + 0.5);
+        /* the free memory under the floor or a low-memory level from 20 s
+           (q 80): no hold from there, the limit counts from that poll */
+        const double atLow = memCapFiredAt(lim, 80, 1, 0);
+        CHECK(atLow >= 20.0 + lim - 0.3 && atLow <= 20.0 + lim + 0.3);
+        /* a new creation (the note changed at 10 s, q 40) starts its own
+           hold: it fires later than the first one alone would */
+        const double atNew = memCapFiredAt(lim, -1, 1, 40);
+        CHECK(atNew >= 10.0 + cap + lim - 0.5 && atNew <= 10.0 + cap + lim + 0.5);
+    }
+    /* the limit off: never held, never fired */
+    CHECK(memCapFiredAt(10.0, -1, 0, 0) < 0.0);
+    {
+        IcoPipeStallWatch w = {0};
+        CHECK(!ico_pipe_mem_hold(&w, 1.0, 0, 1, 1, 0, 10.0));  /* no creation */
+        CHECK(!ico_pipe_mem_hold(&w, 1.25, 1, 0, 1, 0, 10.0)); /* not growing */
+        CHECK(!ico_pipe_mem_hold(&w, 1.5, 1, 1, 1, 1, 10.0));  /* memory low */
+        CHECK(ico_pipe_mem_hold(&w, 1.75, 1, 1, 1, 0, 10.0));
+        CHECK(w.held_s == 0.25);
+    }
+}
+
 int main(void)
 {
     testLimit();
     testStep();
     testFinished();
+    testResetStop();
     testOther();
     testPaused();
     testOff();
     testRender();
     testNote();
     testStall();
+    test188();
+    testMemCap();
     printf("gpu_hang_test: %s\n", failures ? "FAILED" : "ok");
     return failures ? 1 : 0;
 }

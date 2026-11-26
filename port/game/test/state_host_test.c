@@ -9,17 +9,32 @@
  *                menu, a stage switch, the card, the disc, a movie, photo
  *                mode, the credits, the music gallery) and named; the
  *                order when several hold; a load needs no pause; the pause
- *                menu, a port page over it, a game layout, the title
+ *                menu, a port page over it, a game layout, the title; a
+ *                Permadeath journey in force (the active difficulty
+ *                record): a load and a save refused first (after off)
+ *   record       a state's own "difficulty.record" read by its bytes
+ *                (ico_state_record_permadeath): Permadeath on refuses it,
+ *                off, another record version, another size, a block past
+ *                the section's end and no section do not; the same through
+ *                a state file's reg section written and read back
  *   texts        every result has its own log words
  *   slot paths   slot1.ics .. slot4.png; slot 0, slot 5 and a path that
  *                does not fit refused with ""
  *   [dev] keys   "<tick>:<slot>" and "<tick>", and the malformed ones
  *   listing      a folder that does not exist and an empty one: four empty
  *                slots; then states written with each validity field
- *                changed (platform, build, disc, a simulation key) listed
- *                as present and not loadable with the reason, a good one
- *                loadable with its play time, stage, time, commit and
- *                picture, a damaged file present and BAD_FILE
+ *                changed (platform, build, disc) listed as present and not
+ *                loadable with the reason, a good one loadable with its
+ *                play time, stage, time, commit and picture, a damaged file
+ *                present and BAD_FILE; a state with a simulation key other
+ *                than this run's loadable (never refused for a setting),
+ *                before and after the key changes
+ *   settings line  the load's one line for a state saved with other
+ *                settings (ico_state_settings_line): every difference
+ *                named, this run's keys first, a key a later version added
+ *                at its default and a retired one passed over, none for
+ *                the same keys or a key unset on one side and at its
+ *                default's text on the other; a short buffer
  *   thumbnail    the size: the pause picture's square pixels (1920 x 1080
  *                to 960 x 540, a narrow one kept, a tall one held to 960
  *                lines), the fallback DISPLAY frame at the box's shape (640 x
@@ -46,6 +61,7 @@
 
 #include "host_fs.h"
 #include "state_file.h"
+#include "difficulty.h"
 #include "state_rules.h"
 #include "../../test/ico_check.h"
 
@@ -92,6 +108,20 @@ static void test_conditions(void)
     c.layout = 85;
     CHECK(ico_state_conditions(&c, 1, NULL) == ICO_STATE_NOT_PAUSED);
     CHECK(ico_state_conditions(&c, 0, NULL) == ICO_STATE_OK, "a load from the title");
+    /* a load continuing from a checkpoint: the pause menu or the title only */
+    CHECK(ico_state_checkpoint_may_start(&c), "a checkpoint from the title's page");
+    c.layout = 0;
+    c.paused = 0;
+    CHECK(ico_state_checkpoint_may_start(&c), "a checkpoint from the title, no page open (F9)");
+    c = ok_conds();
+    CHECK(ico_state_checkpoint_may_start(&c), "a checkpoint from the pause menu");
+    c.layout = 85;
+    CHECK(ico_state_checkpoint_may_start(&c), "a checkpoint from a page over the pause menu");
+    c.layout = 58;
+    CHECK(!ico_state_checkpoint_may_start(&c), "no checkpoint from another game layout");
+    c = ok_conds();
+    c.paused = 0;
+    CHECK(!ico_state_checkpoint_may_start(&c), "no checkpoint in active play (F9)");
 
     c = ok_conds();
     c.available = 0;
@@ -124,6 +154,14 @@ static void test_conditions(void)
     c.gallery = 1;
     CHECK(ico_state_conditions(&c, 1, &what) == ICO_STATE_PHOTO);
     CHECK_STR(what, "the music gallery");
+    /* a test room (Extras > Unused content): a save and a load refused */
+    c = ok_conds();
+    c.unused = 1;
+    CHECK(ico_state_conditions(&c, 1, &what) == ICO_STATE_PHOTO);
+    CHECK_STR(what, "a test room");
+    what = "";
+    CHECK(ico_state_conditions(&c, 0, &what) == ICO_STATE_PHOTO);
+    CHECK_STR(what, "a test room");
 
     /* the order: off, pause, stage switch, card, disc, movie, photo */
     c = ok_conds();
@@ -145,13 +183,40 @@ static void test_conditions(void)
     CHECK(ico_state_conditions(&c, 0, NULL) == ICO_STATE_PHOTO);
     c.available = 0;
     CHECK(ico_state_conditions(&c, 0, NULL) == ICO_STATE_OFF);
+
+    /* a Permadeath journey in force (ico_difficulty_states_locked): a load
+       and a save refused before anything else is looked at (a state of it
+       could never be loaded) */
+    c = ok_conds();
+    c.locked = 1;
+    what = "";
+    CHECK(ico_state_conditions(&c, 0, &what) == ICO_STATE_PERMADEATH);
+    CHECK_STR(what, "the journey has Permadeath on");
+    what = "";
+    CHECK(ico_state_conditions(&c, 1, &what) == ICO_STATE_PERMADEATH,
+          "a save on a Permadeath journey");
+    CHECK_STR(what, "the journey has Permadeath on: a state of it could never be loaded");
+    c.layout = 58; /* not the pause menu: still the lock's, for both */
+    CHECK(ico_state_conditions(&c, 0, NULL) == ICO_STATE_PERMADEATH);
+    CHECK(ico_state_conditions(&c, 1, NULL) == ICO_STATE_PERMADEATH);
+    c = ok_conds();
+    c.locked = 1;
+    c.stage_switch = 1;
+    c.card_busy = 1;
+    c.movie = 1;
+    c.unused = 1;
+    CHECK(ico_state_conditions(&c, 0, NULL) == ICO_STATE_PERMADEATH, "the lock before the rest");
+    CHECK(ico_state_conditions(&c, 1, NULL) == ICO_STATE_PERMADEATH);
+    c.available = 0;
+    CHECK(ico_state_conditions(&c, 0, NULL) == ICO_STATE_OFF, "off before the lock");
+    CHECK(ico_state_conditions(&c, 1, NULL) == ICO_STATE_OFF);
 }
 
 static void test_texts(void)
 {
     int a, b;
 
-    for (a = ICO_STATE_OK; a <= ICO_STATE_BUSY; a++) {
+    for (a = ICO_STATE_OK; a <= ICO_STATE_PERMADEATH; a++) {
         const char *t = ico_state_result_text((IcoStateResult)a);
 
         CHECK(t != NULL && t[0] != '\0' && strcmp(t, "unknown") != 0, "result %d has no text", a);
@@ -161,6 +226,8 @@ static void test_texts(void)
         }
     }
     CHECK_STR(ico_state_result_text(ICO_STATE_OTHER_SETTINGS), "settings differ");
+    CHECK_STR(ico_state_result_text(ICO_STATE_PERMADEATH),
+              "save states are off on a Permadeath journey");
 }
 
 static void test_paths(void)
@@ -303,26 +370,93 @@ static void test_listing(void)
     CHECK_STR(s[2].build_commit, "another-commit");
     CHECK(s[3].present && !s[3].loadable && s[3].why_not == ICO_STATE_OTHER_DISC);
 
-    /* folder b: a simulation key that differs, a damaged file, slot 3
-       empty, slot 4 good; then the key changed back */
+    /* folder b: a simulation key that differs (and its hash), a damaged
+       file, slot 3 empty, slot 4 good; then the key changed in this run:
+       a setting never greys a slot */
     h = now;
     snprintf(h.keys, sizeof h.keys, "gameplay.mirror=true\n");
+    h.settings_hash = now.settings_hash ^ 1;
     write_state(d2, 1, &h);
     CHECK(ico_state_slot_path(p, sizeof p, d2, 2, ".ics") == 0);
     write_bytes(p, "not a state at all");
     write_state(d2, 4, &now);
     ico_state_list_dir(d2, &now, s);
-    CHECK(s[0].present && !s[0].loadable && s[0].why_not == ICO_STATE_OTHER_SETTINGS);
+    CHECK(s[0].present && s[0].loadable && s[0].why_not == ICO_STATE_OK,
+          "another setting: loadable (%d)", (int)s[0].why_not);
     CHECK(s[1].present && !s[1].loadable && s[1].why_not == ICO_STATE_BAD_FILE);
     CHECK(!s[2].present && s[2].why_not == ICO_STATE_EMPTY);
     CHECK(s[3].present && s[3].loadable);
     snprintf(now.keys, sizeof now.keys, "gameplay.mirror=true\n");
+    now.settings_hash ^= 0x55;
     ico_state_list_dir(d2, &now, s);
-    CHECK(s[0].loadable, "loadable once the key is the same");
-    CHECK(!s[3].loadable && s[3].why_not == ICO_STATE_OTHER_SETTINGS);
+    CHECK(s[0].loadable, "loadable with the key the same");
+    CHECK(s[3].loadable && s[3].why_not == ICO_STATE_OK, "loadable with the key changed (%d)",
+          (int)s[3].why_not);
     /* no header to check against: present, not loadable */
     ico_state_list_dir(d2, NULL, s);
     CHECK(s[0].present && !s[0].loadable);
+}
+
+/* the key-default and retired-key functions state_host.c sets (sim_keys.h),
+   for the test's keys: "false" or unset is the default; "old.row" retired */
+static int fake_default(const char *key, size_t key_n, const char *value, size_t value_n)
+{
+    (void)key;
+    (void)key_n;
+    return value_n == 0 || (value_n == 5 && memcmp(value, "false", 5) == 0);
+}
+
+static int fake_retired(const char *key, size_t key_n)
+{
+    return key_n == 7 && memcmp(key, "old.row", 7) == 0;
+}
+
+static void test_settings_line(void)
+{
+    static const char now_keys[] = "video.video_mode=60hz\ngameplay.mirror=\n"
+                                   "gameplay.hold_type=toggle\nnew.key=false\n";
+    char line[512];
+
+    ico_state_set_key_default(fake_default);
+    ico_state_set_key_retired(fake_retired);
+    /* the same keys: no line */
+    CHECK(ico_state_settings_line(2, now_keys, now_keys, line, sizeof line) == 0 && line[0] == '\0',
+          "the same keys: %s", line);
+    /* unset on one side, the default's text on the other; a later
+       version's key at its default; a retired row: none */
+    CHECK(ico_state_settings_line(2,
+                                  "video.video_mode=60hz\ngameplay.mirror=false\n"
+                                  "gameplay.hold_type=toggle\nold.row=7\n",
+                                  now_keys, line, sizeof line) == 0 &&
+              line[0] == '\0',
+          "nothing that differs: %s", line);
+    /* two settings and a key this version lacks */
+    CHECK(ico_state_settings_line(3,
+                                  "video.video_mode=pal50\ngameplay.mirror=true\n"
+                                  "gameplay.hold_type=toggle\ngone.key=1\n",
+                                  now_keys, line, sizeof line) == 3,
+          "three differences: %s", line);
+    CHECK_STR(line, "state: slot 3 was saved with other settings (video.video_mode=pal50 (now "
+                    "60hz), gameplay.mirror=true (now ), gone.key=1 (now absent)): it loads "
+                    "under this run's");
+    /* a later version's key changed from its default */
+    CHECK(ico_state_settings_line(1,
+                                  "video.video_mode=60hz\ngameplay.mirror=\n"
+                                  "gameplay.hold_type=hold\n",
+                                  "video.video_mode=60hz\ngameplay.mirror=\n"
+                                  "gameplay.hold_type=toggle\nnew.key=true\n",
+                                  line, sizeof line) == 2,
+          "two differences: %s", line);
+    CHECK_STR(line, "state: slot 1 was saved with other settings (gameplay.hold_type=hold (now "
+                    "toggle), new.key=(absent) (now true)): it loads under this run's");
+    /* a short buffer: the start, the count whole */
+    CHECK(ico_state_settings_line(1, "gameplay.mirror=true\n", "gameplay.mirror=\n", line, 16) ==
+                  1 &&
+              strcmp(line, "state: slot 1 w") == 0,
+          "cut: %s", line);
+    CHECK(ico_state_settings_line(1, "gameplay.mirror=true\n", "gameplay.mirror=\n", NULL, 0) == 1);
+    ico_state_set_key_retired(NULL);
+    ico_state_set_key_default(NULL);
 }
 
 static void test_thumbnail(void)
@@ -502,6 +636,139 @@ static void test_pause_picture(void)
           "the first poll on the pause menu: none taken");
 }
 
+/* reads the "reg" section of a state file into reg (n bytes): 1 when read */
+static void *reg_out;
+static uint64_t reg_got;
+
+static void *want_reg(void *user, const IcoStateSectionInfo *s)
+{
+    (void)user;
+    if (strcmp(s->name, "reg") != 0 || s->raw_bytes > 4096) {
+        return NULL;
+    }
+    reg_got = s->raw_bytes;
+    return reg_out;
+}
+
+static void test_record(void)
+{
+    static unsigned char reg[1024], back[4096];
+    IcoDifficulty d;
+    const uint64_t off = 300; /* the record after other blocks */
+    IcoStateSection sec[2];
+    IcoStateWriteResult w;
+    IcoStateHeader hd;
+    char p[640];
+
+    memset(&d, 0, sizeof d);
+    d.version = ICO_DIFF_VERSION;
+    d.row[ICO_DIFF_PERMADEATH] = 1;
+    memset(reg, 0x5A, sizeof reg);
+    memcpy(reg + off, &d, sizeof d);
+    CHECK(ico_state_record_permadeath(reg, sizeof reg, off, sizeof d) == 1,
+          "a record with Permadeath on");
+    CHECK(ico_state_record_permadeath(reg, sizeof reg, off, sizeof d - 4) == 0, "another size");
+    CHECK(ico_state_record_permadeath(reg, sizeof reg, sizeof reg - 100, sizeof d) == 0,
+          "past the end");
+    CHECK(ico_state_record_permadeath(reg, sizeof reg, sizeof reg + 8, sizeof d) == 0,
+          "an offset past the end");
+    CHECK(ico_state_record_permadeath(NULL, 0, 0, sizeof d) == 0, "no section");
+    d.version = ICO_DIFF_VERSION + 1;
+    memcpy(reg + off, &d, sizeof d);
+    CHECK(ico_state_record_permadeath(reg, sizeof reg, off, sizeof d) == 0, "another version");
+    d.version = ICO_DIFF_VERSION;
+    d.row[ICO_DIFF_PERMADEATH] = 0;
+    d.row[ICO_DIFF_KNOCK_LIMIT] = 3;
+    memcpy(reg + off, &d, sizeof d);
+    CHECK(ico_state_record_permadeath(reg, sizeof reg, off, sizeof d) == 0, "Permadeath off");
+
+    /* through a file: the reg section written and read back alone */
+    d.row[ICO_DIFF_PERMADEATH] = 1;
+    memcpy(reg + off, &d, sizeof d);
+    make_now();
+    hd = now;
+    memset(sec, 0, sizeof sec);
+    sec[0].name = "arena";
+    sec[0].data = back;
+    sec[0].bytes = 64;
+    sec[1].name = "reg";
+    sec[1].data = reg;
+    sec[1].bytes = sizeof reg;
+    snprintf(p, sizeof p, "%s/state_host_record.ics", base);
+    CHECK(ico_state_file_write(p, &hd, sec, 2) == ICO_STATE_OK);
+    CHECK(ico_state_file_flush(&w) == 1 && w.result == ICO_STATE_OK, "write %s: %s", p, w.why);
+    reg_out = back;
+    reg_got = 0;
+    CHECK(ico_state_file_read(p, NULL, want_reg, NULL) == ICO_STATE_OK && reg_got == sizeof reg);
+    CHECK(ico_state_record_permadeath(back, reg_got, off, sizeof d) == 1,
+          "the file's record with Permadeath on");
+    remove(p);
+}
+
+/* a fibers section built here: n records of the given sizes */
+static size_t fibers_blob(unsigned char *b, size_t cap, int n, const uint32_t *ctrl,
+                          const uint32_t *stack, int claim)
+{
+    size_t at = 16;
+    int i;
+
+    memset(b, 0, cap);
+    memcpy(b, &claim, sizeof claim);
+    for (i = 0; i < n; i++) {
+        IcoStateFiberRec r;
+
+        memset(&r, 0, sizeof r);
+        r.slot = (uint32_t)i;
+        r.ctrl_bytes = ctrl[i];
+        r.stack_bytes = stack[i];
+        memcpy(b + at, &r, sizeof r);
+        at += sizeof r;
+        /* the bytes as a genuine save pads them, when they fit */
+        if (ctrl[i] < cap && stack[i] < cap) {
+            at += (size_t)ICO_STATE_PAD16(ctrl[i]) + (size_t)ICO_STATE_PAD16(stack[i]);
+        }
+    }
+    return at < cap ? at : cap;
+}
+
+/* the fibers section of a damaged file: every size bounded by the section
+   (a size near 4 GB once wrapped to 0 in the padding and passed) */
+static void test_fibers(void)
+{
+    static unsigned char b[4096];
+    static IcoSchedImage img;
+    uint32_t ctrl[2] = {64, 32}, stack[2] = {100, 48};
+    size_t n;
+
+    n = fibers_blob(b, sizeof b, 2, ctrl, stack, 2);
+    CHECK(ico_state_fibers_parse(b, n, NULL, 0, &img) == 0 && img.n_fibers == 2 &&
+              img.fibers[1].ctrl_bytes == 32 && img.fibers[1].stack_bytes == 48,
+          "a genuine section: two fibers");
+    CHECK(img.fibers[0].stack == (const unsigned char *)img.fibers[0].ctrl + 64 &&
+              (const unsigned char *)img.fibers[1].stack + 48 <= b + n,
+          "the bytes inside the section");
+    CHECK(ico_state_fibers_parse(b, n - 1, NULL, 0, &img) == -1 && img.n_fibers == 0,
+          "one byte short");
+    ctrl[0] = 0xFFFFFFF1u; /* + 15 wrapped to 0 in 32 bits: no bytes then needed */
+    stack[0] = 0;
+    n = fibers_blob(b, sizeof b, 1, ctrl, stack, 1);
+    CHECK(ico_state_fibers_parse(b, n, NULL, 0, &img) == -1, "a control size of 0xFFFFFFF1");
+    ctrl[0] = 0;
+    stack[0] = 0xFFFFFFF8u;
+    n = fibers_blob(b, sizeof b, 1, ctrl, stack, 1);
+    CHECK(ico_state_fibers_parse(b, n, NULL, 0, &img) == -1, "a stack size of 0xFFFFFFF8");
+    ctrl[0] = 64;
+    stack[0] = 100;
+    n = fibers_blob(b, sizeof b, 1, ctrl, stack, ICO_SCHED_MAX_THREADS + 1);
+    CHECK(ico_state_fibers_parse(b, n, NULL, 0, &img) == -1, "a count past the scheduler's");
+    n = fibers_blob(b, sizeof b, 1, ctrl, stack, -1);
+    CHECK(ico_state_fibers_parse(b, n, NULL, 0, &img) == -1, "a negative count");
+    CHECK(ico_state_fibers_parse(b, 8, NULL, 0, &img) == -1, "no room for the count");
+    CHECK(ico_state_fibers_parse(NULL, 0, NULL, 0, &img) == -1, "no section");
+    n = fibers_blob(b, sizeof b, 1, ctrl, stack, 2);
+    CHECK(ico_state_fibers_parse(b, n, NULL, 0, &img) == -1, "a second record past the end");
+}
+
 int main(int argc, char **argv)
 {
     snprintf(base, sizeof base, "%s", argc > 1 ? argv[1] : ".");
@@ -510,7 +777,10 @@ int main(int argc, char **argv)
     test_paths();
     test_dev_keys();
     test_listing();
+    test_settings_line();
     test_thumbnail();
     test_pause_picture();
+    test_record();
+    test_fibers();
     return ico_check_summary("state_host");
 }

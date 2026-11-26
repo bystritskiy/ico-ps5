@@ -1,0 +1,1850 @@
+/* rd_vis.c: the port's visibility test per scene draw (rd_vis.h;
+ * docs/port/RENDER.md, "Culling").
+ *
+ * Today most of list 0's draw commands put nothing on the screen: the game
+ * culls whole objects by box against the native frame with a margin
+ * (GsBase.c gsb_ClipBox), and every packet of an object it keeps is sent,
+ * so the parts beside or behind the camera are drawn and clipped away
+ * (77 % of the commands of issue 179's frame; 54 to 86 % over the
+ * occlusion corpus, build-host/tmp/v098/evidence/perf/occlusion.md).  On a
+ * tile-based GPU each costs its vertex and binning work.  This test drops
+ * them before the replay looks at the frame.
+ *
+ * The bound.  A mesh's positions are qword 0 of each vertex of its stream
+ * (rd_mesh.h RD_VU_QW_*); the box of every vertex of the stream (the
+ * draws' batches and a sheet's tiles all lie in it) with the w lane's range
+ * is kept per mesh by (id, stream serial, vertex count, layout, stream):
+ * RdMeshRec.streamSerial is new at every write of the stream
+ * (rd__mesh_stream_written: creation, rd_update_vu_mesh's morphs, the
+ * interpolation's scratch copies and their blend), so a kept box is always
+ * the stream the device draws; a record never written through it (serial
+ * 0) is bounded again at every draw.  A skinned stream keeps a box per
+ * bone slot (rd_vis.h RdVisSkin).  A grid's vertices are in the command's
+ * payload (the frame's copy of the Mesh3D buffer), bounded at every draw.
+ * Particles are not tested.
+ *
+ * The test.  The programs give each vertex the homogeneous position
+ * h = M (x, y, z, w) in VU order (vu_common.hlsli vu_mat; M = VU memory
+ * 16..19 for normal_c, normal_l and mesh, w = 1, or pos.w under code 36;
+ * cluster: h = mem[4..7] (w0 B0 (p, 1) + w1 B1 (p, 1), 1)).  h is linear
+ * in the position, so every vertex's h is a convex combination of the h of
+ * the box's corners (8, or 16 over the w range), computed here in double;
+ * the shader's float h differs from the exact one by a few roundings of
+ * the sum of the absolute products, which every plane value below must
+ * clear (RD_VIS_TOL of that sum).  For a side of the target's rectangle
+ * (rd_vis.h RdVisRect: the left one, x0) two planes through the eye's
+ * line are tested, h.x - (x0 - 2) h.w and h.x - (x0 - 1) h.w: the command
+ * is skipped when both are negative at every corner (each linear, so at
+ * every vertex too).  What the GPU draws of a triangle then lies left of
+ * x0 - 1:
+ *   - a corner drawn at its GS position (vu_vtx_position: every corner of
+ *     a triangle drawn exactly, and a clipped triangle's corners in front
+ *     of the eye with X and Y not saturated) has w > 0 (the region test
+ *     needs 0 < w, cluster's mem[0].w < w with mem[0].w >= 0 checked;
+ *     vu_gs_ok and the extended snap need w > 0; code 36 is skipped only
+ *     with every corner in front), so x / w < x0 - 2, and its ftoi4 X is
+ *     within 1/16 of that (truncation toward zero; a saturated X keeps its
+ *     side): X < x0 - 1.9, and (X, 1) is beyond the second plane;
+ *   - a corner in the homogeneous form (vu_homogeneous_position: behind
+ *     the eye, saturated, or below GS Z 0) is h itself through the
+ *     clip-space mapping, linear: beyond the second plane at any w;
+ *   - the GPU draws the points of the clip-space triangle with w > 0 (it
+ *     clips at -w <= x <= w and 0 <= z <= w), each a convex combination of
+ *     the three corners: beyond the second plane with w > 0, so left of
+ *     x0 - 1, a whole pixel and more from the target's first sample (GS x0
+ *     on the pixel-centre convention, x0 - 0.5 / scale at worst under MSAA
+ *     or without the half-pixel origin).
+ * Code 34 (clip mode none) wraps X and Y to 16 bits and is never skipped.
+ * Behind the eye: every corner's w < 0 gives every vertex w < 0, no GS
+ * position (each needs w > 0) and every homogeneous corner clipped away;
+ * not for code 36, whose triangles without a clip flag are drawn at their
+ * GS positions whatever w is.  The chain plane, the later mark's depth
+ * bias, the card test, the tick cameras' rule and the content table only
+ * leave out or move depth: never a position.  So a skipped command draws
+ * no pixel of its target, at every preset, scale and aspect: the verdict
+ * depends only on the target's GS size and the payload.
+ *
+ * The shadow frame.  The only way of leaving commands out that is proved
+ * byte for byte is the replay tool's --nop: the command's type becomes
+ * RDC_NOP, every other field, every index and so every command's ordinal
+ * (g_rdStoreOrd) stay, and every scan that walks the lists has a case for
+ * it (the store plan, the passes' areas and cuts, the crack fill's place,
+ * the ring's estimate, the meshes' upload, the vertex pre-pass, the blur
+ * fold, the constant reads, the list loop).  rd__vis_frame returns a copy
+ * of the frame whose lists with a skipped command are copies with those
+ * commands NOPs (the payload and every other list shared).  What decides
+ * across draws or across replays reads the frame as recorded
+ * (rd__vis_source, rd__vis_culled): the strip joining over a part's
+ * packets (rd_join.c: a skipped packet's strips still join the others'),
+ * the fades fold's plan (rd_fades_fold.c: its reads of SCENE's depth
+ * before the clear), and the store plan's carried read (rd_store_plan.c:
+ * a depth read before its clear keeps the stores from then on).
+ *
+ * The occlusion test ([dev] cull = full; rd_vis_hiz.c holds the argument).
+ * Before the walk, list 0 is read once for its occluders' triangles
+ * (hizCollect: the opaque prelit and lit draws the frustum test keeps, the
+ * triangles drawn exactly whose screen box covers a 64th of the frame, the
+ * largest within the budget); then the walk keeps the record of list 0's
+ * depth as it goes (hizCommand, hizDraw): each draw of list 0 the frustum
+ * test keeps is tested against what the draws before it wrote, then its
+ * own triangles go in, and whatever may lower the depth resets it.  The
+ * collect costs less with ICO_RD_CULL_HIZ_FAST on (the default; 0 the
+ * plain pass, a comparison), the same occluders: the vertex pass leaves
+ * the triangles too small to count before projecting them in full
+ * (rd_vis_hiz.c rd__vis_hiz_mesh_ex), the walk takes the collect's
+ * verdicts (HizSeen), a texture's pending scan is made once a collect and
+ * a draw read as before takes its triangles from the collect cache
+ * (rd_vis_hiz_fast.c); ICO_RD_CULL_HIZ_CHECK=1 does each left triangle and
+ * each cache hit in full as well and counts a difference (hizWrong).
+ *
+ * Under MSAA (rd_aa_samples(rd__aa_mode()) > 1) the replay draws SCENE's
+ * passes into SCENE_MS until the first command that touches SCENE's own
+ * colour or depth outside such a pass closes the epoch (rd_replay.c
+ * rd__transition: a DATE snapshot, a texture read of SCENE; msaaPass: a
+ * pass on SCENE's colour with another depth, or SCENE's depth with another
+ * colour).  A NOP has no pass and no transition, so a skipped draw that
+ * would have closed it moves the close later and the draws between are
+ * multisampled where the replay of every draw drew them single-sampled
+ * (different edge pixels after the covered-majority resolve).  The walk
+ * keeps every such draw under MSAA (rd__vis_msaa_may_close; MSAA_EPOCH),
+ * whether or not the epoch is open there: conservative. */
+#include <math.h>
+#include <stdio.h>
+#include <stdlib.h>
+#include <string.h>
+
+#include "rd_ledger_live.h" /* the scene ledger: the skips by model */
+#include "rd_mesh.h"
+#include "rd_perf_hooks.h"
+#include "rd_vis.h"
+#include "shader_consts.h"
+
+/* the lists tested: the scene's (list 11 is the 2D layer and the fades,
+ * list 12 the reduction) */
+#define VIS_LAST_LIST 10
+
+RdVisRect rd__vis_rect(uint32_t gsW, uint32_t gsH, uint32_t tw, uint32_t th)
+{
+    RdVisRect r;
+    r.x0 = 2048.0 - (double)(gsW >> 1);
+    r.y0 = 2048.0 - (double)(gsH >> 1);
+    r.x1 = r.x0 + (double)(tw > gsW ? tw : gsW);
+    r.y1 = r.y0 + (double)(th > gsH ? th : gsH) + 1.0;
+    return r;
+}
+
+static void boxAdd(RdVisBox *b, const float *p)
+{
+    if (b->n == 0) {
+        memcpy(b->lo, p, sizeof(b->lo));
+        memcpy(b->hi, p, sizeof(b->hi));
+    } else {
+        for (int k = 0; k < 4; k++) {
+            b->lo[k] = p[k] < b->lo[k] ? p[k] : b->lo[k];
+            b->hi[k] = p[k] > b->hi[k] ? p[k] : b->hi[k];
+        }
+    }
+    b->n++;
+}
+
+static bool finite4(const float *p)
+{
+    return isfinite(p[0]) && isfinite(p[1]) && isfinite(p[2]) && isfinite(p[3]);
+}
+
+bool rd__vis_box(const float (*stream)[4], uint32_t vertexCount, uint32_t qpv, RdVisBox *out)
+{
+    memset(out, 0, sizeof(*out));
+    if (!stream || qpv == 0) {
+        return vertexCount == 0;
+    }
+    for (uint32_t v = 0; v < vertexCount; v++) {
+        const float *p = stream[(size_t)v * qpv];
+        if (!finite4(p)) {
+            out->n = 0;
+            return false;
+        }
+        boxAdd(out, p);
+    }
+    return true;
+}
+
+bool rd__vis_grid_box(const float (*stream)[4], uint32_t streamQw, uint32_t strips,
+                      uint32_t stripLen, uint32_t qpv, RdVisBox *out)
+{
+    memset(out, 0, sizeof(*out));
+    if (!stream || stripLen < 3u || qpv < 2u || strips == 0) {
+        return false;
+    }
+    /* per strip: the VIF qword, the tag and the colour, the vertices, MSCNT
+     * (vu_grid.hlsl: vu_batch = (3, 1)) */
+    const uint64_t per = (uint64_t)stripLen * qpv + 4u;
+    if ((uint64_t)strips * per > streamQw) {
+        return false;
+    }
+    for (uint32_t s = 0; s < strips; s++) {
+        for (uint32_t k = 0; k < stripLen; k++) {
+            const float *p = stream[(size_t)(s * per + 3u + (uint64_t)k * qpv)];
+            if (!finite4(p)) {
+                out->n = 0;
+                return false;
+            }
+            boxAdd(out, p);
+        }
+    }
+    return true;
+}
+
+/* vu_skin.hlsl vu_bone_mat's slot of a weight's VU address */
+static uint32_t skinSlot(uint32_t addr)
+{
+    const uint32_t i = addr - 16u;
+    return i < 236u ? i : 236u;
+}
+
+bool rd__vis_skin(const float (*stream)[4], uint32_t vertexCount, uint32_t qpv, RdVisSkin *out)
+{
+    memset(out, 0, sizeof(*out));
+    if (!stream || qpv < 3u || vertexCount == 0) {
+        return false;
+    }
+    for (uint32_t v = 0; v < vertexCount; v++) {
+        const float *p = stream[(size_t)v * qpv];
+        const float *wq = stream[(size_t)v * qpv + 2u];
+        uint32_t a0, a1;
+        memcpy(&a0, &wq[0], 4);
+        memcpy(&a1, &wq[2], 4);
+        const float w0 = wq[1], w1 = wq[3];
+        if (!finite4(p) || !(w0 >= 0.0f && w0 <= 1.0f) || !(w1 >= 0.0f && w1 <= 1.0f)) {
+            return false; /* ok stays false: nothing skipped */
+        }
+        const double e = fabs((double)w0 + (double)w1 - 1.0);
+        out->emax = e > out->emax ? e : out->emax;
+        const uint32_t s[2] = {skinSlot(a0), skinSlot(a1)};
+        for (int k = 0; k < 2; k++) {
+            out->used[s[k] >> 5] |= 1u << (s[k] & 31u);
+            boxAdd(&out->box[s[k]], p);
+            out->qwEnd = s[k] + 4u > out->qwEnd ? s[k] + 4u : out->qwEnd;
+        }
+    }
+    out->ok = true;
+    return true;
+}
+
+/* ------------------------------------------------------------ the planes
+ * Plane p of side p / 2 at margin RD_VIS_MARGIN (p even) or
+ * RD_VIS_MARGIN_IN (odd), negative beyond it: left h.x - (x0 - e) h.w,
+ * right (x1 + e) h.w - h.x, top h.y - (y0 - e) h.w, bottom
+ * (y1 + e) h.w - h.y; plane 8 is h.w (negative behind the eye). */
+#define VIS_PLANES 9
+
+typedef struct VisPlane {
+    int lane;     /* x (0) or y (1) */
+    double sign;  /* of the lane */
+    double coefW; /* of h.w */
+} VisPlane;
+
+static void planesOf(const RdVisRect *r, VisPlane pl[8])
+{
+    const double e[2] = {RD_VIS_MARGIN, RD_VIS_MARGIN_IN};
+    for (int k = 0; k < 2; k++) {
+        pl[0 + k] = (VisPlane){0, 1.0, -(r->x0 - e[k])};
+        pl[2 + k] = (VisPlane){0, -1.0, r->x1 + e[k]};
+        pl[4 + k] = (VisPlane){1, 1.0, -(r->y0 - e[k])};
+        pl[6 + k] = (VisPlane){1, -1.0, r->y1 + e[k]};
+    }
+}
+
+static double planeAt(const VisPlane *p, const double h[4])
+{
+    return p->sign * h[p->lane] + p->coefW * h[3];
+}
+
+/* the plane values' running maxima (and h.w's minimum) over the corners;
+ * bad: a corner not finite (never skipped) */
+typedef struct VisAcc {
+    VisPlane pl[8];
+    double max[VIS_PLANES];
+    double minW;
+    bool any, bad;
+} VisAcc;
+
+static void accInit(VisAcc *a, const RdVisRect *r)
+{
+    memset(a, 0, sizeof(*a));
+    planesOf(r, a->pl);
+}
+
+static void accCorner(VisAcc *a, const double h[4])
+{
+    if (!isfinite(h[0]) || !isfinite(h[1]) || !isfinite(h[2]) || !isfinite(h[3])) {
+        a->bad = true;
+        return;
+    }
+    double v[VIS_PLANES];
+    for (int p = 0; p < 8; p++) {
+        v[p] = planeAt(&a->pl[p], h);
+    }
+    v[8] = h[3];
+    for (int p = 0; p < VIS_PLANES; p++) {
+        a->max[p] = !a->any || v[p] > a->max[p] ? v[p] : a->max[p];
+    }
+    a->minW = !a->any || h[3] < a->minW ? h[3] : a->minW;
+    a->any = true;
+}
+
+/* plane p's tolerance: RD_VIS_TOL of the sum of the absolute products
+ * (mag: each lane's bound of |M| |corner|) */
+static double planeTol(const VisAcc *a, int p, const double mag[4])
+{
+    if (p == 8) {
+        return RD_VIS_TOL * mag[3];
+    }
+    return RD_VIS_TOL * (mag[a->pl[p].lane] + fabs(a->pl[p].coefW) * mag[3]);
+}
+
+/* every vertex's plane value is at most (1 - emax) m + emax |c| when the
+ * corners' maximum m is negative (the skinned blend, rd__vis_test_skin;
+ * emax 0 for the others): negative by more than the tolerance */
+static bool beyond(const VisAcc *a, int p, const double mag[4], double emax, const double *c)
+{
+    const double m = a->max[p];
+    if (!(m < 0.0)) {
+        return false;
+    }
+    const double bound = (1.0 - emax) * m + (c ? emax * fabs(c[p]) : 0.0);
+    return bound < -planeTol(a, p, mag);
+}
+
+static int decide(const VisAcc *a, const double mag[4], bool scissor, double emax, const double *c)
+{
+    if (!a->any || a->bad) {
+        return RD_VIS_KEEP;
+    }
+    /* behind the eye (not code 36) first: the sides' planes hold there too
+     * (nothing with w > 0 is drawn) but say less */
+    if (!scissor && beyond(a, 8, mag, emax, c)) {
+        return RD_VIS_NEAR;
+    }
+    /* code 36: only with every corner in front of the eye */
+    const bool front = !scissor || a->minW > planeTol(a, 8, mag);
+    for (int s = 0; s < 4 && front; s++) {
+        if (beyond(a, 2 * s, mag, emax, c) && beyond(a, 2 * s + 1, mag, emax, c)) {
+            return RD_VIS_LEFT + s;
+        }
+    }
+    return RD_VIS_KEEP;
+}
+
+static bool finiteCols(const float (*m)[4], int n)
+{
+    for (int i = 0; i < n; i++) {
+        if (!finite4(m[i])) {
+            return false;
+        }
+    }
+    return true;
+}
+
+/* h = m[0] x + m[1] y + m[2] z + m[3] w, in the VU's order, in double */
+static void hOf(const float (*m)[4], double x, double y, double z, double w, double h[4])
+{
+    for (int c = 0; c < 4; c++) {
+        double s = (double)m[0][c] * x;
+        s = s + (double)m[1][c] * y;
+        s = s + (double)m[2][c] * z;
+        s = s + (double)m[3][c] * w;
+        h[c] = s;
+    }
+}
+
+static double absMax(float a, float b)
+{
+    const double x = fabs((double)a), y = fabs((double)b);
+    return x > y ? x : y;
+}
+
+int rd__vis_test(const float (*m)[4], const RdVisBox *b, bool scissor, const RdVisRect *r)
+{
+    if (!m || !b || !r || b->n == 0 || !finiteCols(m, 4)) {
+        return RD_VIS_KEEP;
+    }
+    /* w: 1, or under code 36 the stream's pos.w (vu_prelit.hlsl), with 1
+     * too (a program without a scissor variant given code 36's clip mode
+     * reads w = 1: vu_lit.hlsl vu_lit_mode) */
+    double ws[2] = {1.0, 1.0};
+    if (scissor) {
+        ws[0] = b->lo[3] < 1.0f ? (double)b->lo[3] : 1.0;
+        ws[1] = b->hi[3] > 1.0f ? (double)b->hi[3] : 1.0;
+    }
+    const double ax = absMax(b->lo[0], b->hi[0]), ay = absMax(b->lo[1], b->hi[1]);
+    const double az = absMax(b->lo[2], b->hi[2]);
+    const double aw = fabs(ws[0]) > fabs(ws[1]) ? fabs(ws[0]) : fabs(ws[1]);
+    double mag[4];
+    for (int c = 0; c < 4; c++) {
+        mag[c] = fabs((double)m[0][c]) * ax + fabs((double)m[1][c]) * ay +
+                 fabs((double)m[2][c]) * az + fabs((double)m[3][c]) * aw;
+    }
+    VisAcc a;
+    accInit(&a, r);
+    const int nw = scissor ? 2 : 1;
+    for (int k = 0; k < 8; k++) {
+        const double x = (double)(k & 1 ? b->hi[0] : b->lo[0]);
+        const double y = (double)(k & 2 ? b->hi[1] : b->lo[1]);
+        const double z = (double)(k & 4 ? b->hi[2] : b->lo[2]);
+        for (int j = 0; j < nw; j++) {
+            double h[4];
+            hOf(m, x, y, z, ws[j], h);
+            accCorner(&a, h);
+        }
+    }
+    return decide(&a, mag, scissor, 0.0, NULL);
+}
+
+bool rd__vis_gs_proof(const float (*m)[4], const RdVisBox *b, bool scissor)
+{
+    if (!m || !b || b->n == 0 || !finiteCols(m, 4)) {
+        return false;
+    }
+    for (int c = 0; c < 4; c++) {
+        if (!isfinite(b->lo[c]) || !isfinite(b->hi[c]) || b->lo[c] > b->hi[c]) {
+            return false;
+        }
+    }
+    /* w: 1, or under code 36 the stream's pos.w over its range and 1 (as
+       rd__vis_test) */
+    double ws[2] = {1.0, 1.0};
+    if (scissor) {
+        ws[0] = b->lo[3] < 1.0f ? (double)b->lo[3] : 1.0;
+        ws[1] = b->hi[3] > 1.0f ? (double)b->hi[3] : 1.0;
+    }
+    const double ax = absMax(b->lo[0], b->hi[0]), ay = absMax(b->lo[1], b->hi[1]);
+    const double az = absMax(b->lo[2], b->hi[2]);
+    const double aw = fabs(ws[0]) > fabs(ws[1]) ? fabs(ws[0]) : fabs(ws[1]);
+    /* each lane's tolerance: the shader's float h differs from the exact one
+       by a few roundings of the sum of the absolute products (RD_VIS_TOL of
+       it, as the culler's planes) */
+    double tol[4];
+    for (int c = 0; c < 4; c++) {
+        tol[c] = RD_VIS_TOL * (fabs((double)m[0][c]) * ax + fabs((double)m[1][c]) * ay +
+                               fabs((double)m[2][c]) * az + fabs((double)m[3][c]) * aw);
+    }
+    /* h is linear in the position: every vertex's h is a convex combination
+       of the box's corners' (8, or 16 over the w range), so the corners'
+       extremes bound every vertex */
+    double minW = 0.0, minZ = 0.0, maxA[3] = {0.0, 0.0, 0.0};
+    bool any = false;
+    const int nw = scissor ? 2 : 1;
+    for (int k = 0; k < 8; k++) {
+        const double x = (double)(k & 1 ? b->hi[0] : b->lo[0]);
+        const double y = (double)(k & 2 ? b->hi[1] : b->lo[1]);
+        const double z = (double)(k & 4 ? b->hi[2] : b->lo[2]);
+        for (int j = 0; j < nw; j++) {
+            double h[4];
+            hOf(m, x, y, z, ws[j], h);
+            if (!isfinite(h[0]) || !isfinite(h[1]) || !isfinite(h[2]) || !isfinite(h[3])) {
+                return false;
+            }
+            minW = !any || h[3] < minW ? h[3] : minW;
+            minZ = !any || h[2] < minZ ? h[2] : minZ;
+            for (int c = 0; c < 3; c++) {
+                maxA[c] = fabs(h[c]) > maxA[c] ? fabs(h[c]) : maxA[c];
+            }
+            any = true;
+        }
+    }
+    /* vu_common.hlsli vu_gs_ok, at every vertex: w > 0 (twice the
+       tolerance clear of it, so the float w and its reciprocal are
+       positive), GS Z not below 0 (h.z at least its tolerance over 0, so
+       the float h.z and p.z = h.z / w are not negative), and no ftoi4
+       saturated: |p| = |h| / w below 2^26, half of where X, Y or Z (in
+       sixteenths, int32) saturate at 2^27 (the float divide's and ftoi4's
+       roundings are far smaller than that factor) */
+    const double w = minW - tol[3];
+    if (!(minW > 2.0 * tol[3]) || !(w > 0.0) || !(minZ >= tol[2])) {
+        return false;
+    }
+    for (int c = 0; c < 3; c++) {
+        if (!((maxA[c] + tol[c]) / w < 67108864.0)) {
+            return false;
+        }
+    }
+    return true;
+}
+
+int rd__vis_test_skin(const float (*mem)[4], const float (*bones)[4], uint32_t boneQw,
+                      const RdVisSkin *s, const RdVisRect *r)
+{
+    if (!mem || !bones || !s || !r || !s->ok || s->qwEnd == 0) {
+        return RD_VIS_KEEP;
+    }
+    /* the bones every slot reads come from the payload (VuBoneCB holds 240
+     * qwords; the card bits go after the slots the weights read), the
+     * region test's lower w is not negative (inside then needs w > 0), the
+     * blend's weights sum near 1 */
+    const uint32_t have = boneQw < 240u ? boneQw : 240u;
+    if (s->qwEnd > have || !(mem[0][3] >= 0.0f) || !finiteCols(&mem[4], 4) || !(s->emax < 0.5)) {
+        return RD_VIS_KEEP;
+    }
+    const float (*m4)[4] = &mem[4];
+    /* the blend w0 X0 + w1 X1 (X = B (p, 1)): each lane at most twice the
+     * largest |B| (|p|, 1) of the slots it reads */
+    double pb[3] = {0.0, 0.0, 0.0};
+    for (uint32_t i = 0; i < RD_VIS_SLOTS; i++) {
+        if (!(s->used[i >> 5] & (1u << (i & 31u)))) {
+            continue;
+        }
+        const float (*bm)[4] = &bones[i];
+        if (!finiteCols(bm, 4)) {
+            return RD_VIS_KEEP;
+        }
+        const RdVisBox *b = &s->box[i];
+        const double a[3] = {absMax(b->lo[0], b->hi[0]), absMax(b->lo[1], b->hi[1]),
+                             absMax(b->lo[2], b->hi[2])};
+        for (int k = 0; k < 3; k++) {
+            const double v = fabs((double)bm[0][k]) * a[0] + fabs((double)bm[1][k]) * a[1] +
+                             fabs((double)bm[2][k]) * a[2] + fabs((double)bm[3][k]);
+            pb[k] = 2.0 * v > pb[k] ? 2.0 * v : pb[k];
+        }
+    }
+    double mag[4];
+    for (int c = 0; c < 4; c++) {
+        mag[c] = fabs((double)m4[0][c]) * pb[0] + fabs((double)m4[1][c]) * pb[1] +
+                 fabs((double)m4[2][c]) * pb[2] + fabs((double)m4[3][c]);
+    }
+    VisAcc a;
+    accInit(&a, r);
+    for (uint32_t i = 0; i < RD_VIS_SLOTS; i++) {
+        if (!(s->used[i >> 5] & (1u << (i & 31u)))) {
+            continue;
+        }
+        const float (*bm)[4] = &bones[i];
+        const RdVisBox *b = &s->box[i];
+        for (int k = 0; k < 8; k++) {
+            const double x = (double)(k & 1 ? b->hi[0] : b->lo[0]);
+            const double y = (double)(k & 2 ? b->hi[1] : b->lo[1]);
+            const double z = (double)(k & 4 ? b->hi[2] : b->lo[2]);
+            double xb[4], h[4];
+            hOf(bm, x, y, z, 1.0, xb);
+            hOf(m4, xb[0], xb[1], xb[2], 1.0, h);
+            accCorner(&a, h);
+        }
+    }
+    /* the planes' values at the translation (mem[7]: the blend's origin,
+     * where a vertex whose weights sum to s lies a share 1 - s of the way) */
+    double t[4], c[VIS_PLANES];
+    for (int k = 0; k < 4; k++) {
+        t[k] = (double)m4[3][k];
+    }
+    for (int p = 0; p < 8; p++) {
+        c[p] = planeAt(&a.pl[p], t);
+    }
+    c[8] = t[3];
+    return decide(&a, mag, false, s->emax, c);
+}
+
+/* ------------------------------------------------------------ the frame */
+
+/* a mesh's kept bound (by its slot) */
+typedef struct VisEntry {
+    uint32_t id, vertexCount, qpv;
+    uint64_t serial;
+    const void *stream;
+    bool boxOk, skinTried;
+    RdVisBox box;
+    RdVisSkin *skin; /* skinned meshes: made on their first skinned draw */
+    /* the box of each batch's vertices (batchN of them; bbOk: every batch
+     * bounded), made on the first draw of a part of the mesh */
+    RdVisBox *bb;
+    uint32_t batchN;
+    bool bbTried, bbOk;
+    /* a triangle of the mesh carries the later mark (vu_later_out raises
+     * its depth), for the marks at laterMarks (markCount bytes) */
+    const uint8_t *laterMarks;
+    uint32_t laterCount;
+    bool later;
+} VisEntry;
+
+static struct {
+    int mode;    /* RD_VIS_*: rd__vis_init's, or a test's */
+    int forced;  /* rd__vis_set_mode's, -1 none */
+    bool inited; /* rd__vis_init ran (the mode read) */
+    RdFrame shadow;
+    const RdFrame *src;
+    RdCmd *cmds[RD_LIST_COUNT];
+    uint32_t cap[RD_LIST_COUNT];
+    /* the walk's skipped commands: list << 24 is not enough for every
+     * index, so two arrays */
+    uint8_t *skipL;
+    uint32_t *skipI;
+    uint32_t nSkip, capSkip;
+    VisEntry *cache; /* RD_MAX_MESHES, made on the first use */
+    VisEntry scratch;
+    RdVisSkin scratchSkin;
+    RdVisCounts last;
+    uint32_t why[RD_VIS_WHY_COUNT]; /* the last walk's, by reason */
+    int whyCur;                     /* the command being decided */
+    uint32_t hz[RD_VIS_HZ_COUNT];   /* the occlusion test's reasons, the last walk's */
+    bool range;                     /* the batch-range box (ICO_RD_CULL_RANGE) */
+    int msaaForced;                 /* rd__vis_set_msaa's, -1 none */
+    bool msaa;                      /* the walk's: samples in force (MSAA_EPOCH) */
+} s_vis = {.forced = -1, .range = true, .msaaForced = -1};
+
+void rd__vis_set_msaa(int on)
+{
+    s_vis.msaaForced = on < 0 ? -1 : on != 0;
+}
+
+bool rd__vis_msaa_may_close(const RdStateBlock *st)
+{
+    if (st->ds.test.date != RD_DATE_OFF) {
+        return true; /* the DATE snapshot reads the target (SCENE's colour) */
+    }
+    const uint32_t scene = RD_TARGET_SCENE + 1u;
+    const RdTexRec *t = st->tex ? rd__tex_rec(st->tex) : NULL;
+    if (t && t->kind == RD_TEXKIND_TARGET && t->target == scene) {
+        return true; /* a texture read of SCENE's colour or depth */
+    }
+    const bool cScene = st->color == scene, dScene = st->depth == scene;
+    /* rd_replay.c msaaPass: SCENE's colour with SCENE's depth or none
+     * opens or keeps the epoch; any other pair touching SCENE closes it */
+    return (cScene || dScene) && !(cScene && (st->depth == 0 || dScene));
+}
+
+static const char *const s_whyNames[RD_VIS_WHY_COUNT] = {"skipped by the stream's box",
+                                                         "skipped by the batches' box",
+                                                         "particles",
+                                                         "2D lists",
+                                                         "no target",
+                                                         "clip none",
+                                                         "no payload",
+                                                         "clip unknown",
+                                                         "no mesh",
+                                                         "no bound",
+                                                         "skinned refused",
+                                                         "grid refused",
+                                                         "skinned reaches",
+                                                         "grid reaches",
+                                                         "scissor mesh reaches",
+                                                         "mesh of batches reaches",
+                                                         "one-batch mesh reaches",
+                                                         "code 34 reaches",
+                                                         "occluded",
+                                                         "kept: may close the MSAA epoch"};
+
+/* rd.h RdPerfRecord.cullHizOcc: the occluder candidates' reasons, in this
+ * order */
+_Static_assert(RD_VIS_HZ_OCC_USED == 0 && RD_VIS_HZ_OCC_NOTRI + 1 == RD_PERF_HIZ_OCC,
+               "RD_PERF_HIZ_OCC: the occluder reasons");
+
+static const char *const s_hzNames[RD_VIS_HZ_COUNT] = {
+    "occluder used",
+    "occluder refused: state",
+    "occluder refused: chain plane",
+    "occluder refused: no PSMZ32 depth",
+    "occluder refused: skipped or unbounded",
+    "occluder refused: program",
+    "occluder refused: alpha test not proven",
+    "occluder refused: box under a 64th of the frame",
+    "occluder refused: no exact triangle",
+    "occluded",
+    "kept: not a mesh or grid under GEQUAL",
+    "kept: no record",
+    "kept: no occluder yet",
+    "kept: box refused",
+    "kept: box outside the record",
+    "kept: a cell uncovered",
+    "kept: within the margin"};
+
+const char *rd__vis_hiz_why_name(int why)
+{
+    return why >= 0 && why < RD_VIS_HZ_COUNT ? s_hzNames[why] : "?";
+}
+
+void rd__vis_hiz_why(uint32_t out[RD_VIS_HZ_COUNT])
+{
+    memcpy(out, s_vis.hz, sizeof(s_vis.hz));
+}
+
+const char *rd__vis_why_name(int why)
+{
+    return why >= 0 && why < RD_VIS_WHY_COUNT ? s_whyNames[why] : "?";
+}
+
+void rd__vis_why(uint32_t out[RD_VIS_WHY_COUNT])
+{
+    memcpy(out, s_vis.why, sizeof(s_vis.why));
+}
+
+/* a command of list 0 with occluder triangles (hizCollect): its index, its
+ * triangles' run in s_hiz.tris, whether it may lower the depth (Z test
+ * ALWAYS: then it marks only when every triangle it draws is exact, at the
+ * least bound over them, lbAll) */
+typedef struct HizCmd {
+    uint32_t index, first, count, lbAll;
+    bool always, allExact;
+} HizCmd;
+
+static struct {
+    bool budgetRead, depthAlways;
+    /* the cheaper collect (ICO_RD_CULL_HIZ_FAST, on unless 0: the batch and
+     * triangle screen boxes before the vertex pass, the walk's verdicts
+     * taken from the collect, the scan memo, the collect cache; the same
+     * occluders) and its check (ICO_RD_CULL_HIZ_CHECK=1: every triangle it
+     * leaves and every cache hit done in full too, RdVisCounts.hizWrong) */
+    bool fast, check;
+    uint32_t budget; /* ICO_RD_CULL_HIZ_TRIS */
+    bool active;     /* this walk keeps the record (full, list 0 replayed) */
+    bool keyed;      /* key is the state's pair the record was set up for */
+    bool keyOk;      /* and the record holds it (else nothing is hidden) */
+    uint32_t key[4]; /* colour target, depth target, gsW, gsH */
+    RdVisHiz z;
+    RdVisHizList tris; /* the occluders' triangles, in command order */
+    HizCmd *cmds;
+    uint32_t nCmds, capCmds, cursor;
+    uint32_t *order; /* the budget's sort */
+    uint32_t orderCap;
+} s_hiz;
+
+bool rd__vis_profile_default(void)
+{
+    const char *e = getenv("ICO_RD_CULL");
+
+    return g_rd.profile.tiler && !(e && e[0]);
+}
+
+static int modeOf(const char *v)
+{
+    if (!v || !v[0]) {
+        /* the default: the frustum skip and the occlusion test; on a tile-based
+         * GPU's phone the frustum skip alone (the test cost 6.8 ms of the
+         * Mali-G52's CPU a replay and hid 0 to 1 draws, issue 179) */
+        return rd__vis_profile_default() ? RD_VIS_FRUSTUM : RD_VIS_FULL;
+    }
+    if (strcmp(v, "off") == 0 || strcmp(v, "0") == 0 || strcmp(v, "false") == 0) {
+        return RD_VIS_OFF;
+    }
+    if (strcmp(v, "frustum") == 0 || strcmp(v, "1") == 0) {
+        return RD_VIS_FRUSTUM;
+    }
+    return RD_VIS_FULL; /* "full", "2", "true" */
+}
+
+const char *rd__vis_mode_name(int mode)
+{
+    return mode == RD_VIS_OFF ? "off" : mode == RD_VIS_FULL ? "full" : "frustum";
+}
+
+/* the occlusion test's switches: the budget (ICO_RD_CULL_HIZ_TRIS, a
+ * count, 0 none) and ICO_VK_DEPTH_ALWAYS (vk_cmd.c: every depth test
+ * passes, so nothing is hidden by the depth) */
+static void hizSwitches(void)
+{
+    const char *t = getenv("ICO_RD_CULL_HIZ_TRIS");
+    char *end = NULL;
+    const unsigned long v = t && t[0] ? strtoul(t, &end, 10) : 0ul;
+    s_hiz.budget =
+        t && t[0] && end && *end == '\0' && v <= 1000000ul ? (uint32_t)v : RD_VIS_HIZ_TRIS;
+    const char *a = getenv("ICO_VK_DEPTH_ALWAYS");
+    s_hiz.depthAlways = a && a[0] && strcmp(a, "0") != 0;
+    const char *fa = getenv("ICO_RD_CULL_HIZ_FAST");
+    s_hiz.fast = !(fa && (strcmp(fa, "0") == 0 || strcmp(fa, "off") == 0));
+    const char *ck = getenv("ICO_RD_CULL_HIZ_CHECK");
+    s_hiz.check = s_hiz.fast && ck && ck[0] && strcmp(ck, "0") != 0;
+    s_hiz.budgetRead = true;
+}
+
+bool rd__vis_hiz_fast(void)
+{
+    if (!s_hiz.budgetRead) {
+        hizSwitches();
+    }
+    return s_hiz.fast;
+}
+
+void rd__vis_init(void)
+{
+    const char *e = getenv("ICO_RD_CULL");
+    s_vis.mode = s_vis.forced >= 0 ? s_vis.forced : modeOf(e);
+    s_vis.inited = true;
+    s_vis.src = NULL;
+    memset(&s_vis.last, 0, sizeof(s_vis.last));
+    memset(s_vis.why, 0, sizeof(s_vis.why));
+    memset(s_vis.hz, 0, sizeof(s_vis.hz));
+    const char *rg = getenv("ICO_RD_CULL_RANGE"); /* 0: the stream's box alone, a comparison */
+    s_vis.range = !(rg && (strcmp(rg, "0") == 0 || strcmp(rg, "off") == 0));
+    hizSwitches();
+    rd__log("cull: %s ([dev] cull, ICO_RD_CULL%s%s%s)%s", rd__vis_mode_name(s_vis.mode),
+            e && e[0] ? " = " : "", e && e[0] ? e : "",
+            rd__vis_profile_default()
+                ? "; the profile's default: the occlusion test costs more on this chip's CPU than "
+                  "it saves, [dev] cull = full turns it on"
+                : "",
+            s_vis.mode == RD_VIS_OFF ? ": every scene draw replayed"
+            : s_vis.mode == RD_VIS_FULL
+                ? ": a scene draw wholly outside its target or behind the eye is not replayed, "
+                  "nor one of list 0 wholly behind the depth the opaque draws before it wrote"
+                : ": a scene draw wholly outside its target or behind the eye is not replayed");
+    if (s_vis.mode == RD_VIS_FULL) {
+        rd__log("cull: the occlusion test: up to %u occluder triangles a picture "
+                "(ICO_RD_CULL_HIZ_TRIS), cells of 2 GS pixels%s",
+                s_hiz.budget,
+                s_hiz.depthAlways ? "; off: ICO_VK_DEPTH_ALWAYS makes every depth test pass" : "");
+    }
+}
+
+int rd__vis_mode(void)
+{
+    if (!s_vis.inited) {
+        s_vis.mode = s_vis.forced >= 0 ? s_vis.forced : modeOf(getenv("ICO_RD_CULL"));
+        s_vis.inited = true;
+    }
+    return s_vis.mode;
+}
+
+void rd__vis_set_mode(int mode)
+{
+    s_vis.forced = mode >= RD_VIS_OFF && mode <= RD_VIS_FULL ? mode : -1;
+    s_vis.inited = false;
+}
+
+const RdFrame *rd__vis_source(const RdFrame *f)
+{
+    return f && f == &s_vis.shadow && s_vis.src ? s_vis.src : f;
+}
+
+const RdCmd *rd__vis_culled(const RdFrame *f, int l, uint32_t i)
+{
+    if (!f || f != &s_vis.shadow || !s_vis.src || l < 0 || l >= RD_LIST_COUNT) {
+        return NULL;
+    }
+    const RdCmdList *sl = &f->lists[l], *ol = &s_vis.src->lists[l];
+    if (i >= sl->count || i >= ol->count || sl->cmds == ol->cmds) {
+        return NULL;
+    }
+    const RdCmd *o = &ol->cmds[i];
+    return sl->cmds[i].type == RDC_NOP && o->type != RDC_NOP ? o : NULL;
+}
+
+void rd__vis_counts(RdVisCounts *out)
+{
+    *out = s_vis.last;
+}
+
+/* mesh m's (id) kept entry, bounded again when its stream changed; NULL
+ * without memory */
+static VisEntry *entryOf(uint32_t id, const RdMeshRec *m)
+{
+    const uint32_t slot = (id & 0xFFFF) - 1u;
+    VisEntry *e;
+    if (m->streamSerial == 0 || slot >= RD_MAX_MESHES) {
+        e = &s_vis.scratch; /* never written through the serial: every draw */
+        e->id = 0;
+    } else {
+        if (!s_vis.cache) {
+            s_vis.cache = calloc(RD_MAX_MESHES, sizeof(VisEntry));
+            if (!s_vis.cache) {
+                return NULL;
+            }
+        }
+        e = &s_vis.cache[slot];
+    }
+    if (e->id != 0 && e->id == id && e->serial == m->streamSerial &&
+        e->vertexCount == m->vertexCount && e->qpv == m->qwPerVertex &&
+        e->stream == (const void *)m->stream) {
+        return e;
+    }
+    e->id = e == &s_vis.scratch ? 0u : id;
+    e->serial = m->streamSerial;
+    e->vertexCount = m->vertexCount;
+    e->qpv = m->qwPerVertex;
+    e->stream = m->stream;
+    e->boxOk = rd__vis_box((const float (*)[4])m->stream, m->vertexCount, m->qwPerVertex, &e->box);
+    e->skinTried = false;
+    free(e->bb);
+    e->bb = NULL;
+    e->batchN = 0;
+    e->bbTried = e->bbOk = false;
+    e->laterMarks = NULL;
+    e->laterCount = UINT32_MAX; /* not read yet */
+    return e;
+}
+
+bool rd__vis_mesh_gs_proof(uint32_t id, const RdMeshRec *m, const float (*mem)[4], bool scissor)
+{
+    if (!m || !m->stream || !mem || m->vertexCount == 0) {
+        return false;
+    }
+    /* the whole stream's box: every vertex a draw of the mesh reads, its
+       batches' and a sheet's tiles' (the header above) */
+    VisEntry *e = entryOf(id, m);
+    return e != NULL && e->boxOk && rd__vis_gs_proof(&mem[16], &e->box, scissor);
+}
+
+/* the per-batch boxes on a kept entry (made once a stream version); false
+ * when the entry has none (no memory, a batch outside the stream) */
+static bool batchBoxes(VisEntry *e, const RdMeshRec *m)
+{
+    const uint32_t qpv = m->qwPerVertex;
+    if (!e->bbTried) {
+        e->bbTried = true;
+        e->bb = calloc(m->batchCount, sizeof(RdVisBox));
+        e->batchN = e->bb ? m->batchCount : 0;
+        e->bbOk = e->bb != NULL;
+        for (uint32_t b = 0; e->bbOk && b < m->batchCount; b++) {
+            const RdVuBatchRec *br = &m->batches[b];
+            e->bbOk = (uint64_t)br->firstVertex + br->vertexCount <= m->vertexCount &&
+                      rd__vis_box((const float (*)[4])m->stream + (size_t)br->firstVertex * qpv,
+                                  br->vertexCount, qpv, &e->bb[b]);
+        }
+    }
+    return e->bbOk && e->batchN == m->batchCount;
+}
+
+/* The box of the vertices of batches first .. last - 1 of mesh m (the ones a
+ * draw reads: its indices lie in its batches' own vertices, rd_internal.h
+ * RdVuBatchRec); false when a batch lies outside the stream, the mesh
+ * carries a sheet's tiles (a draw out of the box reads them too), or the
+ * range holds no vertex. Per-batch boxes are kept on the entry; the scratch
+ * entry (a stream never written through the serial) is measured each time. */
+static bool rangeBox(VisEntry *e, const RdMeshRec *m, uint32_t first, uint32_t last, RdVisBox *out)
+{
+    memset(out, 0, sizeof(*out));
+    if (!m->batches || m->tiledFrom || first >= last || last > m->batchCount) {
+        return false;
+    }
+    const uint32_t qpv = m->qwPerVertex;
+    const bool keep = e != &s_vis.scratch;
+    if (keep && !batchBoxes(e, m)) {
+        return false;
+    }
+    for (uint32_t b = first; b < last; b++) {
+        RdVisBox t;
+        const RdVisBox *bx = keep ? &e->bb[b] : &t;
+        if (!keep) {
+            const RdVuBatchRec *br = &m->batches[b];
+            if ((uint64_t)br->firstVertex + br->vertexCount > m->vertexCount ||
+                !rd__vis_box((const float (*)[4])m->stream + (size_t)br->firstVertex * qpv,
+                             br->vertexCount, qpv, &t)) {
+                memset(out, 0, sizeof(*out));
+                return false;
+            }
+        }
+        if (bx->n == 0) {
+            continue;
+        }
+        if (out->n == 0) {
+            *out = *bx;
+        } else {
+            for (int k = 0; k < 4; k++) {
+                out->lo[k] = bx->lo[k] < out->lo[k] ? bx->lo[k] : out->lo[k];
+                out->hi[k] = bx->hi[k] > out->hi[k] ? bx->hi[k] : out->hi[k];
+            }
+            out->n += bx->n;
+        }
+    }
+    return out->n != 0;
+}
+
+/* whether a triangle of m carries the later mark (kept per entry while
+ * the marks are the same bytes) */
+static bool laterOf(VisEntry *e, const RdMeshRec *m)
+{
+    if (e->laterMarks != m->kickMark || e->laterCount != m->markCount) {
+        e->later = false;
+        for (uint32_t k = 0; m->kickMark && k < m->markCount && !e->later; k++) {
+            e->later = (m->kickMark[k] & ICO_VU_MARK_LATER) != 0u;
+        }
+        e->laterMarks = m->kickMark;
+        e->laterCount = m->markCount;
+    }
+    return e->later;
+}
+
+static const RdVisSkin *skinOf(VisEntry *e, const RdMeshRec *m)
+{
+    RdVisSkin *s = e == &s_vis.scratch ? &s_vis.scratchSkin : e->skin;
+    if (!s) {
+        s = e->skin = malloc(sizeof(RdVisSkin));
+        if (!s) {
+            return NULL;
+        }
+        e->skinTried = false;
+    }
+    if (!e->skinTried) {
+        (void)rd__vis_skin((const float (*)[4])m->stream, m->vertexCount, m->qwPerVertex, s);
+        e->skinTried = e != &s_vis.scratch;
+    }
+    return s;
+}
+
+/* the walk's counts and the command's verdict */
+typedef struct VisWalk {
+    const RdFrame *f;
+    RdVisCounts n;
+    bool noMemory;
+} VisWalk;
+
+/* what the occlusion test reads of a mesh or grid draw cmdVerdict bounded:
+ * VU memory 16..19, the stream's bound, the clip mode, the later mark */
+typedef struct VisDraw {
+    float m[4][4];
+    RdVisBox box;
+    bool have, scissor, later;
+} VisDraw;
+
+/* The verdicts hizCollect worked out for list 0's occluder candidates
+ * (cmdVerdict's: the verdict, the reason, what it added to the counts and
+ * the draw), in command order: the walk that follows takes them instead of
+ * a second cmdVerdict of the same command in the same state (the collect
+ * and the walk both start list 0 at the frame's start state and apply each
+ * command's state; the entries cmdVerdict reads are kept by stream
+ * version), so its verdicts and counts are those it would have made. */
+typedef struct HizSeen {
+    uint32_t index, exempt, unbounded;
+    int v, why;
+    bool noMemory;
+    VisDraw d;
+} HizSeen;
+
+static struct {
+    HizSeen *s;
+    uint32_t n, cap, cursor;
+} s_seen;
+
+static int cmdVerdict(VisWalk *w, int l, const RdCmd *c, const RdStateBlock *st, VisDraw *d)
+{
+    const RdFrame *f = w->f;
+    d->have = false;
+    if (c->type == RDC_PARTICLES || l > VIS_LAST_LIST) {
+        w->n.exempt++; /* the particles (v1), the 2D layer's lists */
+        s_vis.whyCur = c->type == RDC_PARTICLES ? RD_VIS_WHY_PARTICLES : RD_VIS_WHY_LIST_2D;
+        return RD_VIS_KEEP;
+    }
+    const RdTargetRec *tc = st->color ? rd__target_rec(st->color) : NULL;
+    if (!tc) {
+        w->n.exempt++;
+        s_vis.whyCur = RD_VIS_WHY_NO_TARGET;
+        return RD_VIS_KEEP;
+    }
+    if (s_vis.msaa && rd__vis_msaa_may_close(st)) {
+        /* replayed as recorded: its pass or its reads may close the MSAA
+         * epoch where the replay of every draw closes it (the head
+         * comment's last paragraph) */
+        w->n.exempt++;
+        s_vis.whyCur = RD_VIS_WHY_MSAA_EPOCH;
+        return RD_VIS_KEEP;
+    }
+    const uint64_t after = sizeof(RdVuPayload) + sizeof(RdVuBlock);
+    if (!f->payload || c->u[2] < after || (uint64_t)c->u[1] + c->u[2] > f->payloadSize) {
+        w->n.unbounded++;
+        s_vis.whyCur = RD_VIS_WHY_NO_PAYLOAD;
+        return RD_VIS_KEEP;
+    }
+    const uint8_t *pay = f->payload + c->u[1];
+    RdVuPayload p;
+    memcpy(&p, pay, sizeof(p));
+    /* code 34: X and Y wrap to 16 bits, so no plane test; a mesh or grid
+     * is still a candidate for the occlusion test (the hiz vertex and
+     * occludee rules put every accepted corner inside the GS region, where
+     * no wrap happens) */
+    const bool none = p.clip == RD_VU_CLIP_NONE;
+    if (none && c->type == RDC_SKINNED) {
+        w->n.exempt++;
+        s_vis.whyCur = RD_VIS_WHY_CLIP_NONE;
+        return RD_VIS_KEEP;
+    }
+    if (!none && p.clip != RD_VU_CLIP_REGION && p.clip != RD_VU_CLIP_SCISSOR) {
+        w->n.unbounded++;
+        s_vis.whyCur = RD_VIS_WHY_CLIP_UNKNOWN;
+        return RD_VIS_KEEP;
+    }
+    const bool scissor = p.clip == RD_VU_CLIP_SCISSOR;
+    float mem[36][4];
+    memcpy(mem, pay + sizeof(RdVuPayload), sizeof(mem));
+    const RdVisRect r = rd__vis_rect(st->gsW, st->gsH, tc->w, tc->h);
+    int v = RD_VIS_KEEP;
+    bool bounded = false;
+    int why = RD_VIS_WHY_NO_MESH; /* until a bound is made */
+    RdVisBox rb;
+    bool haveRb = false;
+    if (c->type == RDC_MESH || c->type == RDC_SKINNED) {
+        const bool skin = c->type == RDC_SKINNED;
+        const bool progOk = skin ? (p.prog == RD_PROG_SKIN || p.prog == RD_PROG_SKIN_SPEC)
+                                 : p.prog <= RD_PROG_REFLECT;
+        const RdMeshRec *m = progOk ? rd__mesh_rec(c->u[0]) : NULL;
+        if (m && m->vu && m->stream && m->vertexCount && m->qwPerVertex &&
+            p.firstBatch < m->batchCount) {
+            VisEntry *e = entryOf(c->u[0], m);
+            w->noMemory = w->noMemory || !e;
+            why = skin ? RD_VIS_WHY_NO_SKIN : RD_VIS_WHY_NO_BOX;
+            if (e && !skin && e->boxOk && e->box.n) {
+                bounded = true;
+                v = rd__vis_test((const float (*)[4]) & mem[16], &e->box, scissor, &r);
+                why = none               ? RD_VIS_WHY_KEEP_NONE
+                      : scissor          ? RD_VIS_WHY_KEEP_SCISSOR
+                      : p.batchCount > 1 ? RD_VIS_WHY_KEEP_MESH_N
+                                         : RD_VIS_WHY_KEEP_MESH_1;
+                if (none) {
+                    v = RD_VIS_KEEP; /* no plane test */
+                }
+                /* the draw reads some of the mesh's batches (doVuDraw's
+                 * range): their own box may lie off the target when the
+                 * whole stream's does not */
+                uint32_t last = p.firstBatch + p.batchCount;
+                if (last > m->batchCount || p.batchCount == 0) {
+                    last = m->batchCount;
+                }
+                if (v == RD_VIS_KEEP && s_vis.range &&
+                    (p.firstBatch != 0 || last != m->batchCount) &&
+                    rangeBox(e, m, p.firstBatch, last, &rb)) {
+                    haveRb = true;
+                    if (!none) {
+                        v = rd__vis_test((const float (*)[4]) & mem[16], &rb, scissor, &r);
+                        if (v != RD_VIS_KEEP) {
+                            why = RD_VIS_WHY_SKIP_RANGE;
+                        }
+                    }
+                } else if (v != RD_VIS_KEEP) {
+                    why = RD_VIS_WHY_SKIP_WHOLE;
+                }
+                memcpy(d->m, &mem[16], sizeof(d->m));
+                d->box = haveRb ? rb : e->box; /* the batches the draw reads */
+                d->scissor = scissor;
+                /* normal_c and normal_l raise a later-marked triangle
+                 * (vu_mesh_out's chain) */
+                d->later = laterOf(e, m);
+                d->have = true;
+            } else if (e && skin && (uint64_t)after + (uint64_t)p.boneQw * 16u <= c->u[2]) {
+                const RdVisSkin *s = skinOf(e, m);
+                w->noMemory = w->noMemory || !s;
+                if (s && s->ok) {
+                    bounded = true;
+                    const float (*bones)[4] = (const float (*)[4])(const void *)(pay + after);
+                    v = rd__vis_test_skin((const float (*)[4])mem, bones, p.boneQw, s, &r);
+                    why = v == RD_VIS_KEEP ? RD_VIS_WHY_KEEP_SKIN : RD_VIS_WHY_SKIP_WHOLE;
+                }
+            }
+        }
+    } else if (c->type == RDC_GRID) {
+        why = RD_VIS_WHY_NO_GRID;
+        const uint64_t at = after + (uint64_t)p.boneQw * 16u;
+        if ((p.prog == RD_PROG_GRID || p.prog == RD_PROG_GRID_LIT) &&
+            at + (uint64_t)p.streamQw * 16u <= c->u[2]) {
+            const float (*stream)[4] = (const float (*)[4])(const void *)(pay + at);
+            RdVisBox b;
+            if (rd__vis_grid_box(stream, p.streamQw, p.batchCount, p.vertsPerBatch, p.qwPerVertex,
+                                 &b) &&
+                b.n) {
+                bounded = true;
+                v = rd__vis_test((const float (*)[4]) & mem[16], &b, scissor, &r);
+                if (none) {
+                    v = RD_VIS_KEEP;
+                }
+                why = none               ? RD_VIS_WHY_KEEP_NONE
+                      : v == RD_VIS_KEEP ? RD_VIS_WHY_KEEP_GRID
+                                         : RD_VIS_WHY_SKIP_WHOLE;
+                memcpy(d->m, &mem[16], sizeof(d->m));
+                d->box = b;
+                d->scissor = scissor;
+                d->later = false; /* vu_grid.hlsl: no chain */
+                d->have = true;
+            }
+        }
+    }
+    if (!bounded) {
+        w->n.unbounded++;
+    } else if (none) {
+        w->n.exempt++; /* bounded but never plane-tested */
+    }
+    if (v == RD_VIS_KEEP) {
+        /* the draw's screen box against its triangles (rd_perf_hooks.h) */
+        rd__perf_box_note(l, d->have ? (const float (*)[4])d->m : NULL, d->box.lo, d->box.hi,
+                          d->have && d->scissor, r.x0, r.y0, r.x1, r.y1);
+    }
+    s_vis.whyCur = why;
+    return v;
+}
+
+/* ------------------------------------------- the occlusion test's walk */
+
+/* the state's targets the record can follow: a colour target and a depth
+ * buffer of PSMZ32 (the 16- and 24-bit Z formats clamp at their top) */
+static bool hizPair(const RdStateBlock *st, const RdTargetRec **tcOut)
+{
+    if (!st->color || !st->depth) {
+        return false;
+    }
+    const RdTargetRec *tc = rd__target_rec(st->color), *td = rd__target_rec(st->depth);
+    if (!tc || !td || !td->withDepth || td->zFormat != RD_ZFMT_32) {
+        return false;
+    }
+    *tcOut = tc;
+    return true;
+}
+
+/* the state may lower the depth: Z write on under a test other than
+ * GEQUAL, GREATER or NEVER (ZTE off is ALWAYS: rd_pipeline.c) */
+static bool hizLowers(const RdStateBlock *st)
+{
+    const RdTestState *t = &st->ds.test;
+    return st->ds.zwrite == RD_ZWRITE_ON &&
+           !(t->zte &&
+             (t->ztst == RD_ZTST_GEQUAL || t->ztst == RD_ZTST_GREATER || t->ztst == RD_ZTST_NEVER));
+}
+
+/* an occluder's state: its depth written wherever it is rasterised (Z
+ * write, GEQUAL or ALWAYS, no DATE, no clip of the pixel), opaque and
+ * unmasked; the alpha test is hizAlphaPasses' */
+static bool hizOccluderState(const RdStateBlock *st)
+{
+    const RdDrawState *d = &st->ds;
+    return d->zwrite == RD_ZWRITE_ON && d->test.zte &&
+           (d->test.ztst == RD_ZTST_GEQUAL || d->test.ztst == RD_ZTST_ALWAYS) && d->abe == 0 &&
+           d->test.date == RD_DATE_OFF && d->colorMask == 0xF && d->fbmsk == 0 && d->pabe == 0;
+}
+
+/* Whether the alpha test passes at every pixel of the mesh draw c (so the
+ * depth is written wherever it is rasterised): no test, ALWAYS, or the
+ * alpha plan's range of As (rd_alpha_plan.c rd__alpha_range_of_draw, what
+ * doVuDraw plans the same draw's passes with: the texture's alpha over
+ * every level the device holds under the state's TEXA, the function and
+ * every vertex's alpha) passing the test whole.  The scene's opaque
+ * meshes draw under ATE GREATER 0x60 with AFAIL FB_ONLY (a failing pixel
+ * writes colour, not depth), so without the range no list-0 draw of the
+ * corpus would be an occluder. */
+static bool hizAlphaPasses(const RdStateBlock *st, const RdFrame *f, const RdCmd *c,
+                           const RdMeshRec *m, uint8_t prog)
+{
+    const RdTestState *t = &st->ds.test;
+    if (!t->ate || t->atst == RD_ATST_ALWAYS) {
+        return true;
+    }
+    const RdAlphaSrc src = {
+        .kind = RD_ALPHA_SRC_VU, .prog = prog, .cmdType = c->type, .f = f, .c = c, .mesh = m};
+    RdAlphaRange as;
+    rd__alpha_range_of_draw(st, &src, &as);
+    RdTexAlphaScan scan;
+    uint8_t tlo, thi;
+    const RdTexRec *tex =
+        st->ds.texEnabled && st->ds.tcc == RD_TCC_RGBA ? rd__tex_rec(st->tex) : NULL;
+    const bool pending = tex && (s_hiz.fast ? rd__vis_hiz_scan_memo(st->tex, &scan)
+                                            : rd__vis_hiz_pending_scan(st->tex, &scan));
+    if (pending && rdtex_alpha_range(&scan, (RdTexSrc)tex->src, st->ds.texa, &tlo, &thi)) {
+        /* The texture is uploaded after the walk (rd_replay.c replayFrame:
+         * rd__vis_frame, then rd__upload_dirty_textures), so the alpha
+         * plan's scan (rd__tex_alpha_scan) does not have it yet: every
+         * texture of a dump's first replay, a texture new or changed this
+         * picture in a game.  Its range from the scan the upload will
+         * make, as rd__alpha_range_of_draw composes it with the vertices'
+         * (the plan untextured gives their range, widened as it widens
+         * it), and the vertices' range itself as well: an upload that
+         * fails leaves the draw untextured (resolveTexture's placeholder) */
+        RdStateBlock u = *st;
+        u.ds.texEnabled = 0;
+        RdAlphaRange v;
+        rd__alpha_range_of_draw(&u, &src, &v);
+        uint32_t lo = tlo, hi = thi;
+        if (st->ds.texFn != RD_TEXFN_DECAL) {
+            lo = ((uint32_t)tlo * v.lo) >> 7;
+            hi = ((uint32_t)thi * v.hi) >> 7;
+            lo = lo > 255u ? 255u : lo;
+            hi = hi > 255u ? 255u : hi;
+        }
+        as.lo = (uint8_t)(v.lo < lo ? v.lo : lo);
+        as.hi = (uint8_t)(v.hi > hi ? v.hi : hi);
+    }
+    const uint32_t lo = as.lo, hi = as.hi, ref = t->aref;
+    switch (t->atst) {
+    case RD_ATST_LESS:
+        return hi < ref;
+    case RD_ATST_LEQUAL:
+        return hi <= ref;
+    case RD_ATST_EQUAL:
+        return lo == ref && hi == ref;
+    case RD_ATST_GEQUAL:
+        return lo >= ref;
+    case RD_ATST_GREATER:
+        return lo > ref;
+    case RD_ATST_NOTEQUAL:
+        return hi < ref || lo > ref;
+    default:
+        return false; /* NEVER */
+    }
+}
+
+static void hizReset(VisWalk *w)
+{
+    if (s_hiz.z.nWritten) {
+        rd__vis_hiz_reset(&s_hiz.z);
+        w->n.hizResets++;
+    }
+}
+
+/* the record follows the state's targets and frame size: a new pair
+ * starts it again; true when it holds the state's pair */
+static bool hizKey(VisWalk *w, const RdStateBlock *st)
+{
+    const uint32_t key[4] = {st->color, st->depth, st->gsW, st->gsH};
+    if (s_hiz.keyed && memcmp(key, s_hiz.key, sizeof(key)) == 0) {
+        return s_hiz.keyOk;
+    }
+    hizReset(w);
+    memcpy(s_hiz.key, key, sizeof(key));
+    s_hiz.keyed = true;
+    s_hiz.keyOk = false;
+    const RdTargetRec *tc;
+    if (hizPair(st, &tc)) {
+        const RdVisRect r = rd__vis_rect(st->gsW, st->gsH, tc->w, tc->h);
+        s_hiz.keyOk = rd__vis_hiz_setup(&s_hiz.z, &r);
+        w->noMemory = w->noMemory || !s_hiz.keyOk;
+    }
+    return s_hiz.keyOk;
+}
+
+/* every command of list 0 before its verdict: the actions other than the
+ * VU draws that may lower the depth reset the record */
+static void hizCommand(VisWalk *w, const RdCmd *c, const RdStateBlock *st)
+{
+    if (!hizKey(w, st)) {
+        return;
+    }
+    switch (c->type) {
+    case RDC_CLEAR:
+    case RDC_COPY:
+    case RDC_EXACT_BLEND:
+    case RDC_SHADOW_STRIP:
+    case RDC_SHADOW_RESET:
+    case RDC_SHADOW_RESOLVE:
+    case RDC_POST_STUB:
+        hizReset(w); /* their own targets and depth state */
+        break;
+    case RDC_SCREEN:
+    case RDC_WORLD_PRIMS:
+        if (hizLowers(st)) {
+            hizReset(w);
+        }
+        break;
+    default:
+        break;
+    }
+}
+
+/* a VU draw of list 0 the frustum test kept: hidden by the record, or its
+ * own depth writes into it */
+static int hizDraw(VisWalk *w, uint32_t index, const RdCmd *c, const RdStateBlock *st,
+                   const VisDraw *d)
+{
+    const double t0 = rd__now_ms(); /* the test, then its own triangles in (the raster) */
+    int v = RD_VIS_KEEP;
+    const bool held = hizKey(w, st);
+    int hz = RD_VIS_HZ_NOT_ELIGIBLE;
+    if (!d->have || !(c->type == RDC_MESH || c->type == RDC_GRID) || !st->ds.test.zte ||
+        st->ds.test.ztst != RD_ZTST_GEQUAL) {
+        hz = RD_VIS_HZ_NOT_ELIGIBLE;
+    } else if (!held) {
+        hz = RD_VIS_HZ_NO_RECORD;
+    } else if (!s_hiz.z.nWritten) {
+        hz = RD_VIS_HZ_EMPTY;
+    } else {
+        RdVisHizBox b;
+        hz = RD_VIS_HZ_BOX;
+        if (rd__vis_hiz_occludee((const float (*)[4])d->m, &d->box, d->scissor, &b)) {
+            w->n.hizTested++;
+            int why;
+            if (rd__vis_hiz_hidden_why(&s_hiz.z, &b, b.zmax + rd__vis_hiz_margin(b.zmax, d->later),
+                                       &why)) {
+                v = RD_VIS_OCCLUDED;
+                hz = RD_VIS_HZ_HIDDEN;
+            } else {
+                hz = why == RD_VIS_HIZ_OUTSIDE     ? RD_VIS_HZ_OUTSIDE
+                     : why == RD_VIS_HIZ_UNCOVERED ? RD_VIS_HZ_UNCOVERED
+                                                   : RD_VIS_HZ_MARGIN;
+            }
+        }
+    }
+    s_vis.hz[hz]++;
+    if (v == RD_VIS_OCCLUDED) {
+        s_vis.whyCur = RD_VIS_WHY_OCCLUDED;
+    }
+    const double t1 = rd__now_ms();
+    w->n.hizTestMs += t1 - t0;
+    while (s_hiz.cursor < s_hiz.nCmds && s_hiz.cmds[s_hiz.cursor].index < index) {
+        s_hiz.cursor++;
+    }
+    const HizCmd *hc = s_hiz.cursor < s_hiz.nCmds && s_hiz.cmds[s_hiz.cursor].index == index
+                           ? &s_hiz.cmds[s_hiz.cursor]
+                           : NULL;
+    if (v == RD_VIS_KEEP) {
+        if (hizLowers(st)) {
+            hizReset(w); /* Z test ALWAYS: what it covers is its own depth */
+        }
+        const RdTargetRec *tc =
+            held && hc && (!hc->always || hc->allExact) ? rd__target_rec(st->color) : NULL;
+        if (tc) {
+            /* the samples the scissor lets through (rd_pass_area.c
+             * rd__scissor_texels: the target's GS pixels, outward in
+             * texels), the half line taken off at the top (a draw with
+             * it puts a pixel's samples half a GS pixel lower) */
+            const double ox = 2048.0 - (double)(st->gsW >> 1), oy = 2048.0 - (double)(st->gsH >> 1);
+            const int32_t sx0 = st->scissor[0] < 0 ? 0 : st->scissor[0];
+            const int32_t sy0 = st->scissor[1] < 0 ? 0 : st->scissor[1];
+            const int32_t sx1 =
+                st->scissor[2] >= (int32_t)tc->w ? (int32_t)tc->w - 1 : st->scissor[2];
+            const int32_t sy1 =
+                st->scissor[3] >= (int32_t)tc->h ? (int32_t)tc->h - 1 : st->scissor[3];
+            const double clip[4] = {ox + sx0, oy + sy0 + 0.5, ox + sx1 + 1.0, oy + sy1 + 1.0};
+            for (uint32_t k = 0; k < hc->count && sx1 >= sx0 && sy1 >= sy0; k++) {
+                RdVisHizTri t = s_hiz.tris.t[hc->first + k];
+                if (!t.sel) {
+                    continue;
+                }
+                if (hc->always) {
+                    t.lb = hc->lbAll; /* each sample holds the last triangle's depth */
+                }
+                w->n.hizCells += rd__vis_hiz_raster(&s_hiz.z, &t, clip);
+                w->n.hizTris++;
+            }
+        }
+    }
+    const double t2 = rd__now_ms();
+    w->n.hizRasterMs += t2 - t1;
+    w->n.hizMs += t2 - t0;
+    return v;
+}
+
+/* the budget's order: the larger screen box first, then the earlier */
+static const RdVisHizTri *s_sortTris;
+
+static int byArea(const void *a, const void *b)
+{
+    const uint32_t i = *(const uint32_t *)a, j = *(const uint32_t *)b;
+    const double x = s_sortTris[i].area, y = s_sortTris[j].area;
+    return x > y ? -1 : x < y ? 1 : (i > j) - (i < j);
+}
+
+/* the verdict of command index of list 0 cmdVerdict gave in hizCollect,
+ * kept for the walk (nothing kept without memory: the walk works it out) */
+static void seenPut(uint32_t index, int v, const VisWalk *scratch, const VisDraw *d)
+{
+    if (s_seen.n == s_seen.cap) {
+        const uint32_t cap = s_seen.cap ? s_seen.cap * 2u : 64u;
+        HizSeen *g = realloc(s_seen.s, (size_t)cap * sizeof(HizSeen));
+        if (!g) {
+            return;
+        }
+        s_seen.s = g;
+        s_seen.cap = cap;
+    }
+    HizSeen *e = &s_seen.s[s_seen.n++];
+    e->index = index;
+    e->v = v;
+    e->why = s_vis.whyCur;
+    e->exempt = scratch->n.exempt;
+    e->unbounded = scratch->n.unbounded;
+    e->noMemory = scratch->noMemory;
+    e->d = *d;
+}
+
+/* the walk's command index of list 0: the collect's verdict, with what it
+ * added to the counts, when it made one */
+static bool seenTake(VisWalk *w, uint32_t index, VisDraw *d, int *v)
+{
+    while (s_seen.cursor < s_seen.n && s_seen.s[s_seen.cursor].index < index) {
+        s_seen.cursor++;
+    }
+    if (s_seen.cursor >= s_seen.n || s_seen.s[s_seen.cursor].index != index) {
+        return false;
+    }
+    const HizSeen *e = &s_seen.s[s_seen.cursor];
+    w->n.exempt += e->exempt;
+    w->n.unbounded += e->unbounded;
+    w->noMemory = w->noMemory || e->noMemory;
+    s_vis.whyCur = e->why;
+    *d = e->d;
+    *v = e->v;
+    return true;
+}
+
+/* mesh id's per-batch boxes for the collect's batch filter (rd_vis_hiz.c
+ * rd__vis_hiz_mesh_ex), NULL when its entry keeps none (a record of serial
+ * 0, a sheet's tiles, a batch outside the stream) */
+static const RdVisBox *hizBatchBoxes(uint32_t id, const RdMeshRec *m)
+{
+    if (m->streamSerial == 0 || m->tiledFrom || !m->batches || !m->batchCount) {
+        return NULL;
+    }
+    VisEntry *e = entryOf(id, m); /* cmdVerdict's, kept */
+    return e && e != &s_vis.scratch && batchBoxes(e, m) ? e->bb : NULL;
+}
+
+/* under ICO_RD_CULL_HIZ_CHECK: the cache's triangles of command i
+ * (out->t[first ..], *lbAll, all) against the pass's own; a difference is
+ * counted wrong */
+static void hizCheckHit(VisWalk *w, const RdMeshRec *m, const RdVuPayload *p, const float (*mem)[4],
+                        uint32_t i, double minArea, bool always, uint32_t first, uint32_t lbAll,
+                        int all)
+{
+    static RdVisHizList s_check;
+    s_check.n = 0;
+    RdVisHizPass ps;
+    memset(&ps, 0, sizeof(ps));
+    ps.fast = !always;
+    uint32_t lb;
+    const int a = rd__vis_hiz_mesh_ex(m, p, mem, i, minArea, &s_check, &lb, &ps);
+    bool same =
+        a >= 0 && s_check.n == s_hiz.tris.n - first && (!always || (a == all && lb == lbAll));
+    for (uint32_t k = 0; same && k < s_check.n; k++) {
+        const RdVisHizTri *x = &s_check.t[k], *y = &s_hiz.tris.t[first + k];
+        same = memcmp(x->x, y->x, sizeof(x->x)) == 0 && memcmp(x->y, y->y, sizeof(x->y)) == 0 &&
+               x->r == y->r && x->area == y->area && x->lb == y->lb && x->cmd == y->cmd &&
+               x->sel == y->sel;
+    }
+    w->n.hizChecked++;
+    w->n.hizWrong += same ? 0u : 1u;
+}
+
+/* list 0's occluders' triangles before the walk (the walk's state up to
+ * each command, the frustum verdict), the budget's largest */
+static void hizCollect(VisWalk *w, const RdFrame *f, int keep)
+{
+    s_hiz.tris.n = 0;
+    s_hiz.nCmds = 0;
+    s_hiz.cursor = 0;
+    s_seen.n = s_seen.cursor = 0;
+    s_hiz.keyed = s_hiz.keyOk = false;
+    rd__vis_hiz_reset(&s_hiz.z);
+    if (!s_hiz.budgetRead) {
+        hizSwitches();
+    }
+    s_hiz.active = rd__vis_mode() == RD_VIS_FULL && !s_hiz.depthAlways && rd__first_list(keep) == 0;
+    if (!s_hiz.active) {
+        return;
+    }
+    /* the decodes in flight into their textures (rd_tex_decode.h), which
+     * the ring's estimate settles right after anyway: the occluders' alpha
+     * proof reads the texels a dirty texture is about to upload.  A wait
+     * for the decode workers, timed apart (hizSettleMs), not the test's */
+    const double ts = rd__now_ms();
+    rdtex_settle();
+    const double t0 = rd__now_ms();
+    w->n.hizSettleMs += t0 - ts;
+    rd__vis_hiz_collect_begin();
+    VisWalk scratch;
+    memset(&scratch, 0, sizeof(scratch));
+    scratch.f = f;
+    RdVisHizPass ps;
+    memset(&ps, 0, sizeof(ps));
+    ps.check = s_hiz.check;
+    RdStateBlock st = f->startState;
+    const RdCmdList *cl = &f->lists[0];
+    for (uint32_t i = 0; i < cl->count && s_hiz.budget; i++) {
+        const RdCmd *c = &cl->cmds[i];
+        rd__apply_state(&st, c);
+        const RdTargetRec *tc;
+        if (c->type != RDC_MESH) {
+            continue;
+        }
+        if (c->b[5] != 0) {
+            s_vis.hz[RD_VIS_HZ_OCC_CHAIN]++; /* b[5]: the chain's clip plane */
+            continue;
+        }
+        if (!hizOccluderState(&st)) {
+            s_vis.hz[RD_VIS_HZ_OCC_STATE]++;
+            continue;
+        }
+        if (!hizPair(&st, &tc)) {
+            s_vis.hz[RD_VIS_HZ_OCC_TARGET]++;
+            continue;
+        }
+        VisDraw d;
+        scratch.n.exempt = scratch.n.unbounded = 0;
+        scratch.noMemory = false;
+        const int v = cmdVerdict(&scratch, 0, c, &st, &d);
+        if (s_hiz.fast) {
+            seenPut(i, v, &scratch, &d);
+        }
+        if (v != RD_VIS_KEEP || !d.have) {
+            s_vis.hz[RD_VIS_HZ_OCC_BOUND]++;
+            continue;
+        }
+        RdVuPayload p;
+        memcpy(&p, f->payload + c->u[1], sizeof(p)); /* cmdVerdict read the sizes */
+        const RdMeshRec *m = rd__mesh_rec(c->u[0]);
+        if (!m || (p.prog != RD_PROG_PRELIT && p.prog != RD_PROG_LIT)) {
+            s_vis.hz[RD_VIS_HZ_OCC_PROG]++;
+            continue;
+        }
+        const double ta = rd__now_ms();
+        const bool alphaOk = hizAlphaPasses(&st, f, c, m, p.prog);
+        w->n.hizAlphaMs += rd__now_ms() - ta;
+        if (!alphaOk) {
+            s_vis.hz[RD_VIS_HZ_OCC_ALPHA]++;
+            continue;
+        }
+        const double minArea = (double)st.gsW * (double)st.gsH / 64.0;
+        RdVisHizBox hb;
+        if (rd__vis_hiz_occludee((const float (*)[4])d.m, &d.box, d.scissor, &hb) &&
+            (hb.x1 - hb.x0) * (hb.y1 - hb.y0) < minArea) {
+            s_vis.hz[RD_VIS_HZ_OCC_SMALL]++;
+            continue; /* no triangle of it can be large enough */
+        }
+        float mem[36][4];
+        memcpy(mem, f->payload + c->u[1] + sizeof(RdVuPayload), sizeof(mem));
+        const float (*cm)[4] = (const float (*)[4])mem;
+        const uint32_t first = s_hiz.tris.n;
+        /* a draw under Z test ALWAYS reads lbAll and every triangle's
+         * exactness: the full pass; the others the fast one */
+        const bool always = st.ds.test.ztst == RD_ZTST_ALWAYS;
+        const double tv = rd__now_ms();
+        uint32_t lbAll;
+        int all;
+        w->n.hizCacheDraws++;
+        if (s_hiz.fast && rd__vis_hiz_cache_get(c->u[0], m, &p, cm, minArea, always, i, &s_hiz.tris,
+                                                &lbAll, &all)) {
+            w->n.hizCacheHits++;
+            if (s_hiz.check) {
+                hizCheckHit(w, m, &p, cm, i, minArea, always, first, lbAll, all);
+            }
+        } else {
+            ps.fast = s_hiz.fast && !always;
+            ps.bb = ps.fast ? hizBatchBoxes(c->u[0], m) : NULL;
+            ps.bbN = ps.bb ? m->batchCount : 0;
+            all = rd__vis_hiz_mesh_ex(m, &p, cm, i, minArea, &s_hiz.tris, &lbAll, &ps);
+            if (s_hiz.fast) {
+                rd__vis_hiz_cache_put(c->u[0], m, &p, cm, minArea, always, &s_hiz.tris, first,
+                                      lbAll, all);
+            }
+        }
+        w->n.hizVertMs += rd__now_ms() - tv;
+        if (all < 0) {
+            w->noMemory = true;
+            s_hiz.tris.n = first;
+            continue;
+        }
+        if (s_hiz.tris.n == first) {
+            s_vis.hz[RD_VIS_HZ_OCC_NOTRI]++;
+            continue;
+        }
+        s_vis.hz[RD_VIS_HZ_OCC_USED]++;
+        if (s_hiz.nCmds == s_hiz.capCmds) {
+            const uint32_t cap = s_hiz.capCmds ? s_hiz.capCmds * 2u : 64u;
+            HizCmd *g = realloc(s_hiz.cmds, (size_t)cap * sizeof(HizCmd));
+            if (!g) {
+                w->noMemory = true;
+                s_hiz.tris.n = first;
+                continue;
+            }
+            s_hiz.cmds = g;
+            s_hiz.capCmds = cap;
+        }
+        s_hiz.cmds[s_hiz.nCmds++] =
+            (HizCmd){i, first, s_hiz.tris.n - first, lbAll, always, all == 1};
+    }
+    w->n.hizVerts += ps.verts;
+    w->n.hizCheapVerts += ps.cheapVerts;
+    w->n.hizTrisRead += ps.trisRead;
+    w->n.hizTrisBatch += ps.trisBatch;
+    w->n.hizTrisArea += ps.trisArea;
+    w->n.hizChecked += ps.checked;
+    w->n.hizWrong += ps.wrong;
+    const uint32_t n = s_hiz.tris.n;
+    w->n.hizTrisKept = n;
+    if (n > s_hiz.budget) {
+        if (n > s_hiz.orderCap) {
+            uint32_t *o = realloc(s_hiz.order, (size_t)n * sizeof(uint32_t));
+            if (!o) {
+                w->noMemory = true;
+                s_hiz.tris.n = s_hiz.nCmds = 0; /* no occluder this picture */
+                const double dt = rd__now_ms() - t0;
+                w->n.hizCollectMs += dt;
+                w->n.hizMs += dt;
+                return;
+            }
+            s_hiz.order = o;
+            s_hiz.orderCap = n;
+        }
+        for (uint32_t k = 0; k < n; k++) {
+            s_hiz.order[k] = k;
+        }
+        s_sortTris = s_hiz.tris.t;
+        qsort(s_hiz.order, n, sizeof(uint32_t), byArea); /* n > budget: two or more */
+        for (uint32_t k = 0; k < n; k++) {
+            s_hiz.tris.t[s_hiz.order[k]].sel = k < s_hiz.budget ? 1u : 0u;
+        }
+        w->n.hizOverBudget = n - s_hiz.budget;
+    }
+    const double dt = rd__now_ms() - t0;
+    w->n.hizCollectMs += dt;
+    w->n.hizMs += dt;
+}
+
+static void visWalk(void *user, int list, uint32_t index, const RdCmd *c, const RdStateBlock *st)
+{
+    VisWalk *w = user;
+    if (list == 0 && s_hiz.active) {
+        hizCommand(w, c, st);
+    }
+    if (c->type < RDC_MESH || c->type > RDC_PARTICLES) {
+        return;
+    }
+    w->n.draws++;
+    VisDraw d;
+    int v;
+    if (!(list == 0 && s_hiz.active && seenTake(w, index, &d, &v))) {
+        v = cmdVerdict(w, list, c, st, &d);
+    }
+    if (v == RD_VIS_KEEP && list == 0 && s_hiz.active) {
+        v = hizDraw(w, index, c, st, &d);
+    }
+    w->n.byVerdict[v]++;
+    s_vis.why[s_vis.whyCur]++;
+    if (v == RD_VIS_KEEP) {
+        return;
+    }
+    if (s_vis.nSkip == s_vis.capSkip) {
+        const uint32_t cap = s_vis.capSkip ? s_vis.capSkip * 2u : 1024u;
+        uint8_t *nl = realloc(s_vis.skipL, cap);
+        if (nl) {
+            s_vis.skipL = nl;
+        }
+        uint32_t *ni = nl ? realloc(s_vis.skipI, (size_t)cap * sizeof(uint32_t)) : NULL;
+        if (ni) {
+            s_vis.skipI = ni;
+        }
+        if (!nl || !ni) {
+            w->noMemory = true;
+            w->n.byVerdict[v]--;
+            w->n.byVerdict[RD_VIS_KEEP]++;
+            s_vis.why[s_vis.whyCur]--;
+            s_vis.why[RD_VIS_WHY_KEEP_MESH_1]++;
+            return; /* drawn */
+        }
+        s_vis.capSkip = cap;
+    }
+    s_vis.skipL[s_vis.nSkip] = (uint8_t)list;
+    s_vis.skipI[s_vis.nSkip] = index;
+    s_vis.nSkip++;
+    rd__ledger_cull(c, v, w->f->number);
+    w->n.skipped++;
+    if (v == RD_VIS_OCCLUDED) {
+        w->n.occluded++;
+    } else {
+        w->n.frustum++;
+    }
+}
+
+/* rate-limited: the first 8, then every 100th */
+static void noMemoryLine(void)
+{
+    static uint32_t s_seen;
+    s_seen++;
+    if (s_seen <= 8u || s_seen % 100u == 0u) {
+        rd__log("cull: no memory for the shadow lists or the bounds: the scene draws it could "
+                "not take are replayed (%u replays so far)",
+                s_seen);
+    }
+}
+
+const RdFrame *rd__vis_frame(const RdFrame *f, int keep)
+{
+    s_vis.src = NULL;
+    if (f) {
+        rd__ledger_picture(f->number); /* the stage's pictures, whatever the mode */
+    }
+    if (!f || rd__vis_mode() == RD_VIS_OFF || g_rdWin.first || f->number == 0) {
+        memset(&s_vis.last, 0, sizeof(s_vis.last));
+        memset(s_vis.why, 0, sizeof(s_vis.why));
+        memset(s_vis.hz, 0, sizeof(s_vis.hz));
+        return f;
+    }
+    memset(s_vis.why, 0, sizeof(s_vis.why));
+    memset(s_vis.hz, 0, sizeof(s_vis.hz));
+    s_vis.msaa = s_vis.msaaForced >= 0 ? s_vis.msaaForced != 0 : rd_aa_samples(rd__aa_mode()) > 1u;
+    const double t0 = rd__now_ms();
+    VisWalk w;
+    memset(&w, 0, sizeof(w));
+    w.f = f;
+    s_vis.nSkip = 0;
+    hizCollect(&w, f, keep);
+    RdStateBlock st = f->startState;
+    rd__walk(f, keep, &st, visWalk, &w);
+    s_hiz.active = false;
+    const RdFrame *out = f;
+    if (s_vis.nSkip) {
+        /* the shadow: the frame, its lists with a skipped command copied */
+        bool ok = true;
+        bool copy[RD_LIST_COUNT] = {false};
+        for (uint32_t k = 0; k < s_vis.nSkip; k++) {
+            copy[s_vis.skipL[k]] = true;
+        }
+        for (int l = 0; l < RD_LIST_COUNT && ok; l++) {
+            const uint32_t n = f->lists[l].count;
+            if (!copy[l] || n <= s_vis.cap[l]) {
+                continue;
+            }
+            RdCmd *g = realloc(s_vis.cmds[l], (size_t)n * sizeof(RdCmd));
+            if (!g) {
+                ok = false;
+                break;
+            }
+            s_vis.cmds[l] = g;
+            s_vis.cap[l] = n;
+        }
+        if (ok) {
+            s_vis.shadow = *f;
+            for (int l = 0; l < RD_LIST_COUNT; l++) {
+                if (!copy[l]) {
+                    continue;
+                }
+                const uint32_t n = f->lists[l].count;
+                memcpy(s_vis.cmds[l], f->lists[l].cmds, (size_t)n * sizeof(RdCmd));
+                s_vis.shadow.lists[l].cmds = s_vis.cmds[l];
+                s_vis.shadow.lists[l].cap = n;
+            }
+            for (uint32_t k = 0; k < s_vis.nSkip; k++) {
+                s_vis.cmds[s_vis.skipL[k]][s_vis.skipI[k]].type = RDC_NOP;
+            }
+            s_vis.src = f;
+            out = &s_vis.shadow;
+        } else {
+            w.noMemory = true;
+            w.n.byVerdict[RD_VIS_KEEP] += w.n.skipped;
+            w.n.skipped = w.n.frustum = w.n.occluded = 0;
+            s_vis.why[RD_VIS_WHY_KEEP_MESH_1] += s_vis.why[RD_VIS_WHY_SKIP_WHOLE] +
+                                                 s_vis.why[RD_VIS_WHY_SKIP_RANGE] +
+                                                 s_vis.why[RD_VIS_WHY_OCCLUDED];
+            s_vis.why[RD_VIS_WHY_SKIP_WHOLE] = s_vis.why[RD_VIS_WHY_SKIP_RANGE] = 0;
+            s_vis.why[RD_VIS_WHY_OCCLUDED] = 0;
+        }
+    }
+    if (w.noMemory) {
+        noMemoryLine();
+    }
+    w.n.ms = rd__now_ms() - t0;
+    s_vis.last = w.n;
+    g_rdPerf.cullDraws = w.n.draws;
+    g_rdPerf.cullSkipped = w.n.skipped;
+    g_rdPerf.cullFrustum = w.n.frustum;
+    g_rdPerf.cullOccluded = w.n.occluded;
+    g_rdPerf.cullMs = w.n.ms;
+    g_rdPerf.cullHizMs = w.n.hizMs;
+    g_rdPerf.cullHizSettleMs = w.n.hizSettleMs;
+    g_rdPerf.cullHizCollectMs = w.n.hizCollectMs;
+    g_rdPerf.cullHizAlphaMs = w.n.hizAlphaMs;
+    g_rdPerf.cullHizVertMs = w.n.hizVertMs;
+    g_rdPerf.cullHizRasterMs = w.n.hizRasterMs;
+    g_rdPerf.cullHizTestMs = w.n.hizTestMs;
+    g_rdPerf.cullHizVerts = w.n.hizVerts + w.n.hizCheapVerts;
+    g_rdPerf.cullHizTrisRead = w.n.hizTrisRead;
+    g_rdPerf.cullHizTrisKept = w.n.hizTrisKept;
+    g_rdPerf.cullHizCells = w.n.hizCells;
+    g_rdPerf.cullHizTested = w.n.hizTested;
+    g_rdPerf.cullHizOverBudget = w.n.hizOverBudget;
+    g_rdPerf.cullHizCacheHits = w.n.hizCacheHits;
+    g_rdPerf.cullHizCacheDraws = w.n.hizCacheDraws;
+    for (int k = 0; k < RD_PERF_HIZ_OCC; k++) {
+        g_rdPerf.cullHizOcc[k] = s_vis.hz[RD_VIS_HZ_OCC_USED + k];
+    }
+    return out;
+}

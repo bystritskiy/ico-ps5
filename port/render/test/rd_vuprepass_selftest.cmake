@@ -2,9 +2,11 @@
 # checked and its log matched (rd_vuprepass_selftest.c): the one line
 # "VU pre-pass: on (self-test: ...)", "VU pre-pass: off (self-test:
 # <reason>)" or "VU pre-pass: off (self-test not run)", LINE its regex;
-# EXTRA: another line the log must hold.
+# EXTRA: another line the log must hold, NOT_ a line it must not (both
+# matched with the log's ";" read as ",": a ";" in a -D argument would
+# split it).
 # -DTOOL=<rd_vuprepass_selftest_test> -DMODE=<on|off|notrun> [-DVARIANT=plain]
-# -DLINE=<regex> [-DEXTRA=<regex>]
+# -DLINE=<regex> [-DEXTRA=<regex>] [-DNOT_=<regex>]
 execute_process(COMMAND "${TOOL}" "${MODE}" ${VARIANT} RESULT_VARIABLE rc OUTPUT_VARIABLE out
                 ERROR_VARIABLE err)
 message(STATUS "${out}")
@@ -23,8 +25,34 @@ if(NOT n EQUAL 1)
   message(FATAL_ERROR "${n} \"rd: VU pre-pass: ${LINE}\" lines, 1 expected:\n${err}")
 endif()
 if(EXTRA)
-  if(NOT err MATCHES "${EXTRA}")
+  if(NOT flat MATCHES "${EXTRA}")
     message(FATAL_ERROR "no line matching \"${EXTRA}\":\n${err}")
   endif()
+endif()
+if(NOT_)
+  if(flat MATCHES "${NOT_}")
+    message(FATAL_ERROR "a line matching \"${NOT_}\":\n${err}")
+  endif()
+endif()
+# the discard-free twins' clipper check, where it ran: the device's verdict
+# and its cost in the test's own output (CI's log shows what its rasteriser
+# measured)
+string(REGEX MATCH "rd: discard-free twins: the clipper check: (clean|not clean|not checked) \\([^\n]*" verdict "${err}")
+if(verdict)
+  message(STATUS "${verdict}")
+endif()
+string(REGEX MATCH "rd: discard-free twins: the clipper check's cost: [^\n]*" cost "${err}")
+if(cost)
+  message(STATUS "${cost}")
+endif()
+# the one-pass blend's check, where it ran: each arm's verdict and the
+# result (CI's log shows what its rasteriser measured)
+string(REGEX MATCHALL "rd: one-pass blend: the check's arm [ABC] [^\n]*" opArms "${err}")
+foreach(_l IN LISTS opArms)
+  message(STATUS "${_l}")
+endforeach()
+string(REGEX MATCH "rd: one-pass blend: (on|off for the run) \\(check: [^\n]*" opRes "${err}")
+if(opRes)
+  message(STATUS "${opRes}")
 endif()
 message(STATUS "rd_vuprepass_selftest ${MODE}: the pre-pass's verdict logged")

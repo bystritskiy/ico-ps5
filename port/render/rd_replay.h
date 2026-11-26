@@ -9,6 +9,13 @@
 #include "rd_internal.h"
 #include "rd_passring.h"
 #include "shader_consts.h"
+#include "rd_present_scene.h" /* rd_replay.c and rd_blur_border.c call its hooks */
+#include "rd_late_pass.h"     /* rd_crack_fill.c, rd_store_plan.c and rd_replay.c call it */
+#include "rd_fill11.h"        /* rd_crack_fill.c, rd_replay.c and rd_blur_border.c call it */
+#include "rd_aura_paste.h"    /* rd_fx_plan.c calls it */
+#include "rd_no_volume.h"     /* rd_replay.c, rd_store_plan.c and rd_shadow_merge.c call it */
+#include "rd_hash.h"          /* rd_replay.c uniformOffset */
+#include "rd_cpu_phase.h"     /* rd_replay.c, rd_store_plan.c: the CPU phases */
 
 /* Consecutive screen-prim commands that bind the same things are one draw
  * (doScreen).  A command whose plan is one draw opens a run or joins the
@@ -88,6 +95,10 @@ typedef struct Replay {
      * snapshot and no stencil bit taken (prepareDraw); PRIM.AA1's
      * per-primitive DATE draws are not needed then (doScreen) */
     int dateDstNow;
+    /* the shadow tiles (rd_shadow_tile.c): the draw being planned is a
+     * composite over the tile mask (its DATE tests become TEST0_T/TEST1_T,
+     * expandPasses); reset by every prepareDraw */
+    int tileNow;
     uint32_t dateStFor, dateStSerial, dateStPass;
     RhiRect dateStArea;
 } Replay;
@@ -124,6 +135,10 @@ typedef struct DrawSetup {
      * doScreen), DrawCB.scale.w of its sprite_above1x passes; 0 the pixel's
      * footprint */
     uint32_t a1xSteps;
+    /* the shadow tiles (rd_shadow_tile.c): bindDrawEx draws the DATE set-up
+     * over the tile mask (rd__shadow_tile_take) instead of
+     * rd__replay_date_take */
+    int shadowTile;
 } DrawSetup;
 
 /* rd_replay.c: beginPass, bindDrawKeep, bindGroup, s_bindEpoch, dstBind,
@@ -162,10 +177,11 @@ uint32_t rd__replay_msaa_want(void);
  * replay's end), its line once a list and cause; returns
  * RdPerfRecord.msaaCloseAt's value */
 enum {
-    RD_MSAA_CLOSE_READ,   /* SCENE's colour or depth read, copied or snapshot (the hook) */
-    RD_MSAA_CLOSE_SHADOW, /* a pass on SCENE's depth with another colour (the shadow count's) */
-    RD_MSAA_CLOSE_DEPTH,  /* a pass on SCENE with another depth */
-    RD_MSAA_CLOSE_END,    /* the replay's end */
+    RD_MSAA_CLOSE_READ,    /* SCENE's colour or depth read, copied or snapshot (the hook) */
+    RD_MSAA_CLOSE_SHADOW,  /* a pass on SCENE's depth with another colour (the shadow count's) */
+    RD_MSAA_CLOSE_DEPTH,   /* a pass on SCENE with another depth */
+    RD_MSAA_CLOSE_COUNTED, /* a shadow reset: the count on SCENE_MS after it (rd_msaa_shadow.c) */
+    RD_MSAA_CLOSE_END,     /* the replay's end */
     RD_MSAA_CLOSE_COUNT
 };
 
@@ -200,6 +216,16 @@ bool rd__replay_blur_covers(const Replay *r, const RdTargetRec *tc, const RdPost
                             const RdDrawState *d, const RdPipeKeyInt *key, int useDepth);
 bool rd__replay_blur_swap(Replay *r, RdTargetRec *tc);
 bool rd__replay_take_snap(Replay *r, RdTargetRec *tc, RhiRect area);
+/* rd_blur_texels.c: blurSnapArea's helpers (the texels a staticBlur sprite
+ * reads).  rd__blur_uv_axis: one axis's texel range [*lo, *hi] of a sprite
+ * x0..x1 with UVs u0..u1 (12.4) sampling a target of scale ss, TEX0 size
+ * size, backing size asz and Full pixel crop crop16 (16ths); false (the
+ * whole axis) under REPEAT, for an empty sprite or where the shader's
+ * product could overflow.  rd__blur_kernel_reach: the above-1x kernel's
+ * texels past the GS's taps for one axis's step. */
+bool rd__blur_uv_axis(int32_t x0, int32_t x1, int32_t u0, int32_t u1, float ss, float size,
+                      int clamp, uint32_t asz, int32_t crop16, int32_t *lo, int32_t *hi);
+int32_t rd__blur_kernel_reach(uint32_t step32);
 int rd__replay_perf_target_post(const Replay *r, const RdCmd *c);
 void rd__replay_perf_post(Replay *r, int post);
 bool rd__replay_blur_fix128_skip(void);
@@ -219,6 +245,15 @@ void rd__blur_post_sprite(Replay *r, const RdFrame *f, const RdCmd *c);
  * repeat of SCENE's outer columns (rd_internal.h rd__scene_border_state) is
  * done before this replay's first post sprite that reads SCENE */
 void rd__scene_border_arm(const Replay *r);
+/* rd_blur_border.c: that repeat, if this replay's fog armed it, done now:
+ * at a held glow's mask, not drawn (rd__glow_hold_nop) */
+void rd__scene_border_due(Replay *r);
+/* rd_glow_hold.c: the list loop's RDC_NOP c; a held glow's sprite that read
+ * SCENE (marked by rd__glow_hold) takes SCENE's repeat (rd__scene_border_due) */
+void rd__glow_hold_nop(Replay *r, const RdCmd *c);
+/* rd_glow_hold.c: c is such a marked NOP (the crack fill's walk takes it as
+ * the sprite it was: rd__crack_fill_at) */
+bool rd__glow_hold_mask(const RdCmd *c);
 /* rd_blur_smooth.c: the motion blur's sprite c under Smooth
  * (rd_internal.h rd__blur_smooth_arm): the accumulator's passes, then the
  * recorded sprite reading the accumulator with FIX'; false when Smooth is
@@ -239,7 +274,10 @@ bool rd__blur_smooth_sprite(Replay *r, const RdFrame *f, const RdCmd *c);
  *                   alpha alone, *alpha set: the fill then writes RGB
  *                   alone), HERE the fill before it in a pass of its own,
  *                   PASTE the fill as the first draw of its pass (the
- *                   aura's paste into SCENE).  The store plan's scan and
+ *                   aura's paste into SCENE), TAKE as HERE, or its
+ *                   snapshot here and its draw held (another target's
+ *                   sprite after the glow's alpha: rd_late_pass.c, which
+ *                   then says where it lands).  The store plan's scan and
  *                   the walk ask it the same, so the store the fill reads
  *                   is kept up to that command; ICO_RD_CRACK_PLACE=7 (the
  *                   tests' A/B) answers HERE always: the start of list 7
@@ -263,16 +301,30 @@ enum {
     RD_CRACK_MSAA_RESOLVED, /* the epoch closed before the fog (msaaEnd's resolve) */
 };
 
-enum { RD_CRACK_PLACE_HOLD, RD_CRACK_PLACE_HERE, RD_CRACK_PLACE_PASTE };
+enum { RD_CRACK_PLACE_HOLD, RD_CRACK_PLACE_HERE, RD_CRACK_PLACE_PASTE, RD_CRACK_PLACE_TAKE };
 
 void rd__crack_fill(Replay *r, RdTargetRec *tc, const RdTargetRec *tz, int msaa);
 int rd__crack_fill_place(const RdFrame *f, const RdCmd *c, const RdStateBlock *st, bool *alpha);
 void rd__crack_fill_at(Replay *r, const RdFrame *f, const RdCmd *c, int list, bool msaaOpen);
 void rd__crack_fill_late(Replay *r, bool msaaOpen);
 bool rd__crack_fill_paste_due(void);
+/* armed for the glow's paste being drawn now (the late pass's held fill:
+ * rd_fx_plan.c takes it in the premultiplied add's pass) */
+bool rd__crack_fill_glow_due(void);
 void rd__crack_fill_in_pass(Replay *r, uint32_t tdId);
 void rd__crack_fill_paste_late(Replay *r, const char *why);
 bool rd__crack_fill_may(const RdStateBlock *st);
+/* FILLSWAP and CRACKTAP (rd_crack_fill.c): the swap's start-up self-test
+ * (rd_fog_path.c, with the other self-tests; true when it passed or had
+ * nothing to check), its result (0 not run, 1 passed, 2 failed), and the
+ * tests' switches (-1 the environment's: ICO_RD_CRACK_SWAP, ICO_RD_CRACK_TAP2) */
+bool rd__crack_swap_selftest(void);
+int rd__crack_swap_test(void);
+bool rd__crack_swap_on(void);
+const char *rd__crack_swap_why_text(uint32_t why);
+bool rd__crack_tap2_on(void);
+void rd__crack_swap_force(int on);
+void rd__crack_tap2_force(int on);
 /* the first list the armed fill may be drawn in (rd_store_plan.c's touch) */
 #define RD_CRACK_LATE_LIST 7
 /* the target's passes readable for the exact blend's attachment read (exactReadable) */
@@ -324,12 +376,20 @@ bool rd__fx_plan_draw(Replay *r, const RdFxDraw *x);
  *                    clear of another target kept for that target's next
  *                    pass to take as its load op (the clear carry) */
 bool rd__fx_fold(const RdDrawState *d, const uint8_t rgba[4], uint8_t *identity, uint8_t rgb[3]);
+/* rd__fx_alpha_only  a sprite under d with record p writes RGB 0 whatever
+ *                    its texture's RGB (MODULATE by RGBAQ's RGB 0, no
+ *                    blend): its texture's alpha alone is read */
+bool rd__fx_alpha_only(const RdDrawState *d, const RdPostRec *p);
 uint32_t rd__a1x_sprite_steps(const Replay *r, const DrawSetup *ds, const IcoSpriteVertex *v,
                               uint32_t nv, uint8_t prim);
 int rd__sprite_above1x(const Replay *r, const RdDrawPass *dp, const DrawSetup *ds, uint32_t redId);
 bool rd__fx_reduction_clears(Replay *r, const RdScreenVtx v[2], float col[4]);
 void rd__replay_end_pass(Replay *r);
 void rd__replay_end_pass_for(Replay *r, uint32_t tex);
+/* rd_replay.c s_vpExact: the lists' exact viewport for the passes begun
+ * from here (true), or the plain one (the upscale hook's); rd_layer.c's
+ * pre-upscale reduction draws as the lists do inside rd__upscale_point */
+void rd__replay_vp_exact(bool on);
 /* box_reduce_ps's DrawCB for the count target tc, its scaled texels into
  * its GS size (shadowReduce; shadow_count_ps reads the same fields): the
  * source texels per output pixel, the source size, a Full pixel source's
@@ -365,6 +425,12 @@ void rd__fill_draw_cb_extra(const Replay *r, const RdDrawPass *dp, const DrawSet
  *                      untextured); counts RdPerfRecord.constReads /
  *                      constKept (rd__const_reads_on: rd_internal.h) */
 void rd__const_cmd(const RdCmd *c);
+/* rd__const_actions  the actions walked so far this replay (this command's
+ *                    counted); rd__const_took  the sprite being drawn now
+ *                    (this action) into tcId was drawn in a cleared source's
+ *                    colour (rd_aura_paste.c's chain) */
+uint32_t rd__const_actions(void);
+bool rd__const_took(uint32_t tcId);
 void rd__const_note_clear(uint32_t id, const RdTargetRec *t, const float col[4]);
 bool rd__const_read(const RdTargetRec *tc, uint32_t tcId, const RdTargetRec *src, uint32_t srcId,
                     const RdDrawState *d, RdPostRec *p, uint32_t tfmt);
@@ -387,6 +453,29 @@ bool rd__const_read(const RdTargetRec *tc, uint32_t tcId, const RdTargetRec *src
  *                       n - 1 the glow's edge strip draws after c, pass 1
  *                       of blur(n) on a wide frame, under r's state, as
  *                       c's texels at its first drawn column n; 0: none */
+/* rd_date_cut.c (docs/port/WORK_BUFFERS.md, "DATE's passes without the
+ * depth"; the rule: rd_date_cut.h).
+ * rd__date_cut_on        (rd.h) the cut in force
+ * rd__date_cut_scan_begin, rd__date_cut_scan_cmd, rd__date_cut_scan_end
+ *                        rd_store_plan.c rd__store_plan_scan's walk: every
+ *                        command under the state after it (state: a state
+ *                        command), its ordinal; the depth-free runs found;
+ *                        rd__date_cut_end (rd__store_plan_end) the walk's end
+ * rd__date_cut_depth     rd_replay.c prepareDrawEx, after the DATE snapshot:
+ *                        the draw's depth (DrawSetup.tdId, depthFmt) from td
+ *                        (its depth target, NULL none), none for a draw of a
+ *                        depth-free run whose pass begins here or is open on
+ *                        its target without a depth
+ * rd__date_snapshot      rd_replay.c dateSnapshot: the R8 snapshot of tc
+ *                        (taken, retaken or reused, counted by why); closing
+ *                        and ended the MSAA epoch's state for rd__date_snap */
+bool rd__date_cut_scan_begin(const RdFrame *f);
+void rd__date_cut_scan_cmd(const RdCmd *c, const RdStateBlock *st, bool state, uint32_t ord);
+void rd__date_cut_scan_end(uint32_t ord);
+void rd__date_cut_end(void);
+void rd__date_cut_depth(Replay *r, DrawSetup *ds, const RdTargetRec *td);
+RhiTexture rd__date_snapshot(Replay *r, RdTargetRec *tc, uint32_t tcId, const RhiRect *area,
+                             bool closing, bool ended);
 bool rd__replay_date_take(Replay *r, const DrawSetup *ds);
 bool rd__replay_date_clear(Replay *r, const DrawSetup *ds, const RhiRect *area);
 bool rd__replay_blur_fold(Replay *r, const RdFrame *f, const RdCmd *c);
@@ -427,7 +516,12 @@ int rd__replay_glow_edge_columns(const Replay *r, const RdFrame *f, const RdCmd 
  *                       (rd__fades_fold_on, rd_internal.h)
  * rd__fades_fold_exact  whether the sprites blend exactly (the GS's floor)
  *                       under exact mode mode (RdBlendExact) on a target of
- *                       dstUsage usage: RdFadesFoldEnv.exact */
+ *                       dstUsage usage: RdFadesFoldEnv.exact
+ * rd__fades_fold_present rd_present_scene.c: true when this replay's plan
+ *                       is the reduction's textured sprite at ordinal ord
+ *                       (its plan copied to out when not NULL); take: the
+ *                       present from SCENE applies it instead (counted as
+ *                       the reduction's taking it) */
 #define RD_FADES_FOLD_STEPS 4
 #define RD_FADES_FOLD_SPRITES 8
 
@@ -463,8 +557,106 @@ bool rd__aura_box_draw(Replay *r, DrawSetup *ds, const RdPipeKeyInt *key, const 
                        const RdTargetRec *src, RhiTexture srcTex, uint32_t steps, int other);
 void rd__fades_fold_screen(const Replay *r, const RdDrawPass *dp, const DrawSetup *ds,
                            IcoDrawCB *cb);
+/* rd_lamps.h RD_LAMPS_LOWRES: a draw into WORK2 above 1x takes WORK2's own
+ * depth (prepareDrawEx, after rd__late_pass_join) */
+void rd__lamps_lowres_depth(Replay *r, DrawSetup *ds);
+/* blurAbove1xSteps: src is WORK2 at the GS size under LOWRES with SCENE
+ * scaled, so its reduction keeps the above-1x box over the GS footprint */
+bool rd__lamps_lowres_box(const RdTargetRec *src);
+/* rd_lamps.h RD_LAMPS_LOWRESMS, at beginPass's end: the open pass's sample
+ * count (4 in the lamps' multisampled pass, else 1), and the pass begun
+ * (the per-sample depth fill drawn first in it) */
+uint8_t rd__lamps_pass_samples(void);
+void rd__lamps_pass_begun(Replay *r);
 void rd__fades_fold_end(void);
 bool rd__fades_fold_exact(int mode, uint32_t usage, bool rgba8);
+bool rd__fades_fold_present(uint32_t ord, bool take, RdFadesFold *out);
+/* The glow's mask folded into its reduction (rd_glow_fold.c; rd_internal.h
+ * has the switch and the plan).
+ * rd__glow_fold_scan_begin  rd_store_plan.c rd__store_plan_scan: true when
+ *                      this replay's walk is to be read for the fold (the
+ *                      switch on, no pass window); the counters zeroed
+ * rd__glow_fold_scan_reset, rd__glow_fold_scan_cmd, rd__glow_fold_scan_end
+ *                      the walk's every command (state: a state command),
+ *                      then the verdict (logged once per reason, counted)
+ * rd__glow_fold_skip   rd_blur_border.c blurPostSprite: the planned fill or
+ *                      mask, not drawn (its state kept); true: skip it
+ * rd__glow_fold_due    rd_fx_plan.c rd__fx_plan_draw: the planned reduction
+ *                      x takes the fold: fx_glow_mask's words, SCENE's
+ *                      record and, where WORK2 was drawn between the fill and
+ *                      the mask (the sun's fans), WORK2's (*kept, else NULL:
+ *                      the texels the mask keeps read from it); false otherwise (where it was planned but
+ *                      cannot take it, the fill and the mask are drawn
+ *                      first: rd__glow_fold_undo)
+ * rd__glow_fold_drawn  the reduction drawn with the fold (counted, logged
+ *                      once)
+ * rd__glow_fold_undo   the fill and the mask drawn now with their states,
+ *                      the fold off from now on (why: the log)
+ * rd__glow_fold_end    rd_store_plan.c rd__store_plan_end: a plan no
+ *                      reduction took is logged and turns the fold off */
+bool rd__glow_fold_scan_begin(const RdFrame *f);
+void rd__glow_fold_scan_reset(void);
+void rd__glow_fold_scan_cmd(const RdFrame *f, const RdCmd *c, const RdStateBlock *st, bool state,
+                            uint32_t ord);
+void rd__glow_fold_scan_end(void);
+bool rd__glow_fold_skip(Replay *r, const RdFrame *f, const RdCmd *c);
+bool rd__glow_fold_due(Replay *r, const RdFxDraw *x, uint32_t words[RD_GLOW_FOLD_WORDS],
+                       RdTargetRec **scene, RdTargetRec **kept);
+void rd__glow_fold_drawn(void);
+void rd__glow_fold_undo(Replay *r, const char *why);
+void rd__glow_fold_end(void);
+/* The glow drawn only where it can add light (rd_glow_light.c).
+ * rd__glow_light_on, rd__glow_light_force  (rd.h) the switch
+ * rd__glow_light_scan_begin, _scan_cmd, _scan_end  rd_store_plan.c
+ *                        rd__store_plan_scan's walk: every command (state:
+ *                        a state command), then the plan (counted, logged)
+ * rd__glow_light_planned this replay applies a plan (the WORK2 fold stands
+ *                        down, rd_glow_fold.c)
+ * rd__glow_light_sprite  rd_blur_border.c blurPostSprite: true when the
+ *                        plan handled post sprite c (skipped, drawn as a
+ *                        clear, drawn with its source planned)
+ * rd__glow_light_skip    rd_replay.c doScreen: command ord is not drawn (the
+ *                        fades fold's, rd__fades_fold_skip, or the sun's
+ *                        fans off the picture under a plan)
+ * rd__glow_light_src     rd_const_read.c rd__const_read: the colour the plan
+ *                        gives source srcId for the sprite being drawn
+ * rd__glow_light_lazy_begin, _readback  rd_pass_cut.c: the lazy clears of
+ *                        WORK2_PAD, WORK2 and WORK3 drawn before a replay
+ *                        that reads them first, or before a read outside one
+ * rd__glow_light_reset   rd_pass_cut.c rd__pass_cut_init: a new renderer
+ *                        holds no lazy clear
+ * rd__blur_post_planned  rd_blur_border.c: sprite c and its glow edge strip
+ *                        drawn (no fold, no border) */
+bool rd__glow_light_scan_begin(const RdFrame *f);
+void rd__glow_light_scan_cmd(const RdFrame *f, const RdCmd *c, const RdStateBlock *st, bool state,
+                             uint32_t ord);
+void rd__glow_light_scan_end(void);
+bool rd__glow_light_planned(void);
+/* rd__glow_light_plan  this replay's plan (RD_GLOW_LIGHT_*; NONE before its
+ *                      scan, at 1x and with the plan off); rd__glow_light_skips
+ *                      the plan does not draw command c (walked now:
+ *                      g_rdStoreOrd).  rd_late_pass.c holds the crack fill
+ *                      past a skipped paste of a DARK frame */
+int rd__glow_light_plan(void);
+bool rd__glow_light_skips(const RdCmd *c);
+bool rd__glow_light_sprite(Replay *r, const RdFrame *f, const RdCmd *c);
+bool rd__glow_light_skip(uint32_t ord);
+bool rd__glow_light_src(uint32_t srcId, uint8_t rgba[4]);
+void rd__glow_light_lazy_begin(void);
+void rd__glow_light_readback(uint32_t id);
+void rd__glow_light_reset(void);
+void rd__blur_post_planned(Replay *r, const RdFrame *f, const RdCmd *c);
+/* rd_blur_border.c blurPostSprite, before SCENE's border repeat: the pass
+ * serial there, so the passes the repeat begins are not counted as the
+ * glow chain's (RdPerfRecord.glowLightPasses) */
+void rd__glow_light_mark(const Replay *r);
+/* rd_pass_area.c rd__pass_area_begin (every render pass rd_replay.c
+ * beginPass begins): a pass begun in the light plan's chain, named in
+ * rd__glow_light_debug (its target, size, colour load op, the command after) */
+void rd__glow_light_pass(uint32_t cid, const RdTargetRec *t, int load);
+/* rd_const_read.c: fx_tfx of texel t under RGBAQ col and the sprite's
+ * flags (TFX in bits 1..2, TCC), the shader's integers */
+void rd__const_tfx(const uint8_t t[4], const uint8_t col[4], uint32_t flags, uint8_t out[4]);
 /* rd_replay_vu.c.
  * rd__replay_vu       a VU draw under its camera's picture
  * rd__vu_prepass      before list 0 (replayFrame, after the uploads and
@@ -489,5 +681,59 @@ void rd__replay_vu_flush(Replay *r);
 void rd__replay_vu_flush_post(Replay *r, int post);
 void rd__vu_prepass(const RdFrame *f, int keep);
 void rd__vu_prepass_shutdown(void);
+
+/* rd_vis.c (rd_vis.h): the port's visibility test per scene draw.
+ * rd__vis_frame       the frame replayFrame walks: f, or its shadow with
+ *                     the scene draws wholly off their target or behind
+ *                     the eye turned into RDC_NOPs (after rd__diag_frame,
+ *                     before every scan of the lists)
+ * rd__vis_source      the frame a shadow was made from (what decides
+ *                     across draws or replays: rd_join.c, rd_fades_fold.c)
+ * rd__vis_culled      a shadow's NOP at (l, i) as recorded, or NULL
+ *                     (rd_store_plan.c's carried depth read) */
+const RdFrame *rd__vis_frame(const RdFrame *f, int keep);
+const RdFrame *rd__vis_source(const RdFrame *f);
+const RdCmd *rd__vis_culled(const RdFrame *f, int l, uint32_t i);
+
+/* rd_msaa_shadow.c: the shadow count drawn in the MSAA epoch, on SCENE_MS's
+ * own depth and stencil (docs/port/MSAA.md "The shadow count in the epoch").
+ * rd__msaa_shadow_reset  doShadowReset: the reset taken in the epoch (true:
+ *                        the epoch closed, then the count's pass begun on
+ *                        SCENE_MS's colour and depth, its colour and stencil
+ *                        cleared; false: the count after the epoch's
+ *                        resolve, as before, with the line saying why)
+ * rd__msaa_shadow_pass   the strips and the resolve: the count's pass open
+ *                        (begun again when a command ended it); false
+ *                        outside the count
+ * rd__msaa_shadow_done   doShadowResolve after the seven draws: the count
+ *                        resolved into its target
+ * rd__msaa_shadow_selftest  the count in the epoch against the count without
+ *                        anti-aliasing, the volumes' depth test included, on
+ *                        SCENE at samples (rd_fog_path.c rd__fog_aa_reconcile)
+ * rd__msaa_shadow_force  the tests' switch: -1 the self-test's choice, 0 the
+ *                        count after the resolve, 1 in the epoch;
+ *                        rd__msaa_shadow_mode the way in force
+ * rd__msaa_shadow_counts the counts drawn in the epoch in the last replay
+ * rd__msaa_shadow_retest the self-test runs again at its next call
+ * rd__msaa_shadow_free   SCENE_MS goes (rd_replay.c msaaFree): no count open
+ * and from rd_replay.c: rd__msaa_pair (SCENE_MS's colour and depth, their
+ * states and count; true while the epoch is open with its depth drawn) and
+ * rd__msaa_close (msaaEnd for RD_MSAA_CLOSE_COUNTED) */
+/* rd_replay.c shadowTargets: the shadow commands' colour target tc and depth
+ * target td of one texel size; a temporary of the scene's GS size whose
+ * texels are another scale's (made before a scale change, its frame
+ * replayed after it) is made again at the scale in force (rd_msaa_shadow.c) */
+bool rd__shadow_size_agree(RdTargetRec *tc, const RdTargetRec *td);
+bool rd__msaa_shadow_reset(Replay *r, RdTargetRec *tc, RdTargetRec *td);
+bool rd__msaa_shadow_pass(Replay *r);
+void rd__msaa_shadow_done(Replay *r, RdTargetRec *tc);
+bool rd__msaa_shadow_selftest(uint32_t samples);
+void rd__msaa_shadow_force(int mode);
+int rd__msaa_shadow_mode(void);
+uint32_t rd__msaa_shadow_counts(void);
+void rd__msaa_shadow_retest(void);
+void rd__msaa_shadow_free(void);
+bool rd__msaa_pair(RhiTexture t[2], RhiState *st[2], uint32_t *samples);
+void rd__msaa_close(Replay *r);
 
 #endif /* PORT_RENDER_RD_REPLAY_H */

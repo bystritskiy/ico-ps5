@@ -136,3 +136,41 @@ float4 ps_subpass(VSOut i) : SV_Target0
     return i.col;
 }
 #endif
+
+// The vertex shader's stores (RHI_BIND_STORAGE_BUFFER_RW, rhi.h
+// RhiLimits.vertexStores; rhi_test_stores.c): point i writes its record
+// (i, 3i + 1, 0xC0DE0000 + i, 0x5EED) into element i of the
+// buffer at u0 of group 0 and lies outside the clip volume (the pipeline
+// has no rasterization).  Not in the Direct3D 11 text (feature level 11_0
+// has no vertex shader UAVs)
+#ifndef ICO_D3D11
+RWStructuredBuffer<uint4> g_store : REG(u0, 0);
+
+struct VSStoreOut {
+    float4 pos : SV_Position;
+#ifdef __spirv__
+    [[vk::builtin("PointSize")]] float size : PSIZE;
+#endif
+};
+
+VSStoreOut vs_store(uint vid : SV_VertexID)
+{
+    g_store[vid] = uint4(vid, vid * 3u + 1u, 0xC0DE0000u + vid, 0x5EEDu);
+    VSStoreOut o;
+    o.pos = float4(2.0, 2.0, 0.0, 1.0);
+#ifdef __spirv__
+    o.size = 1.0;
+#endif
+    return o;
+}
+
+// The compute shader's stores (RhiPipelineDesc.compute, rhi.h
+// RhiLimits.computeStores; rhi_test_compute.c): invocation i of a group of
+// 64 writes vs_store's record for i into element i of the same buffer (the
+// VU record's compute builds, port/shaders/vu_common.hlsli VU_PRE_CS)
+[numthreads(64, 1, 1)]
+void cs_store(uint3 t : SV_DispatchThreadID)
+{
+    g_store[t.x] = uint4(t.x, t.x * 3u + 1u, 0xC0DE0000u + t.x, 0x5EEDu);
+}
+#endif

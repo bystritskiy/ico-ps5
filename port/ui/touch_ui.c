@@ -24,6 +24,7 @@
 #include "font.h"
 #include "charFileManager.h" /* texFile */
 #include "layout_ext.h"
+#include "pad_glyphs.h"
 #include "rd.h"
 #include "strings.h"
 
@@ -472,15 +473,156 @@ static int sheetLoaded(int glyph, int no)
     return len > 0 && strncmp(have, want, len) == 0 && have[len] == '\0';
 }
 
+/* The box a zone's picture is drawn in, output pixels: the disc glyph's
+   proportions (its box beside a 27-unit label, layout_ext.h
+   lt_ext_glyph_box) fitted to the disc or key, w x h centred on (cx, cy);
+   0 when the glyph has no box. */
+static int glyphBox(const IcoTouchButton *b, int glyph, float *w, float *h, float *cx, float *cy)
+{
+    int gw = 0, gh = 0;
+
+    lt_ext_glyph_box(glyph, 27.0f, &gw, &gh);
+    if (gw <= 0 || gh <= 0) {
+        return 0;
+    }
+    /* the grid's x unit is 14/15 of its y unit on screen */
+    const float a = (float)gw * 14.0f / (15.0f * (float)gh);
+    float bw, bh;
+    if (b->round) {
+        bw = bh = b->rect.w * 0.78f;
+    } else {
+        bw = b->rect.w * 0.8f;
+        bh = b->rect.h * 0.7f;
+    }
+    /* bw and bh are in layout pixels; the fit is made in output
+       pixels so the glyph keeps its proportions when kx != ky */
+    bw *= s_d.kx;
+    bh *= s_d.ky;
+    *w = bw < bh * a ? bw : bh * a;
+    *h = *w / a;
+    *cx = (b->rect.x + b->rect.w * 0.5f) * s_d.kx;
+    *cy = (b->rect.y + b->rect.h * 0.5f) * s_d.ky;
+    return 1;
+}
+
+/* the zones drawn with the button pictures' art at the last draw, and
+   each one's quad (output pixels: x0, y0, x1, y1) (tests) */
+static uint32_t s_artZones;
+static float s_artQuad[ICO_TOUCH_BUTTONS][4];
+
+unsigned ui__touch_art_zones(void)
+{
+    return (unsigned)s_artZones;
+}
+
+int ui__touch_art_quad(int zone, float q[4])
+{
+    if (zone < 0 || zone >= ICO_TOUCH_BUTTONS || !((s_artZones >> zone) & 1u)) {
+        return 0;
+    }
+    memcpy(q, s_artQuad[zone], sizeof(s_artQuad[zone]));
+    return 1;
+}
+
+/* The button pictures' art (pad_glyphs.h) on the zones that have a picture
+   while a set is in force: its ink fitted inside the button it stands on
+   and centred on it, at its group's fit (pad_glyphs_fit_circle /
+   pad_glyphs_fit_box: one scale for the four face pictures, one for the
+   four shoulders, the largest at which every one of them fits a button of
+   this shape and size, so A is not bigger than B), so the picture scales
+   with the button (the size setting, the editor's per-button scale, the
+   output's resolution) and never leaves it.  The room (touch_ui.h): a
+   round button's circle of UI_TOUCH_ART_ROUND of its radius, a key's box
+   of UI_TOUCH_ART_KEY_W x UI_TOUCH_ART_KEY_H of its size, each held a
+   pixel inside the ring or frame (th thick) where a tiny window's 2-pixel
+   floor on th would reach it.  Rasterised at the size it is shown in
+   output pixels, the cell's texels whole (the art's cell, not a disc
+   sheet's, so no half-texel inset), the held and opacity alpha of the
+   disc's pictures.  No sheet check: the art is the port's own texture.
+   Returns the mask of the zones drawn. */
+static uint32_t drawArtGlyphs(const IcoTouchOverlay *o, float th)
+{
+    uint32_t drawn = 0;
+    const int style = pad_glyphs_style();
+    const float kmin = s_d.kx < s_d.ky ? s_d.kx : s_d.ky;
+
+    for (int z = 0; z < ICO_TOUCH_BUTTONS; z++) {
+        const IcoTouchButton *b = &o->layout.button[z];
+        const int g = glyphOf(z);
+        const int held = (o->info.pressed >> z) & 1u;
+        const float ca = shownAlpha(o, b->alpha);
+        float uv[4];
+        unsigned tex = 0;
+
+        if (g < 0 || b->rect.w <= 0.0f || b->rect.h <= 0.0f || ca < 0.0f) {
+            continue;
+        }
+        const float aa = pad_glyphs_aspect(style, g), hk = pad_glyphs_height(style, g);
+        float letter;
+        if (b->round) {
+            const float r = b->rect.w * 0.5f;
+            const float R = fminf(UI_TOUCH_ART_ROUND * r * kmin, (r - th) * kmin - 1.0f);
+            letter = R > 0.0f ? pad_glyphs_fit_circle(style, g, 2.0f * R) : 0.0f;
+        } else {
+            const float bw = fminf(UI_TOUCH_ART_KEY_W * b->rect.w * s_d.kx,
+                                   (b->rect.w - 2.0f * th) * s_d.kx - 2.0f);
+            const float bh = fminf(UI_TOUCH_ART_KEY_H * b->rect.h * s_d.ky,
+                                   (b->rect.h - 2.0f * th) * s_d.ky - 2.0f);
+            letter = pad_glyphs_fit_box(style, g, bw, bh);
+        }
+        if (!(letter > 0.0f) || !(aa > 0.0f) || !(hk > 0.0f)) {
+            continue;
+        }
+        const float h = letter * hk, w = h * aa;
+        const float cx = (b->rect.x + b->rect.w * 0.5f) * s_d.kx;
+        const float cy = (b->rect.y + b->rect.h * 0.5f) * s_d.ky;
+        const long px = lrintf(letter);
+        if (!pad_glyphs_texture(g, px < 1 ? 1 : (int)px, &tex, uv, NULL)) {
+            continue;
+        }
+        RdScreenVtx v[2];
+        float al = (float)(held ? 0x80 : 0x70) * s_d.opacity * ca;
+
+        al = al > 128.0f ? 128.0f : al;
+        s_artQuad[z][0] = cx - w * 0.5f;
+        s_artQuad[z][1] = cy - h * 0.5f;
+        s_artQuad[z][2] = cx + w * 0.5f;
+        s_artQuad[z][3] = cy + h * 0.5f;
+        memset(v, 0, sizeof(v));
+        v[0].x = fix16(s_artQuad[z][0], s_d.maxX);
+        v[0].y = fix16(s_artQuad[z][1], s_d.maxY);
+        v[1].x = fix16(s_artQuad[z][2], s_d.maxX);
+        v[1].y = fix16(s_artQuad[z][3], s_d.maxY);
+        v[0].s = uv[0] * 16.0f;
+        v[0].t = uv[1] * 16.0f;
+        v[1].s = uv[2] * 16.0f;
+        v[1].t = uv[3] * 16.0f;
+        v[0].q = v[1].q = 1.0f;
+        v[0].rgba[0] = v[0].rgba[1] = v[0].rgba[2] = v[1].rgba[0] = v[1].rgba[1] = v[1].rgba[2] =
+            0x80;
+        v[0].rgba[3] = v[1].rgba[3] = (uint8_t)(al + 0.5f);
+        rd_overlay_prims(RD_PRIM_SPRITES, v, 2, (RdTex){tex}, RD_BLEND_LERP_AS);
+        drawn |= 1u << z;
+    }
+    return drawn;
+}
+
 /* the game's button pictures on the discs and keys, each zone that has one
-   (glyphOf) and whose sheet is loaded.  The sprites are in 12.4 output
+   (glyphOf) and whose sheet is loaded, or the button pictures' art on them
+   while a set is in force (drawArtGlyphs; th the rings' and frames'
+   thickness).  The sprites are in 12.4 output
    pixels as the menus' glyphs are (font.c ovEmit), the texel rectangle half
    a texel in on each side as display_texture samples it; zones on one
    texture go in one draw.  Returns the mask of the zones drawn. */
-static uint32_t drawGlyphs(const IcoTouchOverlay *o)
+static uint32_t drawGlyphs(const IcoTouchOverlay *o, float th)
 {
     unsigned tex[ICO_TOUCH_BUTTONS];
     uint32_t drawn = 0, done = 0;
+
+    s_artZones = 0;
+    if (pad_glyphs_active()) {
+        return s_artZones = drawArtGlyphs(o, th);
+    }
 
     for (int z = 0; z < ICO_TOUCH_BUTTONS; z++) {
         const int g = glyphOf(z);
@@ -498,7 +640,7 @@ static uint32_t drawGlyphs(const IcoTouchOverlay *o)
         for (int z = first; z < ICO_TOUCH_BUTTONS; z++) {
             const IcoTouchButton *b = &o->layout.button[z];
             const int held = (o->info.pressed >> z) & 1u;
-            int uvwh[4], gw = 0, gh = 0;
+            int uvwh[4];
 
             const float ca = shownAlpha(o, b->alpha);
 
@@ -512,26 +654,10 @@ static uint32_t drawGlyphs(const IcoTouchOverlay *o)
             if (lt_ext_glyph_source(glyphOf(z), uvwh) < 0) {
                 continue;
             }
-            lt_ext_glyph_box(glyphOf(z), 27.0f, &gw, &gh);
-            if (gw <= 0 || gh <= 0) {
+            float w, h, cx, cy;
+            if (!glyphBox(b, glyphOf(z), &w, &h, &cx, &cy)) {
                 continue;
             }
-            /* the grid's x unit is 14/15 of its y unit on screen */
-            const float a = (float)gw * 14.0f / (15.0f * (float)gh);
-            float bw, bh;
-            if (b->round) {
-                bw = bh = b->rect.w * 0.78f;
-            } else {
-                bw = b->rect.w * 0.8f;
-                bh = b->rect.h * 0.7f;
-            }
-            /* bw and bh are in layout pixels; the fit is made in output
-               pixels so the glyph keeps its proportions when kx != ky */
-            bw *= s_d.kx;
-            bh *= s_d.ky;
-            const float w = bw < bh * a ? bw : bh * a, h = w / a;
-            const float cx = (b->rect.x + b->rect.w * 0.5f) * s_d.kx;
-            const float cy = (b->rect.y + b->rect.h * 0.5f) * s_d.ky;
             float al = (float)(held ? 0x80 : 0x70) * s_d.opacity * ca;
             RdScreenVtx *p = &v[n++], *q = &v[n++];
 
@@ -1106,7 +1232,7 @@ void ui_touch_draw_overlay(const struct RdOverlayCtx *ctx)
     drawButtons(&o, th);
     drawDpad(&o, th);
     flush();
-    const uint32_t withGlyph = drawGlyphs(&o);
+    const uint32_t withGlyph = drawGlyphs(&o, th);
     drawLabels(ctx, &o, withGlyph);
     if (o.edit.active) {
         drawEditor(ctx, &o, th);

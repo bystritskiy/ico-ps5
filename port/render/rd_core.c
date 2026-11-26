@@ -28,17 +28,39 @@
 #include <string.h>
 #include <time.h>
 #include "../fmv/rd_video.h"
+#include "rd_glass.h" /* rd_glass_reset */
+#include "rd_lamps.h"
+#include "rd_log_line.h"
+#include "rd_made_outside.h" /* what play makes outside the key cache, named */
 #include "rd_internal.h"
-#include "modelpack.h" /* the model pack switch */
+#include "rd_hold.h"
+#include "rd_icon_hold.h"   /* rd__icon_pass_drop */
+#include "rd_loss_keep.h"   /* rd__loss_keep_recycle */
+#include "rd_layer.h"       /* the display layer's reserved slots */
+#include "rd_ledger_live.h" /* the scene ledger: the box cull's drops by model */
+#include "rd_fsr3.h"        /* rd__fsr3_fp16_word, the summary's precision */
+#include "modelpack.h"      /* the model pack switch */
 #include "rd_mesh.h"
+#include "rd_present_scene.h"
+#include "rd_shadow_tile.h" /* rd__shadow_tile_shutdown */
+#include "rd_shadowres.h"   /* the shadow levels' start line */
 #include "rd_tex.h"
 #include "rd_tex_decode.h"
+#include "rd_tone.h"
+#include "rd_upscale_temporal.h"
+#include "rd_upscale.h"
+#include "rd_velocity.h"
+#include "rd_vis.h"
+#include "rd_vu_record.h" /* the record's write on the display line */
+#include "rd_vu_skin_check.h"
+#include "rhi_device_table.h" /* the summary's device table rows */
+#include "rd_device_rows.h"   /* rd__device_value */
 #include "texpack.h"
 
 RdContext g_rd;
 
 static RdHostCall s_hostCall;
-static RdReplayGate s_replayGate; /* rd_set_replay_gate: Frame rate Original's late skip */
+static RdReplayGate s_replayGate; /* rd_set_replay_gate: Frame rate Original's skip */
 
 double rd__now_ms(void)
 {
@@ -105,13 +127,13 @@ static uint32_t s_notImplementedCount;
 
 /* ------------------------------------------------------------ diagnostics */
 
+/* one write a line (rd_log_line.h): the streams are unbuffered, so three
+ * calls let another thread's line land inside this one */
 void rd__log(const char *fmt, ...)
 {
     va_list ap;
     va_start(ap, fmt);
-    fputs("rd: ", stderr);
-    vfprintf(stderr, fmt, ap);
-    fputc('\n', stderr);
+    (void)rd_log_line_write(stderr, "rd: ", NULL, fmt, ap);
     va_end(ap);
 }
 
@@ -130,10 +152,15 @@ void rd_summary_text(char *out, size_t size)
     if (g_rd.passSplit) {
         snprintf(split, sizeof split, ", pass split every %u VU draws", g_rd.passSplit);
     }
+    /* the device table's count of rows in force on this device (every
+       backend notes it at its start-up lines, which name the rows:
+       port/rhi/rhi_device_table.h rhi_device_table_start) */
+    const char *rows = rhi_device_table_noted();
     snprintf(out, size,
              "blend %s; profile %s; index values dense (marks in the stream); fog %s; VU shaders "
              "%s%s%s%s; VU pre-pass %s%s; VU merge %s; VU fuse %s; constant reads %s; fades "
-             "fold %s; pipelines %s (pool %d, cache %d); menu text %s",
+             "fold %s; cull %s; pipelines %s (pool %d, cache %d); menu text %s; FSR 3.1 fp16 "
+             "%s%s%s",
              g_rdSumBlend[0] ? g_rdSumBlend : "(self-test not reached)",
              rd__profile_text()[0] ? rd__profile_text() : "(not decided)",
              g_rdSumFog[0] ? g_rdSumFog : "(self-test not reached)",
@@ -149,14 +176,22 @@ void rd_summary_text(char *out, size_t size)
              rd__vu_fuse_text(),  /* the fused scissor pair (rd_replay_vu.c vuMergeInit) */
              rd__const_reads_on() ? "on" : "off", /* rd_const_read.c */
              rd__fades_fold_on() ? "on" : "off",  /* rd_fades_fold.c */
+             rd__vis_mode_name(rd__vis_mode()),   /* rd_vis.c */
              careful && rd__pipelines_lazy_on()
                  ? "the careful start-up set, stopped at its budget (the rest on first use)"
              : rd__pipelines_lazy_on() ? "on first use (no start-up set)"
              : careful                 ? "the careful start-up set"
                                        : "the start-up set",
              RHI_PIPELINE_POOL_MAX, RD_PIPELINE_CACHE_MAX,
-             /* the sheets of scale 1 and 2 (rd_tex.c rd__sheet_baked) */
-             g_rd.sheetShader ? "shader" : "baked at 1x and 2x (the shader above)");
+             /* the sheets of scale 1, and 2 on the tile-based classes (rd_tex.c
+                rd__sheet_baked) */
+             g_rd.sheetShader           ? "shader"
+             : g_rd.profile.sheetBake2x ? "baked at 1x and 2x (the shader above)"
+                                        : "baked at 1x (the shader above)",
+             /* FSR 3.1's precision (rd_fsr3.c, issue 203) */
+             rd__fsr3_fp16_word(),
+             /* the device table's rows (rhi_device_table.h) */
+             rows ? "; " : "", rows ? rows : "");
 }
 
 /* ------------------------------------------------ the VU index spans
@@ -315,9 +350,7 @@ void rd__log_once(int bit, const char *fmt, ...)
     g_rd.onceFlags |= 1u << bit;
     va_list ap;
     va_start(ap, fmt);
-    fputs("rd: ", stderr);
-    vfprintf(stderr, fmt, ap);
-    fputs(" (reported once)\n", stderr);
+    (void)rd_log_line_write(stderr, "rd: ", " (reported once)", fmt, ap);
     va_end(ap);
 }
 
@@ -474,6 +507,8 @@ bool rd__apply_state(RdStateBlock *s, const RdCmd *c)
     case RDC_AA1:
         s->aa1 = c->b[0];
         return true;
+    case RDC_UPSCALE_POINT: /* a marker: no state (rd_upscale.h) */
+        return true;
     default:
         return false;
     }
@@ -508,6 +543,7 @@ void rd__frame_reset(RdFrame *f)
     f->closed = 0;
     f->keep = 0;
     f->number = 0;
+    rd__frame_sent_clear(f);
 }
 
 void rd__frame_free(RdFrame *f)
@@ -684,6 +720,9 @@ static void namedTargetDesc(int id, uint32_t gsW, uint32_t gsH, uint32_t *w, uin
     if (*w == 0) {
         *w = 1; /* a test's frame narrower than 8 pixels */
     }
+    if (id == RD_TARGET_WORK2 && rd__lamps_lowres_on()) {
+        *depth = 1; /* the lamps' own depth at that size (rd_lamps.c) */
+    }
     /* the scene's scale applies to a scene-class target's texture, not to
      * the GS size: rd__target_scale_of */
 }
@@ -697,9 +736,12 @@ static void namedTargetDesc(int id, uint32_t gsW, uint32_t gsH, uint32_t *w, uin
  * (namedTargetDesc), at those GS sizes (the PS2's) at every scale. */
 static int sceneClass(int id)
 {
-    return id == RD_TARGET_SCENE || id == RD_TARGET_DISPLAY || id == RD_TARGET_WORK2 ||
-           id == RD_TARGET_AURA_WORK || id == RD_TARGET_DATE_SNAPSHOT ||
-           id == RD_TARGET_DISPLAY_HELD;
+    /* WORK2 at the GS frame's size above 1x too under the lamps' LOWRES
+     * (rd_lamps.h: the lamps and the mask drawn at the PS2's own resolution,
+     * the reduction's input), with its own depth (namedTargetDesc) */
+    return id == RD_TARGET_SCENE || id == RD_TARGET_DISPLAY ||
+           (id == RD_TARGET_WORK2 && !rd__lamps_lowres_on()) || id == RD_TARGET_AURA_WORK ||
+           id == RD_TARGET_DATE_SNAPSHOT || id == RD_TARGET_DISPLAY_HELD;
 }
 
 /* DISPLAY and its held copy (the motion blur), of one size and scale */
@@ -755,29 +797,41 @@ static uint32_t scaled(uint32_t n, float k)
  * 1 (Original, and every Enhanced target the options leave alone) tw == w,
  * th == h.  The scale is the resolution's alone: sx == sy, but under the
  * Window resolution, whose box keeps the PS2's pixel shape
- * (rd__apply_display).  A block of any other size (a reflection block, the
- * queen barrier's copy) is drawn at its own GS size, whatever the aspect:
- * the game sizes it, and its picture is the one its own screen matrix
- * gives.  Under Water reflections: Sharp (RdSettings.waterSharp) such a
- * block that rd_block_target made (t->block: puddle.c's and pool.c's
- * reflections, the queen barrier's copy) takes the scene's scale instead,
- * both ways as SCENE has it, so its picture has the scene's texels per GS
- * pixel; its depth buffer is made at the same texture size, and the
- * grids and sprites that sample it address it in GS texels (the scale is
- * the texture's alone).  With the option off nothing here changes.  Every
- * other named target (the work buffers, the shadow levels) is at its GS
- * size, the PS2's, at every scale. */
+ * (rd__apply_display).  A block of any other size that rd_block_target
+ * made (t->block: puddle.c's and pool.c's reflections, the water at the
+ * mill, the queen barrier's copy) takes the scene's scale too, in every
+ * preset and at every aspect, both ways as SCENE has it, so its picture
+ * has the scene's texels per GS pixel (the game sizes the block; its
+ * picture is the one its own screen matrix gives, only finer): its depth
+ * buffer is made at the same texture size, and the grids and sprites that
+ * sample it address it in GS texels (the scale is the texture's alone).
+ * At scale 1 that is its GS size, as before.  This was v0.11.6's Water
+ * reflections: Sharp; Original, the GS size at every scale, is the tests'
+ * ICO_RD_WATER_SCALE=0 (g_rd.waterPs2).  Every other temporary target and
+ * every other named target (the work buffers, the shadow levels) is at its
+ * GS size, the PS2's, at every scale. */
 void rd__target_scale_of(RdTargetRec *t, int named)
 {
     float sx = 1.0f, sy = 1.0f;
     int scene = named >= 0 ? sceneClass(named) : (t->w == g_rd.gsW && t->h == g_rd.gsH);
-    if (scene) {
-        sx = g_rd.sceneSx > 0.0f ? g_rd.sceneSx : 1.0f;
-        sy = g_rd.sceneSy > 0.0f ? g_rd.sceneSy : 1.0f;
+    if (scene && (displayClass(named) || named == RD_UPSCALED_NAMED)) {
+        /* DISPLAY, its held copy and the upscaler's output UPSCALED: the
+         * display scale, the scene's own but while a temporal upscaler
+         * draws the scene below it (rd_upscale.h) */
+        rd__display_scale(&sx, &sy);
         if (displayClass(named) && g_rd.fullHeight) {
             sy *= 2.0f; /* the full-height scene: no vertical halving */
         }
-    } else if (named < 0 && t->block && g_rd.settings.waterSharp) {
+    } else if (scene) {
+        sx = g_rd.sceneSx > 0.0f ? g_rd.sceneSx : 1.0f;
+        sy = g_rd.sceneSy > 0.0f ? g_rd.sceneSy : 1.0f;
+    } else if (named == RD_TARGET_WORK2 && rd__lamps_lowres_factor() > 1.0f) {
+        /* the lamps' lowres2x (rd_lamps.h): twice the GS size, at most the
+         * scene's scale (1 at 1x: nothing changes there) */
+        const float k = rd__lamps_lowres_factor();
+        sx = g_rd.sceneSx > k ? k : (g_rd.sceneSx > 1.0f ? g_rd.sceneSx : 1.0f);
+        sy = g_rd.sceneSy > k ? k : (g_rd.sceneSy > 1.0f ? g_rd.sceneSy : 1.0f);
+    } else if (named < 0 && t->block && !g_rd.waterPs2) {
         sx = g_rd.sceneSx > 0.0f ? g_rd.sceneSx : 1.0f;
         sy = g_rd.sceneSy > 0.0f ? g_rd.sceneSy : 1.0f;
     }
@@ -828,7 +882,8 @@ const char *rd__target_name(uint32_t id)
         return "block";
     }
     const uint32_t slot = (id & 0xFFFF) - 1;
-    return slot < RD_TARGET_COUNT ? s_targetNames[slot] : "temporary";
+    const char *layer = rd__layer_slot_name(slot); /* COMPOSITE, PRE_DISPLAY, ... */
+    return slot < RD_TARGET_COUNT ? s_targetNames[slot] : layer ? layer : "temporary";
 }
 
 uint8_t rd__target_code(uint32_t id)
@@ -1068,6 +1123,7 @@ static void createNamedTargets(void)
         rd__temp_target_pool_clear();
         rd__scene_caches_free();
         rd__effects_depth_free();
+        rd__upscale_free(); /* UPSCALED, at the old display size (rd_upscale.c) */
         rhi_collect_garbage_now();
     }
     for (;;) {
@@ -1132,8 +1188,8 @@ void rd__note_target_pressure(const RdTargetRec *t)
     const int idx = (int)(t - g_rd.targets);
     const int scene = idx >= 0 && idx < RD_TARGET_COUNT ? sceneClass(idx)
                                                         : (t->w == g_rd.gsW && t->h == g_rd.gsH);
-    /* a block at the scene's scale (Water reflections: Sharp) comes down
-     * with the scene */
+    /* a block at the scene's scale (rd__target_scale_of) comes down with
+     * the scene */
     const int sharpBlock = t->block && (t->sx > 1.0f || t->sy > 1.0f);
     if (scene || sharpBlock) {
         rd__note_scene_pressure();
@@ -1173,7 +1229,8 @@ uint32_t rd__temp_target_alloc_ex(uint32_t w, uint32_t h, int withDepth, int kee
     want.block = block ? 1 : 0;
     rd__target_scale_of(&want, -1);
     int pick = -1, empty = -1, other = -1;
-    for (int i = RD_TARGET_COUNT; i < RD_MAX_TARGETS; i++) {
+    /* not the display layer's reserved slots (rd_layer.h) */
+    for (int i = RD_TARGET_COUNT; i < RD_LAYER_SLOT_FIRST; i++) {
         const RdTargetRec *t = &g_rd.targets[i];
         if (t->live) {
             continue;
@@ -1194,7 +1251,7 @@ uint32_t rd__temp_target_alloc_ex(uint32_t w, uint32_t h, int withDepth, int kee
     }
     if (pick < 0) {
         rd__log_once(RD_ONCE_TEMP_FULL, "out of temporary targets (%d)",
-                     RD_MAX_TARGETS - RD_TARGET_COUNT);
+                     RD_LAYER_SLOT_FIRST - RD_TARGET_COUNT);
         return 0;
     }
     RdTargetRec *t = &g_rd.targets[pick];
@@ -1398,6 +1455,7 @@ static uint32_t texAlloc(void)
 /* The whole texture changed (a create, rd_update_texture) */
 static void texDirtyAll(RdTexRec *t)
 {
+    rd__hold_tex_changed(); /* the paused scene's hold (rd_hold.h) */
     if (!t->dirty) {
         g_rd.texDirtyCount++;
     }
@@ -1611,6 +1669,7 @@ void rd_update_texture_rect(RdTex tex, uint32_t x, uint32_t y, uint32_t w, uint3
         return; /* nothing changed: nothing to upload */
     }
     g_rd.texRectUpdates++;
+    rd__hold_tex_changed();
     if (!t->dirty) {
         g_rd.texDirtyCount++;
         t->dirty = 1;
@@ -1645,6 +1704,7 @@ void rd_destroy_texture(RdTex tex)
     if (t->dirty && g_rd.texDirtyCount) {
         g_rd.texDirtyCount--;
     }
+    rd__hold_tex_changed();
     free(t->pixels);
     free(t->gsChain);
     rd__free_pending(t); /* a replacement destroyed before its upload */
@@ -1791,7 +1851,16 @@ bool rd_init(uint32_t gsWidth, uint32_t gsHeight, const RdSettings *settings, vo
     if (!g_rd.textures || !g_rd.meshes) {
         return false;
     }
-    if (!rd__gpu_init(sdlWindow)) {
+    if (sdlWindow) {
+        /* the window's start and switch: written out at once (stderr is
+         * fully buffered on Windows), so a hang in the driver's start or in
+         * a shader compile leaves the step in the log */
+        rd__log("starting the device and making its shaders (the backend's lines follow)");
+        fflush(stderr);
+    }
+    const bool gpuUp = rd__gpu_init(sdlWindow);
+    rhi_plan_end(); /* its shaders made: the progress screens' set (rd_shader_plan.c) */
+    if (!gpuUp) {
         rd__gpu_shutdown();
         free(g_rd.textures);
         free(g_rd.meshes);
@@ -1799,11 +1868,19 @@ bool rd_init(uint32_t gsWidth, uint32_t gsHeight, const RdSettings *settings, vo
         return false;
     }
     g_rd.hasDevice = true;
+    /* the display times' join emptied: the new device's present ids start
+       at 1 again (vk_glass.c vkr_glass_device_made), so the old run's last
+       shown picture would block every pair (rd_glass.h; rd_init runs with
+       no replay in flight) */
+    rd_glass_reset();
+    rd__made_outside_init(); /* the RHI's create hook (named in play once the window says) */
     g_rd.windowed = sdlWindow != NULL; /* the game: the desktop's local reads (rd_profile.c) */
     rd__profile_init();                /* the device profile (rd_profile.c) */
     rd__aura_box_init();               /* the aura's read in two passes (rd_aura_box.c) */
     rd__pass_area_init();              /* the passes' render areas (rd_pass_area.c) */
     rd__pass_cut_init();               /* the passes cut (rd_pass_cut.c) */
+    rd__present_scene_init();          /* no owed DISPLAY of another context */
+    rd__vis_init();                    /* the scene draws' visibility test (rd_vis.c) */
     rd__shadow_merge_init();           /* the volumes in the scene's pass (rd_shadow_merge.c) */
     rd__sprite_planes_init();          /* issue 161: the planes builds off (rd_screen_planes.c) */
     /* the two-pass blend without dual-source blending (a
@@ -1813,8 +1890,9 @@ bool rd_init(uint32_t gsWidth, uint32_t gsHeight, const RdSettings *settings, vo
     if (g_rd.noDual) {
         rd__log("blend: two-pass fallback (no dualSrcBlend)");
     }
-    /* the menu text's texels baked on the CPU at strip scales 1 and 2
-     * (rd_tex.c rd__sheet_baked; issue 173 at 1x, the phone's menus at 2x);
+    /* the menu text's texels baked on the CPU at strip scale 1 (issue 173)
+     * and, on the tile-based classes, 2 (the phone's menus; rd_tex.c
+     * rd__sheet_baked, the profile's sheetBake2x, issue 126);
      * ICO_RD_SHEET_SHADER=1 ([dev] sheet_shader) draws them through
      * font_sheet_ps, as scales 3 and 4 are drawn (the A/B) */
     {
@@ -1824,9 +1902,11 @@ bool rd_init(uint32_t gsWidth, uint32_t gsHeight, const RdSettings *settings, vo
             rd__log("text: menu text through the sheet shader at every scale ([dev] sheet_shader "
                     "= true, ICO_RD_SHEET_SHADER=1)");
         } else {
-            rd__log("text: menu text baked on the CPU at 1x and 2x (RGBA8 pages, four reads a "
-                    "pixel; the sheet shader at 3x and 4x; [dev] sheet_shader = true draws every "
-                    "scale through it)");
+            rd__log("text: %s (RGBA8 pages, four reads a pixel; the sheet shader %s; [dev] "
+                    "sheet_shader = true draws every scale through it)",
+                    g_rd.profile.sheetBake2x ? "menu text baked at 1x and 2x"
+                                             : "menu text baked at 1x; 2x through the sheet shader",
+                    g_rd.profile.sheetBake2x ? "at 3x and 4x" : "at 2x, 3x and 4x");
         }
     }
     /* the VU draws' index values carry nothing but the kick and corner, the
@@ -1860,10 +1940,18 @@ bool rd_init(uint32_t gsWidth, uint32_t gsHeight, const RdSettings *settings, vo
     rd__dst_init();
     /* the fog's depth path (RdContext.fogPath, depthCopy) */
     rd__fog_path_init();
-    rd__apply_display(); /* the scales the named targets take */
-    if (g_rd.settings.waterSharp) {
-        rd__log("water reflections: sharp (the scene's scale)");
+    /* the render-to-texture blocks' scale (rd__target_scale_of): the
+     * scene's, or their GS size under the tests' ICO_RD_WATER_SCALE=0 */
+    {
+        const char *ws = getenv("ICO_RD_WATER_SCALE");
+        g_rd.waterPs2 = ws != NULL && strcmp(ws, "0") == 0;
+        rd__log("water reflections: %s",
+                g_rd.waterPs2 ? "the blocks at their GS size, the PS2's (ICO_RD_WATER_SCALE=0, "
+                                "the tests' switch)"
+                              : "the blocks at the scene's scale (at 1x their GS size)");
     }
+    rd__shadow_fine_log(); /* the shadow's levels (rd_shadowres.c) */
+    rd__apply_display();   /* the scales the named targets take */
     if (g_rd.settings.motionBlurSmooth) {
         logMotionBlur(""); /* made at its first sprite (rd_blur_smooth.c) */
     }
@@ -1873,7 +1961,8 @@ bool rd_init(uint32_t gsWidth, uint32_t gsHeight, const RdSettings *settings, vo
     if (g_rd.settings.glowSmooth) {
         logGlowBetween("");
     }
-    rd__crack_fill_init(); /* its line once SCENE is made */
+    rd__tone_log(NULL, &g_rd.settings); /* the colour adjustment, when on */
+    rd__crack_fill_init();              /* its line once SCENE is made */
     createNamedTargets();
     readDumpConfig();
     rdtex__decode_init(g_rd.windowed); /* the texture decode pool (rd_tex_decode.h) */
@@ -1896,6 +1985,7 @@ void rd_shutdown(void)
     for (int i = 0; i < RD_FRAME_RING; i++) {
         rd__frame_free(&g_rd.frames[i]);
     }
+    rd__loss_keep_shutdown();
     rd__interp_shutdown();
     for (int i = 0; i < RD_MAX_TARGETS; i++) {
         if (g_rd.targets[i].live || g_rd.targets[i].parked) {
@@ -1916,11 +2006,16 @@ void rd_shutdown(void)
             rd__free_pending(t);
         }
     }
+    rd__made_outside_shutdown(); /* the run's line of what play made outside the key cache */
     if (g_rd.hasDevice) {
         rd_video_shutdown(); /* the FMV path's objects (rd_video.c), before the device */
         rd__present_shutdown();
-        rd__crack_fill_shutdown(); /* the crack filler's count target and buffer */
-        rd__aura_box_shutdown();   /* the aura's ROWBOX (rd_aura_box.c) */
+        rd__crack_fill_shutdown();  /* the crack filler's count target and buffer */
+        rd__aura_box_shutdown();    /* the aura's ROWBOX (rd_aura_box.c) */
+        rd__lamps_shutdown();       /* LOWRES's copy of SCENE's depth (rd_lamps.c) */
+        rd__hold_shutdown();        /* the paused scene's copy and readbacks (rd_hold.c) */
+        rd__shadow_tile_shutdown(); /* the shadow tiles' masks (rd_shadow_tile.c) */
+        rd__vu_skin_shutdown();     /* the skin check's probes (rd_vu_skin_check.c) */
         rd__gpu_shutdown();
     }
     rd__pipeline_cache_clear();
@@ -2111,11 +2206,13 @@ uint32_t rd_aa_supported_mask(void)
         if (!g_rd.fs[RD_FS_MSAA_RESOLVE].id || !g_rd.fs[RD_FS_DEPTH_RESOLVE].id) {
             return mask;
         }
+        const bool max4 = rd__device_value(RHI_DC_MSAA_MAX4) != 0;
         for (int aa = RD_AA_MSAA2; aa <= RD_AA_MSAA8; aa++) {
             const uint32_t n = rd_aa_samples(aa);
 
-            /* a tile-based GPU: 4 samples at most (memory) */
-            if ((l->msaaCounts & n) != 0u && !(l->tiler && n > 4u)) {
+            /* a tile-based GPU: 4 samples at most (memory; the device
+               table's MSAA_MAX4, the row tiler) */
+            if ((l->msaaCounts & n) != 0u && !(max4 && n > 4u)) {
                 mask |= 1u << aa;
             }
         }
@@ -2127,7 +2224,8 @@ int rd__aa_requested(void)
 {
     const int aa = g_rd.settings.antiAlias;
 
-    if (aa <= RD_AA_OFF || aa >= RD_AA_COUNT || g_rd.settings.preset == RD_PRESET_ORIGINAL) {
+    if (aa <= RD_AA_OFF || aa >= RD_AA_COUNT || g_rd.settings.preset == RD_PRESET_ORIGINAL ||
+        rd_aa_off_for_temporal()) {
         return RD_AA_OFF;
     }
     return (rd_aa_supported_mask() & (1u << aa)) != 0u ? aa : RD_AA_OFF;
@@ -2137,7 +2235,15 @@ int rd__aa_mode(void)
 {
     const int aa = rd__aa_requested();
 
+    if (rd__upscale_wanted()) {
+        return RD_AA_OFF; /* the temporal upscaler is the anti-aliasing (rd_upscale.h) */
+    }
     return g_rd.msaaBlocked && rd_aa_samples(aa) > 1u ? RD_AA_OFF : aa;
+}
+
+bool rd_aa_off_for_temporal(void)
+{
+    return rd__upscale_temporal_on(&g_rd.settings, rd__crt_on());
 }
 
 bool rd_aa_msaa_blocked(void)
@@ -2169,6 +2275,11 @@ int rd_scene_scale_lowered(void)
        fallback brought it down; in the Resolution row's terms (the
        supersampling factor divided out) */
     const float m = g_rd.ssaa > 1.0f ? g_rd.ssaa : 1.0f;
+    if (rd__upscale_point_on()) {
+        /* a temporal upscaler draws the scene below the row's scale by
+         * design (rd_upscale.h): lowered only by the allocation fallback */
+        return !g_rd.sceneFellBack ? 0 : (g_rd.sceneSy < 1.0f ? 1 : (int)g_rd.sceneSy);
+    }
     if (g_rd.settings.sceneScale <= 0.0f || g_rd.sceneSy + 0.5f >= g_rd.settings.sceneScale * m) {
         return 0;
     }
@@ -2291,8 +2402,15 @@ static void logDerived(void)
             dropped                     ? "dropped (vu_np_ps)"
             : g_rd.profile.vuPlanesFrac ? "kept"
                                         : "kept (every scale)",
-            rd__vu_extended() ? "extended" : "the PS2's", (unsigned)g_rd.filterUpgrade,
-            g_rd.vuPrepass ? "on" : "off", (unsigned)g_rd.fogPath, rd__profile_text());
+            rd__region_camera() ? (rd__vu_extended() ? "the camera's (extended)" : "the camera's")
+            : rd__vu_extended() ? "extended"
+                                : "the PS2's",
+            (unsigned)g_rd.filterUpgrade,
+            !g_rd.vuPrepass            ? "off"
+            : rd__vu_record_compute()  ? "on (record compute)"
+            : rd__vu_record_buffered() ? "on (record stores)"
+                                       : "on (record targets)",
+            (unsigned)g_rd.fogPath, rd__profile_text());
 }
 
 typedef struct ReplayCall {
@@ -2300,15 +2418,31 @@ typedef struct ReplayCall {
     int keep;
 } ReplayCall;
 
+/* Frame rate Original's picture replayed and presented inside the game's
+ * step, the game thread waiting (rd_end_frame: no render thread, parked,
+ * sync, a picture that waits, the escape, no gate) */
 static void replayOnHost(void *arg)
 {
     const ReplayCall *c = (const ReplayCall *)arg;
-    if (s_replayGate != NULL && !s_replayGate(c->keep)) {
-        return; /* the window's late skip: the last picture stays */
-    }
-    rd__note_frame_present(c->f); /* rd_last_present_info, as rd_present notes its own */
-    rd__blur_smooth_arm(1, 1);    /* Motion blur: Smooth at one present a tick */
+    rd__thread_in_step(true);            /* its record's present: "inside the game step" */
+    rd__blur_smooth_arm(1, 1, 0.0, 0.0); /* Motion blur: Smooth at one present a tick */
     rd__replay_frame(c->f, c->keep, true);
+    rd__thread_in_step(false);
+}
+
+/* the hand-over on the host's stack (the overlay's layers are collected in
+ * it: the UI's callbacks, not on the game's fiber stack) */
+typedef struct PostCall {
+    const RdFrame *f;
+    int keep;
+    bool ok;
+    double waitMs;
+} PostCall;
+
+static void postOnHost(void *arg)
+{
+    PostCall *c = (PostCall *)arg;
+    c->ok = rd__replay_frame_post(c->f, c->keep, &c->waitMs);
 }
 
 void rd_begin_frame(void)
@@ -2336,12 +2470,12 @@ void rd_begin_frame(void)
         /* the model pack's switch and its dump, on a change */
         const bool modelsChanged = g_rd.settings.modelPack != g_rd.pendingSettings.modelPack;
         const bool dumpChanged = g_rd.settings.dumpModels != g_rd.pendingSettings.dumpModels;
-        const bool waterChanged = g_rd.settings.waterSharp != g_rd.pendingSettings.waterSharp;
         const bool blurChanged =
             g_rd.settings.motionBlurSmooth != g_rd.pendingSettings.motionBlurSmooth;
         const bool glowChanged = g_rd.settings.glowSmooth != g_rd.pendingSettings.glowSmooth;
         const uint32_t strengthWas = rd__blur_strength_pct();
         const bool presetChanged = g_rd.settings.preset != g_rd.pendingSettings.preset;
+        rd__tone_log(&g_rd.settings, &g_rd.pendingSettings); /* from the next present */
         g_rd.settings = g_rd.pendingSettings;
         g_rd.settingsPending = false;
         if (packOff) {
@@ -2352,11 +2486,6 @@ void rd_begin_frame(void)
         }
         if (dumpChanged) {
             modelpack_set_dump_enabled(g_rd.settings.dumpModels != 0);
-        }
-        if (waterChanged) {
-            /* the blocks made from this frame on (rd__target_scale_of) */
-            rd__log("water reflections: %s", g_rd.settings.waterSharp ? "sharp (the scene's scale)"
-                                                                      : "original (their GS size)");
         }
         if (glowChanged) {
             logGlowBetween(", from the next present");
@@ -2421,6 +2550,7 @@ void rd_begin_frame(void)
      * the one before it */
     int idx = g_rd.lastIndex < 0 ? 0 : (g_rd.lastIndex + 1) % RD_FRAME_RING;
     RdFrame *f = &g_rd.frames[idx];
+    rd__loss_keep_recycle(f); /* a frame the GPU may not have finished, copied (rd_dump.c) */
     rd__frame_reset(f);
     f->number = ++g_rd.frameCounter;
     rd__vu_mesh_sweep_stale(); /* retired meshes no kept frame drew */
@@ -2496,6 +2626,148 @@ static void closeNote(double ms)
     s_close.maxMs = ms > s_close.maxMs ? ms : s_close.maxMs;
 }
 
+/* rd_frame_post_take's sums and rd_frame_post_last_take's record (the game
+ * thread's) */
+static RdFramePost s_post;
+static RdFramePostLast s_postLast;
+static bool s_postLastHave;
+
+void rd_frame_post_take(RdFramePost *out)
+{
+    *out = s_post;
+    memset(&s_post, 0, sizeof(s_post));
+}
+
+bool rd_frame_post_last_take(RdFramePostLast *out)
+{
+    const bool have = s_postLastHave;
+    *out = s_postLast;
+    s_postLastHave = false;
+    return have;
+}
+
+void rd_frame_post_text(const RdFramePost *p, char *out, size_t cap)
+{
+    if (cap == 0) {
+        return;
+    }
+    out[0] = '\0';
+    if (p->posts == 0 && p->inlines == 0 && p->busySkips == 0) {
+        return;
+    }
+    snprintf(out, cap,
+             "; its picture handed over in %.1f ms (longest %.1f ms; %u waited for the picture "
+             "before, %.1f ms in all; %u skipped: render thread busy (%u on the picture before, %u "
+             "at its wait for the picture two before's GPU work, %u for the submit thread's "
+             "present)); presents waited inside the step: %u (%.1f ms)",
+             p->posts ? p->postMs / p->posts : 0.0, p->postMaxMs, p->postWaits, p->postWaitMs,
+             p->busySkips, p->busyBy[RD_BUSY_RENDER], p->busyBy[RD_BUSY_SLOT],
+             p->busyBy[RD_BUSY_SUBMIT], p->inlines, p->inlineMs);
+}
+
+void rd_frame_post_last_text(const RdFramePostLast *p, char *out, size_t cap)
+{
+    if (cap == 0) {
+        return;
+    }
+    out[0] = '\0';
+    switch (p->how) {
+    case RD_POST_HANDED:
+        snprintf(out, cap, ", the picture handed over %.1f ms (%.1f ms waiting for the one before)",
+                 p->ms, p->waitMs);
+        break;
+    case RD_POST_INLINE:
+        snprintf(out, cap, ", the picture replayed inside the step %.1f ms", p->ms);
+        break;
+    case RD_POST_SKIP_BUSY:
+        snprintf(out, cap, ", the picture not presented (the render thread busy)");
+        break;
+    case RD_POST_SKIP_LATE:
+        snprintf(out, cap, ", the picture not presented (the step late)");
+        break;
+    default:
+        break;
+    }
+}
+
+/* waited: a picture handed over that found the render thread busy (a keep
+ * frame the gate presents: it waited for the picture before, waitMs) */
+static void postNote(uint32_t frame, int how, double ms, double waitMs, bool waited, int busyBy)
+{
+    s_postLast = (RdFramePostLast){frame, how, ms, waitMs};
+    s_postLastHave = true;
+    switch (how) {
+    case RD_POST_HANDED:
+        s_post.posts++;
+        s_post.postMs += ms;
+        s_post.postMaxMs = ms > s_post.postMaxMs ? ms : s_post.postMaxMs;
+        if (waited) {
+            s_post.postWaits++;
+            s_post.postWaitMs += waitMs;
+        }
+        break;
+    case RD_POST_INLINE:
+        s_post.inlines++;
+        s_post.inlineMs += ms;
+        break;
+    case RD_POST_SKIP_BUSY:
+        s_post.busySkips++;
+        if (busyBy > RD_BUSY_NONE && busyBy < RD_BUSY_REASONS) {
+            s_post.busyBy[busyBy]++;
+        }
+        break;
+    default:
+        s_post.lateSkips++;
+        break;
+    }
+}
+
+/* Frame rate Original: frame f's one picture, on the game thread
+ * (rd_set_replay_gate).  The gate first, with the render thread's busy
+ * state (the rule: a frame whose picture would wait for the picture before,
+ * its walk or its present, is left out, the last picture staying, unless it
+ * is a keep frame); then the hand-over, the step going on at once; where
+ * there is none, the replay inside the step as before. */
+static void originalPicture(const RdFrame *f)
+{
+    const double t0 = rd__now_ms();
+    /* what is busy (rd.h RD_BUSY_*): the 10 s line's skips by cause */
+    const int busyBy = s_replayGate != NULL ? rd__thread_picture_busy() : RD_BUSY_NONE;
+    const bool busy = busyBy != RD_BUSY_NONE;
+    const int gate = s_replayGate != NULL ? s_replayGate(f->keep, busy) : RD_GATE_PRESENT;
+    if (gate != RD_GATE_PRESENT) {
+        /* the window's skip: the last picture stays */
+        postNote(f->number, gate == RD_GATE_BUSY ? RD_POST_SKIP_BUSY : RD_POST_SKIP_LATE, 0.0, 0.0,
+                 false, busyBy);
+        return;
+    }
+    /* rd_last_present_info, as rd_present notes its own: the hand-over
+       notes it after its wait for the picture before (a keep frame told
+       busy), so that picture's screenshot check still reads its own frame */
+    if (s_replayGate != NULL && rd__replay_frame_post_ok()) {
+        PostCall c = {f, f->keep, false, 0.0};
+        onHostStack(postOnHost, &c);
+        if (c.ok) {
+            postNote(f->number, RD_POST_HANDED, rd__now_ms() - t0, c.waitMs, busy, RD_BUSY_NONE);
+            return;
+        }
+    }
+    rd__note_frame_present(f); /* again where a refused hand-over noted it: the same words */
+    ReplayCall c = {f, f->keep};
+    rd__on_host(replayOnHost, &c); /* on the render thread, waited for; or here */
+    if (s_replayGate != NULL) {
+        postNote(f->number, RD_POST_INLINE, rd__now_ms() - t0, 0.0, false, RD_BUSY_NONE);
+    }
+}
+
+/* rd_set_paused_source's: the game's pause, read as each frame closes */
+static int (*s_pausedFn)(void);
+
+void rd_set_paused_source(int (*fn)(void))
+{
+    s_pausedFn = fn;
+}
+
 void rd_end_frame(int keep)
 {
     rd__texlock_wait();
@@ -2509,6 +2781,7 @@ void rd_end_frame(int keep)
         return;
     }
     f->keep = keep ? 1 : 0;
+    f->paused = s_pausedFn && s_pausedFn() ? 1u : 0u; /* the paused scene's hold (rd_hold.h) */
     if (f->cut) {
         /* a plain cut, the camera's or the frame's, wins over a wall's */
         f->camera.cut = f->cut == RD_CAMERA_CUT_WALL && f->camera.cut != 1 ? RD_CAMERA_CUT_WALL : 1;
@@ -2526,10 +2799,12 @@ void rd_end_frame(int keep)
     g_rd.videoShown = 0;
     closeNote(rd__now_ms() - closeAt);
     /* with interpolation on (either preset) the host presents (rd_present);
-     * with it off the frame is replayed and presented once here */
+     * with it off the frame is replayed and presented once from here */
+    if (!rd_interpolation_active()) {
+        rd__velocity_attach(f, f->keep); /* VuPrevCB: the tick before's (rd_velocity.h) */
+    }
     if (g_rd.hasDevice && !rd_interpolation_active()) {
-        ReplayCall c = {f, f->keep};
-        rd__on_host(replayOnHost, &c);
+        originalPicture(f);
     }
     if (s_dumpEvery && f->number % s_dumpEvery == 0 && f->number >= s_dumpFrom) {
         if (!rd__render_call(dumpEvery, f)) {
@@ -2545,7 +2820,13 @@ void rd_discard_frame(void)
         return;
     }
     /* the state the dropped lists would have left is not applied: nothing
-     * of them reached the GS */
+     * of them reached the GS.  Its camera cut is the next frame's (as
+     * rd_camera_cut between frames): the camera moved all the same, so the
+     * next picture snaps and the temporal upscaler drops its history (a
+     * plain cut wins over the wall's) */
+    if (f->cut && g_rd.cutPending != 1) {
+        g_rd.cutPending = f->cut;
+    }
     rd__frame_reset(f);
     g_rd.recIndex = -1;
     g_rd.discardOpen = false;
@@ -2595,6 +2876,7 @@ void rd_free_camera(void)
 
 void rd_note_cull_drop(const char *model, int part, int rule, int views, int oneWhy)
 {
+    rd__ledger_box(model, part, rule, views);
     RdFrame *f = rd__rec_frame();
     if (!f) {
         return;
@@ -2931,8 +3213,15 @@ void rd_screen_prims(RdPrim type, const RdScreenVtx *v, uint32_t count, RdSpace 
     if (!v || count == 0 || (unsigned)type > RD_PRIM_SPRITES) {
         return;
     }
-    if ((g_rd.spaceOverride > 0 ? g_rd.spaceOverride - 1 : (int)space) == RD_SPACE_WORLD &&
-        !rd__draw_filter_pass(key)) {
+    if ((g_rd.spaceOverride > 0 ? g_rd.spaceOverride - 1 : (int)space) == RD_SPACE_WORLD
+            ? !rd__draw_filter_pass(key)
+            : rd_icon_pass_on()) {
+        /* a world draw the filter leaves out; UI and full-screen in the icon pass */
+        if (rd_icon_pass_on()) {
+            rd__icon_pass_drop(RD_ICON_DROP_PRIMS);
+        } else {
+            rd__ledger_unnamed_out("(screen prims)", RD_LEDGER_FILTER);
+        }
         return;
     }
     RdFrame *f = rd__rec_frame();
@@ -2964,6 +3253,10 @@ void rd_screen_prims(RdPrim type, const RdScreenVtx *v, uint32_t count, RdSpace 
 
 void rd_deferred_text(const RdTextItem *item, RdKey key)
 {
+    if (rd_icon_pass_on()) {
+        rd__icon_pass_drop(RD_ICON_DROP_TEXT);
+        return; /* the menus' text: not in the title's icon pass (rd.h rd_set_icon_pass) */
+    }
     RdFrame *f = rd__rec_frame();
     if (!item || !f) {
         if (item) {
@@ -3016,6 +3309,8 @@ static RdCmd *pushStub(uint8_t type, RdKey key, const void *const *parts, const 
                        int n)
 {
     if (!rd__draw_filter_pass(key)) {
+        rd__ledger_unnamed_out(type == RDC_SHADOW_STRIP ? "(a shadow volume)" : "(world prims)",
+                               RD_LEDGER_FILTER);
         return NULL; /* rd_world_prims, rd_shadow_strip: world draws */
     }
     RdFrame *f = rd__rec_frame();

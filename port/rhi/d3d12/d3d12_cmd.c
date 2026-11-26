@@ -248,11 +248,24 @@ uint32_t rhi_read_timestamps_busy(uint64_t *ns, uint32_t max)
     return 0;
 }
 
+/* no slot clock here (rhi.h rhi_read_timestamp_clock: Vulkan's) */
+bool rhi_read_timestamp_clock(RhiTimestampClock *out)
+{
+    memset(out, 0, sizeof(*out));
+    return false;
+}
+
 /* ------------------------------------------------------- occlusion queries
  * Not supported here (rhi.h rhi_cmd_begin_occlusion: the replay tool's
  * measurement is Vulkan's); an occlusion query heap (D3D12_QUERY_HEAP_TYPE_OCCLUSION, BeginQuery/EndQuery of D3D12_QUERY_TYPE_OCCLUSION) resolved into the slot's readback buffer as the timestamps are would be the form. */
 bool rhi_occlusion_supported(void)
 {
+    return false;
+}
+
+bool rhi_occlusion_prepare(uint32_t count)
+{
+    (void)count;
     return false;
 }
 
@@ -364,6 +377,11 @@ uint32_t rhi_frame_slot(void)
     return (uint32_t)(g_dx.frameIndex % RHI_FRAMES_IN_FLIGHT);
 }
 
+bool rhi_commands_left(void)
+{
+    return true; /* no list limit a slot on this backend */
+}
+
 void rhi_wait_idle(void)
 {
     g_dx.counts.waitIdles++;
@@ -424,6 +442,7 @@ RhiCommandList rhi_begin_commands(void)
     }
     dx_bind_heaps(c->cl);
     c->recording = true;
+    c->externalOpen = false;
     /* the bind cache starts empty (Reset cleared the list's state; the
      * slot's recycle zeroed the cache too) */
     c->pipeline = NULL;
@@ -928,6 +947,70 @@ void rhi_cmd_set_blend_state(RhiCommandList cl, const RhiBlendState *blend)
     (void)blend;
 }
 
+/* ------------------------------------------------- external compute
+ * rhi_native.h: the caller records compute work (FidelityFX) straight into
+ * the native command list between rhi_cmd_external_begin and _end.  D3D12
+ * needs no barrier from us (the texture barriers are in the list already and
+ * the caller's work follows them; the external code leaves each resource in
+ * the state it was given).  What the work disturbs is the list's bound
+ * state: it sets its own descriptor heaps, a compute pipeline state in the
+ * one PSO slot and its own compute root signature.  begin and end both
+ * forget the cached root signature, topology, root arguments, vertex buffer
+ * views, viewport, scissor and index buffer (d3dp_external_rebind); end sets
+ * the two descriptor heaps and the pipeline state again. */
+static void dx_forget_bindings(DxCmdList *c)
+{
+    const uint32_t m = d3dp_external_rebind(c->pipeline != NULL);
+    if (m & D3DP_REBIND_ROOT) {
+        c->rootSet = NULL;
+        c->groupDirty = 0xFFu;
+    }
+    if (m & D3DP_REBIND_TOPOLOGY) {
+        c->topoSet = D3D_PRIMITIVE_TOPOLOGY_UNDEFINED;
+    }
+    if (m & D3DP_REBIND_VIEWS) {
+        c->vbDirty = 0xFFFFFFFFu;
+        c->known = 0;
+    }
+}
+
+bool rhi_cmd_external_begin(RhiCommandList cl)
+{
+    DxCmdList *c = dx_get_cmd(cl);
+    if (!c || !c->recording || !g_dx.compute.ok) {
+        return false;
+    }
+    if (c->inPass || c->externalOpen) {
+        static uint32_t s_refused;
+        if (s_refused++ < 8u) {
+            DX_LOG("rhi_cmd_external_begin: %s: refused (%u)",
+                   c->inPass ? "inside a render pass" : "already open", s_refused);
+        }
+        return false;
+    }
+    dx_forget_bindings(c);
+    c->externalOpen = true;
+    return true;
+}
+
+void rhi_cmd_external_end(RhiCommandList cl)
+{
+    DxCmdList *c = dx_get_cmd(cl);
+    if (!c || !c->recording || !c->externalOpen) {
+        return;
+    }
+    c->externalOpen = false;
+    dx_forget_bindings(c);
+    const uint32_t m = d3dp_external_rebind(c->pipeline != NULL);
+    if (m & D3DP_REBIND_HEAPS) {
+        dx_bind_heaps(c->cl);
+    }
+    if ((m & D3DP_REBIND_PSO) && c->pipeline) {
+        ID3D12GraphicsCommandList_SetPipelineState(c->cl, c->pipeline->pso);
+        g_dx.counts.pipelineBinds++;
+    }
+}
+
 void rhi_cmd_local_read_barrier(RhiCommandList cl, uint32_t mask)
 {
     (void)cl;
@@ -1301,4 +1384,51 @@ bool rhi_readback_texture(RhiTexture h, RhiViewAspect aspect, void *dst, size_t 
     dx_drain_messages();
     rhi_destroy_buffer(rb);
     return ok;
+}
+
+/* rhi.h rhi_cmd_buffer_store_begin / _end: no vertex stores on D3D12 this release (RhiLimits.vertexStores false), so
+ * nothing is bracketed: the renderer draws the VU record into render targets */
+bool rhi_cmd_buffer_store_begin(RhiCommandList cl, RhiBuffer buf)
+{
+    (void)cl;
+    (void)buf;
+    return false;
+}
+
+bool rhi_cmd_buffer_store_end(RhiCommandList cl, RhiBuffer buf)
+{
+    (void)cl;
+    (void)buf;
+    return false;
+}
+
+/* rhi.h rhi_cmd_buffer_compute_begin / _end, rhi_cmd_dispatch: no compute
+ * stores on Direct3D 12 this release (RhiLimits.computeStores false; compute pipelines and UAV barriers are later work), so
+ * the renderer never dispatches here: the bracket refuses and a dispatch
+ * is a no-op, said once */
+bool rhi_cmd_buffer_compute_begin(RhiCommandList cl, RhiBuffer buf)
+{
+    (void)cl;
+    (void)buf;
+    return false;
+}
+
+bool rhi_cmd_buffer_compute_end(RhiCommandList cl, RhiBuffer buf)
+{
+    (void)cl;
+    (void)buf;
+    return false;
+}
+
+void rhi_cmd_dispatch(RhiCommandList cl, uint32_t gx, uint32_t gy, uint32_t gz)
+{
+    static bool s_said;
+    (void)cl;
+    if (!s_said) {
+        s_said = true;
+        DX_LOG(
+            "rhi_cmd_dispatch: no compute dispatches on Direct3D 12 in this release (%u x %u x %u "
+            "groups not recorded)",
+            gx, gy, gz);
+    }
 }

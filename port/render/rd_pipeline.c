@@ -75,10 +75,34 @@
  */
 #include <stdlib.h>
 #include <string.h>
+#include "attempt_ledger.h" /* the camera rule on the plain set's row */
+#include "rd_lamps.h"
+#include "rd_glow_blur.h"
 #include "rd_cache_name.h"
+#include "rd_fill11.h"
+#include "rd_made_outside.h"
+#include "rd_hash.h"
+#include "rd_cpu_phase.h"
+#include "attempt_ledger.h" /* ICO_ATT_SET_SIZE */
+#include "rd_device_rows.h" /* rd_device_rows_reason */
+#include "rd_list_draws.h"
 #include "rd_internal.h"
+#include "rd_vu_zero.h"   /* rd__pipeline_drop_vs */
+#include "rd_fastps.h"    /* the fast pixel build's modules and pipelines */
+#include "rd_nodiscard.h" /* the discard-free twins' modules and pipelines */
+#include "rd_onepass.h"   /* the one-pass blend's blend state and pipelines */
 #include "rd_passring.h"
+#include "rd_paste_spec.h"
+#include "rd_comp_spec.h"
 #include "rd_pipe_finish.h"
+#include "rd_plain_camera.h"
+#include "rd_present_scene.h"
+#include "rd_shadow_tile.h"
+#include "rd_volume_fs.h"
+#include "rd_vu_record.h"
+#include "rd_vu_rec_sink.h"
+#include "rd_vu_rec_early.h" /* rd_set_size_need */
+#include "rd_vu_skin_check.h"
 #include "shader_consts.h"
 #include "shaders_gen.h"
 
@@ -508,9 +532,10 @@ RdPipeKeyInt rd__post_key(RdVsId vs, RdFsId fs, RhiFormat colorFmt)
     return k;
 }
 
-RdPipeKeyInt rd__present_depth_key(RhiFormat colorFmt)
+RdPipeKeyInt rd__present_depth_key(RhiFormat colorFmt, bool tone)
 {
-    RdPipeKeyInt k = rd__post_key(RD_VS_BLIT, RD_FS_BLIT_DEPTH, colorFmt);
+    RdPipeKeyInt k =
+        rd__post_key(RD_VS_BLIT, tone ? RD_FS_BLIT_DEPTH_TONE : RD_FS_BLIT_DEPTH, colorFmt);
     k.depthFmt = RHI_FMT_D32F;
     k.gs.ztst = RD_ZTST_ALWAYS;
     k.gs.zwrite = RD_ZWRITE_ON;
@@ -621,6 +646,12 @@ static RhiBlendState blendState(RdBlendPath bp, uint8_t mask, uint8_t nodual)
     b.alphaOp = RHI_BO_ADD;
     b.colorOp = RHI_BO_ADD;
     b.enable = bp != RD_BP_NONE;
+    if (bp == RD_BP_LERP && (nodual & RD_NODUAL_ONEPASS) && (mask & 8u)) {
+        /* the one-pass blend's colour pass (rd_onepass.h): c0.a is the
+         * factor As/128, stored as (As/128) * the constant's alpha 128/255
+         * (rd__op_bind sets the constant at bind) */
+        b.srcAlpha = RHI_BF_CONSTANT;
+    }
     switch (bp) {
     case RD_BP_LERP:
         /* no dual-source blending: the colour pass's c0.a is the factor */
@@ -735,6 +766,33 @@ static void shadowStencil(uint8_t mode, RhiDepthStencilState *ds)
         ds->stencilReadMask = RD_DATE_STENCIL_BIT;
         ds->stencilWriteMask = f.pass == RHI_SO_KEEP ? 0 : RD_DATE_STENCIL_BIT;
         break;
+    /* the shadow tiles (rd_shadow_tile.c; rd.h RD_STENCIL_DATE_CLEAR2 on):
+     * bit 7 marks a dead tile of a composite's area */
+    case RD_STENCIL_DATE_CLEAR2:
+        f.pass = RHI_SO_REPLACE; /* the reference 0 */
+        ds->stencilReadMask = 0;
+        ds->stencilWriteMask = RD_DATE_STENCIL_BIT | RD_TILE_STENCIL_BIT;
+        break;
+    case RD_STENCIL_TILE_MARK:
+        f.pass = RHI_SO_REPLACE; /* the reference RD_TILE_STENCIL_BIT */
+        ds->stencilReadMask = 0;
+        ds->stencilWriteMask = RD_TILE_STENCIL_BIT;
+        break;
+    case RD_STENCIL_DATE_SET_T:
+        f.compare = RHI_CMP_EQUAL; /* (0x40 & 0x80) == (s & 0x80): bit 7 is 0 */
+        f.pass = RHI_SO_REPLACE;
+        ds->stencilReadMask = RD_TILE_STENCIL_BIT;
+        ds->stencilWriteMask = RD_DATE_STENCIL_BIT;
+        break;
+    case RD_STENCIL_DATE_TEST0_T:
+    case RD_STENCIL_DATE_TEST1_T:
+        /* under 0xC0 against the reference 0x40: GREATER (0x40 > s) holds
+         * for s = 0 alone (bit 6 and bit 7 both 0), EQUAL for s = 0x40
+         * alone (bit 6 1, bit 7 0) */
+        f.compare = mode == RD_STENCIL_DATE_TEST1_T ? RHI_CMP_EQUAL : RHI_CMP_GREATER;
+        ds->stencilReadMask = RD_DATE_STENCIL_BIT | RD_TILE_STENCIL_BIT;
+        ds->stencilWriteMask = 0;
+        break;
     default:
         f.compare = RHI_CMP_EQUAL;
         ds->stencilReadMask = (uint8_t)(1u << ((mode - RD_STENCIL_RESOLVE_BIT0) & 7));
@@ -749,6 +807,17 @@ static void shadowStencil(uint8_t mode, RhiDepthStencilState *ds)
 /* k's description into *d; layouts (4 entries) holds the bind group
  * layouts d points at.  false: the key's destination read has no shader or
  * layout here (it is not created) */
+
+/* a record stage's key drawn through its batch build: the pre-pass's
+   batches on and the stage's batch build made (the zero-area cull's rule
+   stage has its batch build in the record's own set alone, rd_vu_zero.h,
+   so the batches decide) */
+static bool keyBatched(const RdPipeKeyInt *k)
+{
+    return g_rd.vuPreBatch && k->vs < RD_VS_COUNT &&
+           (g_rd.vsBatch[k->vs].id || rd__vs_is_vu_zero(k->vs));
+}
+
 static bool pipelineDesc(const RdPipeKeyInt *k, RhiPipelineDesc *d, RhiBindGroupLayout *layouts)
 {
     static const RhiVertexBinding vb = {0, sizeof(IcoSpriteVertex), false};
@@ -795,7 +864,7 @@ static bool pipelineDesc(const RdPipeKeyInt *k, RhiPipelineDesc *d, RhiBindGroup
         {9, 0, RHI_VTX_F32x4, offsetof(IcoSpritePlaneVertex, sx)},
         {10, 0, RHI_VTX_F32x4, offsetof(IcoSpritePlaneVertex, sy)},
     };
-    if (rd__vs_is_vu_pre(k->vs) || rd__vs_is_vu_stage(k->vs)) {
+    if (rd__vs_is_vu_pre(k->vs) || rd__vs_is_vu_stage(k->vs) || rd__vs_is_vu_zero(k->vs)) {
         /* the vertex pre-pass and the record stages (rd_replay_vu.c
          * rd__vu_prepass): the entry reads group 1 as the VU programs do;
          * points into the record's three RGBA32_UINT targets through
@@ -805,10 +874,57 @@ static bool pipelineDesc(const RdPipeKeyInt *k, RhiPipelineDesc *d, RhiBindGroup
         layouts[1] = g_rd.layoutVu;
         layouts[2] = g_rd.layoutTex;
         memset(d, 0, sizeof(*d));
+        if (k->colorFmt == RHI_FMT_UNKNOWN && k->fs == RD_FS_VU_PRE_CS) {
+            /* the record written by compute dispatches (rd_vu_record.h; the
+             * key's fs RD_FS_VU_PRE_CS, rd__vu_pre_key): the compute build,
+             * group 0 (FrameCB) and group 1's store layout alone (the
+             * compute builds read sets 0 and 1); the tick stage's two keys
+             * the same pipeline twice, as under the stores */
+            layouts[1] = g_rdRec.layoutVuPre;
+            d->compute = rd__vu_record_cs(k->vs, keyBatched(k));
+            if (!d->compute.id || !layouts[1].id) {
+                return false;
+            }
+            d->layouts = layouts;
+            d->layoutCount = 2;
+            d->debugName = "rd vu pre-pass (compute)";
+            return true;
+        }
+        if (k->colorFmt == RHI_FMT_UNKNOWN) {
+            /* the record stored by the vertex shaders (rd_vu_record.h; the
+             * key's colorFmt UNKNOWN, rd__vu_pre_key): the store build, group
+             * 1's store layout, no fragment shader, no rasterization; the
+             * tick stage's lane is vu_tri.w (the key's two masks stay two
+             * keys, the same pipeline twice).  Where the passes begin on the
+             * throwaway target (rd_vu_rec_sink.h rd__vu_rec_sink_wanted: the
+             * Intel driver row, the subpass read) it is the pipeline's one
+             * target, named with its format and a write mask of 0 so the
+             * pipeline matches the pass on both render pass paths; elsewhere
+             * no target, as v0.11.2; the key is unchanged */
+            layouts[1] = g_rdRec.layoutVuPre;
+            d->vertex = rd__vu_record_vs(k->vs, keyBatched(k));
+            if (!d->vertex.id || !layouts[1].id) {
+                return false;
+            }
+            d->layouts = layouts;
+            d->layoutCount = 3;
+            d->topology = RHI_TOPO_POINT_LIST;
+            d->cullNone = true;
+            if (rd__vu_rec_sink_wanted()) {
+                d->colorFormats[0] = RD_VU_REC_SINK_FMT;
+                d->blend[0].writeMask = 0;
+                d->colorCount = 1;
+            } else {
+                d->colorCount = 0;
+            }
+            d->depthFormat = RHI_FMT_UNKNOWN;
+            d->noRaster = true;
+            d->debugName = "rd vu pre-pass (stores)";
+            return true;
+        }
         /* the batch build under the pre-pass's batches (g_rd.vuPreBatch,
          * set once a run before any pipeline; rd_replay_vu.c vuPrepassRun) */
-        d->vertex =
-            g_rd.vuPreBatch && g_rd.vsBatch[k->vs].id ? g_rd.vsBatch[k->vs] : g_rd.vs[k->vs];
+        d->vertex = keyBatched(k) ? g_rd.vsBatch[k->vs] : g_rd.vs[k->vs];
         d->fragment = g_rd.fs[RD_FS_VU_PRE];
         if (!d->vertex.id || !d->fragment.id) {
             return false;
@@ -854,8 +970,18 @@ static bool pipelineDesc(const RdPipeKeyInt *k, RhiPipelineDesc *d, RhiBindGroup
     if (!d->vertex.id) {
         return false;
     }
-    /* no dual-source blending: the *_nodual twin (c0 alone) */
+    /* no dual-source blending: the *_nodual twin (c0 alone); its
+     * discard-free twin with RD_NODUAL_NODISCARD (rd_nodiscard.h: made only
+     * once the twins are tried, else no description) */
     d->fragment = k->gs.nodual && g_rd.fsNoDual[k->fs].id ? g_rd.fsNoDual[k->fs] : g_rd.fs[k->fs];
+    if (k->gs.nodual & RD_NODUAL_NODISCARD) {
+        d->fragment = rd__nd_module(k->fs);
+    }
+    /* the fast pixel build (rd_fastps.h: RD_NODUAL_FAST, its discard-free
+       form with RD_NODUAL_NODISCARD too; made only once it is tried) */
+    if (k->gs.nodual & RD_NODUAL_FAST) {
+        d->fragment = rd__fps_module((k->gs.nodual & RD_NODUAL_NODISCARD) != 0u);
+    }
     if (!d->fragment.id) {
         return false; /* a module this build does not have (rd__gpu_init's fence) */
     }
@@ -929,14 +1055,11 @@ static RhiPipeline createPipeline(const RdPipeKeyInt *k)
 static uint16_t s_hash[RD_PIPE_HASH];
 _Static_assert(RD_PIPELINE_CACHE_MAX < 65535, "s_hash holds a cache slot + 1 in 16 bits");
 
+/* the key's bytes (every field a uint8_t: no padding), 8 at a time
+ * (rd_hash.c); the slot only: a hit is keyEqual's */
 static uint32_t keyHash(const RdPipeKeyInt *k)
 {
-    const uint8_t *b = (const uint8_t *)k;
-    uint32_t h = 2166136261u;
-    for (size_t i = 0; i < sizeof(*k); i++) {
-        h = (h ^ b[i]) * 16777619u;
-    }
-    return h;
+    return rd__hash_words(k, sizeof(*k), 0u);
 }
 
 static RdActivityFn s_activityFn;
@@ -973,6 +1096,15 @@ void rd_set_memory_fn(RdMemoryFn fn)
     s_memoryFn = fn;
 }
 
+/* rd_set_memory_clause_fn: the system's memory on a start-up batch's line
+   (issue 215) */
+static RdMemoryClauseFn s_memClauseFn;
+
+void rd_set_memory_clause_fn(RdMemoryClauseFn fn)
+{
+    s_memClauseFn = fn;
+}
+
 /* rd_set_low_memory_fn: the system's low-memory signal stops the start-up
  * set between two batches (issue 128) */
 static RdLowMemoryFn s_lowMemoryFn;
@@ -980,6 +1112,31 @@ static RdLowMemoryFn s_lowMemoryFn;
 void rd_set_low_memory_fn(RdLowMemoryFn fn)
 {
     s_lowMemoryFn = fn;
+}
+
+/* rd_set_set_size_fn (issue 215): the start-up set sized by the device's own
+   memory fall, asked in createKeys while rd_precreate_pipelines makes the
+   start-up set (s_sizeOn; not a display change's keys, nor a replay's) */
+static RdSetSizeFn s_setSizeFn;
+static bool s_sizeOn;
+/* a family was left to first use by it this run: the ledger's second count
+   (the pipelines made on first use since) */
+static bool s_sizeStopped;
+
+void rd_set_set_size_fn(RdSetSizeFn fn)
+{
+    s_setSizeFn = fn;
+}
+
+/* the pipelines made on first use after the set (rd__get_pipeline), for the
+   window's 10 s line: the block's count and longest (taken), the run's */
+static uint32_t s_fuBlock, s_fuRun, s_fuLongUs;
+
+void rd_pipelines_first_use_take(uint32_t *block, float *longestMs, uint32_t *run)
+{
+    *block = __atomic_exchange_n(&s_fuBlock, 0u, __ATOMIC_RELAXED);
+    *longestMs = (float)__atomic_exchange_n(&s_fuLongUs, 0u, __ATOMIC_RELAXED) / 1000.0f;
+    *run = __atomic_load_n(&s_fuRun, __ATOMIC_RELAXED);
 }
 
 /* How the start-up set is made (rd.h RdPipelineSetPolicy; createKeys):
@@ -1011,6 +1168,38 @@ const RdPipelineSetPolicy *rd_pipeline_policy_careful(void)
 {
     static const RdPipelineSetPolicy careful = {8u, 1u, 128u, true};
     return &careful;
+}
+
+/* rd_set_pipeline_resume (issue 123): the next start-up set from at, its
+ * batches capped (s_setBatchCap while rd_precreate_pipelines runs; 0 none);
+ * rd_pipeline_set_stop: where the last set stopped */
+static struct {
+    bool armed, skipBefore;
+    uint32_t at, batch;
+} s_resume;
+
+static uint32_t s_setBatchCap;
+/* the batch the last createKeys of the start-up set made its keys in */
+static uint32_t s_setBatchUsed;
+static RdPipelineSetStop s_setStop;
+static bool s_setStopped;
+
+void rd_set_pipeline_resume(uint32_t at, uint32_t batch, bool skipBefore)
+{
+    s_resume.armed = true;
+    s_resume.at = at;
+    s_resume.batch = batch;
+    s_resume.skipBefore = skipBefore;
+}
+
+bool rd_pipeline_set_stop(RdPipelineSetStop *out)
+{
+    if (!s_setStopped) {
+        memset(out, 0, sizeof(*out));
+        return false;
+    }
+    *out = s_setStop;
+    return true;
 }
 
 /* Whether the pipeline cache is measured for the batches' lines and written
@@ -1073,7 +1262,7 @@ void rd__pipe_key_text(const RdPipeKeyInt *k, char *out, size_t size)
 static bool keyIsVu(const RdPipeKeyInt *k)
 {
     return (k->vs >= RD_VS_VU_FIRST && k->vs <= RD_VS_VU_LAST) || rd__vs_is_vu_main(k->vs) ||
-           rd__vs_is_vu_pre(k->vs) || rd__vs_is_vu_stage(k->vs);
+           rd__vs_is_vu_pre(k->vs) || rd__vs_is_vu_stage(k->vs) || rd__vs_is_vu_zero(k->vs);
 }
 
 /* the key's fields; a point key (the pre-pass's, a record stage's) " pre"
@@ -1082,7 +1271,9 @@ static void keyWords(const RdPipeKeyInt *k, char *out, size_t size)
 {
     snprintf(out, size, "program %u blend %u vs %u fs %u fmt %u/%u msaa %u dst %u%s", k->gs.program,
              k->gs.blend, k->vs, k->fs, k->colorFmt, k->depthFmt, k->gs.msaa, (unsigned)k->dst,
-             rd__vs_is_vu_pre(k->vs) || rd__vs_is_vu_stage(k->vs) ? " pre" : "");
+             rd__vs_is_vu_pre(k->vs) || rd__vs_is_vu_stage(k->vs) || rd__vs_is_vu_zero(k->vs)
+                 ? " pre"
+                 : "");
 }
 
 /* whether a program entry's key draws through the plain variant (the
@@ -1100,8 +1291,27 @@ static void keyVsName(const RdPipeKeyInt *k, char *out, size_t size)
 {
     const char *v = rd__vs_name(k->vs);
     const size_t n = strlen(v);
-    if (g_rd.vuMerge && g_rd.vsMerge[k->vs].id) {
+    const bool batched = keyBatched(k);
+    if ((rd__vs_is_vu_pre(k->vs) || rd__vs_is_vu_stage(k->vs) || rd__vs_is_vu_zero(k->vs)) &&
+        k->fs == RD_FS_VU_PRE_CS && n > 7) {
+        /* the record's compute build (pipelineDesc): vu_X_compute_pre_cs
+         * or vu_X_batch_compute_pre_cs (rd_vu_record.c), so a crash's note
+         * names it (startup_retry.h startup_retry_note_has_vu_store: the
+         * restart takes the render targets' record) */
+        snprintf(out, size, "%.*s%s_compute_pre_cs", (int)(n - 7), v, batched ? "_batch" : "");
+    } else if ((rd__vs_is_vu_pre(k->vs) || rd__vs_is_vu_stage(k->vs) || rd__vs_is_vu_zero(k->vs)) &&
+               k->colorFmt == RHI_FMT_UNKNOWN && n > 7 && rd__vu_record_vs(k->vs, batched).id) {
+        /* the record stored by the vertex shaders (pipelineDesc): the store
+         * build it draws through, vu_X_store_pre_vs or
+         * vu_X_batch_store_pre_vs (rd_vu_record.c), so a crash's note names
+         * it (startup_retry.h startup_retry_note_has_vu_store: the restart
+         * takes the render targets' record before giving up the pre-pass) */
+        snprintf(out, size, "%.*s%s_store_pre_vs", (int)(n - 7), v, batched ? "_batch" : "");
+    } else if (g_rd.vuMerge && g_rd.vsMerge[k->vs].id) {
         rd__vu_merge_name(k->vs, keyPlain(k), out, size); /* the draw merge's build */
+    } else if (keyPlain(k) && g_rd.vuBonesRing && k->vs >= RD_VS_VU_SKIN &&
+               k->vs <= RD_VS_VU_SKIN_DEBUG) {
+        rd__vu_bones_ring_name(k->vs, out, size); /* the ring build (vu_bones = ring) */
     } else if (keyPlain(k) && n > 3) {
         snprintf(out, size, "%.*s_plain_vs", (int)(n - 3), v);
     } else {
@@ -1111,11 +1321,20 @@ static void keyVsName(const RdPipeKeyInt *k, char *out, size_t size)
 
 static void keyFsName(const RdPipeKeyInt *k, char *out, size_t size)
 {
-    const char *f = rd__fs_name(k->fs);
+    /* the entries past the name table's count name themselves (rd_paste_spec.c) */
+    const char *f = k->fs == RD_FS_FX_PASTE      ? RD_PASTE_SPEC_NAME
+                    : k->fs == RD_FS_SPRITE_COMP ? RD_COMP_SPEC_NAME
+                                                 : rd__fs_name(k->fs);
     if (k->dst == RHI_DST_READ_STORAGE) {
         snprintf(out, size, "%s_dstrov", f);
     } else if (k->dst == RHI_DST_READ_ATTACHMENT) {
         snprintf(out, size, "%s_dstatt", f);
+    } else if (k->gs.nodual & RD_NODUAL_FAST) {
+        snprintf(out, size, "%s",
+                 (k->gs.nodual & RD_NODUAL_NODISCARD) ? RD_FPS_MODULE_NAME_ND
+                                                      : RD_FPS_MODULE_NAME); /* rd_fastps.h */
+    } else if ((k->gs.nodual & RD_NODUAL_NODISCARD) && rd_nd_module_name(k->fs)) {
+        snprintf(out, size, "%s", rd_nd_module_name(k->fs)); /* rd_nodiscard.h */
     } else if (k->gs.nodual && k->fs < RD_FS_COUNT && g_rd.fsNoDual[k->fs].id) {
         snprintf(out, size, "%s_nodual", f);
     } else {
@@ -1226,6 +1445,13 @@ void rd__pipeline_note_end(void)
     activityDone();
 }
 
+void rd__activity_note(const char *note)
+{
+    if (s_activityFn != NULL) {
+        s_activityFn(note);
+    }
+}
+
 /* The key a draw is created with: the MSAA epoch (a pipeline fetched for a
  * multisampled pass draws with its sample count; single-sampled passes keep
  * msaa 0: the same keys as without anti-aliasing) and, without dual-source
@@ -1258,7 +1484,7 @@ static const RdPipeKeyInt *drawKeyTurned(const RdPipeKeyInt *k, RdPipeKeyInt *tm
 
 uint32_t rd__key_dynamic_bits(const RdPipeKeyInt *k)
 {
-    if (rd__vs_is_vu_pre(k->vs) || rd__vs_is_vu_stage(k->vs)) {
+    if (rd__vs_is_vu_pre(k->vs) || rd__vs_is_vu_stage(k->vs) || rd__vs_is_vu_zero(k->vs)) {
         return 0; /* three targets, no depth: every state static */
     }
     uint32_t bits = 0;
@@ -1289,6 +1515,9 @@ void rd__key_dynamic_normalise(RdPipeKeyInt *k)
     if (bits & RHI_DYN_BLEND) {
         k->gs.blend = RD_BLEND_COUNT;
         k->gs.colorMask = 0xF;
+        /* the one-pass blend's colour pass (rd_onepass.h) draws with the
+         * colour pass's module; its blend state is the bind's: one pipeline */
+        k->gs.nodual = (uint8_t)(k->gs.nodual & ~RD_NODUAL_ONEPASS);
     }
 }
 
@@ -1308,6 +1537,22 @@ static const RdPipeKeyInt *drawKey(const RdPipeKeyInt *k, RdPipeKeyInt *tmp)
         k = tmp;
     }
     return k;
+}
+
+/* rd_vu_skin_check.h: the description rd__get_pipeline would make for k
+ * (drawKey's key: the pass's sample count, the dynamic state and the
+ * attachment read's mask normalised), for a pipeline made beside the
+ * cache (the skin check's box draw, compiled in the background) */
+bool rd__pipeline_desc(const RdPipeKeyInt *k, RhiPipelineDesc *d, RhiBindGroupLayout layouts[4])
+{
+    RdPipeKeyInt tmp;
+    return pipelineDesc(drawKey(k, &tmp), d, layouts);
+}
+
+void rd__pipeline_key_norm(const RdPipeKeyInt *k, RdPipeKeyInt *out)
+{
+    RdPipeKeyInt tmp;
+    *out = *drawKey(k, &tmp);
 }
 
 /* k's slot in s_hash: its entry's (*found) or the empty slot the probe
@@ -1524,6 +1769,7 @@ static RhiPipeline keepPipeline(const RdPipeKeyInt *k, RhiPipeline p, uint32_t a
     s_hash[at] = (uint16_t)s_used;
     rd__stats_here()->pipelineCreates++;
     rd__passring_pipeline(p.id, k->vs, k->fs, k->dst);
+    rd__list_draws_note(k->fs, k->gs.stencil); /* the list's draws by entry (rd_list_draws.h) */
     return p;
 }
 
@@ -1569,7 +1815,18 @@ static struct {
     float slowMs;
     RdPipeKeyInt slow;
     double t0, tLast; /* the open batch's first and last creation */
+    /* the open batch's keys by family (rd__pipe_key_family) and how many
+       of them the start-up set holds (issue 123: lazyBatchKeys) */
+    uint32_t fam[RD_KF_COUNT];
+    uint32_t inSet;
 } s_lazy;
+
+/* the start-up set's keys as rd__enumerate_reachable gives them, taken at
+ * the run's first creation on first use (lazyCount, on the thread that
+ * draws; a display change later is not followed) */
+static RdPipeKeyInt s_lazySet[RD_PIPELINE_CACHE_MAX];
+static uint32_t s_lazySetN;
+static bool s_lazySetMade;
 
 bool rd__pipelines_lazy_on(void)
 {
@@ -1596,6 +1853,25 @@ static void lazyCount(const RdPipeKeyInt *k, float ms)
     if (ms > s_lazy.slowMs) {
         s_lazy.slowMs = ms;
         s_lazy.slow = *k;
+    }
+    if (s_lazy.n == 0) {
+        memset(s_lazy.fam, 0, sizeof(s_lazy.fam));
+        s_lazy.inSet = 0;
+    }
+    if (!s_lazySetMade) {
+        const uint32_t n = rd__enumerate_reachable(s_lazySet, RD_PIPELINE_CACHE_MAX);
+        s_lazySetN = n < RD_PIPELINE_CACHE_MAX ? n : RD_PIPELINE_CACHE_MAX;
+        s_lazySetMade = true;
+    }
+    s_lazy.fam[rd__pipe_key_family(k)]++;
+    /* k is drawKey's: each set key made the same way, under the pass in
+       force (its sample count) */
+    for (uint32_t j = 0; j < s_lazySetN; j++) {
+        RdPipeKeyInt tmp;
+        if (keyEqual(drawKey(&s_lazySet[j], &tmp), k)) {
+            s_lazy.inSet++;
+            break;
+        }
     }
     s_lazy.n++;
     s_lazy.made++;
@@ -1655,7 +1931,11 @@ static void firstUseLine(const RdPipeKeyInt *k, float ms)
  * dynamically (the RHI skips the values already in force) */
 void rd__set_pipeline(RhiCommandList cl, RhiPipeline p, const RdPipeKeyInt *k)
 {
+    /* a shadow composite's or level's run noted for its own entry: the twin's
+     * pipeline, every fixed-function state the same (rd_comp_spec.c) */
+    p = rd__comp_spec_turn(p, k);
     rhi_cmd_set_pipeline(cl, p);
+    rd__op_bind(cl, k); /* the blend constant of a one-pass key (rd_onepass.h) */
     if (k == NULL || !p.id || (!g_rd.dynDepth && !g_rd.dynBlend)) {
         return;
     }
@@ -1677,11 +1957,14 @@ RhiPipeline rd__get_pipeline(const RdPipeKeyInt *k)
     bool found;
     k = drawKey(k, &tmp);
     const uint32_t at = probeKey(k, &found);
+    g_rdCpu.pipeLookups++; /* the CPU phases' count (rd_cpu_phase.c) */
     if (found) {
+        g_rdCpu.pipeHits++;
         /* a failed entry: drawn as nothing, not created again */
         const RhiPipeline p = s_cache[s_hash[at] - 1].pipe;
         if (p.id) {
             rd__passring_pipeline(p.id, k->vs, k->fs, k->dst);
+            rd__list_draws_note(k->fs, k->gs.stencil); /* rd_list_draws.h */
         }
         return p;
     }
@@ -1710,9 +1993,24 @@ RhiPipeline rd__get_pipeline(const RdPipeKeyInt *k)
     RhiStats st0, st1;
     rhiPipeCounts(&st0);
     const double t0 = rd__now_ms();
+    rd__made_outside_key_begin(); /* its own line below, not rd_made_outside.c's */
     RhiPipeline p = createPipeline(k);
+    rd__made_outside_key_end();
     const float ms = (float)(rd__now_ms() - t0);
     s_createMs += ms;
+    if (p.id && (s_lazy.on || s_startupSet)) {
+        /* the window's 10 s line (rd_pipelines_first_use_take): one more,
+           and the longest in microseconds (held below 4000 s) */
+        const uint32_t us = ms <= 0.0f ? 0u : ms < 4.0e6f ? (uint32_t)(ms * 1000.0f) : 4000000000u;
+        uint32_t cur = __atomic_load_n(&s_fuLongUs, __ATOMIC_RELAXED);
+        __atomic_add_fetch(&s_fuBlock, 1u, __ATOMIC_RELAXED);
+        __atomic_add_fetch(&s_fuRun, 1u, __ATOMIC_RELAXED);
+        while (us > cur && !__atomic_compare_exchange_n(&s_fuLongUs, &cur, us, false,
+                                                        __ATOMIC_RELAXED, __ATOMIC_RELAXED)) {}
+        if (s_sizeStopped) {
+            ico_attempt_fire2(ICO_ATT_SET_SIZE, 1u); /* made on first use after the rule's stop */
+        }
+    }
     if (p.id && s_lazy.on) {
         lazyCount(k, ms);
     } else if (p.id && s_startupSet) {
@@ -1733,9 +2031,12 @@ RhiPipeline rd__get_pipeline(const RdPipeKeyInt *k)
 
 static void finClear(void);
 
+static void twinClear(void);
+
 void rd__pipeline_cache_clear(void)
 {
-    finClear(); /* the background set's batch in flight, and the set itself */
+    finClear();  /* the background set's batch in flight, and the set itself */
+    twinClear(); /* the discard-free twins' (rd_nodiscard.h) */
     if (g_rd.hasDevice) {
         for (uint32_t i = 0; i < s_used; i++) {
             if (s_cache[i].pipe.id) {
@@ -1750,6 +2051,29 @@ void rd__pipeline_cache_clear(void)
     s_createStopped = false;
     s_fullLogged = false;
     memset(s_hash, 0, sizeof(s_hash));
+}
+
+uint32_t rd__pipeline_drop_vs(uint8_t vs)
+{
+    uint32_t n = 0;
+    for (uint32_t i = 0; i < s_used && g_rd.hasDevice; i++) {
+        if (s_cache[i].key.vs == vs && s_cache[i].pipe.id) {
+            rhi_destroy_pipeline(s_cache[i].pipe);
+            s_cache[i].pipe = (RhiPipeline){0};
+            s_count--;
+            n++;
+        }
+    }
+    return n;
+}
+
+uint32_t rd__pipeline_count_vs(uint8_t vs)
+{
+    uint32_t n = 0;
+    for (uint32_t i = 0; i < s_used; i++) {
+        n += s_cache[i].key.vs == vs && s_cache[i].pipe.id ? 1u : 0u;
+    }
+    return n;
 }
 
 static RdPipelineProgressFn s_progressFn;
@@ -1780,12 +2104,14 @@ float rd_precreate_longest_ms(void)
 /* The pool's headroom (rhi_pipeline_pool.h) holds what is alive outside
  * the cache at once: one batch's descriptions (its ids held until it
  * ends, its duplicates destroyed then), the COLCLAMP 0 pipelines, Motion
- * blur: Smooth's two (rd_blur_smooth.c) and the movie's three (rd_video.c:
- * two outputs, the field pipeline) */
-_Static_assert(RD_PIPE_BATCH + RD_WRAP_PIPES + RD_BLUR_SMOOTH_PIPES + 3u <=
+ * blur: Smooth's two (rd_blur_smooth.c), the movie's three (rd_video.c:
+ * two outputs, the field pipeline) and the skin check's (rd_vu_skin_check.h
+ * RD_VU_SKIN_PIPES: the probe's, c2's, column 3's, the box checks' and
+ * twin C's) */
+_Static_assert(RD_PIPE_BATCH + RD_WRAP_PIPES + RD_BLUR_SMOOTH_PIPES + 3u + RD_VU_SKIN_PIPES <=
                    (unsigned)RHI_PIPELINE_POOL_HEADROOM,
-               "the RHI's pipeline pool headroom holds a batch, the wrap, Smooth's and the movie "
-               "pipelines");
+               "the RHI's pipeline pool headroom holds a batch, the wrap, Smooth's, the movie's "
+               "and the skin check's pipelines");
 _Static_assert(RD_PIPELINE_CACHE_MAX + RHI_PIPELINE_POOL_HEADROOM == RHI_PIPELINE_POOL_MAX,
                "the RHI's pipeline pool holds the cache and the headroom");
 
@@ -2048,7 +2374,7 @@ static void batchTimes(const RdPipeKeyInt *keys, const float *ms, uint32_t n, ui
                        uint32_t last, uint32_t total, double wallMs, uint32_t threads,
                        const char *what)
 {
-    char line[600], mem[96];
+    char line[1000], mem[96];
     size_t at = 0;
     float lo = 0.0f, hi = 0.0f;
     double sum = 0.0;
@@ -2114,7 +2440,15 @@ static void batchTimes(const RdPipeKeyInt *keys, const float *ms, uint32_t n, ui
     if (s_batchFn != NULL) {
         s_batchFn(line);
     }
-    /* the log: the same and each pipeline's time */
+    /* the log: the same, the system's memory where the rule picks this
+       batch (issue 215: the free memory the process's own figure misses),
+       and each pipeline's time */
+    if (s_memClauseFn != NULL) {
+        char sys[400];
+        if (s_memClauseFn(first, last, total, sys, sizeof(sys))) {
+            BT_PUT("; system: %s", sys);
+        }
+    }
     BT_PUT("; each (s):");
     for (uint32_t j = 0; j < n; j++) {
         BT_PUT(" %.2f", ms[j] / 1000.0);
@@ -2172,9 +2506,16 @@ static void createKeys(const RdPipeKeyInt *keys, uint32_t m, bool resolved, PreT
     finJoin();
     /* the policy (rd_set_pipeline_policy): the batch's size, its threads,
      * the memory bound of the start-up set (times: not a replay's keys) */
-    const uint32_t batchMax = s_setPolicy.batch > 0u && s_setPolicy.batch < RD_PIPE_BATCH
-                                  ? s_setPolicy.batch
-                                  : RD_PIPE_BATCH;
+    const uint32_t policyBatch = s_setPolicy.batch > 0u && s_setPolicy.batch < RD_PIPE_BATCH
+                                     ? s_setPolicy.batch
+                                     : RD_PIPE_BATCH;
+    /* a resumed start-up set's smaller batches (rd_set_pipeline_resume) */
+    const uint32_t batchMax = times != NULL && s_setBatchCap > 0u && s_setBatchCap < policyBatch
+                                  ? s_setBatchCap
+                                  : policyBatch;
+    if (times != NULL) {
+        s_setBatchUsed = batchMax;
+    }
     const bool budgeted = times != NULL && s_setPolicy.memoryBudgetMB > 0u;
     const long startKb = budgeted ? residentKb() : -1;
     static RdPipeKeyInt bk[RD_PIPE_BATCH];
@@ -2201,11 +2542,81 @@ static void createKeys(const RdPipeKeyInt *keys, uint32_t m, bool resolved, PreT
     PreBatch pb = {0, m, 0, 0, NULL, NULL, 0, 0, 0, -1};
     memset(c, 0, sizeof(*c));
     c->threads = 1;
+    /* issue 215: the start-up set sized by the device's own memory fall
+       (rd_set_set_size_fn): each key's family counted once, 2 for a key
+       made already or never made (the sprite planes off); the families the
+       window stopped are skipped from then on */
+    static uint8_t sizeFam[RD_PIPELINE_CACHE_MAX];
+    const bool sized =
+        times != NULL && s_sizeOn && s_setSizeFn != NULL && m <= RD_PIPELINE_CACHE_MAX;
+    uint32_t sizeMade[2] = {0u, 0u}, sizeSkipped[2] = {0u, 0u}, sizeAtStop = 0u;
+    uint32_t sizeFirstSkip = UINT32_MAX;
+    unsigned sizeMask = 0u;
+    bool sizeBegin = true;
+    char sizeWhy[160] = "";
+    if (sized) {
+        for (uint32_t j = 0; j < m; j++) {
+            RdPipeKeyInt tmp;
+            bool f;
+            const RdPipeKeyInt *k = resolved ? &keys[j] : drawKey(&keys[j], &tmp);
+            (void)probeKey(k, &f);
+            sizeFam[j] = f || (g_rd.spritePlanesOff && rd__key_is_sprite_planes(k)) ? 2u
+                         : keyIsVu(k)                                               ? 1u
+                                                                                    : 0u;
+        }
+    }
     if (s_progressFn != NULL) {
         s_progressFn(s_progressCtx, 0, m);
     }
     uint32_t i = 0;
     while (i < m && !pb.stop) {
+        if (sized) {
+            /* the window's ask before the batch (issue 215): the counts by
+               family from i on, play's known need */
+            RdSetSizeAsk ask;
+            char why[160];
+            memset(&ask, 0, sizeof(ask));
+            ask.made[0] = sizeMade[0];
+            ask.made[1] = sizeMade[1];
+            ask.next = -1;
+            for (uint32_t j = i; j < m; j++) {
+                if (sizeFam[j] < 2u) {
+                    ask.left[sizeFam[j]]++;
+                    if (ask.next < 0 && !((sizeMask >> sizeFam[j]) & 1u)) {
+                        ask.next = (int)sizeFam[j];
+                    }
+                }
+            }
+            ask.begin = sizeBegin;
+            {
+                RdSetNeed need;
+                rd_set_size_need(&need);
+                ask.needRecordBytes = need.recordNeed;
+                ask.needArenaBytes = need.arenaNeed;
+                ask.madeRecordBytes = need.recordMade;
+                ask.madeArenaBytes = need.arenaMade;
+            }
+            ask.place = i;
+            ask.total = m;
+            why[0] = '\0';
+            const unsigned was = sizeMask;
+            sizeMask |= s_setSizeFn(&ask, why, sizeof(why));
+            sizeBegin = false;
+            if (sizeMask != was && why[0] != '\0') {
+                snprintf(sizeWhy, sizeof(sizeWhy), "%s", why);
+            }
+            const unsigned live = (ask.left[0] > 0u ? 1u : 0u) | (ask.left[1] > 0u ? 2u : 0u);
+            if (live != 0u && (live & ~sizeMask) == 0u) {
+                /* every family with keys left is stopped: the set stops
+                   here, the rest made on first use */
+                sizeAtStop = ask.left[0] + ask.left[1];
+                snprintf(c->budget, sizeof(c->budget),
+                         "(memory: the start-up set sized by the device's memory fall: %.150s; %u "
+                         "pipelines left to first use)",
+                         sizeWhy, sizeAtStop + sizeSkipped[0] + sizeSkipped[1]);
+                break;
+            }
+        }
         /* the batch: the next keys not made yet, up to RD_PIPE_BATCH, all
          * with a destination read or all without */
         const uint32_t first = i;
@@ -2235,6 +2646,13 @@ static void createKeys(const RdPipeKeyInt *keys, uint32_t m, bool resolved, PreT
             if (found) {
                 /* made, or a failed entry (not created again) */
                 c->failed += s_cache[s_hash[at] - 1].pipe.id == 0;
+                continue;
+            }
+            if (sizeMask != 0u && ((sizeMask >> (keyIsVu(k) ? 1u : 0u)) & 1u)) {
+                /* issue 215: its family stopped by the memory fall: made on
+                   first use */
+                sizeSkipped[keyIsVu(k) ? 1 : 0]++;
+                sizeFirstSkip = sizeFirstSkip == UINT32_MAX ? i : sizeFirstSkip;
                 continue;
             }
             if (s_createStopped) {
@@ -2438,6 +2856,7 @@ static void createKeys(const RdPipeKeyInt *keys, uint32_t m, bool resolved, PreT
                     continue;
                 }
                 c->compiled++;
+                sizeMade[keyIsVu(&bk[j]) ? 1 : 0]++; /* issue 215's counts */
                 /* the progress screen's frame may have made the same key
                    meanwhile, or filled the cache */
                 if (found || s_used >= RD_PIPELINE_CACHE_MAX) {
@@ -2460,7 +2879,32 @@ static void createKeys(const RdPipeKeyInt *keys, uint32_t m, bool resolved, PreT
     s_batchNote[0] = '\0';
     c->stop = pb.stop;
     c->stoppedAt = i;
-    if (!pb.stop && s_progressFn != NULL) {
+    if (sized && sizeSkipped[0] + sizeSkipped[1] > 0u && c->budget[0] == '\0' && !pb.stop) {
+        /* issue 215: the set ran on with a family stopped: it stops as if
+           at its first skipped key, so the rest is made on first use with
+           the lazy path's batches and cache writes */
+        snprintf(c->budget, sizeof(c->budget),
+                 "(memory: the start-up set sized by the device's memory fall: %.150s; %u "
+                 "pipelines left to first use)",
+                 sizeWhy, sizeSkipped[0] + sizeSkipped[1]);
+        c->stoppedAt = sizeFirstSkip < m ? sizeFirstSkip : i;
+    }
+    if (sized && sizeMask != 0u) {
+        const uint32_t left = sizeAtStop + sizeSkipped[0] + sizeSkipped[1];
+        s_sizeStopped = true;
+        ico_attempt_fire(ICO_ATT_SET_SIZE, left);
+        rd__log("pipelines: the start-up set sized by the device's memory fall: %u made (2D %u, "
+                "VU %u), %u left to first use (%u skipped in the set: 2D %u, VU %u; %u after its "
+                "stop)",
+                sizeMade[0] + sizeMade[1], sizeMade[0], sizeMade[1], left,
+                sizeSkipped[0] + sizeSkipped[1], sizeSkipped[0], sizeSkipped[1], sizeAtStop);
+    }
+    if (!pb.stop && s_progressFn != NULL && !(s_sizeOn && c->budget[0] != '\0')) {
+        /* (m, m) only for a set that went to its end: a start-up set
+           stopped early (its budget, the memory size rule) is closed by the
+           window with the count made (rd_precreate_pipelines' return,
+           diag_host.h ico_diag_set_pipelines_over; issue 215's "684 of 684"
+           for 51 made) */
         s_progressFn(s_progressCtx, m, m);
     }
     if (s_activityFn != NULL) {
@@ -2787,9 +3231,14 @@ static bool finWaitLine(uint32_t n)
     return n <= 8u || n % 100u == 0u;
 }
 
+static bool twinBusy(void);
+
 void rd__pipe_finish_tick(double pictureMs)
 {
-    if (!s_fin.on || !g_rd.hasDevice || s_gatherOn) {
+    /* the discard-free twins' queue first (below): one background batch in
+       flight at a time, its or the finisher's */
+    rd__pipeline_twin_tick(false);
+    if (!s_fin.on || !g_rd.hasDevice || s_gatherOn || twinBusy()) {
         return;
     }
     const double now = rd__now_ms();
@@ -2857,6 +3306,372 @@ void rd__pipe_finish_tick(double pictureMs)
     }
 }
 
+/* --------------------------------------------- the discard-free twins' set
+ * (rd_nodiscard.h).  A pass whose twin's pipeline is not made draws through
+ * its *_nodual build and asks for the twin here (rd__pipeline_twin: queued
+ * once, never made in the draw).  Between pictures (rd__pipe_finish_tick)
+ * the queue's next batch is begun on the workers at low priority, as the
+ * background finisher's are, and taken once its compiles have ended: never
+ * waited for in play, none begun while the finisher's hold is in force (a
+ * late game step, a slow picture) or while the finisher runs, and one
+ * background set in flight at a time (RhiGpuProgress.bgPipesLeft counts the
+ * one set in flight).  A backend without background creation
+ * (rhi_create_pipelines_begin NULL: Direct3D, OpenGL) makes the batch there,
+ * between pictures.  A twin's pipeline the device could not make turns the
+ * twins off for the run (rd__nd_fault). */
+#define RD_TWIN_QUEUE 256u
+/* the bounds of the twins' background set in play: at most RD_TWIN_BATCH
+   pipelines a batch, on at most RD_FINISH_THREADS workers at low priority,
+   one batch in flight and none begun under the finisher's hold or while it
+   runs; its cost in the 10 s line (rd__pipeline_twins_take) */
+#define RD_TWIN_BATCH 8u
+
+static struct {
+    RdPipeKeyInt q[RD_TWIN_QUEUE]; /* asked for, not begun */
+    uint32_t n;
+    RhiPipelineJobs *jobs; /* the batch in flight */
+    uint32_t nb;
+    RdPipeKeyInt bk[RD_FINISH_BATCH];
+    RhiPipelineDesc bd[RD_FINISH_BATCH];
+    RhiBindGroupLayout bl[RD_FINISH_BATCH][4];
+    RhiStats st0;
+    uint32_t background; /* made by the background's workers or here, the run */
+    double t0;           /* the batch in flight's begin (rd__now_ms) */
+    /* the block's (the 10 s line's, __atomic): pipelines made, failed,
+       batches, and the batches' wall time in microseconds */
+    uint32_t blockMade, blockFailed, blockBatches;
+    uint64_t blockUs;
+} s_twin;
+
+void rd__pipeline_twins_take(uint32_t *made, uint32_t *failed, uint32_t *batches, double *ms)
+{
+    *made = __atomic_exchange_n(&s_twin.blockMade, 0u, __ATOMIC_RELAXED);
+    *failed = __atomic_exchange_n(&s_twin.blockFailed, 0u, __ATOMIC_RELAXED);
+    *batches = __atomic_exchange_n(&s_twin.blockBatches, 0u, __ATOMIC_RELAXED);
+    *ms = (double)__atomic_exchange_n(&s_twin.blockUs, 0u, __ATOMIC_RELAXED) / 1000.0;
+}
+
+static bool twinBusy(void)
+{
+    return s_twin.jobs != NULL;
+}
+
+RhiPipeline rd__pipeline_twin(const RdPipeKeyInt *k)
+{
+    RdPipeKeyInt tmp;
+    bool found;
+    k = drawKey(k, &tmp);
+    const uint32_t at = probeKey(k, &found);
+    g_rdCpu.pipeLookups++; /* the CPU phases' count (rd_cpu_phase.c) */
+    if (found) {
+        g_rdCpu.pipeHits++;
+        const RhiPipeline p = s_cache[s_hash[at] - 1].pipe; /* a failed entry: none */
+        if (p.id) {
+            rd__passring_pipeline(p.id, k->vs, k->fs, k->dst);
+            rd__list_draws_note(k->fs, k->gs.stencil); /* rd_list_draws.h */
+        }
+        return p;
+    }
+    if (s_gatherOn) {
+        gatherKey(k); /* the self-test's: made with its other keys, on the workers */
+        return (RhiPipeline){0};
+    }
+    if (!g_rd.hasDevice || s_createStopped) {
+        return (RhiPipeline){0};
+    }
+    for (uint32_t i = 0; i < s_twin.n; i++) {
+        if (keyEqual(&s_twin.q[i], k)) {
+            return (RhiPipeline){0};
+        }
+    }
+    for (uint32_t i = 0; s_twin.jobs != NULL && i < s_twin.nb; i++) {
+        if (keyEqual(&s_twin.bk[i], k)) {
+            return (RhiPipeline){0};
+        }
+    }
+    if (s_twin.n < RD_TWIN_QUEUE) {
+        s_twin.q[s_twin.n++] = *k;
+    }
+    return (RhiPipeline){0};
+}
+
+/* the batch's pipelines kept (a failed one: the twins off for the run) */
+static void twinKeep(const RhiPipeline *bp)
+{
+    RhiStats st1;
+    char why[224];
+    rhiPipeCounts(&st1);
+    failReason(&s_twin.st0, &st1, why, sizeof(why));
+    for (uint32_t j = 0; j < s_twin.nb; j++) {
+        bool found;
+        const uint32_t at = probeKey(&s_twin.bk[j], &found);
+        if (!bp[j].id) {
+            if (!found) {
+                keepPipeline(&s_twin.bk[j], bp[j], at, "in the discard-free twins' set", why);
+            }
+            char what[320];
+            snprintf(what, sizeof(what),
+                     "a twin's pipeline (program %u blend %u vs %u fs %u) could not be made in the "
+                     "background (%.200s)",
+                     s_twin.bk[j].gs.program, s_twin.bk[j].gs.blend, s_twin.bk[j].vs,
+                     s_twin.bk[j].fs, why);
+            __atomic_add_fetch(&s_twin.blockFailed, 1u, __ATOMIC_RELAXED);
+            if ((s_twin.bk[j].gs.nodual & RD_NODUAL_ONEPASS) ||
+                !(s_twin.bk[j].gs.nodual & (RD_NODUAL_NODISCARD | RD_NODUAL_FAST))) {
+                /* the one-pass blend's (rd_onepass.h): its keys, and the
+                   ordinary kick keys it asks for before it unfuses */
+                rd__op_fault(what);
+            } else if (s_twin.bk[j].gs.nodual & RD_NODUAL_FAST) {
+                rd__fps_fault(what); /* the fast pixel build's (rd_fastps.h) */
+            } else {
+                rd__nd_fault(what);
+            }
+            continue;
+        }
+        if (found || s_used >= RD_PIPELINE_CACHE_MAX) {
+            rhi_destroy_pipeline(bp[j]); /* made meanwhile (the self-test's), or no room */
+            continue;
+        }
+        keepPipeline(&s_twin.bk[j], bp[j], at, "in the discard-free twins' set", "");
+        s_twin.background++;
+        __atomic_add_fetch(&s_twin.blockMade, 1u, __ATOMIC_RELAXED);
+    }
+    const double wall = rd__now_ms() - s_twin.t0;
+    __atomic_add_fetch(&s_twin.blockBatches, 1u, __ATOMIC_RELAXED);
+    __atomic_add_fetch(&s_twin.blockUs, (uint64_t)(wall > 0.0 ? wall * 1000.0 : 0.0),
+                       __ATOMIC_RELAXED);
+    s_twin.nb = 0;
+    s_batchNote[0] = '\0';
+    activityDone();
+}
+
+/* the batch in flight taken (wait: until its compiles end); false when it
+   goes on */
+static bool twinEnd(bool wait)
+{
+    RhiPipeline bp[RD_FINISH_BATCH];
+    if (s_twin.jobs == NULL) {
+        return true;
+    }
+    if (!rhi_create_pipelines_end(s_twin.jobs, wait, bp, NULL, NULL)) {
+        return false;
+    }
+    s_twin.jobs = NULL;
+    twinKeep(bp);
+    return true;
+}
+
+/* the queue's next keys begun (or made here without background creation) */
+static void twinBegin(void)
+{
+    uint32_t nb = 0, used = 0;
+    for (; used < s_twin.n && nb < RD_TWIN_BATCH; used++) {
+        const RdPipeKeyInt *k = &s_twin.q[used];
+        bool found;
+        (void)probeKey(k, &found);
+        if (found || s_createStopped || cacheFull(k) ||
+            s_used + nb + RD_PIPE_BATCH >= RD_PIPELINE_CACHE_MAX) {
+            continue; /* made meanwhile, or no room: drawn through the *_nodual build */
+        }
+        if (!pipelineDesc(k, &s_twin.bd[nb], s_twin.bl[nb])) {
+            bool f2;
+            const uint32_t at = probeKey(k, &f2);
+            keepPipeline(k, (RhiPipeline){0}, at, "in the discard-free twins' set",
+                         "its description was not made (a twin's module not made)");
+            continue;
+        }
+        s_twin.bk[nb++] = *k;
+    }
+    memmove(s_twin.q, s_twin.q + used, (size_t)(s_twin.n - used) * sizeof(s_twin.q[0]));
+    s_twin.n -= used;
+    if (nb == 0) {
+        return;
+    }
+    {
+        char mods[320];
+        batchModules(s_twin.bk, nb, mods, sizeof(mods));
+        /* the crash report's note while the batch compiles (as the
+           finisher's: " in the background: " for the watchdog's pipeline
+           limit, port/platform/gpu_hang.c ico_pipe_note_creating) */
+        int w = snprintf(s_batchNote, sizeof(s_batchNote),
+                         "creating %u pipelines of the %s in the background: %s", nb,
+                         (s_twin.bk[0].gs.nodual & RD_NODUAL_ONEPASS) ||
+                                 !(s_twin.bk[0].gs.nodual & (RD_NODUAL_NODISCARD | RD_NODUAL_FAST))
+                             ? "one-pass blend"
+                         : (s_twin.bk[0].gs.nodual & RD_NODUAL_FAST) ? "fast pixel build"
+                                                                     : "discard-free twins",
+                         mods);
+        (void)w;
+        if (s_activityFn != NULL) {
+            s_activityFn(s_batchNote);
+        }
+    }
+    rhiPipeCounts(&s_twin.st0);
+    s_twin.nb = nb;
+    s_twin.t0 = rd__now_ms();
+    s_twin.jobs = rhi_create_pipelines_begin(s_twin.bd, nb, RD_FINISH_THREADS, true);
+    if (s_twin.jobs == NULL) {
+        /* no background creation on this backend: made here, between
+           pictures */
+        RhiPipeline bp[RD_FINISH_BATCH];
+        for (uint32_t j = 0; j < nb; j++) {
+            bp[j] = rhi_create_pipeline(&s_twin.bd[j]);
+        }
+        twinKeep(bp);
+    }
+}
+
+void rd__pipeline_twin_tick(bool wait)
+{
+    if (!g_rd.hasDevice || s_gatherOn) {
+        return;
+    }
+    if (s_twin.jobs != NULL) {
+        if (!wait) {
+            /* taken once its compiles have returned, without a call that
+               waits for the submit thread (the finisher's rule) */
+            RhiGpuProgress gp;
+            if (rhi_gpu_progress(&gp) && gp.bgPipesLeft > 0) {
+                return;
+            }
+        }
+        if (!twinEnd(wait) || !wait) {
+            return; /* one step a picture in play */
+        }
+    }
+    if (s_twin.n == 0 || s_fin.on || s_fin.jobs != NULL ||
+        !(rd__nd_on() || rd__fps_on() || rd__op_on())) {
+        return;
+    }
+    if (!wait && (double)__atomic_load_n(&s_finHoldUs, __ATOMIC_ACQUIRE) / 1000.0 > rd__now_ms()) {
+        return; /* the finisher's hold: a late game step or a slow picture */
+    }
+    twinBegin();
+    if (wait) {
+        (void)twinEnd(true);
+        /* the tests' waited path (ICO_RD_VU_NODISCARD=1, rd__nd_replay_begin):
+           the whole queue, a batch at a time, so the next replay draws every
+           pass the CPU gives a twin through it (play: one batch a picture) */
+        while (s_twin.n > 0 && s_twin.jobs == NULL &&
+               (rd__nd_on() || rd__fps_on() || rd__op_on()) && !s_createStopped) {
+            twinBegin();
+            (void)twinEnd(true);
+        }
+    }
+}
+
+/* the batch in flight ended (its pipelines destroyed), the queue emptied */
+void rd__pipeline_twin_forget_queued(void)
+{
+    s_twin.n = 0; /* the batch in flight, if any, is taken as before */
+}
+
+static void twinClear(void)
+{
+    if (s_twin.jobs != NULL && g_rd.hasDevice) {
+        (void)rhi_create_pipelines_end(s_twin.jobs, true, NULL, NULL, NULL);
+        s_batchNote[0] = '\0';
+    }
+    s_twin.jobs = NULL;
+    s_twin.nb = 0;
+    s_twin.n = 0;
+}
+
+/* every made pipeline whose key has a bit of mask destroyed (the queue
+   emptied first) */
+static uint32_t dropBits(uint8_t mask)
+{
+    twinClear();
+    uint32_t n = 0;
+    for (uint32_t i = 0; i < s_used && g_rd.hasDevice; i++) {
+        if ((s_cache[i].key.gs.nodual & mask) && s_cache[i].pipe.id) {
+            rhi_destroy_pipeline(s_cache[i].pipe);
+            s_cache[i].pipe = (RhiPipeline){0}; /* a failed entry: never asked for again */
+            s_count--;
+            n++;
+        }
+    }
+    return n;
+}
+
+uint32_t rd__pipeline_drop_twins(void)
+{
+    return dropBits(RD_NODUAL_NODISCARD); /* with the fast build's discard-free form */
+}
+
+uint32_t rd__pipeline_drop_fast(void)
+{
+    return dropBits(RD_NODUAL_FAST);
+}
+
+static uint32_t countBits(uint8_t want, uint8_t mask)
+{
+    uint32_t n = 0;
+    for (uint32_t i = 0; i < s_used; i++) {
+        n += (s_cache[i].key.gs.nodual & mask) == want && s_cache[i].pipe.id ? 1u : 0u;
+    }
+    return n;
+}
+
+uint32_t rd__pipeline_count_twins(void)
+{
+    /* the discard-free twins' own, the fast build's discard-free form not
+       among them */
+    return countBits(RD_NODUAL_NODISCARD, RD_NODUAL_NODISCARD | RD_NODUAL_FAST);
+}
+
+uint32_t rd__pipeline_count_fast(void)
+{
+    return countBits(RD_NODUAL_FAST, RD_NODUAL_FAST);
+}
+
+uint32_t rd__pipeline_count_onepass(void)
+{
+    return countBits(RD_NODUAL_ONEPASS, RD_NODUAL_ONEPASS);
+}
+
+uint32_t rd__pipeline_twins_background(void)
+{
+    return s_twin.background;
+}
+
+uint32_t rd__pipeline_mark(void)
+{
+    return s_used;
+}
+
+uint32_t rd__pipeline_forget_since(uint32_t mark)
+{
+    if (mark >= s_used) {
+        return 0;
+    }
+    if (g_rd.hasDevice) {
+        rhi_wait_idle(); /* none of them in flight */
+    }
+    uint32_t n = 0;
+    for (uint32_t i = mark; i < s_used; i++) {
+        if (s_cache[i].pipe.id) {
+            if (g_rd.hasDevice) {
+                rhi_destroy_pipeline(s_cache[i].pipe);
+            }
+            s_count--;
+            n++;
+        } else if (s_failedCount > 0u) {
+            s_failedCount--;
+        }
+    }
+    /* the entries after the mark gone (made again when a draw asks), the
+       index over the rest rebuilt */
+    s_used = mark;
+    memset(s_hash, 0, sizeof(s_hash));
+    for (uint32_t i = 0; i < s_used; i++) {
+        bool found;
+        const uint32_t at = probeKey(&s_cache[i].key, &found);
+        s_hash[at] = (uint16_t)(i + 1u);
+    }
+    return n;
+}
+
 /* the pipelines line's words for the dynamic state in force
  * (rd__key_dynamic_normalise) */
 static const char *dynamicWords(void)
@@ -2900,7 +3715,9 @@ uint32_t rd_precreate_pipelines(void)
                                      rd__pipe_family_name((RdKeyFamily)f), fam[f]);
             at += put > 0 ? (size_t)put : 0;
         }
-        rd__log("pipelines: the start-up set by family: %s", w);
+        char sh[160];
+        rd__sheet_set_words(sh, sizeof(sh));
+        rd__log("pipelines: the start-up set by family: %s; %s", w, sh);
     }
     rd__uber_set_line(n); /* GS state as shader data: the set it replaces */
     if (n > m) {
@@ -2935,10 +3752,55 @@ uint32_t rd_precreate_pipelines(void)
                     moved);
         }
     }
-    createKeys(keys, m, false, &times, &c);
+    /* issue 123: resumed where an earlier start's set stopped for memory
+       (rd_set_pipeline_resume): from at, in smaller batches; the keys
+       before it left to the pipeline cache, or made after the rest */
+    static RdPipeKeyInt rot[RD_PIPELINE_CACHE_MAX];
+    const RdPipeKeyInt *setKeys = keys;
+    uint32_t setN = m, base = 0;
+    s_setStopped = false;
+    s_setBatchCap = 0;
+    if (s_resume.armed) {
+        const uint32_t pol = s_setPolicy.batch > 0u && s_setPolicy.batch < RD_PIPE_BATCH
+                                 ? s_setPolicy.batch
+                                 : RD_PIPE_BATCH;
+        const uint32_t half = s_resume.batch > 0u ? s_resume.batch : pol / 2u;
+        base = s_resume.at < m ? s_resume.at : 0u;
+        s_setBatchCap = half > 4u ? half : 4u; /* pipe_resume.h's floor */
+        if (base > 0u && s_resume.skipBefore) {
+            setKeys = keys + base;
+            setN = m - base;
+        } else if (base > 0u) {
+            memcpy(rot, keys + base, (size_t)(m - base) * sizeof(keys[0]));
+            memcpy(rot + (m - base), keys, (size_t)base * sizeof(keys[0]));
+            setKeys = rot;
+        }
+        rd__log("pipelines: the start-up set resumes at pipeline %u of %u after an earlier "
+                "start's stop for memory, in batches of %u (the set's own %u)%s",
+                base + 1u, m, s_setBatchCap < pol ? s_setBatchCap : pol, pol,
+                base == 0u            ? ""
+                : s_resume.skipBefore ? "; the pipelines before it are left to first use (the "
+                                        "pipeline cache file holds them)"
+                                      : "; the pipelines before it are made after the rest");
+        s_resume.armed = false;
+    }
+    s_sizeOn = true; /* issue 215: the window's ask (rd_set_set_size_fn) */
+    createKeys(setKeys, setN, false, &times, &c);
+    s_sizeOn = false;
+    s_setBatchCap = 0;
+    if (c.budget[0]) {
+        /* where it stopped in the set's own order (the rotation undone),
+           for the next start's resume (the window's activity file) */
+        s_setStopped = true;
+        s_setStop.at =
+            setKeys == keys + base && base > 0u ? base + c.stoppedAt : (base + c.stoppedAt) % m;
+        s_setStop.total = m;
+        s_setStop.batch = s_setBatchUsed;
+        snprintf(s_setStop.why, sizeof(s_setStop.why), "%s", c.budget);
+    }
     if (c.stop) {
         rd__log("pipelines: the start-up set stopped at %u of %u (the game is closing)",
-                c.stoppedAt, m);
+                c.stoppedAt, setN);
     }
     const double ms = rd__now_ms() - t0;
     s_startupSet = true;
@@ -2952,7 +3814,7 @@ uint32_t rd_precreate_pipelines(void)
         rd_pipelines_lazy(c.budget);
         /* the window may finish the rest in the background (a stop at the
            free-memory floor: rd_pipelines_background_start) */
-        finOffer(keys, m, c.stoppedAt);
+        finOffer(setKeys, setN, c.stoppedAt);
     }
     if (c.compiled) {
         preTimesLog(&times);
@@ -3100,6 +3962,7 @@ void rd_pipelines_lazy(const char *why)
 {
     memset(&s_lazy, 0, sizeof(s_lazy));
     s_lazy.on = true;
+    s_lazySetMade = false;
     rd__log("pipelines: no start-up set %s: pipelines are made as the game needs them%s",
             why != NULL && why[0] != '\0' ? why : "(no reason given)", dynamicWords());
     rd__log("pipelines: the pipeline cache holds %llu KB at the start; it is written after each "
@@ -3113,13 +3976,36 @@ void rd_pipelines_lazy(const char *why)
  * pipelines 0.02-0.61 s, mean 0.14 s, over 1.8 s; memory 210 MB (most 214
  * MB), pipeline cache 3104 KB; slowest 0.61 s program ... (font_sheet_ps
  * ...)") to the log and the activity file (rd_set_batch_fn) */
+/* The lazy batch's keys by family and how many of them the start-up set
+ * holds (lazyCount): "; by family program 12, vu 17; 27 of them in the
+ * start-up set" (issue 123: a resumed set made before play would have made
+ * those; one outside it is a key only a frame's walk reaches) */
+static void lazyBatchKeys(char *out, size_t size)
+{
+    size_t at = 0;
+    out[0] = '\0';
+    for (int f = 0; f < RD_KF_COUNT && at < size; f++) {
+        if (s_lazy.fam[f] != 0) {
+            const int put = snprintf(out + at, size - at, "%s %s %u", at ? "," : "; by family",
+                                     rd__pipe_family_name((RdKeyFamily)f), s_lazy.fam[f]);
+            at += put > 0 ? (size_t)put : 0;
+        }
+    }
+    if (at < size) {
+        const int put =
+            snprintf(out + at, size - at, "; %u of them in the start-up set", s_lazy.inSet);
+        (void)put;
+    }
+}
+
 static void lazyBatchEnd(double now)
 {
-    char line[600], mem[96], w[96], mods[160];
+    char line[600], mem[96], w[96], mods[160], fams[192];
     (void)rhi_pipeline_cache_save();
     memoryText(mem, sizeof(mem));
     keyWords(&s_lazy.slow, w, sizeof(w));
     keyModules(&s_lazy.slow, mods, sizeof(mods));
+    lazyBatchKeys(fams, sizeof(fams));
     s_lazy.batches++;
     snprintf(line, sizeof(line),
              "lazy batch %u, pipelines %u-%u of this run (compiler %s): %u pipelines %.2f-%.2f "
@@ -3128,6 +4014,16 @@ static void lazyBatchEnd(double now)
              s_compiler[0] ? s_compiler : "unnamed by the driver", s_lazy.n, s_lazy.lo / 1000.0,
              s_lazy.hi / 1000.0, s_lazy.sum / s_lazy.n / 1000.0, (now - s_lazy.t0) / 1000.0, mem,
              s_lazy.slowMs / 1000.0, w, mods);
+    {
+        /* the family words after it, cut at the line's end (copied by
+           hand: a format with them all made gcc 14's -Wformat-truncation
+           at -O1 with fortify see a possible cut) */
+        size_t len = strlen(line);
+        for (size_t i = 0; fams[i] != '\0' && len + 1 < sizeof(line); i++) {
+            line[len++] = fams[i];
+        }
+        line[len] = '\0';
+    }
     s_lazy.n = 0;
     if (s_batchFn != NULL) {
         s_batchFn(line);
@@ -3181,8 +4077,9 @@ const RdPipeKeyInt *rd__pipeline_key_at(uint32_t i)
  * the record, a stage pipeline that could not be made, a failed self-test,
  * the pre-pass off) draws the old way, through its program's own entry
  * with vu_ps: vu_X_vs (the extended build), or on a
- * device of the table (RhiLimits.vuFallbackPlain, vk_device.c kVuPlainOnly)
- * and under Mesa's Turnip driver (rd__driver_is_turnip, issue 163)
+ * device of the table (RhiLimits.vuFallbackPlain, the device table's row
+ * adreno-740-qualcomm) and under Mesa's Turnip driver (rd__driver_is_turnip,
+ * the row turnip, issue 163)
  * vu_X_plain_vs (ICO_VU_PLAIN: no card test, no tick cameras), as
  * [dev] vu_set = plain (ICO_RD_VU_SET=plain), ICO_RD_VU_PLAIN=1 or the
  * host (rd_set_vu_plain_only) ask anywhere (rd__vu_set_choose);
@@ -3201,6 +4098,29 @@ bool rd__vu_extended(void)
 {
     return g_rd.settings.preset != RD_PRESET_ORIGINAL || g_rd.gsW > ICO_SH_FRAME_BASE_W ||
            g_rd.sceneSx > 1.0f || g_rd.sceneSy > 1.0f;
+}
+
+/* [dev] region_rule (ICO_RD_REGION_RULE): camera (unset, the default) or
+ * ps2; anything else is camera, logged.  Read at each device start
+ * (rd__vu_policy_init: a test may start the renderer under both), and on
+ * the first ask without one (the record-only renderer) */
+static int s_regionCamera = -1;
+
+static void regionRuleRead(void)
+{
+    const char *e = getenv("ICO_RD_REGION_RULE");
+    s_regionCamera = !(e && strcmp(e, "ps2") == 0);
+    if (e && e[0] && strcmp(e, "ps2") != 0 && strcmp(e, "camera") != 0) {
+        rd__log("region rule: ICO_RD_REGION_RULE=%s is not camera or ps2: camera", e);
+    }
+}
+
+bool rd__region_camera(void)
+{
+    if (s_regionCamera < 0) {
+        regionRuleRead();
+    }
+    return s_regionCamera != 0;
 }
 
 static char s_vuHostWhy[128];
@@ -3253,6 +4173,19 @@ int rd_pipeline_cache_file(char *out, size_t cap)
         RdCacheKey k;
         rd_cache_key_begin(&k, RD_PIPELINE_CACHE_FORMAT);
         for (unsigned i = 0; i < g_icoShaderCount; i++) {
+            /* the zero-area cull's rule-stage builds (rd_vu_zero.h) and the
+               discard-free twins (rd_nodiscard.h, "_nodual_nd") and the fast
+               pixel builds (rd_fastps.h, "_nodual_fast", "_nodual_fast_nd")
+               left out:
+               with them the file's name is the build's without them, so a
+               device keeps the cache it had (the driver's own cache checks
+               each module it holds) */
+            const size_t nl = strlen(g_icoShaders[i].name);
+            if (strncmp(g_icoShaders[i].name, "vu_tri_rule_zero_", 17) == 0 ||
+                (nl > 10 && strcmp(g_icoShaders[i].name + nl - 10, "_nodual_nd") == 0) ||
+                strstr(g_icoShaders[i].name, "_nodual_fast") != NULL) {
+                continue;
+            }
             rd_cache_key_module(&k, g_icoShaders[i].name, g_icoShaders[i].stage,
                                 g_icoShaders[i].spirv, g_icoShaders[i].spirv_len);
         }
@@ -3301,8 +4234,22 @@ void rd__vu_set_choose(const RhiLimits *lim, bool envPlain, bool envExtended, co
         snprintf(out->why, sizeof(out->why), "on this device (%s)", lim->vuFallbackPlain);
         out->kind = "plain set by the device table";
         out->brief = lim->vuFallbackPlain;
+        out->noBeside = true;
     } else if (rd__driver_is_turnip(lim)) {
-        /* Mesa's Turnip on an Adreno: a skinned draw's vertex thrown far off
+        /* The shape of a gate on the Mesa version (lim->mesa, parsed from the
+         * driver's driverInfo, logged in the profile line's "turnip:" note):
+         * this branch would read `rd__driver_is_turnip(lim) &&
+         * !turnip_sliver_fixed(&lim->mesa)`, true for a build that is not
+         * known fixed, where turnip_sliver_fixed is true for a version a
+         * device test showed free of the sliver with the extended set ([dev]
+         * vu_set = extended on a 740 or 750: Mesa 25.x, "-devel" builds
+         * included, are unverified).  No version is known fixed yet, so the
+         * plain set stays for every Turnip, a build that names no version
+         * included; a build of Mesa's main branch ("-devel") is a version
+         * between two releases, so the gate would name the build's commit
+         * with it, not the number alone.
+         *
+         * Mesa's Turnip on an Adreno: a skinned draw's vertex thrown far off
          * Ico showed as a sliver through the extended set's clipped
          * triangles between ticks (issue 163).  The plain set drops a
          * triangle that fails the region test and reaches into the picture
@@ -3314,7 +4261,14 @@ void rd__vu_set_choose(const RhiLimits *lim, bool envPlain, bool envExtended, co
                  "(Turnip driver: the extended set's clipped triangles showed a stray vertex "
                  "there, issue 163; [dev] vu_set = extended asks for the extended one)");
         out->kind = "plain set";
-        out->brief = "Turnip driver, issue 163";
+        /* the turnip row's reason (port/rhi/rhi_device_table.c: "Turnip
+           driver, issue 163") */
+        const char *brief = rd_device_rows_reason("turnip", RHI_DC_VU_FALLBACK_PLAIN);
+        out->brief = brief != NULL ? brief : "";
+        /* the side bands would draw those dropped triangles again, clipped
+         * beside the 4:3 picture (a phone's frame is always wider): the
+         * sliver of a skinned draw would come back there (vuDropMode) */
+        out->noBeside = true;
     } else if (envPlain) {
         snprintf(out->why, sizeof(out->why),
                  "(vu_set = plain: ICO_RD_VU_SET=plain or ICO_RD_VU_PLAIN=1)");
@@ -3329,6 +4283,7 @@ void rd__vu_set_choose(const RhiLimits *lim, bool envPlain, bool envExtended, co
     if (out->plain && envExtended) {
         out->plain = false;
         out->overridden = true;
+        out->noBeside = false;
         out->kind = "extended set by [dev] (vu_set = extended, ICO_RD_VU_SET=extended or "
                     "ICO_RD_VU_EXTENDED=1)";
         out->brief = "";
@@ -3381,6 +4336,17 @@ bool rd__vu_policy_init(const RhiLimits *lim)
     RdVuSetChoice choice;
     rd__vu_set_choose(lim, setPlain || envOn("ICO_RD_VU_PLAIN"),
                       setExtended || envOn("ICO_RD_VU_EXTENDED"), s_vuHostWhy, &choice);
+    {
+        /* the tests' stand-in for a device that keeps the plain set
+         * (ICO_RD_VU_PLAIN=row, docs/port/TESTING.md): its drops as the
+         * table's row and Turnip keep them (rd_plain_camera.h), on lavapipe */
+        const char *vp = getenv("ICO_RD_VU_PLAIN");
+        if (choice.plain && !choice.noBeside && vp && strcmp(vp, "row") == 0) {
+            choice.noBeside = true;
+            rd__log("VU shaders: ICO_RD_VU_PLAIN=row: the plain set's drops as on a device that "
+                    "keeps it (the tests' stand-in for the device table's row)");
+        }
+    }
     const char *kind = choice.kind;
     snprintf(g_rd.vuPlainWhy, sizeof(g_rd.vuPlainWhy), "%s", choice.why);
     bool plain = choice.plain;
@@ -3392,7 +4358,11 @@ bool rd__vu_policy_init(const RhiLimits *lim)
     }
     /* the ten mesh entries' plain modules (vu_X_vs's is vu_X_plain_vs;
      * rd_replay.c rd__gpu_shutdown destroys them), made only when the
-     * fallback takes them; one missing keeps the extended ones */
+     * fallback takes them; one missing keeps the extended ones (counted
+     * into the start-up set's progress, rd_shader_plan.c) */
+    if (plain) {
+        rhi_plan_shaders((uint32_t)(RD_VS_VU_GRID_SPEC - RD_VS_VU_PRELIT + 1));
+    }
     for (uint8_t v = RD_VS_VU_PRELIT; plain && v <= RD_VS_VU_GRID_SPEC; v++) {
         char name[64];
         const char *e = rd__vs_name(v);
@@ -3412,8 +4382,58 @@ bool rd__vu_policy_init(const RhiLimits *lim)
             kind = "extended set (a plain module missing from this build)";
         }
     }
+    /* issue 123's ladder, step 1 ([dev] vu_bones = ring, ICO_RD_VU_BONES;
+     * docs/port/VU_SKIN_CHECK.md "The ladder"): the cluster entries' ring
+     * builds (vu_X_ring_plain_vs, vu_common.hlsli ICO_VU_BONES_RING: the
+     * bones through t5 from VuCB's mark lane, rd_replay_vu.c vuSource) in
+     * place of their plain variants, the same words computed; with the plain
+     * set only (they are plain variants), one missing keeps the plain ones */
+    g_rd.vuBonesRing = false;
+    {
+        /* the window's choice in the run (rd_set_vu_bones) over the
+         * environment the start exported */
+        const char *vb = rd__vu_bones_asked();
+        const bool want = vb && strcmp(vb, "ring") == 0;
+        const char *why = NULL;
+        if (vb && vb[0] && !want && strcmp(vb, "cbuffer") != 0) {
+            rd__log("VU bones: ICO_RD_VU_BONES=%s is not ring or cbuffer: cbuffer", vb);
+        }
+        if (want && !plain) {
+            why = "the program entries are the extended set, the ring builds plain variants";
+        } else if (want) {
+            RhiShader ring[RD_VS_VU_SKIN_DEBUG - RD_VS_VU_SKIN + 1];
+            memset(ring, 0, sizeof(ring));
+            bool all = true;
+            rhi_plan_shaders((uint32_t)(RD_VS_VU_SKIN_DEBUG - RD_VS_VU_SKIN + 1));
+            for (uint8_t v = RD_VS_VU_SKIN; v <= RD_VS_VU_SKIN_DEBUG; v++) {
+                char name[64];
+                rd__vu_bones_ring_name(v, name, sizeof(name));
+                ring[v - RD_VS_VU_SKIN] = rd__make_shader(name);
+                all = all && ring[v - RD_VS_VU_SKIN].id != 0;
+            }
+            for (uint8_t v = RD_VS_VU_SKIN; v <= RD_VS_VU_SKIN_DEBUG; v++) {
+                RhiShader *r = &ring[v - RD_VS_VU_SKIN];
+                if (all) {
+                    rhi_destroy_shader(g_rd.vsPlain[v]); /* the plain build, unused */
+                    g_rd.vsPlain[v] = *r;
+                } else if (r->id) {
+                    rhi_destroy_shader(*r);
+                }
+            }
+            g_rd.vuBonesRing = all;
+            why = all ? NULL : "a ring build is missing from this build";
+        }
+        /* the ring builds usable: the plain set on Vulkan (the skin
+         * check's twins and the ladder run there) */
+        rd__vu_bones_policy(want, g_rd.vuBonesRing, plain && rhi_backend() == RHI_BACKEND_VULKAN,
+                            why);
+    }
     g_rd.vuFallbackPlain = plain;
     g_rd.vuPlainBrief = plain ? choice.brief : NULL;
+    /* the device's plain set (issue 163): no side bands on any VU draw (the
+     * record path, where it is asked for on such a device, included); the
+     * profile line says so */
+    g_rd.vuNoBeside = plain && choice.noBeside;
     for (uint8_t v = RD_VS_VU_PRELIT; v <= RD_VS_VU_PARTICLE; v++) {
         g_rd.vsFallback[v] = plain && g_rd.vsPlain[v].id ? g_rd.vsPlain[v] : g_rd.vs[v];
     }
@@ -3430,10 +4450,31 @@ bool rd__vu_policy_init(const RhiLimits *lim)
     /* PC port: which set the program entries (and the draw merge's builds,
      * rd_replay_vu.c vuMergeInit) take and why, first (issues 163/164) */
     rd__log("VU shaders: %s%s%s: the program entries (largest %s %u words) and the mesh and grid "
-            "draws' merge builds of the same set%s; the record path's modules on every device "
-            "(largest %s %u words), in the start-up set only with the vertex pre-pass off",
+            "draws' merge builds of the same set%s, in the start-up set only with the vertex "
+            "pre-pass off; the record path's modules on every device (largest %s %u words), in "
+            "the start-up set only with it on",
             kind, plain ? " " : "", plain ? g_rd.vuPlainWhy : "", fn, fw,
             plain ? " (no wide-screen rule and no tick cameras on those draws)" : "", mn, mw);
+    /* the region rule's mode (rd_replay_vu.c vuSource; a report shows which
+     * rule drew the picture on its start lines) */
+    regionRuleRead();
+    if (rd__region_camera() && g_rd.vuNoBeside) {
+        /* the device's plain set (rd_plain_camera.h, issue 123): the
+         * static meshes and grids by the camera, the skinned draws as the
+         * PS2 (issue 163) */
+        rd__log("%s; [dev] region_rule = ps2 keeps the PS2's drops on every draw",
+                RD_PLAIN_CAMERA_START);
+    } else if (rd__region_camera()) {
+        rd__log("region rule: the camera decides (triangles the PS2 drops are drawn clipped when "
+                "they face the eye; [dev] region_rule = ps2 keeps the PS2's drops)");
+    } else {
+        rd__log("region rule: the PS2's ([dev] region_rule = ps2: a triangle the VU drops stays "
+                "dropped, %s)",
+                g_rd.vuNoBeside ? "with no side bands on this device's plain set (issue 163)"
+                                : "drawn beside the 4:3 picture on a wider frame when it faces "
+                                  "the eye");
+    }
+    ico_attempt_decide_plain_camera(g_rd.vuNoBeside, rd__region_camera());
     return true;
 }
 
@@ -3450,8 +4491,13 @@ RdPipeKeyInt rd__vu_pre_key(uint8_t preVs)
     k.gs.colorMask = 0xF;
     k.gs.prim = RD_PRIM_POINTS;
     k.vs = preVs;
-    k.fs = RD_FS_VU_PRE;
-    k.colorFmt = RHI_FMT_RGBA32_UINT;
+    /* the record's write (rd_vu_record.h): the three RGBA32_UINT targets,
+     * or none under the stores (the pipeline stores from its vertex
+     * shader) and the compute dispatches (fs RD_FS_VU_PRE_CS, no module:
+     * the key's own mark, the key having no spare byte); every kind may be
+     * in the cache across the self-test's fallback */
+    k.fs = rd__vu_record_compute() ? RD_FS_VU_PRE_CS : RD_FS_VU_PRE;
+    k.colorFmt = rd__vu_record_buffered() ? RHI_FMT_UNKNOWN : RHI_FMT_RGBA32_UINT;
     k.depthFmt = RHI_FMT_UNKNOWN;
     return k;
 }
@@ -3487,11 +4533,16 @@ RdKeyFamily rd__pipe_key_family(const RdPipeKeyInt *k)
     case RD_STENCIL_DATE_TEST1:
     case RD_STENCIL_DATE_TEST0_SET:
     case RD_STENCIL_DATE_TEST1_CLR:
+    case RD_STENCIL_DATE_CLEAR2:
+    case RD_STENCIL_TILE_MARK:
+    case RD_STENCIL_DATE_SET_T:
+    case RD_STENCIL_DATE_TEST0_T:
+    case RD_STENCIL_DATE_TEST1_T:
         return RD_KF_DATE;
     default:
         break;
     }
-    if (rd__vs_is_vu_pre(k->vs) || rd__vs_is_vu_stage(k->vs)) {
+    if (rd__vs_is_vu_pre(k->vs) || rd__vs_is_vu_stage(k->vs) || rd__vs_is_vu_zero(k->vs)) {
         return RD_KF_VU_POINT;
     }
     if (keyIsVu(k)) {
@@ -3500,6 +4551,7 @@ RdKeyFamily rd__pipe_key_family(const RdPipeKeyInt *k)
     switch (k->fs) {
     case RD_FS_BOX_REDUCE:
     case RD_FS_SHADOW_COUNT:
+    case RD_FS_SHADOW_COUNT_LOAD:
         return RD_KF_SHADOW;
     case RD_FS_FOG:
     case RD_FS_FOG_BUFFER:
@@ -3507,6 +4559,8 @@ RdKeyFamily rd__pipe_key_family(const RdPipeKeyInt *k)
     case RD_FS_FOG_LOCAL:
     case RD_FS_DEPTH_RESOLVE:
     case RD_FS_DEPTH_UPSAMPLE:
+    case RD_FS_DEPTH_DOWN:
+    case RD_FS_DEPTH_DOWN_MS:
     case RD_FS_MSAA_RESOLVE:
     case RD_FS_CRACK_FILL:
     case RD_FS_CRACK_COUNT:
@@ -3515,11 +4569,16 @@ RdKeyFamily rd__pipe_key_family(const RdPipeKeyInt *k)
     case RD_FS_CRT_BLOOM:
     case RD_FS_CRT_BLUR:
     case RD_FS_CRT:
+    case RD_FS_FSR1_EASU: /* the other present-stage filter (rd_fsr1.c) */
+    case RD_FS_FSR1_RCAS:
         return RD_KF_CRT;
     case RD_FS_FX_SPRITE:
     case RD_FS_FX_SPRITE_UINT:
     case RD_FS_FX_BLUR2:
+    case RD_FS_FX_BLUR4:
+    case RD_FS_FX_GLOWBLUR:
     case RD_FS_FX_FRAME:
+    case RD_FS_FX_PASTE:
     case RD_FS_FX_LOCAL:
     case RD_FS_FX_AURA_ROWS:
     case RD_FS_FX_AURA_SUM:
@@ -3621,7 +4680,10 @@ static uint32_t enumerateAll(RdPipeKeyInt *out, uint32_t max)
     n = rd__enumerate_reachable_water(out, max, n);
     n = rd__enumerate_reachable_crt(out, max, n);
     n = rd__enumerate_reachable_date(out, max, n); /* after every family that draws DATE */
-    return rd__enumerate_reachable_blur(out, max, n);
+    n = rd__enumerate_reachable_blur(out, max, n);
+    /* the shadow composites' and levels' twins (rd_comp_spec.c), of every key
+     * above of their forms */
+    return rd__comp_spec_keys(out, max, n, n);
 }
 
 /* In the two-pass fallback every key is what rd__expand_no_dual
@@ -3757,6 +4819,8 @@ uint32_t rd__enumerate_reachable_fog(RdPipeKeyInt *out, uint32_t max, uint32_t n
             const RdPipeKeyInt k = rd__crack_fill_key(kKinds[c]);
             n = rd__add_pipe_key(out, max, n, &k);
         }
+        /* the fills' depth twins for list 11's pass (rd_fill11.c) */
+        n = rd__fill11_enumerate(out, max, n);
     }
     /* the MSAA epoch's single-sampled resolves into SCENE (rd_replay.c
      * msaaEnd): the colour and depth together, the depth alone */
@@ -3800,9 +4864,12 @@ RdPipeKeyInt rd__crack_fill_key(int kind)
 
 RdPipeKeyInt rd__date_setup_key(uint8_t mode, RhiFormat colorFmt)
 {
-    RdPipeKeyInt k = rd__post_key(
-        RD_VS_BLIT, mode == RD_STENCIL_DATE_CLEAR ? RD_FS_DATE_CLEAR : RD_FS_DATE_STENCIL,
-        colorFmt);
+    RdPipeKeyInt k = rd__post_key(RD_VS_BLIT,
+                                  mode == RD_STENCIL_DATE_CLEAR || mode == RD_STENCIL_DATE_CLEAR2
+                                      ? RD_FS_DATE_CLEAR
+                                  : mode == RD_STENCIL_TILE_MARK ? RD_FS_SHADOW_TILE_MARK
+                                                                 : RD_FS_DATE_STENCIL,
+                                  colorFmt);
     k.depthFmt = RHI_FMT_D32F_S8;
     k.gs.ztst = RD_ZTST_ALWAYS;
     k.gs.zwrite = RD_ZWRITE_OFF;
@@ -3855,6 +4922,8 @@ uint32_t rd__enumerate_reachable_date(RdPipeKeyInt *out, uint32_t max, uint32_t 
     static const int kBlends[] = {-1, 4, 5, 6};
     static const uint8_t kPrims[] = {RD_PRIM_TRIANGLES, RD_PRIM_LINES};
     const uint32_t n0 = n < max ? n : max;
+    /* the shadow tiles' keys where they may be drawn (rd_shadow_tile.c) */
+    const bool tiles = rd__shadow_tile_keys_wanted();
     for (size_t t = 0; t < sizeof(kTests) / sizeof(kTests[0]); t++) {
         for (int space = 0; space < 2; space++) {
             for (int zw = 0; zw < 2; zw++) {
@@ -3875,9 +4944,21 @@ uint32_t rd__enumerate_reachable_date(RdPipeKeyInt *out, uint32_t max, uint32_t 
                             kt.key.fs = RD_FS_SPRITE_TEXA;
                             if (rd__date_stencil_pass(&dp[i])) {
                                 n = rd__add_pipe_key(out, max, n, &dp[i].key);
+                                /* the shadow composite's TEST word without a Z
+                                 * write: its twin over the tile mask */
+                                if (t == 0 && !zw && tiles) {
+                                    RdPipeKeyInt tk = dp[i].key;
+                                    rd__shadow_tile_test_key(&tk);
+                                    n = rd__add_pipe_key(out, max, n, &tk);
+                                }
                             }
                             if (rd__date_stencil_pass(&kt)) {
                                 n = rd__add_pipe_key(out, max, n, &kt.key);
+                                if (t == 0 && !zw && tiles) {
+                                    RdPipeKeyInt tk = kt.key;
+                                    rd__shadow_tile_test_key(&tk);
+                                    n = rd__add_pipe_key(out, max, n, &tk);
+                                }
                             }
                         }
                     }
@@ -3928,12 +5009,25 @@ uint32_t rd__enumerate_reachable_date(RdPipeKeyInt *out, uint32_t max, uint32_t 
     const RdPipeKeyInt clear = rd__date_setup_key(RD_STENCIL_DATE_CLEAR, RHI_FMT_RGBA8_UNORM);
     const RdPipeKeyInt set = rd__date_setup_key(RD_STENCIL_DATE_SET, RHI_FMT_RGBA8_UNORM);
     n = rd__add_pipe_key(out, max, n, &clear);
+    if (tiles) {
+        /* the tiled set-up's three keys and the mask's */
+        static const uint8_t kTileModes[] = {RD_STENCIL_DATE_CLEAR2, RD_STENCIL_TILE_MARK,
+                                             RD_STENCIL_DATE_SET_T};
+        for (size_t i = 0; i < sizeof kTileModes; i++) {
+            const RdPipeKeyInt k = rd__date_setup_key(kTileModes[i], RHI_FMT_RGBA8_UNORM);
+            n = rd__add_pipe_key(out, max, n, &k);
+        }
+        const RdPipeKeyInt mask = rd__shadow_tile_mask_key();
+        n = rd__add_pipe_key(out, max, n, &mask);
+    }
     return rd__add_pipe_key(out, max, n, &set);
 }
 
 /* --------------------------------------------------------------- shadows */
 
-RdPipeKeyInt rd__shadow_volume_key(const RdStateBlock *s, RhiFormat colorFmt, int decr)
+/* the volume pipeline as the state asks for it: sprite_world_vs with
+ * sprite_ps (the start-up set's and the self-test's general form) */
+static RdPipeKeyInt shadowVolumeGeneral(const RdStateBlock *s, RhiFormat colorFmt, int decr)
 {
     RdPipeKeyInt k;
     memset(&k, 0, sizeof(k));
@@ -3954,6 +5048,15 @@ RdPipeKeyInt rd__shadow_volume_key(const RdStateBlock *s, RhiFormat colorFmt, in
     return k;
 }
 
+/* the volume draw's key (rd_replay.c doShadowStripIn): the general form, or
+ * its twin by date_clear_ps where the stencil-only entry is taken
+ * (rd_volume_fs.c: no colour output and no discard, the same stencil) */
+RdPipeKeyInt rd__shadow_volume_key(const RdStateBlock *s, RhiFormat colorFmt, int decr)
+{
+    const RdPipeKeyInt k = shadowVolumeGeneral(s, colorFmt, decr);
+    return rd__volume_fs_turn(&k, decr);
+}
+
 /* The box reduction of the scaled count to the GS size
  * (rd_replay.c shadowReduce): RGBA8 like the count. */
 RdPipeKeyInt rd__shadow_reduce_key(void)
@@ -3962,10 +5065,13 @@ RdPipeKeyInt rd__shadow_reduce_key(void)
 }
 
 /* The count in one draw (rd_replay.c shadowCountOne): RGBA8 like the
- * count, no depth attachment (the stencil is read through its view) */
+ * count, no depth attachment (the stencil is read through its view); the
+ * loads-only build where the loads are read (rd__shadow_count_loads) */
 RdPipeKeyInt rd__shadow_count_key(void)
 {
-    return rd__post_key(RD_VS_BLIT, RD_FS_SHADOW_COUNT, RHI_FMT_RGBA8_UNORM);
+    const bool load = rd__shadow_count_loads() && g_rd.fs[RD_FS_SHADOW_COUNT_LOAD].id;
+    return rd__post_key(RD_VS_BLIT, load ? RD_FS_SHADOW_COUNT_LOAD : RD_FS_SHADOW_COUNT,
+                        RHI_FMT_RGBA8_UNORM);
 }
 
 RdPipeKeyInt rd__shadow_resolve_key(int pass, uint32_t step)
@@ -3991,9 +5097,15 @@ uint32_t rd__enumerate_reachable_shadow(RdPipeKeyInt *out, uint32_t max, uint32_
     RdStateBlock s;
     rd__reset_state_block(&s);
     s.ds.test = rd_test_from_gs(RD_TEST_Z_GEQUAL); /* shadow_Reset's TEST 0x50000 */
+    /* the volumes' keys of both Z tests (the game's GEQUAL, the self-tests'
+     * ALWAYS) by sprite_ps, and their date_clear_ps twins where the
+     * stencil-only entry is offered (rd_volume_fs.c) */
+    RdPipeKeyInt vol[4];
+    uint32_t nv = 0;
     for (int decr = 0; decr < 2; decr++) {
-        const RdPipeKeyInt k = rd__shadow_volume_key(&s, RHI_FMT_RGBA8_UNORM, decr);
+        const RdPipeKeyInt k = shadowVolumeGeneral(&s, RHI_FMT_RGBA8_UNORM, decr);
         n = rd__add_pipe_key(out, max, n, &k);
+        vol[nv++] = k;
     }
     for (int p = 0; p < RD_SHADOW_RESOLVE_PASSES; p++) {
         const RdPipeKeyInt k = rd__shadow_resolve_key(p, 4);
@@ -4013,6 +5125,13 @@ uint32_t rd__enumerate_reachable_shadow(RdPipeKeyInt *out, uint32_t max, uint32_
     if (g_rd.profile.shadowOne && g_rd.fs[RD_FS_SHADOW_COUNT].id) {
         const RdPipeKeyInt k1 = rd__shadow_count_key();
         n = rd__add_pipe_key(out, max, n, &k1);
+        /* the loads-only build too: the self-test's second replay, and
+         * the form a device whose gathers it finds wrong keeps */
+        if (g_rd.fs[RD_FS_SHADOW_COUNT_LOAD].id) {
+            const RdPipeKeyInt kl =
+                rd__post_key(RD_VS_BLIT, RD_FS_SHADOW_COUNT_LOAD, RHI_FMT_RGBA8_UNORM);
+            n = rd__add_pipe_key(out, max, n, &kl);
+        }
         /* the self-test's volumes (rd_shadow_selftest.c SB_TEST: TEST
          * 0x30000, every face counts), into SCENE's RGBA8 colour: the
          * phone's two first-use lines in list 3 at start (ztst 1, stencil 1
@@ -4021,11 +5140,19 @@ uint32_t rd__enumerate_reachable_shadow(RdPipeKeyInt *out, uint32_t max, uint32_
         rd__reset_state_block(&sa);
         sa.ds.test = rd_test_from_gs(RD_TEST_Z_ALWAYS);
         for (int decr = 0; decr < 2; decr++) {
-            const RdPipeKeyInt kt = rd__shadow_volume_key(&sa, RHI_FMT_RGBA8_UNORM, decr);
+            const RdPipeKeyInt kt = shadowVolumeGeneral(&sa, RHI_FMT_RGBA8_UNORM, decr);
             n = rd__add_pipe_key(out, max, n, &kt);
         }
     }
-    return n;
+    /* the twins: the game's GEQUAL pair and the ALWAYS pair the volumes'
+     * own self-test draws (its frame, rd_shadow_selftest.c, under both) */
+    RdStateBlock sz;
+    rd__reset_state_block(&sz);
+    sz.ds.test = rd_test_from_gs(RD_TEST_Z_ALWAYS);
+    for (int decr = 0; decr < 2; decr++) {
+        vol[nv++] = shadowVolumeGeneral(&sz, RHI_FMT_RGBA8_UNORM, decr);
+    }
+    return rd__volume_fs_keys(out, max, n, vol, nv);
 }
 
 uint32_t rd__enumerate_reachable_screen(RdPipeKeyInt *out, uint32_t max)
@@ -4187,6 +5314,10 @@ uint32_t rd__enumerate_reachable_screen(RdPipeKeyInt *out, uint32_t max)
      * TEST 0x30000, no Z write, ALPHA 0x44 or 0x48; UI_KEEP_STATE keeps the
      * layout packet's, which differs only in the alpha test, a uniform)
      * through font_ps, with and without the depth target */
+    /* font_sheet_ps only where a scale the bake does not take is drawn
+     * (rd__sheet_shader_in_scene, issue 188: 70k words, the phone's driver
+     * stopped compiling it) */
+    const bool sheetScene = rd__sheet_shader_in_scene();
     for (size_t b = 0; b < 2; b++) {
         for (size_t dz = 0; dz < 2; dz++) {
             RdStateBlock s;
@@ -4202,6 +5333,9 @@ uint32_t rd__enumerate_reachable_screen(RdPipeKeyInt *out, uint32_t max)
                 /* the menus' sheet text (font_sheet_ps, and
                  * font_sheet_baked_ps at 1x) in the same states */
                 for (int sh = 0; sh < 3; sh++) {
+                    if (sh == 1 && !sheetScene) {
+                        continue;
+                    }
                     dp[i].key.fs = sh == 2   ? RD_FS_FONT_SHEET_BAKED
                                    : sh == 1 ? RD_FS_FONT_SHEET
                                              : RD_FS_FONT;
@@ -4220,19 +5354,51 @@ uint32_t rd__enumerate_reachable_screen(RdPipeKeyInt *out, uint32_t max)
     n = rd__add_pipe_key(out, max, n, &dateSnap);
     n = rd__add_pipe_key(out, max, n, &blitA);
     n = rd__add_pipe_key(out, max, n, &blitB);
+    /* the box blit with the colour adjustment (a Picture tone row not 50,
+     * rd__tone_active), on both outputs: made at start-up whatever the
+     * settings, so moving a row makes no pipeline at run time */
+    const RdPipeKeyInt blitToneA = rd__post_key(RD_VS_BLIT, RD_FS_BLIT_TONE, RHI_FMT_RGBA8_UNORM);
+    const RdPipeKeyInt blitToneB = rd__post_key(RD_VS_BLIT, RD_FS_BLIT_TONE, RHI_FMT_BGRA8_UNORM);
+    n = rd__add_pipe_key(out, max, n, &blitToneA);
+    n = rd__add_pipe_key(out, max, n, &blitToneB);
+    /* the present from SCENE (rd_present_scene.c): its box blit on both
+     * outputs and its draw of DISPLAY on demand (RGBA8), only while the
+     * switch is on (off by default in v0.11.5) and the module is in the
+     * table; so a start with it off makes no pipeline more */
+    if (rd__present_scene_on() && g_rd.fs[RD_FS_BLIT_SCENE].id) {
+        const RdPipeKeyInt sceneA = rd__post_key(RD_VS_BLIT, RD_FS_BLIT_SCENE, RHI_FMT_RGBA8_UNORM);
+        const RdPipeKeyInt sceneB = rd__post_key(RD_VS_BLIT, RD_FS_BLIT_SCENE, RHI_FMT_BGRA8_UNORM);
+        n = rd__add_pipe_key(out, max, n, &sceneA);
+        n = rd__add_pipe_key(out, max, n, &sceneB);
+    }
     /* the present's box average of DISPLAY into an RGBA8 texture of the box's
      * (or the game's own) size (rd_present.c reduceInto: supersampling, a
      * scaled scene with more texels than the box has pixels, Downsampling) */
     const RdPipeKeyInt reduce = rd__post_key(RD_VS_BLIT, RD_FS_AA_REDUCE, RHI_FMT_RGBA8_UNORM);
     n = rd__add_pipe_key(out, max, n, &reduce);
+    /* FSR 1.0 (Options > Picture > Upscaling, rd_fsr1.c): EASU and RCAS into
+     * RGBA8 textures of the box's size, only while Upscaling is FSR 1.0 (a
+     * change of the row reruns this set, rd_core.c displayPipelines, before
+     * the next replay), so no other start compiles them (FXC on D3D11, two
+     * more pipelines on a phone); not where a module is missing (OpenGL
+     * without its GLSL) */
+    if (g_rd.settings.upscale == RD_UPSCALE_FSR1 && g_rd.fs[RD_FS_FSR1_EASU].id &&
+        g_rd.fs[RD_FS_FSR1_RCAS].id) {
+        const RdPipeKeyInt easu = rd__post_key(RD_VS_BLIT, RD_FS_FSR1_EASU, RHI_FMT_RGBA8_UNORM);
+        const RdPipeKeyInt rcas = rd__post_key(RD_VS_BLIT, RD_FS_FSR1_RCAS, RHI_FMT_RGBA8_UNORM);
+        n = rd__add_pipe_key(out, max, n, &easu);
+        n = rd__add_pipe_key(out, max, n, &rcas);
+    }
     /* the box blit with the effects depth, on both outputs (not where the
      * device cannot draw to a D32F depth buffer: a render pass with that
      * attachment is invalid there) */
     if (!g_rd.hasDevice || rhi_limits()->depth32Attachment) {
-        const RdPipeKeyInt depthA = rd__present_depth_key(RHI_FMT_RGBA8_UNORM);
-        const RdPipeKeyInt depthB = rd__present_depth_key(RHI_FMT_BGRA8_UNORM);
-        n = rd__add_pipe_key(out, max, n, &depthA);
-        n = rd__add_pipe_key(out, max, n, &depthB);
+        for (int tone = 0; tone < 2; tone++) {
+            const RdPipeKeyInt depthA = rd__present_depth_key(RHI_FMT_RGBA8_UNORM, tone != 0);
+            const RdPipeKeyInt depthB = rd__present_depth_key(RHI_FMT_BGRA8_UNORM, tone != 0);
+            n = rd__add_pipe_key(out, max, n, &depthA);
+            n = rd__add_pipe_key(out, max, n, &depthB);
+        }
     }
     n = rd__add_pipe_key(out, max, n, &exact);
     return n;
@@ -4244,6 +5410,7 @@ uint32_t rd__enumerate_reachable_overlay(RdPipeKeyInt *out, uint32_t max, uint32
 {
     static const uint8_t kOverlayBlends[] = {RD_BLEND_LERP_AS, RD_BLEND_CS_AS_ADD_CD};
     static const RhiFormat kOutFormats[] = {RHI_FMT_RGBA8_UNORM, RHI_FMT_BGRA8_UNORM};
+    const bool sheet = rd__sheet_shader_in_overlay(); /* issue 188 */
     for (size_t f = 0; f < 2; f++) {
         for (size_t b = 0; b < 2; b++) {
             RdStateBlock s;
@@ -4257,9 +5424,12 @@ uint32_t rd__enumerate_reachable_overlay(RdPipeKeyInt *out, uint32_t max, uint32
                 dp[i].key.fs = RD_FS_FONT;
                 n = rd__add_pipe_key(out, max, n, &dp[i].key);
                 /* the popups' and the photo panel's sheet text
-                 * (font_sheet_ps; font_sheet_baked_ps at 1x) */
-                dp[i].key.fs = RD_FS_FONT_SHEET;
-                n = rd__add_pipe_key(out, max, n, &dp[i].key);
+                 * (font_sheet_ps above the bake's scales; font_sheet_baked_ps
+                 * at 1x, and 2x on the tile-based classes) */
+                if (sheet) {
+                    dp[i].key.fs = RD_FS_FONT_SHEET;
+                    n = rd__add_pipe_key(out, max, n, &dp[i].key);
+                }
                 dp[i].key.fs = RD_FS_FONT_SHEET_BAKED;
                 n = rd__add_pipe_key(out, max, n, &dp[i].key);
             }
@@ -4326,8 +5496,57 @@ uint32_t rd__enumerate_reachable_blur(RdPipeKeyInt *out, uint32_t max, uint32_t 
     if (g_rd.profile.blurFold && g_rd.fs[RD_FS_FX_BLUR2].id) {
         s.ds.test = rd_test_from_gs(RD_TEST_Z_ALWAYS);
         s.ds.zwrite = RD_ZWRITE_OFF;
-        const RdPipeKeyInt k = rd__blur_fold_key(&s, RHI_FMT_RGBA8_UNORM);
+        RdPipeKeyInt k = rd__blur_fold_key(&s, RHI_FMT_RGBA8_UNORM);
         n = rd__add_pipe_key(out, max, n, &k);
+        /* and of two pairs where the lamps' FOLD4 is asked for (rd_lamps.h) */
+        if (g_rd.fs[RD_FS_FX_BLUR4].id && (rd__lamps_wanted() & RD_LAMPS_FOLD4)) {
+            k.fs = RD_FS_FX_BLUR4;
+            n = rd__add_pipe_key(out, max, n, &k);
+        }
+    }
+    /* the glow's blur chain in two passes (rd_glow_blur.c) where it is asked for: the fold's
+     * key with fx_glowblur_ps */
+    if (rd__glow_blur_on()) {
+        s.ds.test = rd_test_from_gs(RD_TEST_Z_ALWAYS);
+        s.ds.zwrite = RD_ZWRITE_OFF;
+        const RdPipeKeyInt kg = rd__glow_blur_key(&s);
+        n = rd__add_pipe_key(out, max, n, &kg);
+    }
+    /* the lamps' WORK2 depth at the GS size above 1x (rd_lamps.c LOWRES): a depth-only blit */
+    if (g_rd.fs[RD_FS_DEPTH_DOWN].id && rd__lamps_lowres_on()) {
+        RdPipeKeyInt kd = rd__post_key(RD_VS_BLIT, RD_FS_DEPTH_DOWN, RHI_FMT_UNKNOWN);
+        kd.depthFmt = RHI_FMT_D32F_S8;
+        kd.gs.ztst = RD_ZTST_ALWAYS;
+        kd.gs.zwrite = RD_ZWRITE_ON;
+        n = rd__add_pipe_key(out, max, n, &kd);
+        /* and per sample in the multisampled lamps pass (LOWRESMS): RGBA8,
+         * no colour written, 4 samples */
+        if (g_rd.fs[RD_FS_DEPTH_DOWN_MS].id && rd__lamps_lowres_ms()) {
+            RdPipeKeyInt km = rd__post_key(RD_VS_BLIT, RD_FS_DEPTH_DOWN_MS, RHI_FMT_RGBA8_UNORM);
+            km.depthFmt = RHI_FMT_D32F_S8;
+            km.gs.ztst = RD_ZTST_ALWAYS;
+            km.gs.zwrite = RD_ZWRITE_ON;
+            km.gs.colorMask = 0;
+            km.gs.msaa = 4;
+            n = rd__add_pipe_key(out, max, n, &km);
+            /* and fx_frame_ps's alpha alone (the glow's mask, rd_fx_plan.c)
+             * drawn in that pass: rd__fx_enumerate's key at Z ALWAYS without
+             * the Z write, no depth, as rd__get_pipeline turns it for a
+             * 4-sample pass (the PowerVR phone made it on first use in
+             * v0.11.6-rc1, 594.6 ms in list 7) */
+            if (g_rd.profile.fxPlan && g_rd.fs[RD_FS_FX_FRAME].id) {
+                RdStateBlock sm;
+                rd__reset_state_block(&sm);
+                sm.ds.colorMask = 0xF;
+                sm.ds.test = rd_test_from_gs(RD_TEST_Z_ALWAYS);
+                sm.ds.test.ztst = RD_ZTST_ALWAYS;
+                sm.ds.zwrite = RD_ZWRITE_OFF;
+                RdPipeKeyInt kf = rd__blur_key(&sm, RHI_FMT_RGBA8_UNORM, RHI_FMT_D32F_S8, NULL, 0);
+                kf.fs = RD_FS_FX_FRAME;
+                kf.gs.msaa = 4;
+                n = rd__add_pipe_key(out, max, n, &kf);
+            }
+        }
     }
     n = rd__aura_box_keys(out, max, n);   /* the aura's read in two passes (rd_aura_box.c) */
     return rd__fx_enumerate(out, max, n); /* the frame-size post sprites (rd_fx_plan.c) */

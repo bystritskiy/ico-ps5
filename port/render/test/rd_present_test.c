@@ -147,6 +147,8 @@
  *             with a capture armed the output's pass is ended for the copy
  *             and opened again (one more), and the shown picture is the
  *             same byte for byte; each layer's rectangle is drawn
+ *   fsr1      Upscaling: FSR 1.0 (rd_present_fsr1_test.inc)
+ *   fsr3      Upscaling: FSR 3.1 rows (rd_present_fsr3_rows_test.inc)
  *   blank     rd_present_blank: at 800 x 600 with nothing
  *             registered the output is all 0 (no scene, though a frame was
  *             just recorded and presented); with an overlay drawing a red
@@ -162,6 +164,7 @@
 #include <stdlib.h>
 #include <string.h>
 #include "rd_internal.h"
+#include "rd_tone.h"
 #include "rd_submit.h"
 #include "rd_tex.h"
 #include "../../core/region.h" /* the Japanese disc's reduction crop */
@@ -770,6 +773,19 @@ static RdSettings originalSettings(void)
     s.aspect = 4.0f / 3.0f;
     s.vsync = 1;
     return s;
+}
+
+/* the colour adjustment exactRun and depthRun present with
+ * (rd_present_tone_test.inc): gamma, brightness, contrast, saturation; 0
+ * (every other case) leaves the settings at 0, the game's picture */
+static uint8_t s_runTone[4];
+
+static void applyRunTone(RdSettings *s)
+{
+    s->toneGamma = s_runTone[0];
+    s->toneBrightness = s_runTone[1];
+    s->toneContrast = s_runTone[2];
+    s->toneSaturation = s_runTone[3];
 }
 
 /* What the renderer produced for the rich frame on llvmpipe before the
@@ -1575,34 +1591,35 @@ static void checkScales(void)
     rd__target_scale_of(&t, -1);
     CHECK(t.tw == 256 && t.th == 256 && t.sx == 1.0f && t.sy == 1.0f,
           "scales: a 256 x 256 block at 16:9 stays 256 texels across (%u)", t.tw);
-    /* Water reflections (RdSettings.waterSharp): a block rd_block_target
-     * made (RdTargetRec.block) that is not scene-sized.  Original: its GS
-     * size, as any other temporary target; Sharp: the scene's scale, both
-     * ways, its depth with it (one texture size); another temporary target
-     * of that size stays; a frame-sized block is scene-class either way */
+    /* a block rd_block_target made (RdTargetRec.block) that is not
+     * scene-sized: the scene's scale, both ways, its depth with it (one
+     * texture size; v0.11.6's Water reflections: Sharp); under
+     * ICO_RD_WATER_SCALE=0 (g_rd.waterPs2) its GS size, as any other
+     * temporary target (v0.11.6's Original); another temporary target of
+     * that size stays; a frame-sized block is scene-class either way */
     t.block = 1;
+    g_rd.waterPs2 = true;
     rd__target_scale_of(&t, -1);
     CHECK(t.tw == 256 && t.th == 256 && t.sx == 1.0f && t.sy == 1.0f,
-          "scales: water Original: the reflection block at 2x is its GS size (%ux%u)", t.tw, t.th);
-    s.waterSharp = 1;
-    applyWith(&s);
+          "scales: water PS2 size: the reflection block at 2x is its GS size (%ux%u)", t.tw, t.th);
+    g_rd.waterPs2 = false;
     rd__target_scale_of(&t, -1);
     CHECK(t.tw == 512 && t.th == 512 && t.sx == 2.0f && t.sy == 2.0f && t.ox == 0.0f,
-          "scales: water Sharp: the reflection block at 2x is 512 x 512 (%ux%u, %g)", t.tw, t.th,
+          "scales: water: the reflection block at 2x is 512 x 512 (%ux%u, %g)", t.tw, t.th,
           (double)t.sx);
     t.w = 688; /* puddle.c's block on a 16:9 frame: as wide as the frame, 256 lines */
     rd__target_scale_of(&t, -1);
     CHECK(t.tw == 1376 && t.th == 512 && t.sx == g_rd.sceneSx && t.sy == g_rd.sceneSy,
-          "scales: water Sharp: a frame-wide reflection block at 16:9 2x is %ux%u", t.tw, t.th);
+          "scales: water: a frame-wide reflection block at 16:9 2x is %ux%u", t.tw, t.th);
     t.block = 0;
     t.w = 256;
     rd__target_scale_of(&t, -1);
-    CHECK(t.tw == 256 && t.sx == 1.0f, "scales: water Sharp: other temporary targets stay");
+    CHECK(t.tw == 256 && t.sx == 1.0f, "scales: water: other temporary targets stay");
     t.block = 1;
     t.w = 688;
     t.h = 512;
     rd__target_scale_of(&t, -1);
-    CHECK(t.tw == 1376 && t.th == 1024, "scales: water Sharp: a frame-sized block is as SCENE");
+    CHECK(t.tw == 1376 && t.th == 1024, "scales: water: a frame-sized block is as SCENE");
     /* the scene's scale at 4x too, while the work buffers keep their GS
      * sizes */
     s.sceneScale = 4.0f;
@@ -1610,18 +1627,18 @@ static void checkScales(void)
     t.w = t.h = 256;
     rd__target_scale_of(&t, -1);
     CHECK(workAtGsSize() && t.tw == 1024 && t.th == 1024 && t.sx == 4.0f,
-          "scales: water Sharp at 4x: the block is 1024 x 1024 (%ux%u)", t.tw, t.th);
+          "scales: water at 4x: the block is 1024 x 1024 (%ux%u)", t.tw, t.th);
     /* at 1x both are the GS size */
     s.sceneScale = 1.0f;
-    for (int sharp = 0; sharp <= 1; sharp++) {
-        s.waterSharp = (uint8_t)sharp;
-        applyWith(&s);
+    applyWith(&s);
+    for (int ps2 = 0; ps2 <= 1; ps2++) {
+        g_rd.waterPs2 = ps2 != 0;
         rd__target_scale_of(&t, -1);
         CHECK(t.tw == 256 && t.th == 256 && t.sx == 1.0f && t.sy == 1.0f,
-              "scales: water %s at 1x: the block is 256 x 256 (%ux%u)",
-              sharp ? "Sharp" : "Original", t.tw, t.th);
+              "scales: water%s at 1x: the block is 256 x 256 (%ux%u)", ps2 ? " PS2 size" : "", t.tw,
+              t.th);
     }
-    s.waterSharp = 0;
+    g_rd.waterPs2 = false;
     t.block = 0;
     g_rd.gsW = savedW;
     g_rd.settings = saved;
@@ -2771,6 +2788,7 @@ static bool exactRun(float aspect, uint32_t outW, uint32_t outH, int full, Exact
     s.fullPixel = (uint8_t)(full == 1);
     s.borderMask = (uint8_t)(full == 2);
     s.fullHeightScene = 1;
+    applyRunTone(&s);
     const uint32_t FW = (uint32_t)ico_frame_width_for(aspect);
     if (!rd_init(FW, 512, &s, NULL)) {
         return false;
@@ -5229,7 +5247,21 @@ typedef struct ShotSeen {
     uint32_t w, h;
 } ShotSeen;
 
-static ShotSeen s_shotA, s_shotB;
+static ShotSeen s_shotA, s_shotB, s_shotC;
+
+/* ICO_RD_SHOT_LATE (rd_shot_late.h): v NULL removes it */
+static void setLate(const char *v)
+{
+#ifdef _WIN32
+    _putenv_s("ICO_RD_SHOT_LATE", v ? v : "");
+#else
+    if (v) {
+        setenv("ICO_RD_SHOT_LATE", v, 1);
+    } else {
+        unsetenv("ICO_RD_SHOT_LATE");
+    }
+#endif
+}
 
 static void shotFn(uint8_t *rgba, uint32_t w, uint32_t h, void *user)
 {
@@ -5250,6 +5282,11 @@ static void shotForget(ShotSeen *seen)
 static void armShotA(void)
 {
     CHECK(rd_capture_shot(shotFn, &s_shotA), "shot: armed in the open frame");
+}
+
+static void armShotB(void)
+{
+    CHECK(rd_capture_shot(shotFn, &s_shotB), "shot: the late one armed in the open frame");
 }
 
 static void armDeferred(void)
@@ -5361,6 +5398,40 @@ static void checkShotAt(const char *dir, int crt)
         CHECK(diff == 0 && alpha == 0,
               "shot (crt %d): the present's pixels in the box (%zu differ, %zu not opaque)", crt,
               diff, alpha);
+    }
+    /* the state picture read at its slot's recycle (rd_shot_late.h, the
+       tile-based GPUs' path, forced here): no answer at its own present,
+       one within the frames in flight, byte for byte the old read's */
+    if (rhi_backend() == RHI_BACKEND_VULKAN && s_shotA.px) {
+        setLate("1");
+        shotForget(&s_shotB);
+        s_afterBegin = armShotB;
+        recordRichFrame(t, 1);
+        s_afterBegin = NULL;
+        const int atOwn = s_shotB.calls;
+        int frames = 1;
+        while (s_shotB.calls == 0 && frames <= RHI_FRAMES_IN_FLIGHT + 1) {
+            recordRichFrame(t, 1);
+            frames++;
+        }
+        CHECK(atOwn == 0 && s_shotB.calls == 1 && s_shotB.px && s_shotB.w == s_shotA.w &&
+                  s_shotB.h == s_shotA.h &&
+                  memcmp(s_shotB.px, s_shotA.px, (size_t)s_shotA.w * s_shotA.h * 4) == 0,
+              "shot (crt %d): read at the slot's recycle: %d at its present, %d calls after %d "
+              "frames, %ux%u, the same bytes as the read with a wait",
+              crt, atOwn, s_shotB.calls, frames, s_shotB.w, s_shotB.h);
+        /* replaced while pending: the pending one told NULL */
+        shotForget(&s_shotB);
+        s_afterBegin = armShotB;
+        recordRichFrame(t, 1);
+        s_afterBegin = NULL;
+        CHECK(s_shotB.calls == 0 && rd_capture_shot(shotFn, &s_shotC) && s_shotB.calls == 1 &&
+                  s_shotB.px == NULL,
+              "shot (crt %d): a pending late read replaced is told NULL", crt);
+        rd_capture_shot_cancel();
+        shotForget(&s_shotB);
+        shotForget(&s_shotC);
+        setLate(NULL);
     }
 
     /* armed before the frame began: the later frame's present drops it */
@@ -5566,6 +5637,7 @@ static bool depthRun(uint32_t w, uint32_t h, int on, DepthRun *r)
     s.outputWidth = w;
     s.outputHeight = h;
     s.effectsDepth = (uint8_t)on;
+    applyRunTone(&s);
     if (!rd_init(512, 512, &s, NULL)) {
         return false;
     }
@@ -5731,7 +5803,7 @@ static void checkEffectsDepth(void)
     for (int m = 0; m < 2; m++) {
         for (int f = 0; f < 2; f++) {
             const RdPipeKeyInt k =
-                rd__present_depth_key(f ? RHI_FMT_BGRA8_UNORM : RHI_FMT_RGBA8_UNORM);
+                rd__present_depth_key(f ? RHI_FMT_BGRA8_UNORM : RHI_FMT_RGBA8_UNORM, false);
             CHECK(k.depthFmt == RHI_FMT_D32F && k.gs.zwrite == RD_ZWRITE_ON &&
                       k.gs.ztst == RD_ZTST_ALWAYS && k.fs == RD_FS_BLIT_DEPTH,
                   "effects depth: the key");
@@ -5741,8 +5813,13 @@ static void checkEffectsDepth(void)
     }
 }
 
-/* The effects depth's two start-up keys exist exactly where the device can
- * draw to a D32F depth buffer (RhiLimits.depth32Attachment; false under
+#include "rd_present_tone_test.inc"
+#include "rd_present_fsr1_test.inc"
+#include "rd_present_fsr3_rows_test.inc"
+
+/* The effects depth's start-up keys (its two outputs, with and without the
+ * colour adjustment) exist exactly where the device can draw to a D32F
+ * depth buffer (RhiLimits.depth32Attachment; false under
  * ICO_VK_FAKE_NO_D32F_ATTACHMENT, which also gives the limit false). */
 static void checkNoD32Keys(void)
 {
@@ -5756,13 +5833,14 @@ static void checkNoD32Keys(void)
     const bool can = rhi_limits()->depth32Attachment != 0;
     CHECK(can == !fake, "no D32F keys: depth32Attachment %d under the fake %d", (int)can,
           (int)fake);
-    for (int m = 0; m < 2; m++) {
+    for (int m = 0; m < 4; m++) {
         for (int f = 0; f < 2; f++) {
             const RdPipeKeyInt k =
-                rd__present_depth_key(f ? RHI_FMT_BGRA8_UNORM : RHI_FMT_RGBA8_UNORM);
-            CHECK(reachable(&k, m != 0) == can,
-                  "no D32F keys: the %s key is %sin the start-up set (depth32Attachment %d)",
-                  f ? "BGRA8" : "RGBA8", can ? "not " : "", (int)can);
+                rd__present_depth_key(f ? RHI_FMT_BGRA8_UNORM : RHI_FMT_RGBA8_UNORM, m >= 2);
+            CHECK(reachable(&k, (m & 1) != 0) == can,
+                  "no D32F keys: the %s key%s is %sin the start-up set (depth32Attachment %d)",
+                  f ? "BGRA8" : "RGBA8", m >= 2 ? " with the colour adjustment" : "",
+                  can ? "not " : "", (int)can);
         }
     }
     rd_shutdown();
@@ -6069,7 +6147,11 @@ int main(int argc, char **argv)
     checkShot(dir);
     checkPresentPasses(dir);
     checkEffectsDepth();
+    checkToneDepth();
     checkNoD32Keys();
+    checkTone();
+    checkFsr1();
+    checkFsr3Rows();
     checkReduceKey();
     checkBlank();
     checkRingGrowth();

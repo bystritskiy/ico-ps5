@@ -605,21 +605,24 @@ RhiShader rhi_create_shader(const RhiShaderDesc *desc)
         text = gl_flip_vertex_y(gl_redeclare_per_vertex(text));
     }
     const GLenum type = desc->stage == RHI_STAGE_VERTEX ? GL_VERTEX_SHADER : GL_FRAGMENT_SHADER;
-    const GLchar *src = text;
-    const GLuint program = glf.CreateShaderProgramv(type, 1, &src);
-    free(text);
+    /* one of the start-up set: the progress screen (gl_start_screen.c) */
+    gl_start_screen_shader(desc->planIndex, desc->planTotal);
+    /* on the compile thread when the window set its wait hooks, held to
+     * their limit (gl_compile.c); text is taken */
     GLint linked = GL_FALSE;
-    if (program) {
-        glf.GetProgramiv(program, GL_LINK_STATUS, &linked);
-    }
+    char log[2048];
+    const GLuint program = gl_compile_program(type, text, name, &linked, log, sizeof(log));
     if (!program || linked != GL_TRUE) {
-        if (gl_log_rate(&s_failures)) {
-            char log[2048];
-            GLsizei n = 0;
-            log[0] = '\0';
-            if (program) {
-                glf.GetProgramInfoLog(program, (GLsizei)sizeof(log), &n, log);
+        if (g_gl.compileStalled && !program) {
+            if (gl_log_rate(&s_failures)) {
+                GL_LOG("shader %s: not made (the driver stalled compiling %s; OpenGL does not "
+                       "start)",
+                       name, g_gl.stalledName);
             }
+            return out;
+        }
+        if (gl_log_rate(&s_failures)) {
+            size_t n = strlen(log);
             while (n > 0 && (log[n - 1] == '\n' || log[n - 1] == '\r')) {
                 log[--n] = '\0';
             }
@@ -823,7 +826,8 @@ static bool gl_make_entry(const RhiBindGroupDesc *d, const D3dpLayout *l, uint32
         e->dyn = dynamic ? l->offset[i] : GL_BIND_STATIC;
         return true;
     }
-    case RHI_BIND_STORAGE_BUFFER: {
+    case RHI_BIND_STORAGE_BUFFER:
+    case RHI_BIND_STORAGE_BUFFER_RW: {
         GlBuffer *buf = b ? gl_get_buffer(b->buffer) : NULL;
         uint64_t size = 0;
         if (buf && b->offset < buf->size) {

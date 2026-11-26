@@ -22,6 +22,7 @@
 #include "s_init.h"
 #include "typedef.h"
 #include "main.h"
+#include "ico_unused.h" /* PC port: Extras > Unused content's test rooms */
 
 static int _la_set_current_port_2(void *p, int first);
 static int _la_set_current_port_lock_2(void *p, int first);
@@ -422,6 +423,18 @@ int ico_mirror_slot_loaded(int slot, unsigned int sum);
 /* port/game/achievements.h: the run state kept per save slot */
 void ico_ach_slot_saved(int slot, unsigned int sum);
 int ico_ach_slot_loaded(int slot, unsigned int sum);
+
+/* PC port: port/game/difficulty.h: the journey's difficulty kept per card and
+   slot in difficulty.toml (the save's checksum and its preview), and
+   Permadeath's end: a save of an ended journey does not load and its game
+   over has no Continue */
+void ico_difficulty_slot_saved(int port, int slot, unsigned int sum, int stage, unsigned int play,
+                               int sofa);
+
+void ico_difficulty_slot_loaded(int port, int slot, unsigned int sum);
+int ico_difficulty_slot_finished(int port, int slot, int stage, unsigned int play, int sofa);
+int ico_difficulty_sum_finished(unsigned int sum);
+int ico_difficulty_finished(void);
 /* port/game/options.h: Players (girlControlMode) kept per save slot on the
    2001 discs, whose game block has no word for it (mcard.c gameblock_write) */
 int ico_players_slot_saved(int slot, unsigned int sum, int mode);
@@ -434,6 +447,7 @@ void ico_opt_hold_type_toggled(int type);
 void la_host_new_game_go(void);
 int la_host_mc_slot_pickable(int slot);
 int la_host_mc_files_shown(void);
+int la_host_checkpoint_continue(int onTitle);
 
 /* la_vibe_select's confirm: the New Game screen in place of the start, which
    its confirm runs (la_host_new_game_go, after la_vibe_select) */
@@ -2222,6 +2236,36 @@ inline int la_mc_load_current_slot_select(void)
     return -1;
 }
 
+/* PC port: the save's difficulty entry (difficulty.toml) with the preview the
+   product file now holds for it: the Continue list knows that preview before
+   a load, so it can refuse a save of an ended journey (la_host_load_refused) */
+static void la_host_difficulty_saved(void)
+{
+    const struct McPreview *p =
+        (const struct McPreview *)&IosMcProductFile[mc.port].file[mc.fileNo];
+
+    ico_difficulty_slot_saved(mc.port, mc.fileNo, (unsigned int)mc.sum, p->stage,
+                              (unsigned int)la_preview_play(p), la_preview_sofa(p));
+}
+
+/* PC port: 1 when file `item` of the card in `port` is a save of a journey
+   that ended (Permadeath: any game over ends it), by the preview its
+   product file record shows (la_preview_play/la_preview_sofa: the 2001
+   discs' order); the Continue list then plays the negative sound and stays.
+   difficulty_file.c logs the refusal. */
+static int la_host_load_refused(int port, int item)
+{
+    const struct McPreview *p;
+
+    if (port < 0 || port > 1 || item < 0 || item > 9 ||
+        IosMcProductFile[port].file[item].stage == (unsigned int)-1) {
+        return 0; /* no file there */
+    }
+    p = (const struct McPreview *)&IosMcProductFile[port].file[item];
+    return ico_difficulty_slot_finished(port, item, p->stage, (unsigned int)la_preview_play(p),
+                                        la_preview_sofa(p));
+}
+
 static int loadCardChanged = 1; /* derived name */
 
 static int loadFileChosen = 0; /* derived name */
@@ -2258,6 +2302,11 @@ static int la_mc_load_file_select_jun26(int first, int item)
     }
 
     if ((fileMask != 0 || loadFileChosen != 0) && PSH_POSITIVE(0)) {
+        /* PC port: a save of an ended journey is refused here */
+        if (la_host_load_refused(filePort, item)) {
+            NEGATIVE_SE();
+            return -1;
+        }
         if (IosMcProductFile[filePort].file[item].stage != 0xFFFFFFFF) {
             selectFile = item;
             lastPort = filePort;
@@ -2354,6 +2403,12 @@ int la_mc_load_file_select(int first, int item)
     }
 
     if ((fileMask != 0 || loadFileChosen != 0) && (pad[0].flags & PAL_JPNKORCN(0x40, 0x20))) {
+        /* PC port: a save of an ended journey is refused here, with the
+           negative sound in place of the positive one */
+        if (la_host_load_refused(filePort, item)) {
+            NEGATIVE_SE();
+            return -1;
+        }
         POSITIVE_SE();
         if (IosMcProductFile[filePort].file[item].stage != 0xFFFFFFFF) {
             selectFile = item;
@@ -2725,6 +2780,16 @@ static int la_load_processing_jun26(int first)
         loadStep++;
         break;
     case 9:
+        /* PC port: the backstop of the Continue list's refusal: a save of an
+           ended journey (its game block's checksum in difficulty.toml) is
+           not applied; back to the file list */
+        if (ico_difficulty_sum_finished((unsigned int)mc.sum)) {
+            NEGATIVE_SE();
+            loadStep = 0;
+            lt_set_item_select_func(0);
+            actionStarted = 0;
+            return 16;
+        }
         gflagKeepState();
         gflagInit();
         gamesysMemoryLoad(gameSysMemoryFuncList, gameSysMainSaveBuff, 0);
@@ -2778,6 +2843,8 @@ static int la_load_processing_jun26(int first)
         playTime((struct McPreview *)IosMcPreviewInfo, &hour, &min, &sec);
         ico_mirror_slot_loaded(mc.fileNo, (unsigned int)mc.sum); /* the slot's mirror flag */
         ico_ach_slot_loaded(mc.fileNo, (unsigned int)mc.sum);    /* the slot's achievement run */
+        /* PC port: the journey's difficulty (difficulty.toml) */
+        ico_difficulty_slot_loaded(mc.port, mc.fileNo, (unsigned int)mc.sum);
         if (ICO_NTSCAUG6JUN26) {
             /* PC port: Players, kept beside the save on these discs (the
                European gameblock_read reads it from the card) */
@@ -2868,6 +2935,16 @@ int la_load_processing(int first)
         loadStep++;
         break;
     case 10:
+        /* PC port: the backstop of the Continue list's refusal: a save of an
+           ended journey (its game block's checksum in difficulty.toml) is
+           not applied; back to the file list */
+        if (ico_difficulty_sum_finished((unsigned int)mc.sum)) {
+            NEGATIVE_SE();
+            loadStep = 0;
+            lt_set_item_select_func(0);
+            actionStarted = 0;
+            return PAL_JPNKORCN_NTSCAUG6JUN26(0x13, 0x10, 16);
+        }
         gflagKeepState();
         gflagInit();
         gamesysMemoryLoad(gameSysMemoryFuncList, gameSysMainSaveBuff, 0);
@@ -2886,6 +2963,8 @@ int la_load_processing(int first)
         }
         ico_mirror_slot_loaded(mc.fileNo, (unsigned int)mc.sum); /* the slot's mirror flag */
         ico_ach_slot_loaded(mc.fileNo, (unsigned int)mc.sum);    /* the slot's achievement run */
+        /* PC port: the journey's difficulty (difficulty.toml) */
+        ico_difficulty_slot_loaded(mc.port, mc.fileNo, (unsigned int)mc.sum);
         if (ICO_NTSCAUG6JUN26) {
             /* PC port: Players, kept beside the save on these discs (the
                European gameblock_read reads it from the card) */
@@ -4396,6 +4475,7 @@ int la_save_processing(int first)
     case 10:
         ico_mirror_slot_saved(mc.fileNo, (unsigned int)mc.sum); /* the run's mirror flag */
         ico_ach_slot_saved(mc.fileNo, (unsigned int)mc.sum);    /* the achievement run */
+        la_host_difficulty_saved(); /* PC port: the journey's difficulty (difficulty.toml) */
         if (ICO_NTSCAUG6JUN26) {
             /* PC port: Players, kept beside the save on these discs (the
                European gameblock_write writes it to the card) */
@@ -5037,8 +5117,53 @@ static int gameOverVoice = 0; /* derived name */
 
 static int gameOverVoiceOpened = 0; /* derived name */
 
+/* PC port: the game over of a journey that ended (port/game/difficulty.h:
+   with Permadeath any game over ends it): Continue is hidden and the cursor
+   kept on Quit, the item after it; the Continue case acts as Quit, as in a
+   test room of Extras > Unused content.  exec_layout_texture puts every mask
+   back to the layout's own before the procs run, and runs no proc while the
+   layout fades (in: the first tick, drawn at alpha 0; out: the 0.5 s after a
+   choice, after a 0.25 s hold on the discs that are not from 2001), so the
+   layout's own mask (defaultMask) is set too: without it Continue came back
+   for the fade-out after Quit was chosen.  Every disc's game over layout
+   (62 European; 59 Japanese, Korean, Asian; 58 on the 2001 discs) has
+   Continue and Quit side by side, Continue's own mask 0. */
+static void la_host_game_over_quit_only(int cont)
+{
+    int i;
+
+    if (!ico_difficulty_finished()) {
+        /* an ended journey's mask left from its game over: the disc's own
+           (nothing in the game masks Continue) */
+        lt_default_mask_property(cont, 0);
+        lt_mask_property(cont, 0);
+        return;
+    }
+    lt_default_mask_property(cont, 1);
+    lt_mask_property(cont, 1);
+    /* the layout holding the item: every disc has at least 75 game layouts
+       (port/core/region.h layout_count) */
+    for (i = 0; i < 75; i++) {
+        LtProp *p = &texLayout[i];
+
+        if (p->curItem == cont && cont >= p->first && cont + 1 < p->last) {
+            p->curItem = cont + 1;
+        }
+        if (p->curItem == cont + 1 && cont >= p->first && cont + 1 < p->last) {
+            /* the cursor on Quit: Left (the button, and the stick
+               default_item_select reads after this proc) would move it onto
+               the hidden Continue (Quit's left item) for a tick, with the
+               cursor's sound; Up and Down lead nowhere on this layout */
+            pad[0].flags &= ~(0x1000 | 0x4000 | 0x8000);
+            pad[0].ana[2] = 0x80;
+            pad[0].ana[3] = 0x80;
+        }
+    }
+}
+
 static int la_game_over_continue_jun26(int first)
 {
+    la_host_game_over_quit_only(378); /* PC port: an ended journey: Quit only */
     if (first) {
         iosPadEnable();
         systemStatus[5] = 1;
@@ -5060,8 +5185,17 @@ static int la_game_over_continue_jun26(int first)
                 0) { /* JPN property ids 23 lower, KOR property ids 29 lower */
         case 378:
             if (PSH_POSITIVE(0)) {
-                systemStatus[4] = 1;
-                nextStage = gFlagSaveStage;
+                if (ico_unused_active() || ico_difficulty_finished()) {
+                    /* PC port: a test room of Extras > Unused content has no
+                       save stage, and an ended journey (Permadeath) no
+                       Continue: Continue goes to the title as Quit does */
+                    ico_unused_game_over();
+                    gflagInit();
+                    nextStage = 1;
+                } else {
+                    systemStatus[4] = 1;
+                    nextStage = gFlagSaveStage;
+                }
                 releaseGameLoopCursor();
                 lt_set_item_select_func(0);
                 actionStarted = 0;
@@ -5070,6 +5204,7 @@ static int la_game_over_continue_jun26(int first)
             break;
         case 379:
             if (PSH_POSITIVE(0)) {
+                ico_unused_game_over(); /* PC port: the log's reason, in a test room */
                 gflagInit();
                 sampleModeDemoEndTimeOut();
             }
@@ -5081,6 +5216,7 @@ static int la_game_over_continue_jun26(int first)
 
 static int la_game_over_continue_ntscaug6(int first)
 {
+    la_host_game_over_quit_only(378); /* PC port: an ended journey: Quit only */
     if (first) {
         enable_game_pause = 1;
         iosPadEnable();
@@ -5114,8 +5250,17 @@ static int la_game_over_continue_ntscaug6(int first)
                 return -1;
             }
             POSITIVE_SE();
-            systemStatus[4] = 1;
-            nextStage = gFlagSaveStage;
+            if (ico_unused_active() || ico_difficulty_finished()) {
+                /* PC port: a test room of Extras > Unused content has no save
+                   stage, and an ended journey (Permadeath) no Continue:
+                   Continue goes to the title as Quit does */
+                ico_unused_game_over();
+                gflagInit();
+                nextStage = 1;
+            } else {
+                systemStatus[4] = 1;
+                nextStage = gFlagSaveStage;
+            }
             releaseGameLoopCursor();
             lt_set_item_select_func(0);
             actionStarted = 0;
@@ -5125,6 +5270,7 @@ static int la_game_over_continue_ntscaug6(int first)
                 return -1;
             }
             POSITIVE_SE();
+            ico_unused_game_over(); /* PC port: the log's reason, in a test room */
             gflagInit();
             nextStage = 1;
             releaseGameLoopCursor();
@@ -5144,6 +5290,7 @@ int la_game_over_continue(int first)
     if (ICO_NTSCAUG6) {
         return la_game_over_continue_ntscaug6(first);
     }
+    la_host_game_over_quit_only(429 - PAL_JPNCN_KOR(0, 23, 29)); /* PC port: an ended journey */
     if (first) {
         if (fadeStatus != 0) {
             scpFadeIn(3.0f);
@@ -5181,8 +5328,18 @@ int la_game_over_continue(int first)
                 return -1;
             }
             POSITIVE_SE();
-            systemStatus[4] = 1;
-            nextStage = gFlagSaveStage;
+            if (ico_unused_active() || ico_difficulty_finished()) {
+                /* PC port: a test room of Extras > Unused content has no save
+                   stage, and an ended journey (Permadeath) no Continue:
+                   Continue goes to the title as Quit does */
+                ico_unused_game_over();
+                optionScreenMode = 0;
+                gflagInit();
+                nextStage = 1;
+            } else {
+                systemStatus[4] = 1;
+                nextStage = gFlagSaveStage;
+            }
             releaseGameLoopCursor();
             lt_set_item_select_func(0);
             actionStarted = 0;
@@ -5192,6 +5349,7 @@ int la_game_over_continue(int first)
                 return -1;
             }
             POSITIVE_SE();
+            ico_unused_game_over(); /* PC port: the log's reason, in a test room */
             optionScreenMode = 0;
             gflagInit();
             nextStage = 1;
@@ -5819,7 +5977,7 @@ int la_host_mc_files_shown(void)
 
 /* PC port: what the pause menu's Back does before it returns la_game_loop
    (la_game_pause and its twins), for the port's Settings procs that close
-   the menu into the game (Game variants > Debug menu); the caller returns
+   the menu into the game (Developer > Debug menu); the caller returns
    the region's la_game_loop */
 void la_host_resume_play(void)
 {
@@ -5874,3 +6032,56 @@ void la_host_end_game(void)
 unsigned int stage_after_skipping_demo = 0;
 
 int layoutActPushStartNew = 0;
+
+/* Kept at the end of this file: clang places a file's statics in the order
+   of their first use, and this function's use of nextStage ahead of
+   saveCardChanged's first use swapped the two in the game's data (the
+   layout the save states of v0.11.7 and v0.11.8 resume under). */
+/* PC port: Load on a save state that cannot resume where it was saved
+   (port/game/state_checkpoint_live.c, on the Main thread at a tick's end):
+   the game continues from the checkpoint the state holds, already in
+   gameSysMainSaveBuff with the card block's option words, by
+   la_load_processing's own steps after iosMcLoadGameBlock (the kept flags
+   across gflagInit, the image loaded, systemStatus[3] and [4]; the caller
+   puts the state's preview in IosMcPreviewInfo after, where the card load
+   puts the product file's).  From the title the title's sounds go as the
+   load leaves the title; in play as End Game leaves play (la_end_confirm:
+   the fight music paused and closed and the sound segments closed on the
+   discs whose End Game does so, not the August preview and the June demo).
+   Then the stage switch and the boy's records as the load makes them.
+   Returns the stage it switches to. */
+int la_host_checkpoint_continue(int onTitle)
+{
+    gflagKeepState();
+    gflagInit();
+    gamesysMemoryLoad(gameSysMemoryFuncList, gameSysMainSaveBuff, 0);
+    la_host_load_saved();
+    gflagRestoreState();
+    la_host_load_log(-1);
+    systemStatus[3] = 1;
+    systemStatus[4] = 1;
+    seEnvForceClose = 1;
+    if (onTitle) {
+        if (ICO_JUN26) {
+            soundDataSegAllClose(0, 2);
+        } else if (titleAdpcm != 0) {
+            titleAdpcm->stream->fadeStep = 0x40;
+        }
+        titleAdpcm = 0;
+    } else if (!ICO_AUG6JUN26) {
+        fightSoundProcessRequestPause();
+        fightSoundClose();
+        soundDataSegAllClose(0, 2);
+    }
+    if (!ICO_NTSCAUG6JUN26 && gflagChk(395)) {
+        /* the ending's save (end.c actEndingSave), which a title load sends
+           to the second journey's screen: a checkpoint never holds it, so it
+           goes to its stage as any other image */
+        ico_diag_milestone("checkpoint: the image holds the ending's flag 395; to stage %d",
+                           gFlagSaveStage);
+    }
+    nextStage = gFlagSaveStage;
+    stgmgrForceSwitchWithFade(gFlagSaveStage, ICO_JUN26 ? 0.5f : 0.05f, 4.0f);
+    ACTGame_SetActors_Debug(gFlagSaveStage, 0);
+    return gFlagSaveStage;
+}

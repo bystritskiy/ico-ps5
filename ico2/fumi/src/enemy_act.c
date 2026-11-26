@@ -31,11 +31,23 @@
 
 /* port/game/options.c: [gameplay] yorda_safe */
 extern int ico_opt_yorda_safe(void);
-/* PC port: port/game/options.c: [gameplay] pit_time.  The time factor (0.5 to 3) and
-   the dive's play-speed ratio with it applied (2x under a stage camera effect, else 1x,
-   divided by the factor); actEnemyKidnapEnd uses both. */
+/* PC port: port/game/options.c: [gameplay] pit_time.  The time factor (the seconds set
+   over the disc's own pull-in time, 1 for Original) and the dive's play-speed ratio with
+   it applied (2x under a stage camera effect, else 1x, divided by the factor);
+   actEnemyKidnapEnd uses both. */
 extern float ico_opt_pit_time_factor(void);
 extern float ico_opt_pit_dive_ratio(int camera);
+/* PC port: port/game/options.c: [gameplay] shadows_together.  1: the Shadow waits its
+   turn (another Shadow is attacking and the option is off), 0: it may go; counts and
+   logs each time the option lets one go (EnemyUtil_isOtherStatus) */
+extern int ico_opt_shadow_waits(int other_attacking);
+/* PC port: port/game/no_shadows.h: No Shadows (the journey's Customize row).  ico_no_shadows:
+   1 while it is on.  ico_no_shadows_hold: the same answer for actEnemyStart, counting one Shadow
+   held back (was_dead: it began in its pit).  ico_no_shadows_forced: the log line of a forced
+   condition (0: a forced grab of Yorda skipped). */
+extern int ico_no_shadows(void);
+extern int ico_no_shadows_hold(int label, int was_dead);
+extern void ico_no_shadows_forced(int what, int a);
 
 /* port/game/gamestate.c: achievement signals */
 #include "ico_gamestate.h"
@@ -1276,8 +1288,11 @@ inline ICO_WORD_PTR(GObj *) actEnemy_GetClingTarget(GObj *self)
 }
 
 /* PC port: port/game/variants.h: Shadow toughness (0 Original, 1 American,
-   2 not tougher later) */
+   2 not tougher later, 3 third journey) */
 extern int ico_variant_shade_toughness(void);
+/* PC port: port/game/variants.h: 0 with Peaceful shadows on (a Shadow is
+   started without its brain thread; Yorda's own, girl_act.c, is not asked) */
+extern int ico_variant_shadow_brain(void);
 
 /* A static inline shared by actEnemyRestart and actEnemyStart.  `max` is a
    local holding 43. */
@@ -1290,6 +1305,11 @@ static inline float getEnemyRestartLife(GObj *self) /* derived name */
        the first playthrough on every playthrough (the USA disc's has none) */
     if (ico_variant_shade_toughness() != 0) {
         idx = 38;
+    }
+    /* Third journey: the table's own entry for a third playthrough (x2 on
+       the PAL-family discs), which the clear count (at most 1) never reaches */
+    if (ico_variant_shade_toughness() == 3) {
+        idx = 40;
     }
     idx = (idx < 38) ? 38 : ((idx <= max) ? idx : max);
     return GetEnemyDefLife(self) * _ACTGame_GetParamF(idx);
@@ -1634,6 +1654,14 @@ static int actEnemyForceSwitchToCarry_jun26(void *self)
 
 static int actEnemyForceSwitchToCarry(void *self)
 {
+    /* PC port: No Shadows: the Shadow is not there (actEnemyStart hid it as a killed one), so
+       Yorda is not moved to it nor fixed to its hand: 0, as when the carry cannot start.  The
+       cage room (st13c's CageFallChk twins) then goes on as after the Shadow's death: its
+       GirlCarryChk sees her not carried, HandChk its dead bit, SekizoChk the hand flag */
+    if (ico_no_shadows()) {
+        ico_no_shadows_forced(0, ((GObj *)self)->labelId);
+        return 0;
+    }
     if (ICO_JUN26) {
         return actEnemyForceSwitchToCarry_jun26(self);
     }
@@ -1683,6 +1711,10 @@ inline int ACTEnemyForceSwitchToCarry(GObj *self)
     int r = actEnemyForceSwitchToCarry(self);
     if (r != 0) {
         _BrainMode_SetDirect(self, 0, 0);
+    }
+    /* PC port: No Shadows: no carry act for a Shadow that is not there */
+    if (ico_no_shadows()) {
+        return r;
     }
     ACTSendMailCorrect(self, PAL_NTSC_AUG6_JUN26(0x104, 244, 241, 235));
     return r;
@@ -1797,9 +1829,11 @@ static void actEnemyKidnapEnd_jun26(GObj *volatile self)
             }
         }
         /* PC port: [gameplay] pit_time slows or speeds the dive (the shadow pulling Yorda
-           into the pit) by reserving the play speed over the game's own at the same priority;
+           into the pit: the five SINK motions A to E, one after the other, all of them in
+           this action) by reserving the play speed over the game's own at the same priority;
            a frozen shadow keeps the freeze above */
-        if (GOBJ_SUB(self)->ctrl.motion == 938 && ico_opt_pit_time_factor() != 1.0f &&
+        if (GOBJ_SUB(self)->ctrl.motion >= 934 && GOBJ_SUB(self)->ctrl.motion <= 938 &&
+            ico_opt_pit_time_factor() != 1.0f &&
             (((int)((long long)sub->flags20.ll >> 5)) & 1) == 0) {
             ACTGame_SetMotionPlaySpeedRatio_Reserve(self, ico_opt_pit_dive_ratio(0), 0);
         }
@@ -1914,9 +1948,11 @@ static void actEnemyKidnapEnd_aug6(GObj *volatile self)
             }
         }
         /* PC port: [gameplay] pit_time slows or speeds the dive (the shadow pulling Yorda
-           into the pit) by reserving the play speed over the game's own at the same priority;
+           into the pit: the five SINK motions A to E, one after the other, all of them in
+           this action) by reserving the play speed over the game's own at the same priority;
            a frozen shadow keeps the freeze above */
-        if (GOBJ_SUB(self)->ctrl.motion == 905 && ico_opt_pit_time_factor() != 1.0f &&
+        if (GOBJ_SUB(self)->ctrl.motion >= 901 && GOBJ_SUB(self)->ctrl.motion <= 905 &&
+            ico_opt_pit_time_factor() != 1.0f &&
             (((int)((long long)sub->flags20.ll >> 7)) & 1) == 0) {
             ACTGame_SetMotionPlaySpeedRatio_Reserve(
                 self, ico_opt_pit_dive_ratio(GetEfStageCameraTargetID() != 0), 0);
@@ -2047,9 +2083,11 @@ static void actEnemyKidnapEnd_ntsc(GObj *volatile self)
             }
         }
         /* PC port: [gameplay] pit_time slows or speeds the dive (the shadow pulling Yorda
-           into the pit) by reserving the play speed over the game's own at the same priority;
+           into the pit: the five SINK motions A to E, one after the other, all of them in
+           this action) by reserving the play speed over the game's own at the same priority;
            a frozen shadow keeps the freeze above */
-        if (GOBJ_SUB(self)->ctrl.motion == 903 && ico_opt_pit_time_factor() != 1.0f &&
+        if (GOBJ_SUB(self)->ctrl.motion >= 899 && GOBJ_SUB(self)->ctrl.motion <= 903 &&
+            ico_opt_pit_time_factor() != 1.0f &&
             (((int)((long long)sub->flags20.ll >> 10)) & 1) == 0) {
             ACTGame_SetMotionPlaySpeedRatio_Reserve(
                 self, ico_opt_pit_dive_ratio(GetEfStageCameraTargetID() != 0), 0);
@@ -2206,9 +2244,11 @@ void actEnemyKidnapEnd(GObj *volatile self)
             }
         }
         /* PC port: [gameplay] pit_time slows or speeds the dive (the shadow pulling Yorda
-           into the pit) by reserving the play speed over the game's own at the same priority;
+           into the pit: the five SINK motions A to E, one after the other, all of them in
+           this action) by reserving the play speed over the game's own at the same priority;
            a frozen shadow keeps the freeze above */
-        if (GOBJ_SUB(self)->ctrl.motion == 952 && ico_opt_pit_time_factor() != 1.0f &&
+        if (GOBJ_SUB(self)->ctrl.motion >= 948 && GOBJ_SUB(self)->ctrl.motion <= 952 &&
+            ico_opt_pit_time_factor() != 1.0f &&
             (((int)((long long)sub->flags20.ll >> 21)) & 1) == 0) {
             ACTGame_SetMotionPlaySpeedRatio_Reserve(
                 self, ico_opt_pit_dive_ratio(GetEfStageCameraTargetID() != 0), 0);
@@ -4235,7 +4275,12 @@ static inline ICO_WORD_PTR(GObj *) EnemyUtil_isOtherStatus_jun26(GObj *self, int
     return 0;
 }
 
-inline ICO_WORD_PTR(GObj *) EnemyUtil_isOtherStatus(GObj *self, int mode)
+/* The game's turn rule: another Shadow (object kind 4) in its attack (act mode 15) or
+   with its attack mail out (the flag enemyDodgeSendMail sets), else 0.  Every caller
+   holds a Shadow back while it is non-zero: the change to the ATTACK brain
+   (subEnemyBrain_ToBoy's three arms), the attack mails of the ATTACK brain and of the
+   swipe on the way to Yorda (enemyDodgeSendMail) */
+static inline ICO_WORD_PTR(GObj *) EnemyUtil_isOtherStatus_disc(GObj *self, int mode)
 {
     if (ICO_JUN26) {
         return EnemyUtil_isOtherStatus_jun26(self, mode);
@@ -4257,6 +4302,17 @@ inline ICO_WORD_PTR(GObj *) EnemyUtil_isOtherStatus(GObj *self, int mode)
         }
     }
     return 0;
+}
+
+/* PC port ([gameplay] shadows_together, Options > Gameplay > Shadows attack together):
+   with the option on, no other Shadow's attack holds this one back, so every Shadow
+   follows its own approach, wait and attack chance at once; the rule's scan still runs
+   so the log can count the turns the option skipped.  Off: the game's value. */
+inline ICO_WORD_PTR(GObj *) EnemyUtil_isOtherStatus(GObj *self, int mode)
+{
+    ICO_WORD_PTR(GObj *) other = EnemyUtil_isOtherStatus_disc(self, mode);
+
+    return ico_opt_shadow_waits(other != 0) ? other : 0;
 }
 
 static int GetFlyPosition(float *out, float *me, float *tgt)
@@ -5695,13 +5751,22 @@ static void actEnemyStart_ntsc(GObj *self)
     if (actEnemyFlagCheckDead(self) != 0) {
         alive = 1;
     }
+    /* PC port: No Shadows: every Shadow of the room starts as a killed one does (actCommonDie:
+       the dead bit 18, then actEnemyHyde below: out of sight with the display bit 21 clear,
+       which EnemyDL and the pits' callers read): a script waiting for no live Shadow
+       (scpCheckExistAliveEnemy, actEnemyFlagCheckDead) passes, nothing calls one out
+       (generator.c), and the generator packet a save writes holds them as killed ones */
+    if (ico_no_shadows_hold(((GObj *)self)->labelId, alive)) {
+        actEnemyFlagOnDead(self);
+        alive = 1;
+    }
     if (alive != 0) {
         act->flags18.ll = act->flags18.ll & ~(1LL << 32);
         act->flags18.ll = act->flags18.ll & ~(1LL << 33);
     }
     _ACTWait(1);
     act->mainMail = (ActMail *)&actIntrList[67];
-    if (debug_brain_flag != 0) {
+    if (debug_brain_flag != 0 && ico_variant_shadow_brain()) {
         actCreateSubThread((void *)subEnemyBrainMain, 20);
     }
     actCreateSubThread((void *)subEnemyControl, 21);
@@ -5777,12 +5842,21 @@ static void actEnemyStart_jun26(GObj *self)
     if (actEnemyFlagCheckDead(self) != 0) {
         alive = 1;
     }
+    /* PC port: No Shadows: every Shadow of the room starts as a killed one does (actCommonDie:
+       the dead bit 18, then actEnemyHyde below: out of sight with the display bit 21 clear,
+       which EnemyDL and the pits' callers read): a script waiting for no live Shadow
+       (scpCheckExistAliveEnemy, actEnemyFlagCheckDead) passes, nothing calls one out
+       (generator.c), and the generator packet a save writes holds them as killed ones */
+    if (ico_no_shadows_hold(((GObj *)self)->labelId, alive)) {
+        actEnemyFlagOnDead(self);
+        alive = 1;
+    }
     if (alive != 0) {
         act->flags18.ll = act->flags18.ll & ~(1LL << 32);
     }
     _ACTWait(1);
     act->mainMail = (ActMail *)&actIntrList[65];
-    if (debug_brain_flag != 0) {
+    if (debug_brain_flag != 0 && ico_variant_shadow_brain()) {
         actCreateSubThread((void *)subEnemyBrainMain, 20);
     }
     actCreateSubThread((void *)subEnemyControl, 21);
@@ -5856,13 +5930,22 @@ static void actEnemyStart_aug6(GObj *self)
     if (actEnemyFlagCheckDead(self) != 0) {
         alive = 1;
     }
+    /* PC port: No Shadows: every Shadow of the room starts as a killed one does (actCommonDie:
+       the dead bit 18, then actEnemyHyde below: out of sight with the display bit 21 clear,
+       which EnemyDL and the pits' callers read): a script waiting for no live Shadow
+       (scpCheckExistAliveEnemy, actEnemyFlagCheckDead) passes, nothing calls one out
+       (generator.c), and the generator packet a save writes holds them as killed ones */
+    if (ico_no_shadows_hold(((GObj *)self)->labelId, alive)) {
+        actEnemyFlagOnDead(self);
+        alive = 1;
+    }
     if (alive != 0) {
         act->flags18.ll = act->flags18.ll & ~(1LL << 32);
         act->flags18.ll = act->flags18.ll & ~(1LL << 33);
     }
     _ACTWait(1);
     act->mainMail = (ActMail *)&actIntrList[67];
-    if (debug_brain_flag != 0) {
+    if (debug_brain_flag != 0 && ico_variant_shadow_brain()) {
         actCreateSubThread((void *)subEnemyBrainMain, 20);
     }
     actCreateSubThread((void *)subEnemyControl, 21);
@@ -5951,6 +6034,15 @@ void actEnemyStart(GObj *self)
     if (actEnemyFlagCheckDead(self) != 0) {
         alive = 1;
     }
+    /* PC port: No Shadows: every Shadow of the room starts as a killed one does (actCommonDie:
+       the dead bit 18, then actEnemyHyde below: out of sight with the display bit 21 clear,
+       which EnemyDL and the pits' callers read): a script waiting for no live Shadow
+       (scpCheckExistAliveEnemy, actEnemyFlagCheckDead) passes, nothing calls one out
+       (generator.c), and the generator packet a save writes holds them as killed ones */
+    if (ico_no_shadows_hold(((GObj *)self)->labelId, alive)) {
+        actEnemyFlagOnDead(self);
+        alive = 1;
+    }
     if (alive != 0) {
         act->flags18.ll = act->flags18.ll & ~(1LL << 32);
         act->flags18.ll = act->flags18.ll & ~(1LL << 33);
@@ -5962,7 +6054,7 @@ void actEnemyStart(GObj *self)
         GOBJ_WORK(self)->motherGObj = isysGObjSearchFromObjLayoutID(GOBJ_WORK(self)->motherLabel);
     }
     act->mainMail = (ActMail *)&actIntrList[74];
-    if (debug_brain_flag != 0) {
+    if (debug_brain_flag != 0 && ico_variant_shadow_brain()) {
         actCreateSubThread((void *)subEnemyBrainMain, 20);
     }
     actCreateSubThread((void *)subEnemyControl, 21);

@@ -6,15 +6,17 @@
  * is 10 MB at 2364x1080, about 1 ms each way on the PowerVR phone, and
  * every pass on SCENE has its depth bound, read or not.  Before the walk
  * (rd__store_plan_scan) the replayed lists are read once with their state
- * (the same walk notes each command for the pass area, rd_pass_area.c, and
- * the passes cut, rd_pass_cut.c; the fades fold plans before it, its
- * sprites decided first), and for every depth texture the last command
+ * (the same walk notes each command for the pass area, rd_pass_area.c, the
+ * passes cut, rd_pass_cut.c, and the glow's chain, rd_glow_fold.c; the
+ * fades fold plans before it, its sprites decided first), and for every depth texture the last command
  * that may touch its depth or stencil is found, by ordinal (the commands
  * of the replayed lists counted in order, state commands included).  A command touches a depth when it
  * is
  *   - a draw (screen prims, the VU draws, a post sprite) on the state's
  *     depth with the Z test on (ZTE and not ALWAYS), Z write on, DATE on
- *     (the stencil bit) or PRIM.AA1 (its stencil pairs); DATE on a post
+ *     (the stencil bit) or PRIM.AA1 (its stencil pairs); the passes DATE's
+ *     snapshots open without the depth (rd_date_cut.c, the same walk) are
+ *     begun without it and change no load or store here; DATE on a post
  *     sprite other than the reduction's is no touch (planPost: the sprite
  *     tests the destination alpha in its shader, from the snapshot or the
  *     local read, never through the stencil);
@@ -78,7 +80,12 @@
 #include <stdlib.h>
 #include <string.h>
 
+#include "rd_lamps.h"
+#include "rd_layer.h"
 #include "rd_replay.h"
+#include "rd_shadow_box.h"
+#include "rd_shadowres.h" /* rd__shadow_count_end */
+#include "rd_upscale.h"
 
 /* the command the walk replays (rd_replay.c replayFrame), counted as the
  * scan counts */
@@ -255,9 +262,36 @@ static void planDrawEx(const RdStateBlock *st, uint32_t ord, int l, bool date)
     }
 }
 
+/* DATE counts as a touch on every path (the stencil bit may hold it), as
+ * before DATE's passes without the depth (rd_date_cut.c): the store plan's
+ * loads and stores are the same with the cut on or off */
 static void planDraw(const RdStateBlock *st, uint32_t ord, int l)
 {
     planDrawEx(st, ord, l, true);
+}
+
+/* A scene draw the visibility test skipped (rd_vis.c, an RDC_NOP of the
+ * shadow frame): no touch, since it draws nothing (the passes after the
+ * touches before it may drop the store), but a read of a depth before the
+ * depth's clear is the carried read it is in the frame as recorded, so the
+ * stores are kept from then on (the loop after the walk) exactly as
+ * without the test: a later replay whose draw reads that depth sees it. */
+static void planCulledRead(const RdStateBlock *st, uint32_t ord, int l)
+{
+    const RdDrawState *ds = &st->ds;
+    const bool test = ds->test.zte && ds->test.ztst != RD_ZTST_ALWAYS;
+    const bool stencil = ds->test.date != RD_DATE_OFF || st->aa1;
+    const RdTexRec *tv = ds->texEnabled ? rd__tex_rec(st->tex) : NULL;
+    const uint32_t ids[2] = {
+        test || stencil ? st->depth : 0u,
+        tv && tv->kind == RD_TEXKIND_TARGET && tv->view == RD_VIEW_DEPTH ? tv->target : 0u};
+    for (int k = 0; k < 2; k++) {
+        PlanDepth *p = ids[k] ? planDepth(ids[k], true) : NULL;
+        if (p && p->firstRead == PLAN_NONE) {
+            p->firstRead = ord;
+            p->firstList = l;
+        }
+    }
 }
 
 /* A post sprite (not the fog): a draw, but DATE is no touch of the depth
@@ -324,10 +358,11 @@ static void planKeep(uint32_t tex, uint32_t target, uint32_t frame)
 }
 
 /* the crack fill reads SCENE's depth before command ord (list l, index i
- * in it), where rd__crack_fill_place puts it as the walk does (the walk may
- * draw it earlier, never later): a touch by the command before, so every
- * pass begun up to it keeps the store, and the last store's cut does not
- * take the pass open there (PlanDepth.late) */
+ * in it), where rd__crack_fill_place puts it as the walk does, or where the
+ * late pass's held draw lands at the latest (rd_late_pass.c
+ * rd__late_pass_scan: the walk may draw it earlier, never later): a touch
+ * by the command before, so every pass begun up to it keeps the store, and
+ * the last store's cut does not take the pass open there (PlanDepth.late) */
 static void planLate(uint32_t ord, int l, uint32_t i)
 {
     if (ord == 0) {
@@ -346,15 +381,65 @@ static void planLate(uint32_t ord, int l, uint32_t i)
     s_plan.lateTarget = 0;
 }
 
+/* planLate's touch once the scan's walk is done (the late pass held the
+ * fill: rd_late_pass.c rd__late_pass_scan_end picks its place after the
+ * glow's plan): the same as planLate's in-order touch at ord - 1, every
+ * later touch of the depth kept */
+static void planLateAfter(uint32_t ord, int l, uint32_t i)
+{
+    PlanDepth *p = ord ? planDepth(s_plan.lateTarget, true) : NULL;
+    if (p) {
+        if (p->last != PLAN_AFTER && p->last < ord) {
+            p->last = ord;
+            p->lastType = RDC_POST_STUB;
+            p->lastPost = RD_POST_FOG;
+            p->lastList = (int8_t)l;
+            p->lastCmd = i;
+        }
+        if (p->lastIn < ord) {
+            p->lastIn = ord;
+        }
+        if (p->firstRead == PLAN_NONE || p->firstRead > ord - 1u) {
+            p->firstRead = ord - 1u;
+            p->firstList = l;
+        }
+        p->late = ord;
+    }
+    s_plan.lateTarget = 0;
+}
+
 void rd__store_plan_scan(const RdFrame *f, int keep)
 {
-    rd__fades_fold_scan(f, keep);  /* the sprites the reduction draws (rd_fades_fold.c) */
+    rd__layer_scan(f, keep);      /* the display layer's plan (rd_layer.c; the upscaler only) */
+    rd_cpu_mark(RD_CPU_U_LAYER);  /* the upload's phases (rd_cpu_phase.c) */
+    rd__fades_fold_scan(f, keep); /* the sprites the reduction draws (rd_fades_fold.c) */
+    rd_cpu_mark(RD_CPU_U_FADES);
     rd__shadow_merge_scan_begin(); /* the resets the volumes' merge looks for */
     /* one walk of the lists for the passes' areas (after the fold, whose
      * sprites draw nothing: rd_pass_area.c), the passes cut (rd_pass_cut.c)
      * and the plan: each notes every command under the same state */
     const bool area = rd__pass_area_scan_begin(f, keep);
     const bool cut = rd__pass_cut_scan_begin(f, keep);
+    /* and the glow's chain, whose mask the reduction may compute
+     * (rd_glow_fold.c: WORK2's fill, mask and reduction and nothing else
+     * touching WORK2; the passes' area, cut and plan read its sprites as
+     * drawn, which only keeps more) */
+    const bool glow = rd__glow_fold_scan_begin(f);
+    /* and the glow's light plan (rd_glow_light.c: which of the chain is
+     * drawn; the area, cut and plan read its commands as drawn, which only
+     * keeps more) */
+    const bool light = rd__glow_light_scan_begin(f);
+    /* and the lamps' writes into WORK2 for the lamps' pass area
+     * (rd_lamps.c: read after the light plan's verdict) */
+    rd__lamps_scan_begin(light ? f : NULL);
+    /* and DATE's passes without the depth (rd_date_cut.c: the runs a DATE
+     * snapshot opens whose draws never touch the depth) */
+    const bool dateCut = rd__date_cut_scan_begin(f);
+    /* and the shadows' sources and composites (rd_shadow_box.c) */
+    const bool box = rd__shadow_box_scan_begin(f);
+    /* and a shadow window with no volume (rd_no_volume.c: after the box's
+     * roles, which it reads) */
+    rd__no_volume_scan_begin(f, keep);
     s_plan.n = s_plan.nUndef = 0;
     s_plan.full = false;
     s_plan.anyTouch = 0;
@@ -370,20 +455,23 @@ void rd__store_plan_scan(const RdFrame *f, int keep)
     g_rdPerf.storePlanMode = s_plan.mode;
     s_plan.scanFrame = f->number;
     const bool plan = s_plan.mode != 0;
-    if (!plan && !area && !cut) {
+    if (!plan && !area && !cut && !glow && !light && !dateCut && !box) {
         return;
     }
+    const bool fxDepth = plan && rd__effects_depth_wanted();
     if (plan) {
-        s_plan.effects = rd__effects_depth_wanted();
+        /* the present reads SCENE's depth, or the upscale point does after
+         * the lists (rd_upscale.h: the temporal upscaler's depth input) */
+        s_plan.effects = fxDepth || rd__upscale_point_on();
     }
     if (plan && g_rd.settings.effectsDepth) {
         /* once a run each way: the setting is on by default, and reads
          * nothing without an effects program */
         static bool s_saidOn, s_saidOff;
-        bool *said = s_plan.effects ? &s_saidOn : &s_saidOff;
+        bool *said = fxDepth ? &s_saidOn : &s_saidOff;
         if (!*said) {
             *said = true;
-            rd__log(s_plan.effects
+            rd__log(fxDepth
                         ? "store plan: the present reads SCENE's depth for an effects program "
                           "([video] effects_depth): its stores are kept"
                         : "store plan: [video] effects_depth is on but no effects program reads "
@@ -393,14 +481,17 @@ void rd__store_plan_scan(const RdFrame *f, int keep)
     RdStateBlock st = f->startState;
     uint32_t ord = 0;
     s_plan.lateTarget = 0;
-    bool lateAlpha = false; /* rd__crack_fill_place's, as the walk's */
+    /* rd__crack_fill_place's, as the walk's, and the late pass's hold: the
+     * fill's read where the walk may draw it at the latest */
+    RdLateScan late;
+    rd__late_pass_scan_begin(&late);
     int l = rd__first_list(keep);
     for (; l < RD_LIST_COUNT; l++) {
         const RdCmdList *list = &f->lists[l];
         for (uint32_t i = 0; i < list->count; i++, ord++) {
             const RdCmd *c = &list->cmds[i];
             if (plan && l >= RD_CRACK_LATE_LIST && s_plan.lateTarget &&
-                rd__crack_fill_place(f, c, &st, &lateAlpha) != RD_CRACK_PLACE_HOLD) {
+                rd__late_pass_scan(&late, f, c, &st, ord, l, i)) {
                 planLate(ord, l, i); /* the fill before command ord, or in its pass */
             }
             const bool state = rd__apply_state(&st, c);
@@ -410,6 +501,23 @@ void rd__store_plan_scan(const RdFrame *f, int keep)
             if (cut) {
                 rd__pass_cut_scan_cmd(c, &st, state, ord);
             }
+            if (glow) {
+                rd__glow_fold_scan_cmd(f, c, &st, state, ord);
+            }
+            if (light) {
+                rd__glow_light_scan_cmd(f, c, &st, state, ord);
+                rd__lamps_scan_cmd(f, c, &st, state, ord);
+            }
+            /* the box's roles first: one DATE set-up for the composites
+             * (rd_date_one.c, from the box scan) marks the composites whose
+             * snapshot is shared, which the DATE cut's runs read */
+            if (box) {
+                rd__shadow_box_scan_cmd(f, c, &st, state, ord);
+            }
+            if (dateCut) {
+                rd__date_cut_scan_cmd(c, &st, state, ord);
+            }
+            rd__no_volume_scan_cmd(f, c, &st, state, ord);
             if (state || !plan) {
                 continue;
             }
@@ -420,6 +528,10 @@ void rd__store_plan_scan(const RdFrame *f, int keep)
             s_plan.curCmd = i;
             switch (c->type) {
             case RDC_NOP:
+                if (rd__vis_culled(f, l, i)) {
+                    planCulledRead(&st, ord, l); /* a scene draw rd_vis.c skipped */
+                }
+                break;
             case RDC_OVERLAY_TEXT:
             case RDC_COPY:
             case RDC_EXACT_BLEND:
@@ -478,7 +590,7 @@ void rd__store_plan_scan(const RdFrame *f, int keep)
             }
         }
     }
-    if (plan && s_plan.lateTarget) {
+    if (plan && s_plan.lateTarget && !late.held) {
         planLate(ord, l - 1, 0); /* held to the walk's end (rd__crack_fill_late) */
     }
     if (area) {
@@ -487,6 +599,26 @@ void rd__store_plan_scan(const RdFrame *f, int keep)
     if (cut) {
         rd__pass_cut_scan_end(ord);
     }
+    if (light) {
+        rd__glow_light_scan_end(); /* the plan (rd_glow_light.c), before the fold's verdict */
+    }
+    rd__lamps_scan_end(); /* the lamps' pass area by the plan (rd_lamps.c) */
+    uint32_t lateOrd = 0, lateI = 0;
+    int lateL = 0;
+    if (plan && s_plan.lateTarget &&
+        rd__late_pass_scan_end(&late, ord, l - 1, &lateOrd, &lateL, &lateI)) {
+        planLateAfter(lateOrd, lateL, lateI); /* the late pass's place, by the glow's plan */
+    }
+    if (glow) {
+        rd__glow_fold_scan_end(); /* the verdict (rd_glow_fold.c) */
+    }
+    if (dateCut) {
+        rd__date_cut_scan_end(ord); /* the replay's end closes the open run */
+    }
+    if (box) {
+        rd__shadow_box_scan_end();
+    }
+    rd__no_volume_scan_end();
     if (!plan) {
         return;
     }
@@ -541,8 +673,8 @@ void rd__store_plan_pass(const RdTargetRec *d, uint32_t did, RhiLoadOp *depthLoa
         return;
     }
     g_rdPerf.storeDepthPasses++;
-    if (s_plan.mode == 0) {
-        return;
+    if (s_plan.mode == 0 || rd__lamps_own_depth(did)) {
+        return; /* WORK2's own depth under the lamps' LOWRES: not in the scan, kept */
     }
     PlanDepth *p = planDepth(did, true);
     if (!p) {
@@ -759,7 +891,10 @@ void rd__store_plan_count_color(const RdTargetRec *c, RhiColorAttachment *a)
 void rd__store_plan_end(void)
 {
     rd__fades_fold_end();        /* a fold no reduction took (rd_fades_fold.c) */
+    rd__glow_fold_end();         /* the glow's likewise (rd_glow_fold.c) */
     rd__last_store_replay_end(); /* why a last touch's pass kept its store (rd_pass_cut.c) */
+    rd__date_cut_end();          /* no run outside the walk (rd_date_cut.c) */
+    rd__shadow_count_end();      /* the count's guard (rd_shadow_one.c) */
     planNothingDropped();
     s_plan.nPrevDropped = 0;
     for (uint32_t i = 0; i < s_plan.n; i++) {

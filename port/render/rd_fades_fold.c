@@ -108,7 +108,9 @@
 #include <stdlib.h>
 #include <string.h>
 
+#include "rd_layer.h"
 #include "rd_replay.h"
+#include "rd_upscale.h"
 
 /* off from here on: a reduction that did not take a planned fold */
 static bool s_off;
@@ -574,6 +576,10 @@ static bool sceneBlendExact(const RdTargetRec *sc)
 
 void rd__fades_fold_scan(const RdFrame *f, int keep)
 {
+    /* the frame as recorded (rd_vis.c): a scene draw the visibility test
+     * skipped still reads SCENE's depth here (the plan's depthRead, kept
+     * across replays); the ordinals are the shadow's */
+    f = rd__vis_source(f);
     s_fold.on = false;
     s_applied = 0;
     g_rdPerf.fadesFolded = 0;
@@ -590,6 +596,22 @@ void rd__fades_fold_scan(const RdFrame *f, int keep)
             rd__log("fades fold: off under GS state as shader data (the reduction's sprite "
                     "draws through the colour read, which has no fold); list 11's sprites are "
                     "drawn into SCENE");
+        }
+        return;
+    }
+    if (rd__upscale_point_on()) {
+        /* a temporal upscaler takes SCENE at the reduction (rd_upscale.h):
+           the fades must be in SCENE before it, not applied by the
+           reduction after it */
+        static bool saidUp; /* once a run */
+        if (!saidUp) {
+            saidUp = true;
+            rd__log(rd__layer_on()
+                        ? "fades fold: off while a temporal upscaler is in force; lists 11-12's "
+                          "sprites are drawn into the display-scale composite after the upscale "
+                          "(the display layer)"
+                        : "fades fold: off while a temporal upscaler takes SCENE at the "
+                          "reduction; list 11's sprites are drawn into SCENE");
         }
         return;
     }
@@ -724,6 +746,20 @@ void rd__fades_fold_screen(const Replay *r, const RdDrawPass *dp, const DrawSetu
     cb->aux1[1] = s_fold.alphas;
     cb->aux1[2] = s_fold.bars;
     s_applied++;
+}
+
+bool rd__fades_fold_present(uint32_t ord, bool take, RdFadesFold *out)
+{
+    if (!active() || ord != s_fold.reductionOrd) {
+        return false;
+    }
+    if (out) {
+        *out = s_fold;
+    }
+    if (take) {
+        s_applied++; /* the steps reach the picture through the present */
+    }
+    return true;
 }
 
 void rd__fades_fold_end(void)

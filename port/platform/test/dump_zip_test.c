@@ -10,13 +10,32 @@
  * aspect missing a file is left out; none to zip writes nothing.  The
  * device-loss zip (ico_loss_dump_zip): the lost frame's dump first, the one
  * before it, the log, the loose dumps gone after; without the one before,
- * the lost one and the log; the second .rddump (ico_dump_zip_extract_nth),
+ * the lost one and the log; its entries stored (the F12 and slow-scene
+ * zips deflated); the second .rddump (ico_dump_zip_extract_nth),
  * also of F12's pair (ico_frame_dump_zip with the tick before); its path
  * (ico_loss_dump_path); the pruning
  * (ico_loss_dump_prune) keeps the newest loss zips by name and leaves
- * every other file alone.  ico_zip_add_file: the bug-report picture added to
+ * every other file alone; ico_loss_dump_prune_except never deletes the zip
+ * just written, even one a clock that went back sorts first; the bisect's
+ * message (ico_dump_zip_extract_why) tells a file that cannot be opened
+ * (errno), bytes that are not a zip (empty, cut short, another file) and a
+ * zip with no frame in it (listing what it holds).  ico_zip_add_file: the bug-report picture added to
  * a finished zip, its entries kept; ico_zip_move_file: F12's blended
- * present's frame added third, the loose file gone.
+ * present's frame added third, the loose file gone.  The slow-scene zip
+ * (ico_slow_dump_path, ico_slow_dump_prune): its name, its contents (the
+ * frame, then the log), one kept, the loss zips left alone.  The
+ * upscaler's pictures (upscale_pictures.h, issue 203): the stem of
+ * <stem>-present.png; the four found beside it and added to the bug-report
+ * zip, composite first, then scene, velocity, depth, the zip under the cap;
+ * with a cap the second picture would pass, the composite alone added and
+ * the line naming the scene's refusal; none beside the picture (no
+ * upscaler) adds nothing; the wait for a capture the present after the
+ * request did not dispatch (ico_upscale_pictures_after with PENDING): the
+ * present kept, nothing added while the outcome stays PENDING, the four
+ * added after the present when it is WRITTEN; an outcome other than
+ * PENDING adds at once, an EXPIRED one with none on disk adds nothing; in a folder whose name is
+ * not ASCII ("José", UTF-8) the four are found (sized through
+ * ico_path_kind: a plain stat() missed them on Windows).
  * argv[1]: a folder the test may write in (the build folder).
  */
 #include <stdio.h>
@@ -25,6 +44,7 @@
 #include "dump_zip.h"
 #include "host_fs.h"
 #include "miniz.h"
+#include "upscale_pictures.h"
 
 static int fails;
 
@@ -38,7 +58,7 @@ static int fails;
 
 static int put(const char *path, const void *data, size_t n)
 {
-    FILE *f = fopen(path, "wb");
+    FILE *f = ico_fopen(path, "wb");
     const int ok = f != NULL && fwrite(data, 1, n, f) == n;
 
     if (f != NULL) {
@@ -68,6 +88,27 @@ static int entry_is(mz_zip_archive *z, const char *name, const void *data, size_
            memcmp(back, data, n) == 0;
 }
 
+/* entry name's compression method in the zip at path (0 stored,
+   MZ_DEFLATED), or -1; a stored entry's compressed size is its size */
+static int entry_method(const char *path, const char *name)
+{
+    mz_zip_archive z;
+    mz_zip_archive_file_stat st;
+    int m = -1;
+
+    memset(&z, 0, sizeof(z));
+    if (!mz_zip_reader_init_file(&z, path, 0)) {
+        return -1;
+    }
+    const int i = find(&z, name);
+    if (i >= 0 && mz_zip_reader_file_stat(&z, (mz_uint)i, &st) &&
+        (st.m_method != 0 || st.m_comp_size == st.m_uncomp_size)) {
+        m = (int)st.m_method;
+    }
+    mz_zip_reader_end(&z);
+    return m;
+}
+
 static void test_loss(const char *base)
 {
     char dir[1200], lost[1300], before[1300], log[1300], zip[1300], name[64], why[160];
@@ -87,7 +128,7 @@ static void test_loss(const char *base)
     CHECK(put(lost, a, sizeof(a)) == 0);
     CHECK(put(before, b, sizeof(b)) == 0);
     CHECK(put(log, text, sizeof(text) - 1) == 0);
-    CHECK(ico_loss_dump_zip(zip, lost, before, log, why, sizeof(why)) == 0);
+    CHECK(ico_loss_dump_zip(zip, lost, before, log, 1, why, sizeof(why)) == 0);
     memset(&z, 0, sizeof(z));
     CHECK(mz_zip_reader_init_file(&z, zip, 0));
     CHECK(mz_zip_reader_get_num_files(&z) == 3);
@@ -120,14 +161,31 @@ static void test_loss(const char *base)
     CHECK(ico_path_kind(before, NULL, NULL) == -1);
     /* no frame before it: the lost one and the log */
     CHECK(put(lost, a, sizeof(a)) == 0);
-    CHECK(ico_loss_dump_zip(zip, lost, NULL, log, why, sizeof(why)) == 0);
+    CHECK(ico_loss_dump_zip(zip, lost, NULL, log, 1, why, sizeof(why)) == 0);
     memset(&z, 0, sizeof(z));
     CHECK(mz_zip_reader_init_file(&z, zip, 0));
     CHECK(mz_zip_reader_get_num_files(&z) == 2);
     mz_zip_reader_end(&z);
+    /* the levels (issue 123): the loss zip stored, its entries' bytes as
+       they are (the watchdog's thread writes it after a GPU hang), F12's
+       and the slow scene's deflated */
+    {
+        static char big[4096];
+        memset(big, 'x', sizeof(big));
+        CHECK(put(lost, big, sizeof(big)) == 0);
+        CHECK(ico_loss_dump_zip(zip, lost, NULL, log, 1, why, sizeof(why)) == 0);
+        CHECK(entry_method(zip, "frame-121-lost.rddump") == 0);
+        CHECK(entry_method(zip, "ico-pc.log") == 0);
+        CHECK(put(lost, big, sizeof(big)) == 0);
+        CHECK(ico_loss_dump_zip(zip, lost, NULL, log, 0, why, sizeof(why)) == 0);
+        CHECK(entry_method(zip, "frame-121-lost.rddump") == MZ_DEFLATED);
+        CHECK(put(lost, big, sizeof(big)) == 0);
+        CHECK(ico_frame_dump_zip(zip, lost, NULL, log, why, sizeof(why)) == 0);
+        CHECK(entry_method(zip, "frame-121-lost.rddump") == MZ_DEFLATED);
+    }
     /* a missing lost dump writes nothing */
     remove(zip);
-    CHECK(ico_loss_dump_zip(zip, lost, NULL, log, why, sizeof(why)) == -1);
+    CHECK(ico_loss_dump_zip(zip, lost, NULL, log, 1, why, sizeof(why)) == -1);
     CHECK(ico_path_kind(zip, NULL, NULL) == -1);
     /* the pruning: five loss zips, the newest three kept, the log and a
        zip of another name untouched */
@@ -153,6 +211,248 @@ static void test_loss(const char *base)
     remove(log);
     snprintf(zip, sizeof(zip), "%s/no-such-folder", dir);
     CHECK(ico_loss_dump_prune(zip, 3) == -1);
+    ico_rmdir(dir);
+}
+
+/* The bisect's start-up message (ico_dump_zip_extract_why): each way a loss
+   zip fails to give a frame says which, and the prune that never deletes
+   the zip just written (ico_loss_dump_prune_except). */
+static void test_why(const char *base)
+{
+    char dir[1200], zip[1300], lost[1300], log[1300], why[400], name[64];
+    const char a[] = "the lost frame", b[] = "the frame before", text[] = "the log\n";
+    size_t size = 0;
+    void *got;
+
+    snprintf(dir, sizeof(dir), "%s/loss-why-test", base);
+    ico_mkdir(dir);
+    snprintf(zip, sizeof(zip), "%s/loss-20261110-184124.zip", dir);
+    snprintf(lost, sizeof(lost), "%s/frame-128-lost.rddump", dir);
+    snprintf(log, sizeof(log), "%s/ico-pc.log", dir);
+    /* cannot open: the file is gone, with the errno and its text */
+    got = ico_dump_zip_extract_why(zip, 0, &size, name, sizeof(name), why, sizeof(why));
+    CHECK(got == NULL);
+    CHECK(strstr(why, "cannot open ") == why);
+    CHECK(strstr(why, zip) != NULL && strstr(why, "errno ") != NULL);
+    CHECK(strstr(why, "not a zip") == NULL && strstr(why, "no frame") == NULL);
+    /* not a zip: empty, and bytes that are another file's */
+    CHECK(put(zip, "", 0) == 0);
+    got = ico_dump_zip_extract_why(zip, 0, &size, name, sizeof(name), why, sizeof(why));
+    CHECK(got == NULL && strstr(why, "is not a zip: 0 bytes, an empty file") != NULL);
+    CHECK(put(zip, text, sizeof(text) - 1) == 0);
+    got = ico_dump_zip_extract_why(zip, 0, &size, name, sizeof(name), why, sizeof(why));
+    CHECK(got == NULL && strstr(why, "is not a zip: 8 bytes, ") != NULL);
+    /* a zip cut short is not a zip either (the central directory is last) */
+    CHECK(put(lost, a, sizeof(a)) == 0);
+    CHECK(put(log, text, sizeof(text) - 1) == 0);
+    CHECK(ico_loss_dump_zip(zip, lost, NULL, log, 1, why, sizeof(why)) == 0);
+    {
+        FILE *f = ico_fopen(zip, "rb");
+        unsigned char buf[512];
+        size_t n = f != NULL ? fread(buf, 1, sizeof(buf), f) : 0;
+
+        if (f != NULL) {
+            fclose(f);
+        }
+        CHECK(n > 40);
+        CHECK(put(zip, buf, n / 2) == 0);
+        got = ico_dump_zip_extract_why(zip, 0, &size, name, sizeof(name), why, sizeof(why));
+        CHECK(got == NULL && strstr(why, "is not a zip: ") != NULL);
+        CHECK(strstr(why, "no frame") == NULL);
+    }
+    /* a zip with no frame inside: the log alone, and what it holds is listed */
+    {
+        const IcoZipMem e = {"ico-pc.log", text, sizeof(text) - 1};
+        mz_zip_archive z;
+        void *out = NULL;
+        size_t outSize = 0;
+
+        memset(&z, 0, sizeof(z));
+        CHECK(mz_zip_writer_init_heap(&z, 0, 0));
+        CHECK(mz_zip_writer_add_mem(&z, e.name, e.data, e.size, MZ_NO_COMPRESSION));
+        CHECK(mz_zip_writer_finalize_heap_archive(&z, &out, &outSize));
+        mz_zip_writer_end(&z);
+        CHECK(put(zip, out, outSize) == 0);
+        mz_free(out);
+        got = ico_dump_zip_extract_why(zip, 0, &size, name, sizeof(name), why, sizeof(why));
+        CHECK(got == NULL && strstr(why, "is a zip (") != NULL);
+        CHECK(strstr(why, "no frame number 1 (.rddump) inside (0 found)") != NULL);
+        CHECK(strstr(why, "it holds: ico-pc.log (8 bytes)") != NULL);
+    }
+    /* a frame inside: the message is empty, the same bytes as before */
+    CHECK(put(lost, a, sizeof(a)) == 0);
+    CHECK(put(log, text, sizeof(text) - 1) == 0);
+    CHECK(ico_loss_dump_zip(zip, lost, NULL, log, 1, why, sizeof(why)) == 0);
+    strcpy(why, "stale");
+    got = ico_dump_zip_extract_why(zip, 0, &size, name, sizeof(name), why, sizeof(why));
+    CHECK(got != NULL && size == sizeof(a) && memcmp(got, a, size) == 0 && why[0] == '\0');
+    free(got);
+    /* only one frame: the second one (the frame before) is named missing */
+    got = ico_dump_zip_extract_why(zip, 1, &size, name, sizeof(name), why, sizeof(why));
+    CHECK(got == NULL && strstr(why, "no frame number 2 (.rddump) inside (1 found)") != NULL);
+    /* the old entry point is the same without a message */
+    CHECK(ico_dump_zip_extract_nth(zip, 1, &size, NULL, 0) == NULL);
+    /* the lost frame's entry damaged (its stored bytes changed: the CRC
+       fails) and the frame before intact: the lost frame is said to be
+       damaged, never the next .rddump handed back as frame 1 */
+    {
+        const IcoZipMem e[2] = {{"loss-1-lost.rddump", a, sizeof(a)},
+                                {"loss-1-before.rddump", b, sizeof(b)}};
+        mz_zip_archive z;
+        void *out = NULL;
+        size_t outSize = 0;
+
+        memset(&z, 0, sizeof(z));
+        CHECK(mz_zip_writer_init_heap(&z, 0, 0));
+        for (int i = 0; i < 2; i++) {
+            CHECK(mz_zip_writer_add_mem(&z, e[i].name, e[i].data, e[i].size, MZ_NO_COMPRESSION));
+        }
+        CHECK(mz_zip_writer_finalize_heap_archive(&z, &out, &outSize));
+        mz_zip_writer_end(&z);
+        for (size_t i = 0; out != NULL && i + sizeof(a) <= outSize; i++) {
+            if (memcmp((const char *)out + i, a, sizeof(a)) == 0) {
+                ((char *)out)[i] ^= 0x20; /* "The lost frame": the CRC no longer matches */
+                break;
+            }
+        }
+        CHECK(put(zip, out, outSize) == 0);
+        mz_free(out);
+        got = ico_dump_zip_extract_why(zip, 0, &size, name, sizeof(name), why, sizeof(why));
+        CHECK(got == NULL);
+        CHECK(strstr(why, "whose frame entry loss-1-lost.rddump") != NULL);
+        CHECK(strstr(why, "could not be extracted") != NULL);
+        free(got);
+        /* the second frame is still the second */
+        got = ico_dump_zip_extract_why(zip, 1, &size, name, sizeof(name), why, sizeof(why));
+        CHECK(got != NULL && size == sizeof(b) && memcmp(got, b, size) == 0 && why[0] == '\0');
+        free(got);
+    }
+    remove(zip);
+    remove(lost);
+    remove(log);
+
+    /* the prune that keeps the zip just written: the clock went back, so
+       it sorts before three older ones and the name order alone deletes it */
+    {
+        static const char *const stamps[5] = {"20261110-184124", "20261110-190000",
+                                              "20261110-191000", "20261110-192000",
+                                              "20261109-120000"};
+        IcoPruneInfo info;
+
+        for (int i = 0; i < 5; i++) {
+            CHECK(ico_loss_dump_path(zip, sizeof(zip), dir, stamps[i]) == 0);
+            CHECK(put(zip, "z", 1) == 0);
+        }
+        CHECK(ico_loss_dump_path(zip, sizeof(zip), dir, stamps[0]) == 0);
+        CHECK(ico_loss_dump_prune_except(dir, 3, zip, &info) == 2);
+        CHECK(info.found == 5 && info.removed == 2 && info.saved == 1);
+        /* the oldest names went (20261109 and the next), the written one
+           and the two newest stayed */
+        CHECK(strstr(info.names, "loss-20261109-120000.zip") != NULL);
+        CHECK(strstr(info.names, "loss-20261110-190000.zip") != NULL);
+        CHECK(strstr(info.names, "loss-20261110-184124.zip") == NULL);
+        for (int i = 0; i < 5; i++) {
+            char z2[1300];
+
+            CHECK(ico_loss_dump_path(z2, sizeof(z2), dir, stamps[i]) == 0);
+            CHECK(ico_path_kind(z2, NULL, NULL) == (i == 0 || i == 2 || i == 3 ? 0 : -1));
+            remove(z2);
+        }
+        /* the written zip is the newest: nothing changes from the plain
+           rule, saved stays 0 */
+        for (int i = 0; i < 4; i++) {
+            char z2[1300];
+
+            CHECK(ico_loss_dump_path(z2, sizeof(z2), dir, stamps[i == 0 ? 4 : i]) == 0);
+            CHECK(put(z2, "z", 1) == 0);
+        }
+        CHECK(ico_loss_dump_path(zip, sizeof(zip), dir, stamps[3]) == 0);
+        CHECK(ico_loss_dump_prune_except(dir, 3, zip, &info) == 1);
+        CHECK(info.found == 4 && info.removed == 1 && info.saved == 0);
+        for (int i = 0; i < 5; i++) {
+            char z2[1300];
+
+            CHECK(ico_loss_dump_path(z2, sizeof(z2), dir, stamps[i]) == 0);
+            remove(z2);
+        }
+        /* a zip that is not there: the plain rule */
+        CHECK(ico_loss_dump_prune_except(dir, 3, "nowhere/loss-x.zip", &info) == 0);
+        CHECK(info.found == 0 && info.saved == 0);
+    }
+    snprintf(zip, sizeof(zip), "%s/no-such-folder", dir);
+    CHECK(ico_loss_dump_prune_except(zip, 3, NULL, NULL) == -1);
+    ico_rmdir(dir);
+}
+
+/* The slow-scene zip (ico_slow_dump_path, ico_loss_dump_zip with no frame
+   before, ico_slow_dump_prune): its name, its contents (the one frame, then
+   the log, the loose dump gone), and the pruning to the newest three slow zips that leaves
+   the loss zips and every other file alone, as the loss pruning leaves the
+   slow ones */
+static void test_slow(const char *base)
+{
+    char dir[1200], dump[1300], log[1300], zip[1300], zip2[1300], why[160];
+    const char a[] = "the slow scene's frame", text[] = "window: slow scene\n";
+    mz_zip_archive z;
+    size_t size = 0;
+
+    snprintf(dir, sizeof(dir), "%s/slow-test", base);
+    ico_mkdir(dir);
+    snprintf(dump, sizeof(dump), "%s/slow-20261106-120000.rddump", dir);
+    snprintf(log, sizeof(log), "%s/ico-pc.log", dir);
+    CHECK(ico_slow_dump_path(zip, sizeof(zip), dir, "20261106-120000") == 0);
+    CHECK(strstr(zip, "/slow-20261106-120000.zip") != NULL);
+    CHECK(ico_slow_dump_path(zip, 8, dir, "20261106-120000") == -1);
+    CHECK(ico_slow_dump_path(zip, sizeof(zip), dir, "20261106-120000") == 0);
+    CHECK(put(dump, a, sizeof(a)) == 0);
+    CHECK(put(log, text, sizeof(text) - 1) == 0);
+    CHECK(ico_loss_dump_zip(zip, dump, NULL, log, 0, why, sizeof(why)) == 0);
+    memset(&z, 0, sizeof(z));
+    CHECK(mz_zip_reader_init_file(&z, zip, 0));
+    CHECK(mz_zip_reader_get_num_files(&z) == 2);
+    CHECK(find(&z, "slow-20261106-120000.rddump") == 0);
+    CHECK(entry_is(&z, "slow-20261106-120000.rddump", a, sizeof(a)));
+    CHECK(entry_is(&z, "ico-pc.log", text, sizeof(text) - 1));
+    mz_zip_reader_end(&z);
+    CHECK(ico_path_kind(dump, NULL, NULL) == -1); /* the loose dump is gone */
+    void *got = ico_dump_zip_extract(zip, &size, NULL, 0);
+    CHECK(got != NULL && size == sizeof(a) &&
+          memcmp(got, a, size) == 0); /* rd_replay_tool takes it */
+    free(got);
+
+    /* the newest ICO_SLOW_DUMP_KEEP (3) kept: three newer slow zips, a loss
+       zip and another file; the oldest goes */
+    char zip3[1300], zip4[1300];
+    CHECK(ICO_SLOW_DUMP_KEEP == 3);
+    CHECK(ico_slow_dump_path(zip2, sizeof(zip2), dir, "20261106-130000") == 0);
+    CHECK(ico_slow_dump_path(zip3, sizeof(zip3), dir, "20261106-140000") == 0);
+    CHECK(ico_slow_dump_path(zip4, sizeof(zip4), dir, "20261106-150000") == 0);
+    CHECK(put(zip2, "z", 1) == 0);
+    CHECK(put(zip3, "z", 1) == 0);
+    CHECK(put(zip4, "z", 1) == 0);
+    char loss[1300], other[1300];
+    snprintf(loss, sizeof(loss), "%s/loss-20261106-110000.zip", dir);
+    snprintf(other, sizeof(other), "%s/slow-notes.txt", dir);
+    CHECK(put(loss, "z", 1) == 0);
+    CHECK(put(other, "z", 1) == 0);
+    CHECK(ico_slow_dump_prune(dir, ICO_SLOW_DUMP_KEEP) == 1);
+    CHECK(ico_path_kind(zip, NULL, NULL) == -1);
+    CHECK(ico_path_kind(zip2, NULL, NULL) == 0);
+    CHECK(ico_path_kind(zip3, NULL, NULL) == 0);
+    CHECK(ico_path_kind(zip4, NULL, NULL) == 0);
+    CHECK(ico_path_kind(loss, NULL, NULL) == 0);
+    CHECK(ico_path_kind(other, NULL, NULL) == 0);
+    /* the loss pruning leaves the slow zip alone */
+    CHECK(ico_loss_dump_prune(dir, 0) == 1);
+    CHECK(ico_path_kind(zip2, NULL, NULL) == 0);
+    CHECK(ico_slow_dump_prune(dir, ICO_SLOW_DUMP_KEEP) == 0);
+    remove(zip2);
+    remove(zip3);
+    remove(zip4);
+    remove(other);
+    remove(log);
+    snprintf(zip, sizeof(zip), "%s/no-such-folder", dir);
+    CHECK(ico_slow_dump_prune(zip, 1) == -1);
     ico_rmdir(dir);
 }
 
@@ -234,6 +534,242 @@ static void test_add(const char *base)
         CHECK(ico_zip_move_file(zip, blended, why, sizeof(why), NULL) == -1);
         remove(zip);
     }
+}
+
+static void test_upscale_pictures(const char *base)
+{
+    char dump[1200], present[1200], zip[1200], why[160], stem[1200], path[1300], line[1400];
+    char rd[300], pic[3000];
+    int added = -1;
+    mz_zip_archive z;
+
+    snprintf(dump, sizeof(dump), "%s/up-v1.rddump", base);
+    snprintf(present, sizeof(present), "%s/up-present.png", base);
+    snprintf(zip, sizeof(zip), "%s/up-v1.zip", base);
+    CHECK(ico_upscale_pictures_stem(present, stem, sizeof(stem)) == 0);
+    CHECK(strlen(stem) + strlen("-present.png") == strlen(present));
+    CHECK(ico_upscale_pictures_stem("up.png", stem, sizeof(stem)) == -1);
+    for (size_t i = 0; i < sizeof(rd); i++) {
+        rd[i] = (char)(i * 11 + 3);
+    }
+    /* incompressible bytes: the zip grows by about each picture's size */
+    uint32_t x = 2463534242u;
+    for (size_t i = 0; i < sizeof(pic); i++) {
+        x ^= x << 13;
+        x ^= x >> 17;
+        x ^= x << 5;
+        pic[i] = (char)(x >> 24);
+    }
+    CHECK(put(dump, rd, sizeof(rd)) == 0);
+    CHECK(put(present, pic, sizeof(pic)) == 0);
+    CHECK(ico_frame_dump_zip(zip, dump, NULL, NULL, why, sizeof(why)) >= 0);
+    /* no picture beside the present yet: none found, none added */
+    CHECK(ico_upscale_pictures_zip(present, zip, ICO_REPORT_ZIP_CAP, 0, &added, line,
+                                   sizeof(line)) == 0);
+    CHECK(added == 0);
+    (void)ico_upscale_pictures_stem(present, stem, sizeof(stem));
+    for (int i = 0; i < ICO_UPSCALE_PICTURES; i++) {
+        snprintf(path, sizeof(path), "%s%s", stem, ico_upscale_picture_suffix(i));
+        CHECK(put(path, pic, sizeof(pic) - (size_t)i * 100u) == 0);
+    }
+    /* all four into the zip, in order, the bytes kept, under the cap */
+    CHECK(ico_upscale_pictures_zip(present, zip, ICO_REPORT_ZIP_CAP, sizeof(pic), &added, line,
+                                   sizeof(line)) == 4);
+    CHECK(added == 4);
+    CHECK(strstr(line, "up-scene.png") != NULL && strstr(line, "up-composite.png") != NULL);
+    memset(&z, 0, sizeof(z));
+    CHECK(mz_zip_reader_init_file(&z, zip, 0));
+    CHECK(mz_zip_reader_get_num_files(&z) == 5);
+    CHECK(entry_is(&z, "up-scene.png", pic, sizeof(pic)));
+    CHECK(entry_is(&z, "up-velocity.png", pic, sizeof(pic) - 100u));
+    CHECK(entry_is(&z, "up-depth.png", pic, sizeof(pic) - 200u));
+    CHECK(entry_is(&z, "up-composite.png", pic, sizeof(pic) - 300u));
+    {
+        /* the zip's order: the dump, then composite, scene, velocity, depth */
+        static const char *const order[] = {"up-composite.png", "up-scene.png", "up-velocity.png",
+                                            "up-depth.png"};
+        for (int k = 0; k < 4; k++) {
+            CHECK(find(&z, order[k]) == k + 1);
+        }
+    }
+    mz_zip_reader_end(&z);
+    remove(zip);
+    /* a cap the second picture would pass: the first alone, the refusal
+       named, the zip within the cap */
+    CHECK(put(dump, rd, sizeof(rd)) == 0);
+    CHECK(ico_frame_dump_zip(zip, dump, NULL, NULL, why, sizeof(why)) >= 0);
+    {
+        FILE *f = fopen(zip, "rb");
+        long have = 0;
+
+        if (f != NULL) {
+            fseek(f, 0, SEEK_END);
+            have = ftell(f);
+            fclose(f);
+        }
+        const uint64_t cap = (uint64_t)have + sizeof(pic) + 512u + sizeof(pic) / 2u;
+
+        CHECK(ico_upscale_pictures_zip(present, zip, cap, 0, &added, line, sizeof(line)) == 4);
+        CHECK(added == 1);
+        CHECK(strstr(line, "up-scene.png not added") != NULL);
+        f = fopen(zip, "rb");
+        have = 0;
+        if (f != NULL) {
+            fseek(f, 0, SEEK_END);
+            have = ftell(f);
+            fclose(f);
+        }
+        CHECK(have > 0 && (uint64_t)have <= cap);
+    }
+    memset(&z, 0, sizeof(z));
+    CHECK(mz_zip_reader_init_file(&z, zip, 0));
+    CHECK(mz_zip_reader_get_num_files(&z) == 2);
+    CHECK(find(&z, "up-composite.png") >= 0 && find(&z, "up-scene.png") < 0);
+    mz_zip_reader_end(&z);
+    /* F12 without a zip: the four named, nothing written */
+    CHECK(ico_upscale_pictures_zip(present, NULL, 0, 0, &added, line, sizeof(line)) == 4);
+    CHECK(added == 0 && strstr(line, "-composite.png") != NULL);
+    remove(zip);
+    /* the wait: the present after the request did not dispatch (a keep
+       frame); the present goes in first, the four when the outcome comes */
+    CHECK(put(dump, rd, sizeof(rd)) == 0);
+    CHECK(ico_frame_dump_zip(zip, dump, NULL, NULL, why, sizeof(why)) >= 0);
+    for (int i = 0; i < ICO_UPSCALE_PICTURES; i++) {
+        snprintf(path, sizeof(path), "%s%s", stem, ico_upscale_picture_suffix(i));
+        remove(path);
+    }
+    CHECK(ico_upscale_pictures_after(present, zip, ICO_UPSCALE_OUTCOME_PENDING) == 1);
+    CHECK(ico_upscale_pictures_waiting() == 1);
+    CHECK(ico_zip_add_file(zip, present, "up-present.png", why, sizeof(why), NULL) == 0);
+    CHECK(ico_upscale_pictures_step(ICO_UPSCALE_OUTCOME_PENDING) == 0);
+    CHECK(ico_upscale_pictures_waiting() == 1);
+    for (int i = 0; i < ICO_UPSCALE_PICTURES; i++) {
+        snprintf(path, sizeof(path), "%s%s", stem, ico_upscale_picture_suffix(i));
+        CHECK(put(path, pic, sizeof(pic) / 4u) == 0);
+    }
+    CHECK(ico_upscale_pictures_step(ICO_UPSCALE_OUTCOME_WRITTEN) == 1);
+    CHECK(ico_upscale_pictures_waiting() == 0);
+    CHECK(ico_upscale_pictures_step(ICO_UPSCALE_OUTCOME_WRITTEN) == 0);
+    memset(&z, 0, sizeof(z));
+    CHECK(mz_zip_reader_init_file(&z, zip, 0));
+    CHECK(mz_zip_reader_get_num_files(&z) == 6);
+    CHECK(find(&z, "up-present.png") == 1 && find(&z, "up-composite.png") == 2);
+    CHECK(entry_is(&z, "up-depth.png", pic, sizeof(pic) / 4u));
+    mz_zip_reader_end(&z);
+    remove(zip);
+    /* an outcome other than PENDING: at once, nothing kept (the dump is
+       moved into each zip: written again for the next) */
+    CHECK(put(dump, rd, sizeof(rd)) == 0);
+    if (ico_frame_dump_zip(zip, dump, NULL, NULL, why, sizeof(why)) < 0) {
+        printf("FAIL %s:%d: the zip for the outcome case: %s\n", __FILE__, __LINE__, why);
+        fails++;
+    }
+    CHECK(ico_upscale_pictures_after(present, zip, ICO_UPSCALE_OUTCOME_WRITTEN) == 0);
+    CHECK(ico_upscale_pictures_waiting() == 0);
+    memset(&z, 0, sizeof(z));
+    CHECK(mz_zip_reader_init_file(&z, zip, 0));
+    CHECK(mz_zip_reader_get_num_files(&z) == 5);
+    mz_zip_reader_end(&z);
+    remove(zip);
+    /* expired with none on disk: nothing added, nothing kept */
+    for (int i = 0; i < ICO_UPSCALE_PICTURES; i++) {
+        snprintf(path, sizeof(path), "%s%s", stem, ico_upscale_picture_suffix(i));
+        remove(path);
+    }
+    CHECK(put(dump, rd, sizeof(rd)) == 0);
+    if (ico_frame_dump_zip(zip, dump, NULL, NULL, why, sizeof(why)) < 0) {
+        printf("FAIL %s:%d: the zip for the expired case: %s\n", __FILE__, __LINE__, why);
+        fails++;
+    }
+    CHECK(ico_upscale_pictures_after(present, zip, ICO_UPSCALE_OUTCOME_PENDING) == 1);
+    CHECK(ico_upscale_pictures_step(ICO_UPSCALE_OUTCOME_EXPIRED) == 1);
+    memset(&z, 0, sizeof(z));
+    CHECK(mz_zip_reader_init_file(&z, zip, 0));
+    CHECK(mz_zip_reader_get_num_files(&z) == 1);
+    mz_zip_reader_end(&z);
+    remove(zip);
+    remove(present);
+    for (int i = 0; i < ICO_UPSCALE_PICTURES; i++) {
+        snprintf(path, sizeof(path), "%s%s", stem, ico_upscale_picture_suffix(i));
+        remove(path);
+    }
+
+    /* a user folder whose name is not ASCII: the four found by their sizes */
+    /* 1100: present[1200] takes dir + "/up-present.png" without truncation (gcc's
+       -Wformat-truncation at -O2 refused 1200) */
+    char dir[1100];
+
+    snprintf(dir, sizeof(dir), "%s/up-Jos\xc3\xa9", base);
+    ico_mkdir(dir);
+    snprintf(present, sizeof(present), "%s/up-present.png", dir);
+    CHECK(put(present, pic, sizeof(pic)) == 0);
+    CHECK(ico_upscale_pictures_stem(present, stem, sizeof(stem)) == 0);
+    for (int i = 0; i < ICO_UPSCALE_PICTURES; i++) {
+        snprintf(path, sizeof(path), "%s%s", stem, ico_upscale_picture_suffix(i));
+        CHECK(put(path, pic, sizeof(pic)) == 0);
+    }
+    CHECK(ico_upscale_pictures_zip(present, NULL, 0, 0, &added, line, sizeof(line)) == 4);
+    CHECK(strstr(line, "Jos\xc3\xa9") != NULL);
+    ico_remove(present);
+    for (int i = 0; i < ICO_UPSCALE_PICTURES; i++) {
+        snprintf(path, sizeof(path), "%s%s", stem, ico_upscale_picture_suffix(i));
+        ico_remove(path);
+    }
+    ico_rmdir(dir);
+}
+
+/* the scene ledger's text (ico_dump_zip_set_ledger): a zip that takes the
+   log takes scene-ledger.txt beside it, byte for byte; a zip without the
+   log does not; with none set neither */
+static const char kLedger[] = "The scene ledger: ...\n\nscene ledger: stage 40 (deja) ended: ...\n";
+
+static size_t fakeLedger(char *out, size_t cap)
+{
+    snprintf(out, cap, "%s", kLedger);
+    return strlen(out);
+}
+
+static void test_ledger(const char *base)
+{
+    char dump[1200], log[1200], zip[1200], why[160];
+    char rd[256], text[] = "window: a log line\n";
+    mz_zip_archive z;
+
+    for (size_t i = 0; i < sizeof(rd); i++) {
+        rd[i] = (char)(i * 11 + 3);
+    }
+    snprintf(dump, sizeof(dump), "%s/ledger-v1.rddump", base);
+    snprintf(log, sizeof(log), "%s/ledger.log", base);
+    snprintf(zip, sizeof(zip), "%s/ledger-v1.zip", base);
+    CHECK(put(log, text, sizeof(text) - 1) == 0);
+    ico_dump_zip_set_ledger(fakeLedger);
+    CHECK(put(dump, rd, sizeof(rd)) == 0);
+    CHECK(ico_frame_dump_zip(zip, dump, NULL, log, why, sizeof(why)) == 0);
+    memset(&z, 0, sizeof(z));
+    CHECK(mz_zip_reader_init_file(&z, zip, 0));
+    CHECK(mz_zip_reader_get_num_files(&z) == 3);
+    CHECK(entry_is(&z, "scene-ledger.txt", kLedger, sizeof(kLedger) - 1));
+    CHECK(entry_is(&z, "ledger.log", text, sizeof(text) - 1));
+    mz_zip_reader_end(&z);
+    remove(zip);
+    /* no log: no ledger either (the zip is the frame alone) */
+    CHECK(put(dump, rd, sizeof(rd)) == 0);
+    CHECK(ico_frame_dump_zip(zip, dump, NULL, NULL, why, sizeof(why)) == 1);
+    memset(&z, 0, sizeof(z));
+    CHECK(mz_zip_reader_init_file(&z, zip, 0));
+    CHECK(mz_zip_reader_locate_file(&z, "scene-ledger.txt", NULL, 0) < 0);
+    mz_zip_reader_end(&z);
+    remove(zip);
+    /* none set: the log alone */
+    ico_dump_zip_set_ledger(NULL);
+    CHECK(put(dump, rd, sizeof(rd)) == 0);
+    CHECK(ico_frame_dump_zip(zip, dump, NULL, log, why, sizeof(why)) == 0);
+    memset(&z, 0, sizeof(z));
+    CHECK(mz_zip_reader_init_file(&z, zip, 0));
+    CHECK(mz_zip_reader_get_num_files(&z) == 2);
+    mz_zip_reader_end(&z);
+    remove(zip);
+    remove(log);
 }
 
 int main(int argc, char **argv)
@@ -402,7 +938,11 @@ int main(int argc, char **argv)
     }
 
     test_loss(argv[1]);
+    test_why(argv[1]);
+    test_slow(argv[1]);
     test_add(argv[1]);
+    test_ledger(argv[1]);
+    test_upscale_pictures(argv[1]);
 
     printf("dump_zip_test: %s\n", fails ? "FAILED" : "ok");
     return fails ? 1 : 0;

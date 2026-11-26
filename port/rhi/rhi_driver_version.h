@@ -22,15 +22,50 @@
 #define RHI_VENDOR_INTEL 0x8086u
 #define RHI_VENDOR_QUALCOMM 0x5143u
 #define RHI_VENDOR_APPLE 0x106Bu
+#define RHI_VENDOR_IMGTEC 0x1010u
 /* VkDriverId values */
 #define RHI_DRIVER_ID_NVIDIA_PROPRIETARY 4u
 #define RHI_DRIVER_ID_INTEL_PROPRIETARY_WINDOWS 5u
 #define RHI_DRIVER_ID_QUALCOMM_PROPRIETARY 8u
 #define RHI_DRIVER_ID_MOLTENVK 14u
+#define RHI_DRIVER_ID_MESA_TURNIP 18u
 
 /* The text into buf (always terminated when n > 0); returns buf. */
 char *rhi_driver_version_text(uint32_t vendorId, uint32_t driverId, uint32_t driverVersion,
                               char *buf, size_t n);
+
+/* The Mesa version a Mesa driver (Turnip, RADV, ANV, llvmpipe, NVK) names in
+ * VK_KHR_driver_properties' driverInfo: "Mesa 25.3.0-devel (git-bbdd688)"
+ * on a Turnip build from Mesa's main branch, "Mesa 24.2.8" on a release,
+ * "Mesa 25.0.7-2 (LLVM 19.1.7)" on a distribution's package.  known is 0
+ * when the driver names none (every non-Mesa driver); devel is 1 for a
+ * "-devel" version (a build of Mesa's main branch, which is no release of
+ * its number: its code lies between that release and the one before). */
+typedef struct RhiMesaVersion {
+    int known;
+    unsigned major, minor, patch;
+    int devel;
+} RhiMesaVersion;
+
+/* Reads the Mesa version out of driverName ("turnip Mesa driver") and
+ * driverInfo (either may be NULL).  Tolerant: the word Mesa in any case
+ * followed by a space, '-', '_' or 'v' and major.minor[.patch] in driverInfo
+ * ("Mesa 25.3.0-devel (git-bbdd688)", "mesa-25.1", "Mesa v24.2.8"); else,
+ * when driverName holds the word Mesa and driverInfo is a bare version
+ * ("25.3.0-devel"), that.  Anything else (Qualcomm's "Compiler Version:
+ * E031.41.03.47" text, an empty one) leaves *out unknown.  Returns
+ * out->known. */
+int rhi_mesa_version_parse(const char *driverName, const char *driverInfo, RhiMesaVersion *out);
+
+/* "Mesa 25.3.0" or "Mesa 25.3.0-devel" into buf; "" when not known. */
+char *rhi_mesa_version_text(const RhiMesaVersion *v, char *buf, size_t n);
+
+/* A driver's own text on one line (issue 123: Qualcomm's VkDriverInfo carries
+ * newlines, "Driver Build: ..., Date: 11/28/25\nCompiler Version: ...", which
+ * broke every log line that quoted it): each run of control characters
+ * (newline, carriage return, tab, ...) becomes one space, a leading and a
+ * trailing space are dropped.  In place; returns s. */
+char *rhi_text_one_line(char *s);
 
 /* 1 for Qualcomm's own Adreno driver: vendor 0x5143 with
  * VK_DRIVER_ID_QUALCOMM_PROPRIETARY, or with the id unknown (0).  Mesa's
@@ -57,5 +92,21 @@ int rhi_driver_is_moltenvk(uint32_t vendorId, uint32_t driverId, int moltenvkBui
  * Mac, which states no such bound), and for a null one (RhiLimits
  * colorBytesPerPixel). */
 uint32_t rhi_metal_color_bytes(const char *deviceName);
+
+/* Why this driver's pipeline compiles run one at a time, or NULL for any
+ * other (issue 188): Imagination's PowerVR (vendor 0x1010) whose driver text
+ * (RhiLimits.driverText or driverName: "PowerVR B-Series Vulkan Driver
+ * 1.15@6133110") names the B-Series, "PowerVR B-Series"; the Vulkan
+ * version (apiMajor.apiMinor) is not used: no source says an older
+ * PowerVR below Vulkan 1.3 has the fault.  Imagination's own answer on the reporter's driver (Moto
+ * G54, BXM-8-256, 1.15@6133110): its compiler is not thread-safe, so shader
+ * module and pipeline creation must not run at the same time on two
+ * threads; the D-Series DXT-48 on driver 26.1 at Vulkan 1.4 compiles the
+ * same set in parallel without a fault.  vk_pipeline.c then makes one
+ * compile thread and holds one lock around vkCreateShaderModule and
+ * vkCreateGraphicsPipelines; the window's pre-game pipeline limit is 60 s
+ * there (port/platform/gpu_hang.h ico_pipe_stall_limit_s). */
+const char *rhi_driver_compiler_serial(uint32_t vendorId, const char *driverText, uint32_t apiMajor,
+                                       uint32_t apiMinor);
 
 #endif /* PORT_RHI_RHI_DRIVER_VERSION_H */

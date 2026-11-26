@@ -19,6 +19,7 @@
 #include "rd_thread.h"
 #include "render_thread.h"
 #include "rhi.h"
+#include "slow_judge.h"
 #include "ui_fps.h"
 #include "video_options.h"
 #include "window_disc.h"
@@ -35,6 +36,11 @@ WindowPres g_windowPres;
 Uint64 g_windowDeadline;
 
 static int s_pollRestarted; /* the poll's restart at the first game frame, once */
+
+/* The idle ask (pace_policy.h pace_rt_fill, PACE_FILL_DEFAULT): a further present
+   asked of the rule only with the render thread idle, the pipe planned by
+   the GPU's mean and corrected by what has ended, the slot ahead's job end */
+static const bool k_fill = PACE_FILL_DEFAULT != 0;
 
 /* The pacer more than RESYNC_NS behind: the lag is dropped (counted) */
 static void resync(Uint64 now)
@@ -96,6 +102,20 @@ static void rt_ask(PaceRtAsk *q, const IcoRtPlan *p, Uint64 now, Uint64 refresh,
     q->gpuNs = s_pres.gpuNs;
     q->paced = s_pres.budget.paced;
     q->asMade = asMade;
+    if (k_fill) {
+        /* The idle ask: the pipe by the larger of the GPU records' median and
+           mean (pace_rt_fill_gpu_ns); with the slot ahead the jobs' ends by
+           the GPU's (PaceRtAsk.slotAhead) and its typical and longest
+           lately (PaceStepEst.gpuTyp, gpuLongNs) */
+        if (s_pres.gpuHist.count != 0) {
+            q->gpuNs = pace_rt_fill_gpu_ns(&s_pres.gpuHist);
+        }
+        q->slotAhead = p->slotAhead;
+        if (q->slotAhead) {
+            q->gpuTypNs = pace_rt_typ_ns(&s_pres.stepEst.gpuTyp);
+            q->gpuLongNs = s_pres.stepEst.gpuLongNs;
+        }
+    }
 }
 
 /* A further present of a frame already shown, handed to the render thread
@@ -128,12 +148,52 @@ static PaceRtHold rt_further_hold(Uint64 now, Uint64 refresh, Uint64 period, boo
         return PACE_RT_GO;
     }
     rt_ask(&q, &p, now, refresh, period, asMade);
+    if (k_fill && p.sinceNs == 0) {
+        /* The idle ask: asked with the render thread idle (the pace waited for
+           it): the pipe's ends of the pictures done are what is known of
+           them (pace_policy.h pace_rt_pipe_idle), counted for the block */
+        ico_render_thread_note_fix(pace_rt_pipe_idle(&s_pres.rtPipe, &q, p.endNs, p.byFence));
+    }
     const PaceRtHold why = pace_rt_further_trace(&q, &s_pres.rtPipe, &t);
 
     if (why == PACE_RT_GO || why == PACE_RT_MISS) {
         ico_render_thread_note_ask(&q, &t, (int)why);
     }
+    if (s_pres.stepEst.backoff != 0 && s_pres.stepEst.judgedFrame == 0) {
+        /* backed off: whether the frame's first further picture, the one
+           the back-off holds, would have fitted under the normal plan: the
+           back-off's evidence (pace_policy.h PaceStepEst,
+           pace_step_normal_fits) */
+        pace_step_est_judge(
+            &s_pres.stepEst,
+            pace_step_normal_fits(&s_pres.stepEst, &q, &s_pres.rtPipe,
+                                  pace_step_closes(s_pres.sinceClose, 1, s_pres.frameSteps),
+                                  pace_step_closes(s_pres.sinceClose, 2, s_pres.frameSteps)));
+    }
     return why;
+}
+
+/* The even cadence (rd.h rd_present_even_hold): for a further present, the
+   time from now at which the step rule (rt_further_hold's question, asked
+   of the pure rule at later times, pace_rt_further_trace) would first hold
+   one handed over then, within limitNs; 0 when it would not (or holds it
+   now: the guard's own) */
+static double even_rule_ms(Uint64 now, Uint64 limitNs, Uint64 refresh, Uint64 period, bool asMade)
+{
+    IcoRtPlan p;
+    PaceRtAsk q;
+    PaceRtTrace t;
+
+    if (!ico_render_thread_plan(&p)) {
+        return 0.0;
+    }
+    for (Uint64 dt = 0; dt <= limitNs; dt += 500000ull) {
+        rt_ask(&q, &p, now + dt, refresh, period, asMade);
+        if (pace_rt_further_trace(&q, &s_pres.rtPipe, &t) != PACE_RT_GO) {
+            return dt == 0 ? 0.0 : (double)dt / 1e6;
+        }
+    }
+    return 0.0;
 }
 
 /* A present handed to the render thread at now: the pipeline's prediction
@@ -177,14 +237,98 @@ static void rt_pipe_posted(Uint64 now, Uint64 refresh, Uint64 period)
                       pace_rt_pipe_reads_end(&s_pres.rtPipe, now, &q, pace_rt_pipe_behind(&q)), &q);
 }
 
+/* A miss's GPU time for the lines: "the GPU's longest picture around it
+   X ms against a typical Y ms" (no record: not known) */
+static void step_pic_text(char *out, size_t n, const PaceStepMiss *m)
+{
+    if (m->picNs == 0) {
+        snprintf(out, n, "the GPU's times around it not known");
+    } else if (m->typNs == 0) {
+        snprintf(out, n, "the GPU's longest picture around it %.1f ms, no typical yet",
+                 (double)m->picNs / 1e6);
+    } else {
+        snprintf(out, n, "the GPU's longest picture around it %.1f ms against a typical %.1f ms",
+                 (double)m->picNs / 1e6, (double)m->typNs / 1e6);
+    }
+}
+
+/* What the step rule's note judged, began and ended (pace_policy.h
+   PaceStepEvent): an outlier miss, a counted one, a back-off's start with
+   its three misses and its end, each its own line, the first 8 then every
+   100th */
+static void step_events(const PaceStepEst *e, uint64_t tickNs)
+{
+    const PaceStepEvent *ev = &e->ev;
+    char a[112], b[112], c[112];
+
+    if (ev->judged == PACE_STEP_OUTLIER) {
+        ico_log_limited("window: step rule outlier miss",
+                        "window: step rule: an outlier miss, not counted toward the back-off: the "
+                        "miss %u steps ago (late by %.1f ms) came with a picture the GPU took %.1f "
+                        "ms against a typical %.1f ms (over %u/%u of the median of the %u before "
+                        "it, among the pictures from %u steps before it to %u after); %u outlier "
+                        "misses so far, %u counted",
+                        e->steps - ev->miss.at, (double)ev->miss.lateNs / 1e6,
+                        (double)ev->miss.picNs / 1e6, (double)ev->miss.typNs / 1e6,
+                        PACE_STEP_OUTLIER_NUM, PACE_STEP_OUTLIER_DEN, (unsigned)PACE_HIST_LEN,
+                        PACE_STEP_JUDGE_BEFORE, PACE_STEP_JUDGE_AFTER, e->outliers, e->counted);
+    } else if (ev->judged == PACE_STEP_COUNTED && ev->began) {
+        step_pic_text(a, sizeof(a), &e->cnt[0]);
+        step_pic_text(b, sizeof(b), &e->cnt[1]);
+        step_pic_text(c, sizeof(c), &e->cnt[2]);
+        ico_log_limited("window: step rule back-off",
+                        "window: step rule: back-off of at most %u steps after the third miss the "
+                        "pictures caused within %u steps, each counted (no outlier picture around "
+                        "it): %u steps ago late by %.1f ms (%s), %u steps ago late by %.1f ms "
+                        "(%s), %u steps ago late by %.1f ms (%s): the pictures between frames "
+                        "planned at the whole period until a frame's picture between frames "
+                        "would have fitted the normal plan %u frames in a row; %u such back-offs "
+                        "so far, %u misses of the pictures' (%u under %.0f ms, %u counted, %u "
+                        "outliers), %u the game's own",
+                        PACE_STEP_BACKOFF_STEPS, PACE_STEP_MISS_WINDOW, e->steps - e->cnt[0].at,
+                        (double)e->cnt[0].lateNs / 1e6, a, e->steps - e->cnt[1].at,
+                        (double)e->cnt[1].lateNs / 1e6, b, e->steps - e->cnt[2].at,
+                        (double)e->cnt[2].lateNs / 1e6, c, pace_step_fit_frames(tickNs),
+                        e->backoffs, e->pictureMisses, e->smallMisses,
+                        (double)PACE_STEP_MISS_FLOOR_NS / 1e6, e->counted, e->outliers,
+                        e->gameMisses);
+    } else if (ev->judged == PACE_STEP_COUNTED) {
+        step_pic_text(a, sizeof(a), &ev->miss);
+        ico_log_limited("window: step rule counted miss",
+                        "window: step rule: the miss %u steps ago (late by %.1f ms) counted toward "
+                        "the back-off (%s: no outlier); %u counted in the last %u steps (the "
+                        "third begins it)",
+                        e->steps - ev->miss.at, (double)ev->miss.lateNs / 1e6, a,
+                        pace_step_est_recent(e), PACE_STEP_MISS_WINDOW);
+    }
+    if (ev->ended == PACE_STEP_END_FIT) {
+        ico_log_limited("window: step rule back-off end",
+                        "window: step rule: back-off ended after %u steps: the pictures between "
+                        "frames fitted in %u consecutive frames (half a second of %.1f ms "
+                        "frames); %u ended so, %u at the limit",
+                        ev->endSteps, ev->endFrames, (double)tickNs / 1e6, e->fitEnds,
+                        e->limitEnds);
+    } else if (ev->ended == PACE_STEP_END_LIMIT) {
+        ico_log_limited("window: step rule back-off end",
+                        "window: step rule: back-off ended at its limit of %u steps (the pictures "
+                        "between frames fitted in the last %u consecutive frames of the %u "
+                        "needed); %u ended so, %u by the pictures fitting",
+                        PACE_STEP_BACKOFF_STEPS, ev->endFrames, pace_step_fit_frames(tickNs),
+                        e->limitEnds, e->fitEnds);
+    }
+}
+
 /* The step that ran before this pace (the timer path, s_deadline its
    deadline now): its own time (the step less its waits for a picture's
    reads) into the step's estimate, a miss of its period into the plan
    (pace_policy.h PaceStepEst: nothing under the floor, the margin widened
-   over it, the whole period after the third in the window), both into the
-   10 s line; a miss with the
-   further presents planned by the render thread is named, the first 8 then
-   every 100th */
+   over it, judged two steps on by the GPU's times around it: an outlier
+   miss, or counted, the whole period after the third counted in the
+   window until the pictures between frames fit again), a closed frame's
+   judgement into the back-off's evidence (pace_step_est_frame), all into
+   the 10 s line; with the further presents planned by the render thread
+   each miss and what was judged, begun and ended is named, the first 8
+   then every 100th */
 static void step_note(Uint64 period, bool closed)
 {
     const Uint64 now = SDL_GetTicksNS();
@@ -231,38 +375,40 @@ static void step_note(Uint64 period, bool closed)
     pace_step_typ_note(typ, own, period, load);
     const PaceStepAct act = pace_step_est_note(&s_pres.stepEst, own, missed, late, byPictures);
     const PaceStepEst *e = &s_pres.stepEst;
+    /* the game's frame length (as the pace's tick): the back-off's evidence
+       is half a second of frames */
+    uint64_t tick = s_pres.tickPrev ? s_pres.tickAt - s_pres.tickPrev : 2 * period;
 
+    tick = tick < period ? period : (tick > 4 * period ? 4 * period : tick);
+    if (closed) {
+        (void)pace_step_est_frame(&s_pres.stepEst, tick);
+    }
     ico_render_thread_note_step(
         waited, missed, late, backedOff, pace_step_plan_ns(&s_pres.stepEst, true, period),
         pace_step_plan_ns(&s_pres.stepEst, false, period), e->widenNs, e->typ[1].meanNs,
-        pace_step_typ_dev_ns(&e->typ[1]), typ->skipped != skipped0, (int)act);
-    if (!missed || !rd_interpolation_active() || ico_render_thread_mode() != FM_MODE_ON) {
+        pace_step_typ_dev_ns(&e->typ[1]), typ->skipped != skipped0, (int)act, &e->ev);
+    if (!rd_interpolation_active() || ico_render_thread_mode() != FM_MODE_ON) {
+        return;
+    }
+    step_events(e, tick);
+    if (!missed) {
         return;
     }
     /* what the miss did to the plan (pace_policy.h PaceStepEst) */
-    if (act == PACE_STEP_STRICT) {
-        ico_log_limited("window: step rule back-off",
-                        "window: step rule: back-off %u steps after the third miss the pictures "
-                        "caused within %u steps (late by %.1f ms, %.1f ms of it waiting for a "
-                        "picture, %.1f ms the presents ran past the step's start): the pictures "
-                        "between frames planned at the whole period; %u such fall-backs so far, "
-                        "%u misses of the pictures' (%u under %.0f ms), %u the game's own",
-                        e->backoff, PACE_STEP_MISS_WINDOW, (double)late / 1e6, (double)waited / 1e6,
-                        (double)presentsLate / 1e6, e->backoffs, e->pictureMisses, e->smallMisses,
-                        (double)PACE_STEP_MISS_FLOOR_NS / 1e6, e->gameMisses);
-    } else if (act == PACE_STEP_WIDEN) {
+    if (act == PACE_STEP_WIDEN) {
         ico_log_limited("window: step rule margin",
                         "window: step rule: the margin widened by %.1f ms to %.1f ms after a miss "
                         "the pictures caused (late by %.1f ms, %.1f ms of it waiting for a "
-                        "picture, %.1f ms the presents ran past the step's start; %u of the "
-                        "pictures' over %.0f ms in the last %u steps): the next pictures are "
-                        "held that much earlier, the widening falling an eighth a step; %u "
-                        "misses of the pictures' so far (%u under %.0f ms), %u the game's own",
+                        "picture, %.1f ms the presents ran past the step's start; %u counted "
+                        "toward the back-off in the last %u steps): the next pictures are held "
+                        "that much earlier, the widening falling an eighth a step; whether it "
+                        "counts is judged in %u steps, by the GPU's times of the pictures around "
+                        "it; %u misses of the pictures' so far (%u under %.0f ms), %u the game's "
+                        "own",
                         (double)late / 1e6, (double)e->widenNs / 1e6, (double)late / 1e6,
-                        (double)waited / 1e6, (double)presentsLate / 1e6, e->recent,
-                        (double)PACE_STEP_MISS_FLOOR_NS / 1e6, PACE_STEP_MISS_WINDOW,
-                        e->pictureMisses, e->smallMisses, (double)PACE_STEP_MISS_FLOOR_NS / 1e6,
-                        e->gameMisses);
+                        (double)waited / 1e6, (double)presentsLate / 1e6, pace_step_est_recent(e),
+                        PACE_STEP_MISS_WINDOW, PACE_STEP_JUDGE_AFTER + 1u, e->pictureMisses,
+                        e->smallMisses, (double)PACE_STEP_MISS_FLOOR_NS / 1e6, e->gameMisses);
     } else if (act == PACE_STEP_SMALL) {
         ico_log_limited("window: step rule small miss",
                         "window: step rule: a miss the pictures caused under %.0f ms (late by %.1f "
@@ -354,6 +500,13 @@ static int present_once(float a, Uint64 refresh, Uint64 period)
         s_pres.cost -= pause; /* the present's own time, a refresh: what the history and the
                                  loop's judgement of the next present see */
     }
+    {
+        /* The idle ask's guard: the hand-over's own time, less its wait for the
+           render thread's picture before (the drain) */
+        const Uint64 drain = rd_submit_waited_ns() - handWait0;
+
+        s_pres.handCost = s_pres.cost > drain ? s_pres.cost - drain : 0;
+    }
     if (!ok) {
         return 0;
     }
@@ -371,9 +524,13 @@ static int present_once(float a, Uint64 refresh, Uint64 period)
     if (rd_submit_async()) {
         /* handed to the render thread, its present still to come (the
            counters are the hand-over's, rhi.h rhi_set_call_guard): the
-           display's wait is this present's acquire and its wait for the
-           picture before it (that one's submit and present: FIFO's full
-           queue), the GPU's the fence waits; never more than the present */
+           display's wait is the acquire counted since the last hand-over
+           and this present's wait for the render thread's picture before
+           (its present with no submit thread, and the wait for room in the
+           present queue made at its end, Direct3D 11's frame latency wait,
+           rd_thread.h rd__room_ahead_take; with the submit thread the drain
+           is the render thread's alone), the GPU's the fence waits; never
+           more than the present */
         const Uint64 disp = (st.acquireNs - before.acquireNs) + (rd_submit_waited_ns() - handWait0);
         const Uint64 fence = st.fenceWaitNs - before.fenceWaitNs;
 
@@ -795,6 +952,20 @@ void window_present_pace(int hz)
                                ? pace_lock_presents(s_pres.framerate, period)
                                : 0;
         if (n > 0 && pace_grid_period_ok(n, window_refresh_ns(period), period)) {
+            /* the vsync lock is never as made, and the as-made decision
+               below is not reached on this path: declared here each step as
+               the paced timer path does (rd_present_as_made(false): the GPU
+               queue's model, the own timer and the screen's model emptied,
+               no display times chained or read).  Left as made after a
+               switch from Uncapped, a stale present-clock value (a timer
+               present that failed before it was taken) gave the first locked
+               picture the as-made rules' moment, and the rules' models
+               carried the pre-lock pictures into the next as-made run
+               (rd_pace_gpu_test testLockTransition); s_pres.asMade 0 so a
+               return to as made logs its line and starts its allowance again */
+            s_pres.asMade = 0;
+            s_pres.pictureNs = 0; /* one picture a refresh (slow_judge.h) */
+            rd_present_as_made(false);
             pace_locked(n, period);
             return;
         }
@@ -825,6 +996,7 @@ void window_present_pace(int hz)
                 (unsigned)RHI_FRAMES_IN_FLIGHT);
     }
     s_pres.budget.asMade = asMade ? (unsigned)RHI_FRAMES_IN_FLIGHT : 0u;
+    rd_present_as_made(asMade); /* the alpha from the hand-over (rd_rebase.h) */
     s_pres.budget.presents = 0; /* the step's presents (pace_budget_step) */
     s_pres.budget.optional = 0;
     /* paced by the GPU's time: vsync off or mailbox in use (pace_policy.h) */
@@ -844,32 +1016,37 @@ void window_present_pace(int hz)
 
         s_pres.frameSteps = n <= 4u ? n : 0u;
         s_pres.sinceClose = 0;
+        if (!rd_interpolation_active() && s_pres.frameSteps != 0u) {
+            /* one picture a game frame: the interval slow pictures are
+               judged against (slow_judge.h; the last known through a load) */
+            s_pres.pictureNs = (Uint64)s_pres.frameSteps * period;
+        }
     } else {
         s_pres.sinceClose++;
     }
     if (!rd_interpolation_active()) {
-        /* framerate "original": rd_end_frame presented the frame once; the
-           picture is held until the next.  That present's start-up log line
-           (the frame whole: t 1) */
-        RdPresentInfo pi;
-        const bool whole =
-            newFrame && rd_last_present_info(&pi) && pi.frame == s_pres.frame && !pi.keep;
-
+        /* framerate "original": rd_end_frame made the frame's one picture
+           (handed over to the render thread, or replayed inside the step);
+           the picture is held until the next.  That present's start-up log
+           line (the frame whole: t 1) */
         if (newFrame) {
             window_boot_log(1.0f);
-            /* that present ran inside the step (rd_end_frame's replay):
-               the first on a swapchain made since the last one is the
-               rebuild's past a refresh (as present_once), paused out
-               before the deadline is judged */
+            /* the first present on a swapchain made since the last one is
+               the rebuild's past a refresh (as present_once), paused out
+               before the deadline is judged: what the step itself spent on
+               the picture (its hand-over, or its replay inside the step;
+               rd.h rd_frame_post_last_take), not the replay's own time,
+               which a picture handed over spends off the step */
             RhiStats st;
+            const double stepMs = s_pres.postHave ? s_pres.post.ms : 0.0;
 
             rhi_get_stats(&st);
             window_pace_paused(pace_first_present_pause(st.swapchains, &s_pres.swapchains,
-                                                        (Uint64)(rd_last_replay_ms() * 1e6),
+                                                        (Uint64)(stepMs * 1e6),
                                                         window_refresh_ns(period)));
         }
         now = SDL_GetTicksNS();
-        window_orig_step(now >= s_deadline, whole ? rd_last_replay_ms() : -1.0);
+        window_orig_step(now >= s_deadline);
         if (now < s_deadline) {
             SDL_DelayPrecise(s_deadline - now);
         } else if (now - s_deadline > RESYNC_NS) {
@@ -902,6 +1079,7 @@ void window_present_pace(int hz)
         gap = s_pres.fifoLock ? 0
                               : pace_present_gap(s_pres.framerate, uncappedMailbox != 0,
                                                  rhi_present_mailbox(), refresh);
+        s_pres.pictureNs = gap; /* a cap's gap (slow_judge.h), 0: a refresh */
         if (!gap) {
             s_pres.nextPresent = 0;
         }
@@ -996,9 +1174,37 @@ void window_present_pace(int hz)
            pictures as made (vsync off, uncapped): there the GPU's own
            back-pressure (the slot fences) is the limit and the allowance
            only measures */
+        if (s_pres.presentedFrame == s_pres.frame && k_fill && now < s_deadline &&
+            !s_pres.paceSlow && !s_pres.offScreen) {
+            /* The idle ask (pace_policy.h pace_rt_fill): with a picture in
+               progress the further present is neither asked nor handed over:
+               the pace waits for the render thread (at most to the deadline;
+               not idle by then, none this step) and asks again, so the rule
+               plans its post at the time it is made and the hand-over never
+               waits in its drain past what the rule allowed */
+            IcoRtPlan fp;
+
+            if (ico_render_thread_plan(&fp) &&
+                pace_rt_fill(now, fp.sinceNs, s_deadline) == PACE_FILL_WAIT) {
+                const bool idle = ico_render_thread_wait_idle(s_deadline);
+                const Uint64 after = SDL_GetTicksNS();
+
+                ico_render_thread_note_fill(after - now, !idle);
+                if (!idle) {
+                    if (after < s_deadline) {
+                        SDL_DelayPrecise(s_deadline - after);
+                    }
+                    break;
+                }
+                continue;
+            }
+        }
         if (s_pres.presentedFrame == s_pres.frame) {
-            const int guard = now >= s_deadline || s_pres.paceSlow || s_pres.offScreen ||
-                              (!s_pres.fifoLock && now + s_pres.cost > s_deadline);
+            /* The idle ask: the guard's cost the hand-over's own (its drain was
+               the wait the pace now makes before the ask) */
+            const int guard =
+                now >= s_deadline || s_pres.paceSlow || s_pres.offScreen ||
+                (!s_pres.fifoLock && now + (k_fill ? s_pres.handCost : s_pres.cost) > s_deadline);
             const PaceRtHold rtWhy =
                 guard ? PACE_RT_GO : rt_further_hold(now, refresh, period, asMade);
             const int rtLate = rtWhy != PACE_RT_GO;
@@ -1029,6 +1235,41 @@ void window_present_pace(int hz)
             }
             SDL_DelayPrecise(wake - now);
             continue;
+        }
+        /* the even cadence (rd.h rd_present_even_hold, rd_pace_even.h; off by
+           default, ICO_RD_PACE_EVEN=1): with pictures as made the hand-over
+           held until its picture's GPU end is due a refresh before the
+           refresh it is aimed at (its present carries that refresh as its
+           desired time); past this step's deadline the step ends and the
+           next one asks again */
+        if (asMade) {
+            const double untilMs = now < s_deadline ? (double)(s_deadline - now) / 1e6 : 0.0;
+            double holdMs = rd_present_even_hold(untilMs, (double)tick / 1e6, 0.0);
+
+            if (holdMs > 0.01 && s_pres.presentedFrame == s_pres.frame) {
+                /* a further picture: asked again with the time the step
+                   rule would hold it from (the plan moves it before that
+                   where its refreshes go round the game's tick) */
+                const double ruleMs =
+                    even_rule_ms(now, (Uint64)(holdMs * 1e6) + 1000000ull, refresh, period, asMade);
+
+                if (ruleMs > 0.0) {
+                    holdMs = rd_present_even_hold(untilMs, (double)tick / 1e6, ruleMs);
+                }
+            }
+
+            if (holdMs > 0.01) {
+                const Uint64 wake = now + (Uint64)(holdMs * 1e6);
+
+                if (wake >= s_deadline) {
+                    if (now < s_deadline) {
+                        SDL_DelayPrecise(s_deadline - now);
+                    }
+                    break;
+                }
+                SDL_DelayPrecise(wake - now);
+                continue;
+            }
         }
         /* alpha from the present clock (the measured time smoothed
            to the presents' steady cadence) against the simulated time the
@@ -1082,4 +1323,51 @@ void window_present_pace(int hz)
     if (now > s_deadline && now - s_deadline > RESYNC_NS) {
         resync(now);
     }
+}
+
+/* --- what slow pictures and steps are judged against (slow_judge.h) ----- */
+
+double window_slow_replay_ms(void)
+{
+    static Uint64 s_refresh = ~(Uint64)0, s_picture = ~(Uint64)0;
+    static double s_key = -1.0;
+    static unsigned s_lines;
+    const Uint64 refresh = window_refresh_ns(0);
+
+    if (refresh != s_refresh || s_pres.pictureNs != s_picture || s_pres.slowMs != s_key) {
+        /* a change of the interval in force (a frame rate, a display):
+           said, the first 8 times then every 100th */
+        s_refresh = refresh;
+        s_picture = s_pres.pictureNs;
+        s_key = s_pres.slowMs;
+        s_lines++;
+        if (s_lines <= 8u || s_lines % 100u == 0u) {
+            char text[320];
+
+            (void)slow_judge_text(text, sizeof(text), refresh, s_pres.pictureNs, s_pres.slowMs);
+            fprintf(stderr, "window: %s (change %u of the run)\n", text, s_lines);
+        }
+    }
+    return slow_judge_replay_ms(refresh, s_pres.pictureNs);
+}
+
+double window_slow_step_ms(void)
+{
+    return slow_judge_step_ms(s_pres.slowMs, window_refresh_ns(0), s_pres.pictureNs);
+}
+
+double window_slow_target_hz(void)
+{
+    return slow_judge_target_hz(window_refresh_ns(0), s_pres.pictureNs);
+}
+
+double window_block_game_fps(double sec)
+{
+    /* the close before this block's first: the last block's last close
+       (0: the first block, counted over its wall time) */
+    static Uint64 s_first;
+    const double fps = slow_judge_game_fps(s_pres.statFrames, s_first, s_pres.tickAt, sec);
+
+    s_first = s_pres.tickAt;
+    return fps;
 }

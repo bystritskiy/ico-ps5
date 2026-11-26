@@ -10,8 +10,12 @@
  * drawn.  Its animation runs on (op.c's actTitleCamera2 waits on
  * opTitleLogoMode), so back on the title it shows settled, with no intro.
  *
+ * The New Game screen (settings.h ui_new_game_screen_enter) leaves it as
+ * the vibration screen had it: the game's own title animation has taken
+ * the lettering away by then.
+ *
  * Once hidden it stays hidden until the title's own menu (layout 12 or 13)
- * is back or the stage changes, so Extras > Credits and a model's stage
+ * or the file select is back or the stage changes, so Extras > Credits and a model's stage
  * load do not show it again while the title fades out.  The pause menu's
  * Settings (any other stage) never hides anything.
  *
@@ -31,12 +35,15 @@ extern "C" {
 #endif
 
 /* common/src/main.c, once a Main tick after the layouts ran (ExecIcoMisc)
-   and before the objects are drawn: the hidden state for this tick. */
+   and before the objects are drawn: the hidden state for this tick, then
+   the icon capture's step (title_icon.h ico_title_icon_tick). */
 void ico_title_logo_update(void);
 
 /* seki/src/RegistPacket.c reg_DispObj, for every object it draws: nonzero
    when the object's model (its name) is the logo's and the logo is hidden
-   (as the tick's ico_title_logo_update left it). */
+   (as the tick's ico_title_logo_update left it).  While the application
+   icon's capture pass is on (title_icon.h), nonzero for every model but
+   "I": the letter is drawn alone. */
 int ico_title_logo_skip(const char *model);
 
 /* seki/src/RegistPacket.c reg_DispObj, for every object it draws: nonzero

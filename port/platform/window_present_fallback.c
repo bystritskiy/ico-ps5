@@ -17,6 +17,22 @@ static IcoPresentFallbackMode s_mode;
 static int s_modeRead;
 static int s_pending; /* the switch asked for, applied at the step's end */
 
+/* the rhi's question when it makes a swapchain (rhi_present_fifo_start: the
+   vendor id and driver text it passes), with the driver id from the same
+   limits (rhi_limits() is filled before the first swapchain): a renamed
+   Turnip build is Turnip by its id, not Qualcomm's own driver.  The answer
+   is the device table's FIFO_FROM_START on that identity
+   (ico_present_fallback_start; vsync is the rhi's own test, so 0 here; the
+   window hands this question over only where the mode and the build ask,
+   window_fifo_set) */
+static int fifo_start_now(unsigned vendorId, const char *driverText)
+{
+    const RhiLimits *l = rhi_limits();
+
+    return ico_present_fallback_start(s_mode, ICO_PRESENT_FALLBACK_ANDROID, 0, vendorId,
+                                      l != NULL ? l->driverId : 0u, driverText);
+}
+
 void window_fifo_set(void)
 {
     if (!s_modeRead) {
@@ -33,46 +49,78 @@ void window_fifo_set(void)
         }
     }
     rhi_present_fifo_fallback(s_fallback.taken || s_mode == ICO_PRESENT_FALLBACK_FIFO);
+    /* auto on Android: Qualcomm's own driver makes its first swapchain
+       FIFO at the fewest images when vsync is off (the rhi asks the
+       driver's ids, so this works before the device exists); off keeps
+       mailbox, fifo needs no question; elsewhere (Windows on Snapdragon)
+       no question, so Vsync Off stays immediate there */
+    rhi_present_fifo_start(ico_present_fallback_start_asked(s_mode, ICO_PRESENT_FALLBACK_ANDROID)
+                               ? fifo_start_now
+                               : NULL);
 }
 
-/* What the window says about a present it notes (present_fallback.h):
-   vsync off in the options, the swapchain in mailbox mode, Vulkan, a
-   driver the switch is for; the dev key off keeps mailbox; FIFO from the
-   start needs no switch */
+/* Whether the swapchain in use is the one FIFO from the start made
+   (present_fallback.h ico_present_fallback_start): after the device exists */
+static int start_active(void)
+{
+    IcoVideoOptions o;
+    const RhiLimits *l = rhi_limits();
+
+    ico_video_get(&o);
+    return rhi_backend() == RHI_BACKEND_VULKAN && l != NULL && !rhi_present_mailbox() &&
+           !s_fallback.taken &&
+           ico_present_fallback_start(s_mode, ICO_PRESENT_FALLBACK_ANDROID, o.vsync, l->vendorId,
+                                      l->driverId, l->driverText);
+}
+
+/* What the window says about a present it notes (present_fallback.h
+   ico_present_fallback_gate: vsync off in the options, the swapchain in
+   mailbox mode, Vulkan, a driver the switch is for (Qualcomm's own; others
+   answer OTHER); the dev key off keeps mailbox; FIFO from the start needs
+   no switch) */
 static int gate(void)
 {
     IcoVideoOptions o;
     const RhiLimits *l = rhi_limits();
 
     ico_video_get(&o);
-    if (o.vsync || !rhi_present_mailbox() || rhi_backend() != RHI_BACKEND_VULKAN || l == NULL ||
-        !ico_present_fallback_driver_eligible(l->vendorId, l->driverText) ||
-        s_mode == ICO_PRESENT_FALLBACK_FIFO) {
-        return ICO_PRESENT_FALLBACK_GATE_NO;
-    }
-    return s_mode == ICO_PRESENT_FALLBACK_OFF ? ICO_PRESENT_FALLBACK_GATE_KEPT
-                                              : ICO_PRESENT_FALLBACK_GATE_YES;
+    return ico_present_fallback_gate(o.vsync, rhi_present_mailbox(),
+                                     rhi_backend() == RHI_BACKEND_VULKAN,
+                                     l != NULL ? l->vendorId : 0u, l != NULL ? l->driverId : 0u,
+                                     l != NULL ? l->driverText : NULL, s_mode);
 }
 
 const char *window_fifo_words(void)
 {
     static char words[96];
+    static int s_startLogged;
+    const int start = start_active();
 
+    if (start && !s_startLogged) {
+        /* once, before the present mode line that asks for these words */
+        char line[160];
+
+        s_startLogged = 1;
+        ico_present_fallback_start_line(line, sizeof line);
+        fprintf(stderr, "%s\n", line);
+    }
     ico_present_fallback_mode_suffix(&s_fallback, s_mode, gate() == ICO_PRESENT_FALLBACK_GATE_YES,
-                                     words, sizeof words);
+                                     start, words, sizeof words);
     return words;
 }
 
-void window_fifo_note(double presentMs, unsigned replay, const char *framerateName)
+void window_fifo_note(double presentMs, unsigned replay, const char *framerateName,
+                      const char *where, const char *split)
 {
     if (presentMs > 250.0) {
         const RhiLimits *l = rhi_limits();
         ico_log_limited("window: present blocked",
                         "window: a present blocked %.0f ms in the driver's present call (replay "
-                        "%u; %s on %s, %s; present %s, framerate %s)",
+                        "%u; %s on %s, %s; present %s, framerate %s%s)%s%s",
                         presentMs, replay, rhi_backend_kind_name(rhi_backend()), rhi_adapter_name(),
                         l && l->driverText ? l->driverText : "driver unknown",
-                        rhi_present_mode_name(), framerateName);
+                        rhi_present_mode_name(), framerateName, where ? where : "",
+                        split && split[0] ? ": " : "", split ? split : "");
     }
     const int got = ico_present_fallback_note(&s_fallback, SDL_GetTicksNS(), presentMs, gate());
     char line[512];
@@ -87,6 +135,12 @@ void window_fifo_note(double presentMs, unsigned replay, const char *framerateNa
                                          line, sizeof line);
         fprintf(stderr, "%s\n", line);
         s_pending = 1;
+    } else if (got == ICO_PRESENT_FALLBACK_OTHER) {
+        const RhiLimits *l = rhi_limits();
+
+        ico_present_fallback_other_line(&s_fallback, rhi_adapter_name(),
+                                        l != NULL ? l->driverText : NULL, line, sizeof line);
+        fprintf(stderr, "%s\n", line);
     } else if (got == ICO_PRESENT_FALLBACK_KEPT) {
         ico_present_fallback_kept_line(&s_fallback, line, sizeof line);
         fprintf(stderr, "%s\n", line);

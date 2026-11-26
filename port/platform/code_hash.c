@@ -395,7 +395,11 @@ static size_t mask_x64(const uint8_t *p, size_t n, uint8_t *buf, uint64_t addr, 
 
 /* --- arm64 -------------------------------------------------------------------- */
 
-uint32_t ico_code_a64_writes(uint32_t w)
+typedef uint32_t (*A64Writes)(uint32_t w);
+
+/* rules 1 and 2's decoder, kept as those rules' hashes were made (a record
+   of those rules compares with this build's code under it) */
+static uint32_t a64_writes_v2(uint32_t w)
 {
     const uint32_t rd = 1u << (w & 31);
     const uint32_t rn = 1u << ((w >> 5) & 31);
@@ -463,6 +467,348 @@ uint32_t ico_code_a64_writes(uint32_t w)
     return ~0u;
 }
 
+/* rules 3: the general registers written, by the A64 encoding tables'
+   classes (Arm ARM C4.1); an unknown load or store, an unallocated or SVE /
+   SME word: every register */
+static uint32_t a64_writes_v3(uint32_t w)
+{
+    const uint32_t rd = 1u << (w & 31);
+    const uint32_t rn = 1u << ((w >> 5) & 31);
+    const uint32_t rt2 = 1u << ((w >> 10) & 31);
+    const uint32_t rs = 1u << ((w >> 16) & 31);
+    const uint32_t call = 0x7FFFFu | 1u << 30; /* x30 and, through the callee, x0-x18 */
+    const unsigned opc = (w >> 22) & 3;
+    const unsigned v = (w >> 26) & 1;
+
+    /* branches, exceptions and system (op0 101x) */
+    if ((w & 0x7C000000u) == 0x14000000u) {
+        return (w & 0x80000000u) != 0 ? call : 0u; /* BL; B */
+    }
+    if ((w & 0x7E000000u) == 0x34000000u || (w & 0x7E000000u) == 0x36000000u ||
+        (w & 0xFF000000u) == 0x54000000u) {
+        return 0; /* CBZ, CBNZ, TBZ, TBNZ, B.cond, BC.cond */
+    }
+    if ((w & 0xFE000000u) == 0xD6000000u) {
+        return ((w >> 21) & 3u) == 1u ? call : 0u; /* BLR, BLRAA...; BR, RET, ERET... */
+    }
+    if ((w & 0xFF000000u) == 0xD4000000u) {
+        /* SVC, HVC, SMC as a call; BRK, HLT, DCPS write nothing */
+        return ((w >> 21) & 7u) == 0u && (w & 3u) != 0u ? call : 0u;
+    }
+    if ((w & 0xFFC00000u) == 0xD5000000u) {
+        if ((w & 0x00200000u) != 0) {
+            return rd; /* L set: MRS, SYSL, TSTART, TTEST write Rt */
+        }
+        if ((w & 0xFFFFF01Fu) == 0xD503201Fu) {
+            const unsigned h = (w >> 5) & 0x7Fu; /* CRm:op2 */
+
+            if ((h >> 3) == 1u) {
+                return 1u << 16 | 1u << 17; /* PACIA1716 ... AUTIB1716 */
+            }
+            if ((h >> 3) == 3u || h == 7u) {
+                return 1u << 30; /* PACIAZ ... AUTIBSP, XPACLRI */
+            }
+            return h == 0x28u ? 1u << 16 : 0u; /* CHKFEAT X16; the other hints */
+        }
+        return 0; /* MSR, SYS, barriers */
+    }
+    /* data processing, immediate (op0 100x): ADR, ADRP, ADD, logical, MOVZ,
+       bitfield, extract */
+    if ((w & 0x1C000000u) == 0x10000000u) {
+        return rd;
+    }
+    /* loads and stores (op0 x1x0) */
+    if ((w & 0x0A000000u) == 0x08000000u) {
+        if ((w & 0xBE000000u) == 0x0C000000u) {
+            return (w & 0x00800000u) != 0 ? rn : 0u; /* SIMD structures: post-index the base */
+        }
+        if ((w & 0x3E000000u) == 0x08000000u) {
+            /* exclusive, ordered, compare and swap: Rt, Rt2, Rs (a store's
+               status, CAS's old value) and Rs + 1 (CASP), the base (RCpc 3) */
+            return rd | rt2 | rs | 1u << (((w >> 16) + 1u) & 31u) | rn;
+        }
+        if ((w & 0x3B000000u) == 0x18000000u) {
+            return v ? 0u : rd; /* literal: LDR, LDRSW, PRFM */
+        }
+        if ((w & 0x3B000000u) == 0x19000000u) {
+            return rd | rn | rs; /* RCpc unscaled, memory tags, memory copy and set */
+        }
+        if ((w & 0x3A000000u) == 0x28000000u) {
+            /* pairs: a load of general registers writes both, never a SIMD
+               one; pre/post index write the base */
+            const unsigned idx = (w >> 23) & 3;
+            uint32_t out = ((w >> 22) & 1u) != 0 && !v ? rd | rt2 : 0u;
+
+            if (idx == 1 || idx == 3) {
+                out |= rn;
+            }
+            return out;
+        }
+        if ((w & 0x3B000000u) == 0x39000000u) {
+            return opc != 0 && !v ? rd : 0u; /* unsigned offset */
+        }
+        if ((w & 0x3B200000u) == 0x38000000u) {
+            /* the 9-bit forms; pre/post index write the base */
+            const unsigned idx = (w >> 10) & 3;
+            uint32_t out = opc != 0 && !v ? rd : 0u;
+
+            if (idx == 1 || idx == 3) {
+                out |= rn;
+            }
+            return out;
+        }
+        if ((w & 0x3B200C00u) == 0x38200800u) {
+            return opc != 0 && !v ? rd : 0u; /* register offset */
+        }
+        if ((w & 0x3B200C00u) == 0x38200000u && !v) {
+            /* atomics (LDADD, SWP, LDAPR...): Rt; ST64BV(0): Rs too; LD64B:
+               eight registers */
+            if ((w & 0xFFFFFC00u) == 0xF83FD000u) {
+                return ~0u;
+            }
+            return (w & 0xFFE0E000u) == 0xF820A000u ? rd | rs : rd;
+        }
+        if ((w & 0x3B200400u) == 0x38200400u && !v) {
+            return rd | ((w & 0x800u) != 0 ? rn : 0u); /* LDRAA, LDRAB: Rt; W the base */
+        }
+        return ~0u;
+    }
+    /* data processing, register (op0 x101) */
+    if ((w & 0x0E000000u) == 0x0A000000u) {
+        if ((w & 0x3FE00000u) == 0x3A400000u) {
+            return 0; /* CCMN, CCMP (register and immediate): the flags alone */
+        }
+        if ((w & 0xFFE07C10u) == 0xBA000400u || (w & 0xFFFFBC1Fu) == 0x3A00080Du) {
+            return 0; /* RMIF, SETF8, SETF16: the flags alone */
+        }
+        return rd;
+    }
+    /* SIMD and floating point (op0 x111) */
+    if ((w & 0x0E000000u) == 0x0E000000u) {
+        if ((w & 0x5F20FC00u) == 0x1E200000u) {
+            /* to and from a general register: FCVT[NPMZA][SU] (opcode 0, 1,
+               4, 5), FMOV to a general register and FJCVTZS (6) write one;
+               SCVTF, UCVTF (2, 3) and FMOV from one (7) do not */
+            const unsigned op = (w >> 16) & 7u;
+
+            return op <= 1u || (op >= 4u && op <= 6u) ? rd : 0u;
+        }
+        if ((w & 0x5F200000u) == 0x1E000000u) {
+            return ((w >> 16) & 6u) == 0u ? rd : 0u; /* fixed point: FCVTZS, FCVTZU */
+        }
+        if ((w & 0xBFE0FC00u) == 0x0E003C00u || (w & 0xBFE0FC00u) == 0x0E002C00u) {
+            return rd; /* UMOV, SMOV */
+        }
+        return 0;
+    }
+    return ~0u;
+}
+
+static A64Writes a64_writes_of(int rules)
+{
+    return rules >= 3 ? a64_writes_v3 : a64_writes_v2;
+}
+
+uint32_t ico_code_a64_writes(uint32_t w)
+{
+    return a64_writes_v3(w);
+}
+
+uint32_t ico_code_a64_writes_rules(int rules, uint32_t w)
+{
+    return a64_writes_of(rules)(w);
+}
+
+/* --- what a paused thread can hold (ico_code_a64_page_carried) -------------- */
+
+#define A64_CARRY (0x1FFu | 0x3FFu << 19) /* x0-x8, x19-x28 */
+#define A64_CALL_KILL (0x7FFFFu | 1u << 30)
+
+/* the registers the word surely writes (code_hash.h: the over-claimed
+   classes write nothing here) */
+static uint32_t a64_must_writes(uint32_t w)
+{
+    uint32_t r;
+
+    if ((w & 0x7C000000u) == 0x14000000u) {
+        return 0;
+    }
+    if ((w & 0x0A000000u) == 0x08000000u) {
+        if ((w & 0x3E000000u) == 0x08000000u || (w & 0x3B000000u) == 0x19000000u ||
+            (w & 0xFFC00000u) == 0xF9800000u || (w & 0xFFE00400u) == 0xF8800000u ||
+            (w & 0xFFE00C00u) == 0xF8A00800u || (w & 0xFF000000u) == 0xD8000000u ||
+            (w & 0x3B200C00u) == 0x38200000u) {
+            return 0;
+        }
+    }
+    r = a64_writes_v3(w);
+    return r == ~0u ? 0u : r;
+}
+
+/* word j of n, entered with the page in regs: 1 when it may hand the page to
+   a paused thread */
+static int a64_carries(uint32_t w, uint32_t regs, size_t n, size_t j)
+{
+    const unsigned rt = w & 31u, rn = (w >> 5) & 31u, rt2 = (w >> 10) & 31u, rm = (w >> 16) & 31u;
+    const int carry = (regs & A64_CARRY) != 0;
+    int64_t t;
+#define HELD(r) (((regs >> (r)) & 1u) != 0)
+
+    if (a64_writes_v3(w) == ~0u) {
+        return regs != 0; /* not understood */
+    }
+    if ((w & 0x7C000000u) == 0x14000000u) {
+        if ((w & 0x80000000u) != 0) {
+            return carry; /* BL */
+        }
+        t = (int64_t)j + sign_extend(w & 0x3FFFFFFu, 26);
+        return (t < 0 || t >= (int64_t)n) && carry; /* B out of it: a tail call */
+    }
+    if ((w & 0xFF000000u) == 0x54000000u || (w & 0x7E000000u) == 0x34000000u) {
+        t = (int64_t)j + sign_extend((w >> 5) & 0x7FFFFu, 19);
+        return (t < 0 || t >= (int64_t)n) && carry;
+    }
+    if ((w & 0x7E000000u) == 0x36000000u) {
+        t = (int64_t)j + sign_extend((w >> 5) & 0x3FFFu, 14);
+        return (t < 0 || t >= (int64_t)n) && carry;
+    }
+    if ((w & 0xFE000000u) == 0xD6000000u) {
+        return carry; /* BLR, BR, RET */
+    }
+    if ((w & 0xFFE0FFE0u) == 0xAA0003E0u || (w & 0x7F800000u) == 0x11000000u ||
+        (w & 0x9F000000u) == 0x90000000u || (w & 0x9F000000u) == 0x10000000u) {
+        return 0; /* MOV, ADD of 0 (copies, followed), a base use, ADRP, ADR */
+    }
+    if ((w & 0x3B000000u) == 0x39000000u || (w & 0x3B200000u) == 0x38000000u) {
+        return ((w >> 22) & 3u) == 0 && ((w >> 26) & 1u) == 0 && HELD(rt);
+    }
+    if ((w & 0x3B200C00u) == 0x38200800u) {
+        return (((w >> 22) & 3u) == 0 && ((w >> 26) & 1u) == 0 && HELD(rt)) || HELD(rm);
+    }
+    if ((w & 0x3A000000u) == 0x28000000u) {
+        return ((w >> 22) & 1u) == 0 && ((w >> 26) & 1u) == 0 && (HELD(rt) || HELD(rt2));
+    }
+    if ((w & 0x0A000000u) == 0x08000000u) {
+        return HELD(rt) || HELD(rt2) || HELD(rm) || HELD(rn);
+    }
+    if ((w & 0x1C000000u) == 0x10000000u) {
+        if ((w & 0x1F800000u) == 0x12800000u) {
+            return ((w >> 29) & 3u) == 3u && HELD(rt);
+        }
+        return HELD(rn) || ((w & 0x1F800000u) == 0x13800000u && HELD(rm));
+    }
+    if ((w & 0x0E000000u) == 0x0A000000u) {
+        return HELD(rn) || HELD(rm) || ((w & 0x1F000000u) == 0x1B000000u && HELD(rt2));
+    }
+    if ((w & 0x0E000000u) == 0x0E000000u) {
+        return HELD(rn);
+    }
+    if ((w & 0xFFC00000u) == 0xD5000000u) {
+        return HELD(rt);
+    }
+    return HELD(rt) || HELD(rn) || HELD(rt2) || HELD(rm);
+#undef HELD
+}
+
+static int a64_carry_push(uint32_t *into, uint8_t *seen, size_t *work, size_t *nwork,
+                          uint8_t *queued, size_t n, int64_t j, uint32_t v)
+{
+    if (j < 0 || j >= (int64_t)n) {
+        return 0;
+    }
+    if (!seen[j] || (v & ~into[j]) != 0) {
+        seen[j] = 1;
+        into[j] |= v;
+        if (!queued[j]) {
+            queued[j] = 1;
+            work[(*nwork)++] = (size_t)j;
+        }
+    }
+    return 0;
+}
+
+int ico_code_a64_page_carried(const uint32_t *ws, size_t n, size_t k)
+{
+    uint32_t *into;
+    uint8_t *seen, *queued;
+    size_t *work, nwork = 0;
+    int out = 0;
+
+    if (k >= n) {
+        return 1;
+    }
+    into = (uint32_t *)calloc(n, sizeof *into);
+    seen = (uint8_t *)calloc(n, 1);
+    queued = (uint8_t *)calloc(n, 1);
+    work = (size_t *)malloc(n * sizeof *work);
+    if (into == NULL || seen == NULL || queued == NULL || work == NULL) {
+        free(into);
+        free(seen);
+        free(queued);
+        free(work);
+        return -1;
+    }
+    (void)a64_carry_push(into, seen, work, &nwork, queued, n, (int64_t)k + 1, 1u << (ws[k] & 31u));
+    while (nwork > 0 && !out) {
+        const size_t j = work[--nwork];
+        const uint32_t w = ws[j], v = into[j];
+        uint32_t o;
+        const unsigned d = w & 31u;
+
+        queued[j] = 0;
+        if (v == 0) {
+            continue;
+        }
+        if (a64_carries(w, v, n, j)) {
+            out = 1;
+            break;
+        }
+        if ((w & 0xFC000000u) == 0x94000000u ||
+            ((w & 0xFE000000u) == 0xD6000000u && ((w >> 21) & 3u) == 1u)) {
+            o = v & ~A64_CALL_KILL & ~a64_must_writes(w);
+        } else {
+            o = v & ~a64_must_writes(w);
+            if ((w & 0xFFE0FFE0u) == 0xAA0003E0u && ((v >> ((w >> 16) & 31u)) & 1u) != 0 &&
+                d != 29 && d != 31) {
+                o |= 1u << d;
+            }
+            if ((w & 0xFF800000u) == 0x91000000u && ((v >> ((w >> 5) & 31u)) & 1u) != 0 &&
+                ((w >> 10) & 0xFFFu) == 0 && d != 29 && d != 31) {
+                o |= 1u << d; /* ADD Xd, Xn, #0 */
+            }
+        }
+        if ((w & 0xFC000000u) == 0x14000000u) {
+            (void)a64_carry_push(into, seen, work, &nwork, queued, n,
+                                 (int64_t)j + sign_extend(w & 0x3FFFFFFu, 26), o);
+        } else if ((w & 0xFF000010u) == 0x54000000u || (w & 0x7E000000u) == 0x34000000u) {
+            if ((w & 0xFF00001Fu) != 0x5400000Eu) {
+                (void)a64_carry_push(into, seen, work, &nwork, queued, n, (int64_t)j + 1, o);
+            }
+            (void)a64_carry_push(into, seen, work, &nwork, queued, n,
+                                 (int64_t)j + sign_extend((w >> 5) & 0x7FFFFu, 19), o);
+        } else if ((w & 0x7E000000u) == 0x36000000u) {
+            (void)a64_carry_push(into, seen, work, &nwork, queued, n, (int64_t)j + 1, o);
+            (void)a64_carry_push(into, seen, work, &nwork, queued, n,
+                                 (int64_t)j + sign_extend((w >> 5) & 0x3FFFu, 14), o);
+        } else if ((w & 0xFE000000u) == 0xD6000000u && ((w >> 21) & 3u) != 1u) {
+            if (((w >> 21) & 0xFu) == 0) { /* BR: a jump table's case, any word */
+                size_t i;
+
+                for (i = 0; i < n; i++) {
+                    (void)a64_carry_push(into, seen, work, &nwork, queued, n, (int64_t)i, o);
+                }
+            }
+        } else {
+            (void)a64_carry_push(into, seen, work, &nwork, queued, n, (int64_t)j + 1, o);
+        }
+    }
+    free(into);
+    free(seen);
+    free(queued);
+    free(work);
+    return out;
+}
+
 static uint32_t get32(const uint8_t *p)
 {
     return (uint32_t)p[0] | (uint32_t)p[1] << 8 | (uint32_t)p[2] << 16 | (uint32_t)p[3] << 24;
@@ -476,14 +822,96 @@ static void put32(uint8_t *p, uint32_t v)
     p[3] = (uint8_t)(v >> 24);
 }
 
-static size_t mask_a64(const uint8_t *p, size_t n, uint8_t *buf, uint64_t addr)
+/* a load or store (unsigned offset): the form lld's erratum 843419 patch
+   moves into a stub */
+static int a64_ldst_uimm(uint32_t w)
 {
-    const size_t words = n / 4;
-    uint32_t pend = 0; /* registers an ADRP set and nothing wrote since */
-    size_t k, keep = 0;
+    return (w & 0x3B000000u) == 0x39000000u;
+}
+
+/* rules 3: word k of the function at addr (ws, `words` words) is an
+   erratum 843419 patch site: 1 and *insn the stub's instruction it stands
+   for (code_hash.h) */
+static int a64_patch_site(const uint32_t *ws, size_t words, size_t k, uint64_t addr,
+                          const IcoA64Text *tx, uint32_t *insn)
+{
+    const uint32_t w = ws[k];
+    const uint64_t pc = addr + 4u * (uint64_t)k;
+    const uint8_t *s;
+    uint64_t t;
+    uint32_t s0, s1;
+    size_t back;
+    int found = 0;
+
+    if (tx == NULL || tx->bytes == NULL || (w & 0xFC000000u) != 0x14000000u) {
+        return 0;
+    }
+    t = pc + (uint64_t)(sign_extend(w & 0x3FFFFFFu, 26) * 4);
+    if ((t >= addr && t - addr < 4u * (uint64_t)words) || t < tx->lo || t > tx->hi ||
+        tx->hi - t < 8u) {
+        return 0; /* inside the function, or no stub the range holds */
+    }
+    s = (const uint8_t *)tx->bytes + (t - tx->lo);
+    s0 = get32(s);
+    s1 = get32(s + 4);
+    /* the stub: a load or store (unsigned offset), then B to the word after
+       the patch site */
+    if (!a64_ldst_uimm(s0) || (s1 & 0xFC000000u) != 0x14000000u ||
+        t + 4u + (uint64_t)(sign_extend(s1 & 0x3FFFFFFu, 26) * 4) != pc + 4u) {
+        return 0;
+    }
+    /* the erratum's sequence: an ADRP 8 or 12 bytes before, at page offset
+       0xff8 or 0xffc, whose register is the stub's base */
+    for (back = 2; back <= 3 && !found; back++) {
+        if (k >= back) {
+            const uint32_t a = ws[k - back];
+            const uint64_t apc = pc - 4u * (uint64_t)back;
+
+            found = (a & 0x9F000000u) == 0x90000000u &&
+                    ((apc & 0xFFFu) == 0xFF8u || (apc & 0xFFFu) == 0xFFCu) &&
+                    (a & 31u) == ((s0 >> 5) & 31u);
+        }
+    }
+    if (!found) {
+        return 0;
+    }
+    *insn = s0;
+    return 1;
+}
+
+size_t ico_code_a64_unpatch(const void *code, size_t words, uint64_t addr, const IcoA64Text *tx,
+                            uint32_t *ws)
+{
+    const uint8_t *p = (const uint8_t *)code;
+    size_t k, sites = 0;
 
     for (k = 0; k < words; k++) {
-        const uint32_t w = get32(p + 4 * k);
+        ws[k] = get32(p + 4 * k);
+    }
+    if (tx == NULL) {
+        return 0;
+    }
+    /* each site against the words as linked (an ADRP is never a site) */
+    for (k = 2; k < words; k++) {
+        uint32_t insn;
+
+        if (a64_patch_site(ws, words, k, addr, tx, &insn)) {
+            ws[k] = insn;
+            sites++;
+        }
+    }
+    return sites;
+}
+
+/* rules 1's masking (and the first half of 2's and 3's) over the words ws */
+static void mask_a64(const uint32_t *ws, size_t words, uint8_t *buf, uint64_t addr, size_t n,
+                     A64Writes writes)
+{
+    uint32_t pend = 0; /* registers an ADRP set and nothing wrote since */
+    size_t k;
+
+    for (k = 0; k < words; k++) {
+        const uint32_t w = ws[k];
         const uint64_t pc = addr + 4 * k;
         uint32_t m = w;
         uint64_t t;
@@ -519,20 +947,200 @@ static size_t mask_a64(const uint8_t *p, size_t n, uint8_t *buf, uint64_t addr)
             m = w & ~(0xFFFu << 10); /* the low 12 bits of an ADRP's address */
         }
         put32(buf + 4 * k, m);
-        wr = ico_code_a64_writes(w);
+        wr = writes(w);
         pend = wr == ~0u ? 0u : pend & ~wr;
         if ((w & 0x9F000000u) == 0x90000000u && (w & 31) != 29 && (w & 31) != 31) {
             pend |= 1u << (w & 31);
         }
+    }
+}
+
+/* the kept length: up to the last word that is not padding (zero, NOP) */
+static size_t a64_keep(const uint8_t *p, size_t n)
+{
+    const size_t words = n / 4;
+    size_t k, keep = 0;
+
+    for (k = 0; k < words; k++) {
+        const uint32_t w = get32(p + 4 * k);
+
         if (w != 0 && w != 0xD503201Fu) {
             keep = 4 * (k + 1);
         }
     }
-    if (n > 4 * words) {
-        memcpy(buf + 4 * words, p + 4 * words, n - 4 * words);
-        keep = n;
+    return n > 4 * words ? n : keep;
+}
+
+/* rules 2 and 3 (code_hash.h): the 12-bit offset of every ADD (immediate)
+   or load/store (unsigned offset) whose base register may hold an ADRP page
+   on some path through the function's own branches, zeroed in buf.  A
+   forward data-flow to a fixed point over the words: an ADRP makes its
+   register a page, a MOV (ORR Xd, XZR, Xm) copies one, any other write
+   ends one (the rules' decoder; an unknown instruction ends all); B,
+   B.cond, CBZ/CBNZ and TBZ/TBNZ inside the function lead to their target as
+   well, B and RET lead nowhere else, and BR (a jump table's case) leads to
+   every word.  Rules 3 run it over the words with the patch sites
+   replaced (a site's word is a load: it leads to the next).
+   tools/code_hash_a64.py is the same in Python. */
+
+/* the word a branch at word k leads to inside the function, or SIZE_MAX */
+static size_t a64_target(uint32_t w, size_t k, size_t words)
+{
+    int64_t d;
+
+    if ((w & 0xFC000000u) == 0x14000000u) {
+        d = sign_extend(w & 0x3FFFFFFu, 26);
+    } else if ((w & 0xFF000010u) == 0x54000000u || (w & 0x7E000000u) == 0x34000000u) {
+        d = sign_extend((w >> 5) & 0x7FFFFu, 19);
+    } else if ((w & 0x7E000000u) == 0x36000000u) {
+        d = sign_extend((w >> 5) & 0x3FFFu, 14);
+    } else {
+        return SIZE_MAX;
     }
-    return keep;
+    if (d < -(int64_t)k || d >= (int64_t)(words - k)) {
+        return SIZE_MAX;
+    }
+    return (size_t)((int64_t)k + d);
+}
+
+static int a64_flow(const uint32_t *ws, size_t words, size_t from, uint32_t regs, int adrp,
+                    A64Writes writes, uint32_t *into, uint8_t *seen)
+{
+    uint8_t *queued;
+    size_t *work, nwork = 0;
+
+    memset(into, 0, words * sizeof *into);
+    memset(seen, 0, words);
+    if (words == 0 || from > words) {
+        return 0;
+    }
+    queued = (uint8_t *)calloc(words, 1);
+    work = (size_t *)malloc(words * sizeof *work);
+    if (queued == NULL || work == NULL) {
+        free(queued);
+        free(work);
+        return -1;
+    }
+    if (from == words) {
+        seen[0] = 1;
+        queued[0] = 1;
+        work[nwork++] = 0;
+    }
+    while (nwork > 0 || from < words) {
+        const size_t at = from < words ? from : work[--nwork];
+        const uint32_t w = ws[at];
+        const uint32_t v = into[at];
+        const uint32_t wr = writes(w);
+        const uint32_t d = w & 31;
+        uint32_t out;
+        size_t next[2], nn = 0, j, t;
+        int all = 0;
+
+        if (from < words) {
+            out = regs; /* the seed: as after its own word */
+            from = words + 1;
+        } else {
+            queued[at] = 0;
+            if (wr == ~0u) {
+                out = 0;
+            } else {
+                out = v & ~wr;
+                if (adrp && (w & 0x9F000000u) == 0x90000000u && d != 29 && d != 31) {
+                    out |= 1u << d;
+                } else if ((w & 0xFFE0FFE0u) == 0xAA0003E0u &&
+                           ((v >> ((w >> 16) & 31)) & 1u) != 0 && d != 29 && d != 31) {
+                    out |= 1u << d;
+                }
+            }
+        }
+        if ((w & 0xFC000000u) == 0x14000000u ||
+            ((w & 0xFF00001Fu) == 0x5400000Eu)) { /* b, b.al: the target only */
+        } else if ((w & 0xFE000000u) == 0xD6000000u && ((w >> 21) & 3u) != 1u) {
+            all = ((w >> 21) & 0xFu) == 0; /* br: every word; ret, eret: none */
+        } else if (at + 1 < words) {
+            next[nn++] = at + 1;
+        }
+        t = a64_target(w, at, words);
+        if (t != SIZE_MAX) {
+            next[nn++] = t;
+        }
+        for (j = 0; j < (all ? words : nn); j++) {
+            const size_t to = all ? j : next[j];
+
+            if (!seen[to] || (out & ~into[to]) != 0) {
+                seen[to] = 1;
+                into[to] |= out;
+                if (!queued[to]) {
+                    queued[to] = 1;
+                    work[nwork++] = to;
+                }
+            }
+        }
+    }
+    free(queued);
+    free(work);
+    return 0;
+}
+
+int ico_code_a64_flow(const void *code, size_t words, uint64_t addr, const IcoA64Text *tx,
+                      size_t from, uint32_t regs, int adrp, uint32_t *into, uint8_t *seen)
+{
+    uint32_t *ws = (uint32_t *)malloc((words ? words : 1) * sizeof *ws);
+    int rc;
+
+    if (ws == NULL) {
+        return -1;
+    }
+    (void)ico_code_a64_unpatch(code, words, addr, tx, ws);
+    rc = a64_flow(ws, words, from, regs, adrp, a64_writes_v3, into, seen);
+    free(ws);
+    return rc;
+}
+
+static void mask_a64_pages(const uint32_t *ws, size_t words, uint8_t *buf, A64Writes writes)
+{
+    uint32_t *into;
+    uint8_t *seen;
+    size_t k;
+
+    if (words == 0) {
+        return;
+    }
+    into = (uint32_t *)malloc(words * sizeof *into);
+    seen = (uint8_t *)malloc(words);
+    if (into == NULL || seen == NULL || a64_flow(ws, words, words, 0, 1, writes, into, seen) != 0) {
+        /* no room for the flow: every offset off any register an ADRP of the
+           function writes, the widest answer the flow could give */
+        uint32_t pages = 0;
+
+        for (k = 0; k < words; k++) {
+            if ((ws[k] & 0x9F000000u) == 0x90000000u) {
+                pages |= 1u << (ws[k] & 31);
+            }
+        }
+        pages &= ~(1u << 29 | 1u << 31);
+        for (k = 0; k < words; k++) {
+            const uint32_t w = ws[k];
+
+            if (((w & 0x7F800000u) == 0x11000000u || (w & 0x3B000000u) == 0x39000000u) &&
+                ((pages >> ((w >> 5) & 31)) & 1u) != 0) {
+                put32(buf + 4 * k, get32(buf + 4 * k) & ~(0xFFFu << 10));
+            }
+        }
+        free(into);
+        free(seen);
+        return;
+    }
+    for (k = 0; k < words; k++) {
+        const uint32_t w = ws[k];
+
+        if (seen[k] && ((w & 0x7F800000u) == 0x11000000u || (w & 0x3B000000u) == 0x39000000u) &&
+            ((into[k] >> ((w >> 5) & 31)) & 1u) != 0) {
+            put32(buf + 4 * k, get32(buf + 4 * k) & ~(0xFFFu << 10));
+        }
+    }
+    free(into);
+    free(seen);
 }
 
 /* --- the hash ----------------------------------------------------------------- */
@@ -540,8 +1148,21 @@ static size_t mask_a64(const uint8_t *p, size_t n, uint8_t *buf, uint64_t addr)
 uint64_t ico_code_hash(int arch, const void *code, size_t n, uint64_t addr, uint64_t image_lo,
                        uint64_t image_hi)
 {
+    return ico_code_hash_rules(ICO_CODE_HASH_RULES, arch, code, n, addr, image_lo, image_hi);
+}
+
+uint64_t ico_code_hash_rules(int rules, int arch, const void *code, size_t n, uint64_t addr,
+                             uint64_t image_lo, uint64_t image_hi)
+{
+    return ico_code_hash_text(rules, arch, code, n, addr, image_lo, image_hi, NULL);
+}
+
+uint64_t ico_code_hash_text(int rules, int arch, const void *code, size_t n, uint64_t addr,
+                            uint64_t image_lo, uint64_t image_hi, const IcoA64Text *tx)
+{
     const uint8_t *p = (const uint8_t *)code;
     uint8_t *buf;
+    uint32_t *ws = NULL;
     size_t keep;
     uint64_t h;
 
@@ -549,13 +1170,35 @@ uint64_t ico_code_hash(int arch, const void *code, size_t n, uint64_t addr, uint
         return xxh3_64(p, n);
     }
     buf = (uint8_t *)malloc(n);
+    if (arch == ICO_CODE_A64 && buf != NULL) {
+        ws = (uint32_t *)malloc((n / 4 ? n / 4 : 1) * sizeof *ws);
+        if (ws == NULL) {
+            free(buf);
+            buf = NULL;
+        }
+    }
     if (buf == NULL) {
         /* no copy to mask: a hash no other build's masked hash equals */
         return xxh3_64(p, n) ^ 0x9E3779B97F4A7C15ull;
     }
-    keep = arch == ICO_CODE_X64 ? mask_x64(p, n, buf, addr, image_lo, image_hi)
-                                : mask_a64(p, n, buf, addr);
+    if (arch == ICO_CODE_X64) {
+        keep = mask_x64(p, n, buf, addr, image_lo, image_hi);
+    } else {
+        const size_t words = n / 4;
+        const A64Writes writes = a64_writes_of(rules);
+
+        (void)ico_code_a64_unpatch(code, words, addr, rules >= 3 ? tx : NULL, ws);
+        mask_a64(ws, words, buf, addr, n, writes);
+        if (n > 4 * words) {
+            memcpy(buf + 4 * words, p + 4 * words, n - 4 * words);
+        }
+        if (rules >= 2) {
+            mask_a64_pages(ws, words, buf, writes);
+        }
+        keep = a64_keep(p, n);
+    }
     h = xxh3_64(buf, keep);
+    free(ws);
     free(buf);
     return h;
 }

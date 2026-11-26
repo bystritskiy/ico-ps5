@@ -17,7 +17,21 @@
  * VK_KHR_get_physical_device_properties2 is taken, the device without the
  * extended queries; review finding 5), and the [video] adapter rule
  * (adapterCell: a wanted name no device has still starts the device, the
- * same one a plain start picks, with one device marked current).
+ * same one a plain start picks, with one device marked current), and the
+ * recycled slot's clock (clockCell: rhi_read_timestamp_clock's submit
+ * times, stamps, calibrated pair and the trace of a blocked wait), the
+ * submit thread's wait before its present (waitSubmittedCell:
+ * rhi_wait_submitted on a held list from another thread, seen by
+ * rhi_gpu_progress beside this thread's fence wait, a loss found there;
+ * the counter read rhi_submitted_finished; the samples' wait
+ * rhi_wait_value_ns on a held list, a forced VK_NOT_READY returned as it
+ * is; none on the fence ring), and the
+ * range checks of the commands robust access does not cover (rangeCell), and
+ * after the vertex and compute stores' cells the buffer barriers' scopes
+ * (rhi_vk_scope.c; alone with the argument `scopes`), and a pass's own
+ * colour read in it with a depth target bound, through dynamic rendering's
+ * local read or the VkRenderPass path's subpass read (rhi_vk_subpass.c;
+ * alone with the argument `subpass`).
  *
  * Exit 0 on success, 1 on a mismatch or a validation error, 77 (skipped)
  * when no Vulkan device can be created.  Set VK_ICD_FILENAMES to pick a
@@ -26,12 +40,15 @@
 #include "rhi_test_common.h"
 #include "rhi_test_spv.h"
 #include "vk/rhi_vk.h"
+#include "ico_thread.h"
 #include <stdint.h>
 #include <stdio.h>
 #include <stdlib.h>
 #include <string.h>
 #include <sys/stat.h>
+#include <time.h>
 #ifdef _WIN32
+#include <windows.h>
 #include <direct.h>
 #define MKDIR(d) _mkdir(d)
 #else
@@ -65,7 +82,7 @@ static int hazardCell(void)
     if (!rhi_create_backend("vulkan")) {
         return 0;
     }
-    RhiDeviceDesc dd = {NULL, false, true, "rhi_vk_test hazards"};
+    RhiDeviceDesc dd = {NULL, false, true, "rhi_vk_test hazards", NULL};
     if (!rhi_init(&dd)) {
         return 0;
     }
@@ -115,7 +132,7 @@ static int passAreaCell(void)
     if (!rhi_create_backend("vulkan")) {
         return 0;
     }
-    RhiDeviceDesc dd = {NULL, false, true, "rhi_vk_test pass area"};
+    RhiDeviceDesc dd = {NULL, false, true, "rhi_vk_test pass area", NULL};
     if (!rhi_init(&dd)) {
         return 0;
     }
@@ -221,7 +238,7 @@ static int cacheCell(void)
                 fclose(fp);
             }
         }
-        RhiDeviceDesc dd = {NULL, false, true, "rhi_vk_test cache"};
+        RhiDeviceDesc dd = {NULL, false, true, "rhi_vk_test cache", NULL};
         if (!rhi_create_backend("vulkan") || !rhi_init(&dd)) {
             rhi_test_log("FAIL cache cell: init %d\n", pass);
             failures++;
@@ -331,7 +348,7 @@ static int cacheDropCell(void)
     /* rhi_init does it: the old file is gone after the init */
     snprintf(path, sizeof(path), "%s/pipelines-now.vkcache", dir);
     rhi_set_pipeline_cache_path(path);
-    RhiDeviceDesc dd = {NULL, false, true, "rhi_vk_test cache drop"};
+    RhiDeviceDesc dd = {NULL, false, true, "rhi_vk_test cache drop", NULL};
     if (!rhi_create_backend("vulkan") || !rhi_init(&dd)) {
         rhi_test_log("FAIL cache drop cell: init\n");
         failures++;
@@ -367,7 +384,7 @@ static int limitsCell(void)
     if (!e || strcmp(e, "mali") != 0) {
         return 0;
     }
-    RhiDeviceDesc dd = {NULL, false, true, "rhi_vk_test limits"};
+    RhiDeviceDesc dd = {NULL, false, true, "rhi_vk_test limits", NULL};
     if (!rhi_create_backend("vulkan") || !rhi_init(&dd)) {
         rhi_test_log("FAIL limits cell: init\n");
         return 1;
@@ -488,7 +505,7 @@ static int poolCell(void)
     if (envOn("ICO_VK_FAKE_NO_DUAL") || envOn("ICO_VK_FAKE_D24S8") || envOn("ICO_VK_FAKE_LIMITS")) {
         return 0;
     }
-    RhiDeviceDesc dd = {NULL, false, true, "rhi_vk_test pool"};
+    RhiDeviceDesc dd = {NULL, false, true, "rhi_vk_test pool", NULL};
     if (!rhi_create_backend("vulkan") || !rhi_init(&dd)) {
         rhi_test_log("FAIL pool cell: init\n");
         return 1;
@@ -676,7 +693,7 @@ static int poolCell(void)
  * validation message. */
 static int renderAreaCell(void)
 {
-    RhiDeviceDesc dd = {NULL, false, true, "rhi_vk_test render area"};
+    RhiDeviceDesc dd = {NULL, false, true, "rhi_vk_test render area", NULL};
     if (!rhi_create_backend("vulkan") || !rhi_init(&dd)) {
         rhi_test_log("FAIL render area cell: init\n");
         return 1;
@@ -825,8 +842,11 @@ static int renderAreaCell(void)
  * at the first begin (inside the pass, a one-time submit), the second
  * frame's reset in the slot's first list.  Then again under
  * ICO_VK_DEPTH_ALWAYS=1 (vk_cmd.c: every depth test passes, the
- * measurement's run without the depth): 64, 64 and 64.  No validation
- * message. */
+ * measurement's run without the depth): 64, 64 and 64.  Then once more
+ * with the pools made beforehand for 4 queries (rhi_occlusion_prepare:
+ * outside any recording; each slot resets 4): the same counts, and query 5
+ * begun in the first frame, past the 4, dropped (RHI_OCCLUSION_NONE, the
+ * read still 3).  No validation message. */
 static void testSetEnv(const char *name, const char *value)
 {
 #ifdef _WIN32
@@ -840,9 +860,9 @@ static void testSetEnv(const char *name, const char *value)
 #endif
 }
 
-static int occlusionRun(bool always)
+static int occlusionRun(bool always, uint32_t prepare)
 {
-    RhiDeviceDesc dd = {NULL, false, true, "rhi_vk_test occlusion"};
+    RhiDeviceDesc dd = {NULL, false, true, "rhi_vk_test occlusion", NULL};
     if (!rhi_create_backend("vulkan") || !rhi_init(&dd)) {
         rhi_test_log("FAIL occlusion cell: init\n");
         return 1;
@@ -856,6 +876,10 @@ static int occlusionRun(bool always)
         }                                                                                          \
     } while (0)
     OCC_CHECK(rhi_occlusion_supported(), "not supported on Vulkan\n");
+    if (prepare) {
+        OCC_CHECK(rhi_occlusion_prepare(prepare), "the pools not made for %u\n", prepare);
+        OCC_CHECK(rhi_occlusion_prepare(prepare), "a second prepare refused\n");
+    }
     const RhiShader vs = rhi_create_shader(&(RhiShaderDesc){.stage = RHI_STAGE_VERTEX,
                                                             .bytecode = spv_vs_main,
                                                             .bytecodeSize = sizeof(spv_vs_main),
@@ -938,6 +962,12 @@ static int occlusionRun(bool always)
                 rhi_cmd_draw(cl, 6, q * 6u, 1);
                 rhi_cmd_end_occlusion(cl, q);
             }
+            if (prepare && round == 0) {
+                /* past the prepared range: dropped */
+                rhi_cmd_begin_occlusion(cl, prepare + 1u);
+                rhi_cmd_draw(cl, 6, 0, 1);
+                rhi_cmd_end_occlusion(cl, prepare + 1u);
+            }
             rhi_cmd_end_render_pass(cl);
             rhi_end_commands(cl);
             rhi_submit(cl);
@@ -965,6 +995,10 @@ static int occlusionRun(bool always)
                       (unsigned long long)got[1], (unsigned long long)got[2],
                       (unsigned long long)behind);
             OCC_CHECK(got[7] == 12345u, "frame %d: index 7 written past the count read\n", round);
+            if (prepare) {
+                OCC_CHECK(got[prepare + 1u] == 12345u,
+                          "frame %d: the query past the prepared %u was read\n", round, prepare);
+            }
         }
         /* a frame without queries reads none */
         rhi_wait_frame();
@@ -995,10 +1029,11 @@ static int occlusionRun(bool always)
 
 static int occlusionCell(void)
 {
-    int failures = occlusionRun(false);
+    int failures = occlusionRun(false, 0);
     testSetEnv("ICO_VK_DEPTH_ALWAYS", "1");
-    failures += occlusionRun(true);
+    failures += occlusionRun(true, 0);
     testSetEnv("ICO_VK_DEPTH_ALWAYS", NULL);
+    failures += occlusionRun(false, 4);
     return failures;
 }
 
@@ -1016,7 +1051,7 @@ static int syncCell(void)
     const char *api = getenv("ICO_VK_FAKE_API");
     const bool vk10 = api && (strcmp(api, "1.0") == 0 || strcmp(api, "1.0bare") == 0);
     const bool fences = api && (strcmp(api, "1.1") == 0 || vk10);
-    RhiDeviceDesc dd = {NULL, false, true, "rhi_vk_test sync"};
+    RhiDeviceDesc dd = {NULL, false, true, "rhi_vk_test sync", NULL};
     if (!rhi_create_backend("vulkan") || !rhi_init(&dd)) {
         rhi_test_log("FAIL sync cell: init\n");
         return 1;
@@ -1113,6 +1148,526 @@ static int syncCell(void)
     return failures + (int)rhi_vk_validation_error_count();
 }
 
+/* the CPU's clock as the backend reads it (vk_device.c vkr_now_ns) */
+static uint64_t clockNowNs(void)
+{
+#ifdef _WIN32
+    LARGE_INTEGER f, c;
+    QueryPerformanceFrequency(&f);
+    QueryPerformanceCounter(&c);
+    return (uint64_t)((double)c.QuadPart * 1e9 / (double)f.QuadPart);
+#else
+    struct timespec t;
+    clock_gettime(CLOCK_MONOTONIC, &t);
+    return (uint64_t)t.tv_sec * 1000000000ull + (uint64_t)t.tv_nsec;
+#endif
+}
+
+/* The recycled slot's clock (rhi.h rhi_read_timestamp_clock, vk_tsclock.c;
+ * issue 123).  Slot a's first use: stamps 0 and 1 around clears of a
+ * 1024x1024 target; slot b one light list; then slot a again, its first
+ * list (the slot's query reset and stamp 0) held on the host
+ * (vkr_test_hold_next_submit) and released by another thread 150 ms later,
+ * stamp 1 in a second list.  The recycle's wait for that use blocks while
+ * the GPU runs none of it, the slot's results still its first use's: the
+ * trace's first point holds both stamps, stale (the previous use's first
+ * value), and the longest still stretch is stale with both; nothing fell
+ * after the slot's own results came (no second run); the use's two
+ * submissions and their times before the wait, both stamps recorded and
+ * written in the end; with calibrated clocks (where offered: lavapipe's
+ * VK_EXT_calibrated_timestamps) the pair read after the wait and stamp 0
+ * placed after the release and before the wait's end.  On the fence path
+ * (ICO_VK_FAKE_API=1.1 and =1.0) there is no hold: the rest is checked. */
+static void clockList(uint32_t stampA, uint32_t stampB, RhiTexture heavy, uint32_t passes,
+                      RhiState *state, RhiCommandList *out)
+{
+    RhiCommandList cl = rhi_begin_commands();
+    if (stampA != UINT32_MAX) {
+        rhi_cmd_write_timestamp(cl, stampA);
+    }
+    for (uint32_t k = 0; k < passes; k++) {
+        RhiTextureBarrier pre = {heavy, *state, RHI_STATE_RENDER_TARGET};
+        rhi_cmd_barrier(cl, &pre, 1);
+        *state = RHI_STATE_RENDER_TARGET;
+        RhiRenderPassDesc rp = {0};
+        rp.color[0].texture = heavy;
+        rp.color[0].load = RHI_LOAD_CLEAR;
+        rp.color[0].clear[0] = (float)(k & 1u);
+        rp.color[0].clear[3] = 1.0f;
+        rp.colorCount = 1;
+        rp.width = rp.height = 1024;
+        rhi_cmd_begin_render_pass(cl, &rp);
+        rhi_cmd_end_render_pass(cl);
+    }
+    if (stampB != UINT32_MAX) {
+        rhi_cmd_write_timestamp(cl, stampB);
+    }
+    rhi_end_commands(cl);
+    *out = cl;
+}
+
+static void clockSleepMs(unsigned ms)
+{
+#ifdef _WIN32
+    Sleep(ms);
+#else
+    struct timespec t = {(time_t)(ms / 1000u), (long)(ms % 1000u) * 1000000L};
+    nanosleep(&t, NULL);
+#endif
+}
+
+static uint64_t s_releaseNs;
+
+static void clockRelease(void *arg)
+{
+    (void)arg;
+    clockSleepMs(150);
+    s_releaseNs = clockNowNs();
+    if (!vkr_test_release_hold()) {
+        rhi_test_log("FAIL clock cell: the hold not released\n");
+    }
+}
+
+static int clockCell(void)
+{
+    RhiDeviceDesc dd = {NULL, false, true, "rhi_vk_test clock", NULL};
+    if (!rhi_create_backend("vulkan") || !rhi_init(&dd)) {
+        rhi_test_log("FAIL clock cell: init\n");
+        return 1;
+    }
+    int failures = 0;
+#define CLK_CHECK(cond, ...)                                                                       \
+    do {                                                                                           \
+        if (!(cond)) {                                                                             \
+            rhi_test_log("FAIL clock cell: " __VA_ARGS__);                                         \
+            failures++;                                                                            \
+        }                                                                                          \
+    } while (0)
+    if (!rhi_timestamps_supported()) {
+        rhi_test_log("clock cell: no timestamps on this device: skipped\n");
+        rhi_shutdown();
+        return 0;
+    }
+    RhiTexture heavy = rhi_create_texture(&(RhiTextureDesc){
+        1024, 1024, 1, RHI_FMT_RGBA8_UNORM, RHI_TEX_RENDER_TARGET, "clock heavy", 0});
+    CLK_CHECK(heavy.id != 0, "target\n");
+    RhiState state = RHI_STATE_UNDEFINED;
+    RhiTimestampClock c;
+    RhiCommandList l1, l2;
+    /* slot a, its first use */
+    rhi_wait_frame();
+    clockList(0, 1, heavy, 8, &state, &l1);
+    rhi_submit(l1);
+    /* slot b, no stamps: its recycle reads no query (on lavapipe a query
+       read waits for the queue, the held submission's included) */
+    rhi_wait_frame();
+    clockList(UINT32_MAX, UINT32_MAX, heavy, 1, &state, &l1);
+    rhi_submit(l1);
+    /* slot a again (its first use recycled): the clears before its reset */
+    rhi_wait_frame();
+    CLK_CHECK(rhi_read_timestamp_clock(&c) && c.submits == 1 && rhi_ts_has(c.available, 0) &&
+                  rhi_ts_has(c.available, 1),
+              "the first use: %u submissions, stamps %d %d\n", c.submits,
+              (int)rhi_ts_has(c.available, 0), (int)rhi_ts_has(c.available, 1));
+    clockList(0, UINT32_MAX, heavy, 2, &state, &l1); /* the slot's reset, stamp 0 */
+    clockList(UINT32_MAX, 1, heavy, 0, &state, &l2);
+    const uint64_t t0 = clockNowNs();
+    const bool held = vkr_test_hold_next_submit();
+    s_releaseNs = 0;
+    rhi_submit(l1);
+    rhi_submit(l2);
+    IcoThread *rel = held ? ico_thread_create(clockRelease, NULL) : NULL;
+    CLK_CHECK(!held || rel != NULL, "the release thread\n");
+    rhi_wait_frame(); /* slot b */
+    rhi_wait_frame(); /* slot a: the wait for its second use */
+    const uint64_t t1 = clockNowNs();
+    if (rel != NULL) {
+        ico_thread_join(rel);
+    }
+    vkr_test_hold_destroy();
+    CLK_CHECK(rhi_read_timestamp_clock(&c), "no clock\n");
+    const double waitMs = c.waitBeginNs ? (double)(c.waitEndNs - c.waitBeginNs) / 1e6 : 0.0;
+    rhi_test_log("clock cell: waited %.1f ms, %u trace points (%u more), first %u available "
+                 "stale %u, still %.1f ms (stale %d), again %d, calibrated %d (deviation %llu "
+                 "ns), %u valid bits\n",
+                 waitMs, c.traceN, c.traceMore, c.traceN ? (unsigned)c.trace[0].avail : 0u,
+                 c.traceN ? (unsigned)c.trace[0].stale : 0u, (double)c.stillUs / 1e3,
+                 (int)c.stillStale, (int)c.again, (int)c.calibrated,
+                 (unsigned long long)c.deviationNs, c.validBits);
+    CLK_CHECK(c.submits == 2 && c.firstSubmitNs >= t0 && c.lastSubmitNs >= c.firstSubmitNs &&
+                  c.lastSubmitNs <= t1,
+              "%u submissions (want 2), times %llu .. %llu outside %llu .. %llu\n", c.submits,
+              (unsigned long long)c.firstSubmitNs, (unsigned long long)c.lastSubmitNs,
+              (unsigned long long)t0, (unsigned long long)t1);
+    CLK_CHECK(rhi_ts_has(c.recorded, 0) && rhi_ts_has(c.recorded, 1) &&
+                  rhi_ts_has(c.available, 0) && rhi_ts_has(c.available, 1) && !c.again,
+              "stamps recorded %d %d written %d %d, again %d\n", (int)rhi_ts_has(c.recorded, 0),
+              (int)rhi_ts_has(c.recorded, 1), (int)rhi_ts_has(c.available, 0),
+              (int)rhi_ts_has(c.available, 1), (int)c.again);
+    uint64_t ts[2] = {0, 0};
+    CLK_CHECK(rhi_read_timestamps(ts, 2) == 2 && ts[1] >= ts[0], "stamps %llu %llu\n",
+              (unsigned long long)ts[0], (unsigned long long)ts[1]);
+    if (c.calibrated) {
+        /* stamp 0 after the release (the submit without a hold), and before
+           the pair (read after the wait) */
+        const double at0 = (double)c.cpuNs - (double)(c.gpuNs - ts[0]);
+        const double from = (double)(s_releaseNs ? s_releaseNs : c.firstSubmitNs) - 1e6;
+        CLK_CHECK(c.cpuNs <= t1 && c.gpuNs >= ts[1] &&
+                      (c.waitEndNs == 0 || c.cpuNs >= c.waitEndNs) && at0 >= from &&
+                      at0 <= (double)c.cpuNs + 1e6,
+                  "calibrated pair %llu / %llu, stamp 0 at %.0f outside %.0f .. the pair\n",
+                  (unsigned long long)c.gpuNs, (unsigned long long)c.cpuNs, at0, from);
+    }
+    CLK_CHECK(!held || waitMs >= 100.0, "a held wait of %.1f ms (the release after 150 ms)\n",
+              waitMs);
+    /* the single wait (rhi_tile_rule.h: a tile-based phone GPU or two lost
+       starts; rhi_vk_clock_arm fakes Arm's vendor id): one
+       wait, no trace, no calibrated pair; ICO_TEST_POLLED_WANT (1 or 0)
+       names the wait the device must run */
+    const bool polled = rhi_limits()->polledWait;
+    const char *pw = getenv("ICO_TEST_POLLED_WANT");
+    CLK_CHECK(!pw || !pw[0] || (pw[0] != '0') == polled, "the %s wait (%s), %s wanted\n",
+              polled ? "polled" : "single", rhi_limits()->waitWords ? rhi_limits()->waitWords : "?",
+              pw ? pw : "");
+    if (!polled) {
+        CLK_CHECK(c.traceN == 0 && c.traceMore == 0 && !c.calibrated && !c.again,
+                  "the single wait: %u trace points, calibrated %d, again %d (none wanted)\n",
+                  c.traceN, (int)c.calibrated, (int)c.again);
+        rhi_test_log("clock cell: the single wait (%s): no trace, no calibrated pair\n",
+                     rhi_limits()->waitWords ? rhi_limits()->waitWords : "?");
+    } else if (waitMs >= (double)RHI_TS_TRACE_AFTER_MS + 2.0 * RHI_TS_TRACE_STEP_MS) {
+        /* a read that does not wait (a phone's driver): the first point
+           before the release holds the first use's stamps, stale, and the
+           still stretch is theirs; lavapipe's read waits for the queue, so
+           its one point comes after the release, the use's own */
+        const bool early = c.traceN >= 1 && c.trace[0].atUs < 140000u;
+        CLK_CHECK(c.traceN >= 1 && c.trace[0].avail == 2 && c.trace[0].firstNs != 0 &&
+                      c.trace[0].atUs >= RHI_TS_TRACE_AFTER_MS * 1000u &&
+                      c.trace[0].stale == (early ? 1u : 0u),
+                  "trace %u points, the first %u available stale %u at %u us\n", c.traceN,
+                  c.traceN ? (unsigned)c.trace[0].avail : 0u,
+                  c.traceN ? (unsigned)c.trace[0].stale : 0u, c.traceN ? c.trace[0].atUs : 0u);
+        CLK_CHECK(!early || (c.stillUs > 0 && c.stillStale && c.stillAvail == 2),
+                  "still %u us with %u available, stale %d\n", c.stillUs, c.stillAvail,
+                  (int)c.stillStale);
+    } else {
+        rhi_test_log("clock cell: the wait did not pass %u ms: the trace not checked\n",
+                     (unsigned)RHI_TS_TRACE_AFTER_MS);
+    }
+    rhi_destroy_texture(heavy);
+#undef CLK_CHECK
+    rhi_wait_idle();
+    rhi_shutdown();
+    return failures + (int)rhi_vk_validation_error_count();
+}
+
+/* rhi_wait_submitted (rhi.h; the submit thread's wait before its present,
+ * port/render/rd_submit_thread.h "the GPU's end first").  A finished list:
+ * true at once.  A list held on the host (vkr_test_hold_next_submit) is
+ * waited for on another thread, as the submit thread does: while it blocks
+ * rhi_gpu_progress names that submission, unfinished, with a wait time
+ * that grows (the GPU hang limit's input, port/platform/gpu_hang.h: one
+ * submission's wait counted while it is not finished), still after this
+ * thread's own fence wait for a finished slot came and went beside it
+ * (rhi_wait_frame, the recording thread's); it returns true only after the
+ * release 150 ms in, and the progress then shows it finished and no wait.
+ * The samples' wait (rhi_wait_value_ns, the GPU's end first's verdict):
+ * rhi_last_submitted names the list just submitted; a finished one and
+ * value 0 return 0 at once; a held one is waited for on another thread
+ * (seen by the watchdog as rhi_wait_submitted's), returns 0 only after the
+ * release with the time it blocked, and while it blocks this thread
+ * submits the next list on the other slot (the ahead order's shape: the
+ * wait on a third thread beside a submit), which lands with the next
+ * number, leaves the wait and the watchdog's view on the held one, and
+ * finishes after the release; a forced VK_NOT_READY comes back as
+ * it is (1: the submit thread's sample then counts unknown, never a class,
+ * rd_submit_queue_test), the device not lost, and the next wait is 0.
+ * A wait that reports the device lost (vkr_test_force_wait_result) returns
+ * false, the device lost and the failed wait's submission noted; a wait
+ * after it makes none.  On the fence sync (ICO_VK_FAKE_API=1.1, 1.0: the
+ * slots not apart) both waits return at once with none made. */
+static int s_wsDone;
+static bool s_wsResult;
+static uint64_t s_wsEndNs;
+static uint64_t s_wvValue, s_wvNs, s_wvNext;
+static int32_t s_wvResult;
+
+static void wsWait(void *arg)
+{
+    (void)arg;
+    s_wsResult = rhi_wait_submitted();
+    s_wsEndNs = clockNowNs();
+    __atomic_store_n(&s_wsDone, 1, __ATOMIC_RELEASE);
+}
+
+static void wvWait(void *arg)
+{
+    (void)arg;
+    s_wvResult = rhi_wait_value_ns(s_wvValue, &s_wvNs);
+    s_wsEndNs = clockNowNs();
+    __atomic_store_n(&s_wsDone, 1, __ATOMIC_RELEASE);
+}
+
+static int waitSubmittedCell(void)
+{
+    RhiDeviceDesc dd = {NULL, false, true, "rhi_vk_test wait submitted", NULL};
+    if (!rhi_create_backend("vulkan") || !rhi_init(&dd)) {
+        rhi_test_log("FAIL wait submitted cell: init\n");
+        return 1;
+    }
+    int failures = 0;
+#define WS_CHECK(cond, ...)                                                                        \
+    do {                                                                                           \
+        if (!(cond)) {                                                                             \
+            rhi_test_log("FAIL wait submitted cell: " __VA_ARGS__);                                \
+            failures++;                                                                            \
+        }                                                                                          \
+    } while (0)
+    RhiTexture heavy = rhi_create_texture(&(RhiTextureDesc){
+        1024, 1024, 1, RHI_FMT_RGBA8_UNORM, RHI_TEX_RENDER_TARGET, "wait submitted", 0});
+    WS_CHECK(heavy.id != 0, "target\n");
+    RhiState state = RHI_STATE_UNDEFINED;
+    RhiCommandList l;
+    RhiGpuProgress p;
+    rhi_wait_frame(); /* slot a: one list, finished */
+    clockList(UINT32_MAX, UINT32_MAX, heavy, 1, &state, &l);
+    rhi_submit(l);
+    if (!rhi_limits()->slotOverlap) {
+        uint64_t none = 0, ns = 1;
+        const int32_t wv = rhi_wait_value_ns(rhi_last_submitted(), &ns);
+        WS_CHECK(!rhi_wait_submitted() && rhi_submitted_finished(&none) == -1 &&
+                     wv == RHI_WAIT_NONE && ns == 0,
+                 "the fence sync: a wait made (%d, %llu ns), or the counter read, where none is "
+                 "offered\n",
+                 (int)wv, (unsigned long long)ns);
+        rhi_test_log("wait submitted cell: the slots not apart (the fence sync): no wait, as "
+                     "wanted\n");
+        rhi_destroy_texture(heavy);
+        rhi_wait_idle();
+        rhi_shutdown();
+        return failures + (int)rhi_vk_validation_error_count();
+    }
+    rhi_wait_idle();
+    WS_CHECK(rhi_wait_submitted(), "a finished list: false returned\n");
+    rhi_gpu_progress(&p);
+    WS_CHECK(p.waitingFor == 0 && p.finished >= p.submitted,
+             "after a finished wait: waiting for %llu, finished %llu of %llu\n",
+             (unsigned long long)p.waitingFor, (unsigned long long)p.finished,
+             (unsigned long long)p.submitted);
+    rhi_wait_frame(); /* slot b: held on the host */
+    clockList(UINT32_MAX, UINT32_MAX, heavy, 1, &state, &l);
+    const bool held = vkr_test_hold_next_submit();
+    rhi_submit(l);
+    rhi_gpu_progress(&p);
+    const uint64_t value = p.submitted;
+    __atomic_store_n(&s_wsDone, 0, __ATOMIC_RELEASE);
+    s_wsResult = false;
+    IcoThread *th = held ? ico_thread_create(wsWait, NULL) : NULL;
+    WS_CHECK(!held || th != NULL, "the waiting thread\n");
+    if (th != NULL) {
+        clockSleepMs(60);
+        rhi_gpu_progress(&p);
+        const uint64_t ns1 = p.waitingNs;
+        {
+            /* the verdict's read (rhi_submitted_finished): the held one still
+               running, the newest taken when asked with 0 */
+            uint64_t v = value, newest = 0;
+            const int held1 = rhi_submitted_finished(&v), held0 = rhi_submitted_finished(&newest);
+            WS_CHECK(held1 == 0 && held0 == 0 && newest == value && rhi_last_submitted() == value,
+                     "the counter read while held: %d, %d (newest %llu, last submitted %llu, want "
+                     "%llu)\n",
+                     held1, held0, (unsigned long long)newest,
+                     (unsigned long long)rhi_last_submitted(), (unsigned long long)value);
+        }
+        WS_CHECK(!__atomic_load_n(&s_wsDone, __ATOMIC_ACQUIRE) && p.waitingFor == value &&
+                     p.finished < value && ns1 >= 40000000ull,
+                 "held: done %d, waiting for %llu (want %llu), finished %llu, %.1f ms\n",
+                 __atomic_load_n(&s_wsDone, __ATOMIC_ACQUIRE), (unsigned long long)p.waitingFor,
+                 (unsigned long long)value, (unsigned long long)p.finished, (double)ns1 / 1e6);
+        /* this thread's fence wait beside it: slot a recycled (its list
+           finished: the wait's pair set and cleared) */
+        rhi_wait_frame();
+        clockSleepMs(40);
+        rhi_gpu_progress(&p);
+        WS_CHECK(!__atomic_load_n(&s_wsDone, __ATOMIC_ACQUIRE) && p.waitingFor == value &&
+                     p.waitingNs > ns1,
+                 "after this thread's fence wait: done %d, waiting for %llu (want %llu), %.1f "
+                 "ms (before %.1f)\n",
+                 __atomic_load_n(&s_wsDone, __ATOMIC_ACQUIRE), (unsigned long long)p.waitingFor,
+                 (unsigned long long)value, (double)p.waitingNs / 1e6, (double)ns1 / 1e6);
+        clockSleepMs(50);
+        const uint64_t rel = clockNowNs();
+        WS_CHECK(vkr_test_release_hold(), "the hold not released\n");
+        ico_thread_join(th);
+        rhi_gpu_progress(&p);
+        uint64_t vAfter = value;
+        WS_CHECK(s_wsResult && s_wsEndNs >= rel && p.waitingFor == 0 && p.finished >= value &&
+                     rhi_submitted_finished(&vAfter) == 1,
+                 "released: %d, ended %s the release, waiting for %llu, finished %llu of %llu\n",
+                 (int)s_wsResult, s_wsEndNs >= rel ? "after" : "before",
+                 (unsigned long long)p.waitingFor, (unsigned long long)p.finished,
+                 (unsigned long long)value);
+        rhi_test_log("wait submitted cell: submission %llu waited for beside the recording "
+                     "thread's fence wait, seen by the watchdog %.1f ms in\n",
+                     (unsigned long long)value, (double)ns1 / 1e6);
+    } else {
+        rhi_test_log("wait submitted cell: no hold on this device: the held wait not driven\n");
+    }
+    vkr_test_hold_destroy();
+    rhi_wait_idle();
+    {
+        /* the samples' wait: a finished submission and 0 at once */
+        rhi_gpu_progress(&p);
+        uint64_t ns = 1;
+        const int32_t done = rhi_wait_value_ns(p.submitted, &ns);
+        uint64_t ns0 = 1;
+        const int32_t zero = rhi_wait_value_ns(0, &ns0);
+        WS_CHECK(done == 0 && zero == 0 && ns0 == 0 && ns < 50000000ull,
+                 "the samples' wait on a finished submission: %d in %.1f ms, on 0: %d\n", (int)done,
+                 (double)ns / 1e6, (int)zero);
+    }
+    rhi_wait_frame(); /* a held one, waited for on another thread */
+    clockList(UINT32_MAX, UINT32_MAX, heavy, 1, &state, &l);
+    const bool heldV = vkr_test_hold_next_submit();
+    rhi_submit(l);
+    s_wvValue = rhi_last_submitted();
+    rhi_gpu_progress(&p);
+    WS_CHECK(s_wvValue == p.submitted && s_wvValue != 0,
+             "rhi_last_submitted %llu after the submit, the progress's %llu\n",
+             (unsigned long long)s_wvValue, (unsigned long long)p.submitted);
+    __atomic_store_n(&s_wsDone, 0, __ATOMIC_RELEASE);
+    s_wvResult = RHI_WAIT_NONE;
+    s_wvNs = 0;
+    IcoThread *tv = heldV ? ico_thread_create(wvWait, NULL) : NULL;
+    WS_CHECK(!heldV || tv != NULL, "the samples' waiting thread\n");
+    if (tv != NULL) {
+        const uint64_t start = clockNowNs();
+        clockSleepMs(60);
+        rhi_gpu_progress(&p);
+        WS_CHECK(!__atomic_load_n(&s_wsDone, __ATOMIC_ACQUIRE) && p.waitingFor == s_wvValue,
+                 "the samples' wait held: done %d, the watchdog waiting for %llu (want %llu)\n",
+                 __atomic_load_n(&s_wsDone, __ATOMIC_ACQUIRE), (unsigned long long)p.waitingFor,
+                 (unsigned long long)s_wvValue);
+        {
+            /* the ahead order's shape (port/render/rd_submit_thread.h
+               "ahead"): the wait on a third thread while this thread, the
+               submit thread's part, records and submits the next list (the
+               other slot, behind the held one on the one queue): the submit
+               lands (a new number), the wait goes on for its own value, the
+               watchdog still names it */
+            rhi_wait_frame();
+            RhiCommandList l2;
+            clockList(UINT32_MAX, UINT32_MAX, heavy, 1, &state, &l2);
+            rhi_submit(l2);
+            const uint64_t next = rhi_last_submitted();
+            clockSleepMs(20);
+            rhi_gpu_progress(&p);
+            WS_CHECK(next > s_wvValue && !__atomic_load_n(&s_wsDone, __ATOMIC_ACQUIRE) &&
+                         p.waitingFor == s_wvValue && p.submitted == next &&
+                         p.finished < s_wvValue && !rhi_device_lost(),
+                     "a submit beside the samples' wait on another thread: submission %llu (past "
+                     "%llu wanted), done %d, the watchdog waiting for %llu (want %llu), finished "
+                     "%llu, lost %d\n",
+                     (unsigned long long)next, (unsigned long long)s_wvValue,
+                     __atomic_load_n(&s_wsDone, __ATOMIC_ACQUIRE), (unsigned long long)p.waitingFor,
+                     (unsigned long long)s_wvValue, (unsigned long long)p.finished,
+                     (int)rhi_device_lost());
+            s_wvNext = next;
+        }
+        clockSleepMs(20);
+        const uint64_t rel = clockNowNs();
+        WS_CHECK(vkr_test_release_hold(), "the samples' hold not released\n");
+        ico_thread_join(tv);
+        rhi_gpu_progress(&p);
+        /* it blocked from its start (at most this thread's start, before
+           the 100 ms of sleeps) to the release: at least the sleeps less
+           the thread's own start, and it ended after the release */
+        WS_CHECK(s_wvResult == 0 && s_wsEndNs >= rel && s_wvNs + 20000000ull >= rel - start &&
+                     p.waitingFor == 0 && p.finished >= s_wvValue,
+                 "the samples' wait released: %d, ended %s the release, blocked %.1f ms of the "
+                 "%.1f ms held, waiting for %llu, finished %llu of %llu\n",
+                 (int)s_wvResult, s_wsEndNs >= rel ? "after" : "before", (double)s_wvNs / 1e6,
+                 (double)(rel - start) / 1e6, (unsigned long long)p.waitingFor,
+                 (unsigned long long)p.finished, (unsigned long long)s_wvValue);
+        rhi_test_log("wait submitted cell: the samples' wait for submission %llu blocked %.1f ms "
+                     "until the release\n",
+                     (unsigned long long)s_wvValue, (double)s_wvNs / 1e6);
+        {
+            /* the list submitted beside it ran after the release, in order */
+            uint64_t ns2 = 0;
+            const int32_t w2 = rhi_wait_value_ns(s_wvNext, &ns2);
+            uint64_t v2 = s_wvNext;
+            WS_CHECK(
+                w2 == 0 && rhi_submitted_finished(&v2) == 1 && rhi_vk_validation_error_count() == 0,
+                "the list submitted beside the wait: wait %d, finished %d, %u validation "
+                "errors\n",
+                (int)w2, rhi_submitted_finished(&v2), (unsigned)rhi_vk_validation_error_count());
+            rhi_test_log("wait submitted cell: submission %llu landed beside the third thread's "
+                         "wait for %llu and finished after its release\n",
+                         (unsigned long long)s_wvNext, (unsigned long long)s_wvValue);
+        }
+    } else {
+        rhi_test_log("wait submitted cell: no hold on this device: the samples' held wait not "
+                     "driven\n");
+    }
+    vkr_test_hold_destroy();
+    rhi_wait_idle();
+    {
+        /* a forced VK_NOT_READY: returned as it is (the sample's unknown),
+           no loss, and the next wait is the driver's again */
+        rhi_gpu_progress(&p);
+        uint64_t ns = 0;
+        vkr_test_force_wait_result(RHI_VK_TEST_NOT_READY);
+        const int32_t notReady = rhi_wait_value_ns(p.submitted, &ns);
+        const bool lost = rhi_device_lost();
+        const int32_t again = rhi_wait_value_ns(p.submitted, &ns);
+        rhi_gpu_progress(&p);
+        WS_CHECK(notReady == RHI_VK_TEST_NOT_READY && !lost && again == 0 && p.waitingFor == 0,
+                 "the samples' wait forced not ready: %d (want %d), lost %d, the next %d, "
+                 "waiting for %llu\n",
+                 (int)notReady, RHI_VK_TEST_NOT_READY, (int)lost, (int)again,
+                 (unsigned long long)p.waitingFor);
+    }
+    /* a loss found by the wait (as the driver reports it there) */
+    rhi_wait_frame();
+    clockList(UINT32_MAX, UINT32_MAX, heavy, 1, &state, &l);
+    rhi_submit(l);
+    rhi_gpu_progress(&p);
+    const uint64_t lostValue = p.submitted;
+    vkr_test_force_wait_result(RHI_VK_TEST_DEVICE_LOST);
+    const bool lostOk = rhi_wait_submitted();
+    rhi_gpu_progress(&p);
+    WS_CHECK(!lostOk && rhi_device_lost() && p.waitingFor == 0 && !rhi_wait_submitted(),
+             "a lost wait: returned %d, lost %d, waiting for %llu (submission %llu), a second "
+             "wait made\n",
+             (int)lostOk, (int)rhi_device_lost(), (unsigned long long)p.waitingFor,
+             (unsigned long long)lostValue);
+    rhi_destroy_texture(heavy);
+#undef WS_CHECK
+    rhi_shutdown();
+    return failures + (int)rhi_vk_validation_error_count();
+}
+
+/* The commands robust access does not cover (vk_range.c, issue 123): no
+ * indexed draw or copy of the cells before this one reached past its
+ * resource (no line), and each check's cases at the edge and one past it
+ * (vkr_test_range_cases: 16- and 32-bit indices, buffer copies, texture
+ * regions and mips, a copy's buffer rows, BC1 blocks). */
+static int rangeCell(void)
+{
+    const uint32_t before = vkr_test_range_bad();
+    const uint32_t wrong = vkr_test_range_cases();
+    rhi_test_log("range cell: %u commands past their resource in the cells before, %u cases "
+                 "wrong\n",
+                 before, wrong);
+    if (before != 0 || wrong != 0) {
+        rhi_test_log("FAIL range cell: %u commands past their resource, %u cases wrong\n", before,
+                     wrong);
+        return 1;
+    }
+    return 0;
+}
+
 /* ICO_VK_FAKE_NO_D32F_ATTACHMENT (ctest rhi_vk_vk10_nod32f): the device is
  * still picked and RhiLimits.depth32Attachment is false; without the
  * variable lavapipe (D32F is an attachment there) reports true. */
@@ -1120,7 +1675,7 @@ static int d32fCell(void)
 {
     const char *e = getenv("ICO_VK_FAKE_NO_D32F_ATTACHMENT");
     const bool fake = e && e[0] && e[0] != '0';
-    RhiDeviceDesc dd = {NULL, false, true, "rhi_vk_test d32f"};
+    RhiDeviceDesc dd = {NULL, false, true, "rhi_vk_test d32f", NULL};
     if (!rhi_create_backend("vulkan") || !rhi_init(&dd)) {
         rhi_test_log("FAIL d32f cell: init\n");
         return 1;
@@ -1144,7 +1699,7 @@ static int d32fCell(void)
  * ICO_VK_DEVICE the variable wins and the cell checks only the start. */
 static int adapterCell(void)
 {
-    RhiDeviceDesc dd = {NULL, false, true, "rhi_vk_test adapter"};
+    RhiDeviceDesc dd = {NULL, false, true, "rhi_vk_test adapter", NULL};
     char plain[256];
     RhiAdapterInfo list[RHI_MAX_ADAPTERS];
     int failures = 0;
@@ -1206,16 +1761,121 @@ static int adapterCell(void)
     return failures != 0;
 }
 
-int main(void)
+/* rhi_vk_budget, rhi_vk_budget_phone: VK_EXT_memory_budget's numbers in
+ * rhi_get_stats (videoMem*): read twice, the free part the budget less the
+ * use (0 past it), never above the budget; ICO_TEST_BUDGET_WANT=0 none at
+ * all (a tile-based phone GPU faked: not asked), =1 a budget (the device
+ * must list the extension); unset, either.  77 without a device */
+static int budgetCell(void)
+{
+    RhiDeviceDesc dd = {NULL, false, true, "rhi_vk_test budget", NULL};
+    if (!rhi_create_backend("vulkan") || !rhi_init(&dd)) {
+        rhi_test_log("SKIP budget: no Vulkan device\n");
+        return 77;
+    }
+    RhiStats a, b;
+    rhi_get_stats(&a);
+    rhi_get_stats(&b);
+    const char *want = getenv("ICO_TEST_BUDGET_WANT");
+    int fails = 0;
+    rhi_test_log(
+        "budget: %llu MB, %llu MB in use, %llu MB free (again: %llu, %llu, %llu)\n",
+        (unsigned long long)(a.videoMemBudget >> 20), (unsigned long long)(a.videoMemUsage >> 20),
+        (unsigned long long)(a.videoMemAvailable >> 20),
+        (unsigned long long)(b.videoMemBudget >> 20), (unsigned long long)(b.videoMemUsage >> 20),
+        (unsigned long long)(b.videoMemAvailable >> 20));
+    if (want && strcmp(want, "0") == 0 &&
+        (a.videoMemBudget || a.videoMemUsage || a.videoMemAvailable)) {
+        rhi_test_log("FAIL budget: a budget where none is asked\n");
+        fails++;
+    }
+    if (want && strcmp(want, "1") == 0 && a.videoMemBudget == 0) {
+        rhi_test_log("FAIL budget: no budget where the device offers one\n");
+        fails++;
+    }
+    for (int k = 0; k < 2; k++) {
+        const RhiStats *s = k ? &b : &a;
+        const uint64_t left =
+            s->videoMemBudget > s->videoMemUsage ? s->videoMemBudget - s->videoMemUsage : 0u;
+        if (s->videoMemAvailable != left || s->videoMemAvailable > s->videoMemBudget) {
+            rhi_test_log("FAIL budget: read %d: %llu free of a %llu budget with %llu in use\n", k,
+                         (unsigned long long)s->videoMemAvailable,
+                         (unsigned long long)s->videoMemBudget,
+                         (unsigned long long)s->videoMemUsage);
+            fails++;
+        }
+    }
+    if (a.videoMemBudget != b.videoMemBudget) {
+        /* the second read inside 250 ms gives the first's numbers */
+        rhi_test_log("FAIL budget: two reads in a moment differ\n");
+        fails++;
+    }
+    rhi_shutdown();
+    return fails ? 1 : 0;
+}
+
+/* rhi_vk_scope.c: the buffer barriers' scopes (RhiStats.fragmentHolds) */
+int rhi_vk_scope_cell(const RhiTestConfig *cfg);
+/* rhi_vk_subpass.c: the pass's own colour read with a depth target bound */
+int rhi_vk_subpass_cell(const RhiTestConfig *cfg);
+
+int main(int argc, char **argv)
 {
     const RhiTestConfig cfg = {"vulkan", "rhi_vk_test", true, NULL, rhi_vk_validation_error_count};
+    if (argc > 1 && strcmp(argv[1], "scopes") == 0) {
+        /* rhi_vk_scopes*: the buffer barriers' first scopes alone
+           (rhi_vk_scope.c), 77 without a device */
+        return rhi_vk_scope_cell(&cfg);
+    }
+    if (argc > 1 && strcmp(argv[1], "clock") == 0) {
+        /* rhi_vk_clock_arm: the recycled slot's clock alone (the single wait
+           on a faked Arm vendor id, ICO_TEST_POLLED_WANT=0) */
+        RhiDeviceDesc probe = {NULL, false, true, "rhi_vk_test clock probe", NULL};
+        if (!rhi_create_backend("vulkan") || !rhi_init(&probe)) {
+            rhi_test_log("SKIP clock: no Vulkan device\n");
+            return 77;
+        }
+        rhi_shutdown();
+        return clockCell() ? 1 : 0;
+    }
+    if (argc > 1 && strcmp(argv[1], "budget") == 0) {
+        /* rhi_vk_budget*: VK_EXT_memory_budget's numbers alone */
+        return budgetCell();
+    }
+    if (argc > 1 && strcmp(argv[1], "subpass") == 0) {
+        /* rhi_vk_subpass*: the local read with a depth target alone
+           (rhi_vk_subpass.c), 77 without a device */
+        return rhi_vk_subpass_cell(&cfg);
+    }
+    if (argc > 1 && strcmp(argv[1], "stores") == 0) {
+        /* rhi_vk_stores: the vertex shaders' stores alone (rhi_test_stores.c),
+           77 without them */
+        return rhi_test_vertex_stores(&cfg);
+    }
+    if (argc > 1 && strcmp(argv[1], "nostores") == 0) {
+        /* rhi_vk_nostores (ICO_VK_FAKE_NO_VERTEX_STORES=1): the device
+           reports none and the bracket refuses */
+        return rhi_test_vertex_stores(&cfg) == 77 ? 0 : 1;
+    }
+    if (argc > 1 && strcmp(argv[1], "compute") == 0) {
+        /* rhi_vk_compute*: the compute shaders' stores alone
+           (rhi_test_compute.c), 77 without them */
+        return rhi_test_compute_stores(&cfg);
+    }
+    if (argc > 1 && strcmp(argv[1], "nocompute") == 0) {
+        /* rhi_vk_nocompute (ICO_VK_FAKE_NO_COMPUTE_STORES=1): the device
+           reports none, the bracket refuses, a dispatch records nothing */
+        return rhi_test_compute_stores(&cfg) == 77 ? 0 : 1;
+    }
     int rc = rhi_test_run_cells(&cfg);
     if (rc != 0) {
         return rc;
     }
     return (hazardCell() || passAreaCell() || cacheCell() || cacheDropCell() || limitsCell() ||
-            poolCell() || renderAreaCell() || occlusionCell() || syncCell() || d32fCell() ||
-            adapterCell())
+            poolCell() || renderAreaCell() || occlusionCell() || syncCell() || clockCell() ||
+            waitSubmittedCell() || d32fCell() || rangeCell() || adapterCell() ||
+            rhi_test_vertex_stores(&cfg) == 1 || rhi_test_compute_stores(&cfg) == 1 ||
+            rhi_vk_scope_cell(&cfg) == 1 || rhi_vk_subpass_cell(&cfg) == 1)
                ? 1
                : 0;
 }

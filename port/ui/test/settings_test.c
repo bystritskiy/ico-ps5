@@ -27,8 +27,15 @@
  * (settings_render).
  */
 #include "settings_fixture.h"
+#include "pointer.h"
+#include "ui_mouse.h"
+#include "ico_rows.h"
 #include "popup.h"
-#include "ui_lang.h" /* ui_settings_text_language */
+#include "ui_lang.h"             /* ui_settings_text_language */
+#include "settings_difficulty.h" /* the New Game draft */
+#include "pad_glyphs.h"          /* Controls > Button pictures */
+#include "pad_kind.h"            /* ico_pad_kind_reset */
+#include "settings_pads.h"
 
 static void testBuild(void)
 {
@@ -43,16 +50,10 @@ static void testBuild(void)
     static const int apiStrs[] = {UI_STR_OPT_GRAPHICS_API, UI_STR_OPT_GRAPHICS_ADAPTER,
                                   UI_STR_GRAPHICS_APPLY,   UI_STR_GRAPHICS_KEEP,
                                   UI_STR_GRAPHICS_REVERT,  UI_STR_BACK};
-    static const int fxOpts[] = {UI_OPT_EFFECT_GLOW,
-                                 UI_OPT_EFFECT_GLOW_SMOOTH,
-                                 UI_OPT_EFFECT_DEPTH_OF_FIELD,
-                                 UI_OPT_EFFECT_SOFTENING,
-                                 UI_OPT_EFFECT_MOTION_BLUR,
-                                 UI_OPT_EFFECT_MOTION_BLUR_STRENGTH,
-                                 UI_OPT_EFFECT_FOG,
-                                 UI_OPT_EFFECT_WATER,
-                                 UI_OPT_EFFECT_CINEMATIC_BARS,
-                                 UI_OPT_BACK};
+    static const int fxOpts[] = {
+        UI_OPT_EFFECT_GLOW,      UI_OPT_EFFECT_GLOW_SMOOTH,    UI_OPT_EFFECT_DEPTH_OF_FIELD,
+        UI_OPT_EFFECT_SOFTENING, UI_OPT_EFFECT_MOTION_BLUR,    UI_OPT_EFFECT_MOTION_BLUR_STRENGTH,
+        UI_OPT_EFFECT_FOG,       UI_OPT_EFFECT_CINEMATIC_BARS, UI_OPT_BACK};
     static const int fxStrs[] = {UI_STR_OPT_EFFECT_GLOW,
                                  UI_STR_OPT_EFFECT_GLOW_SMOOTH,
                                  UI_STR_OPT_EFFECT_DEPTH_OF_FIELD,
@@ -60,28 +61,49 @@ static void testBuild(void)
                                  UI_STR_OPT_EFFECT_MOTION_BLUR,
                                  UI_STR_OPT_EFFECT_MOTION_BLUR_STRENGTH,
                                  UI_STR_OPT_EFFECT_FOG,
-                                 UI_STR_OPT_EFFECT_WATER,
                                  UI_STR_OPT_EFFECT_CINEMATIC_BARS,
                                  UI_STR_BACK};
-    static const int picOpts[] = {UI_OPT_ANTI_ALIAS, UI_OPT_DOWNSAMPLE,   UI_OPT_FULL_HEIGHT,
-                                  UI_OPT_FILTER,     UI_OPT_FULL_PIXEL,   UI_OPT_BRIGHTNESS,
-                                  UI_OPT_CRT,        UI_OPT_CRT_STRENGTH, UI_OPT_TEXTURE_PACK,
-                                  UI_OPT_MODEL_PACK, UI_OPT_BACK};
+    static const int picOpts[] = {UI_OPT_ANTI_ALIAS,
+                                  UI_OPT_DOWNSAMPLE,
+                                  UI_OPT_UPSCALE,
+                                  UI_OPT_UPSCALE_QUALITY,
+                                  UI_OPT_UPSCALE_SHARPNESS,
+                                  UI_OPT_FULL_HEIGHT,
+                                  UI_OPT_FILTER,
+                                  UI_OPT_FULL_PIXEL,
+                                  UI_OPT_BRIGHTNESS,
+                                  UI_OPT_CRT,
+                                  UI_OPT_CRT_STRENGTH,
+                                  UI_OPT_TONE_GAMMA,
+                                  UI_OPT_TONE_BRIGHTNESS,
+                                  UI_OPT_TONE_CONTRAST,
+                                  UI_OPT_TONE_SATURATION,
+                                  UI_OPT_TEXTURE_PACK,
+                                  UI_OPT_MODEL_PACK,
+                                  UI_OPT_BACK};
     static const int picStrs[] = {UI_STR_OPT_AA,
                                   UI_STR_OPT_DOWNSAMPLE,
+                                  UI_STR_OPT_UPSCALE,
+                                  UI_STR_OPT_UPSCALE_QUALITY,
+                                  UI_STR_OPT_UPSCALE_SHARPNESS,
                                   UI_STR_OPT_FULL_HEIGHT,
                                   UI_STR_OPT_FILTERING,
                                   UI_STR_OPT_FULL_PIXEL,
                                   UI_STR_OPT_BRIGHTNESS,
                                   UI_STR_OPT_CRT,
                                   UI_STR_OPT_CRT_STRENGTH,
+                                  UI_STR_OPT_TONE_GAMMA,
+                                  UI_STR_OPT_TONE_BRIGHTNESS,
+                                  UI_STR_OPT_TONE_CONTRAST,
+                                  UI_STR_OPT_TONE_SATURATION,
                                   UI_STR_OPT_TEXTURE_PACK,
                                   UI_STR_OPT_MODEL_PACK,
                                   UI_STR_BACK};
-    static const int devOpts[] = {UI_OPT_DEVELOPER, UI_OPT_DUMP_TEXTURES, UI_OPT_DUMP_MODELS,
-                                  UI_OPT_BACK};
+    static const int devOpts[] = {UI_OPT_DEVELOPER,      UI_OPT_DUMP_TEXTURES, UI_OPT_DUMP_MODELS,
+                                  UI_OPT_VAR_DEBUG_MENU, UI_OPT_FREE_MOVEMENT, UI_OPT_BACK};
     static const int devStrs[] = {UI_STR_OPT_DEVELOPER_MODE, UI_STR_OPT_DUMP_TEXTURES,
-                                  UI_STR_OPT_DUMP_MODELS, UI_STR_BACK};
+                                  UI_STR_OPT_DUMP_MODELS,    UI_STR_OPT_VAR_DEBUG_MENU,
+                                  UI_STR_OPT_FREE_MOVEMENT,  UI_STR_BACK};
     static const int mainStrs[] = {UI_STR_SECTION_DISPLAY,
                                    UI_STR_SECTION_PICTURE,
                                    UI_STR_SECTION_EFFECTS,
@@ -109,18 +131,19 @@ static void testBuild(void)
                                     UI_OPT_OUTPUT, UI_OPT_DEVICE, UI_OPT_BACK};
     static const int audioStrs[] = {UI_STR_OPT_VOLUME, UI_STR_OPT_MUSIC_VOL, UI_STR_OPT_EFFECTS_VOL,
                                     UI_STR_OPT_OUTPUT, UI_STR_OPT_DEVICE,    UI_STR_BACK};
-    static const int ctlOpts[] = {UI_OPT_LINK,        UI_OPT_BUTTON_CONFIG, UI_OPT_VIBRATION,
-                                  UI_OPT_HOLD_TYPE,   UI_OPT_STICK_FIX,     UI_OPT_MOUSE_CAMERA,
-                                  UI_OPT_MOUSE_SENS,  UI_OPT_MOUSE_INVERT,  UI_OPT_MOUSE_SPEED,
-                                  UI_OPT_MOUSE_RANGE, UI_OPT_MOUSE_RETURN,  UI_OPT_CIRCLE_BACK,
-                                  UI_OPT_LINK,        UI_OPT_BACK};
-    static const int ctlStrs[] = {UI_STR_OPT_REMAP,        UI_STR_OPT_BUTTON_CONFIG,
-                                  UI_STR_OPT_VIBRATION,    UI_STR_OPT_HOLD_TYPE,
-                                  UI_STR_OPT_STICK_FIX,    UI_STR_OPT_MOUSE_CAMERA,
-                                  UI_STR_OPT_MOUSE_SENS,   UI_STR_OPT_MOUSE_INVERT,
-                                  UI_STR_OPT_MOUSE_SPEED,  UI_STR_OPT_MOUSE_RANGE,
-                                  UI_STR_OPT_MOUSE_RETURN, UI_STR_OPT_CIRCLE_BACK,
-                                  UI_STR_SECTION_TOUCH,    UI_STR_BACK};
+    static const int ctlOpts[] = {
+        UI_OPT_LINK,        UI_OPT_BUTTON_CONFIG, UI_OPT_VIBRATION,    UI_OPT_BUTTON_PICTURES,
+        UI_OPT_HOLD_TYPE,   UI_OPT_ZOOM_TYPE,     UI_OPT_CAMERA_RESET, UI_OPT_YORDA_LOOK,
+        UI_OPT_STICK_FIX,   UI_OPT_MOUSE_CAMERA,  UI_OPT_MOUSE_SENS,   UI_OPT_MOUSE_INVERT,
+        UI_OPT_MOUSE_SPEED, UI_OPT_MOUSE_RANGE,   UI_OPT_MOUSE_RETURN, UI_OPT_CIRCLE_BACK,
+        UI_OPT_LINK,        UI_OPT_BACK};
+    static const int ctlStrs[] = {
+        UI_STR_OPT_REMAP,           UI_STR_OPT_BUTTON_CONFIG, UI_STR_OPT_VIBRATION,
+        UI_STR_OPT_BUTTON_PICTURES, UI_STR_OPT_HOLD_TYPE,     UI_STR_OPT_ZOOM_TYPE,
+        UI_STR_OPT_CAMERA_RESET,    UI_STR_OPT_YORDA_LOOK,    UI_STR_OPT_STICK_FIX,
+        UI_STR_OPT_MOUSE_CAMERA,    UI_STR_OPT_MOUSE_SENS,    UI_STR_OPT_MOUSE_INVERT,
+        UI_STR_OPT_MOUSE_SPEED,     UI_STR_OPT_MOUSE_RANGE,   UI_STR_OPT_MOUSE_RETURN,
+        UI_STR_OPT_CIRCLE_BACK,     UI_STR_SECTION_TOUCH,     UI_STR_BACK};
     static const int touchOpts[] = {
         UI_OPT_TOUCH_MODE,  UI_OPT_TOUCH_SIZE,      UI_OPT_TOUCH_OPACITY,
         UI_OPT_TOUCH_EDIT,  UI_OPT_TOUCH_SNAP,      UI_OPT_TOUCH_GRID,
@@ -129,15 +152,73 @@ static void testBuild(void)
         UI_STR_OPT_TOUCH_MODE, UI_STR_OPT_TOUCH_SIZE,  UI_STR_OPT_TOUCH_OPACITY,
         UI_STR_OPT_TOUCH_EDIT, UI_STR_OPT_TOUCH_SNAP,  UI_STR_OPT_TOUCH_GRID,
         UI_STR_TOUCH_RESET,    UI_STR_TOUCH_RESET_ALL, UI_STR_BACK};
-    static const int gameOpts[] = {UI_OPT_YORDA,          UI_OPT_PIT_TIME,     UI_OPT_SHADOW_SPEED,
-                                   UI_OPT_STICK_FIX,      UI_OPT_DOOR_FIX,     UI_OPT_YORDA_TRIPS,
-                                   UI_OPT_NATURAL_CHAINS, UI_OPT_SKIP_OPENING, UI_OPT_SECOND_CARD,
-                                   UI_OPT_FILM_EFFECT,    UI_OPT_PLAYERS,      UI_OPT_BACK};
-    static const int gameStrs[] = {
-        UI_STR_OPT_YORDA,          UI_STR_OPT_PIT_TIME,     UI_STR_OPT_SHADOW_SPEED,
-        UI_STR_OPT_STICK_FIX,      UI_STR_OPT_DOOR_FIX,     UI_STR_OPT_YORDA_TRIPS,
-        UI_STR_OPT_NATURAL_CHAINS, UI_STR_OPT_SKIP_OPENING, UI_STR_OPT_SECOND_CARD,
-        UI_STR_OPT_FILM_EFFECT,    UI_STR_OPT_PLAYERS,      UI_STR_BACK};
+    /* Gameplay: its own seven rows, the two pages' links, the pause menu's
+       Difficulty link, Back */
+    static const int gameOpts[] = {UI_OPT_STICK_FIX,   UI_OPT_DOOR_FIX, UI_OPT_SECOND_CARD,
+                                   UI_OPT_FILM_EFFECT, UI_OPT_PLAYERS,  UI_OPT_VAR_SWORD_COLOUR,
+                                   UI_OPT_VAR_WEAPON,  UI_OPT_LINK,     UI_OPT_LINK,
+                                   UI_OPT_LINK,        UI_OPT_BACK};
+    static const int gameStrs[] = {UI_STR_OPT_STICK_FIX,
+                                   UI_STR_OPT_DOOR_FIX,
+                                   UI_STR_OPT_SECOND_CARD,
+                                   UI_STR_OPT_FILM_EFFECT,
+                                   UI_STR_OPT_PLAYERS,
+                                   UI_STR_OPT_VAR_SWORD_COLOUR,
+                                   UI_STR_OPT_VAR_WEAPON,
+                                   UI_STR_SECTION_CHAINS,
+                                   UI_STR_SECTION_CUTSCENES,
+                                   UI_STR_DIFF_LINK,
+                                   UI_STR_BACK};
+    static const int chainOpts[] = {UI_OPT_NATURAL_CHAINS, UI_OPT_VAR_CHAIN_SPEED,
+                                    UI_OPT_VAR_CHAIN_DAMPING, UI_OPT_BACK};
+    static const int chainStrs[] = {UI_STR_OPT_NATURAL_CHAINS, UI_STR_OPT_VAR_CHAIN_SPEED,
+                                    UI_STR_OPT_VAR_CHAIN_DAMPING, UI_STR_BACK};
+    /* the New Game's Customize (its three pages, Mirror mode and New Game+)
+       and the three pages: every row of the draft */
+    static const int custOpts[] = {UI_OPT_LINK,           UI_OPT_LINK,         UI_OPT_LINK,
+                                   UI_OPT_NEWGAME_MIRROR, UI_OPT_NEWGAME_PLUS, UI_OPT_BACK};
+    static const int custStrs[] = {UI_STR_SECTION_SHADOWS,  UI_STR_SECTION_COMBAT,
+                                   UI_STR_DIFF_RULES,       UI_STR_OPT_MIRROR,
+                                   UI_STR_OPT_NEWGAME_PLUS, UI_STR_BACK};
+    static const int shadowOpts[] = {
+        UI_OPT_SHADOW_SPEED, UI_OPT_VAR_TOUGHNESS,    UI_OPT_VAR_AGGRESSION,  UI_OPT_VAR_PEACEFUL,
+        UI_OPT_YORDA,        UI_OPT_SHADOWS_TOGETHER, UI_OPT_DIFF_NO_SHADOWS, UI_OPT_BACK};
+    static const int shadowStrs[] = {UI_STR_OPT_SHADOW_SPEED,   UI_STR_OPT_VAR_TOUGHNESS,
+                                     UI_STR_OPT_VAR_AGGRESSION, UI_STR_OPT_VAR_PEACEFUL,
+                                     UI_STR_OPT_YORDA,          UI_STR_OPT_SHADOWS_TOGETHER,
+                                     UI_STR_DIFF_NO_SHADOWS,    UI_STR_BACK};
+    static const int combatOpts[] = {UI_OPT_VAR_AUTO_GUARD,
+                                     UI_OPT_VAR_ATTACK_TURN,
+                                     UI_OPT_VAR_SHADOWS_WAIT_DOWN,
+                                     UI_OPT_VAR_ONE_HIT,
+                                     UI_OPT_VAR_NEVER_DODGE,
+                                     UI_OPT_VAR_BARRIER,
+                                     UI_OPT_BACK};
+    static const int combatStrs[] = {UI_STR_OPT_VAR_AUTO_GUARD,
+                                     UI_STR_OPT_VAR_ATTACK_TURN,
+                                     UI_STR_OPT_VAR_SHADOWS_WAIT_DOWN,
+                                     UI_STR_OPT_VAR_ONE_HIT,
+                                     UI_STR_OPT_VAR_NEVER_DODGE,
+                                     UI_STR_OPT_VAR_BARRIER,
+                                     UI_STR_BACK};
+    static const int rulesOpts[] = {UI_OPT_PIT_TIME,
+                                    UI_OPT_YORDA_TRIPS,
+                                    UI_OPT_VAR_NO_HINTS,
+                                    UI_OPT_DIFF_KNOCK_LIMIT,
+                                    UI_OPT_DIFF_KNOCK_SCOPE,
+                                    UI_OPT_DIFF_PERMADEATH,
+                                    UI_OPT_BACK};
+    static const int rulesStrs[] = {UI_STR_OPT_PIT_TIME,
+                                    UI_STR_OPT_YORDA_TRIPS,
+                                    UI_STR_OPT_VAR_NO_HINTS,
+                                    UI_STR_DIFF_KNOCK_LIMIT,
+                                    UI_STR_DIFF_KNOCK_SCOPE,
+                                    UI_STR_DIFF_PERMADEATH,
+                                    UI_STR_BACK};
+    static const int cutOpts[] = {UI_OPT_SKIP_OPENING, UI_OPT_VAR_NO_LOOK, UI_OPT_VAR_IGNORE_CAMS,
+                                  UI_OPT_BACK};
+    static const int cutStrs[] = {UI_STR_OPT_SKIP_OPENING, UI_STR_OPT_VAR_NO_LOOK,
+                                  UI_STR_OPT_VAR_IGNORE_CAMS, UI_STR_BACK};
     static const int listOpts[8] = {UI_OPT_LIST, UI_OPT_LIST, UI_OPT_LIST, UI_OPT_LIST,
                                     UI_OPT_LIST, UI_OPT_LIST, UI_OPT_LIST, UI_OPT_LIST};
     static const int listStrs[8] = {-1, -1, -1, -1, -1, -1, -1, -1};
@@ -150,65 +231,94 @@ static void testBuild(void)
     ui_settings_install();
     CHECK(labelsAre(UI_PAGE_MAIN, mainOpts, mainStrs, 16), "main page rows");
     CHECK(labelsAre(UI_PAGE_GRAPHICS, apiOpts, apiStrs, 6), "Graphics page rows");
-    CHECK(labelsAre(UI_PAGE_EFFECTS, fxOpts, fxStrs, 10), "effects rows");
-    CHECK(labelsAre(UI_PAGE_PICTURE, picOpts, picStrs, 11), "picture rows");
-    CHECK(labelsAre(UI_PAGE_DEVELOPER, devOpts, devStrs, 4), "developer rows");
+    CHECK(labelsAre(UI_PAGE_EFFECTS, fxOpts, fxStrs, 9), "effects rows");
+    CHECK(labelsAre(UI_PAGE_PICTURE, picOpts, picStrs, 18), "picture rows");
+    CHECK(labelsAre(UI_PAGE_DEVELOPER, devOpts, devStrs, 6), "developer rows");
     {
-        /* Characters and Game variants (links), then Add to Steam,
+        /* the Characters and Unused content links, then Add to Steam,
            Export textures, Back up your data and Restore from a backup
            (hidden without a host) before the pop-ups and Back */
-        static const int extrasOpts[] = {UI_OPT_EXTRAS_MUSIC,
-                                         UI_OPT_EXTRAS_MODELS,
-                                         UI_OPT_EXTRAS_CREDITS,
-                                         UI_OPT_LINK,
-                                         UI_OPT_LINK,
-                                         UI_OPT_EXTRAS_STEAM,
-                                         UI_OPT_EXTRAS_EXPORT_TEXTURES,
-                                         UI_OPT_EXTRAS_BACKUP,
-                                         UI_OPT_EXTRAS_RESTORE,
-                                         UI_OPT_ACH_POPUPS,
-                                         UI_OPT_BACK};
-        static const int extrasStrs[] = {UI_STR_EXTRAS_MUSIC,
-                                         UI_STR_EXTRAS_MODELS,
-                                         UI_STR_EXTRAS_CREDITS,
-                                         UI_STR_SECTION_CHARACTERS,
-                                         UI_STR_SECTION_VARIANTS,
-                                         UI_STR_EXTRAS_STEAM,
-                                         UI_STR_EXTRAS_EXPORT_TEXTURES,
-                                         UI_STR_EXTRAS_BACKUP,
-                                         UI_STR_EXTRAS_RESTORE,
-                                         UI_STR_OPT_ACH_POPUPS,
-                                         UI_STR_BACK};
-        CHECK(labelsAre(UI_PAGE_EXTRAS, extrasOpts, extrasStrs, 11), "Extras page rows");
-        /* Game variants: the eight variants, the Debug menu, Back */
-        static const int varOpts[] = {UI_OPT_VAR_TOUGHNESS,   UI_OPT_VAR_ONE_HIT,
-                                      UI_OPT_VAR_NEVER_DODGE, UI_OPT_VAR_AGGRESSION,
-                                      UI_OPT_VAR_NO_HINTS,    UI_OPT_VAR_BARRIER,
-                                      UI_OPT_VAR_NO_LOOK,     UI_OPT_VAR_IGNORE_CAMS,
-                                      UI_OPT_VAR_DEBUG_MENU,  UI_OPT_BACK};
-        static const int varStrs[] = {UI_STR_OPT_VAR_TOUGHNESS,   UI_STR_OPT_VAR_ONE_HIT,
-                                      UI_STR_OPT_VAR_NEVER_DODGE, UI_STR_OPT_VAR_AGGRESSION,
-                                      UI_STR_OPT_VAR_NO_HINTS,    UI_STR_OPT_VAR_BARRIER,
-                                      UI_STR_OPT_VAR_NO_LOOK,     UI_STR_OPT_VAR_IGNORE_CAMS,
-                                      UI_STR_OPT_VAR_DEBUG_MENU,  UI_STR_BACK};
-        CHECK(labelsAre(UI_PAGE_VARIANTS, varOpts, varStrs, 10), "Game variants page rows");
+        static const int extrasOpts[] = {UI_OPT_EXTRAS_MUSIC,   UI_OPT_EXTRAS_MODELS,
+                                         UI_OPT_EXTRAS_CREDITS, UI_OPT_LINK,
+                                         UI_OPT_LINK,           UI_OPT_EXTRAS_STEAM,
+                                         UI_OPT_EXTRAS_DESKTOP, UI_OPT_EXTRAS_EXPORT_TEXTURES,
+                                         UI_OPT_EXTRAS_BACKUP,  UI_OPT_EXTRAS_RESTORE,
+                                         UI_OPT_ACH_POPUPS,     UI_OPT_BACK};
+        static const int extrasStrs[] = {
+            UI_STR_EXTRAS_MUSIC,       UI_STR_EXTRAS_MODELS,          UI_STR_EXTRAS_CREDITS,
+            UI_STR_SECTION_CHARACTERS, UI_STR_SECTION_UNUSED,         UI_STR_EXTRAS_STEAM,
+            UI_STR_EXTRAS_DESKTOP,     UI_STR_EXTRAS_EXPORT_TEXTURES, UI_STR_EXTRAS_BACKUP,
+            UI_STR_EXTRAS_RESTORE,     UI_STR_OPT_ACH_POPUPS,         UI_STR_BACK};
+        CHECK(labelsAre(UI_PAGE_EXTRAS, extrasOpts, extrasStrs, 12), "Extras page rows");
+        /* Extras > Unused content: the two test rooms, the movie, the art,
+           Back (each shown by the host: settings_extras_test testUnused) */
+        static const int unusedOpts[] = {UI_OPT_UNUSED_ARENA, UI_OPT_UNUSED_CLIMB,
+                                         UI_OPT_UNUSED_MOVIE, UI_OPT_UNUSED_ART, UI_OPT_BACK};
+        static const int unusedStrs[] = {UI_STR_UNUSED_ARENA, UI_STR_UNUSED_CLIMB,
+                                         UI_STR_UNUSED_MOVIE, UI_STR_UNUSED_ART, UI_STR_BACK};
+        CHECK(labelsAre(UI_PAGE_UNUSED, unusedOpts, unusedStrs, 5), "Unused content page rows");
     }
     CHECK(labelsAre(UI_PAGE_DISPLAY, dispOpts, dispStrs, 9),
           "display rows (Frame rate without a framerate key)");
     CHECK(labelsAre(UI_PAGE_AUDIO, audioOpts, audioStrs, 6), "audio rows");
-    CHECK(labelsAre(UI_PAGE_CONTROLS, ctlOpts, ctlStrs, 14), "controls rows");
+    CHECK(labelsAre(UI_PAGE_CONTROLS, ctlOpts, ctlStrs, 18), "controls rows");
     CHECK(labelsAre(UI_PAGE_TOUCH, touchOpts, touchStrs, 9), "touch screen rows");
     CHECK(ui_settings_page_rows(UI_PAGE_TOUCH_LAYOUT, NULL, NULL, NULL, 16) == 0,
           "the Edit layout page has no rows");
     {
         /* Touch screen opens its page, Edit layout the editor's */
-        int cl[16], co[16];
-        const int cn = ui_settings_page_rows(UI_PAGE_CONTROLS, cl, co, NULL, 16);
-        CHECK(cn == 14 && co[12] == UI_OPT_LINK &&
-                  lt_ext_prop(cl[12])->right == ui_settings_page_layout(UI_PAGE_TOUCH),
+        int cl[24], co[24];
+        const int cn = ui_settings_page_rows(UI_PAGE_CONTROLS, cl, co, NULL, 24);
+        CHECK(cn == 18 && co[16] == UI_OPT_LINK &&
+                  lt_ext_prop(cl[16])->right == ui_settings_page_layout(UI_PAGE_TOUCH),
               "Touch screen opens its page");
     }
-    CHECK(labelsAre(UI_PAGE_GAMEPLAY, gameOpts, gameStrs, 12), "gameplay rows");
+    CHECK(labelsAre(UI_PAGE_GAMEPLAY, gameOpts, gameStrs, 11), "gameplay rows");
+    CHECK(labelsAre(UI_PAGE_CHAINS, chainOpts, chainStrs, 4), "Gameplay > Chains rows");
+    CHECK(labelsAre(UI_PAGE_CUTSCENES, cutOpts, cutStrs, 4), "Gameplay > Cutscenes rows");
+    CHECK(labelsAre(UI_PAGE_CUSTOMIZE, custOpts, custStrs, 6), "Customize rows");
+    CHECK(labelsAre(UI_PAGE_SHADOWS, shadowOpts, shadowStrs, 8), "Customize > Shadows rows");
+    CHECK(labelsAre(UI_PAGE_COMBAT, combatOpts, combatStrs, 7), "Customize > Combat rows");
+    CHECK(labelsAre(UI_PAGE_RULES, rulesOpts, rulesStrs, 7), "Customize > Rules rows");
+    {
+        /* Chains and Cutscenes open their pages, right before Back (settings_extra's
+           testNaturalChains and testSkipOpening walk them and back); Customize's
+           three links its pages, which no Settings page leads to */
+        static const UiSettingsPage kSub[2] = {UI_PAGE_CHAINS, UI_PAGE_CUTSCENES};
+        static const UiSettingsPage kCust[3] = {UI_PAGE_SHADOWS, UI_PAGE_COMBAT, UI_PAGE_RULES};
+        int gl[16], go[16];
+        const int gn = ui_settings_page_rows(UI_PAGE_GAMEPLAY, gl, go, NULL, 16);
+        CHECK(gn == 11, "Gameplay: eleven rows (%d)", gn);
+        for (int k = 0; k < 2 && gn == 11; k++) {
+            CHECK(go[7 + k] == UI_OPT_LINK &&
+                      lt_ext_prop(gl[7 + k])->right == ui_settings_page_layout(kSub[k]),
+                  "Gameplay row %d opens page %d", 7 + k, kSub[k]);
+        }
+        /* the Difficulty link opens Customize (read-only), from Gameplay only */
+        CHECK(gn == 11 && go[9] == UI_OPT_LINK &&
+                  lt_ext_prop(gl[9])->right == ui_settings_page_layout(UI_PAGE_CUSTOMIZE),
+              "Gameplay's Difficulty link opens Customize");
+        const int cn = ui_settings_page_rows(UI_PAGE_CUSTOMIZE, gl, go, NULL, 16);
+        CHECK(cn == 6, "Customize: six rows (%d)", cn);
+        for (int k = 0; k < 3 && cn == 6; k++) {
+            CHECK(go[k] == UI_OPT_LINK &&
+                      lt_ext_prop(gl[k])->right == ui_settings_page_layout(kCust[k]),
+                  "Customize row %d opens page %d", k, kCust[k]);
+        }
+        for (int p = 0; p < UI_PAGE_COUNT; p++) {
+            int pl[24];
+            const int pn = ui_settings_page_rows((UiSettingsPage)p, pl, NULL, NULL, 24);
+            for (int k = 0; k < pn && p != UI_PAGE_CUSTOMIZE; k++) {
+                for (int c = 0; c < 3; c++) {
+                    CHECK(lt_ext_prop(pl[k])->right != ui_settings_page_layout(kCust[c]),
+                          "page %d row %d does not open Customize's page %d", p, k, kCust[c]);
+                }
+                CHECK(p == UI_PAGE_GAMEPLAY ||
+                          lt_ext_prop(pl[k])->right != ui_settings_page_layout(UI_PAGE_CUSTOMIZE),
+                      "page %d row %d does not open Customize", p, k);
+            }
+        }
+    }
     /* the pop-ups switch is an item of the list (first, before the achievements), not a row of its own */
     CHECK(labelsAre(UI_PAGE_ACHIEVEMENTS, listOpts, listStrs, 8), "achievement slots");
     CHECK(labelsAre(UI_PAGE_REMAP, listOpts, listStrs, 8), "remap slots");
@@ -227,10 +337,12 @@ static void testBuild(void)
                   l->first >= LT_GAME_PROPERTY_COUNT && l->last > l->first && l->proc != NULL,
               "page %d layout", p);
     }
-    /* the gameplay option's explanation */
-    int yorda = ui_settings_row_of(UI_PAGE_GAMEPLAY, UI_OPT_YORDA);
-    CHECK(yorda >= 0, "the Yorda row");
-    /* the Gameplay page holds the stick fix beside Yorda's */
+    /* Shadows never take Yorda on Customize > Shadows, on neither Gameplay nor its Chains page */
+    int yorda = ui_settings_row_of(UI_PAGE_SHADOWS, UI_OPT_YORDA);
+    CHECK(yorda >= 0 && ui_settings_row_of(UI_PAGE_GAMEPLAY, UI_OPT_YORDA) < 0 &&
+              ui_settings_row_of(UI_PAGE_CHAINS, UI_OPT_YORDA) < 0,
+          "the Yorda row");
+    /* the Gameplay page holds the stick fix */
     CHECK(ui_settings_row_of(UI_PAGE_GAMEPLAY, UI_OPT_STICK_FIX) >= 0, "the stick fix row");
     CHECK(ui_settings_row_of(UI_PAGE_CONTROLS, UI_OPT_STICK_FIX) >= 0, "also on Controls");
     /* no Menu text or Font row (one behaviour: the game's
@@ -247,32 +359,60 @@ static void testBuild(void)
     /* the New Game screen */
     int ml = ui_new_game_screen_layout();
     CHECK(ml >= LT_GAME_LAYOUT_COUNT && lt_ext_layout(ml)->proc != NULL, "New Game screen layout");
-    static const char *const kNgLabel[2] = {"Mirror mode", "New Game+"};
-    for (int r = 0; r < 2; r++) {
-        const int off = ui_new_game_screen_row(r, 0), on = ui_new_game_screen_row(r, 1);
-        CHECK(off >= 0 && on >= 0 && strcmp(lt_ext_row_text(off - 1), kNgLabel[r]) == 0 &&
-                  strcmp(lt_ext_row_text(off), "Off") == 0 &&
-                  strcmp(lt_ext_row_text(on), "On") == 0,
-              "New Game screen row %d: %s Off / On", r, kNgLabel[r]);
-        CHECK(lt_ext_prop(off)->rightItem == on && lt_ext_prop(on)->leftItem == off,
-              "row %d: Off and On side by side", r);
-        CHECK(lt_ext_prop(off)->dispY == lt_ext_prop(on)->dispY &&
-                  lt_ext_prop(off - 1)->dispY == lt_ext_prop(off)->dispY,
-              "row %d: the label, Off and On on one line", r);
+    {
+        /* Difficulty (its value and two arrows after it, owned by it),
+           Customize at pitch 24 from y 46, the Start row centred under them
+           at 100; no Mirror mode or New Game+ row (they are Customize's) */
+        const int d = ui_new_game_screen_difficulty(), c = ui_new_game_screen_customize();
+        const int st = ui_new_game_screen_start();
+        CHECK(d >= 0 && strcmp(lt_ext_row_text(d), "Difficulty") == 0 &&
+                  lt_ext_prop(d)->selectable && lt_ext_prop(d + 1)->ownerItem == d &&
+                  lt_ext_prop(d + 2)->ownerItem == d && lt_ext_prop(d + 3)->ownerItem == d &&
+                  lt_ext_pointer_role(d + 1) == LT_POINTER_STEP &&
+                  lt_ext_pointer_role(d + 2) == LT_POINTER_LEFT &&
+                  lt_ext_pointer_role(d + 3) == LT_POINTER_RIGHT,
+              "the Difficulty row, its value and arrows (%d)", d);
+        CHECK(c >= 0 && strcmp(lt_ext_row_text(c), "Customize") == 0, "the Customize row (%d)", c);
+        CHECK(lt_ext_prop(d)->dispY == 46 && lt_ext_prop(c)->dispY == 70 &&
+                  lt_ext_prop(st)->dispY == 100,
+              "the rows at 46, 70, Start at 100 (%d %d %d)", lt_ext_prop(d)->dispY,
+              lt_ext_prop(c)->dispY, lt_ext_prop(st)->dispY);
+        {
+            /* the screen's rows: Difficulty's four, Customize, Start, the
+               note (at 182); none reads Mirror mode, New Game+, Off or On */
+            const LtProp *nl = lt_ext_layout(ml);
+            int selectable = 0;
+            for (int k = nl->first; k < nl->last; k++) {
+                const char *t = lt_ext_row_text(k);
+                selectable += lt_ext_prop(k)->selectable && lt_ext_prop(k)->ownerItem < 0;
+                CHECK(strcmp(t, "Mirror mode") != 0 && strcmp(t, "New Game+") != 0 &&
+                          strcmp(t, "Off") != 0 && strcmp(t, "On") != 0,
+                      "New Game screen row %d is no Mirror mode / New Game+ row (\"%s\")", k, t);
+            }
+            CHECK(nl->last - nl->first == 7 && selectable == 3 &&
+                      lt_ext_prop(nl->last - 1)->dispY == 182,
+                  "seven rows (%d), three items (%d), the note at 182 (%d)", nl->last - nl->first,
+                  selectable, lt_ext_prop(nl->last - 1)->dispY);
+        }
+        CHECK(st >= 0 && strcmp(lt_ext_row_text(st), "Start") == 0, "the Start row (%d)", st);
+        gFlagGameClear = 0;
+        const int m0 = ui_new_game_screen_enter();
+        CHECK(m0 == ml && lt_ext_layout(ml)->curItem == d &&
+                  strcmp(lt_ext_row_text(d + 1), "Normal") == 0,
+              "entered: the cursor on Difficulty, Normal (\"%s\")", lt_ext_row_text(d + 1));
+        CHECK(lt_ext_prop(d)->upItem == st && lt_ext_prop(d)->downItem == c &&
+                  lt_ext_prop(c)->upItem == d && lt_ext_prop(c)->downItem == st &&
+                  lt_ext_prop(st)->upItem == c && lt_ext_prop(st)->downItem == d,
+              "up/down: Difficulty, Customize, Start, round");
     }
-    CHECK(lt_ext_prop(ui_new_game_screen_row(1, 0))->dispY >
-              lt_ext_prop(ui_new_game_screen_row(0, 0))->dispY,
-          "New Game+ under Mirror mode");
-    CHECK(ui_new_game_screen_row(2, 0) == -1 && ui_new_game_screen_row(-1, 1) == -1,
-          "no third row");
     {
         /* every row of the screen inside the layout, the note's bottom
            at 212 at most */
         const LtProp *l = lt_ext_layout(ml);
         for (int k = l->first; k < l->last; k++) {
-            CHECK(lt_ext_prop(k)->dispY >= 100 &&
+            CHECK(lt_ext_prop(k)->dispY >= 40 &&
                       lt_ext_prop(k)->dispY + lt_ext_prop(k)->dispH <= 212,
-                  "New Game screen row %d in 100..212 (%d+%d)", k, lt_ext_prop(k)->dispY,
+                  "New Game screen row %d in 40..212 (%d+%d)", k, lt_ext_prop(k)->dispY,
                   lt_ext_prop(k)->dispH);
         }
     }
@@ -625,6 +765,176 @@ static void testDownsample(void)
     useConfig("[video]\ndownsample = \"box\"\n");
     CHECK(strcmp(ui_settings_value_text(UI_OPT_DOWNSAMPLE), "To original size") == 0,
           "a file's box: To original size");
+}
+
+/* the Upscaling row (issue 99): on Picture right after Downsampling with
+   Sharpness under it (shown only while Upscaling is on), Off by default,
+   Right and Left both switch it, Sharpness 80 by default stepping by 10 and
+   held at 0 and 100, the preset is not changed, [video] upscaling = "fsr1"
+   and upscaling_sharpness are saved, a file's are read, and the note is on
+   the page */
+static void testUpscale(void)
+{
+    char p[1100];
+    IcoVideoOptions o;
+    int l[18], op[18];
+
+    useConfig("[video]\npreset = \"enhanced\"\n");
+    fakeTables();
+    lt_ext_reset();
+    ui_settings_reset();
+    ui_set_language(UI_LANG_EN);
+    ui_settings_install();
+    const int n = ui_settings_page_rows(UI_PAGE_PICTURE, l, op, NULL, 18);
+    CHECK(n > 5 && op[1] == UI_OPT_DOWNSAMPLE && op[2] == UI_OPT_UPSCALE &&
+              op[3] == UI_OPT_UPSCALE_QUALITY && op[4] == UI_OPT_UPSCALE_SHARPNESS,
+          "the rows are on Picture right after Downsampling");
+    CHECK(ui_settings_row_of(UI_PAGE_DISPLAY, UI_OPT_UPSCALE) < 0, "not on Display");
+    CHECK(strcmp(ui_str(UI_STR_OPT_UPSCALE), "Upscaling") == 0 &&
+              strcmp(ui_str(UI_STR_OPT_UPSCALE_SHARPNESS), "Sharpness") == 0,
+          "their labels");
+    CHECK(strcmp(ui_settings_value_text(UI_OPT_UPSCALE), "Off") == 0, "Off by default (%s)",
+          ui_settings_value_text(UI_OPT_UPSCALE));
+    CHECK(!ui_settings_opt_shown(UI_OPT_UPSCALE_SHARPNESS), "Sharpness hidden while Off");
+    CHECK(rowWithPrefix(UI_PAGE_PICTURE, "FSR (AMD) sharpens a picture") >= 0,
+          "its note is on the page");
+    ico_video_get(&o);
+    const int presetBefore = ico_video_preset(&o);
+    ui_settings_step(UI_OPT_UPSCALE, 1);
+    ico_video_get(&o);
+    CHECK(o.upscale == ICO_UPSCALE_FSR1 && ico_video_upscale() == ICO_UPSCALE_FSR1 &&
+              strcmp(ui_settings_value_text(UI_OPT_UPSCALE), "FSR 1.0") == 0,
+          "Right: FSR 1.0 (%d \"%s\")", o.upscale, ui_settings_value_text(UI_OPT_UPSCALE));
+    CHECK(ui_settings_opt_shown(UI_OPT_UPSCALE_SHARPNESS), "Sharpness shown while on");
+    CHECK(strcmp(ui_settings_value_text(UI_OPT_UPSCALE_SHARPNESS), "80 (Default)") == 0,
+          "Sharpness 80 by default (%s)", ui_settings_value_text(UI_OPT_UPSCALE_SHARPNESS));
+    ui_settings_step(UI_OPT_UPSCALE_SHARPNESS, 1);
+    CHECK(strcmp(ui_settings_value_text(UI_OPT_UPSCALE_SHARPNESS), "90") == 0, "Right: 90 (%s)",
+          ui_settings_value_text(UI_OPT_UPSCALE_SHARPNESS));
+    ui_settings_step(UI_OPT_UPSCALE_SHARPNESS, 1);
+    ui_settings_step(UI_OPT_UPSCALE_SHARPNESS, 1);
+    CHECK(ico_video_upscale_sharpness() == 100, "held at 100 (%d)", ico_video_upscale_sharpness());
+    for (int i = 0; i < 12; i++) {
+        ui_settings_step(UI_OPT_UPSCALE_SHARPNESS, -1);
+    }
+    CHECK(ico_video_upscale_sharpness() == 0, "held at 0 (%d)", ico_video_upscale_sharpness());
+    for (int i = 0; i < 7; i++) {
+        ui_settings_step(UI_OPT_UPSCALE_SHARPNESS, 1);
+    }
+    ico_video_get(&o);
+    CHECK(ico_video_preset(&o) == presetBefore, "the preset is not changed");
+    CHECK(ui_settings_save() == 0, "save");
+    path(p, sizeof(p), "settings_test.toml");
+    IcoToml *t = ico_toml_load(p);
+    CHECK(t != NULL && ico_toml_get(t, "video.upscaling") != NULL &&
+              strcmp(ico_toml_get(t, "video.upscaling"), "fsr1") == 0 &&
+              ico_toml_get(t, "video.upscaling_sharpness") != NULL &&
+              strcmp(ico_toml_get(t, "video.upscaling_sharpness"), "70") == 0,
+          "[video] upscaling = \"fsr1\", upscaling_sharpness = 70");
+    ico_toml_free(t);
+    ui_settings_step(UI_OPT_UPSCALE, -1);
+    ico_video_get(&o);
+    CHECK(o.upscale == ICO_UPSCALE_OFF &&
+              strcmp(ui_settings_value_text(UI_OPT_UPSCALE), "Off") == 0,
+          "Left: Off again");
+    useConfig("[video]\nupscaling = \"fsr1\"\nupscaling_sharpness = 40\n");
+    CHECK(strcmp(ui_settings_value_text(UI_OPT_UPSCALE), "FSR 1.0") == 0 &&
+              strcmp(ui_settings_value_text(UI_OPT_UPSCALE_SHARPNESS), "40") == 0,
+          "a file's fsr1 and 40");
+}
+
+static int s_temporalOk;
+
+static int fakeTemporal(void)
+{
+    return s_temporalOk;
+}
+
+/* the FSR 3.1 value and the Upscaling quality row (issue 99): the stepper
+   skips FSR 3.1 where the device cannot run it, a saved "fsr3" then reads
+   "FSR 3.1 (off: not available)" with no quality or Sharpness row and is never
+   rewritten, and where it runs the quality row steps Native AA / Quality /
+   Balanced / Performance (config upscaling_quality) and the Anti-aliasing row
+   says "(off: FSR 3.1)" */
+static void testUpscaleFsr3(void)
+{
+    char p[1100];
+    IcoVideoOptions o;
+
+    useConfig("[video]\npreset = \"enhanced\"\nupscaling = \"fsr3\"\nanti_aliasing = \"ssaa2\"\n");
+    fakeTables();
+    lt_ext_reset();
+    ui_settings_reset();
+    ui_set_language(UI_LANG_EN);
+    ui_settings_install();
+    s_temporalOk = 0;
+    ui_settings_set_temporal_query(fakeTemporal);
+    CHECK(strcmp(ui_settings_value_text(UI_OPT_UPSCALE), "FSR 3.1 (off: not available)") == 0,
+          "a saved fsr3 the device cannot run (%s)", ui_settings_value_text(UI_OPT_UPSCALE));
+    CHECK(!ui_settings_opt_shown(UI_OPT_UPSCALE_QUALITY) &&
+              !ui_settings_opt_shown(UI_OPT_UPSCALE_SHARPNESS),
+          "quality and Sharpness hidden while FSR 3.1 is not available");
+    CHECK(strstr(ui_settings_value_text(UI_OPT_ANTI_ALIAS), "FSR 3.1") == NULL,
+          "Anti-aliasing is not blamed on FSR 3.1 (%s)", ui_settings_value_text(UI_OPT_ANTI_ALIAS));
+    CHECK(ico_video_upscale() == ICO_UPSCALE_FSR3, "the saved word is kept");
+    CHECK(strcmp(ui_str(UI_STR_VAL_UPSCALE_FSR3), "FSR 3.1") == 0 &&
+              strcmp(ui_str(UI_STR_OPT_UPSCALE_QUALITY), "Upscaling quality") == 0,
+          "their labels");
+    /* Right from the unavailable FSR 3.1 goes round to Off; Right from FSR 1.0 skips it */
+    ui_settings_step(UI_OPT_UPSCALE, 1);
+    CHECK(ico_video_upscale() == ICO_UPSCALE_OFF, "Right: Off (%d)", ico_video_upscale());
+    ui_settings_step(UI_OPT_UPSCALE, 1);
+    ui_settings_step(UI_OPT_UPSCALE, 1);
+    CHECK(ico_video_upscale() == ICO_UPSCALE_OFF, "FSR 1.0 then Off: FSR 3.1 skipped (%d)",
+          ico_video_upscale());
+    ui_settings_step(UI_OPT_UPSCALE, -1);
+    CHECK(ico_video_upscale() == ICO_UPSCALE_FSR1, "Left from Off: FSR 1.0 (%d)",
+          ico_video_upscale());
+    /* supported: all three values, the quality row, the Anti-aliasing words */
+    s_temporalOk = 1;
+    ui_settings_step(UI_OPT_UPSCALE, 1);
+    ico_video_get(&o);
+    CHECK(o.upscale == ICO_UPSCALE_FSR3 &&
+              strcmp(ui_settings_value_text(UI_OPT_UPSCALE), "FSR 3.1") == 0,
+          "FSR 3.1 offered where it runs (%s)", ui_settings_value_text(UI_OPT_UPSCALE));
+    CHECK(ui_settings_opt_shown(UI_OPT_UPSCALE_QUALITY) &&
+              ui_settings_opt_shown(UI_OPT_UPSCALE_SHARPNESS),
+          "quality and Sharpness shown");
+    CHECK(strcmp(ui_settings_value_text(UI_OPT_UPSCALE_QUALITY), "Native AA") == 0,
+          "Native AA by default (%s)", ui_settings_value_text(UI_OPT_UPSCALE_QUALITY));
+    ui_settings_step(UI_OPT_UPSCALE_QUALITY, 1);
+    CHECK(strcmp(ui_settings_value_text(UI_OPT_UPSCALE_QUALITY), "Quality") == 0, "Quality (%s)",
+          ui_settings_value_text(UI_OPT_UPSCALE_QUALITY));
+    ui_settings_step(UI_OPT_UPSCALE_QUALITY, 1);
+    CHECK(strcmp(ui_settings_value_text(UI_OPT_UPSCALE_QUALITY), "Balanced") == 0, "Balanced");
+    ui_settings_step(UI_OPT_UPSCALE_QUALITY, 1);
+    CHECK(strcmp(ui_settings_value_text(UI_OPT_UPSCALE_QUALITY), "Performance") == 0,
+          "Performance");
+    ui_settings_step(UI_OPT_UPSCALE_QUALITY, 1);
+    CHECK(ico_video_upscale_quality() == ICO_UPSCALE_Q_NATIVE, "around to Native AA (%d)",
+          ico_video_upscale_quality());
+    ui_settings_step(UI_OPT_UPSCALE_QUALITY, -1);
+    CHECK(ico_video_upscale_quality() == ICO_UPSCALE_Q_PERFORMANCE, "Left: Performance");
+    CHECK(strstr(ui_settings_value_text(UI_OPT_ANTI_ALIAS), "(off: FSR 3.1)") != NULL,
+          "Anti-aliasing says (off: FSR 3.1) (%s)", ui_settings_value_text(UI_OPT_ANTI_ALIAS));
+    ui_settings_step(UI_OPT_UPSCALE, 1);
+    CHECK(ico_video_upscale() == ICO_UPSCALE_OFF, "Right: Off again (%d)", ico_video_upscale());
+    CHECK(!ui_settings_opt_shown(UI_OPT_UPSCALE_QUALITY), "quality hidden while Off");
+    ui_settings_step(UI_OPT_UPSCALE, -1);
+    CHECK(ico_video_upscale() == ICO_UPSCALE_FSR3, "Left from Off: FSR 3.1 (%d)",
+          ico_video_upscale());
+    CHECK(ui_settings_save() == 0, "save");
+    path(p, sizeof(p), "settings_test.toml");
+    IcoToml *t = ico_toml_load(p);
+    CHECK(t != NULL && ico_toml_get(t, "video.upscaling") != NULL &&
+              strcmp(ico_toml_get(t, "video.upscaling"), "fsr3") == 0 &&
+              ico_toml_get(t, "video.upscaling_quality") != NULL &&
+              strcmp(ico_toml_get(t, "video.upscaling_quality"), "performance") == 0,
+          "[video] upscaling = \"fsr3\", upscaling_quality = \"performance\"");
+    ico_toml_free(t);
+    CHECK(rowWithPrefix(UI_PAGE_PICTURE, "FSR (AMD) sharpens a picture") >= 0,
+          "the note is on the page");
+    ui_settings_set_temporal_query(NULL);
 }
 
 static void checkSavedPreset(const char *want)
@@ -1117,7 +1427,7 @@ static void testPhoto(void)
  * enemies defeated and a save in this run.  Shown while a stage runs, the
  * labels from x 300 and every line between the black bars (field lines 38
  * to 198), the values the port's figures; hidden on the title's stage and
- * in photo mode; the assists' line only with one on; the area only where
+ * in photo mode; the area only where
  * the save screen names one; the game's rows where they were. */
 /* the pause entry layout's label row with this text (shown or not), -1 */
 static int statLabel(const char *text)
@@ -1209,7 +1519,7 @@ static void testPauseStats(void)
     init_layout_texture(2);
     const int ph = ui_settings_photo_row();
     const LtProp *el = lt_ext_layout(ui_settings_entry_layout(57));
-    CHECK(el->first == ph && el->last > ph + 2 * 13, "the lines after Photo mode (%d .. %d)",
+    CHECK(el->first == ph && el->last > ph + 2 * 7, "the lines after Photo mode (%d .. %d)",
           el->first, el->last);
     for (int r = ph + 1; r < el->last; r++) {
         CHECK(lt_ext_prop(r)->defaultMask && !lt_ext_prop(r)->selectable,
@@ -1237,29 +1547,28 @@ static void testPauseStats(void)
     CHECK(v && strcmp(v, "1") == 0, "Saves \"%s\"", v ? v : "(hidden)");
     v = statValue(UI_STR_STATS_ENEMIES);
     CHECK(v && strcmp(v, "5") == 0, "Enemies \"%s\"", v ? v : "(hidden)");
-    v = statValue(UI_STR_OPT_NEWGAME_PLUS);
-    CHECK(v && strcmp(v, "Off") == 0, "New Game+ \"%s\"", v ? v : "(hidden)");
-    v = statValue(UI_STR_OPT_MIRROR);
-    CHECK(v && strcmp(v, "Off") == 0, "Mirror mode \"%s\"", v ? v : "(hidden)");
-    char want[32];
-    snprintf(want, sizeof(want), "0 / %d", ico_ach_count());
-    v = statValue(UI_STR_SECTION_ACHIEVEMENTS);
-    CHECK(v && strcmp(v, want) == 0, "Achievements \"%s\" (want \"%s\")", v ? v : "(hidden)", want);
+    v = statValue(UI_STR_DIFF_LINE);
+    CHECK(v && strcmp(v, ui_str(UI_STR_DIFF_NORMAL)) == 0, "Difficulty \"%s\"", v ? v : "(hidden)");
     v = statValue(UI_STR_STATS_AREA);
     CHECK(v && strcmp(v, ui_str(UI_STR_MT_LOC_MAIN_GATE)) == 0, "Area \"%s\"", v ? v : "(hidden)");
-    CHECK(statValue(UI_STR_STATS_ASSISTS) == NULL, "no assist on: no Assists line");
+    /* the journey's other facts are not lines here (the Customize view and
+       the Achievements page show them) */
+    CHECK(statLabel(ui_str(UI_STR_OPT_NEWGAME_PLUS)) < 0 &&
+              statLabel(ui_str(UI_STR_OPT_MIRROR)) < 0 &&
+              statLabel(ui_str(UI_STR_SECTION_ACHIEVEMENTS)) < 0,
+          "no New Game+, Mirror mode or Achievements line");
+    CHECK(shown == 2 * 7 + 1, "seven lines and the backdrop (%d rows)", shown);
     /* the lines packed from the top, a pitch apart */
     const int pt = statLabel(ui_str(UI_STR_STATS_PLAY_TIME)),
               de = statLabel(ui_str(UI_STR_STATS_DEATHS)),
-              ar = statLabel(ui_str(UI_STR_STATS_AREA)),
-              ac = statLabel(ui_str(UI_STR_SECTION_ACHIEVEMENTS));
+              ar = statLabel(ui_str(UI_STR_STATS_AREA)), df = statLabel(ui_str(UI_STR_DIFF_LINE));
     CHECK(lt_ext_prop(pt)->dispX == 300 &&
               lt_ext_prop(pt + 1)->dispX + lt_ext_prop(pt + 1)->dispW <= 610,
           "from x 300 to 610");
     CHECK(lt_ext_prop(de)->dispY > lt_ext_prop(pt)->dispY &&
               lt_ext_prop(ar)->dispY ==
-                  lt_ext_prop(ac)->dispY + (lt_ext_prop(de)->dispY - lt_ext_prop(pt)->dispY),
-          "Area right under Achievements when no assist is on");
+                  lt_ext_prop(df)->dispY + (lt_ext_prop(de)->dispY - lt_ext_prop(pt)->dispY),
+          "Area right under the Difficulty line");
     /* the Photo mode row's box ends before the lines; the game's rows
        where they were */
     CHECK(lt_ext_prop(ph)->dispX + lt_ext_prop(ph)->dispW < 300, "Photo mode's box ends at x %d",
@@ -1281,32 +1590,53 @@ static void testPauseStats(void)
           v ? v : "(hidden)");
     v = statValue(UI_STR_STATS_DEATHS);
     CHECK(v && strcmp(v, "4") == 0, "Deaths \"%s\"", v ? v : "(hidden)");
-    v = statValue(UI_STR_OPT_NEWGAME_PLUS);
-    CHECK(v && strcmp(v, "On") == 0, "New Game+ \"%s\"", v ? v : "(hidden)");
-    v = statValue(UI_STR_OPT_MIRROR);
-    CHECK(v && strcmp(v, "On") == 0, "Mirror mode \"%s\"", v ? v : "(hidden)");
 
-    /* the assists: the line and one line for each on, nothing for those off */
-    ico_opt_set_yorda_safe(1);
-    ico_opt_set_developer_mode(1);
-    frame(0);
-    const int as = statLabel(ui_str(UI_STR_STATS_ASSISTS));
-    CHECK(as >= 0 && !lt_ext_prop(as)->masked, "an assist on: the Assists line");
-    if (as >= 0) {
-        CHECK(!lt_ext_prop(as + 3)->masked &&
-                  strcmp(lt_ext_row_text(as + 3), ui_str(UI_STR_OPT_YORDA)) == 0 &&
-                  !lt_ext_prop(as + 5)->masked &&
-                  strcmp(lt_ext_row_text(as + 5), ui_str(UI_STR_OPT_DEVELOPER_MODE)) == 0 &&
-                  lt_ext_prop(as + 7)->masked,
-              "the two on, one a line (\"%s\", \"%s\")", lt_ext_row_text(as + 3),
-              lt_ext_row_text(as + 5));
+    /* the journey's line: the mode, the knock-down count by the scope, Permadeath */
+    {
+        IcoDifficulty hard;
+        char line[96];
+
+        ico_difficulty_preset(ICO_DIFF_HARD, &hard);
+        ico_difficulty_begin(&hard);
+        frame(0);
+        snprintf(line, sizeof(line), "%s", ui_str(UI_STR_DIFF_HARD));
+        snprintf(line + strlen(line), sizeof(line) - strlen(line), " 0 / 3");
+        v = statValue(UI_STR_DIFF_LINE);
+        CHECK(v && strcmp(v, line) == 0, "Hard with its limit: \"%s\" (want \"%s\")",
+              v ? v : "(hidden)", line);
+        CHECK(ico_difficulty_knockdown(1, 0, 0) == 0, "the first knock-down is counted");
+        frame(0);
+        snprintf(line, sizeof(line), "%s 1 / 3", ui_str(UI_STR_DIFF_HARD));
+        v = statValue(UI_STR_DIFF_LINE);
+        CHECK(v && strcmp(v, line) == 0, "one knock-down in the room: \"%s\"", v ? v : "(hidden)");
+        ico_difficulty_set_row(ICO_DIFF_PERMADEATH, 1);
+        ico_difficulty_set_row(ICO_DIFF_KNOCK_SCOPE, ICO_DIFF_SCOPE_JOURNEY);
+        frame(0);
+        snprintf(line, sizeof(line), "%s 1 / 3, %s", ui_str(UI_STR_DIFF_CUSTOM),
+                 ui_str(UI_STR_DIFF_WORD_PERMADEATH));
+        v = statValue(UI_STR_DIFF_LINE);
+        CHECK(v && strcmp(v, line) == 0, "the journey's count and Permadeath: \"%s\"",
+              v ? v : "(hidden)");
+        /* no limit: no count */
+        ico_difficulty_set_row(ICO_DIFF_KNOCK_LIMIT, 0);
+        ico_difficulty_set_row(ICO_DIFF_PERMADEATH, 0);
+        frame(0);
+        v = statValue(UI_STR_DIFF_LINE);
+        CHECK(v && strchr(v, '/') == NULL && strchr(v, ',') == NULL, "no limit, no count: \"%s\"",
+              v ? v : "(hidden)");
+        ico_difficulty_reset();
+        ui_popup_reset(); /* the knock-down's toast */
+        frame(0);
     }
-    statsShown(&placed);
-    CHECK(placed, "with the assists, every line between the bars");
+
+    /* the assists are not lines here: nothing is added with them on */
+    ico_opt_set_developer_mode(1);
     ico_opt_set_stick_fix(1);
     frame(0);
-    CHECK(statsShown(&placed) == 2 * 13 + 1 && placed,
-          "every line (the three assists and the area): still between the bars");
+    CHECK(statsShown(&placed) == 2 * 7 + 1 && placed &&
+              statLabel(ui_str(UI_STR_OPT_DEVELOPER_MODE)) < 0 &&
+              statLabel(ui_str(UI_STR_OPT_STICK_FIX)) < 0,
+          "both assists on: the same seven lines, between the bars");
     /* each language: a label and its value never overlap once the label is
        set to fit its box (layout_ext.c: down to 60 %) */
     for (int g = 2; g <= 6; g++) {
@@ -1330,14 +1660,11 @@ static void testPauseStats(void)
         }
     }
     NonLinearCameraMove = 2;
-    ico_opt_set_yorda_safe(0);
     ico_opt_set_developer_mode(0);
     ico_opt_set_stick_fix(0);
     ico_opt_set_mirror(0);
     gFlagGameClear = 0;
     frame(0);
-    CHECK(statValue(UI_STR_STATS_ASSISTS) == NULL && lt_ext_prop(as + 3)->masked,
-          "the assists off again: hidden");
 
     /* a stage the save screen has no name for: no Area line */
     stage_no = 39;
@@ -1379,15 +1706,46 @@ static void testPauseStats(void)
     ico_gs_reset();
 }
 
-/* the New Game screen, run by the real layout code: two rows, Mirror
- * mode and New Game+.  The cursor starts on Mirror mode's Off, Right moves
- * to On, Down to New Game+'s choice and Up back to Mirror mode's; each row
- * keeps its own choice, the other row's choice stays lit, and the note
- * follows the cursor's row.  New Game+ starts on when the game was
- * finished (gFlagGameClear set: a finished save's new game), off
- * otherwise; Cross or START writes both choices (the run's mirror mode,
- * gFlagGameClear) and starts the game once; Triangle goes back to the
- * vibration screen (layout 9). */
+/* Customize's row for opt (its label; its value row in *value): Mirror
+   mode and New Game+, -1 for none */
+static int custRow(int opt, int *value)
+{
+    int lb[16], op[16], lv[16];
+    const int n = ui_settings_page_rows(UI_PAGE_CUSTOMIZE, lb, op, lv, 16);
+    for (int i = 0; i < n; i++) {
+        if (op[i] == opt) {
+            if (value) {
+                *value = lv[i];
+            }
+            return lb[i];
+        }
+    }
+    return -1;
+}
+
+/* Customize opened from the screen's Customize row (Cross), its layout */
+static int ngCustomize(int ml)
+{
+    lt_ext_layout(ml)->curItem = ui_new_game_screen_customize();
+    frame(0);
+    press(0x40);
+    const int cl = ui_settings_page_layout(UI_PAGE_CUSTOMIZE);
+    CHECK(settle(cl, 60), "Customize from the New Game screen (%d)", current_layout_id);
+    return cl;
+}
+
+/* the New Game screen, run by the real layout code: Difficulty, Customize
+ * and Start, the cursor's note under them.  The cursor starts on Difficulty
+ * (Normal); up and down loop the three rows.  Mirror mode and New Game+ are
+ * Customize's rows (Off / On, their own notes): a step there toggles the
+ * choice and leaves the draft's mode; stepping Difficulty leaves both
+ * choices; Back returns to the screen on Customize.  New Game+ starts On
+ * when the game was finished (gFlagGameClear set: a finished save's new
+ * game), Off otherwise, Mirror mode Off; Cross on Start or START writes both
+ * choices (the run's mirror mode, gFlagGameClear), hands the draft to the
+ * journey (ico_difficulty_begin) and starts the game once; Triangle goes
+ * back to the vibration screen (layout 9).  The Difficulty row's own steps
+ * and Customize's draft rows are settings_difficulty_test.c's. */
 static void testNewGameScreen(void)
 {
     useConfig("version = 1\n");
@@ -1401,83 +1759,126 @@ static void testNewGameScreen(void)
     init_layout_texture(2);
     settle(54, 4);
     int ml = ui_new_game_screen_enter();
-    const int mOff = ui_new_game_screen_row(0, 0), mOn = ui_new_game_screen_row(0, 1);
-    const int nOff = ui_new_game_screen_row(1, 0), nOn = ui_new_game_screen_row(1, 1);
+    const int diff = ui_new_game_screen_difficulty(), cust = ui_new_game_screen_customize();
+    const int start = ui_new_game_screen_start();
     const int note = lt_ext_layout(ml)->last - 1;
+    int mv = -1, nv = -1;
+    const int mRow = custRow(UI_OPT_NEWGAME_MIRROR, &mv), nRow = custRow(UI_OPT_NEWGAME_PLUS, &nv);
     CHECK(ml >= 0, "the screen is there once installed");
+    CHECK(mRow >= 0 && nRow >= 0 && mv >= 0 && nv >= 0 &&
+              strcmp(lt_ext_row_text(mRow), "Mirror mode") == 0 &&
+              strcmp(lt_ext_row_text(nRow), "New Game+") == 0,
+          "Customize's Mirror mode and New Game+ rows (%d %d)", mRow, nRow);
     lt_switch_layout(ml);
     CHECK(settle(ml, 60), "the New Game screen (%d)", current_layout_id);
     LtProp *l = lt_ext_layout(ml);
-    CHECK(l->curItem == mOff, "the cursor on Mirror mode's Off");
-    CHECK(lt_ext_prop(nOff)->ownerItem == mOff && lt_ext_prop(nOn)->ownerItem == -1,
-          "New Game+ Off lit (a plain New Game)");
-    CHECK(strncmp(lt_ext_row_text(note), "Plays the game flipped", 22) == 0,
-          "the note explains Mirror mode (%s)", lt_ext_row_text(note));
-    press(0x2000); /* right */
-    CHECK(l->curItem == mOn, "right: Mirror mode On");
-    CHECK(lt_ext_prop(nOff)->ownerItem == mOn, "New Game+ Off still lit");
+    CHECK(l->curItem == diff && strcmp(lt_ext_row_text(diff + 1), "Normal") == 0,
+          "the cursor on Difficulty, Normal");
+    CHECK(strncmp(lt_ext_row_text(note), "The game as it shipped", 22) == 0,
+          "the note says what Normal is (%s)", lt_ext_row_text(note));
     press(0x4000); /* down */
-    CHECK(l->curItem == nOff, "down: New Game+'s choice, Off");
-    CHECK(lt_ext_prop(mOn)->ownerItem == nOff && lt_ext_prop(mOff)->ownerItem == -1,
-          "Mirror mode On stays lit");
-    CHECK(lt_ext_prop(nOff)->ownerItem == -1 && lt_ext_prop(nOn)->ownerItem == -1,
-          "the cursor's row: the cursor alone");
-    CHECK(strncmp(lt_ext_row_text(note), "New Game+ plays", 15) == 0,
-          "the note explains New Game+ (%s)", lt_ext_row_text(note));
-    press(0x2000);
-    CHECK(l->curItem == nOn, "right: New Game+ On");
-    press(0x1000); /* up */
-    CHECK(l->curItem == mOn, "up: Mirror mode's choice, On, kept");
-    CHECK(lt_ext_prop(nOn)->ownerItem == mOn, "New Game+ On lit");
+    CHECK(l->curItem == cust && strncmp(lt_ext_row_text(note), "Change each rule", 16) == 0,
+          "down: Customize, its note (%s)", lt_ext_row_text(note));
     press(0x4000);
-    CHECK(l->curItem == nOn, "down again: New Game+ On, kept");
+    CHECK(l->curItem == start && strncmp(lt_ext_row_text(note), "Begins", 6) == 0,
+          "down: Start, its note (%s)", lt_ext_row_text(note));
+    press(0x2000);
+    CHECK(l->curItem == start, "no left/right on Start");
     press(0x4000); /* the rows in a loop */
-    CHECK(l->curItem == mOn, "down from the last row: Mirror mode's choice");
+    CHECK(l->curItem == diff, "down from Start: Difficulty");
+    press(0x1000); /* up */
+    CHECK(l->curItem == start, "up from Difficulty: Start");
+    press(0x1000);
+    CHECK(l->curItem == cust, "up from Start: Customize");
+    press(0x1000);
+    CHECK(l->curItem == diff, "up from Customize: Difficulty");
+
+    /* Customize: both Off (a plain New Game), each its own note; Right and
+       Left toggle; the draft stays Normal; nothing applied before Start */
     int games = s_newGames;
     ico_opt_set_mirror(0);
-    press(0x40); /* Cross */
-    CHECK(ico_opt_mirror() == 1, "Cross: the run is mirrored");
+    ico_difficulty_reset();
+    int cl = ngCustomize(ml);
+    LtProp *c = lt_ext_layout(cl);
+    CHECK(strcmp(lt_ext_row_text(mv), "Off") == 0 && strcmp(lt_ext_row_text(nv), "Off") == 0,
+          "a plain New Game: Mirror mode Off, New Game+ Off (%s, %s)", lt_ext_row_text(mv),
+          lt_ext_row_text(nv));
+    checkPageFits(UI_PAGE_CUSTOMIZE, "Customize");
+    c->curItem = mRow;
+    frame(0);
+    int nn = noteStarting(UI_PAGE_CUSTOMIZE, "Plays the game flipped");
+    CHECK(nn >= 0 && !lt_ext_prop(nn)->masked, "Mirror mode's note on the cursor");
+    press(0x2000); /* right */
+    CHECK(strcmp(lt_ext_row_text(mv), "On") == 0 && ico_opt_mirror() == 0 &&
+              ui__diff_draft_mode() == ICO_DIFF_NORMAL,
+          "Right: Mirror mode On, not applied yet, the draft Normal (%s)", lt_ext_row_text(mv));
+    c->curItem = nRow;
+    frame(0);
+    nn = noteStarting(UI_PAGE_CUSTOMIZE, "New Game+ plays");
+    CHECK(nn >= 0 && !lt_ext_prop(nn)->masked, "New Game+'s note on the cursor");
+    press(0x8000); /* left */
+    CHECK(strcmp(lt_ext_row_text(nv), "On") == 0 && gFlagGameClear == 0 &&
+              ui__diff_draft_mode() == ICO_DIFF_NORMAL && !ui__diff_has_custom(),
+          "Left: New Game+ On, the flag untouched, the draft Normal (%s)", lt_ext_row_text(nv));
+    press(LT_PAD_TRIANGLE);
+    CHECK(settle(ml, 60) && l->curItem == cust && strcmp(lt_ext_row_text(diff + 1), "Normal") == 0,
+          "Back: the screen on Customize, Difficulty still Normal (%s)", lt_ext_row_text(diff + 1));
+
+    /* Difficulty stepped to Hard: both choices kept */
+    l->curItem = diff;
+    frame(0);
+    press(0x2000);
+    CHECK(strcmp(lt_ext_row_text(diff + 1), "Hard") == 0, "Right: Hard");
+    cl = ngCustomize(ml);
+    CHECK(strcmp(lt_ext_row_text(mv), "On") == 0 && strcmp(lt_ext_row_text(nv), "On") == 0,
+          "Hard: Mirror mode and New Game+ still On (%s, %s)", lt_ext_row_text(mv),
+          lt_ext_row_text(nv));
+    press(LT_PAD_TRIANGLE);
+    CHECK(settle(ml, 60), "Back again");
+    l->curItem = diff;
+    frame(0);
+    press(0x8000);
+    CHECK(strcmp(lt_ext_row_text(diff + 1), "Normal") == 0, "Left: Normal again");
+
+    /* Cross on Start: both applied, the game starts once */
+    press(0x1000);
+    CHECK(l->curItem == start && s_newGames == games, "up: Start, nothing started yet");
+    press(0x40); /* Cross on Start */
+    CHECK(ico_opt_mirror() == 1, "Cross on Start: the run is mirrored");
     CHECK(gFlagGameClear == 1, "Cross: New Game+ On sets the cleared flag");
     CHECK(s_newGames == games + 1, "the game starts (gflagOn(382))");
     CHECK(s_lastStartFlag == 382, "the European disc's own start flag (%d)", s_lastStartFlag);
+    CHECK(ico_difficulty_active()->mode == ICO_DIFF_NORMAL && ico_difficulty_has_journey() &&
+              ico_difficulty_active()->origin == ICO_DIFF_ORIGIN_NEW,
+          "the journey begins at Normal, a New Game's");
     press(0x40);
     press(0x800);
     CHECK(s_newGames == games + 1, "once");
 
-    /* from a finished save (gFlagGameClear set): New Game+ starts On, and
-       Off chosen there clears the flag; START confirms */
+    /* from a finished save (gFlagGameClear set): Mirror mode Off again, New
+       Game+ On; Off chosen there clears the flag; START confirms */
     lt_switch_layout(54);
     settle(54, 60);
     gFlagGameClear = 1;
     ml = ui_new_game_screen_enter();
     lt_switch_layout(ml);
     CHECK(settle(ml, 60), "the New Game screen again");
-    CHECK(l->curItem == mOff, "the cursor on Mirror mode's Off again");
-    CHECK(lt_ext_prop(nOn)->ownerItem == mOff && lt_ext_prop(nOff)->ownerItem == -1,
-          "New Game+ On lit (a finished save)");
-    press(0x4000);
-    CHECK(l->curItem == nOn, "down: New Game+ On");
-    press(0x8000); /* left */
-    CHECK(l->curItem == nOff, "left: New Game+ Off");
-    press(0x1000);
-    CHECK(l->curItem == mOff, "up: Mirror mode Off, kept");
+    CHECK(l->curItem == diff && ico_opt_mirror() == 0,
+          "the cursor on Difficulty again, the run's mirror value reset");
+    cl = ngCustomize(ml);
+    CHECK(strcmp(lt_ext_row_text(mv), "Off") == 0 && strcmp(lt_ext_row_text(nv), "On") == 0,
+          "a finished save: Mirror mode Off, New Game+ On (%s, %s)", lt_ext_row_text(mv),
+          lt_ext_row_text(nv));
+    lt_ext_layout(cl)->curItem = nRow;
+    frame(0);
+    press(0x2000);
+    CHECK(strcmp(lt_ext_row_text(nv), "Off") == 0 && gFlagGameClear == 1,
+          "Right: New Game+ Off, the flag untouched until the start");
+    press(LT_PAD_TRIANGLE);
+    CHECK(settle(ml, 60), "Back: the screen");
     press(0x800); /* START */
     CHECK(ico_opt_mirror() == 0 && s_newGames == games + 2, "START: not mirrored, the game starts");
     CHECK(gFlagGameClear == 0, "New Game+ Off: the first journey even after finishing");
-
-    /* a plain New Game with New Game+ chosen On */
-    lt_switch_layout(54);
-    settle(54, 60);
-    gFlagGameClear = 0;
-    ml = ui_new_game_screen_enter();
-    lt_switch_layout(ml);
-    CHECK(settle(ml, 60), "the New Game screen a third time");
-    press(0x4000);
-    CHECK(l->curItem == nOff, "a plain New Game: New Game+ Off");
-    press(0x2000);
-    press(0x40);
-    CHECK(gFlagGameClear == 1 && ico_opt_mirror() == 0 && s_newGames == games + 3,
-          "New Game+ On from a plain New Game");
 
     /* Triangle: the vibration screen, the flag as it was */
     lt_switch_layout(54);
@@ -1485,18 +1886,134 @@ static void testNewGameScreen(void)
     gFlagGameClear = 1;
     ml = ui_new_game_screen_enter();
     lt_switch_layout(ml);
-    CHECK(settle(ml, 60), "the New Game screen a fourth time");
-    press(0x4000);
-    press(0x8000);
+    CHECK(settle(ml, 60), "the New Game screen a third time");
+    cl = ngCustomize(ml);
+    lt_ext_layout(cl)->curItem = nRow;
+    frame(0);
+    press(0x2000); /* New Game+ Off, not started */
+    press(LT_PAD_TRIANGLE);
+    CHECK(settle(ml, 60), "Back: the screen");
     press(0x10);
     CHECK(settle(9, 60), "Triangle: the vibration screen (%d)", current_layout_id);
-    CHECK(s_newGames == games + 3, "no game started");
+    CHECK(s_newGames == games + 2, "no game started");
     CHECK(gFlagGameClear == 1, "Triangle: the cleared flag untouched");
     gFlagGameClear = 0;
+    ico_opt_set_mirror(0);
+    ico_difficulty_reset();
 
     /* not built: -1 (la_vibe_select then starts the game itself) */
     ui_settings_reset();
     CHECK(ui_new_game_screen_enter() == -1 && ui_new_game_screen_layout() == -1, "not built: -1");
+}
+
+/* the pointer on the middle of item j (a 640 x 480 view) */
+static void ngPointAt(int j)
+{
+    const LtProperty *e = lt_ext_prop(j);
+    const int w = e->dispW ? e->dispW : e->texW;
+    const int h = e->dispH ? e->dispH : e->texH;
+    const float gx = e->centerX ? 320.0f : (float)e->dispX + (float)w * 0.5f;
+    const float gy = 2.0f * (float)e->dispY + (float)h * 0.5f;
+    ico_pointer_move(gx / 640.0f, (gy - 2.0f) / 448.0f);
+}
+
+/* one Main tick as main.c runs it: the pointer's tick, then the layouts */
+static void ngMouseFrame(int click)
+{
+    if (click) {
+        ico_pointer_button(1);
+        ico_pointer_button(0);
+    }
+    pad[0].flags = pad[0].now = 0;
+    ui_mouse_tick();
+    frame(pad[0].flags);
+}
+
+/* The New Game screen and the mouse: only a click moves the cursor there
+ * (a hover over Customize or Start moves nothing); a click on Difficulty's
+ * arrows or value steps it, a click on Customize opens Customize, where a
+ * click on Mirror mode's value turns it On; a click on Start begins with
+ * the clicked values. */
+static void testNewGameMouse(void)
+{
+    useConfig("version = 1\n");
+    fakeTables();
+    lt_ext_reset();
+    ui_settings_reset();
+    memset(pad, 0, sizeof(pad));
+    pad[0].ana[0] = pad[0].ana[1] = pad[0].ana[2] = pad[0].ana[3] = 128;
+    NonLinearCameraMove = 2;
+    gFlagGameClear = 0;
+    ico_opt_set_mirror(0);
+    init_layout_texture(2);
+    settle(54, 4);
+    ui_mouse_reset();
+    ui_mouse_set_view(640, 480, 0, 0, 640, 480);
+    const int ml = ui_new_game_screen_enter();
+    const int start = ui_new_game_screen_start();
+    const int diff = ui_new_game_screen_difficulty(), cust = ui_new_game_screen_customize();
+    int mv = -1;
+    (void)custRow(UI_OPT_NEWGAME_MIRROR, &mv);
+    lt_switch_layout(ml);
+    CHECK(settle(ml, 60), "mouse: the New Game screen (%d)", current_layout_id);
+    LtProp *l = lt_ext_layout(ml);
+    ngMouseFrame(0);
+    ngMouseFrame(0);
+    CHECK(ui_mouse_menu_active(), "mouse: the screen is a menu");
+    ngPointAt(cust);
+    ngMouseFrame(0);
+    CHECK(l->curItem == diff, "hover over Customize: nothing moves (%d)", l->curItem);
+    ngPointAt(start);
+    ngMouseFrame(0);
+    CHECK(l->curItem == diff, "hover over Start: the cursor stays (%d)", l->curItem);
+    const int games = s_newGames;
+    /* Difficulty's arrows and value: a click steps (Right on the value) */
+    ngPointAt(diff + 3);
+    ngMouseFrame(0);
+    CHECK(l->curItem == diff, "hover over Difficulty's right arrow: the cursor stays (%d)",
+          l->curItem);
+    ngMouseFrame(1);
+    CHECK(l->curItem == diff && strcmp(lt_ext_row_text(diff + 1), "Hard") == 0,
+          "click on the right arrow: the cursor on Difficulty, Hard (\"%s\")",
+          lt_ext_row_text(diff + 1));
+    ngPointAt(diff + 2);
+    ngMouseFrame(1);
+    CHECK(strcmp(lt_ext_row_text(diff + 1), "Normal") == 0, "click on the left arrow: Normal");
+    ngPointAt(diff + 1);
+    ngMouseFrame(1);
+    CHECK(strcmp(lt_ext_row_text(diff + 1), "Hard") == 0, "click on the value: Right, Hard");
+    /* Customize by a click; Mirror mode's value clicked On there */
+    const int cl = ui_settings_page_layout(UI_PAGE_CUSTOMIZE);
+    ngPointAt(cust);
+    ngMouseFrame(1);
+    CHECK(settle(cl, 60) && s_newGames == games, "click on Customize: its page (%d)",
+          current_layout_id);
+    ngMouseFrame(0);
+    ngMouseFrame(0); /* the page faded in */
+    ngPointAt(mv);
+    ngMouseFrame(1);
+    CHECK(mv >= 0 && strcmp(lt_ext_row_text(mv), "On") == 0 && ico_opt_mirror() == 0,
+          "click on Mirror mode's value: On, not applied yet (\"%s\")",
+          mv >= 0 ? lt_ext_row_text(mv) : "");
+    press(LT_PAD_TRIANGLE);
+    CHECK(settle(ml, 60) && strcmp(lt_ext_row_text(diff + 1), "Hard") == 0,
+          "Back: the screen, still Hard (%d)", current_layout_id);
+    ngMouseFrame(0);
+    ngMouseFrame(0); /* the screen faded in again */
+    ngPointAt(start);
+    ngMouseFrame(0);
+    CHECK(l->curItem == cust, "hover over Start after Back: the cursor stays on Customize (%d)",
+          l->curItem);
+    ngMouseFrame(1);
+    CHECK(s_newGames == games + 1 && gFlagGameClear == 0 && ico_opt_mirror() == 1 &&
+              ico_difficulty_active()->mode == ICO_DIFF_HARD,
+          "click on Start: mirrored, no New Game+, Hard (%d %d %d)", s_newGames - games,
+          gFlagGameClear, ico_opt_mirror());
+    ico_difficulty_reset();
+    gFlagGameClear = 0;
+    ico_opt_set_mirror(0);
+    ui_mouse_reset();
+    ico_pointer_reset();
 }
 
 /* the title's "Quit to desktop" row under Settings (layouts 12 and 13,
@@ -1886,73 +2403,122 @@ static void testValues(void)
     ui_settings_step(UI_OPT_STICK_FIX, 1);
     CHECK(ico_opt_stick_fix() == 1 && strstr(ui_settings_value_text(UI_OPT_STICK_FIX), "On"),
           "stick fix on");
+    /* the New Game draft's rows (Customize's pages): a step edits the
+       draft, never the journey in force nor the config */
+    ico_difficulty_reset();
+    ui__diff_draft_start(NULL);
     ui_settings_step(UI_OPT_YORDA, 1);
-    CHECK(ico_opt_yorda_safe() == 1, "yorda_safe on");
-    /* Time to rescue Yorda: Original, then Longer, Double, Triple, Half, Original around */
+    CHECK(ui__diff_draft()->row[ICO_DIFF_YORDA_SAFE] == 1 && ico_opt_yorda_safe() == 0 &&
+              strcmp(ui_settings_value_text(UI_OPT_YORDA), "On") == 0 &&
+              ico_config_get_string("gameplay.yorda_safe", NULL) == NULL,
+          "Shadows never take Yorda: the draft's, no key");
+    /* Time to rescue Yorda: whole seconds a step from the 15 s Original shows, held at 4
+       and 30, the base Original again */
     {
-        static const char *const kWord[5] = {"half", "original", "longer", "double", "triple"};
-        static const char *const kText[5] = {"Half", "Original", "Longer", "Double", "Triple"};
-        static const float kFactor[5] = {0.5f, 1.0f, 1.5f, 2.0f, 3.0f};
+        char want[32];
         int k;
 
-        CHECK(ui_settings_row_of(UI_PAGE_GAMEPLAY, UI_OPT_PIT_TIME) >
-                      ui_settings_row_of(UI_PAGE_GAMEPLAY, UI_OPT_YORDA) &&
-                  ui_settings_row_of(UI_PAGE_GAMEPLAY, UI_OPT_PIT_TIME) <
-                      ui_settings_row_of(UI_PAGE_GAMEPLAY, UI_OPT_STICK_FIX),
-              "the Time to rescue Yorda row sits between Yorda's and Stick fix's");
-        CHECK(strcmp(ui_settings_value_text(UI_OPT_PIT_TIME), "Original") == 0, "pit time default");
-        for (k = 2; k < 8; k++) {
+        CHECK(ui_settings_row_of(UI_PAGE_RULES, UI_OPT_PIT_TIME) >= 0 &&
+                  ui_settings_row_of(UI_PAGE_RULES, UI_OPT_PIT_TIME) <
+                      ui_settings_row_of(UI_PAGE_RULES, UI_OPT_YORDA_TRIPS),
+              "the Time to rescue Yorda row sits before Yorda trips on Rules");
+        CHECK(strcmp(ui_settings_value_text(UI_OPT_PIT_TIME), "15 s (Original)") == 0,
+              "pit time default (%s)", ui_settings_value_text(UI_OPT_PIT_TIME));
+        for (k = 14; k >= 2; k--) {
+            const int v = k < ICO_PIT_MIN_SECONDS ? ICO_PIT_MIN_SECONDS : k;
+
+            ui_settings_step(UI_OPT_PIT_TIME, -1);
+            snprintf(want, sizeof(want), "%d s", v);
+            CHECK(ui__diff_draft()->row[ICO_DIFF_PIT_TIME] == v &&
+                      strcmp(ui_settings_value_text(UI_OPT_PIT_TIME), want) == 0,
+                  "pit time step down to %d (%s)", v, ui_settings_value_text(UI_OPT_PIT_TIME));
+        }
+        /* back up past the base: 14 is seconds, 15 Original, 16 seconds */
+        for (k = 5; k <= 16; k++) {
             ui_settings_step(UI_OPT_PIT_TIME, 1);
-            CHECK(ico_opt_pit_time() == k % 5 && ico_opt_pit_time_factor() == kFactor[k % 5] &&
-                      strcmp(ui_settings_value_text(UI_OPT_PIT_TIME), kText[k % 5]) == 0 &&
-                      strcmp(ico_config_get_string("gameplay.pit_time", ""), kWord[k % 5]) == 0,
-                  "pit time step %d", k);
         }
-        /* six steps from Original end on Longer; back twice is Half */
+        CHECK(ui__diff_draft()->row[ICO_DIFF_PIT_TIME] == 16, "pit time 16");
         ui_settings_step(UI_OPT_PIT_TIME, -1);
-        ui_settings_step(UI_OPT_PIT_TIME, -1);
-        CHECK(ico_opt_pit_time() == ICO_PIT_HALF, "pit time steps back");
-        ui_settings_step(UI_OPT_PIT_TIME, 1);
-        CHECK(ico_opt_pit_time() == ICO_PIT_ORIGINAL, "pit time back to Original");
+        CHECK(ui__diff_draft()->row[ICO_DIFF_PIT_TIME] == ICO_PIT_ORIGINAL &&
+                  ico_opt_pit_time() == ICO_PIT_ORIGINAL &&
+                  ico_config_get_string("gameplay.pit_time", NULL) == NULL,
+              "pit time back to Original, the journey's and the config untouched");
+        for (k = 16; k <= 40; k++) {
+            ui_settings_step(UI_OPT_PIT_TIME, 1);
+        }
+        CHECK(strcmp(ui_settings_value_text(UI_OPT_PIT_TIME), "30 s") == 0,
+              "pit time held at 30 s");
     }
-    /* Shadow speed: right after Time to rescue Yorda; Original, Faster, Fastest, Slower, Original */
+    /* Shadow speed: first on Customize > Shadows, Shadows attack together sixth there;
+       Original, Faster, Fastest, Slower, Original */
     {
-        static const char *const kWord[4] = {"slower", "original", "faster", "fastest"};
         static const char *const kText[4] = {"Slower", "Original", "Faster", "Fastest"};
-        static const float kFactor[4] = {0.75f, 1.0f, 1.25f, 1.5f};
-        int k;
+        int rl[16], ro[16], k, together = -1, speed = -1;
+        const int rn = ui_settings_page_rows(UI_PAGE_SHADOWS, rl, ro, NULL, 16);
 
-        {
-            /* the rows in page order (ui_settings_row_of gives a layout item, and a
-               row's note item sits between two rows' labels) */
-            int rl[16], ro[16], rn, pit = -1, speed = -1;
-
-            rn = ui_settings_page_rows(UI_PAGE_GAMEPLAY, rl, ro, NULL, 16);
-            for (k = 0; k < rn; k++) {
-                if (ro[k] == UI_OPT_PIT_TIME) {
-                    pit = k;
-                } else if (ro[k] == UI_OPT_SHADOW_SPEED) {
-                    speed = k;
-                }
-            }
-            CHECK(pit >= 0 && speed == pit + 1,
-                  "the Shadow speed row sits right after Time to rescue Yorda (%d, %d)", pit,
-                  speed);
+        for (k = 0; k < rn; k++) {
+            speed = ro[k] == UI_OPT_SHADOW_SPEED ? k : speed;
+            together = ro[k] == UI_OPT_SHADOWS_TOGETHER ? k : together;
         }
+        CHECK(speed == 0 && together == 5,
+              "Shadow speed first, Shadows attack together sixth on Shadows (%d, %d)", speed,
+              together);
         CHECK(strcmp(ui_settings_value_text(UI_OPT_SHADOW_SPEED), "Original") == 0,
               "shadow speed default");
         for (k = 2; k < 7; k++) {
             ui_settings_step(UI_OPT_SHADOW_SPEED, 1);
-            CHECK(ico_opt_shadow_speed() == k % 4 &&
-                      ico_opt_shadow_speed_factor() == kFactor[k % 4] &&
-                      strcmp(ui_settings_value_text(UI_OPT_SHADOW_SPEED), kText[k % 4]) == 0 &&
-                      strcmp(ico_config_get_string("gameplay.shadow_speed", ""), kWord[k % 4]) == 0,
+            CHECK(ui__diff_draft()->row[ICO_DIFF_SHADOW_SPEED] == k % 4 &&
+                      ico_opt_shadow_speed() == ICO_SPEED_ORIGINAL &&
+                      strcmp(ui_settings_value_text(UI_OPT_SHADOW_SPEED), kText[k % 4]) == 0,
                   "shadow speed step %d", k);
         }
-        /* five steps from Original end on Faster; back once is Original */
-        ui_settings_step(UI_OPT_SHADOW_SPEED, -1);
-        CHECK(ico_opt_shadow_speed() == ICO_SPEED_ORIGINAL, "shadow speed steps back");
+        CHECK(ico_config_get_string("gameplay.shadow_speed", NULL) == NULL, "shadow speed: no key");
+        ui__diff_draft_start(NULL);
     }
+    /* Chain swing speed and slowdown (Gameplay > Chains, after Natural chains): the
+       game's own 4 reads "4 (original)", the others are their numbers, 1 to 10 around
+       both ways, each step writes the key as the number; neither switches achievements off */
+    {
+        static const struct {
+            int opt;
+            IcoVariantId id;
+            const char *key;
+        } chain[2] = {
+            {UI_OPT_VAR_CHAIN_SPEED, ICO_VARIANT_CHAIN_SWING_SPEED, "variants.chain_swing_speed"},
+            {UI_OPT_VAR_CHAIN_DAMPING, ICO_VARIANT_CHAIN_SWING_DAMPING,
+             "variants.chain_swing_damping"}};
+
+        for (int r = 0; r < 2; r++) {
+            char want[16];
+
+            CHECK(strcmp(ui_settings_value_text(chain[r].opt), "4 (original)") == 0 &&
+                      ico_variant_get(chain[r].id) == 3,
+                  "chain row %d: the game's 4 by default (%s)", r,
+                  ui_settings_value_text(chain[r].opt));
+            for (int k = 5; k <= 14; k++) {
+                const int v = (k - 1) % 10 + 1; /* 5..10, 1..4 */
+
+                ui_settings_step(chain[r].opt, 1);
+                snprintf(want, sizeof(want), v == 4 ? "4 (original)" : "%d", v);
+                CHECK(strcmp(ui_settings_value_text(chain[r].opt), want) == 0 &&
+                          ico_variant_get(chain[r].id) == v - 1 &&
+                          ico_config_get_int(chain[r].key, 0) == v &&
+                          !ico_variants_suspend_achievements(),
+                      "chain row %d step to %d (%s)", r, v, ui_settings_value_text(chain[r].opt));
+            }
+            ui_settings_step(chain[r].opt, -1);
+            CHECK(ico_variant_get(chain[r].id) == 2 && ico_config_get_int(chain[r].key, 0) == 3,
+                  "chain row %d: Left from 4 is 3", r);
+            ui_settings_step(chain[r].opt, 1);
+        }
+    }
+    /* their notes, on the Chains page, after Natural chains' */
+    CHECK(noteStarting(UI_PAGE_CHAINS, "How fast a chain") >= 0 &&
+              noteStarting(UI_PAGE_CHAINS, "How quickly a swing") >
+                  noteStarting(UI_PAGE_CHAINS, "How fast a chain") &&
+              noteStarting(UI_PAGE_CHAINS, "How fast a chain") >
+                  noteStarting(UI_PAGE_CHAINS, "A chain that comes down"),
+          "the chain rows' notes follow Natural chains'");
     ui_settings_step(UI_OPT_DEVELOPER, 1);
     CHECK(ico_opt_developer_mode() == 1, "developer mode on");
     ui_settings_step(UI_OPT_MOUSE_SENS, 1);
@@ -2030,9 +2596,9 @@ static void testValues(void)
               "[video] preset");
         CHECK(ico_toml_get_bool(t, "video.fullscreen", 0) == 1, "[video] fullscreen");
         CHECK(ico_toml_get_bool(t, "gameplay.stick_fix", 0) == 1 &&
-                  ico_toml_get_bool(t, "gameplay.yorda_safe", 0) == 1 &&
+                  !ico_toml_has(t, "gameplay.yorda_safe") &&
                   ico_toml_get_bool(t, "gameplay.developer_mode", 0) == 1,
-              "[gameplay]");
+              "[gameplay] (no journey row: the draft's)");
         CHECK(ico_toml_get_float(t, "audio.volume", 0) > 0.89 &&
                   ico_toml_get_float(t, "audio.volume", 0) < 0.91,
               "[audio] volume");
@@ -2835,16 +3401,18 @@ static void testGameOptions(void)
                   rowShown(UI_PAGE_PICTURE, UI_OPT_FULL_HEIGHT),
               "title %d: Texture filtering and Full-height are on Picture", title);
         {
-            /* Anti-aliasing, Downsampling, Full-height and Texture filtering
-               first, Full pixel before Brightness and the CRT rows */
-            int fl[16], fo[16];
-            const int fn = ui_settings_page_rows(UI_PAGE_PICTURE, fl, fo, NULL, 16);
-            CHECK(fn > 6 && fo[0] == UI_OPT_ANTI_ALIAS && fo[1] == UI_OPT_DOWNSAMPLE &&
-                      fo[2] == UI_OPT_FULL_HEIGHT && fo[3] == UI_OPT_FILTER &&
-                      fo[4] == UI_OPT_FULL_PIXEL && fo[5] == UI_OPT_BRIGHTNESS &&
-                      fo[6] == UI_OPT_CRT,
-                  "title %d: Picture starts Anti-aliasing, Downsampling, Full-height, Texture "
-                  "filtering, Full pixel, Brightness, CRT",
+            /* Anti-aliasing, Downsampling, Upscaling, Sharpness, Full-height
+               and Texture filtering first, Full pixel before Brightness and
+               the CRT rows */
+            int fl[18], fo[18];
+            const int fn = ui_settings_page_rows(UI_PAGE_PICTURE, fl, fo, NULL, 18);
+            CHECK(fn > 9 && fo[0] == UI_OPT_ANTI_ALIAS && fo[1] == UI_OPT_DOWNSAMPLE &&
+                      fo[2] == UI_OPT_UPSCALE && fo[3] == UI_OPT_UPSCALE_QUALITY &&
+                      fo[4] == UI_OPT_UPSCALE_SHARPNESS && fo[5] == UI_OPT_FULL_HEIGHT &&
+                      fo[6] == UI_OPT_FILTER && fo[7] == UI_OPT_FULL_PIXEL &&
+                      fo[8] == UI_OPT_BRIGHTNESS && fo[9] == UI_OPT_CRT,
+                  "title %d: Picture starts Anti-aliasing, Downsampling, Upscaling, Sharpness, "
+                  "Full-height, Texture filtering, Full pixel, Brightness, CRT",
                   title);
         }
         CHECK(rowShown(UI_PAGE_PICTURE, UI_OPT_CRT) &&
@@ -2863,14 +3431,19 @@ static void testGameOptions(void)
         const int ctlL = openPage(mainL, 4, UI_PAGE_CONTROLS);
         CHECK(rowShown(UI_PAGE_CONTROLS, UI_OPT_BUTTON_CONFIG) == !title &&
                   rowShown(UI_PAGE_CONTROLS, UI_OPT_VIBRATION) == !title &&
-                  rowShown(UI_PAGE_CONTROLS, UI_OPT_HOLD_TYPE),
-              "title %d: the game's controls %s; Hold type always shown", title,
-              title ? "hidden" : "shown");
+                  rowShown(UI_PAGE_CONTROLS, UI_OPT_HOLD_TYPE) &&
+                  rowShown(UI_PAGE_CONTROLS, UI_OPT_ZOOM_TYPE) &&
+                  rowShown(UI_PAGE_CONTROLS, UI_OPT_CAMERA_RESET) &&
+                  rowShown(UI_PAGE_CONTROLS, UI_OPT_YORDA_LOOK) &&
+                  rowShown(UI_PAGE_CONTROLS, UI_OPT_BUTTON_PICTURES),
+              "title %d: the game's controls %s; Button pictures, Hold type and Zoom type always "
+              "shown",
+              title, title ? "hidden" : "shown");
         checkPageFits(UI_PAGE_CONTROLS, title ? "Controls (title)" : "Controls (pause)");
         press(0x4000);
         CHECK(lt_ext_layout(ctlL)->curItem ==
                   ui_settings_row_of(UI_PAGE_CONTROLS,
-                                     title ? UI_OPT_HOLD_TYPE : UI_OPT_BUTTON_CONFIG),
+                                     title ? UI_OPT_BUTTON_PICTURES : UI_OPT_BUTTON_CONFIG),
               "title %d: down from Remap", title);
         press(0x10);
         CHECK(settle(mainL, 60), "Controls: back");
@@ -2894,12 +3467,11 @@ static void testGameOptions(void)
               rowShown(UI_PAGE_GAMEPLAY, UI_OPT_PLAYERS),
           "cleared: Film effect and Players");
     checkPageFits(UI_PAGE_GAMEPLAY, "Gameplay (cleared)");
-    for (int k = 0; k < 9; k++) {
+    for (int k = 0; k < 3; k++) {
         press(0x4000);
     }
     CHECK(lt_ext_layout(gameL)->curItem == film,
-          "down nine times from Yorda (past Time to rescue Yorda, Shadow speed, the stick fix, "
-          "the door fix, Yorda trips, Natural chains, Skip the opening and Second memory card): "
+          "down three times from the stick fix (past the door fix and Second memory card): "
           "Film effect");
     optionScreenMode = 0;
     s_filmCalls = 0;
@@ -2946,6 +3518,10 @@ static void testGameOptions(void)
     press(0x8000);
     CHECK(iosPadActRequestEnable == 1, "Left: on again");
     press(0x4000);
+    CHECK(lt_ext_layout(ctlL)->curItem ==
+              ui_settings_row_of(UI_PAGE_CONTROLS, UI_OPT_BUTTON_PICTURES),
+          "Down: Button pictures after Vibration");
+    press(0x4000);
     ico_opt_set_hold_type(0);
     optionControlType = 0;
     CHECK(strcmp(ui_settings_value_text(UI_OPT_HOLD_TYPE), "A (hold)") == 0, "hold type A (%s)",
@@ -2982,7 +3558,8 @@ static void testGameOptions(void)
     CHECK(ico_opt_hold_choice() == ICO_HOLD_HOLD, "Right: A again");
     press(0x1000);
     press(0x1000);
-    CHECK(lt_ext_layout(ctlL)->curItem == bc, "up twice: Button configuration");
+    press(0x1000);
+    CHECK(lt_ext_layout(ctlL)->curItem == bc, "up three times: Button configuration");
     press(0x40);
     CHECK(settle(59, 60), "Cross: the game's button configuration (%d)", current_layout_id);
     /* la_key_config's OK returns what ui_settings_key_config_back gives */
@@ -3025,7 +3602,8 @@ static void testGameOptions(void)
     CHECK(lt_ext_layout(ctlL)->curItem == remap && lt_ext_layout(ctlL)->defaultItem == remap,
           "title: off the hidden row (%d)", lt_ext_layout(ctlL)->curItem);
     CHECK(lt_ext_prop(bc)->upItem == remap &&
-              lt_ext_prop(bc)->downItem == ui_settings_row_of(UI_PAGE_CONTROLS, UI_OPT_HOLD_TYPE),
+              lt_ext_prop(bc)->downItem ==
+                  ui_settings_row_of(UI_PAGE_CONTROLS, UI_OPT_BUTTON_PICTURES),
           "title: the hidden row's links lead to shown rows (%d, %d)", lt_ext_prop(bc)->upItem,
           lt_ext_prop(bc)->downItem);
     for (int i = 0; i < 12; i++) {
@@ -3075,9 +3653,9 @@ static void testGameOptions(void)
     systemStatus[11] = 0;
 
     /* the game's variables, never the port config */
-    CHECK(ico_config_get_string("video.brightness", NULL) == NULL &&
+    CHECK(ico_config_get_int("video.brightness", 50) == 50 &&
               ico_config_get_string("input.vibration", NULL) == NULL,
-          "no port keys for the game's settings");
+          "no port keys for the game's settings (video.brightness is the Picture page's, 50)");
     /* the strings in every language */
     static const UiLang kLangs[5] = {UI_LANG_EN, UI_LANG_FR, UI_LANG_DE, UI_LANG_IT, UI_LANG_ES};
     static const int kIds[] = {
@@ -3356,10 +3934,16 @@ static void testTexturePack(void)
               back->dispY);
         CHECK(back->dispY + back->dispH <= 226, "Back's box ends at %d", back->dispY + back->dispH);
         checkPageFits(UI_PAGE_MAIN, "Main (title, developer mode)");
-        /* the Developer page: its three rows and Back */
+        /* the Developer page: its five rows and Back (no Debug menu on
+           the June 2001 demo) */
         openPage(mainL, -1, UI_PAGE_DEVELOPER);
-        CHECK(winShownCount(UI_PAGE_DEVELOPER) == 4,
-              "Developer: Developer mode, the two dumps, Back");
+        CHECK(winShownCount(UI_PAGE_DEVELOPER) == (ICO_JUN26 ? 5 : 6),
+              "Developer: Developer mode, the two dumps, the Debug menu, Free movement, Back (%d)",
+              winShownCount(UI_PAGE_DEVELOPER));
+        CHECK(rowShown(UI_PAGE_DEVELOPER, UI_OPT_FREE_MOVEMENT),
+              "Developer: the Free movement row in developer mode, on every disc");
+        CHECK(rowShown(UI_PAGE_DEVELOPER, UI_OPT_VAR_DEBUG_MENU) == !ICO_JUN26,
+              "Developer: the Debug menu row in developer mode");
         checkPageFits(UI_PAGE_DEVELOPER, "Developer (title, developer mode)");
         press(0x10);
         CHECK(settle(mainL, 60), "Developer: back");
@@ -3368,9 +3952,13 @@ static void testTexturePack(void)
     for (int k = 0; k < 4; k++) {
         frame(0); /* the page refreshes */
     }
-    CHECK(!rowShown(UI_PAGE_DEVELOPER, UI_OPT_DUMP_TEXTURES), "hidden again");
+    CHECK(!rowShown(UI_PAGE_DEVELOPER, UI_OPT_DUMP_TEXTURES) &&
+              !rowShown(UI_PAGE_DEVELOPER, UI_OPT_FREE_MOVEMENT),
+          "hidden again");
     openPage(mainL, -1, UI_PAGE_DEVELOPER);
-    CHECK(winShownCount(UI_PAGE_DEVELOPER) == 2, "developer mode off: Developer mode and Back");
+    CHECK(winShownCount(UI_PAGE_DEVELOPER) == 2 &&
+              !rowShown(UI_PAGE_DEVELOPER, UI_OPT_VAR_DEBUG_MENU),
+          "developer mode off: Developer mode and Back");
     checkPageFits(UI_PAGE_DEVELOPER, "Developer (title)");
     press(0x10);
     CHECK(settle(mainL, 60), "Developer: back");
@@ -3793,8 +4381,8 @@ static int fakeTouch(void)
 /* Controls' row that opens the Touch screen page, -1 */
 static int touchLink(void)
 {
-    int labels[16];
-    const int n = ui_settings_page_rows(UI_PAGE_CONTROLS, labels, NULL, NULL, 16);
+    int labels[24];
+    const int n = ui_settings_page_rows(UI_PAGE_CONTROLS, labels, NULL, NULL, 24);
     for (int i = 0; i < n; i++) {
         if (lt_ext_prop(labels[i])->right == ui_settings_page_layout(UI_PAGE_TOUCH)) {
             return labels[i];
@@ -3838,6 +4426,153 @@ static void testTouch(void)
     useConfig("version = 1\n");
 }
 
+/* the value text of Button pictures is want */
+static int padsText(const char *want)
+{
+    const char *v = ui_settings_value_text(UI_OPT_BUTTON_PICTURES);
+    if (strcmp(v, want) != 0) {
+        printf("  Button pictures reads \"%s\", want \"%s\"\n", v, want);
+        return 0;
+    }
+    return 1;
+}
+
+/* Controls > Button pictures (settings_pads.c): Auto's set from the
+   controller pressed last (ico_input_note_pad_kind, the device layer's
+   report), the change counted once, Wii Classic Controller only by hand;
+   the row on the title and from the pause menu, its five values around with
+   the key written, the choice saved on leaving the page; a set that is not
+   complete (pad_glyphs_test_source refuses a piece) skipped by the row and
+   read as Auto from the file; an unknown word read as Auto */
+static void testButtonPictures(void)
+{
+    static const char *const kText[5] = {"PlayStation", "Xbox", "Nintendo",
+                                         "Wii Classic Controller", "Auto (PlayStation)"};
+    static const char *const kKey[5] = {"playstation", "xbox", "nintendo", "wii_classic", "auto"};
+    static const int kStyle[5] = {ICO_PAD_GLYPHS_PLAYSTATION, ICO_PAD_GLYPHS_XBOX,
+                                  ICO_PAD_GLYPHS_NINTENDO, ICO_PAD_GLYPHS_WII_CLASSIC,
+                                  ICO_PAD_GLYPHS_PLAYSTATION};
+
+    static const struct {
+        int kind, style;
+        const char *text;
+    } kAuto[4] = {{ICO_PAD_KIND_XBOX, ICO_PAD_GLYPHS_XBOX, "Auto (Xbox)"},
+                  {ICO_PAD_KIND_NINTENDO, ICO_PAD_GLYPHS_NINTENDO, "Auto (Nintendo)"},
+                  {ICO_PAD_KIND_XBOX, ICO_PAD_GLYPHS_XBOX, "Auto (Xbox)"},
+                  {ICO_PAD_KIND_PLAYSTATION, ICO_PAD_GLYPHS_PLAYSTATION, "Auto (PlayStation)"}};
+
+    char p[1100];
+
+    useConfig("version = 1\n");
+    ico_pad_kind_reset();
+    ui__pads_reset();
+    CHECK(ico_opt_button_pictures() == ICO_BUTTON_PICTURES_AUTO, "Auto without the key");
+    for (int s = 0; s < ICO_PAD_GLYPHS_COUNT; s++) {
+        CHECK(pad_glyphs_set_complete(s), "set %d is complete", s);
+    }
+    /* Auto: the last controller's kind, one change counted a change */
+    CHECK(ui_settings_pads_frame() == ICO_PAD_GLYPHS_PLAYSTATION && ui__pads_changes() == 1 &&
+              padsText("Auto (PlayStation)"),
+          "Auto before any press: PlayStation, the first resolve counted (%u)", ui__pads_changes());
+    for (int i = 0; i < 4; i++) {
+        ico_input_note_pad_kind(kAuto[i].kind, "test");
+        CHECK(ui_settings_pads_frame() == kAuto[i].style && pad_glyphs_style() == kAuto[i].style &&
+                  ui__pads_changes() == (unsigned)(i + 2) && padsText(kAuto[i].text),
+              "Auto, last pad kind %d: style %d (%d, %u changes)", kAuto[i].kind, kAuto[i].style,
+              pad_glyphs_style(), ui__pads_changes());
+        CHECK(ui_settings_pads_frame() == kAuto[i].style && ui__pads_changes() == (unsigned)(i + 2),
+              "pad kind %d, the next frame: the same style, no change counted", kAuto[i].kind);
+    }
+    /* by hand: Wii Classic Controller and PlayStation, whatever the last pad */
+    ico_input_note_pad_kind(ICO_PAD_KIND_XBOX, "test");
+    ico_opt_set_button_pictures(ICO_BUTTON_PICTURES_WII_CLASSIC);
+    CHECK(ui_settings_pads_frame() == ICO_PAD_GLYPHS_WII_CLASSIC &&
+              pad_glyphs_style() == ICO_PAD_GLYPHS_WII_CLASSIC &&
+              padsText("Wii Classic Controller"),
+          "chosen: Wii Classic Controller with an Xbox pad last (%d)", pad_glyphs_style());
+    ico_opt_set_button_pictures(ICO_BUTTON_PICTURES_PLAYSTATION);
+    CHECK(ui_settings_pads_frame() == ICO_PAD_GLYPHS_PLAYSTATION && padsText("PlayStation"),
+          "chosen: PlayStation with an Xbox pad last");
+    ico_opt_set_button_pictures(ICO_BUTTON_PICTURES_AUTO);
+    ico_pad_kind_reset();
+    ui_settings_pads_frame();
+
+    /* the row, from the title and from the pause menu */
+    for (int title = 1; title >= 0; title--) {
+        stage_no = title ? 1 : 11;
+        useConfig("version = 1\n");
+        const int mainL = enterMain(title);
+        const int ctlL = openPage(mainL, 4, UI_PAGE_CONTROLS);
+        const int row = ui_settings_row_of(UI_PAGE_CONTROLS, UI_OPT_BUTTON_PICTURES);
+        CHECK(row >= 0 && ui_settings_row_shown(row) &&
+                  strcmp(lt_ext_row_text(row), "Button pictures") == 0 &&
+                  padsText("Auto (PlayStation)"),
+              "title %d: the Button pictures row, Auto", title);
+        CHECK(noteStarting(UI_PAGE_CONTROLS, "The buttons shown in menus") >= 0,
+              "title %d: its note", title);
+        lt_ext_layout(ctlL)->curItem = row;
+        for (int i = 0; i < 5; i++) {
+            press(LT_PAD_RIGHT);
+            CHECK(padsText(kText[i]) &&
+                      strcmp(ico_config_get_string("input.button_pictures", ""), kKey[i]) == 0 &&
+                      pad_glyphs_style() == kStyle[i],
+                  "title %d: Right %d: %s, [input] button_pictures = %s, style %d", title, i + 1,
+                  kText[i], kKey[i], pad_glyphs_style());
+        }
+        press(LT_PAD_LEFT);
+        CHECK(padsText("Wii Classic Controller"), "title %d: Left from Auto: Wii Classic", title);
+        press(LT_PAD_LEFT);
+        press(LT_PAD_LEFT);
+        CHECK(padsText("Xbox") && pad_glyphs_style() == ICO_PAD_GLYPHS_XBOX,
+              "title %d: Left twice more: Xbox", title);
+        press(LT_PAD_TRIANGLE);
+        CHECK(settle(mainL, 60), "title %d: Controls: back", title);
+        path(p, sizeof(p), "settings_test.toml");
+        IcoToml *t = ico_toml_load(p);
+        CHECK(t != NULL && ico_toml_get(t, "input.button_pictures") != NULL &&
+                  strcmp(ico_toml_get(t, "input.button_pictures"), "xbox") == 0,
+              "title %d: leaving Controls saved button_pictures = \"xbox\"", title);
+        if (t) {
+            ico_toml_free(t);
+        }
+    }
+
+    /* Xbox not complete: the row skips it, the file's "xbox" reads as Auto
+       (which then draws PlayStation's for an Xbox pad) */
+    CHECK(pad_glyphs_test_source(ICO_PAD_GLYPHS_XBOX, 0, "<svg/>", 6) == 0 &&
+              !pad_glyphs_set_complete(ICO_PAD_GLYPHS_XBOX),
+          "a refused piece: Xbox is not complete");
+    useConfig("version = 1\n[input]\nbutton_pictures = \"xbox\"\n");
+    ico_input_note_pad_kind(ICO_PAD_KIND_XBOX, "test");
+    CHECK(ico_opt_button_pictures() == ICO_BUTTON_PICTURES_XBOX &&
+              ui__pads_choice() == ICO_BUTTON_PICTURES_AUTO &&
+              ui_settings_pads_frame() == ICO_PAD_GLYPHS_PLAYSTATION &&
+              padsText("Auto (PlayStation)"),
+          "the key's Xbox, not complete: Auto, PlayStation's drawn for an Xbox pad");
+    ui_settings_step(UI_OPT_BUTTON_PICTURES, 1);
+    CHECK(padsText("PlayStation"), "Right from Auto: PlayStation");
+    ui_settings_step(UI_OPT_BUTTON_PICTURES, 1);
+    CHECK(padsText("Nintendo") &&
+              strcmp(ico_config_get_string("input.button_pictures", ""), "nintendo") == 0,
+          "Right again: Nintendo, Xbox skipped");
+    ui_settings_step(UI_OPT_BUTTON_PICTURES, -1);
+    CHECK(padsText("PlayStation"), "Left: PlayStation, Xbox skipped");
+    CHECK(pad_glyphs_test_source(ICO_PAD_GLYPHS_XBOX, 0, NULL, 0) == 1 &&
+              pad_glyphs_set_complete(ICO_PAD_GLYPHS_XBOX),
+          "the file back: Xbox complete again");
+    ui_settings_step(UI_OPT_BUTTON_PICTURES, 1);
+    CHECK(padsText("Xbox"), "Right: Xbox again");
+
+    /* a word that is none of them: Auto */
+    useConfig("version = 1\n[input]\nbutton_pictures = \"sega\"\n");
+    CHECK(ico_opt_button_pictures() == ICO_BUTTON_PICTURES_AUTO && padsText("Auto (Xbox)"),
+          "an unknown word: Auto");
+    ico_pad_kind_reset();
+    useConfig("version = 1\n");
+    pad_glyphs_set_style(ICO_PAD_GLYPHS_PLAYSTATION);
+    ui__pads_reset();
+}
+
 /* whether opt has a row on page that the page's rule shows (in the window
    or scrolled out of it): -1 for no row of opt on the page */
 static int jpnRowShown(UiSettingsPage page, UiSettingsOpt opt)
@@ -3861,11 +4596,16 @@ static int jpnRowShown(UiSettingsPage page, UiSettingsOpt opt)
    table's number as the game's does; Start confirms on every disc. */
 static void testNewGameStartFlags(void)
 {
+    /* and Hard's Shadow toughness on each (plan "Presets"): American on
+       the two 2001 discs that have it, the demo's own, Third journey on the
+       others */
     static const struct {
         const char *slug;
-        int flag;
-    } discs[] = {{"ntsc", 349}, {"aug6", 348}, {"jun26", 333},
-                 {"jpn", 382},  {"kor", 382},  {"cn", 382}};
+        int flag, tough;
+    } discs[] = {
+        {"ntsc", 349, ICO_TOUGHNESS_AMERICAN},     {"aug6", 348, ICO_TOUGHNESS_AMERICAN},
+        {"jun26", 333, ICO_TOUGHNESS_ORIGINAL},    {"jpn", 382, ICO_TOUGHNESS_THIRD_JOURNEY},
+        {"kor", 382, ICO_TOUGHNESS_THIRD_JOURNEY}, {"cn", 382, ICO_TOUGHNESS_THIRD_JOURNEY}};
 
     for (size_t d = 0; d < sizeof(discs) / sizeof(discs[0]); d++) {
         CHECK(ico_region_select(discs[d].slug) == 0, "the %s disc selected", discs[d].slug);
@@ -3886,8 +4626,15 @@ static void testNewGameStartFlags(void)
         CHECK(ml >= 0, "%s: the New Game screen is installed", discs[d].slug);
         lt_switch_layout(ml);
         CHECK(settle(ml, 60), "%s: the New Game screen (%d)", discs[d].slug, current_layout_id);
-        press(0x800); /* Start */
+        press(0x2000); /* Right on Difficulty: Hard */
+        press(0x800);  /* Start */
         CHECK(s_newGames == games + 1, "%s: the game starts", discs[d].slug);
+        CHECK(ico_difficulty_active()->mode == ICO_DIFF_HARD &&
+                  ico_difficulty_row(ICO_DIFF_SHADE_TOUGHNESS) == discs[d].tough &&
+                  ico_difficulty_row(ICO_DIFF_KNOCK_LIMIT) == 3,
+              "%s: Hard in force, toughness %d (got %d)", discs[d].slug, discs[d].tough,
+              ico_difficulty_row(ICO_DIFF_SHADE_TOUGHNESS));
+        ico_difficulty_reset();
         CHECK(s_lastStartFlag == discs[d].flag, "%s: start flag %d (got %d)", discs[d].slug,
               discs[d].flag, s_lastStartFlag);
         CHECK(ico_region_cur()->gflag_new_game == discs[d].flag, "%s: the table's number",
@@ -4015,6 +4762,63 @@ static void testOtherDisc(void)
     ui_set_language(UI_LANG_EN);
 }
 
+/* Settings > Developer > Free movement ([developer] free_movement): after the
+   Debug menu, shown with Developer mode, Off by default; Right turns it on
+   (ico_rows.h: the game's loops read it, achievements off), sets the key,
+   which the save writes; its note under the cursor; Left turns it off */
+static void testFreeMovement(void)
+{
+    char p[1100];
+
+    stage_no = 11;
+    useConfig("version = 1\n");
+    ico_opt_reload();
+    ico_opt_set_developer_mode(1);
+    const int mainL = enterMain(0);
+    ico_opt_set_developer_mode(1);
+    const int devL = openPage(mainL, -1, UI_PAGE_DEVELOPER);
+    for (int k = 0; k < 4; k++) {
+        frame(0); /* the page refreshes */
+    }
+    const int row = ui_settings_row_of(UI_PAGE_DEVELOPER, UI_OPT_FREE_MOVEMENT);
+    CHECK(row >= 0 && ui_settings_row_shown(row) &&
+              strcmp(lt_ext_row_text(row), "Free movement") == 0,
+          "Developer: the Free movement row");
+    CHECK(row > ui_settings_row_of(UI_PAGE_DEVELOPER, UI_OPT_VAR_DEBUG_MENU),
+          "Developer: after the Debug menu");
+    CHECK(ico_free_movement() == 0 &&
+              strcmp(ui_settings_value_text(UI_OPT_FREE_MOVEMENT), "Off") == 0,
+          "Free movement: Off by default");
+    lt_ext_layout(devL)->curItem = row;
+    press(0x2000);
+    CHECK(ico_free_movement() == 1 && ico_free_movement_row() == 1 &&
+              strcmp(ui_settings_value_text(UI_OPT_FREE_MOVEMENT), "On") == 0 &&
+              ico_config_get_bool("developer.free_movement", 0) == 1,
+          "Right: Free movement On, the game's loops read it, the key set");
+    CHECK(noteStarting(UI_PAGE_DEVELOPER, "Press L2 to fly Ico") >= 0, "its note on the cursor");
+    CHECK(ui_settings_save() == 0, "save");
+    path(p, sizeof(p), "settings_test.toml");
+    IcoToml *t = ico_toml_load(p);
+    CHECK(t != NULL && ico_toml_get_bool(t, "developer.free_movement", 0) == 1,
+          "saved: developer.free_movement = true");
+    if (t != NULL) {
+        ico_toml_free(t);
+    }
+    /* Developer mode off: the row is hidden and does nothing */
+    ico_opt_set_developer_mode(0);
+    CHECK(ico_free_movement() == 0 && ico_free_movement_row() == 1,
+          "Developer mode off: the row's value stays, the movement is off");
+    ico_opt_set_developer_mode(1);
+    press(0x8000);
+    CHECK(ico_free_movement() == 0 && ico_config_get_bool("developer.free_movement", 1) == 0,
+          "Left: Off again");
+    press(0x10);
+    CHECK(settle(mainL, 60), "Developer: back");
+    ico_opt_set_developer_mode(0);
+    useConfig("version = 1\n");
+    ico_opt_reload();
+}
+
 int main(int argc, char **argv)
 {
     snprintf(s_dir, sizeof(s_dir), "%s", argc > 1 ? argv[1] : ".");
@@ -4036,6 +4840,7 @@ int main(int argc, char **argv)
     testPhoto();
     testPauseStats();
     testNewGameScreen();
+    testNewGameMouse();
     testNewGameStartFlags();
     testQuit();
     testCirclePortScreens();
@@ -4046,7 +4851,10 @@ int main(int argc, char **argv)
     testFramerate();
     testShowFps();
     testDownsample();
+    testUpscale();
     testNotesFit();
+    testUpscaleFsr3();
+    testFreeMovement();
     testPreset();
     testCapture();
     testBootSkip();
@@ -4061,6 +4869,7 @@ int main(int argc, char **argv)
     testEffects();
     testGlowSmooth();
     testTouch();
+    testButtonPictures();
     if (failures) {
         printf("settings_test: %d failure(s)\n", failures);
         return 1;

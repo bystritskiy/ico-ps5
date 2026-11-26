@@ -15,10 +15,18 @@ are [RHI.md](RHI.md).
 | `port/include/ico_frame.h` | the native frame: its width for an aspect, the exact width, the TEX0 helpers |
 | `port/game/video_options.h`, `video_options.c` | the `[video]` keys, the presets, Auto aspect, the frame for the options in force |
 | `port/platform/window_host.h`, `window_host.c` | the SDL window, the device on it, the pacing loop, the 10 s stats lines, F11 and F12 |
+| `port/platform/upscale_pictures.h`, `upscale_pictures.c`, `upscale_pictures_arm.c` | F12's and the bug-report row's upscaler pictures: the request, the line naming them, the zip under its cap ([FSR 3.1 upscaling](#fsr-31-upscaling), "The upscaler's pictures") |
 | `port/platform/window_video.h`, `window_video.c` | window mode requests (windowed, borderless over the display, fullscreen at the desktop's mode) and their readback |
 | `port/platform/pace_policy.h`, `pace_policy.c` | the pacing decisions, free of SDL: slow presents, the gap, the vsync lock, the display's intervals, Auto resolution |
 | `port/platform/present_fallback.h`, `present_fallback.c` | the FIFO fallback's decision and lines, free of SDL ([The FIFO fallback](#the-fifo-fallback)) |
 | `port/platform/window_present_fallback.h`, `window_present_fallback.c` | the window's side of the FIFO fallback: the gate, the switch, the lines |
+| `port/platform/display_rate.h`, `display_rate.c` | the refresh rate's log lines and the frame rate pin's decisions, free of SDL ([The refresh rate and the frame rate pin](#the-refresh-rate-and-the-frame-rate-pin)) |
+| `port/platform/present_stall_block.h`, `present_stall_block.c` | the present stalls per 10 s block and per run against the GPU span band and the display's rate, free of SDL ([The refresh rate and the frame rate pin](#the-refresh-rate-and-the-frame-rate-pin)) |
+| `port/platform/window_display_rate.h`, `window_display_rate.c` | the window's side: SDL's display mode in the log, the Android pin through the NDK |
+| `port/platform/present_hist.h`, `present_hist.c` | the 10 s block's histogram of the driver's present call (over 20, 50, 100 and 300 ms); the texts of the lines around a present that blocked (its split, the replay after it) |
+| `port/platform/window_perf_rank.h`, `window_perf_rank.c` | the window's performance lines by scene from the records and the timed pieces as they pop, the ranked line below the game's rate, the run's profile every 300 s and at the end ([ANDROID_DIAGNOSTICS.md](ANDROID_DIAGNOSTICS.md#the-performance-lines-issues-179-211-and-123)) |
+| `port/platform/window_stall.h`, `window_stall.c` | the window's lines around a present that blocked (issue 123), from the replays' records as they pop; the kernel GPU driver's lines on Android |
+| `port/platform/gpu_sysfs.h`, `gpu_sysfs.c` | the kernel GPU driver's nodes, the pure part: the parser, the ring of samples, the block and around reductions, the lines ([ANDROID_DIAGNOSTICS.md](ANDROID_DIAGNOSTICS.md) has the sampler) |
 | `port/platform/window_disc.h`, `window_disc.c` | the window's side of the disc reader: the step's disc wait for the present allowance, the 10 s disc line |
 | `port/platform/window_blended.h`, `window_blended.c` | F12's blended present's frame: the arm after F12's zip (a result still to collect collected first) and the move into it |
 | `port/platform/display_clock.h` | the vblank clock's interface |
@@ -27,10 +35,21 @@ are [RHI.md](RHI.md).
 | `port/platform/perf_block.h`, `perf_block.c` | a 10 s block of replays by phase (the replays line and its maxima) |
 | `port/platform/hotkeys.h`, `hotkeys.c` | F11, F12, Shift+F12 and the stats period |
 | `port/render/rd_present.c` | DISPLAY to the output: the box, line doubling, the overlay, the display options as scales |
-| `port/render/rd_interp.c` | presenting between ticks; the present clock |
+| `port/render/rd_prerotate.c` | the present into a swapchain made in the surface's own turn ([The turned swapchain](#the-turned-swapchain)) |
+| `port/render/rd_interp.c` | presenting between ticks |
+| `port/render/rd_present_clock.c` | the present clock (`rd_present_clock_alpha`), what it notes for `rd_present`, Motion blur: Smooth's presents a tick |
+| `port/render/rd_pace_gpu.c`, `rd_pace_gpu_live.c`, `rd_pace_gpu.h` | with pictures as made, each in-between picture's moment at its GPU work's predicted end, computed and reported, drawn only with `ICO_RD_PACE_GPU=1` (the GPU queue's model, its evenness clause, its attempt ledger row; [Interpolation between ticks](#interpolation-between-ticks)) |
+| `port/render/rd_as_made_timer.c`, `.h`, `rd_pace_rules.c`, `.h` | the own timer for pictures as made (drawn by default on Android only, where the screen's rule does not place a picture: `rd_as_made_timer_decide`) and the rules side by side at every picture |
+| `port/render/rd_glass.c`, `rd_glass_live.c`, `.h`; `port/rhi/vk/vk_glass.c` | the content's speed on the glass: the display's own times read back (`VK_GOOGLE_display_timing`, read only) and the `on the glass` line |
+| `port/render/rd_pace_screen.c`, `rd_pace_screen_live.c`, `.h` | with pictures as made, each picture's moment at the time the screen is predicted to show it (the predicted GPU end, the latch and the refresh grid fitted from the display's own times), drawn by default on Android only (`rd_pace_screen_decide`), elsewhere computed and reported (its clause on the `on the glass` line, its attempt ledger row) |
+| `port/render/rd_pace_even.c`, `rd_pace_even_live.c`, `.h` | the even cadence, off by default (three phone release candidates did not land pictures on their refresh; `ICO_RD_PACE_EVEN=1` for the tests): every picture shown for the same whole number of refreshes, the window's pacer holding each hand-over (`window_present.c`, `rd_present_even_hold`) |
 | `port/render/rd_crt.c`, `port/shaders/crt.hlsl` | the CRT filter |
+| `port/render/rd_upscale_temporal.c`, `port/render/rd_upscale_temporal.h` | Upscaling: FSR 3.1's rows (quality ratios, exclusions, the display line's words; [FSR 3.1 upscaling](#fsr-31-upscaling)) |
+| `port/render/rd_fsr3.c`, `port/render/rd_fsr3.h` | Upscaling: FSR 3.1 itself: the support answer, the context, the dispatch at the upscale point ([FSR 3.1 upscaling](#fsr-31-upscaling)) |
+| `port/render/rd_fsr1.c`, `port/render/rd_fsr1.h`, `port/shaders/fsr1.hlsl`, `port/third_party/fsr1/` | Upscaling: FSR 1.0, AMD's EASU and RCAS at the present ([FSR 1.0 upscaling](#fsr-10-upscaling)) |
+| `port/render/rd_tone.c`, `port/render/rd_tone.h`, `port/shaders/tone.hlsli` | the colour adjustment (Options > Picture's Gamma, Picture brightness, Contrast, Saturation; [Presentation](#presentation)) |
 | `port/platform/fps_counter.h`, `fps_counter.c` | the Frame rate counter's presents per second, free of SDL and rd ([UI.md](UI.md#the-frame-rate-counter)) |
-| `port/platform/test/` | `fps_counter_test.c`, `pace_loop_test.c`, `pace_policy_test.c`, `present_fallback_test.c`, `perf_block_test.c`, `window_video_test.c`, `hotkeys_test.c` |
+| `port/platform/test/` | `fps_counter_test.c`, `pace_loop_test.c`, `pace_policy_test.c`, `present_fallback_test.c`, `display_rate_test.c`, `present_hist_test.c`, `perf_block_test.c`, `window_video_test.c`, `hotkeys_test.c` |
 
 ## The native frame
 
@@ -76,7 +95,8 @@ open border's outer columns). The glow reads SCENE before the reduction, so a fo
 has those columns repeated from columns 2 and W - 3 first, wherever the border is open or the
 frame cropped (issue 26: the same band at 16:9, where the present leaves the columns out but the
 glow had spread them about ten GS pixels in); with the border closed (Full pixel off at 4:3 and
-48:9) SCENE stays the game's, the PS2's picture ([RENDER_POST.md](RENDER_POST.md#post-passes), SCENE's outer
+48:9) SCENE stays the game's (the camera's: the console's except inside triangles it dropped,
+VD-29) ([RENDER_POST.md](RENDER_POST.md#post-passes), SCENE's outer
 columns). The rows the reduction's scissor kept black at the top and bottom show what SCENE
 holds.
 Without it the picture is the same: the same box, scale, crop and replay (the host sets
@@ -99,7 +119,7 @@ box. The mask and the open border apply only on a cropped frame (`rd__frame_crop
 512 and `wExact` under it, as at 16:9, 688 over 682.67, where the crop cuts the game's own border
 away); at 4:3 and at aspects where the frame is exactly the picture's width (48:9 at 2048), Full
 pixel off is the game's own border as before, the reduction's recorded scissor and no mask, so the
-Original preset at 4:3 is the PS2's picture byte for byte (`port/render/rd_present.c`
+Original preset at 4:3 is the camera's: the console's except inside triangles it dropped, [DIVERGENCES.md](DIVERGENCES.md) VD-29; byte for byte the PS2's under `[dev] region_rule = ps2` (`port/render/rd_present.c`
 (`rd__frame_cropped`), `port/render/rd_replay.c` (`borderOpen`)). The `rd: display:` line ends
 with the frame as the options give it, `frame W GS wide (exact E: cropped|exact width), border
 open (its outer two columns a side repeat their neighbours)|open (its columns left out at
@@ -136,7 +156,11 @@ end). The puddle's copy over the frame reads the block inside its edges, the sam
 frame-sized block (the dark volume's) and every VU draw keep the clamp. The `--list` water line and
 the F12 line name the counts: `Full pixel on, border mask off: N render-target reads clamped, M
 block reads kept on REPEAT` (ctest `rd_water`, the ripples; `rd_replay_tool_ripple`,
-`rd_replay_tool_ripple_447`, `rd_replay_tool_ripple_436`, `rd_replay_tool_mirror_floor`).
+`rd_replay_tool_ripple_447`, `rd_replay_tool_ripple_436` and its `_ps2`, `_1x`, `_1x_ps2` twins,
+`rd_replay_tool_mirror_floor`: committed fixtures of the reporter's frames and the corpus's
+puddle room, [TESTING_FIXTURES.md](TESTING_FIXTURES.md), each picture pinned as the release before
+drew the fixture; on the two made with its water rule a replay with the block's reads clamped,
+`ICO_RD_BLOCK_CLAMP=1`, must draw a different picture).
 
 **The [scene scale](ARCHITECTURE.md#terms)** comes from the Resolution row in `rd__apply_display`:
 "Nx" is the GS size times N; "WxH" that size; "window" the presentation box (only with the Enhanced
@@ -183,6 +207,16 @@ key says; the renderer draws an MSAA count the device lacks as off (`port/game/v
 **Downsampling.** `downsample` (`"off"` or `"box"`) is read and saved outside the preset, as
 `show_fps` is, and reaches the renderer as `RdSettings.downsample`; the renderer decides where it is
 in force ([downsampling](#downsampling)).
+
+**Upscaling.** `upscaling` (`"off"` or `"fsr1"`) and `upscaling_sharpness` (0..100, default 80) are
+read and saved outside the preset, as `downsample` is, and reach the renderer as
+`RdSettings.upscale` (`RD_UPSCALE_FSR1`) and `upscaleSharpness`; the renderer decides where FSR 1.0
+is in force ([FSR 1.0 upscaling](#fsr-10-upscaling)). `"fsr3"` (FSR 3.1) is read as saved and sent as
+`RD_UPSCALE_FSR3` with `upscaleQuality` (`[video] upscaling_quality`); it is drawn as off where
+`rd_upscale_temporal_supported()` is false (a device or build that cannot run it) ([FSR 3.1 upscaling](#fsr-31-upscaling)); an unknown word of
+either key reads as `"off"` / `"native"` with a line (`port/game/video_options.c`
+(`ico_video_parse_upscale`, `ico_video_parse_upscale_quality`); `port/platform/window_host.c`
+(`video_settings`)).
 
 **Fallbacks.** A key the parser does not understand logs one `video: ... not understood` line and
 takes the default (resolution, aspect, texture filter, window mode, anti-aliasing,
@@ -232,7 +266,8 @@ DXT-48 phone's log, below):
   scale, GS levels at Original, the crack fill's reach) are read from the settings at each draw
   or set by `rd__apply_display`; a change of scale or preset logs them in one line, `rd: display
   change: derived: preset P, frame W GS wide, scene SxS (whole|fractional), VU planes kept|dropped
-  (vu_np_ps), VU region rule the PS2's|extended, texture filter F, VU pre-pass on|off, fog path N;
+  (vu_np_ps), VU region rule the camera's[ (extended)]|the PS2's|extended (the camera's under the
+  default `[dev] region_rule = camera`, [VU1_PROGRAMS.md](VU1_PROGRAMS.md#the-camera-rule)), texture filter F, VU pre-pass on|off, fog path N;
   profile ...`, so a reporter's log after a change compares with a fresh start's lines.
 - **The pipelines** (`port/render/rd_pipeline.c` (`rd__display_pipelines`)): after the settings
   apply (and after a frame-width reset, `rd_reset_scene`), the reachable set of the new state
@@ -271,7 +306,9 @@ timestamps (Vulkan and D3D12: the sample is taken whenever the replay's timestam
 came back, so D3D12 under its FIFO present samples), else in mailbox mode its CPU time without
 the acquire and the present; under FIFO without timestamps there is no sample. The budget is the cap's period, two fields at frame rate
 Original, else 1/60 s; the rule is off under the CRT filter (`port/platform/window_host.c`
-(`auto_res_sample`, `auto_res_update`, `video_settings`)).
+(`auto_res_sample`, `auto_res_update`, `video_settings`)). Under a temporal upscaler Auto keeps
+the display at the window and its steps lower the scene's scale below it instead
+([The render and display scales](#the-render-and-display-scales)).
 
 ## The window host
 
@@ -285,7 +322,19 @@ pipeline format's, not the build's: [RHI.md](RHI.md#vulkan)), creates the whole 
 pipeline set before the first frame, runs the fog's self-test and logs one start-up line with the
 backend, adapter and options (`window mode M` among them, as in the summary line),
 then `window: present mode M` (`port/platform/window_host.c` (`ico_window_open`, `window_flags`,
-`log_summary`)).
+`log_summary`)). Before `rd_init` it sets the renderer's wait hooks
+(`ico_window_switch_wait_hooks`, [RHI.md](RHI.md#wait-hooks)): OpenGL's shader compiles then run on
+a thread of their own while the window takes its events, so the window stays responsive, and one
+compile is held to the GPU hang limit. The renderer's "Preparing graphics" screen cannot be drawn
+while the device's own shaders are made (it draws with them), so OpenGL draws a screen of its own
+there with no shader at all: "Preparing graphics for OpenGL: N of M shaders" over the same bar,
+from scissored clears ([RHI.md](RHI.md#opengl), `port/rhi/gl/gl_start_screen.c`), counted against
+the renderer's plan of the set (`rhi_plan_shaders`, `port/render/rd_shader_plan.c`); the
+renderer's own screen takes over at the pipeline set. The made hook writes the set's steps
+(`window: shaders: the start-up set begins, 1 of M`, a line at each quarter, `the start-up set is
+over, N made in S s`; `ico_diag_shader_set`) on every backend. Each step of the start and of Options > Graphics > Apply's switch
+writes its line at once (`ico_diag_step`), and the switch runs under its own watchdog limit
+([PLATFORM.md](PLATFORM.md#the-renderer-switched-from-the-menu), the in-process switch and its log lines).
 
 **The window modes** (`port/platform/window_video.c` (`ico_window_video_mode`,
 `ico_window_video_desktop_mode`)). Three distinct modes, as in other games:
@@ -384,7 +433,7 @@ measures ([Further presents and the game step](#further-presents-and-the-game-st
 `lowest not held` when it was unbound all block: the allowance now and its lowest in the block, the
 in-between presents it refused, its drops and climbs and the climbs its GPU gate refused in the
 block (the timer path's; under the lock every climb is a probe, none refused); then `GPU span G ms
-a timed replay`, the median of the last 8 timed presented replays' GPU time (`perf_drain`,
+(the median of the last 8 timed replays)`, the median of the last 8 timed presented replays' GPU time (`perf_drain`,
 `pace_hist_add`) that the timer path's climb gate, the paced budget and the step rule's pipe read,
 not the block's mean: it is the value at the block's end, so a block that ends on a stage's loading
 pictures reads low (a phone at the Original preset: `GPU span 1.9 ms` where the block's replays
@@ -396,9 +445,12 @@ only in the replays line's pass-timed replays (the replays line's `GPU` is the m
 field at 14.1 ms, then named `a presented replay`, beside a block mean of 1.44 ms), or `no
 GPU timestamps` where the backend has none, or `GPU not timed yet`;
 [The present allowance](#the-present-allowance)), the longest [replay](ARCHITECTURE.md#terms) and the replay count with how many
-were over a refresh, the slow
+were over their interval (the larger of the refresh and the picture interval in force), the slow
 steps, the frame rate option (with `(held to the display's X Hz)` while a cap above the refresh
-presents once a refresh, [the present gap](#pacing)), the present mode, the display's refresh with presents a refresh, the
+presents once a refresh, [the present gap](#pacing)), the present mode with, on Vulkan, the
+swapchain's images and those the game holds as the block ends (`present mailbox (images: 10, in use
+1)`: acquired and not yet presented, `RhiStats.swapAcquired`; the hand-over's count while the
+render thread is busy; images the compositor holds are not visible to an app), the display's refresh with presents a refresh, the
 window's pixel size, "step late max" (the latest a simulation step started against when it was due),
 "pump max" (the longest window event pump, [PLATFORM.md](PLATFORM.md#diagnostics)) and the lock's
 state (`window_pace_log`), one of:
@@ -446,6 +498,11 @@ lock held (grid G ms, n presents a step, mailbox|fifo, audio rate xR, CLOCK,
   `window: presents paced by the GPU: N.N a step|not held (GPU span G ms a picture, period P ms)`
   (`not held` at 8 a step or more).
 
+The GPU span G these lines and the allowance's gate read is a timed replay's span less its display
+wait (`rd_perf_pace_gpu_ms`): the present's own list waits for the window's image between the
+scene's stamps and the present's ([RENDER.md](RENDER_PERF.md#the-presents-own-list)), and that wait is
+the display's, not the GPU's work, so under vsync it does not make the GPU look slower.
+
 Paced with the GPU's time known, the drop ends `back to paced by the GPU after 60 steps on time`
 and its climb reads `window: presents back to paced by the GPU (where they started) after S steps
 (GPU span G ms a picture, step T ms, period P ms)`; no refused climb is written there.
@@ -460,7 +517,84 @@ X)` (`perf_log`; issue 123: the Adreno 740 on Qualcomm's driver spent 363-583 ms
 `vkQueuePresentKHR`). Both read the replay records' present time (`perf_drain`); nothing new is
 timed. Under mailbox with vsync off the 10 s line ends with the [FIFO fallback](#the-fifo-fallback)'s
 count, `; k of 3 over 200 ms in 30 s toward FIFO`, and after its switch with `; K since presents went
-FIFO N s ago` (K: the presents over 50 ms since). A numeric cap above the display's refresh in mailbox mode writes `window: frame rate N
+FIFO N s ago` (K: the presents over 50 ms since).
+
+The blocked line goes on past its parenthesis with the present timed apart (issue 123;
+`rhi_present_split`, Vulkan; `RdPerfRecord.presentLockMs`, `presentCallMs`, `presentPollMs`,
+carried from the submit thread's job, `RdSubmitJob`) and the replay's GPU numbers: `: inside
+vkQueuePresentKHR 351.6 ms, the swapchain lock 0.0 ms, the surface poll 0.0 ms, other 0.2 ms; the
+replay's GPU span 71.3 ms against the block's 27.0 ms so far, the GPU idle 0.4 ms before it`
+(`present_split_text`; `other` is the present's time outside the three: the present-signal submit,
+a retired swapchain's destruction, a rebuild). When the lock was taken but no present call followed
+(no slot, or the present-signal submit failed: `RhiPresentSplit.called` false, `presentSplit` 2) it
+reads `no present call made: the swapchain lock 351.5 ms, other 0.5 ms`, so a lock stall still
+shows. Elsewhere the first part reads `the call not timed apart on this graphics API`; a replay without timestamps `the replay's GPU span not timed`; the first timed replay of a
+block `(the block's first timed replay)`; a first stamp written before the replay before ended
+`begun X ms before the one before ended`. The record popped after a present of 250 ms or more
+writes `window: after the present that blocked (replay N, 352 ms): replay N+1 waited 0.3 ms for its frame
+slot (fence 0.2), acquired its image in 298.7 ms, GPU span 26.9 ms, the GPU idle 301.2 ms before
+it` (the first 8, then every 100th; `present_after_text`, `port/platform/window_stall.c`). The
+after, around and stalled-replay lines start at 250 ms (`PRESENT_STALL_LINE_MS`,
+`present_stall_lines`), the blocked line's own size, so the presents of 50 to 250 ms (17 in 110 s of
+a reporter's log) do not spend each line's first 8 before the real stalls; a present over 50 ms
+still arms the per-pass timing, counts in the 10 s lines and adds its gap to the stall gaps. Read
+together: the call holding the whole time with the lock and the poll near 0 puts the wait inside
+the driver; a stalled replay's GPU span far over the block's is the GPU running slow while the
+present waited (a clock drop, another GPU client); a GPU idle about as long as the stall before the
+next replay is the queue draining behind the present, the driver waiting on something other than
+this replay's work.
+
+On Android the kernel GPU driver's state is sampled every 250 ms on a thread of its own ([ANDROID_DIAGNOSTICS.md](ANDROID_DIAGNOSTICS.md);
+`port/platform/gpu_sysfs.h`, `port/platform/window_stall.c`), and three lines come from it. At the
+window's open, once a run: `window: kernel GPU driver: /sys/class/kgsl/kgsl-3d0: readable gpuclk,
+gpu_busy_percentage, reset_count (3 so far), thermal_pwrlevel, ...; not readable temp (EACCES); not
+present clock_mhz, devfreq/cur_freq; the fastest clock 905 MHz, power levels 0 (fastest) to 8;
+sampled every 250 ms`, or `... kgsl-3d0: not readable (EACCES)` (every node denied: nothing
+sampled); on a phone without KGSL (not a Qualcomm GPU) the GPU's devfreq entry and the candidate
+paths, each node's state said and the unverified texts quoted (`window: kernel GPU driver:
+/sys/class/devfreq/13040000.mali: readable cur_freq, max_freq; not present load, ...; the fastest
+clock 950 MHz; CPU clocks of cores 0-7 sampled with it; sampled every 250 ms`, or `...
+/sys/class/kgsl/kgsl-3d0 not present, no GPU entry in /sys/class/devfreq; not present ...`;
+[ANDROID_DIAGNOSTICS.md](ANDROID_DIAGNOSTICS.md#a-phone-without-kgsl-and-the-cpu-clocks)). Each
+10 s block, after the `present calls` line: `window: kernel GPU driver: clock 285-905 MHz (average
+612) over 40 samples, busy 71 % on average, resets 0 in the block (3 in all), thermal power level
+at most 0` (a temperature where `temp` is readable), then the CPU cores' clocks by speed class
+(`; CPU clocks: cores 0-5 1000-1800 MHz (average 1500), cores 6-7 1600-2000 MHz (average
+1900)`). For every present that blocked 250 ms or more, once the sample after it came (or a
+second passed): `window: kernel GPU driver around the present that blocked (replay N): 0.12 s
+before: clock 905 MHz, busy 74 %, resets 3, thermal power level 0; 1 during: clock 285 MHz, busy 9
+%, resets 3; 0.03 s after: clock 285 MHz, busy 12 %, resets 3, thermal power level 0; CPU core 6
+(the game thread's): 2000 MHz before, 1600 MHz during, 2000 MHz after` (the first 8, then every
+100th; the parts whose node is not readable left out; the core the game thread was on as the
+record popped). Nothing is written on other platforms.
+
+The app's own words on the phone's thermal state and screen recording (issue 123;
+[ANDROID_DIAGNOSTICS.md](ANDROID_DIAGNOSTICS.md#the-thermal-state-and-screen-recording) has the Java bridge) come as `ico_pc: thermal status changed:
+MODERATE (2) -> SEVERE (3) (run time 212.4 s)` and `ico_pc: screen recording: visible (run time 40.1
+s)` the moment the system reports a change, and in the window's lines: each 10 s block, after the
+kernel GPU driver's line, `window: thermal: headroom 0.72 (1.0 is the throttling point), status
+MODERATE (2); screen recording not visible` (a headroom of 1.0 or more is the throttling point;
+the status runs NONE 0, LIGHT 1, MODERATE 2, SEVERE 3, CRITICAL 4, EMERGENCY 5, SHUTDOWN 6; a part
+the phone does not report is left out; `window: thermal: not available (...)` once when it reports
+none), and at the end of each `kernel GPU driver around the present that blocked` line,
+`; thermal headroom 0.98, status SEVERE; screen recording visible`. The screen recording state exists
+from Android 15 and shows only recordings the system announces; on older phones a recorder is not
+visible to the log. Thermal status SEVERE or worse, or a headroom near or above 1.0, beside a
+clock drop is the phone throttling; a visible recording beside the first pass grown alone is the
+recorder holding the image. How the lines tell the stall's causes apart, from one log:
+
+| Reading | the GPU's clock or a thermal step | another GPU client | a GPU fault's recovery | the driver's present path | the screen recorder |
+| --- | --- | --- | --- | --- | --- |
+| clock before / after the stall | drops (905 to 285 MHz), thermal level above 0 | unchanged | unchanged | unchanged | unchanged |
+| busy during | high | high | any | low | low to moderate |
+| resets | none | none | one more per stall | none | none |
+| the stalled replay's passes | all about 3x | one or a few grown | one by hundreds of ms | mildly, alike | mildly |
+| the stalled replay's first pass against the others (`the first pass X ms (the block's Y: it waits for the display's image), the other N timed passes Z ms`) | the others grown too | the others grown in places | one later pass grown by hundreds of ms | the first pass grown alone: the display held the image | the first pass grown alone |
+| the GPU idle before the next replay | small | small | large | about the stall | about the stall |
+| the present's split | the call holds it | the call holds it | the call holds it | the call, lock and poll near 0 | the call holds it |
+| `[dev] render_thread` / `submit_thread` = off | unchanged | unchanged | unchanged | the stall's length or period changes | unchanged |
+
+A numeric cap above the display's refresh in mailbox mode writes `window: frame rate N
 is above the display's X Hz: presenting once a refresh (mailbox)` once after each settings change
 (`port/platform/window_present.c` (`pace`)).
 
@@ -490,7 +624,9 @@ window: N replays: CPU A ms (max M): interp, wait, acquire, upload, walk, bind, 
 It gives the replays' mean CPU time by phase, then `longest:` with each phase's maximum in the block
 (wait, acquire, upload, walk, bind, submit, present), so a log says which phase made the slowest
 replay slow; the GPU times when the backend has timestamps (uploads, [lists](ARCHITECTURE.md#terms)
-0-10, lists 11-12, present), else `no GPU timestamps`; the simulation step's mean and maximum;
+0-10, lists 11-12, display wait, present: `GPU 64.0 ms (max 70.1): uploads 2.1, lists 0-10 55.2,
+11-12 1.0, display wait 3.4, present 2.0`; the display wait is the stretch from the scene's list
+to the present's own, [RENDER.md](RENDER_PERF.md#the-presents-own-list)), else `no GPU timestamps`; the simulation step's mean and maximum;
 and a step's mean of the region rule's card verdicts the CPU decided while the draws were recorded
 (the strips and triangles tested, the time;
 [VU1_PROGRAMS.md](VU1_PROGRAMS.md#the-card-test)) (`perf_log`; `port/platform/perf_block.h`
@@ -505,7 +641,7 @@ per picture effect, the per-replay counts (draws, passes, binds, barriers, uploa
 creations, the MSAA samples and resolves, and the graphics allocations against the device's limit
 with the process's memory and the device's available and total memory (`perf_log`;
 `ico_diag_device_memory`, [PLATFORM.md](PLATFORM.md#diagnostics)). Three lines come from the per-pass timing
-([RENDER.md](RENDER.md#the-per-pass-timing)): `window: GPU top passes: ...` (the most expensive
+([RENDER.md](RENDER_PERF.md#the-per-pass-timing)): `window: GPU top passes: ...` (the most expensive
 passes of the block's timed replays, each timed between stamps outside the render passes, with
 the count of passes a replay and of those under 0.05 ms; only with GPU timestamps),
 `window: passes per replay N: render passes R (lists L, <effect> E, ...), <kind> K, ...` (what a
@@ -561,12 +697,13 @@ plan's means per replay, `; stores: N depth and M colour stores dropped a replay
 - `window: GPU ms per replay: lists 0-12 ...; effects: ...; present ...; VU pre-pass ...` and the
   replays line's GPU part: the per-list and per-effect times. On a tile-based GPU the work of a pass
   is done where the pass ends, not where its commands were recorded, so a list's or an effect's time
-  there is where the work ended and not its own cost ([RENDER.md](RENDER.md#the-per-pass-timing));
+  there is where the work ended and not its own cost ([RENDER.md](RENDER_PERF.md#the-per-pass-timing));
   the top passes line and the total are the numbers to compare, and a reporter on such a device
-  should not be asked to explain the lists' split. The GPU ms per replay and top passes lines end with that sentence on a tile-based GPU, and say that the first pass that writes colour carries the wait for the display's image: the Vulkan acquire's wait (`COLOR_ATTACHMENT_OUTPUT`) holds every colour write of the replay's batch, not only the window's image, so it lands in uploads when new targets are cleared first and otherwise in list 0's first pass (a phone at the Original preset in play: uploads 0.53 ms, list 0 6.91 of 14.76).
-- `window: GPU between replays: N timed replays after the one before: the GPU idle before I of them (A ms on average, the longest L ms), K begun before the one before ended (by O ms on average: their spans count that end too); the GPU's time a replay past the one before's end E ms, its span S ms`: each replay's first stamp against the replay before's last (`RdPerfRecord.gpuGapNs`, the same GPU clock; `PaceGpuGap`, `pace_gpu_gap_text`). Every Vulkan stamp is bottom-of-pipe, written once the earlier commands are done, so K is 0 on a driver that keeps the rule and a span then holds its replay's whole GPU time, any wait inside the replay (the display's image) included: that is the time from the replay's start on the GPU to its fence, what the step rule's pipe needs. K above 0 is a driver that writes the first stamp early: the spans count the replay before's end too and E is the GPU's own time a replay, the one to compare with the span the rule reads. I is the GPU waiting for the CPU's submissions.
+  should not be asked to explain the lists' split. The GPU ms per replay and top passes lines end with that sentence on a tile-based GPU, and say that the present's own list alone waits for the display's image and that the stretch before list 0 (named `before list 0` there, `uploads` elsewhere; the passes CSV's `kind` stays `uploads`) is the uploads and the GPU's work still in flight: on the Mali that stamp and list 0's trade at a constant sum, so neither is read alone. The Vulkan acquire's wait (`COLOR_ATTACHMENT_OUTPUT`) holds every colour write of the batch it is attached to, not only the window's image; with a picture in one list and one submit the wait held the scene's off-screen passes too and landed in uploads when new targets were cleared first and otherwise in list 0's first pass (a phone at the Original preset in play: uploads 0.53 ms, list 0 6.91 of 14.76; issue 179's Mali in its boat scene: 38 to 84 ms of 88 to 143 ms pictures). The present's pass is a list of its own, and only its submit takes the wait (`port/rhi/vk/vk_cmd.c` `vkr_submit_batch`, [RENDER.md](RENDER_PERF.md#the-presents-own-list)), but that does not free the picture's other work: every list begins with a global barrier whose first scope is every earlier command on the queue, picture N's present list included, so picture N+1's colour and transfer work queues behind picture N's acquire wait and only its vertex work runs free. On issue 179's Mali the wait is 0.06 to 0.15 ms and the GPU idles 0.0 to 0.1 ms between pictures, so it is not that GPU's limit; the barrier stays (scoping it with an event would still have the display's SHADER_READ to RENDER_TARGET transition wait for the present's reads, for a gain of lists 0 to 10 on a 0.1 ms wait). The replays line's `display wait` is the stretch between the two lists, and where the GPU holds only colour output for the wait (the Mali) the wait shows in `present` instead.
+- `window: GPU between replays: N timed replays after the one before: the GPU idle before I of them (A ms on average, the longest L ms), K begun before the one before ended (by O ms on average: their spans count that end too); the GPU's time a replay past the one before's end E ms, its span S ms`: each replay's first stamp against the replay before's last (`RdPerfRecord.gpuGapNs`, the same GPU clock; `PaceGpuGap`, `pace_gpu_gap_text`). Every Vulkan stamp is bottom-of-pipe, written once the earlier commands are done, so K is 0 on a driver that keeps the rule and a span then holds its replay's whole GPU time, any wait inside the replay (the display's image) included: that is the time from the replay's start on the GPU to its fence, what the step rule's pipe needs. K above 0 is a driver that writes the first stamp early: the spans count the replay before's end too and E is the GPU's own time a replay, the one to compare with the span the rule reads. I is the GPU waiting for the CPU's submissions. A replay's gap is measured from the timed replay before it across any replays without timestamps between (their GPU work then inside it; refused only past 60 s), and when any were, the line goes on `; C of them timed across untimed replays`; the gaps of the replays right after a present that blocked over 50 ms are listed too, `; after the 3 presents blocked over 50 ms: the GPU was idle 301.2, 298.0, 310.5 ms before the next replay` (the stall lines' stalls are another count, the attempt ledger's) (the first 8 of a block, `after the first 8 of the 11 presents blocked over 50 ms` past them; a negative one is a replay begun before the stalled one ended) (issue 123; `rd_perf_gap.h`, `pace_gpu_gap_stall`, `port/platform/window_stall.c`). A gap about the stall's length is a GPU that sat idle while the present blocked: the wait was not this picture's GPU work. From the first such present on Vulkan (never OpenGL or Direct3D) every replay is timed pass by pass until a stalled replay's passes are compared or 3 blocks pass with none, and a stalled replay gets `window: stalled replay N (...)` ([RENDER.md](RENDER_PERF.md#the-per-pass-timing)).
 - `window: per replay ...`: the counts (draws, passes, pipeline and bind group binds, barriers,
-  copies, uploads, DATE snapshots). After the binds, `(repeats skipped: X pipeline, Y bind group, Z
+  copies, `submits 2.0` (the queue submits a replay: a presenting picture's two lists, the scene's
+  and the present's own, [RENDER.md](RENDER_PERF.md#the-presents-own-list)), uploads, DATE snapshots). After the binds, `(repeats skipped: X pipeline, Y bind group, Z
   state)`: the binds and state sets the RHI found already in force and recorded nothing for
   ([RHI.md](RHI.md#the-bind-cache)); the binds before it are what was recorded. Its exact-blend fields (`exact blends`, `destination-read
   draws`, `storage passes`, `pass switches for the exact blend`) are 0 unless the player opted into
@@ -588,7 +725,8 @@ the slow setting and one at 1x, and the log's start-up lines for the mechanisms 
 
 **The slow replay line**
 (`window: slow replay T ms (replay R, frame F, alpha A, about vsync V): ...`) is logged for a replay
-over the display's refresh, at most `SLOW_REPLAY_LINES` (5) a block: its phases with the fence wait
+over the larger of the display's refresh and the picture interval in force
+([PLATFORM_DIAGNOSTICS.md](PLATFORM_DIAGNOSTICS.md#issue-179s-judging-lines)), at most `SLOW_REPLAY_LINES` (5) a block: its phases with the fence wait
 inside `wait`, its uploads, pipeline creations, allocations, buffers and textures created and DATE
 snapshots, and its GPU time. When the cap kept the block's longest replay out, its line is written
 at the block's end, before the first stats line, ending `; the block's longest, past its 5 lines`
@@ -596,9 +734,64 @@ at the block's end, before the first stats line, ending `; the block's longest, 
 arrive two replays late, so the vsync is the one the record was drained at
 (`port/platform/window_host.c` (`slow_replay`, `perf_drain`)). A walk over 500 ms also gets the
 renderer's `rd: slow walk` line ([RENDER.md](PIPELINES.md#the-start-up-set)). `[dev] slow_step_ms`
-(default 8, 0 off) logs up to 5 `slow step` lines a block for simulation steps over it, split into
+(default 8, 0 off, scaled by that interval over the refresh) logs up to 5 `slow step` lines a block for simulation steps over it, split into
 the step's parts and the pump's, with the step's own card verdicts next to the game threads' time
-(`slow_step`).
+(`slow_step`). After the step's time, the game thread's own CPU time over the same span
+(`window: slow step 64.1 ms (CPU 9.8 ms of it; 54.3 ms off the CPU: the thread waited or was not scheduled) at vsync ...`; `cpu_place_thread_cpu_ns` read at
+the end of one pace and the start of the next, left out where the system has no thread clock): a
+step far longer than its CPU time waited (a present, the render thread, a core), one near it
+computed (issue 179). The game threads' part names where that time went: `game threads 199.3 in 39
+switches (longest Main 171.2 ms; on core 2)` is the longest single fiber switch of the step (one
+resume of a game thread until it next yields, the thread named as the thread lines name it: Main,
+the sound thread, the stage's), its time, and the core the game thread was on at the step's end
+(`ico_sched_switch_max`: two clock reads a switch in `ico_sched_run`; the core left out where it is not
+known). A step with the usual 38 or 39 switches and one long switch is script or disc work on that
+thread; many switches and none long, or a long one on a thread that waits, with a picture whose GPU
+span and present blocked beside it, is the system holding the whole process (issue 179). The
+words are `window_scene.c` (`window_scene_threads_text`).
+
+The slow-scene file's arming (a block over `[dev] slow_scene_dump_ms`, the first slow block of each
+new stage as well as a block 1.5 times heavier, three a run) is in
+[ANDROID_DIAGNOSTICS.md](ANDROID_DIAGNOSTICS.md).
+
+**The layout line** (`window: layout: play 6.2 s, scene 3.1 s, pause 0.7 s`), after the first
+line: the block's simulation steps' time by the game's layout when each step ended: `play` (the
+game's play layout), `scene` (a scene's empty layout, or any layout while a movie plays), `title`
+(the two title layouts), `pause` (the pause menu), `settings` (the game's options and button
+configuration) and `other` (the port's pages, the memory card's), those with any time only, in that
+order, in seconds (`window: layout: no steps` when the game did not run). The layout ids are the
+running disc's (`port/core/region.h`: `layout_play`, `layout_scene`, `layout_title_*`,
+`layout_pause`, `layout_options`, `layout_key_config`). It reads a cutscene out of one log: the
+blocks with `scene` time are the scene, whatever the stage (`window_scene.c`, `scene_note_step`).
+
+**The VU line** (`window: VU: 1182 draws, 61k triangles, 550k vertex invocations (pre-pass off: 9 a
+triangle)`), right after the `N replays:` line: a replay's average of the VU draws the walk issued
+(`vuDraw`, before any merge: the cut and the kick of a fan count one each), the triangles in them
+(index lists in threes) and the vertex invocations the picture costs: with the vertex pre-pass off
+(tilers) 9 a triangle (every triangle shades 3 corners, three times each, no index reuse), with it
+on the vertices it recorded (`pre-pass: each vertex once`). The title's pictures are 250 to 340
+draws, the cutscenes of issue 179 1182 to 1473 (`RdPerfRecord.vuDraws`, `vuTris`). With GPU
+timestamps it ends with the GPU's work (the span less the display wait and the present) over the block's timed replays and a
+least-squares line of it against their vertex invocations (the line's own number): `; GPU work 51.8 ms a replay, 16.0 ms +
+0.17 ms a thousand vertex invocations (R^2 0.81, 70 replays)` (`window_scene_vu_fit`; the mean alone with
+fewer than 3 replays or one invocation count, no R^2 when the work did not vary). A high R^2 with a
+large slope is the vertex work setting the GPU's time, the question the VU pre-pass answers on a
+tiler ([ANDROID_DIAGNOSTICS.md](ANDROID_DIAGNOSTICS.md#issue-179s-lines-what-each-decides)).
+After the VU figures it says `; shared vertices: T triangles, S vertex invocations saved (P % of the
+draws')` a picture: the triangles drawn with a strip's shared vertices and the shader runs that saved, out of
+the draws' three a triangle ([PIPELINES.md](PIPELINES.md#shared-vertices-for-clip-mode-none)),
+then `; shared vertices kept (triangles a picture): form a, chain b, marks c, other d, entry e,
+region f, no verdict g`: the mesh draws' triangles that kept the original list, by reason.
+On Vulkan the block adds `window: acquire: the display's image was free at the present's submit in N
+of M pictures` (once a block; `RhiStats.acquireReadyAtSubmit`/`acquireNotReady`: each frame slot's
+acquire is given a fence, and the submit of the present's list asks it; an acquire made ahead of
+the submit thread is counted too: its timeout of 0 only means it does not wait for an image to be
+handed out, and the image it gets may still be in the presentation engine's hands, its semaphore and
+fence signalled later; no line on the other backends). N of M near M
+says the presentation engine hands the image back before the picture needs it, the wait is not the
+limit; N well under M says the pictures wait for the display's image.
+The GPU ms per replay line prints `VU pre-pass off` when the pre-pass is off (it read `0.00`, which
+looked like a cost).
 
 ## Pacing
 
@@ -619,13 +812,31 @@ than 100 ms behind (`RESYNC_NS`) the lag is dropped and counted instead of run o
 with a fake clock and swapchain; the window only supplies its I/O (`port/platform/window_present.c`
 (`pace`, `pace_locked`, the `lock_io_*` callbacks of `PaceLockIo`)). Three paths:
 
-1. **Frame rate Original**: `rd_end_frame` replays and presents the frame once inside the step; the
-   window only sleeps to the deadline (`pace`). The rule is a rate requirement: the game steps at
-   the disc's rate (50 or 59.94 a second) in real time whatever the GPU, and the pictures float with
-   their cost. Before a frame's replay the renderer asks the window (`rd_set_replay_gate`,
-   `orig_gate`, `port/platform/window_lines.c` (`window_orig_gate`)): a frame whose step is already a whole period or more past its due time
-   at that point (the late arm of the timer path's skip) is neither replayed nor presented, and the
-   last picture stays on the screen (`port/platform/pace_policy.h` (`pace_original_present`)). A
+1. **Frame rate Original**: `rd_end_frame` makes each frame's one picture; the window only sleeps
+   to the deadline (`pace`). The rule is a rate requirement: the game steps at the disc's rate (50
+   or 59.94 a second) in real time whatever the GPU and the display, and the pictures float with
+   their cost. With the render thread on, the picture is handed over as the other frame rates'
+   are (`port/render/rd_thread.h` (`rd__replay_frame_post`), `port/render/rd_core.c`
+   (`originalPicture`)): the render thread walks it, the submit thread submits and presents it,
+   and the step goes on at once; its next renderer call waits only for the picture's reads (the
+   walk, texLock, [PLATFORM.md](PLATFORM.md#the-render-thread)). The driver's present call holds
+   the swapchain's lock (`port/rhi/vk/vk_swapchain.c` (`rhi_present`)) and the next picture's
+   acquire takes it, so a picture posted while a present blocks would wait inside its reads, and
+   the step with it: a Mali-G52 in a scene blocked 165-300 ms in `vkQueuePresentKHR`, and with
+   the replay inside the step every second step lasted 55-230 ms and the game ran at half its rate
+   (issue 179). Before a frame's picture the renderer asks the window on the game thread
+   (`rd_set_replay_gate`, `orig_gate`, `port/platform/window_lines.c` (`window_orig_gate`)) with
+   whether the render thread or the submit thread is still busy with the picture before
+   (`rd__thread_picture_busy`): busy, the frame is neither replayed nor presented and the last
+   picture stays (`port/platform/pace_policy.h` (`pace_original_gate`, `PACE_ORIG_BUSY`)). One
+   present is in flight, the steps keep the disc's rate, and the pictures come about `1000 /
+   (walk + present)` a second, a frame interval less at worst (a picture waits for the first
+   frame closed after the one before is done). Without the render thread, parked, in sync, with a
+   capture armed, or under `[dev] original_async = false` ([CONFIG.md](CONFIG.md)) the frame is
+   replayed and presented inside the step, the game thread waiting. On both, a frame whose step is
+   already a whole period or more past its due time at that point (the late arm of the timer
+   path's skip) is neither replayed nor presented, and the last picture stays on the screen
+   (`port/platform/pace_policy.h` (`pace_original_present`, `PACE_ORIG_LATE`)). A
    keep frame (a fade or a menu drawn over the picture before it) is always drawn. The skipped
    frame's step ends at once and pays back a period of the debt, so a picture of G ms against a
    period of P ms comes about `1000 / (G + step)` times a second (all of them while a step and its
@@ -634,16 +845,53 @@ with a fake clock and swapchain; the window only supplies its I/O (`port/platfor
    is not reached for a picture up to about 70 ms. There is no "never two in a row": a skipped
    frame is never shown later, and a picture over two periods needs two skips to every present.
    The swapchain takes mailbox where the surface offers it, as the timer path does (`video_settings`),
-   so that present never waits for the display inside the step; FIFO only without mailbox
+   so that present never waits for the display (on the submit thread, or inside the step where the
+   picture is replayed there); FIFO only without mailbox
    (Direct3D 11 and 12, OpenGL, some surfaces), where a wait for the display shows as a late step
    and the next frame's replay is the one left out. A replayed frame draws the same picture as
-   before (the gate decides only whether it is replayed: Original at 4:3 1x stays the PS2's
-   picture byte for byte); the tools and tests set no gate and replay every frame. Since the gate
+   before (the gate decides only whether it is replayed: Original at 4:3 1x stays the camera's
+   picture, the console's except inside triangles it dropped, VD-29); the tools and tests set no gate and replay every frame inside the step. Since the gate
    skips the replay itself, not only the present (the timer path's skip still replays), an effect
    that reads the previous picture (a motion blur's history, an after-image pass) advances once per
    drawn picture, not once per game step, on a GPU too slow for every picture, and a skipped
    frame's texture uploads and decode settles wait for the next replay (review finding 7: a known
    change of look on a slow GPU, not a defect).
+   A keep frame (every frame of a stage change's fade and load, the boot card check, the ending)
+   that the gate presents while the render thread is busy still waits inside the step for the
+   picture before, its present included, before it is handed over, so an acquire never waits
+   behind a present inside a picture's reads; the 10 s line counts it in `N waited for the
+   picture before`. On every Android device (the device table's `PRESENT_FREE`, row `android`,
+   issue 179; with the frame slots apart) the submit thread may wait for a picture's GPU work to
+   end before its present, outside the swapchain's lock (`port/render/rd_submit_thread.h` "the
+   GPU's end first", `rhi_wait_submitted`): the Mali-G52's present returns at the end of GPU work
+   (the picture before's), and with the lock held through it every picture of more GPU time than
+   the tick made the next frame busy. It does only where the first Original presents show the
+   driver's present waiting for the GPU (16 calls of 2 ms or more begun with the picture
+   before running, 14 back with its work ended; the owner's Pixel's short calls never count, and its counts start again every 256). While that wait runs with no job behind it the gate is not told busy and the hand-over
+   waits for nothing (a keep frame neither): the next picture is walked, acquired and recorded
+   beside it and submitted after that present, so the GPU still holds one picture at a time and
+   pictures of G ms over the tick come about `1000 / G` a second (`rd_tex_test`
+   `threadPresentFree`). Its lines: `rd: submit thread: with Frame rate Original each picture's
+   GPU work may be waited for before its present, ...: decided from the first 16 Original presents
+   ...` and the verdict's `rd: submit thread: N of 16 Frame rate Original presents ...`
+   ([PLATFORM_DIAGNOSTICS.md](PLATFORM_DIAGNOSTICS.md#issue-179s-judging-lines)). The
+   lines: at each start `rd: render thread: with Frame rate Original
+   each game frame's picture is handed over as the other frame rates' are: its submit and present
+   run on the submit thread; ... but a kept frame (a fade, a load) still waits for the picture
+   before, its present included ...` (or `... is replayed and presented inside the game step, the game
+   thread waiting ([dev] original_async = false)`); the 10 s game-thread line's `(closing a frame
+   ...; its picture handed over in 0.6 ms (longest 14.2 ms; 3 waited for the picture before, 31.0 ms
+   in all; 12 skipped: render thread busy); presents waited inside the step: 0 (0.0 ms))`; the 10 s
+   line's `steps late N (frames not presented M: the step late L, the render thread busy B;
+   frames handed over while the picture before waited for its GPU work G)`; a slow
+   step's `, the picture handed over 0.5 ms (0.0 ms waiting for the one before)`, `, the picture
+   replayed inside the step 165.6 ms` or `, the picture not presented (...)`; a present that blocked
+   `window: a present blocked N ms in the driver's present call (...; on the submit thread)` or `(...;
+   inside the game step)`. `pace_policy_test`'s `testOriginalSplit` holds the hand-over's rates:
+   walks of 5 to 40 ms and presents of 1 to 300 ms, the game at 50 steps a second within 2 % and no
+   resync, the pictures between `1000 / (present + walk + a frame interval)` and `1000 / (present +
+   walk)` a second; the same 320 ms picture inside the step resyncs. `rd_tex`'s `threadOriginal`
+   checks the threading and the bytes.
    `pace_policy_test` (`testOriginalRule`, `testOriginalLoop`) holds the rates: 9 to 17 ms a
    picture at 20 ms every frame presented, no skip; 20 to 90 ms 50 steps a second of real time,
    about `1000 / (G + 1)` presents a second, no resync; without the skip a 30 ms picture ran the game
@@ -760,9 +1008,9 @@ typical is what the back-off below is for: the floor, the widened margin, the th
 plan. The model at that phone's numbers (reads of 10 ms with a deviation of 2.5 ms, the closing
 step 9 ms, the step between 1 ms, a submit of 8 ms, 24 / 25 / 26 ms GPU pictures, over 100 s)
 gives 41.0 / 39.5 / 38.1 presented fps where the longest gave 34.8 / 34.4 / 34.3 (the GPU makes
-41.7 / 40 / 38.5), 14 / 22 / 2 steps missing their period in 100 s (7 / 8 / 0 over the floor,
-the latest 2.8 / 3.5 / 1.3 ms past it), one fall-back of 120 steps in the first 10 s while the
-means learn, and the game's clock at most 8.3 ms behind, so the sound, up to 120 ms ahead, is
+41.7 / 40 / 38.5), 14 / 21 / 2 steps missing their period in 100 s (7 / 7 / 0 over the floor,
+the latest 2.8 / 3.4 / 1.3 ms past it), one fall-back of 120 steps in the first 10 s while the
+means learn, and the game's clock at most 7.0 ms behind, so the sound, up to 120 ms ahead, is
 never held back (`pace_loop_test` `testRc11`; `build-host/tmp/v098/evidence/pace4/`). The 10 s
 clause shows the plan's inputs: `a picture holds the renderer for R ms typically (its mean M ms and
 half its deviation of D ms; ...)` and `the steps planned at X ms closing a frame (its mean M ms, its
@@ -785,6 +1033,15 @@ behind (the closing step then ends past its own period by design and the miss co
 frame's end): at the phone's 25 ms GPU pictures 39.8 presented fps against the rule's 39.2, 45-54
 against 40-50 where the GPU has time to spare, for up to a field more input latency and the
 back-off's misses redefined (`build-host/tmp/v098/evidence/pace3/rc10_cells.py`, `lag_trace.py`).
+As a rate requirement in the steady state (the further picture asked as soon as the render
+thread is free; a later ask only ends its reads later): two pictures a frame while `S + 2R <= 3P -
+S - 2 ms` and the step after's start `2S + 3R <= 4P - B - 2 ms` (S the closing step's plan, B the
+step between's, R a picture's reads), one otherwise. With S = 12.5 ms and B = 1.2 ms: 60 a second
+at reads of 8, 9.5 and 11 ms, 30 at 12, 16, 20, 24 and 30 ms, the bound 11.524999 ms to the
+nanosecond; with S = 6 ms the step after binds at 17.177777 ms (`clock_trap_test`, on
+`pace_rt_further_trace`). The rate is not proportional to the cost: it steps at the bound. The
+owner's Pixel crossed it in the cage when its reads went from 8-10 to 16.8 ms for the same pictures
+at lower CPU clocks ([ANDROID_DIAGNOSTICS.md](ANDROID_DIAGNOSTICS.md#one-picture-a-tick-and-the-worst-second-the-owners-pixel)).
 The render thread's times say how long a picture's reads will take: its interpolation, its waits
 for the submit thread and for the GPU's slot fences (2 pictures in flight at most), at the GPU's
 measured time a picture, and its own reads (`port/platform/pace_policy.h` (`pace_rt_further_ask`,
@@ -798,13 +1055,63 @@ stage's first textures, a burst of slow pictures) is answered in proportion to i
   widening, so the slack is `period - (step + 2 ms + widening)` and the next pictures are held
   that much earlier; the widening falls an eighth a step (gone under 1 us), so a 15 ms miss's
   widening is under 2 ms after 17 steps.
-- Only the third such miss within 300 steps (`PACE_STEP_MISS_WINDOW`) plans the whole period, the
-  rule before it (the reads by the next step's due time), for 120 steps; a further fall-back
-  doubles it, to 480 at most; 300 steps without a miss over the floor halve it, then forget it.
+- A miss over the floor counts toward the back-off only when it was the plan's doing. It is judged
+  two steps after its own (`PACE_STEP_JUDGE_AFTER` + 1), once the GPU's records of the pictures
+  around it are in (a record comes when its frame slot is used again, two pictures later;
+  `pace_step_est_gpu`, from `window_host.c`'s `perf_drain`). If one of the records that came from 3
+  steps before its step to 1 step after it (`PACE_STEP_JUDGE_BEFORE`, `PACE_STEP_JUDGE_AFTER`) took
+  more than 7/4 of the median of the 8 records before it (the GPU's time a picture the rule plans
+  the slot fences by), it is an outlier miss: a picture the GPU took far longer than the ones around
+  it on the same scene, which no plan from typical times can foresee. It is not counted, and its
+  widening of the margin is taken back. Otherwise it counts as before. The 7/4 lies between a real
+  rise in the picture time (20 ms after 13.5 is 1.48x, and it moves the median within about 5
+  records) and the slow pictures of the owner's phone log on the old bridge (26-39 ms against a
+  median of 13.5: 1.9x and more).
+- Only the third counted miss within 300 steps (`PACE_STEP_MISS_WINDOW`) plans the whole period,
+  the rule before it (the reads by the next step's due time), and for 120 steps at most
+  (`PACE_STEP_BACKOFF_STEPS`). The back-off ends on evidence before that. While backed off, the
+  first further present asked for each game frame (the one the back-off holds) is also judged by
+  the normal plan, with the same reads, GPU time and margins (`pace_step_normal_fits`). Once that
+  picture would have fitted for half a second of frames in a row (`PACE_STEP_FIT_NS`, counted in
+  the game's frames: 15 at 30 a second, `pace_step_fit_frames`), the back-off ends
+  (`pace_step_est_frame`). A frame whose picture would not have fitted (the normal plan holds it
+  too, or the picture in progress ran past its estimate) starts the run again, and so does a
+  counted miss. So pictures that do not fit two a frame keep it to its limit, and the rate floats
+  with the picture time either way. Only the frame's first ask is judged. A later ask of the same
+  frame comes only because the first was held, after the hold has drained the GPU, a state the
+  normal plan never reaches. The model's sustained 20 ms overload ended 27 back-offs in 30 s by such
+  asks, each followed by new misses, at 1.3 % fewer pictures than before.
 
-So a wrong estimate costs one late step and a few steps of a wider margin, and a load that keeps
-the pictures' misses coming costs 2, 4, then 8 seconds of the strict rule at most, never the state
-of steps 40 ms late with the sound held back. A phone's log is why: with every miss of the
+Before this, every miss over the floor counted, and the back-off lasted 120 steps, doubled by
+each further one up to 480 (8 s) and halved by 300 steps without one. On the owner's phone on the
+old bridge (stage 6, the render thread on the mid cores) that turned a few misses into 8 s
+at 48 presented fps between stretches at 59: three back-offs of 480 steps covered 590, 32 and 394
+of three blocks' 600 steps. Some of those misses came with single GPU pictures at 26-39 ms where
+the median was 13.5, every pass slower by the same factor, on an unchanged scene
+(`build-host/tmp/v0115/design/BRIDGE_STABILITY.md`). Now a wrong estimate costs one late step and a
+few steps of a wider margin, a slow picture of the GPU's costs its own lateness, and a load that
+keeps the plan's misses coming costs at most 2 s of the strict rule at a time, about half a second
+once the pictures fit again. It is never the state of steps 40 ms late with the sound held back.
+The model (`pace_loop_test` `testBackoffEvidence`; vsync off, uncapped, a 120 Hz mailbox, a 4.5 ms
+step, 6 ms reads) gives these presents in 10 s:
+
+| GPU time a picture | 9 ms | 12 ms | 13.5 ms | 17 ms | 20 ms | 25 ms |
+|---|---|---|---|---|---|---|
+| presents (the GPU makes) | 1080 (1112) | 835 (834) | 743 (741) | 590 (588) | 502 (500) | 401 (400) |
+| steps at the whole period (the back-off before) | 0 (0) | 0 (0) | 0 (0) | 121 (241) | 0 (0) | 124 (484) |
+
+The other cells of the model:
+- 13.5 ms with one picture in 20 at 2.5x: 6896 presents in 100 s, what those pictures cost (6898),
+  with no back-off. The back-off before gave 6052, with 5664 of the 6000 steps strict.
+- Three misses the plan made: one back-off, ended after 29 steps.
+- 20 ms pictures for 2 s, then 13.5 ms: the back-off ended 38 steps (0.63 s) after the overload,
+  where the back-off before held 83 steps.
+- 20 ms pictures from then on: every back-off ends at its limit, with the GPU's rate.
+- A GPU varying from 9.1 to 19.4 ms around 13.5: 2751 presents in 40 s, where the back-off before
+  gave 2529.
+
+In every cell the game's clock is within a refresh of where it was with the back-off before. A
+phone's log is why there is a floor and a count at all: with every miss of the
 pictures' doubling the strict plan up to 1920 steps, misses of 0.0-0.6 ms among them, 478-600 of
 every block's 600 steps ran the rule before at 30-41 presented fps where the GPU made 34-45. The
 model at that phone's numbers (a 4.5 ms step, 13 ms reads,
@@ -822,13 +1129,29 @@ nothing (`pace_loop_test` `testBackoffCause`). The 10 s line's `game thread:` cl
 holds (`would have made the step miss its period`), the steps started late by the pictures (with
 the longest) and the steps that missed their period: `N (P the pictures': S under 2 ms, W widened
 the margin, B the third in 300 steps; G the game's own; latest L ms past it; Y steps planned at the
-whole period after the pictures')`. Each miss names what it did (each first 8, then every 100th):
+whole period after the pictures')`. The widened ones are followed by `(B counted
+toward the back-off, C outliers at X ms against a typical Y ms)`, X being the block's slowest
+outlier picture, and the steps at the whole period by `(back-offs ended: E by the pictures between
+frames fitting, M at the limit of 120 steps)`. Each miss names what it did (each first 8, then
+every 100th):
 `window: step rule: a miss the pictures caused under 2 ms (late by L ms, R ms of it waiting for a
 picture, P ms the presents ran past the step's start): inside the rule's margin, nothing changed;
 ...`, `window: step rule: the margin widened by L ms to W ms after a miss the pictures caused (...;
-K of the pictures' over 2 ms in the last 300 steps): ...`, `window: step rule: back-off N steps
-after the third miss the pictures caused within 300 steps (...)` and `window: the game step missed
-its period by ... the game's own time, not the pictures' ...`.
+K counted toward the back-off in the last 300 steps): ...; whether it counts is judged in 2 steps,
+by the GPU's times of the pictures around it; ...` and `window: the game step missed its period by
+... the game's own time, not the pictures' ...`. What each judging did has its own line:
+`window: step rule: an outlier miss, not counted toward the back-off: the miss 2 steps ago (late by
+L ms) came with a picture the GPU took X ms against a typical Y ms (...)`, `window: step rule: the
+miss 2 steps ago (late by L ms) counted toward the back-off (the GPU's longest picture around it X
+ms against a typical Y ms: no outlier); K counted in the last 300 steps (the third begins it)`,
+`window: step rule: back-off of at most 120 steps after the third miss the pictures caused within
+300 steps, each counted (no outlier picture around it): 2 steps ago late by L ms (the GPU's longest
+picture around it X ms against a typical Y ms), ...: the pictures between frames planned at the
+whole period until a frame's picture between frames would have fitted the normal plan 15 frames in
+a row; ...`, and its end, `window: step rule: back-off ended after N steps: the pictures between
+frames fitted in 15 consecutive frames (half a second of 33.4 ms frames); ...` or `window: step
+rule: back-off ended at its limit of 120 steps (the pictures between frames fitted in the last K
+consecutive frames of the 15 needed); ...`.
 
 The rule is a rate requirement ([Pacing](#pacing)): `pace_loop_test` (`testStepRule`) asserts the
 presents in 10 s for 300 game frames by the render thread's reads, at a uniform 4.5 ms step with
@@ -868,7 +1191,7 @@ picture, so the render thread's plan gives it as 0 and says the thread is on bes
 the picture before's fence again: a phone at the Original preset (512x448, the GPU 14.8 ms a
 picture, the reads 8.7 ms, a 3.4 ms closing step, the presents waiting 8.4 ms at the longest)
 predicted it in 595 of 770 asks, held 540 and showed 45.6 presented fps, the Enhanced preset at
-848x448 45.5. The model of those blocks gives 46.0 / 45.1 with that reading and 67.1 / 65.3 with
+848x448 45.5. The model of those blocks gives 46.0 / 45.1 with that reading and 67.1 / 65.7 with
 the thread on, the GPU's own 67.6 / 68.5 (63.3 at the Original preset with the GPU's time
 alternating 21 / 8.6 ms a picture, as that phone's slow replay lines show), 54.5 at 1696x896
 (the GPU's 56.2) and 43.1 / 45.8 / 33.9 at the native blocks above (`pace_loop_test` `testRc13`;
@@ -909,7 +1232,7 @@ on (...): ..., the present's wait the submit thread's (none held for it)`, and i
 thread's 10 s line `0 while the presents waited for the display or the GPU`.
 
 **The decision trace.** Each further present the rule holds is traced in the log, the first 8 of
-a 10 s block and then every 100th, with every input and intermediate of `pace_rt_step_miss`
+the run and then every 100th (`hold N` is still its number in the block; the block's summary line counts them all), with every input and intermediate of `pace_rt_step_miss`
 (`pace_rt_step_trace`, `PaceRtTrace`, `pace_rt_trace_text`), every time against the next step's
 due time:
 `window: step rule: held (hold 3 in this 10 s block): asked 7.0 ms before the next step's due
@@ -931,6 +1254,85 @@ ended by the measured reads a, the interpolation b, the submit thread c, the GPU
 the presents waited half a refresh or more in K asks (the fence of the picture before predicted
 in J...); the asks' means: ...`, the inputs' means over the asks. So a reporter's log says which
 test held each picture, by how much, and which wait set it.
+
+**Asked with the render thread idle.** With the render thread on, on the timer path (every
+mode but the vsync lock and Frame rate Original), a further present is asked of the rule only
+while no picture is in progress (`port/platform/pace_policy.h` (`pace_rt_fill`,
+`PACE_FILL_DEFAULT`), `port/platform/window_present.c` (`window_present_pace`)). With a picture
+in progress the pace waits for the render thread's jobs to end (`ico_render_thread_wait_idle`, at
+most to the step's deadline: not idle by then, no further present that step) and asks again, so
+the rule plans a post at the time it is made and the hand-over never waits in its drain. Before
+this the rule planned the post at the picture in progress's typical whole job, and with the frame
+slots' wait ahead (`rd_thread.c` `slotAhead`: a picture's job ends by waiting for the next
+picture's frame slot, the GPU's end of the picture before it) that job is the GPU's time when the
+GPU is full and the reads alone when a hold drained it: on the owner's Pixel 10 Pro Fold in the
+opening (its log in `build-host/tmp/v0115/evidence/`, the second one of the day; 120 Hz, vsync
+off, uncapped, a GPU of 20.5-22.7 ms a picture) the typical job
+was 19-23 ms, a picture was planned to start 2.9 ms past the next step's due time where the
+pipe's fence said its slot was free 3.7 ms before it (that log's :814), and the presents ran up
+to 12.7 ms past a step's start when a job ran longer (:820). Those misses began the back-offs:
+98 to 290 of a block's 600 steps planned at the whole period (:769-:1340); the block with 98
+made 42.2 presented fps with the GPU busy 94 % of the time (its rate 45), the one with 290 made
+35.8 at 78 %. The parts:
+- The pipe at an ask with the render thread idle (`pace_rt_pipe_idle`): what has ended is not
+  predicted later. The picture before's reads ended with its job; with the slot ahead, a job that
+  ended by its wait (it blocked 0.2 ms or more, `ICO_RT_FENCE_WAIT_NS`) sets the GPU's end of the
+  picture before it to that time and the next one's to at least a GPU picture later
+  (`IcoRtPlan.endNs`, `byFence`; `rd_thread_take_ahead_ns`). The pipe predicts by typical times
+  and drifts: the log's :853 held a picture by the submit thread free at +1.7 ms with the render
+  thread idle.
+- The pipe's GPU time a picture is the larger of the 8 records' median and their mean
+  (`pace_rt_fill_gpu_ns`): a full GPU makes its pictures at the mean, and the phone's ran over the
+  median (:884: median 20.5 ms, mean 21.9, worst 37).
+- With the slot ahead (`PaceRtAsk.slotAhead`, `rd_thread_slot_ahead_on`) the further picture's job
+  is planned to end at the later of its reads' end and the GPU's end of the picture before it, at
+  the GPU's typical time (`PaceStepEst.gpuTyp`), or at its longest lately (`pace_rt_gpu_long`,
+  falling a 32nd of the way a record) when a frame's own pictures fill the GPU (two periods
+  shorter than the typical picture and a slow picture's excess). A new frame's present waits for
+  that job, and the next new frame's for the GPU's end of the further picture at its longest
+  lately; the steps between frames after them must start within their slack, else the further
+  present is held (`PACE_RT_TEST_GPU`). A GPU nearly full with the frames' own pictures otherwise
+  carries a further picture into the frames after it and the next slow GPU picture lands on a
+  step.
+- The guard against a further present past the deadline reads the hand-over's own time, less its
+  drain (`WindowPres.handCost`).
+
+The model (`pace_loop_test` `testFill`: the opening's load, a closing step of 3.5-5.8 ms, the
+step between 0.3-0.7 ms with no renderer call, reads with a deviation of 2.7 ms of which 3 ms the
+interpolation, the submit thread's job 10 ms, the GPU starting 5 ms into it, the slot ahead, 100 s
+on a 120 Hz mailbox, the GPU as the phone's: a mean 6 % over the median, at most 1.47 times it
+in a second and 1.76 times it once in 200 pictures) gives these presented fps, now (before):
+
+| GPU a picture | reads 6 ms | 9 ms | 12 ms | 15 ms |
+|---|---|---|---|---|
+| 13 ms | 70.5 (70.7) | 66.2 (64.0) | 59.6 (59.2) | 52.3 (51.9) |
+| 17 ms | 55.1 (55.5) | 54.2 (54.4) | 52.0 (51.1) | 47.0 (44.9) |
+| 21 ms | 44.5 (45.0) | 44.0 (44.2) | 42.9 (42.1) | 40.5 (37.2) |
+| 25 ms | 37.3 (37.4) | 36.7 (36.7) | 35.3 (35.1) | 31.1 (32.7) |
+| 30 ms | 31.2 (31.5) | 30.9 (31.4) | 30.4 (30.9) | 30.0 (30.2) |
+| 40 ms | 23.7 (23.7) | 23.7 (23.7) | 23.7 (23.7) | 23.7 (23.7) |
+
+At 21 ms and 9 ms reads the GPU is busy 98 % of the time either way; the steps planned at the
+whole period go from 960 to 0 in 100 s, the misses over the floor from 23 to 0 and the latest step
+start from 18.8 to 13.2 ms. Over the model's grid up to 30 ms (both displays, a steady and the
+phone's GPU) the misses over the floor go from 534 to 161 and the steps at the whole period from
+11637 to 216, and the latest start is never later than before (0.5 ms of rounding). The model
+reaches the GPU's rate before too at 9 ms reads; it does not reproduce the phone's 36-42 fps,
+which came with the back-offs above. Where it gives fewer pictures: 25 ms with 15 ms reads
+(31.1 against 32.7, the GPU-full plan), 30 ms (up to 0.5 fewer), 6 ms reads (up to 0.5 fewer);
+40 ms is unchanged. A steady GPU at 21 ms with 15 ms reads gives 44.5 where the rule before gave
+39.8. The 60 Hz mailbox gives the same within 1.6 fps a cell. The 10 s sum line (`window: step
+rule: in 10 s ...`) ends with `; N more held by the GPU's ends behind the next new frames'
+pictures, by X ms on average` and `; asked with the render thread idle: W waits for it before an
+ask (X ms on average; L not idle by the step's deadline, none asked), the pipe's ends corrected
+by what had ended in K asks (Y ms on average)`, and a hold by the GPU test has its trace `...; its
+job would end at +A (a new frame's picture after it waits for that), the GPU end it at +B at its
+longest lately (G ms a picture; ...): the steps between frames after them may start by +C and +D;
+held: past them by E ms` (`pace_rt_trace_text`). A build with `-DPACE_FILL_DEFAULT=0` asks as
+before. On a phone the check is the block's `the GPU's work X ms a picture of the Y ms between
+presents (Z %)` (93 % or more where the GPU is the limit), the presented fps near `1000 /` the
+GPU's mean, the game thread's `N steps planned at the whole period` near 0 and its `steps that
+missed their period` and `latest` no higher than before.
 
 **Vsync off, uncapped.** With vsync off and the frame rate uncapped (the timer path, no FIFO lock,
 the render thread on: `pace_rt_as_made`) the pictures go as they are made, as on a PC with vsync
@@ -976,7 +1378,15 @@ alpha stays the grid's.
   picture is made: its display wait is its wait for the render thread's picture before it
   (`rd_submit_waited_ns`: that one's walk, acquire and present, FIFO's full queue), its GPU wait
   the fence waits counted by then, its cost the game thread's time in it; the pacing rules read them as before
-  (`pace_loop`'s `testAsyncLock` and `testAsyncRates`). A backend whose fence waits
+  (`pace_loop`'s `testAsyncLock` and `testAsyncRates`). With no submit thread (Direct3D 11) the
+  wait for room in the present queue (the frame latency wait the next acquire would make) is made
+  at the end of the picture before, after its present, outside its reads
+  ([PLATFORM.md](PLATFORM.md#the-render-thread), the display's wait ahead): the game's step no
+  longer waits through it as a read wait, which nothing excuses; what is left of it when the next
+  present is posted is that present's wait for the render thread, the display's wait above
+  (`pace_loop`'s `testRoomOffGame`: at 60 Hz about 14 ms a picture on the render thread, no read
+  wait in the step, the period kept; made in the acquire instead, about 4.2 ms of every step's
+  time is the display's as read waits). A backend whose fence waits
   hold the display's wait sets `RhiStats.fenceWaitsHoldDisplay` and the whole wait is the
   display's (`pace_display_wait`): OpenGL, whose swap returns at once while the driver waits for
   FIFO's queue inside the next `glClientWaitSync` (issue 126: a GTX 750 Ti under the n = 1 lock
@@ -1270,10 +1680,33 @@ in output pixels), the deferred text (Enhanced: the frame's text items laid out 
 the top layer (the touch controls); `rd_present_blank` draws the overlay alone (the start-up
 screens). With supersampling, or without anti-aliasing when a scaled scene has more texels than the
 box has pixels on both axes (never at scale 1), `aa_reduce_ps` box-averages DISPLAY to the box
-(`reduceRecord`); with an effects program
+(`reduceRecord`); with Upscaling: FSR 1.0 and fewer texels than the box has pixels on both axes,
+EASU and RCAS draw it at the box's size first ([FSR 1.0 upscaling](#fsr-10-upscaling)); with an effects program
 and `effects_depth` `blit_depth_ps` writes the scene's depth beside it (`port/render/rd_present.c`).
 The UI box is the 4:3 part of the presentation box (`port/render/rd_present.c` (`rd_ui_box_of`)).
-Movies draw their own box ([FMV.md](FMV.md#the-picture-on-screen)).
+Movies draw their own box ([FMV.md](FMV.md#the-picture-on-screen)). Where the present from SCENE is on (off by
+default: [RENDER_POST.md](RENDER_POST.md#the-present-from-scene-off-by-default-until-measured)) and
+the replay left the reduction undrawn, the box blit samples SCENE through the reduction's steps
+(`blit_scene_ps`) instead of DISPLAY; any of the steps above that reads DISPLAY itself (the CRT
+filter, Downsampling, the doubled lines, the effects depth, a capture, the reduce, FSR 1.0) has
+DISPLAY drawn from SCENE first (`rd__present_scene_present_why`, `rd__present_scene_draw`).
+
+**The colour adjustment.** Options > Picture's Gamma, Picture brightness, Contrast and Saturation
+(`RdSettings.toneGamma`, `toneBrightness`, `toneContrast`, `toneSaturation`, 1..100) are PCSX2's
+shade boost: its arithmetic (`bin/resources/shaders/dx11/shadeboost.fx`
+`ContrastSaturationBrightness`, luma weights 0.2125, 0.7154, 0.0721) with each value / 50 as its
+factor (`pcsx2/GS/Renderers/Common/GSDevice.cpp` `GSDevice::ShadeBoost`), so 50 is the identity; the
+one deviation is a 1e-6 floor before the power, where a contrast above 50 takes a dark channel below
+0 (`port/shaders/tone.hlsli`). It acts on the finished picture in the box blit: `blit_tone_ps`
+(`blit_depth_tone_ps` with the effects depth) in place of `blit_ps`, the factors in `DrawCB.param`,
+the bars the cleared black (`port/render/rd_present.c` (`blit`, `depthBlit`), `port/render/rd_tone.c`).
+The line doubling, the CRT filter's crop and overlay copies (`rd__present_blit`), the turn into a
+pre-rotated swapchain and the MSAA resolve keep `blit_ps`. While every row is 50 (or 0, a zeroed
+`RdSettings`) `rd__tone_active` is false and the present is the one without the rows byte for byte.
+The deferred text and the overlay draw after the box blit and are not adjusted; the movies draw
+their own box and are not adjusted either. The four keys are made at start-up on both outputs
+(`rd__enumerate_reachable_screen`). Log: `present: colour adjustment gamma G, brightness B, contrast
+C, saturation S (50 = the game's picture)` at start-up when on and at every change.
 
 **The reduction stays a pass of its own.** Even where the box is the window's size (the phone's
 Resolution Auto with Full pixel: DISPLAY 2366 texels, the window 2364 pixels), the present is not a
@@ -1297,6 +1730,10 @@ frame begun by the time it was asked (`g_rd.frameCounter` then; the present's fr
 CRT filter's box under the filter) and hands the RGBA to the caller, which frees it; a second
 request, a failed copy or the shutdown tell the caller none. `rd_present_box_size` is the last
 present's box size, the picture's shape on screen.
+After the captures' copy and before the overlay, the title's icon capture's hold
+(`rd_icon_hold`, `port/render/rd_icon_hold.c`) draws the last picture presented before the icon
+pass over a present of a pass frame, so the shot reads the pass while the screen keeps the title
+([APP_ICON.md](APP_ICON.md#the-capture-on-the-title)); without a hold nothing there runs.
 
 **Present modes.** The window asks for mailbox through `rhi_prefer_mailbox`; what each backend then
 takes is [RHI.md](RHI.md#vulkan)'s (Vulkan: mailbox when preferred, FIFO latest ready with
@@ -1305,6 +1742,78 @@ takes is [RHI.md](RHI.md#vulkan)'s (Vulkan: mailbox when preferred, FIFO latest 
 default 2, puts the wait for the display in the replay's "acquire" phase). `ICO_VK_PRESENT_WAIT=1`
 gives the lock its SHOWN clock. A vsync change idles the device and rebuilds the swapchain
 (`port/render/rd_present.c` (`rd__apply_display`)).
+
+### The turned swapchain
+
+An Android phone held sideways shows the game's surface turned: the surface's current transform is
+ROTATE_90 (or 270 held the other way round; issue 179's Mali-G52 and issue 188's PowerVR logs:
+`surface transform 0x2 (offered 0x1ff)`), its extent the window's own, landscape (1612x720,
+2400x1080). A swapchain made with the identity transform has the compositor turn every image on
+the GPU before showing it, work that preempts the game's own (Google,
+"Handling device orientation efficiently in Vulkan with pre-rotation",
+android-developers.googleblog.com, February 2020: 1-3 ms a frame and a 40 % higher GPU clock on a
+Pixel 4 XL; Arm's `surface_rotation` sample the same). So the swapchain is made with the current
+transform as its preTransform and its images the extent turned (720x1612), as the spec asks of a
+pre-rotated swapchain, and the compositor shows each image as it is (`port/rhi/vk/vk_swapchain.c`
+(`vkr_swapchain_create`), the choice `vkr_prerotate_turns` in `port/rhi/vk/vk_present_mode.c`).
+The renderer draws everything it drew into the backbuffer (the box blit, the CRT filter, the
+deferred text, the overlay with the touch controls and the frame rate corner, the films, the blank
+start-up frames) into a texture of the window's own size and orientation, exactly as before, and
+one last pass turns that texture into the swapchain image (`port/render/rd_prerotate.c`:
+`blit_vs` with `DrawCB.aux1.w` the quarter turns, the full-screen triangle reading the source at
+the turned position, one texel a pixel, nearest, the bytes unchanged). `rhi_swapchain_size` stays
+the window's size, so every target, every dump, the box, the touch coordinates (window pixels) and
+the captures (F12's `-present.png`, photo mode and the save state's picture, taken from that
+texture) are as they were; the picture on the screen is the same, and only the image the
+compositor gets is turned.
+
+The turn, from the spec (`VK_SURFACE_TRANSFORM_ROTATE_90_BIT_KHR`: the image content is rotated
+90 degrees clockwise), in the image's 0..1 position (U, V), V down, for the picture's (u, v): 90
+(V, 1 - U), the picture's top-left at the image's top-right; 180 (1 - U, 1 - V); 270 (1 - V, U).
+Android's present reports suboptimal whenever the swapchain's preTransform is not the surface's
+transform (AOSP `frameworks/native/vulkan/libvulkan/swapchain.cpp`, `QueuePresentKHR`): with
+identity on a turned surface at every present, which changes nothing and is ignored as before;
+pre-rotated, when the phone is turned over (90 to 270), and then the swapchain is made again in the
+new turn (`vkr_swap_differs`; the surface poll asks the same).
+
+Where it does not apply: identity and the mirrored transforms (the desktop's surfaces are always
+identity), a turn the surface does not offer, a quarter turn whose images would pass the surface's
+largest image (Android's is 4096 x 4096 at least), and `[dev] prerotate = false`
+(`ICO_VK_PREROTATE=0`), the escape, which keeps identity and the compositor's turn
+([CONFIG.md](CONFIG.md)). Direct3D and OpenGL never turn (`rhi_swapchain_rotation` is 0).
+
+The cost: the picture is drawn into its own texture and read once more by the turn, a full-screen
+pass of the window's size (about 2 x 10 MB of memory traffic a picture at 2400x1080) and one more
+texture of the window's size. It replaces the compositor's own full-screen turn of every image;
+whether the trade pays on a given phone (a compositor that turns in the display hardware costs
+nothing, and there the extra pass is a cost) shows in the GPU span and the frame rate of the 10 s
+lines against a run with `[dev] prerotate = false`.
+
+The lines: at a swapchain made in a new turn `rhi_vk: swapchain 2400x1080 pre-rotated 90 (the
+surface's transform 0x2; the compositor no longer rotates): images 1080x2400, the present turns
+the picture into them (turn change 1)`, back to identity
+`rhi_vk: swapchain WxH no longer pre-rotated (...)`; a swapchain made again for a turn alone `rhi_vk: the surface turned (90 to 270
+degrees) at a suboptimal present: the swapchain made again (N times so far)` (the first 8, then
+every 100th); the renderer's first picture in a turn `rd: present: the 2400x1080 picture turned 90
+degrees into the swapchain's 1080x2400 images in one pass (pre-rotated: the compositor shows them
+as they are)`; with the escape, the old `rhi_vk: surface transform 0x2 (offered 0x1ff): presenting
+with identity, the compositor rotates ([dev] prerotate = false, ICO_VK_PREROTATE=0)`. When the
+texture before the turn cannot be made after an image was acquired, the image is cleared at its
+own size and presented (`rd__prerotate_blank`: an acquired image is never left unpresented, the
+films' rule), and `rd: present: no WxH texture for the picture before the turn; a blank image is
+presented in its place (N times)` says so (the first 8, then every 100th).
+
+**The twin.** A headless device has no swapchain to turn, so the tests use a twin: under
+`ICO_VK_FAKE_TRANSFORM=90`, `180` or `270` a headless Vulkan device answers that turn
+(`rhi_swapchain_rotation`), the present draws its picture as always and then turns it, in the same
+pass, into a texture of the turned size, and `rd_read_presented` reads that texture back and turns
+it back on the CPU by the table above (`rd__prerotate_twin_read`); `rd_replay_tool_prerotate`
+holds the result to the identity present byte for byte ([Tests](#tests)). The twin turns back by
+the shader's own table, so it cannot tell a 90 from a 270 swapped on both sides; the direction
+itself is pinned in `shaders_pixel` (`checkTurns` in `port/shaders/test/shaders_pixel_test.c`):
+`blit_vs` turning a 3x2 picture 90, 180 and 270 degrees against images written out by hand from
+the spec's words and Google's sample (the picture's top-left at the image's top-right at 90).
+Only a phone shows whether the spec's reading is the device's.
 
 ### The FIFO fallback
 
@@ -1319,9 +1828,19 @@ the window's side, called from `port/platform/window_host.c` (`video_settings`, 
 
 - A block is a present that spent 200 ms or more in the driver's present call (the replay record's
   present time, `present_blocked`). Three within 30 s switch, once a run, when the vsync option is
-  Off, the swapchain is in mailbox mode, the backend is Vulkan and the driver is not Mesa's (its text
-  names neither `Mesa` nor `turnip`: Turnip on the same tablet showed a few blocks of 230-238 ms in a whole
-  run) (`ico_present_fallback_note`, `ico_present_fallback_driver_eligible`).
+  Off, the swapchain is in mailbox mode, the backend is Vulkan and the driver is Qualcomm's own (vendor id `0x5143`, text naming neither
+  `Mesa` nor `turnip`: Turnip on the same tablet showed a few blocks of 230-238 ms in a whole run)
+  (`ico_present_fallback_note`; the window's `gate()` asks `ico_present_fallback_gate`, which
+  holds the whole decision without the window, `ico_present_fallback_qualcomm_own` in it). Any
+  other driver answers
+  `GATE_OTHER`: the blocks are counted, mailbox is kept, and the window writes `window: present
+  blocked 3 times (204-240 ms) in 8 s on ADAPTER (DRIVER) under mailbox: mailbox kept (presents go
+  FIFO by themselves only on Qualcomm's own driver, where the blocks were measured; [dev]
+  present_fallback = fifo asks for FIFO here)` once (`ico_present_fallback_other_line`), with no
+  `toward FIFO` words on the 10 s lines and no `FIFO fallback armed` on the start's line. A Mali-G52
+  (issue 179) took the switch after three blocks of 204-240 ms and its present calls over
+  100 ms went from 1-4 to 12-23 a 10 s block (blocks of 285-308 ms inside `vkQueuePresentKHR`), and
+  the switch's evidence base, issue 123's Qualcomm logs, had the stall continue under FIFO.
 - The switch line is `window: present blocked 3 times (376-382 ms) in 14 s on ADAPTER (DRIVER) under
   mailbox (vsync off, 6 images): presents now FIFO for this run ([dev] present_fallback=off keeps
   mailbox)`. At the step's end the backend's flag is set (`rhi_present_fifo_fallback`), the
@@ -1336,13 +1855,181 @@ the window's side, called from `port/platform/window_host.c` (`video_settings`, 
   the game's own 30 pictures a second stay, and vsync off keeps the paced allowance whatever the
   present mode (`pace_budget_paced_mode`; `pace_policy_test` (`testBudgetFifo120`)).
 - The start's `window: present mode ...` line and the summary end `, FIFO fallback armed` where the
-  switch can be taken, `, FIFO fallback taken after N blocks` once taken, `, FIFO fallback set by
+  switch can be taken (Qualcomm's own driver only), `, FIFO fallback taken after N blocks` once taken, `, FIFO fallback set by
   [dev] present_fallback=fifo` under that value.
-- `[dev] present_fallback` ([CONFIG.md](CONFIG.md#dev)): `auto` (the default) as above; `off` keeps
+- `[dev] present_fallback` ([CONFIG.md](CONFIG.md#dev)): `auto` (the default) as above, and FIFO from
+  the start on Qualcomm's own driver (below); on other drivers `auto` keeps mailbox and `fifo` is the
+  A/B; `off` keeps
   mailbox and writes `window: present blocked 3 times over 200 ms in N s under mailbox: mailbox kept
   ([dev] present_fallback=off)` once; `fifo` presents FIFO from the start.
 
-The first two or three stutters (20 to 30 s) still happen before the switch.
+The first two or three stutters (20 to 30 s) still happen before the switch, except on Qualcomm's
+own driver, which starts FIFO:
+
+- **FIFO from the start on Qualcomm's own driver (Android).** With `[dev] present_fallback` unset
+  or `auto`, on Android only (`ico_present_fallback_start_asked`; Windows on Snapdragon reports the
+  same vendor id with Qualcomm's own Vulkan driver, and its surface offers immediate mode, so Vsync
+  Off stays immediate there), vsync off, the Vulkan backend and `vendorId` 0x5143 with a driver text naming neither `Mesa` nor
+  `turnip` (`ico_present_fallback_qualcomm_own`, `ico_present_fallback_start`), the first swapchain
+  is FIFO at the surface's fewest images, as the fallback's own swapchain is, so no mailbox to FIFO
+  switch happens mid-run and the GPU draws nothing that is never shown. The window hands the
+  rhi the question before the device exists (`window_fifo_set` -> `rhi_present_fifo_start`); the
+  swapchain asks it with the device's ids when it is made (`vk_swapchain.c`), only with vsync off,
+  and its `rhi_vk: swapchain` line ends `, fifo from the start`. The start line is `window: present
+  fifo (Qualcomm's own driver: FIFO from the start; [dev] present_fallback = off keeps mailbox)`
+  once, before the `window: present mode fifo` line, and the summary's present word is `, FIFO from
+  the start (Qualcomm's own driver)`. `off` keeps mailbox for the whole run (the A/B); `fifo` is
+  unchanged; every other device and vsync on are unchanged. The gate sees a FIFO swapchain, so no
+  switch is counted or taken after it. The reason is Qualcomm's Adreno best-practices guide (FIFO
+  with a minimum image count of 3; mailbox "can sometimes help with frame pacing/latency, but often
+  can cost significant battery and generate significant heat for no benefit"). It is not the fix
+  for issue 123: the stalls continued under FIFO in three logs. Pacing is the fallback's after its
+  switch: vsync off keeps the uncapped rules and the paced allowance whatever the present mode
+  (`pace_rt_as_made`, `pace_budget_paced_mode`; `pace_policy_test` (`testFifoFromStart`)).
+
+### The refresh rate and the frame rate pin
+
+Issue 123's log (Xiaomi Pad 6S Pro, 144 Hz LTPO panel, Qualcomm's own driver) shows a present blocking
+344 to 365 ms five times in 150 s under mailbox and under the FIFO fallback alike, with the GPU
+idle: not the GPU and not the present mode. What the log did not hold was the screen's refresh
+rate, so the next log carries it (`port/platform/display_rate.h`, `window_display_rate.c`):
+
+- `window: display refresh: 144.00 Hz, 3048x2032 "<display>" (run time 85.2 s, N changes this run)`
+  at the start and in every 10 s block (SDL's `SDL_GetCurrentDisplayMode`; the rate from its
+  numerator and denominator where it gives them), `window: display refresh changed: A Hz -> B Hz,
+  WxH (run time T s, change N of this run)` for a change SDL announced
+  (`SDL_EVENT_DISPLAY_CURRENT_MODE_CHANGED`), and `window: display refresh changed without an event
+  from SDL: B Hz` for one no event announced. A change is more than 0.05 Hz. SDL posts the event
+  from its own thread (Android's Java thread), and `SDL_GetCurrentDisplayMode` and
+  `SDL_GetDisplayName` are main-thread calls, so the event watch only counts the events and keeps
+  the last one's run time; the 10 s block's poll on the main thread reads the mode and writes the
+  change's line with T the event's run time (`display_rate_poll`, pure; `display_rate_test`). The
+  line can come up to 10 s after the change; its run time is the change's.
+- `window: present calls: N timed (over 20 ms a, over 50 ms b, over 100 ms c, over 300 ms d), longest
+  M ms, total T ms` in every 10 s block, on every platform: each presented replay's present time
+  (the submit thread's own timing of its present call, `RdPerfRecord.presentMs`) in every row it
+  is over (`port/platform/present_hist.h`). The older `window: present blocked N times over 50 ms`
+  line and the first-8-then-every-100th `a present blocked` lines stay.
+- Android, 11 and later: while the Frame rate row is a number the window asks the system for that rate
+  as a fixed source (`window_frame_rate_pin`, from `video_settings`: `ANativeWindow_setFrameRateWithChangeStrategy`
+  with only-if-seamless, or `ANativeWindow_setFrameRate` where that is the only one the phone has;
+  both through `dlopen("libandroid.so")` and `dlsym`, so the APK keeps minSdk 29; the ANativeWindow
+  from `SDL_PROP_WINDOW_ANDROID_WINDOW_POINTER`). Original, `[dev] frame_rate_pin = off` and a rate
+  above 1000 ask for none and release an earlier ask; the window closing releases it. Uncapped asks
+  for the display's highest rate (the next item).
+  A seamless change only: a mode change that blinks the screen is not asked for. The decisions are
+  `display_pin_mode`, `display_pin_rate` and `display_pin_next` (pure; `display_rate_test`). The first
+  call says `window: frame rate pin: on ([dev] frame_rate_pin = auto); the device offers the call` (or
+  `does not offer`, or `(no native window from SDL)`), then one line each time the ask changes:
+  `window: frame rate pin: asked 60 Hz (fixed source; the Frame rate row is 60) with <call>:
+  returned 0` (`(refused)` after a return other than 0, tried again at the next change), and
+  `window: frame rate pin: released (the Frame rate row is Uncapped) with <call>: returned 0`.
+  The ask is a vote on the Surface: going to the background destroys the SurfaceView's surface and
+  the foreground brings a new native window with no vote. The pin keeps the native window it asked
+  on (`DisplayPin.surface`); a call with another one, or the pump's `resume_recheck` after the app
+  came back (`window_frame_rate_pin_resumed`: the pointer may be reused), forgets the ask
+  (`display_pin_surface`) and asks again: `window: frame rate pin: asked again for a new surface:
+  60 Hz (fixed source; the Frame rate row is 60) with <call>: returned 0`. A new surface with no
+  rate wanted asks and says nothing. Nothing runs on any other platform. It is a hint to the system's refresh rate governor: it does not
+  change the game's own pacing, and nothing about it is measured on a device yet.
+- Android, Uncapped: the owner's phone (Pixel 10 Pro Fold, a panel offering 60 and 120 Hz)
+  ran four Uncapped runs at 120 Hz twice and at 60 Hz twice (the `window: display refresh:` lines),
+  because Uncapped asked for nothing and the system chose; at 60 Hz Uncapped was capped at 60 (the
+  uncapped-under-mailbox gap is one refresh). Under Uncapped the window now asks for the highest rate
+  the display's own mode list offers at the current mode's size: `IcoActivity.displayModes`
+  (`Display.getMode()`'s physical width and height, then each `Display.getSupportedModes()` mode's
+  width, height and rate; `host_android.c` `ico_android_display_modes`, at most 64 modes read), the
+  rates of that size chosen by `display_top_rate` (rates within 0.05 Hz are one; 0, negative and
+  above 1000 Hz are not counted) and the rule by `display_pin_want` (pure; `display_rate_test`). No
+  rate is written anywhere: the list is read again at every call of the pin (the options applied,
+  SDL's display and mode events, a new size, the app coming back, a display report from the
+  activity) and in every 10 s block while the row is Uncapped. The ask is the numbered rows' call
+  with the same arguments: fixed source (the strongest vote the call has, as the numbered rows ask;
+  at the panel's top rate there is no multiple to confuse it with) and
+  `ANATIVEWINDOW_CHANGE_FRAME_RATE_ONLY_IF_SEAMLESS`, with the mode's own rate (119.88 is asked as
+  119.88; the state keeps whole Hz). It is made only with `ANativeWindow_setFrameRateWithChangeStrategy`
+  (Android 12, API 31): the NDK header says the plain call is the same with only-if-seamless, but that
+  sentence was written with API 31 and Android 11's own behaviour is not documented there, so
+  Android 11 keeps today's behaviour under Uncapped. Uncapped asks for none (today's behaviour) and says
+  why once per reason: `window: frame rate pin: Uncapped asks for no rate: <reason>; the system
+  chooses the refresh rate as before`, the reason one of no seamless-only call, `the display's modes
+  could not be read`, `the display lists no mode at the current mode's size WxH (N modes listed)`,
+  `the display offers one rate at WxH (60 Hz, N modes listed)`, and `the system refused the ask
+  (returned R), so it is not made again this run` (after the refused ask's own line). A new ask is
+  never made while the window has no input focus (`SDL_WINDOW_INPUT_FOCUS`; an ask already held is
+  kept): `window: frame rate pin: Uncapped's ask waits for the window's focus (no new ask while the
+  window has none)`; the 10 s block asks once the focus is back. The other guards are the numbered
+  rows': a native window from SDL and a device that offers the call. `[dev] frame_rate_pin = off`
+  turns Uncapped's ask off too (`display_pin_want` checks it before anything else). The ask's line:
+  `window: frame rate pin: asked 120 Hz (fixed source; the display's highest of 60, 120 at 1080x2364;
+  the Frame rate row is Uncapped) with ANativeWindow_setFrameRateWithChangeStrategy: returned 0`
+  (`asked again for a new surface: 120 Hz ...` after the app came back; more than 8 rates: `of N
+  rates, the highest 8: ...`). It is released exactly as the numbered rows' ask: Original, the window
+  closing, and the Surface's end in the background (the vote goes with the Surface; the foreground
+  asks again). The same rate for the other reason (the row 120, then Uncapped at a highest of 120) is
+  a new ask, so the line says which (`DisplayPin.uncapped`). The vsync lock never applies under
+  Uncapped (it needs a cap equal to the refresh), so nothing there changes. Where the highest rate is
+  the one the panel already runs at, nothing visible changes: the ask only keeps the system from
+  lowering it.
+- Android, the refresh the game reads: SDL's Android side passes the display's rate only from
+  `SDLSurface.surfaceChanged` (`mDisplay.getRefreshRate()` with the surface's size, SDL 3.4.18's
+  Java), and a panel that switches rates without a resize leaves SDL's current mode at the old rate:
+  no Android log in the evidence folders shows a `display refresh changed` line, including the
+  issue 211 phone that started at 120 Hz and asked for 60 (its present mode stayed mailbox: the lock
+  saw 120). So `IcoActivity` listens to `DisplayManager.DisplayListener.onDisplayChanged` while the
+  activity is visible (`startDisplayWatch` in `onStart`, `stopDisplayWatch` in `onStop`) and pushes
+  `Display.getRefreshRate()` when the display's rate or mode list changed (`nativeDisplayRate`,
+  `host_android.c` `ico_android_display_hz`, with the mode list's hash). The game paces by that rate
+  only while the Frame rate row is Uncapped (`display_refresh_pick`, pure; `display_rate_test`):
+  `window_refresh_ns` (`window_host.c`) and the refresh line take it over SDL's there
+  (`window_display_refresh_hz`), so under Uncapped the pacer's refresh period, the
+  uncapped-under-mailbox gap (`window_present.c`, `pace_present_gap`), the performance hints' target
+  (`window_perf_hint.c`, the gap) and the evenness line (`rd_even_line`) follow the panel: each reads
+  `window_refresh_ns` at its use, none keeps a copy. A number and Original keep SDL's rate, so the
+  vsync lock and the present mode are decided exactly as before the listener: at Android's default
+  (60 with vsync on) a phone whose panel the pin moves to 60 and a touch boost back to 120 would
+  otherwise flip the lock and remake the swapchain twice a touch. Under Uncapped a report cannot
+  flip either: the lock needs a cap above 0 (`pace_cap_equals_refresh`, `pace_policy.c`, false for a
+  cap of 0 or less), so `video_settings`' fifo is 0 and the mailbox choice does not read the
+  refresh. The pump does no more than ask the pin again after a report under Uncapped
+  (`window_display_rate_pump`: the mode list may have changed); it applies no video settings and
+  makes no swapchain. A report equal to the last one is not sent (`IcoActivity.sendDisplay`,
+  `Arrays.equals`) and one equal to the last one acted on does nothing (`display_report_new`: the
+  rate within 0.05 Hz and the list's hash). The pin sets the row before `video_settings` decides the
+  lock, so a change between Uncapped and a number decides on the new row's rate. The 10 s block writes
+  `window: display refresh changed: 60.00 Hz -> 120.00 Hz ...` at the report's run time under
+  Uncapped; a change of the row between Uncapped and a number can show as a change line too (the
+  rate read switches between the report and SDL's). Nothing about it is measured on a device yet.
+- Desktop (Windows, Linux, macOS) and iOS: no ask under any row (`window_frame_rate_pin` is empty
+  there); Uncapped presents as fast as the present mode allows (one a refresh under mailbox, back to
+  back with vsync off and an immediate mode), and SDL's display mode events keep the refresh current.
+  A desktop display does not change its refresh rate by itself the way a phone's governor does, and a
+  variable refresh display (the Steam Deck's, a VRR monitor) follows the presents; nothing there is
+  touched. iOS has no frame rate request in the port (no `CADisableMinimumFrameDurationOnPhone` in
+  `port/platform/ios/Info.plist.in`); whether a ProMotion iPhone holds the game at 60 Hz without it is
+  not checked here.
+
+- `window: present stalls: 1 over 250 ms in 10.0 s (340 ms at 120.00 Hz: the replay before began
+  33.4 ms earlier, the present held 253.3 ms past the replay's GPU span, GPU idle before it not
+  measured (the GPU clock restarted)); GPU clock restarts 1; GPU span 27.4 ms a replay (26.7-28.7
+  ms, band 25-30 ms; stalled replays 87.1 ms); display 120.00 Hz; GPU clock not readable` in every
+  10 s block from the run's first stall on, on every platform (`port/platform/present_stall_block.h`,
+  fed every record from `window_stall_after`, closed in `window_stall_gpu_block`). Per stall (a
+  present of 250 ms or more): its length, the display's rate as it popped (read, never asked:
+  `window_refresh_ns`), the CPU-side interval since the replay before began (`RdPerfRecord.startMs`;
+  it bounds the GPU's idle before the stall where the GPU's own counter cannot), the time the
+  present held past the replay's GPU span, and the GPU idle before it (or why not measured: the
+  clock restart of `rd_perf_gap_step_ex`). Then the block's GPU clock restarts (at a stall or not),
+  its GPU span over the replays that did not stall (mean, range, 5 ms band) against the stalled
+  spans, the display's rate at the block's end and the kernel driver's GPU clock where readable.
+  The blocks before the first stall write nothing and still count. At the window's close:
+  `window: present stalls this run: 7 over 250 ms in 3.3 min (2.1 a minute); 7 with the GPU clock
+  restarted, 1 after a CPU-side gap of 80 ms or more (6 under, 0 not known), held past the GPU span
+  248-262 ms; by display rate: 120.00 Hz 7 in 3.3 min (2.1 a minute); by the block's GPU span:
+  25-30 ms 7 in 3.0 min (2.3 a minute), ...` (`window_stall_run_summary`; the last part block joins
+  first; each stall counts at its own display rate, each block's time at the rate at its end).
+  What each figure decides is in [ANDROID_DIAGNOSTICS.md](ANDROID_DIAGNOSTICS.md#issue-123s-present-stalls-what-the-mechanisms-predict)
+  (`present_stall_block_test`).
 
 ### Downsampling
 
@@ -1362,6 +2049,312 @@ against the GS grid instead of the window: `perPx` is the scale, so 4x with SSAA
 SSAA2 draws 2x, one reduce for both. The display line ends its options with `, downsampled to original
 size` and is logged again when that changes. The replay tool's `--downsample` sets it, and `--stats`
 prints `present: downsample WxH -> wxh, window reduce off|WxH -> wxh` (`rd__last_present_reduce`).
+
+### FSR 1.0 upscaling
+
+`RdSettings.upscale` = `RD_UPSCALE_FSR1` (Options > Picture > Upscaling: FSR 1.0; `[video]
+upscaling = "fsr1"`, default `"off"`, kept outside the preset) runs AMD FidelityFX Super Resolution
+1.0 at the present: where the picture the box blit would stretch (DISPLAY, line-doubled or full
+height, after Downsampling when that ran) has fewer texels than the presentation box has pixels on
+both axes, its visible columns (the width less `sourceCrop` at each side) are drawn into a texture
+of the box's size by EASU (`fsr1_easu_ps`, AMD's edge-adaptive upscale; the crop through the
+viewport and offset of `FsrEasuConOffset`) and sharpened into a second by RCAS (`fsr1_rcas_ps`),
+which the box blit then draws one texel a pixel, nearest: the border mask, the mirror (a nearest
+flip, as after the window's reduce, so the effects depth flips with the colour), the colour
+adjustment, the deferred text, the capture and the overlay are as without it
+(`port/render/rd_present.c` (`rd__present_record`), `port/render/rd_fsr1.c` (`rd__fsr1_record`)).
+The step comes after the window's reduce: a picture with more texels than the box keeps the reduce
+(supersampling, a resolution above the window's), one with as many (the `window` resolution, the
+one-texel-a-pixel window of `snapWindow`) or a mixed case (more across, fewer down) the plain
+blit. Never under the CRT filter (it draws its own box from the PS2's pixels) and never at the
+`window` resolution (`rd__fsr1_apply`, from `rd__apply_display`). Off (or `RD_UPSCALE_FSR3`, the
+temporal upscaler's value, [below](#fsr-31-upscaling)) nothing here runs and the present is the one
+without the row byte for byte.
+
+**The sharpness.** `RdSettings.upscaleSharpness` (Options > Picture > Sharpness, 0..100 in tens,
+`[video] upscaling_sharpness`, default 80) is RCAS's stops of sharpness taken away,
+`2 (1 - s / 100)`: 100 is RCAS at its sharpest (0 stops), 80 is 0.4 stops, 0 is 2 stops. AMD
+specifies EASU for up to 2x a side (4x the area); past that on either axis (Resolution 1x on a
+1440p or 4K screen, the phone's Auto at 1x stretched 2.1-2.4x) RCAS takes half a stop more, so it
+does not sharpen the stretch's softness into edges (`rd__fsr1_stops`).
+
+**The shaders and the constants.** `port/shaders/fsr1.hlsl` supplies the callbacks AMD's headers
+ask for (`FsrEasuRF/GF/BF` the three gathers, `FsrRcasLoadF` a clamped `Load`) and includes
+`port/third_party/fsr1/ffx_a.h` and `ffx_fsr1.h`, unmodified, on the 32-bit path (`FSR_EASU_F`,
+`FSR_RCAS_F`, `FSR_RCAS_PASSTHROUGH_ALPHA`; no `A_HALF`: no 16-bit types, so SPIR-V 1.0 core and
+GLSL 4.30 hold it on every backend). Both entries run behind `blit_vs` with `IcoFsrCB` in the DrawCB
+slot ([SHADERS.md](SHADERS.md#files)); EASU's alpha is the input's, bilinear, at the pixel's
+position (EASU filters colour alone). The constants are computed on the CPU by a C copy of AMD's
+`FsrEasuConOffset` and `FsrRcasCon`, the same float operations in the same order
+(`rd__fsr1_easu_con`, `rd__fsr1_rcas_con`). Two RGBA8 textures of the box's size (about 12 MB at
+2340 x 1080), made on first use and remade on a change of size, freed at shutdown
+(`rd__fsr1_shutdown`). Both keys are in the start-up set on every device that has the modules
+while Upscaling is FSR 1.0 (`rd__enumerate_reachable_screen`, the CRT family); a change of the row
+reruns the set before the next replay (`displayPipelines`), so a start with Upscaling Off or FSR 3.1
+compiles neither (no FXC run on `fsr1.hlsl` on Direct3D 11, two pipelines fewer on a phone).
+
+**Log lines.** The display line ends its options with `, upscaling fsr1 (sharpness S)` in force,
+`, upscaling fsr1 off (the CRT filter draws its own box)` or `(the window resolution)` asked but
+not in force, and is logged again when that or the sharpness changes. Each change of the pass's
+sizes or stops logs `present: fsr1 WxH (C columns shown) -> wxh, sharpness S (RCAS K stops)`, with
+`, past 2x a side: half a stop softer` when it applies (the first 8, then every 100th); a device
+where a pass cannot be made logs once `present: fsr1 cannot draw here (...): the picture is
+stretched as with Upscaling off`. The replay tool's `--fsr1 [S]` sets it (S the Sharpness, default
+80), and `--stats` prints `present: fsr1 WxH -> wxh` or `present: fsr1 off`
+(`rd__last_present_fsr1`).
+
+**Licence.** AMD's two headers are MIT (Copyright (c) 2021 Advanced Micro Devices, Inc.), vendored
+unmodified with their licence in `port/third_party/fsr1/`; the row, the pinned commit and the files'
+SHA-256 are in [THIRD_PARTY.md](../THIRD_PARTY.md), and the notice ships in `NOTICES.txt`.
+
+### FSR 3.1 upscaling
+
+`RdSettings.upscale` = `RD_UPSCALE_FSR3` (Options > Picture > Upscaling: FSR 3.1; `[video] upscaling =
+"fsr3"`) with `RdSettings.upscaleQuality` (Upscaling quality: Native AA / Quality / Balanced /
+Performance = the ratios 1.0 / 1.5 / 1.7 / 2.0, `[video] upscaling_quality`, default `"native"`) is
+AMD's temporal upscaler, FSR 3.1.4 from the FidelityFX SDK v1.1.4 built from source
+([BUILDING.md](../BUILDING.md#fidelityfx-upscaler-fsr-31)), on Vulkan (Linux and Windows)
+(`port/render/rd_fsr3.c`, `rd_upscale_temporal.c`, `rd_upscale.c`).
+
+**What it does.** The scene is drawn at the render scale r = d / ratio (d the display scale the
+Resolution row, "window" or Auto gives; [The render and display scales](#the-render-and-display-scales))
+with a sub-pixel jitter a present (Halton (2, 3) at index % FSR's phase count,
+`ceil(8 ratio^2)` for the pair of widths: 18 at 1.5); its colour, depth and motion vectors
+([RENDER.md](RENDER.md), "Velocity") go to FSR 3.1 at the upscale point, after the whole post
+chain, before the game's own 2D layer ([RENDER.md](RENDER.md), "The upscale point"), and FSR
+writes UPSCALED (the composite) at the display scale from the jittered pictures it has accumulated;
+the 2D layer (the brightness, fades, letterbox, film noise, save tile and text of lists 11-12) is
+then drawn into it at the display scale and the reduction reads it in SCENE's place
+([DISPLAY_LAYER.md](DISPLAY_LAYER.md)). **Native AA (ratio 1.0) is the
+default**: the scene at the Resolution row's own scale, FSR as a temporal anti-aliasing of it. The
+other qualities draw the scene smaller and rebuild it; this game's 512x448 picture costs little to
+draw, so they buy little time and cost sharpness. MSAA and supersampling are off while it runs
+(the row says "(off: FSR 3.1)"); the Sharpness row (shared with FSR 1.0) is FSR's sharpening at
+Sharpness / 100, off at 0.
+
+**The inputs** (`rd__fsr3_dispatch`): SCENE's RGBA8 colour; SCENE's `D32F_S8` depth read through its
+depth aspect (in place, or the effects-depth copy where the device cannot sample it in place), the
+context made with `INVERTED_DEPTH` because the GS Z grows toward the eye; VELOCITY (RGBA16F, pixels
+of the render target from the current picture to the one before, FSR's own convention: motion
+vector scale (1, 1) times `[dev] velocity_sign`), cleared to zero motion by the upscaler when the
+replay drew no velocity pass; UPSCALED (RGBA8, a storage texture). The jitter in texels (x right, y
+down; FSR's convention); `frameTimeDelta` the present clock's step times the presents since the
+last dispatch; `reset` on the first dispatch, a new size, a camera cut (a discarded frame's
+carried), the wall's cut or the interpolator's camera snap, the first picture after keep frames,
+and a forgotten history, one reason counted ([DISPLAY_LAYER.md](DISPLAY_LAYER.md#history-resets));
+the frame camera's near
+and far (passed swapped, as FSR takes them under inverted depth) and the vertical angle from the
+game's projection distance (`2 atan(gsH / 2 / zoom)`); pre-exposure 1; auto exposure on. The depth
+is not the standard projective depth FSR models (GS Z, `z * 2^-33` on D32), so FSR's depth-based
+disocclusion is approximate. In one sentence, three inputs are not what FSR assumes and are
+accepted as quality-only, checked on hardware: the gamma-encoded RGBA8 colour is given as linear
+(no `NON_LINEAR_COLOR` flag), auto exposure is on for a picture that is not HDR, and the depth is
+the game's own GS Z rather than a projective depth. A re-shown present (the still re-present) does not dispatch: UPSCALED
+stays and the next dispatch is told how many presents passed.
+
+**The context** (one per render size, display size and flags): made at the first dispatch of a size
+on the render thread, where `ffxCreateContext` builds FSR's compute pipelines (`upscaling: FSR 3.1
+context made at frame N in T ms: render WxH -> display WxH (ratio R), jitter phase count P,
+FidelityFX 3.1.4, GPU memory M MB (A MB aliasable)`; T is the stall it cost). When the targets are
+made again (a display change, a window drag) and FSR 3.1 stays in force, the context is kept and the
+next dispatch uses it if the render size, display size and flags are the same (`upscaling: FSR 3.1
+context WxH -> WxH kept at frame N (the targets made again at the same sizes; K times so far)`, the
+first 8 then every 100th); otherwise, and when FSR 3.1 leaves force, it is given back and destroyed
+once the pictures that used it have finished (a few replays later; `... destroyed (the pictures
+that used it finished)`), or at the renderer's shutdown with the GPU idle. **Memory:** FSR's own textures, 23.5 MB at 640x480 -> 960x720 and 32.3 MB at
+640x480 -> 1280x960 on lavapipe, growing with the display size (AMD gives 45 to 300 MB at the
+usual PC sizes); the line names it.
+
+**What ghosts.** Everything drawn into SCENE without motion vectors is accumulated as if it stood
+still: sprites and particles of the scene (the glow composites, the smoke, the sparks: zero
+velocity) and the motion blur's ghost. Moving particles leave a trail; the motion blur's ghost smears
+a little. The game's 2D layer is not among them: the brightness, the fades, the letterbox, the film
+noise, the save tile, the subtitles and the game's text (lists 11-12 after their
+last scene-class command) are drawn over the upscaled picture at the display scale, the display
+layer ([DISPLAY_LAYER.md](DISPLAY_LAYER.md)), so they are neither accumulated nor sharpened. What
+can still reach FSR of them: a frame whose lists 11-12 hold a scene-class command (a Z-tested world
+line, mostly the game's debug draws) sends what precedes that command through FSR that frame
+(counted in the 10 s line as `frames with the layer begun after a scene-class command`), and a frame
+the layer refuses (`display layer: frame N: not begun (<why>)`) is upscaled whole, 2D included.
+Keep frames (a stage switch's fade, the picture before darkened 112/128 a tick) do not dispatch: the
+composite is held 1:1 and darkened once a tick, so the fade stays sharp while it darkens and the
+next picture after it starts a new history. With `[dev] display_layer = false` the 2D layer is drawn
+into SCENE and upscaled with it, and a keep frame upscales the darkened picture again each tick,
+for an A/B. The follow-up: a reactive mask from the particle draws. The motion
+vectors come from the VU vertex pre-pass's second record of each draw (`rd_replay_vu.c`): with the
+pre-pass off (`[dev] vu_prepass = false`, a failed self-test, a record that could not be made)
+FSR 3.1 still runs, but VELOCITY stays zero and every moving object trails; the first dispatch in
+that state logs `FSR 3.1: the vertex pre-pass is off, so moving objects carry no motion: expect
+trails (REASON)` (`rd_upscale.c prepassNote`), and the 10 s velocity line counts the draws left
+at 0.
+
+**The upscaler's pictures** (issue 203; `port/render/rd_upscale_capture.c`,
+`port/platform/upscale_pictures.c`). A dump holds no history, so a replay here cannot show what
+FSR 3.1 built on the reporter's GPU over many frames. With an upscaler in force, F12 and Settings'
+bug-report row also write four pictures beside `frame-<stamp>-present.png`, taken at the next
+dispatch of the upscale point (copies on the replay's command list after the dispatch, outside any
+pass, into textures of the capture's own; read back and written after the submit of the present
+that follows, before that present's own picture; no picture changes, `rd_replay_tool_fsr3_dump`
+compares the present with and without them):
+
+| file | what | how to read it |
+| --- | --- | --- |
+| `-scene.png` | SCENE as the upscaler received it: render size, the whole post chain drawn, jittered, opaque | the port's picture before the upscaler: a flaw here is the port's (a pass, the fog, the water) |
+| `-velocity.png` | VELOCITY, render size: x and y in R and G about 128 (8 levels a texel), the length in B (16 a texel), black where no draw wrote a motion vector (`rd_replay_tool --velocity-dump`'s mapping) | what moves for the upscaler; black areas are drawn without motion vectors (list 2's sea, particles, list 11) |
+| `-depth.png` | SCENE's depth as the upscaler received it, the 24-bit step (depth x 16777215): R its top 8 bits (a grey picture of the depth), G the next 8, B the low 8 | the depth FSR's disocclusion reads; a pattern in G or B the eye cannot see in R is still there; not written where the device cannot read depth back (D24S8; the line says so) |
+| `-composite.png` | COMPOSITE right after the dispatch, display size, before the display layer's draws | the upscaler's output alone: a flaw here and not in `-scene.png` is the upscaler's |
+
+The bug-report row's pictures are halved (a 2 x 2 box) until they are at most 2560 wide and go into
+its zip while the zip stays under 24 MB (GitHub's limit is 25 MB; a picture that would pass it is
+left out and named), in the order composite, scene, velocity, depth (they barely compress, about 3
+bytes a pixel, so the cap leaves out the last first and keeps the pair that tells the port's lines
+from the upscaler's); F12's are full size and stay loose, as its present picture. The lines: the
+renderer's `upscale capture: frame N: <stem>-scene.png, -velocity.png, -depth.png, -composite.png:
+scene.png WxH, ... (read back in T ms; the upscaler's inputs and output: lines in -scene.png are the
+port's, lines only in -composite.png are the upscaler's)`, a picture not given to the upscaler named
+"none (not given to the upscaler)"; the window's `window: F12: wrote <stem>-scene.png, -velocity.png,
+-depth.png, -composite.png (the upscaler's inputs and output: lines in -scene.png are the port's,
+lines only in -composite.png are the upscaler's)` and, for a report, `window: bug report: the
+upscaler's pictures: <name> (N bytes) added; ... K of 4 in <zip>`. Without an upscaler the request is
+dropped at the next present (`upscale capture: no upscaler in force at the present after the
+request: ...`). While the request waits for a dispatch the still re-present is refused (a re-shown
+present does not dispatch; the 10 s `interp: still re-present` line counts those presents: `(N of
+them for an upscaler capture waiting for a dispatch)`), so the next present replays and dispatches.
+A keep frame does not dispatch either (a fade, a loading picture): the request waits for the first
+present that does (`upscale capture: the present after the request did not dispatch the upscaler
+(a keep frame: ...): ... the bug-report zip waits for them (at most 60 presents and 2 s ...)`), at
+most 60 presents and 2 s (both), then is dropped (`upscale capture: no dispatch of the upscaler in N
+presents over T s after the request (keep frames throughout): ... the bug-report zip goes without
+them`). `rd_upscale_capture_state` tells the window the outcome: while it is pending the window adds
+the present's picture to the zip at once (`window: F12: the upscaler's pictures are not taken yet
+...`) and the four when it comes (`window: F12: the upscaler's pictures came N pumps after the
+present's`, then the usual lines); an upscaler that was asked and gave none is said (`window: F12:
+the upscaler's pictures are not beside <present>: <why>; the bug-report zip goes without them`). The
+renderer's line names the presents waited (`...; N presents without a dispatch before it; ...`). `rd_replay_tool --fsr3-dump DIR`
+writes the same four from a dump (the last replay's dispatch), for a side-by-side with a reporter's.
+
+**What the frames held** (the 10 s line under an upscaler, `rd__upscale_note_frame`): `upscale
+point: 10 s: the N pictures dispatched held: the fog in F, the glow chain in G, the aura in A, the
+depth of field in D, the motion blur in M, film noise in K, render-to-texture blocks (the water's
+reflections) in R; FSR 3.1 fp16 <words>` (`off (the port's default; [dev] fsr3_fp16 = on for
+the half-precision path)`, `on (dev)` or `off ([dev] fsr3_fp16 = on, the device offers no fp16)`:
+`rd_fsr3.c rd__fsr3_fp16_word`; each frame's lists scanned once a frame number:
+the post stubs by kind, a TARGET naming a block, the film noise), beside the velocity line's counts
+of the draws left without motion vectors. **Precision.** FSR 3.1 runs in full precision on every GPU (`[dev] fsr3_fp16`, default `off`):
+the FidelityFX context is made as on a device without fp16, so every pass takes its fp32 build
+(`tools/ffx/patches/0004-vk-fp32-default.patch`: `GetDeviceCapabilitiesVK` reports fp16 only for
+`ICO_RD_FSR3_FP16=1` or `on`, which the port exports for `[dev] fsr3_fp16 = on`; `rd_fsr3.c
+rd__fsr3_fp16_dev_on` reads the same variable). Why: the lines below carry the mark of reduced
+precision, and AMD's FSR 2.1 notes moved half-precision computations to full precision for colour
+range and temporal stability; fp16 is only a speed path, and this game's picture is cheap. To opt
+in: `[dev] fsr3_fp16 = on` (`auto`, the old default's word, reads as `off`). The display line, the
+first dispatch's line, the summary and the 10 s line say `fp16 off (the port's default; [dev]
+fsr3_fp16 = on for the half-precision path)` or `fp16 on (dev)` (`off ([dev] fsr3_fp16 = on, the
+device offers no fp16)` where it asked and the device has none). One A/B switch, not a row: the
+environment's `ICO_RD_FOG_JITTER=0`: the fog's draws take no jitter, so the fog dither's Bayer
+phase (`fog_lut.hlsl`) stays at 0 while the scene is jittered (`rd_jitter.c rd__fog_jitter_in`, one
+line when it acts).
+
+**Issue 203's lines** (a GTX 1660, FSR 3.1 Quality at 2560x1440; the reporter's present
+picture measured, `build-host/tmp/v0112/evidence/203/lines-work/`): dark columns exactly vertical
+on the screen (the column profiles of 60-row bands align at shift 0 with correlation 0.84 to 0.97
+from the horizon to the grass), over the sea and the fogged cliff foot, absent where the sun's haze
+is. Their spacing doubles at 1/16, 1/8 and 1/4 of the picture's width (about 4, 8, 15.5 and 31
+window pixels in the four octaves left of the middle) and starts again at 1/2: a pattern keyed to
+power-of-two fractions of a coordinate normalised to the width, the mark of reduced-precision
+arithmetic on it; the port's shaders hold no half-precision type, FSR 3.1 runs every pass but RCAS
+in fp16 on that GPU (before this default). No lavapipe replay of the dumps shows them (FSR 3.1 at Quality 80 and 0,
+Native, `--presents 8|64`, `--repeat 8`, the blended dump, the reporter's filter, height, fog path
+and DATE path, 2560x1440 and 1920x1080, with the water's blocks at their GS size (`--water-ps2`), the column high-pass 0.12 to 0.14
+levels against the reporter's 0.9 to 1.4), and the dump draws the sea's three pack-textured layers
+blank (the reporter's texture pack). Hence the full-precision default above; the pictures above
+confirm it on the next report.
+
+- **Support.** `rd_upscale_temporal_supported()` (`port/render/rd_fsr3.c`): a build with the
+  upscaler (`ICO_FFX`), the Vulkan backend, a Vulkan 1.2 or later device, external compute offered
+  (`rhi_device_compute_caps`) and the FidelityFX extensions whole (`RhiComputeCaps.externalExts`,
+  [RHI.md](RHI.md#native-handles-for-external-compute)). Not on Direct3D 12 (not built: the
+  SDK makes its DXIL with Windows-only tools), Direct3D 11, OpenGL or Metal. The answer is logged
+  once and again when it changes: `upscaling: FSR 3.1 is available (Vulkan, FidelityFX SDK 3.1.4)`
+  or `upscaling: FSR 3.1 is not available (REASON); ...`, the reasons being "this build has no FSR
+  3.1 (built without the FidelityFX SDK)", "it runs on Vulkan; the Direct3D 12 path is not built",
+  "it runs on Vulkan, and the graphics API in use is another", "the Vulkan driver is X.Y, FSR 3.1
+  needs 1.2", "the device's compute support: ...", or the dedicated-allocation one;
+  `rd_upscale_temporal_why()` returns it. A saved `"fsr3"` that is not supported shows "FSR 3.1
+  (off: not available)", is drawn as Off and stays in the config.
+- **Exclusions** (enforced in `rd__upscale_temporal_on`, reported by the settings layer): off under
+  the CRT filter and while `downsample` is on (one or the other); at the Original preset or a
+  display scale of 1x or less only Native AA (ratio 1.0, `rd__upscale_temporal_ratio`); MSAA and
+  SSAA read as off while it runs (`rd__aa_requested`, `rd_aa_off_for_temporal`). Under Auto the
+  host sends the window as the display and Auto's step as the cap on r (`rd_upscale_ratio_of`, the
+  ratio for the settings about to be sent): the ratio in force is then d / r, logged.
+- **Full pixel.** FSR 3.1 takes no source or destination offset, so SCENE's texture (the frame's
+  exact width plus its guard texels at r) maps onto UPSCALED's whole (the same at d): the window lands
+  within guard x (1 - r/d) display texels of its place, under a GS pixel.
+- **One source of truth.** The upscale point's switch has two sources: the settings (FSR 3.1 in force,
+  `rd__upscale_follow` from `rd__apply_display`, its ratio `rd__upscale_temporal_ratio`) and
+  `rd__upscale_set` (`rd_replay_tool --upscale-test`, the tests, `[dev] upscale_test`, which run the
+  test's bilinear stand-in); the second wins while on. `rd__upscale_by_fsr3()` says which the hook
+  (`rd_upscale_hook.c`) runs.
+- **Developer keys.** `[dev] upscale_debug_view = true` draws FSR's debug view in place of the
+  picture (`FFX_UPSCALE_FLAG_DRAW_DEBUG_VIEW`: the motion vectors, the reactive and lock masks; the
+  desktop check of the velocity's sign and of the depth, `[dev] velocity_sign`), `[dev]
+  upscale_debug_checks = true` makes the context check its inputs, with FidelityFX's messages in the
+  log (`upscaling: FidelityFX warning: ...`, the first 8 then every 100th).
+- **Log lines.** The display line ends with `, upscaling fsr3 quality (ratio 1.5, render 1280x672 ->
+  display 1920x1008, FFX 3.1.4, GPU memory N MB), sharpness S, fp16 on|off` in force (the memory once a context of those sizes
+  was made, else "GPU memory on the context's line"; fp16 is whether the device runs FSR's 16-bit
+  shaders, `rd__fsr3_fp16`; the line is logged again when the sharpness changes) and `, upscaling fsr3 off (not available:
+  REASON | the CRT filter draws its own box | Downsampling is on)` asked for but not in force, and is
+  logged again when that changes. A dispatch not made says why: `upscaling: FSR 3.1 not run at frame
+  N (no depth | no motion vectors | no native handles | ...; K times so far)`, the first 8 then every
+  100th.
+- **Tests.** `rd_present` (the FSR 3.1 cases: not supported and identical to Off; on: display-sized
+  and not black; the context made again at a new size, the old one destroyed; every context destroyed
+  at shutdown), `rd_replay_tool_fsr3`, `rd_replay_tool_fsr3_keep` (20 keep frames held after one
+dispatch), `ffx_link_test` (the dispatch with the port's formats under
+  the validation layer), `rhi_native` (the extensions)
+  ([TESTING_PROGRAMS_RENDER.md](TESTING_PROGRAMS_RENDER.md)).
+
+### The render and display scales
+
+A temporal upscaler (FSR 3.1, [above](#fsr-31-upscaling); the developer's stand-in, `[dev]
+upscale_test = true` or `rd_replay_tool --upscale-test [R]`, upscales bilinearly) draws the
+scene below the picture's size and upscales it where the game's reduction reads it
+([RENDER.md](RENDER.md#the-upscale-point)). While one is asked and the CRT filter is off,
+`rd__apply_display` splits the scale in two (`port/render/rd_present.c` (`rd__apply_display`),
+`port/render/rd_upscale.c` (`rd__upscale_render_scale`)):
+
+- **The display scale `d`** is what the Resolution row gives today: a scale (`2x`: 2), a fixed
+  size, or the "window" resolution's box (one texel a window pixel, the frame's exact width over
+  the box across, the PS2's pixel shape kept down, the [Full pixel](#the-native-frame) window's crop as
+  without an upscaler); then the GPU's size limit. DISPLAY, its held copy and the upscaler's
+  output UPSCALED (the composite, with its held copy for keep frames) are made at it, the game's
+  2D layer is drawn into the composite at it ([DISPLAY_LAYER.md](DISPLAY_LAYER.md)), and everything
+  from the reduction on (the present, FSR 1.0, the effects depth's box) is as at that scale
+  without an upscaler. The motion blur's read of DISPLAY takes PRE_DISPLAY under the display layer,
+  the reduction drawn at the render scale.
+- **The render scale `r`** is `d` over the upscaler's ratio (1.5 is FSR's Quality, 1 a
+  native-resolution pass), not below 1 (the game's own size: `2x` at ratio 3 draws at 1x) nor
+  below `d / 3`. The scene-class targets (SCENE, WORK2, AURA_WORK, the DATE snapshot, a
+  frame-sized render-to-texture block, and the display layer's PRE_DISPLAY and PRE_HELD) are made
+  at it; `g_rd.sceneSx/Sy` hold it. A fractional
+  `r` is drawn as any fractional scale is.
+- **Supersampling and MSAA** are off (`rd__aa_mode`: the upscaler is the anti-aliasing), and
+  **Downsampling** with them.
+- **Auto** keeps the display at the window's size and steps the render scale instead: the host
+  sends the "window" resolution and Auto's step as `RdSettings.upscaleRenderCap`, a cap on `r`'s
+  vertical scale (both axes together, never below `d / 3`), and the steps start from the window's
+  scale over the ratio (`port/platform/pace_policy.h` (`pace_auto_window_scale`)): a 2400 x 1080
+  window (2.41x) at ratio 1.5 draws the scene at 1.61x and its first step is 1x.
+- **The allocation fallback** halves `r` as it halves the scale without an upscaler; the display
+  stays. The Resolution row's "lowered" note (`rd_scene_scale_lowered`) names only that fallback.
+
+The display line says both when they differ: `display: scene RxR (WxH) (render scale RxR),
+display WxH (scale DxD; upscaler ratio K asked, E in force[, under Auto's cap])`. Off, `d` is `r`,
+every expression of `rd__apply_display` is the one before and every picture the same bytes.
+Tests: `rd_upscale` (the scales, the window, Auto's cap) and `pace_policy` (the step's window
+scale).
 
 ## Interpolation between ticks
 
@@ -1383,14 +2376,16 @@ present's copies (`FEED_HELD`, `DISPLAY_HELD`), so the motion blur runs once a t
 rate (`port/render/rd_interp.c`, header comment). Under Motion blur: Smooth
 (`[video] effect_motion_blur_mode = "smooth"`, `RdSettings.motionBlurSmooth`) the motion blur's
 sprite instead reads an RGBA16F accumulator of the scenes of every present, `A = S + a' (A - S)`,
-with `a' = FIX' / 128` and `FIX' = clamp(round(128 (FIX / 128)^(1 / k)), FIX, 127)` for k presents
-a tick, so the trail moves on at every present and keeps the PS2's share over a tick; no
+with `a' = FIX' / 128` and `FIX' = clamp(round(128 (FIX / 128)^(dt / tick)), FIX, 127)` for a present
+dt after the one before (dt held to [tick / 64, tick]), so the trail moves on at every present and
+keeps the PS2's share over a tick whatever the count or spacing of the presents; no
 `DISPLAY_HELD` copy is made then. What it gives up against Original: the light the passes after
 the sprite add (the aura, the brightness step, the reduction's tint, a fade) is not fed
 back into the trail, and the old frame's vertical halving (DISPLAY's H / 2 lines) is gone; a
-still picture is the same within a level. k is the present clock's tick over its step on the
-timer path, the presents the tick before counted under the vsync lock, 1 for the first tick; at
-one present a tick FIX' is FIX ([RENDER_POST.md](RENDER_POST.md#the-motion-blur-under-smooth)).
+still picture is the same within a level. dt is the present clock's time since the present before
+on the timer path; under the vsync lock, with no clock, dt is tick / k, k the presents the tick
+before counted (the refresh period), 1 for the first tick; at one present a tick FIX' is FIX
+([RENDER_POST.md](RENDER_POST.md#the-motion-blur-under-smooth)).
 
 **The still re-present.** A between-tick present whose frame would draw the bytes of the tick's last
 rendered present shows that picture again instead of replaying it (`port/render/rd_reshow.c`,
@@ -1439,8 +2434,151 @@ its chain`, `RdPerfRecord.glowHeld` marks the replay, and `rd_replay_tool --pres
 running mean of the intervals between presents and moves towards the measured time by an eighth of
 the error a present; an error over half a tick, a pause of more than four steps or time going
 backwards resets it; `alpha = (clock - tickAt) / tick` in [0, 0.999], `tickAt` the simulated time
-the frame closed and `tick` the last two closes apart, held to one to four periods
-(`port/render/rd.h` (`RdPresentClock`); `port/render/rd_interp.c` (`rd_present_clock_alpha`);
+the frame closed and `tick` the last two closes apart, held to one to four periods. The step is held
+above a quarter of the nominal interval (the Frame rate's gap, a refresh under FIFO), without one
+(Uncapped) a 64th of a tick; a present less than a quarter of the nominal after the one before is a
+doubled present: it moves neither the mean nor the step, and it moves the clock by its own interval
+with no pull towards the measured time, so the clock never goes back at one (a whole step put the
+clock ahead of the measured time and the next doubled present reset it backwards, up to 0.28 of a
+tick at one every 7th); a reset while presents go on takes the step from that interval when it is at
+most four steps or four nominals (a tick without a nominal), whichever is more (a longer one is a
+pause and keeps the step), so a rate slower than four nominals is learnt at one reset (a 120 Hz FIFO
+at 25 presented fps: one reset, then none). A reset that took a doubled present's 0.5 ms as the step
+would hold it there, every later present being over four steps apart and resetting without learning
+one (issue 193: Motion blur: Smooth read 64 presents a tick). Within one frame pair (the same
+`tickAt` and `tick`) the clock never goes back: a reset, or a pull with the clock more than seven
+steps ahead of the measured time, that would put it below its last value keeps that value, so a
+picture shows the same moment as the one before it or a later one, never an earlier one (two quick
+presents after a steady cadence: the first pulls the clock ahead, the second's error is over half
+a tick, and a reset to the measured time would show a moment up to a tenth of a tick earlier on the
+owner's 120 Hz phone). Time going backwards still resets it. The clock stays within 7/16 of a tick
+of the measured time (a pull keeps 7/8 of an error of at most half a tick, a reset puts it on the
+measured time, a held clock's lead only shrinks), so over any span the content's speed is real
+time's within 7/8 of a tick over the span; no present is moved, held back or added, and the rate
+is the same. The holds are counted in the 10 s `window: evenness` line
+([PLATFORM_DIAGNOSTICS.md](PLATFORM_DIAGNOSTICS.md#the-evenness-line)). When the window presents pictures as made (vsync off,
+uncapped, the render thread on: `pace_rt_as_made`), the alpha handed over is instead the measured
+hand-over less the drain's running mean (`port/render/rd_rebase.c`, `rd_thread.c`
+(`presentRebase`), set by `rd_present_as_made` from `pace`): `rd_present_post` waits for the
+picture before (the drain) after the alpha was taken, and the picture's GPU work, which decides
+when it reaches the screen, starts at the hand-over. The value is the measured ask (the clock's value
+less its lead over the time asked) plus (drain - the drain's mean, a sixteenth of the difference a
+present), the shift held to a quarter of a tick each way and a drain over a tick taken as one; within
+a frame it never goes below the frame's last handed-over value; the clamp to [0, 0.999] is the
+clock's. Between two pictures the content then moves by the hand-overs' interval within (the
+largest drain - the smallest) / 16, across a frame's switch too; the present clock's smoothed moment
+is up to 7/16 of a tick off the real time there (on the owner's 120 Hz phone it reset at up to
+a fifth of the presents, and a quarter of the presents clamped at 0, the content repeating the
+picture before). The window asks a frame's presents only between its close (never before its
+deadline `tickAt`) and the next closing step's deadline, so the measured ask is never below 0 and
+only the drain's shift can reach a clamp. Every other mode (the vsync lock, FIFO, the Frame rate
+caps, vsync on) keeps the clock's alpha.
+
+With pictures as made a second rule is computed beside it at every picture and drawn only with
+`ICO_RD_PACE_GPU=1` (the tests' switch; `RD_PACE_GPU_DEFAULT 0`: off by default, the hand-over
+rule's value drawn to the bit, `rd_pace_gpu_test`'s off-by-default case): the moment the picture's
+GPU work is predicted to end, less the mean latency (`port/render/rd_pace_gpu.c`,
+`rd_pace_gpu_live.c`, `rd_pace_gpu.h`; the call in `presentRebase`). It is off because the owner's
+phone felt the motion more sped up with it drawn, in the opening at 47-56 pictures a second and in
+stage 3 at 68-72, although the evenness line's own measure (the content's step against the GPU's
+ends) was better there. Two defects show in that run's lines: the tick's first picture moved before
+the frame's close, so the alpha drawn clamped at 0 (17-42 an `interp:` line in the opening against
+0-1 with the hand-over's moment; 82, down to -0.53 of a tick, in a scene of keep frames), which
+shows the end of the pair before and makes the step after it long; and where most pictures carry no
+measurement (keep frames) the predicted queue ran away (its mean wait 205-426 ms, shifts of +-14
+ms), which the model now caps at one picture's GPU time (`RD_PACE_GPU_IN_FLIGHT`: with two frames in
+flight a picture's work is submitted only once the picture two before it ended). A picture reaches the screen after its GPU work, and where the hand-overs
+are pinned to the game's step grid (two pictures a tick: the first after the closing step, the
+second after the half-tick deadline, the third held by the step rule) the GPU's queue spaces them
+evenly while the hand-overs are 0.3 and 0.7 of a tick apart (the owner's 120 Hz phone in the cage
+with the hand-over's moment: steps .35/.70/.28/.66, every step's deviation .164-.187, the hand-over to the GPU's end
+24.5-33.5 ms against 4 ms elsewhere). The model takes only what the port measures for each picture
+handed over, at its record's collection (`rd_perf.c` `rd__perf_collect_gpu`, through a
+single-producer ring to the poster's thread; no wait, no clock read): G the median of the last 15
+GPU spans (a pipeline-compile replay is an outlier it skips), D the median of the last 15 hand-over
+to first submit times (the slot clock's `firstSubmitNs`), and each picture's end: stamped where the
+slot wait blocked, otherwise its first submit or the picture before's end, whichever is later, plus
+its span, under the wait's bound where there is one. At a hand-over h the picture's GPU start is
+max(h + D, the end of the picture before) and its end that plus G; the queue's wait q = start - (h +
+D) and the shift is q less q's running mean (a sixteenth of the difference a picture, as the
+drain's), so the moment is the predicted end less the mean latency and over a block the mean moment
+is the hand-overs' (the shifts sum to 16 times the mean's change). A picture measured later
+re-anchors the chain and the pictures after it are predicted again. The bound: the shift is held to
+the larger of the 90th share less the mean and the mean less the 10th share of the last 32 measured
+hand-over to end times (the real latencies' own spread, so a mispredicted spike moves a moment no
+further than they differ), and the step from the picture before's moment to 0.5-2 times the
+hand-overs' gap (the evenness line's own range: never back, never the same moment); the clamp and
+the frame's hold above still apply. Where it changes nothing: an empty queue (q 0 at every picture:
+the shift is 0 to the bit), one picture a tick (no further picture among the last 16: 0), before its
+windows hold 15 spans, 15 leads and 10 latencies (after a start or a restart: 0), and a restart when
+the frame number goes back or on by more than 8 or the hand-overs are over a second apart (a stage
+load, a pause, a stall), as the evenness line's chain restarts. Paced modes (`rd_present_as_made`
+false) empty it. A backend with no slot clock or span (OpenGL, Direct3D 11, timestamps off) never
+fills its windows and keeps the hand-over's moment; the attempt ledger's row `in-between pictures for
+the GPU's predicted end` says which ([ANDROID_DIAGNOSTICS.md](ANDROID_DIAGNOSTICS_LEDGERS.md#the-attempt-ledger)),
+the evenness line's last clause what it did. No picture is moved, delayed, dropped or added, the
+step rule, the hold, the back-off and the present allowance are untouched, and game time stays on
+the grid. In `rd_pace_gpu_test`'s simulations (10 s, 120 Hz, a frame every 33.37 ms) every step's
+deviation goes from .210 to .040 ticks in the cage at two a tick (.149 to .068 on the brief's cage
+pattern), .101 to .039 at two to three a tick, .119 to .048 at three, .170 to .066 GPU-bound at one
+to two, and stays the same at one a tick and with an idle GPU; the GPU's end is not the glass (the
+display latches at its next refresh), so up to a refresh of that remains.
+
+A third rule, also computed at every picture as made and drawn on Android where the screen's rule
+below does not place a picture (`RD_AS_MADE_TIMER_DEFAULT 1`, see "The defaults" below), is an own timer (`port/render/rd_as_made_timer.c`, `.h`;
+`rd_pace_rules.c` puts the three side by side). The present clock above is a timer too, and it was
+taken out of this mode because it failed there: it steps each present by the running mean of the
+present intervals and pulls an eighth of the error, so when the step rule holds a further picture
+the interval is a picture's slot longer than the mean, seven eighths of it stay as a lag, the lags
+add up past half a tick and the clock resets forward (35 to 154 presents a 10 s block on the owner's
+phone, up to 22 %), and a lagging clock at a tick's first picture is before the frame's close: a
+clamp at 0 (10 to 94 a block). The evenness line still counts that clock's clamps and resets, which
+is why its `alpha clamped` figures stay at 38-66 at 0 although the alpha drawn clamps far less. The
+own timer keeps the timer's even steps without those causes: each picture's moment is the one
+before plus I, the mean hand-over interval over the last two ticks (the hand-overs' pattern is
+pinned to the step grid and repeats every tick, so a whole-tick window removes it), corrected toward
+the hand-over rule's moment: an error beyond half an interval is taken as whole slots (a held
+picture's slot, which the present clock lacked), the rest pulled a quarter of the way; an error over
+half a tick (a stall, a resync) puts it on the hand-over rule's moment; each step is at least a
+quarter of I (never back, never the same moment). A tick's first picture keeps a lead after the
+close (the largest distance below the close of the last 16 first pictures without it) and the
+timer is held inside its frame's tick rather than the alpha clamped. In `rd_as_made_timer_test`'s
+simulations (10 s, 120 Hz, a mailbox display that shows each picture at the first refresh at or
+after its GPU end) every step's deviation with the hand-over / the GPU end / the timer: the cage
+.210 / .040 / .067, stages 3 and 5 .101 / .039 / .037, three a tick .119 / .048 / .035, the GPU-bound
+opening .170 / .066 / .081, one a tick .017 / .017 / .015; clamps at 0 of the GPU-end rule 67 in
+stages 3 and 5 and 80 in the opening (0 with the hand-over), the timer 0 (held in its tick 0-18 times
+in 10 s); the timer within 9.5 ms of the hand-over rule's moment, so over any span its speed is real
+time's within that over the span. On the modelled display the content's speed against the display's
+gaps deviates .40 (hand-over), .26 (GPU end) and .26 (timer) in the cage: the model favours both
+later rules, the owner's eye did not favour the GPU end, so the display model is not trusted until
+the on-glass line has measured a phone. The desktop paths correspond: the vsync lock's grid is a
+timer by construction (k / (n x perFrame)), FIFO and the caps the present clock, which works there
+because every present is a refresh apart and none is held by the step rule.
+
+Where the device offers `VK_GOOGLE_display_timing` (the Pixel 10 Pro Fold does), on Android with pictures as made only (elsewhere and in capped or vsync modes nothing is chained, the present as without the extension), the display's own
+time of each shown picture is read back (`rhi_present_glass`, `port/rhi/vk/vk_glass.c`: an id and a
+desired time of 0, "any time", chained to each present, so nothing is asked of the display; the
+past times read after each present on the presenting thread with no wait) and the 10 s `window: on
+the glass in 10 s:` line puts each rule's content against it: the content's step over the display's
+gap, 1.00 real time, for the rule drawn and for each rule computed, beside the same steps against
+the hand-overs and the GPU's ends ([PLATFORM_DIAGNOSTICS.md](PLATFORM_DIAGNOSTICS.md#the-on-glass-line)).
+One run per rule drawn then says on the glass which is evenest. Measured on no phone yet.
+
+A fourth rule, also computed at every picture as made and drawn by default on Android only (`RD_PACE_SCREEN_DEFAULT 1`, see "The defaults" below; `port/render/rd_pace_screen.c`, `rd_pace_screen_live.c`, `.h`), draws each picture for the time the screen will show it. The owner's phone's log with the display's times (120 Hz, Uncapped, mailbox) showed why the other three score alike there: the GPU's ends are even (each rule's content against them 1.00, deviation 0.04-0.07) and the display's latch rounds them to whole refreshes, so at about 70 pictures a second a third are shown for one refresh (8.35 ms) and the rest for two; an even content step is then 1.7 times real speed on the one and 0.86 on the other (deviation 0.38-0.40 on the glass for the hand-over and the own timer alike, 23-32 % of pictures above 1.5). The rule: (1) the picture's GPU end as the GPU queue's model predicts it at the hand-over (`rd_pace_gpu_pred_end`, the model above); (2) the display's grid from the shown pictures' own times (`actualPresentTime`): over the last 64, each time's whole refreshes counted gap by gap with the refresh the display reports, the period the least-squares slope of the times over them (the phone reports 8.35 ms; the fit measures the true one), a time more than an eighth of a refresh off it counted, and more than one in eight off it, or a period over 2 % from the reported one, refused as not one grid; (3) the latch's offset X, fitted, not assumed: a shown picture says its predicted end plus X fell within the refresh before the one it was shown at, and X is the middle of the range most of the last 64 agree with (it holds the compositor's latch lead, the prediction's mean error and any offset between rd's clock and the display's); the same fit over the exact GPU ends gives the latch lead itself, logged; (4) the prediction's spread w from the fit's misses (with the phase spread evenly over a refresh, a Gaussian error of deviation w misses in a share w sqrt(2/pi) / P, so w = sqrt(pi/2) P x the share missed, at most half a refresh); (5) the expected time on the glass: each refresh at its probability under that spread (the refresh itself where every picture fitted). Mailbox's rule needs nothing more: a picture finished before the latch is shown there, and one replaced by the next before it gets the next one's refresh, the same time, so it takes no content time. The content drawn is that time less a lag L: L starts where the moment drawn otherwise is (no jump when the rule takes over after a start, a restart or a fall-back) and moves at most 0.25 ms a picture toward the middle of the range that keeps every one of the last 64 pictures inside its frame pair's tick (alpha 0 to 0.999: never before the frame's close, the failure of the GPU-end rule's first pictures of a tick, never past the newest frame the game has made); where no L keeps them all (a frame pair's pictures shown further apart than a tick: the hand-overs' spread in the tick and the latency to the glass together), toward the top of that range, so the pictures held are held at the newest frame rather than before the close. The moment never goes back (held at the one before) and is held at the tick's edges where it would leave them; each hold is counted. Where it cannot predict it draws the moment drawn otherwise (the hand-over rule, or the own timer where that is on) to the bit and counts why: no display time back (desktop, OpenGL, Direct3D, no `VK_GOOGLE_display_timing`), no predicted GPU end (the queue model not ready, no slot clock), under 32 shown pictures since the start, the newest shown picture's predicted end over 250 ms behind the hand-over (stale times), the times off one grid (a changing refresh rate) or a latch that fits under half of them; the attempt ledger's row `in-between pictures for the screen's refresh` says which applies ([ANDROID_DIAGNOSTICS.md](ANDROID_DIAGNOSTICS_LEDGERS.md#the-attempt-ledger)). Threads: the shown pictures' samples come from the thread that collects the records (the join of `rd_glass.c`: the render thread, or the poster's own for a present made in place, never both at once because the poster waits for the render thread's picture before it replays one itself) over a single-producer ring; the poster's thread (`window_present_pace`, which runs both `rd_present_post` and `rd_present_as_made`) takes them before it places a picture and owns the model; the 10 s sums are atomics. In `rd_pace_screen_test`'s simulations of the rule without the refinements of the next paragraph (10 s; the window, the render thread and the GPU queue as in the other rules' tests; a display grid of 1000/120 ms reported as 8.35, a latch lead of 2.5 ms with a jitter of 0.3, mailbox, each time back three refreshes after it was shown) the content's speed on the glass, deviation, for the hand-over / the own timer / the screen: play at one and two refreshes with the prediction's error of the log's better blocks (1.0 ms rms) .445 / .377 / .317 (above 1.5: 19.9 / 26.2 / 12.0 %; below 0.75: 15.7 / 2.2 / 9.4 %; the refresh predicted for 88.6 % of the pictures), the same at the log's worst blocks' error (2.15 ms) .477 / .397 / .423, the opening at two and three refreshes .344 / .234 / .182, a scene with kept frames .440 / .453 / .393, one a tick .035 / .034 / .030, and with an exact prediction .447 / .398 / .190 (the latch's jitter's misses and the holds at the tick's edges remain). So on the model it lowers the share of pictures shown sped up, but cannot reach an even 0.15 in play: the latch's rounding of a prediction about a ms off misses one picture in nine, and each miss is a step of a whole refresh. Only an even cadence on the glass (every picture held the same number of refreshes, which needs the present's timing or the frame rate changed) would; it is built and off by default (the even cadence below). The on-glass line has its measures and its score, the refresh predicted against the one shown, so one log says whether a miss is the model's or the display's ([PLATFORM_DIAGNOSTICS.md](PLATFORM_DIAGNOSTICS.md#the-on-glass-line)).
+
+The owner's phone's log with the rule computed (not drawn) gave, in play, a deviation on the glass of .27-.35 against the own timer's .36-.41 in the same blocks, the refresh predicted for 74-92 % of the pictures. The blocks where the hits fell to 49-72 % with 43-105 pictures a refresh or more off were the three with most kept frames (the second opening scene, 203 of 624 pictures; the deja vu scene, 784 of 1004; the sacrifice scene, 418 of 858): a kept frame's present (a fade, a load, a menu drawn over the picture before; `rd_present`'s keep path draws no alpha and sends no measurement back) was stepped through the GPU queue's model at a scene picture's GPU time and never re-anchored, so its predicted end was one or two refreshes late and chained into the next picture's, and its shown time went into the latch's fit, which went to -21.6 and -32.3 ms with 37-41 of 64 agreeing while the exact GPU end's latch stayed at +4.6 and +8.5. A kept frame's present is now left out of the queue model (`rd_thread.c` `presentRebase`), of the screen's samples and score and of every rule's measure on the glass (its alpha is not drawn), counted as `a kept frame (a fade or a load, its GPU work not modelled)`. Two refinements of the fit go with it: hysteresis (the latch stays where it was unless another range agrees with 4 more of the 64) and, where 16 or more of the window's shown pictures have an exact GPU end, the expected time on the glass from their measured errors (the mean of the refreshes the picture would be shown at with each error, its predicted refresh their most frequent) instead of a symmetric spread: the cage's misses were one late against one early 1.3-2.0 to 1. A re-fit after a change of regime was tried and dropped: in no simulated regime did it trigger. In `rd_pace_screen_test` with the log's regimes (each step on in turn): the kept frames' scenes from .434 / .413 / .383 to .373 / .363 / .304, the hits from 57-65 % to 88-90 % and no picture further than one refresh off (from 145-260); play .304 to .273, the cage .338 to .319, about one picture a refresh .277 to .245; over twelve seeds the measured errors take a further .01-.02 off in play and the cage. The fall-backs and the holds are as above. The `present margin` figure on the line read the driver's unsigned `presentMargin` unsigned and summed it (the phone, asked no desired time, gave values that wrap below 0: the line printed -7373559260669.68 ms): it is read signed, averaged only within a second either way, and the rest counted as `present margin over a second either way N (... not a margin, no desired time was asked)`.
+
+**The even cadence** (off by default: `RD_PACE_EVEN_DEFAULT 0`, `ICO_RD_PACE_EVEN=1` for the tests; `port/render/rd_pace_even.c`, `rd_pace_even_live.c`, `.h`). It shows every picture for the same whole number of refreshes N, so it lowers the pictures a second of Uncapped to the refresh rate over N (on a 120 Hz screen 60 a second where a picture takes about 8.1-16.7 ms, 40 at 16.7-25). N is the fewest refreshes the picture time (the larger of the GPU queue model's median span and its median hand-over to first submit) fits with 0.25 ms to spare, up at once or when 8 of the last 32 aims were late, down after 2 s. The window's pacer (`window_present.c` `window_present_pace`) asks `rd_present_even_hold` before each hand-over and waits until the picture's predicted GPU end sits a refresh before the latch of its refresh (the screen's grid and latch), the present carrying that refresh less half a refresh as its `desiredPresentTime` (`rhi_present_desire`, `port/rhi/vk/vk_glass.c`); a hand-over the step rule would hold is moved before that hold where N goes round the game's tick (`even_rule_ms`); the content is the screen's rule placed for that refresh. It turns itself off for the run where 4 of the last 32 aimed pictures were never shown or the presents with a desired time spend 3 ms more on their acquire and present call. In `rd_pace_screen_test` it takes play from .273 at 70.6 shown a second to .000 at 59.9 and the opening from .179 at 46.3 to .019 at 40.0. **Why it is off:** three runs on the owner's phone did not land the pictures on their refresh. The first aimed none: each hold's sleep overshot, the plan's target receded a refresh at every ask, and the fit starved (now committed at the first ask). The second, held at four refreshes, made the GPU idle 8-10 ms before each picture and take 23.7-25.4 ms for pictures of 16.7-19.2 ms as made (its clocks down), so the end's prediction was 6-32 ms off and 160-181 of 247-266 aimed pictures a block were shown on another refresh (hence the desired present time and the whole refresh of margin). The third, with the desired time, still showed 109-192 of 264-345 aimed pictures a block at four refreshes on another refresh, most of them earlier than asked. Off, nothing of it runs: the hold returns 0, no picture is aimed or given a desired time, its self-check takes no presents, the `on the glass` line has no clause for it, and its start line and attempt ledger row say `off by default (three phone rcs did not land pictures on their refresh)` ([PLATFORM_DIAGNOSTICS.md](PLATFORM_DIAGNOSTICS.md#the-on-glass-line), [DIVERGENCES.md](DIVERGENCES.md) TM-4).
+
+**The defaults.** With pictures as made (vsync off, Frame rate Uncapped, the render thread on) on Android the moment drawn is the screen's rule where it can place the picture (`rd_pace_screen_decide`); where it cannot (no display times, too few shown pictures, stale times, off one grid, a kept frame) the own timer (`rd_as_made_timer_decide`: the owner's phone measured it steadier than the hand-over rule). Both were measured on Android phones only, so on every other build (a desktop, a Mac, an iPhone) neither is drawn: the hand-over rule is, and the screen's rule is computed and reported on the `on the glass` line as a what-if wherever the driver gives the display's times back (`VK_GOOGLE_display_timing` is read wherever it is offered). The owner's phone's run with these defaults (and the VU record by compute and the no-volume break on its PowerVR) was the fastest measured there (the opening 14.2-17.3 ms a picture against 18.3-22.3, stage 3 11.6-11.9 against 14.1) with 74-90 % of the pictures on their predicted refresh and a deviation on the glass of .27-.39. Off Android every picture as made is the hand-over rule's to the bit, with or without the display's times (`rd_pace_gpu_test`'s two off-Android cases: 600 of 600 each, the second with the times faked on and the screen's rule placing 566 pictures it does not draw). The GPU-end rule stays off (above). Each rule's start line and attempt ledger row say what is drawn and why ([ANDROID_DIAGNOSTICS.md](ANDROID_DIAGNOSTICS_LEDGERS.md#the-attempt-ledger)).
+
+The clock itself (its step, resets and holds, Motion blur:
+Smooth's interval and presents a tick, FSR's step) and every pacing input (the step rule's asks,
+holds and estimates) are untouched: this changes only the alpha the render thread draws at, its
+value in the `interp:` alpha line and in the present's record. Not under `ICO_RD_S2_LEGACY=1`, and
+not for a present made in place without the render thread (no drain)
+(`port/render/rd.h` (`RdPresentClock`); `port/render/rd_present_clock.c` (`rd_present_clock_alpha`);
 `port/platform/window_present.c` (`pace`)). `ICO_RD_S2_LEGACY=1` takes the raw measured time instead
 and turns off the finer blending (`port/render/rd_internal.h` (`rd__s2_legacy`)). Under the lock the
 alpha is the grid's exact `k / (n * perFrame)` (`pace_lock_alpha`).
@@ -1491,6 +2629,15 @@ mask fades in with the box: none at 720 output lines or fewer, full at 1080 or m
 (`rd__crt_mask_fade`). `crt.hlsl` binds `CrtCB` at b1 space1 (DrawCB's slot and size, `IcoCrtCB`),
 the source at t1, the blurred target at t2 and a bilinear clamped sampler at s1, all in space2; it
 does not include `common.hlsli` (`port/shaders/crt.hlsl`, header comment).
+
+The colour adjustment ([Presentation](#presentation)) acts on the finished picture before the CRT
+filter, so the filter's scanlines, mask, glow and gamma work on the adjusted colours: `crt.hlsl`'s
+`toneOf` adjusts every source read (`linearAt` in `crt_bloom_ps`, `linearLoad` in `crt_ps`) before
+the gamma decode, the factors in `IcoCrtCB.pad[0..3]` (`c_toneAdj`) and `pad[4]` 1 with it on
+(`c_toneOn`; `port/render/rd_crt.c` (`compose`)). A uniform branch, not a pipeline of its own: with
+every row at 50 it is not taken and each mode's present is the recorded one (`rd_crt_test`
+`checkTone`). This order is the port's own; PCSX2 applies its shade boost to the merged frame before
+its TV shader, by our reading of its source (not checked against PCSX2 on a device).
 
 ## Hotkeys for pictures
 
@@ -1563,8 +2710,11 @@ replay's start, alpha, `first_of_tick`, each picture effect `gpu_<effect>_ms`,
 `vu_pre_draws` and `vu_pre_fallbacks` ([RENDER.md](PIPELINES.md#the-vertex-and-triangle-pre-passes)), the walk's
 CPU time by list `walk_list<N>_ms`, the upload bytes by what they carry `upload_texture_bytes`,
 `upload_uniform_bytes`, `upload_interp_bytes` (of the mesh bytes) and `upload_stream_bytes`, and
-the per-pass timing's `passes` (the pieces begun), `pass_timed` and `pass_count`
-([RENDER.md](RENDER.md#the-per-pass-timing))
+the per-pass timing's `passes` (the pieces begun, the display wait not among them), `pass_timed`
+and `pass_count` ([RENDER.md](RENDER_PERF.md#the-per-pass-timing)), then `gpu_display_wait_ms` (the
+scene list's end to the present's own list's start, `RdPerfRecord.gpuDisplayWaitMs`) and `submits`
+(the queue submits counted with the record: 2 a presenting picture, its scene's list and the
+present's, [RENDER.md](RENDER_PERF.md#the-presents-own-list))
 (`port/platform/window_host.c` (`perf_csv_open`, `perf_csv_line`)). The file
 is flushed after each drain, every vsync (`perf_drain`).
 
@@ -1573,7 +2723,7 @@ window writes `ico-pc-passes.csv` beside it, logging `window: perf_passes: one l
 every replay in <path>`: one line per piece of GPU work, `replay,frame,pass,kind,list,effect,
 target,width,height,draws,pipeline_binds,gpu_us,cpu_us` (the kind in words: `uploads`, `VU
 pre-pass`, `render pass`, `copy`, `snapshot`, `DATE snapshot`, `fog depth read`, `exact blend`,
-`MSAA resolve`, `stencil clear`, `present`; the list -1 outside the lists; the effect `none` or
+`MSAA resolve`, `stencil clear`, `present`, `display wait`; the list -1 outside the lists; the effect `none` or
 its name; the target `SCENE`, `WORK0`, ..., `block`, `temporary`, `window`, `record` or `none`;
 `gpu_us` -1 when a stamp is missing), the replay and frame numbers those of the perf CSV's line
 (`port/platform/window_host.c` (`perf_pass_csv_open`, `perf_passes_add`); `port/render/rd_perf.c`
@@ -1585,9 +2735,9 @@ one's pixels: for a measurement, not for play.
 
 | test | checks |
 | --- | --- |
-| `port/platform/test/pace_loop_test.c` | the vsync lock's loop under a fake clock and swapchain (mailbox, FIFO, a FIFO queue, a vblank clock): grid, alphas, phase, drift (`testFifoDrift`), the ratchet (`testFifoRatchet`), D3D12's full queue (`testQueueBlocking`), the skip guard (`testSkipGuard`), the late-present skip under the lock (`testLateSkipLock`), the present allowance with the fence (`test120Budget`), clocks left, off the screen, long steps, pauses; FIFO latest ready (`testLatestReady`), the timer path's FIFO hold (`testFifoHold`), the audio's starting ratio (`testNominalRatio`), the log's trace (`testTrace`); the render thread's further presents: the step-deadline rule's rates and vsync off's pictures as made (`testStepRule`) |
+| `port/platform/test/pace_loop_test.c` | the vsync lock's loop under a fake clock and swapchain (mailbox, FIFO, a FIFO queue, a vblank clock): grid, alphas, phase, drift (`testFifoDrift`), the ratchet (`testFifoRatchet`), D3D12's full queue (`testQueueBlocking`), the skip guard (`testSkipGuard`), the late-present skip under the lock (`testLateSkipLock`), the present allowance with the fence (`test120Budget`), clocks left, off the screen, long steps, pauses; FIFO latest ready (`testLatestReady`), the timer path's FIFO hold (`testFifoHold`), the audio's starting ratio (`testNominalRatio`), the log's trace (`testTrace`); the render thread's further presents: the step-deadline rule's rates and vsync off's pictures as made (`testStepRule`); the back-off's outlier misses and its end on evidence, by rates against the back-off before (`testBackoffEvidence`); the lock with Direct3D 11's wait for room in the present queue on the render thread, made after the picture before's present (`testRoomOffGame`) |
 | `port/platform/test/pace_policy_test.c` | the slow-present rule, Auto resolution's steps, the present gap, cap versus refresh, the limiter grid, the lock's n and alphas, the grid's period check, the lock's pause, the vblank laws, the first-present pause, the display's intervals, the late-present skip and its loop under a fake clock, the present allowance's rule (`testBudgetRule`), the timer path's unbound start (`testBudgetUnbound`), the reporters' sequences (`testBudgetHitch130`, `testBudgetSustained`, `testBudgetGlWait126`), the window's allowance and clock words (`testBudgetLines`), the timer path with a GPU queue (`testBudgetTimerLoop`) and paced by the GPU (`testBudgetPaced`, `testBudgetPacedLoop`), vsync off under the FIFO fallback at 120 Hz (`testBudgetFifo120`), the step-deadline rule's arithmetic, its back-off, the reads' prediction and the as-made line (`testStepRule`) |
-| `port/platform/test/present_fallback_test.c` | the FIFO fallback's decision over the stock driver's blocks (the third within 30 s switches, never a second time), blocks too far apart or too short, Turnip's driver text, `[dev] present_fallback=off`, the lines word for word |
+| `port/platform/test/present_fallback_test.c` | the FIFO fallback's decision over the stock driver's blocks (the third within 30 s switches, never a second time), blocks too far apart or too short, Turnip's driver text, `[dev] present_fallback=off`, the window's gate (`ico_present_fallback_gate`: Qualcomm's own yes, Mali, PowerVR, NVIDIA and AMD other, Mesa and Turnip, vsync on, not mailbox, not Vulkan and fifo no, off kept), FIFO from the start on Qualcomm's own driver (auto on Android yes; off, fifo, vsync on, Mesa or Turnip text, other vendors, any other platform no), the lines word for word |
 | `port/platform/test/perf_block_test.c` | a block's sums and maxima, the replays over the threshold, the longest-phase text, a reset |
 | `port/platform/test/window_video_test.c` | the window mode requests and their readback on SDL's offscreen driver (77 without one): fullscreen at the desktop's size, Borderless, Windowed back at 960 x 720; Fullscreen through `ico_window_video_mode` holds the desktop's mode (its size and refresh rate) or, where the driver takes none, no mode, and `ico_window_video_desktop_mode` returns which. Whether the display goes exclusive and the swapchain's `VK_EXT_full_screen_exclusive` request are the window system's and a Windows driver's: no test here sees them (lavapipe has no such extension) |
 | `port/platform/test/hotkeys_test.c` | F11, F12, the stats period, F12's file names |
@@ -1595,11 +2745,13 @@ one's pixels: for a measurement, not for play.
 | `port/render/test/rd_interp_test.c` | blending two synthetic frames: the ends, half way, the snaps, ordinals, grids, meshes, particles, shadows, the present clock |
 | `port/render/test/rd_crt_test.c` | the CRT keys, the modes' table and overrides, and each mode's hash at two sizes on a Vulkan device |
 | `port/render/test/rd_boot_present_test.c` | a saved start-up through the presenter, present by present, with DISPLAY's probe points |
-| `port/rhi/test/rhi_vk_present_mode_test.c` | `vkr_choose_present_mode` (mailbox, FIFO latest ready, FIFO, immediate, and FIFO under the FIFO fallback over every set) and `vkr_present_wait_wanted` |
+| `port/rhi/test/rhi_vk_present_mode_test.c` | `vkr_choose_present_mode` (mailbox, FIFO latest ready, FIFO, immediate, and FIFO under the FIFO fallback over every set), `vkr_present_wait_wanted` and `vkr_prerotate_turns` (the turned swapchain's choice: 90, 180, 270; identity, a mirrored turn, a turn not offered, `[dev] prerotate = false` and images past the surface's largest keep identity) |
+| `port/render/test/rd_replay_tool_prerotate.cmake` | the turned present's twin (`ICO_VK_FAKE_TRANSFORM=90`, `180`, `270`) read back turned back is the identity present byte for byte: rd_pixel's dump plain, wide (1280x720), with the overlay test pattern and under the CRT filter, and the fixtures of `port/render/test/fixtures/lists/prerotate.txt` at 640x480 and 2400x1080; each turned run must name its twin |
 
 The ctest names are the file names without `_test`: `pace_loop`, `pace_policy`, `perf_block`,
 `window_video`, `hotkeys` (`port/platform/CMakeLists.txt`), `rd_present`, `rd_interp`, `rd_crt`,
-`rd_boot_present` (`port/render/CMakeLists.txt`), `rhi_vk_present_mode` (`port/rhi/CMakeLists.txt`).
+`rd_boot_present`, `rd_replay_tool_prerotate` (`port/render/CMakeLists.txt`), `rhi_vk_present_mode`
+(`port/rhi/CMakeLists.txt`).
 A pacing change runs ([BUILDING.md](../BUILDING.md#building-a-few-targets)):
 
 ```sh

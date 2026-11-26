@@ -10,16 +10,27 @@
  * time. Every default is the original game's behaviour, except
  * circle_back (default-on port behaviour).
  *
+ * Five options are rows of the journey's difficulty record (difficulty.h),
+ * chosen per save on the New Game screen, not config keys: Shadows never
+ * take Yorda (yorda_safe), Time to rescue Yorda (pit_time), Shadow speed
+ * (shadow_speed), Yorda trips (yorda_trips) and Shadows attack together
+ * (shadows_together).  Their accessors below read the active record and
+ * their setters edit it; their old [gameplay] keys are retired (read once
+ * more only by a save's carry-over, ico_difficulty_from_config).
+ *
  *   [gameplay] stick_fix   false  the stick fix (off on every platform)
- *   [gameplay] yorda_safe  false  the shadows never take Yorda
- *   [gameplay] pit_time    "original"  the time a shadow takes to pull Yorda
- *                                 into a pit (half..triple)
- *   [gameplay] shadow_speed "original"  how fast shadows walk, run and fly
+ *   (row)      yorda_safe  off    the shadows never take Yorda
+ *   (row)      pit_time    original  the time a shadow takes to pull Yorda
+ *                                 into a pit (4..30 seconds)
+ *   (row)      shadow_speed original  how fast shadows walk, run and fly
  *                                 (slower..fastest)
+ *   (row)      shadows_together
+ *                          off    no turns: a shadow attacks while another
+ *                                 does (enemy_act.c EnemyUtil_isOtherStatus)
  *   [gameplay] door_fix    false  holding hands, an arrival does not send
  *                                 Ico and Yorda straight back through the
  *                                 door they came in by (door_grace.h)
- *   [gameplay] yorda_trips false  after 3 s of Ico running pulling her by
+ *   (row)      yorda_trips off    after 3 s of Ico running pulling her by
  *                                 the hand Yorda trips and falls, the main
  *                                 gate's second stage's fall and rule
  *                                 (yorda_trip.h)
@@ -47,6 +58,18 @@
  *                                 "hold" keeps R1 held (the game's Hold type
  *                                 A); "toggle" takes it with one press and
  *                                 lets go with another (B)
+ *   [gameplay] zoom_type   "hold" the zoom button (R2): "hold" zooms in while
+ *                                 it is held (the game's own, every disc);
+ *                                 "toggle" zooms in with one press and out
+ *                                 with the next (zoom_toggle.h); a
+ *                                 pad-recording key
+ *   [gameplay] camera_reset
+ *                          "off"  "on": a press of R3 puts the player's
+ *                                 look-around back on the boy at once
+ *                                 (camera_reset.h); a pad-recording key
+ *   [gameplay] yorda_look  "off"  "hold" or "toggle": L3 turns the boy's head and
+ *                                 the camera to Yorda without calling her
+ *                                 (yorda_look.h); a pad-recording key
  *   [gameplay] developer_mode
  *                          false  the development build's debug menu and
  *                                 debug options
@@ -64,6 +87,10 @@
  *                                 menu words and subtitles, drawn as text
  *                                 over the English disc data: "" none or
  *                                 ru-bobttz, ru-cobra838 or pt-br
+ *   [input] button_pictures
+ *                          "auto" the button pictures drawn: "auto" (the
+ *                                 controller pressed last), "playstation",
+ *                                 "xbox", "nintendo" or "wii_classic"
  *   [dev] debug_option     0      with developer mode: non-zero loads the
  *                                 debug option table the Debug Mode page saves
  *
@@ -71,7 +98,8 @@
  * under #ifdef ICO_HOST only; door_fix is read by door_grace.c, which the
  * game's exit check calls; natural_chains by seki/src/BgAnimation.c under
  * #ifdef ICO_RD (the window build); skip_opening by common/src/kanbanBoot.c
- * and script/src/op.c.
+ * and script/src/op.c; shadows_together by fumi/src/enemy_act.c
+ * (ico_opt_shadow_waits).
  */
 #ifndef ICO_PORT_GAME_OPTIONS_H
 #define ICO_PORT_GAME_OPTIONS_H
@@ -93,32 +121,57 @@ int ico_opt_stick_fix_default_for(int android);
 int ico_opt_stick_fix_default(void);
 int ico_opt_yorda_safe(void);
 void ico_opt_set_yorda_safe(int on);
-/* [gameplay] pit_time (default "original"): how long a shadow takes to pull
-   Yorda into a pit.  The names are half, original, longer, double, triple
-   (ICO_PIT_*); the time factors 0.5, 1, 1.5, 2, 3.  The dive's play speed is
-   1/factor (ico2/fumi/src/enemy_act.c actEnemyKidnapEnd).  Logs
-   "gameplay: pit time <name> (x<factor>)" at load and on change. */
-#define ICO_PIT_HALF 0
-#define ICO_PIT_ORIGINAL 1
-#define ICO_PIT_LONGER 2
-#define ICO_PIT_DOUBLE 3
-#define ICO_PIT_TRIPLE 4
-#define ICO_PIT_COUNT 5
+/* Time to rescue Yorda (the record's pit_time row, default Original): how long a shadow takes to pull
+   Yorda into a pit, in whole seconds ICO_PIT_MIN_SECONDS..ICO_PIT_MAX_SECONDS
+   (an integer in the file), or "original" (the disc's own time).  The pull-in
+   is the five SINK motions A to E the shadow plays one after the other
+   (ico2/fumi/src/enemy_act.c actEnemyKidnapEnd); the disc's own length is
+   ico_opt_pit_chain_ticks() game ticks at 30 a second (25 at 50 Hz, each
+   moving the motions on 1.2 frames: the same seconds), 15.4 s on the
+   released discs.  The time factor is the seconds over that length (1 for
+   Original); the five motions' play speed is 1/factor.  A value equal to the
+   whole-second base (ico_opt_pit_base_seconds, 15) reads as Original.  The
+   words of the earlier versions still read: half, longer, double, triple are
+   1/2, 1.5, 2 and 3 times the disc's own time in whole seconds, held to the
+   range.  Logs "gameplay: pit time <value> (...)" with the disc's length and
+   the factor at the first read and on change. */
+#define ICO_PIT_ORIGINAL 0
+#define ICO_PIT_MIN_SECONDS 4
+#define ICO_PIT_MAX_SECONDS 30
+/* 0 (ICO_PIT_ORIGINAL) or the seconds set */
 int ico_opt_pit_time(void);
-void ico_opt_set_pit_time(int v);
+/* 0, or the base: Original; else the seconds, held to the range */
+void ico_opt_set_pit_time(int seconds);
+/* the seconds the row shows: the value, or the base for Original */
+int ico_opt_pit_seconds(void);
+/* the disc's own pull-in in game ticks (SINK_A..D played to their last frame,
+   SINK_E to frame 51, where the game takes Yorda): 462 on the released discs,
+   463 on the June 2001 demo (port/game/test/pit_dive_base_test.c reads both
+   from each disc); for a region slug, and for the disc in use */
+int ico_opt_pit_chain_ticks_for(const char *slug);
+int ico_opt_pit_chain_ticks(void);
+/* that time in whole seconds, rounded (15 on every disc) */
+int ico_opt_pit_base_seconds(void);
+/* the value text reads in the file ("original", "8", or an earlier version's
+   word) as ico_opt_pit_time keeps it, for a pull-in of ticks; *note 1 when
+   the text was not one (reads Original) or a number held to the range, 2
+   when an earlier version's word was held to it ("double", "triple": 30) */
+int ico_opt_pit_parse(const char *text, int ticks, int *note);
 float ico_opt_pit_time_factor(void);
 /* the dive's play-speed ratio actEnemyKidnapEnd reserves: 1/factor, or 2/factor
-   under a stage camera effect (the game's own 2x) */
+   under a stage camera effect (the game's own 2x; the game's 5 s timeout there
+   is scaled by the factor too) */
 float ico_opt_pit_dive_ratio(int camera);
-/* [gameplay] shadow_speed (default "original"): how fast shadows walk, run and fly.
+/* Shadow speed (the record's shadow_speed row, default Original): how fast shadows walk, run and fly.
    The names are slower, original, faster, fastest (ICO_SPEED_*); the factors 0.75, 1,
    1.25, 1.5.  Walking and running scale by the play speed of the shadow's motion
    (ico2/fumi/src/act-game.c ACTGame_SetMotionPlaySpeedRatio_Exec), flying by the forward
-   push of flyCoreLoop (ico2/fumi/src/commonact.c).  Only the locomotion motions take the
+   push of flyCoreLoop (ico2/fumi/src/commonact.c); the turn per tick of those motions scales too (ico_opt_shadow_turn_limit).  Only the locomotion motions take the
    factor (ico_opt_shadow_speed_motion): attacks, grabs, hits, the dissolve, the pit dive
-   (pit_time owns it) and the turns keep the game's play speed, so the AI's tick-counted
+   (pit_time owns it) keep the game's play speed, so the AI's tick-counted
    waits stay in step with them (review finding 15); not a frozen shadow, not how often
-   they attack.  Logs "gameplay: shadow speed <name> (x<factor>)" at load and on change. */
+   they attack.  Logs "gameplay: shadow speed <name> (x<factor>)" at the first read and on
+   change. */
 #define ICO_SPEED_SLOWER 0
 #define ICO_SPEED_ORIGINAL 1
 #define ICO_SPEED_FASTER 2
@@ -127,6 +180,11 @@ float ico_opt_pit_dive_ratio(int camera);
 int ico_opt_shadow_speed(void);
 void ico_opt_set_shadow_speed(int v);
 float ico_opt_shadow_speed_factor(void);
+/* SetMotionDirectionSmooze's turn limit s (degrees a tick) for an actor of GObj kind and
+   ctrl.motion: a shadow (kind 4) on a locomotion motion turns by s times the speed factor,
+   so its path is the original's path played faster (the same circle); anything else, and
+   the factor 1, return s unchanged.  Logs the first 8 and every 100th scaled turn. */
+float ico_opt_shadow_turn_limit(int kind, int motion, float s);
 /* 1 when motion (a motionKind index, a shadow's ctrl.motion) is one of this disc's
    shadow locomotion motions, by their names in the disc's motion table (the decomp's
    generated motion-def.c): "EN1 FLY", "EN1 CARRY_FLY", "EN1 WALKLOOP1/2",
@@ -137,10 +195,29 @@ float ico_opt_shadow_speed_factor(void);
    North American: 790, 792, 795-800, 888, 889; August 2001: 792, 794, 797-802, 890, 891;
    June 2001: 823, 825, 828-833, 923, 924, 942, 944, 955. */
 int ico_opt_shadow_speed_motion(int motion);
+/* Shadows attack together (the record's shadows_together row, default Off).  The game
+   holds a Shadow back from its attack while another Shadow is in its attack (act mode
+   15) or has its attack mail out (ico2/fumi/src/enemy_act.c EnemyUtil_isOtherStatus:
+   the change to the ATTACK brain, the ATTACK brain's mails, the swipe on the way to
+   Yorda), so they take turns; with the option on none is held back.  Their approach,
+   waits, attack chances, dodges and the kidnap are the game's either way, and one
+   Shadow carries Yorda at a time (she has one carrier).  Logs "gameplay: shadows attack
+   together: 1 at once (the game's turns)" or "...: all at once (no turns)" at the first
+   read and on a change. */
+int ico_opt_shadows_together(void);
+void ico_opt_set_shadows_together(int on);
+/* The hook's answer: 1 when a Shadow waits (other_attacking and the option off), else
+   0.  Each 0 given for other_attacking (a turn the option skipped) is counted, and
+   logged the first 8 times, then every 100th:
+   "gameplay: shadows attack together: a shadow did not wait for another's attack (N
+   this run)". */
+int ico_opt_shadow_waits(int other_attacking);
+/* the turns skipped this run (the count of that log line) */
+unsigned long ico_opt_shadows_together_went(void);
 /* [gameplay] door_fix (default false): the doorway fix of door_grace.h */
 int ico_opt_door_fix(void);
 void ico_opt_set_door_fix(int on);
-/* [gameplay] yorda_trips (default false): Yorda trips (yorda_trip.h).  Logs
+/* Yorda trips (the record's yorda_trips row, default Off; yorda_trip.h).  Logs
    "gameplay: yorda trips on|off" at its first read and on a change; the stage
    load adds her motions from the next stage on. */
 int ico_opt_yorda_trips(void);
@@ -176,7 +253,8 @@ void ico_opt_set_mirror(int on);
    renderer's rd_set_mirror).  NULL unregisters.  One listener. */
 void ico_opt_set_mirror_listener(void (*fn)(int on));
 /* The title (layout_action.c, ICO_HOST): no run is in progress, so the
-   value goes back to [gameplay] mirror (default false). */
+   value goes back to [gameplay] mirror (default false), and the journey's
+   difficulty to Normal (ico_difficulty_reset). */
 void ico_opt_mirror_reset(void);
 
 /* The mirror flag of each save slot, kept in config.toml, never in the card
@@ -344,8 +422,72 @@ int ico_opt_hold_choice_store(void);
    318, reached only on a disc whose layout tables are not recognised): sets
    the type, writes the key and saves config.toml at once. */
 void ico_opt_hold_type_toggled(int type);
+/* [gameplay] zoom_type: how the zoom button (R2) zooms the camera
+   (port/game/zoom_toggle.h): ICO_ZOOM_HOLD ("hold", the default on every
+   disc: the game's own, zoomed in while R2 is held) or ICO_ZOOM_TOGGLE
+   ("toggle": one press zooms in, the next zooms out).  Another word reads
+   as hold, logged once.  A log line each time the type in force changes:
+   "options: zoom type <hold|toggle>".  Not on the memory card. */
+#define ICO_ZOOM_HOLD 0
+#define ICO_ZOOM_TOGGLE 1
+int ico_opt_zoom_type(void);
+/* sets the type for this run (another value reads as ICO_ZOOM_HOLD) */
+void ico_opt_set_zoom_type(int type);
+/* the key's word of a type: "hold" or "toggle" */
+const char *ico_opt_zoom_type_name(int type);
+/* [gameplay] camera_reset: "off" (the default on every disc: the game as
+   shipped) or "on" (camera_reset.h: R3 puts the look-around back on the
+   boy at once).  Another word reads as off, logged once; the value in force
+   is logged when it changes ("options: camera reset <off|on>").  1 when
+   on. */
+int ico_opt_camera_reset(void);
+/* sets it for this run (non-zero: on) */
+void ico_opt_set_camera_reset(int on);
+/* the key's word: "on" or "off" */
+const char *ico_opt_camera_reset_name(int on);
+/* [gameplay] yorda_look: Look at Yorda (port/game/yorda_look.h):
+   ICO_YORDA_LOOK_OFF ("off", the default on every disc: the game as
+   shipped), ICO_YORDA_LOOK_HOLD ("hold": the look while L3 is held) or
+   ICO_YORDA_LOOK_TOGGLE ("toggle": one press starts it, the next ends it).
+   Another word reads as off, logged once; the value in force is logged
+   when it changes ("options: look at yorda <off|hold|toggle>"). */
+#define ICO_YORDA_LOOK_OFF 0
+#define ICO_YORDA_LOOK_HOLD 1
+#define ICO_YORDA_LOOK_TOGGLE 2
+int ico_opt_yorda_look(void);
+/* sets it for this run (another value reads as ICO_YORDA_LOOK_OFF) */
+void ico_opt_set_yorda_look(int type);
+/* the key's word: "off", "hold" or "toggle" */
+const char *ico_opt_yorda_look_name(int type);
+/* [input] button_pictures: whose button pictures the menus, the prompts,
+   photo mode and the touch screen draw (Options > Controls > Button
+   pictures; port/ui/settings_pads.c resolves it once a frame).  "auto"
+   (ICO_BUTTON_PICTURES_AUTO, the default: the controller pressed last,
+   port/input/input.h ico_input_last_pad_kind; Wii Classic Controller is
+   never chosen by Auto), "playstation" (the disc's own pictures), "xbox",
+   "nintendo" (Switch, Wii U) or "wii_classic".  The numbers 0..3 are
+   port/ui/pad_glyphs.h's IcoPadGlyphStyle.  Another word reads as auto,
+   logged once.  Not a pad-recording key: it changes what is drawn only.
+   A set the build cannot draw whole reads as auto too (settings_pads.c,
+   which can ask the pictures; this file cannot). */
+#define ICO_BUTTON_PICTURES_AUTO (-1)
+#define ICO_BUTTON_PICTURES_PLAYSTATION 0
+#define ICO_BUTTON_PICTURES_XBOX 1
+#define ICO_BUTTON_PICTURES_NINTENDO 2
+#define ICO_BUTTON_PICTURES_WII_CLASSIC 3
+#define ICO_BUTTON_PICTURES_COUNT 4
+int ico_opt_button_pictures(void);
+/* out of -1..3 sets auto */
+void ico_opt_set_button_pictures(int choice);
+/* the key's word: "auto", "playstation", "xbox", "nintendo", "wii_classic"
+   ("auto" for anything else) */
+const char *ico_opt_button_pictures_name(int choice);
+/* Writes the run's choice into [input] button_pictures without saving the
+   file: 0, or -1 when it cannot be set. */
+int ico_opt_button_pictures_store(void);
 /* Forget the run-time values: each option is read from the config again on
-   its next use (and the characters' colours, appearance.h). */
+   its next use (and the characters' colours, appearance.h).  The difficulty
+   rows are the journey's and are kept. */
 void ico_opt_reload(void);
 
 #endif /* ICO_PORT_GAME_OPTIONS_H */

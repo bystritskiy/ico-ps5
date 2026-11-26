@@ -54,6 +54,9 @@ extern int ico_door_grace_begin(int stage, int frames);
 extern int ico_door_grace_active(void);
 extern void ico_door_grace_tick(void);
 extern int ico_door_grace_holds(int dest_stage);
+/* PC port: port/game/ico_rows.h: Developer > Free movement, read in place of the
+   local debug switch that the four boy control loops leave at 0 */
+extern int ico_free_movement(void);
 
 typedef struct { /* field names derived */
     int a, b, c;
@@ -1812,7 +1815,7 @@ static void subBoyControl_jun26(GObj *volatile self)
            moving the current target object; the August TRFILE (2052-2056)
            and the PAL listing (2323-2327) have five code-less lines after
            the loop's brace, this block's length; the text is derived */
-        if (dbg) {
+        if (dbg || ico_free_movement()) { /* PC port: Developer > Free movement */
             if ((void *)self == CurrentTargetGObj && (s->pad.trg & 1)) {
                 ACTDebugMove(self, 1);
             }
@@ -2439,7 +2442,7 @@ static void subBoyControl_aug6(GObj *volatile self)
            moving the current target object; the August TRFILE (2052-2056)
            and the PAL listing (2323-2327) have five code-less lines after
            the loop's brace, this block's length; the text is derived */
-        if (dbg) {
+        if (dbg || ico_free_movement()) { /* PC port: Developer > Free movement */
             if ((void *)self == CurrentTargetGObj && (s->pad.trg & 1)) {
                 ACTDebugMove(self, 1);
             }
@@ -3074,7 +3077,7 @@ static void subBoyControl_ntsc(GObj *volatile self)
            moving the current target object; the August TRFILE (2052-2056)
            and the PAL listing (2323-2327) have five code-less lines after
            the loop's brace, this block's length; the text is derived */
-        if (dbg) {
+        if (dbg || ico_free_movement()) { /* PC port: Developer > Free movement */
             if ((void *)self == CurrentTargetGObj && (s->pad.trg & 1)) {
                 ACTDebugMove(self, 1);
             }
@@ -3734,7 +3737,7 @@ void subBoyControl(GObj *volatile self)
         }
         /* a local debug switch, off: the cursor_control idiom of way_tool.c,
            moving the current target object */
-        if (dbg) {
+        if (dbg || ico_free_movement()) { /* PC port: Developer > Free movement */
             if ((void *)self == CurrentTargetGObj && (s->pad.trg & 1)) {
                 if (s->actMode != 1) {
                     ACTSendMailCorrect(self, 258);
@@ -4306,6 +4309,11 @@ static void PutWeapon_jun26(void)
     }
 }
 
+/* PC port: port/game/variants.h: the light sword made as kind 8 by Light sword
+   colour Red reads as the kind 9 it was placed as, so it is set down as the
+   game sets the light sword down */
+extern int ico_variant_weapon_put_kind(int kind);
+
 static void PutWeapon(void)
 {
     if (ICO_JUN26) {
@@ -4318,7 +4326,7 @@ static void PutWeapon(void)
         InitMotionGeoInfo(&GOBJ_SUB(BOYINFO.weapon)->root, BOYINFO.f30, BOYINFO.f34, BOYINFO.f38,
                           -BOYINFO.f40, -BOYINFO.f44, -BOYINFO.f48);
         if (!ICO_NTSCAUG6JUN26) {
-            if (CheckWeaponKind(BOYINFO.weapon) == 9) {
+            if (ico_variant_weapon_put_kind(CheckWeaponKind(BOYINFO.weapon)) == 9) {
                 SetWeaponOffsetMode(BOYINFO.weapon, 1);
             }
         }
@@ -6366,6 +6374,10 @@ inline void actBoyFall(GObj *volatile self)
     }
 }
 
+/* PC port: port/game/variants.h: Turn to face shadows (0: Ico's swing no
+   longer turns him toward the nearest Shadow) */
+extern int ico_variant_attack_turn(void);
+
 /* the nearest enemy in front of the actor, which ACTSearchEnemy and
    actBoyAttack inline */
 static inline void searchEnemy(void *self, ICO_WORD *out_id, float *out_vec) /* derived name */
@@ -6387,7 +6399,7 @@ static void actBoyAttack_ntsc(GObj *volatile self)
     _ACTWait(2);
     searchEnemy((void *)self, &((Act *)sub)->attackTurn, vec);
     while (1) {
-        if (((Act *)sub)->attackTurn) {
+        if (((Act *)sub)->attackTurn && ico_variant_attack_turn()) {
             if (ACTGame_NoWeapon(self)) {
                 SetMotionDirectionWithLimit((void *)self, vec, 5.0f, 45.0f);
             } else {
@@ -6412,7 +6424,7 @@ static void actBoyAttack_jun26(GObj *volatile self)
     _ACTWait(2);
     searchEnemy((void *)self, &((Act *)sub)->attackTurn, vec);
     while (1) {
-        if (((Act *)sub)->attackTurn) {
+        if (((Act *)sub)->attackTurn && ico_variant_attack_turn()) {
             if (ACTGame_NoWeapon(self)) {
                 SetMotionDirectionWithLimit((void *)self, vec, 5.0f, 45.0f);
             } else {
@@ -6448,7 +6460,7 @@ void actBoyAttack(GObj *volatile self)
     _ACTWait(2);
     searchEnemy((void *)self, &((Act *)sub)->attackTurn, vec);
     while (1) {
-        if (((Act *)sub)->attackTurn) {
+        if (((Act *)sub)->attackTurn && ico_variant_attack_turn()) {
             if (ACTGame_NoWeapon(self)) {
                 SetMotionDirectionWithLimit((void *)self, vec, 5.0f, 45.0f);
             } else {
@@ -8918,6 +8930,9 @@ inline void PrivInsCamSet(float *pos, float *tgt, GObj *track, int inFrames, int
     privInsCam.on = 1;
 }
 
+/* PC port: port/game/variants.h: Shadows wait while Ico is down */
+extern int ico_variant_shadows_wait_down(void);
+
 inline int IsBoyStatus_EnemyMustWait(void)
 {
     Act *sub;
@@ -8939,7 +8954,9 @@ inline int IsBoyStatus_EnemyMustWait(void)
             return 1;
         }
     }
-    if (st == 0x15 || 0 < ((ActWork *)sub->work)->downTimer) {
+    /* PC port: Shadows wait while Ico is down off: the down act and the get-up
+       timer no longer hold the Shadows (the stone and 22..23 parts stay) */
+    if (ico_variant_shadows_wait_down() && (st == 0x15 || 0 < ((ActWork *)sub->work)->downTimer)) {
         return 1;
     }
     return 0;

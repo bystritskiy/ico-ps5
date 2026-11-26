@@ -20,28 +20,64 @@ const char *const ICO_SIM_KEYS[] = {
     "game.language",
     "gameplay.mirror",
     "gameplay.stick_fix",
-    "gameplay.yorda_safe",
-    "gameplay.pit_time",
-    "gameplay.shadow_speed",
     "gameplay.developer_mode",
     "dev.start_stage",
     "gameplay.door_fix",
-    "gameplay.yorda_trips",
     "video.anti_aliasing",
     "gameplay.hold_type",
     "gameplay.hold_type_chosen", /* an earlier "hold" without it is the disc's own */
     "gameplay.skip_opening",
-    /* the game variants (port/game/variants.h): each changes the simulation */
+    /* the game variants that stay in config (port/game/variants.h) */
+    "variants.no_cutscene_look",
+    "variants.ignore_cutscene_cameras",
+    /* Gameplay > Combat's weapon rows: the weapon objects' kinds (weapon.c) */
+    "variants.sword_colour",
+    "variants.weapon",
+    "developer.free_movement", /* Developer > Free movement (ico_rows.h) */
+    /* Gameplay > Chains' chain rows: the swing's pace (chain.c, debug values 1..10) */
+    "variants.chain_swing_speed",
+    "variants.chain_swing_damping",
+    "gameplay.zoom_type",    /* Controls > Zoom type: the camera's zoom latch (zoom_toggle.h) */
+    "gameplay.camera_reset", /* Controls > Camera reset: R3 rests the look-around (camera_reset.h) */
+    "gameplay.yorda_look",   /* Controls > Look at Yorda: L3 looks at her (yorda_look.h) */
+    NULL,
+};
+
+/* The keys that left ICO_SIM_KEYS in v0.11.3: rows of each save's difficulty
+   record (port/game/difficulty.h), which a state carries as its own block
+   ("difficulty.record").  A state saved before lists them in its keys text;
+   state_file.c's key check passes over them (a state is never refused for
+   one), and difficulty.c builds an older state's record from them. */
+const char *const ICO_SIM_KEYS_RETIRED[] = {
+    "gameplay.yorda_safe",
+    "gameplay.pit_time",
+    "gameplay.shadow_speed",
+    "gameplay.yorda_trips",
+    "gameplay.shadows_together", /* the Shadows' turns (enemy_act.c) */
     "variants.shade_toughness",
     "variants.one_hit",
     "variants.never_dodge",
     "variants.aggression",
     "variants.no_hints",
     "variants.barrier_hits",
-    "variants.no_cutscene_look",
-    "variants.ignore_cutscene_cameras",
+    "variants.auto_guard",
+    "variants.attack_turn",
+    "variants.shadows_wait_down",
+    "variants.peaceful_shadows", /* no brain thread for a Shadow */
     NULL,
 };
+
+int ico_sim_key_retired(const char *key, size_t key_n)
+{
+    for (int i = 0; key != NULL && ICO_SIM_KEYS_RETIRED[i] != NULL; i++) {
+        const char *k = ICO_SIM_KEYS_RETIRED[i];
+
+        if (strlen(k) == key_n && memcmp(k, key, key_n) == 0) {
+            return 1;
+        }
+    }
+    return 0;
+}
 
 /* Each key's default as the config text gives it (the value the game takes
    when the key is unset), NULL where none is one fixed text (unset is the
@@ -53,31 +89,121 @@ static const char *const kDefaults[] = {
     "auto",     /* game.language */
     "false",    /* gameplay.mirror */
     "false",    /* gameplay.stick_fix (Off on every platform, options.c) */
-    "false",    /* gameplay.yorda_safe */
-    "original", /* gameplay.pit_time */
-    "original", /* gameplay.shadow_speed */
     "false",    /* gameplay.developer_mode */
     NULL,       /* dev.start_stage */
     "false",    /* gameplay.door_fix */
-    "false",    /* gameplay.yorda_trips */
     "off",      /* video.anti_aliasing */
     "disc",     /* gameplay.hold_type */
     "false",    /* gameplay.hold_type_chosen */
     "false",    /* gameplay.skip_opening */
-    "original", /* variants.shade_toughness */
-    "false",    /* variants.one_hit */
-    "false",    /* variants.never_dodge */
-    "own",      /* variants.aggression */
-    "false",    /* variants.no_hints */
-    NULL,       /* variants.barrier_hits: unset is the disc's own number */
     "false",    /* variants.no_cutscene_look */
     "false",    /* variants.ignore_cutscene_cameras */
+    "original", /* variants.sword_colour */
+    "original", /* variants.weapon */
+    "false",    /* developer.free_movement */
+    "4",        /* variants.chain_swing_speed */
+    "4",        /* variants.chain_swing_damping */
+    "hold",     /* gameplay.zoom_type */
+    "off",      /* gameplay.camera_reset */
+    "off",      /* gameplay.yorda_look */
     NULL,
 };
 
 _Static_assert(sizeof(kDefaults) / sizeof(kDefaults[0]) ==
                    sizeof(ICO_SIM_KEYS) / sizeof(ICO_SIM_KEYS[0]),
                "every simulation key has its default (NULL: none)");
+
+/* What a load does about each key when the state's value is not this run's
+   (sim_keys.h IcoSimKeyCarry), in the list's order.  A key added later
+   declares its carry here, in the same place as in the list. */
+static const IcoSimKeyCarry kCarry[] = {
+    /* video.video_mode: the restore puts the game's mode word back
+       (systemStatus[0]), which the host's clock follows; the setting is
+       read at the start (main.c ico_boot_video_mode) */
+    ICO_SIM_CARRY_KEPT,
+    /* game.language: the restore puts the game's language back
+       (NonLinearCameraMove): this run's is set again as the Language row
+       does (settings.c) */
+    ICO_SIM_CARRY_FIXUP,
+    /* gameplay.mirror: options.c's flag is not in the state; it is the
+       running journey's (its save slot's [mirror] keys) */
+    ICO_SIM_CARRY_HARMLESS,
+    /* gameplay.stick_fix: read on every pad read (pad_host.c) */
+    ICO_SIM_CARRY_HARMLESS,
+    /* gameplay.developer_mode: read live; the Debug menu a state left open
+       is closed when developer mode is off now (settings.c) */
+    ICO_SIM_CARRY_FIXUP,
+    /* dev.start_stage: read at the start only */
+    ICO_SIM_CARRY_HARMLESS,
+    /* gameplay.door_fix: a grace the state carries (door_grace.c's blocks)
+       ends when the fix is off now */
+    ICO_SIM_CARRY_FIXUP,
+    /* video.anti_aliasing: the renderer's, not in the state */
+    ICO_SIM_CARRY_HARMLESS,
+    /* gameplay.hold_type and hold_type_chosen: the restore puts the game's
+       hold type back (optionControlType): this run's is set again */
+    ICO_SIM_CARRY_FIXUP,
+    ICO_SIM_CARRY_FIXUP,
+    /* gameplay.skip_opening: read as the opening runs (op.c, kanbanBoot.c),
+       as a change on the menu would be */
+    ICO_SIM_CARRY_HARMLESS,
+    /* variants.no_cutscene_look, variants.ignore_cutscene_cameras: the
+       restore puts the game's debug switches back: this run's values are
+       set again (variants.c ico_variants_state_loaded) */
+    ICO_SIM_CARRY_FIXUP,
+    ICO_SIM_CARRY_FIXUP,
+    /* variants.sword_colour, variants.weapon: read as a weapon is made
+       (variants.c ico_variant_weapon_kind), as a change on the menu would */
+    ICO_SIM_CARRY_HARMLESS,
+    ICO_SIM_CARRY_HARMLESS,
+    /* developer.free_movement: read live (ico_rows.c) */
+    ICO_SIM_CARRY_HARMLESS,
+    /* variants.chain_swing_speed, variants.chain_swing_damping: the game's
+       debug switches, as the cutscene rows */
+    ICO_SIM_CARRY_FIXUP,
+    ICO_SIM_CARRY_FIXUP,
+    /* gameplay.zoom_type: the latch's block clears itself on a tick of Hold
+       (zoom_toggle.c ico_zoom_held) and starts off in a state of Hold */
+    ICO_SIM_CARRY_HARMLESS,
+    /* gameplay.camera_reset: the mute clears on the first tick after the
+       load (camera_reset.c: a call that does not follow the last by one
+       tick) and when the row is off */
+    ICO_SIM_CARRY_HARMLESS,
+    /* gameplay.yorda_look: the toggle's block clears itself on the first
+       tick of Off or Hold (yorda_look.c ico_yorda_look), a state of Off
+       or Hold carries none, and every load ends a toggle
+       (ico_yorda_look_state_loaded) */
+    ICO_SIM_CARRY_HARMLESS,
+};
+
+_Static_assert(sizeof(kCarry) / sizeof(kCarry[0]) + 1 ==
+                   sizeof(ICO_SIM_KEYS) / sizeof(ICO_SIM_KEYS[0]),
+               "every simulation key declares what a load does with it");
+
+int ico_sim_key_carry(const char *key)
+{
+    int i;
+
+    for (i = 0; key != NULL && ICO_SIM_KEYS[i] != NULL; i++) {
+        if (strcmp(ICO_SIM_KEYS[i], key) == 0) {
+            return (int)kCarry[i];
+        }
+    }
+    return -1;
+}
+
+const char *ico_sim_key_carry_name(int carry)
+{
+    switch (carry) {
+    case ICO_SIM_CARRY_HARMLESS:
+        return "harmless";
+    case ICO_SIM_CARRY_FIXUP:
+        return "fix-up";
+    case ICO_SIM_CARRY_KEPT:
+        return "kept";
+    }
+    return "?";
+}
 
 const char *ico_sim_key_default(const char *key)
 {
@@ -186,6 +312,21 @@ static int saved_value(const char *text, const char *key, const char **v, size_t
     return 0;
 }
 
+int ico_sim_keys_value(const char *text, const char *key, char *out, size_t size)
+{
+    const char *v = "";
+    size_t n = 0;
+    const int found = key != NULL && saved_value(text != NULL ? text : "", key, &v, &n);
+
+    if (out != NULL && size > 0) {
+        const size_t m = n < size - 1 ? n : size - 1;
+
+        memcpy(out, v, m);
+        out[m] = '\0';
+    }
+    return found;
+}
+
 const char *ico_sim_keys_first_diff(const char *saved_text, char *out, size_t size)
 {
     int i;
@@ -212,6 +353,13 @@ const char *ico_sim_keys_first_diff(const char *saved_text, char *out, size_t si
             return k;
         }
         if (vn != strlen(cur) || memcmp(v, cur, vn) != 0) {
+            /* unset on one side and the default's text on the other: the
+               same setting (issue 218: a menu writes the key's default once
+               it is opened) */
+            if (ico_sim_key_is_default(k, strlen(k), v, vn) &&
+                ico_sim_key_is_default(k, strlen(k), cur, strlen(cur))) {
+                continue;
+            }
             if (out != NULL && size > 0) {
                 snprintf(out, size, "%s=%.*s (now %s)", k, (int)vn, v, cur);
             }

@@ -1,0 +1,134 @@
+# rd_vu_env_ab: two runs of rd_replay_tool's --pass-dump with --stats over the
+# same dumps, under two environments, every named target's PNG equal byte for
+# byte (the VU record's two writes, rd_vu_record.h: rd_vurecord_ab
+# ICO_RD_VU_RECORD=targets against =stores; the pre-pass's floor:
+# rd_vuprepass_min_ab, ICO_RD_VU_PREPASS_MIN unset against a floor no frame
+# reaches, every VU command drawn the old way).  Each run's output (stdout
+# and then stderr, where the backend's lines go) must match its regex
+# (REQ_A, REQ_B: the lines that say the run took the path it was meant to).  At the Original preset at 4:3 and 1x and the Enhanced
+# preset at 16:9 and 2x, under ICO_RD_BLEND=fixed.  The dumps: DUMP (one
+# file the build writes, may be absent) and the frames LIST names (a fixture
+# list, read by rd_vu_inputs.cmake; or a list of the build's dumps); none
+# here, or no device: SKIP (77).  The path ran: on each arm the quantities
+# FX_A, FX_B name (`|` between) of every listed fixture (its declared
+# properties, rd_fixture_require), every fixture checked.
+# -DTOOL=<rd_replay_tool> -DOUT=<a folder the test may write> -DNAME=<label>
+# -DENV_A=<VAR=VALUE[|VAR=VALUE]> -DENV_B=<...> -DREQ_A=<regex> -DREQ_B=<regex>
+# [-DDUMP=<dump>] [-DLIST=<list>] [-DFX_A=<quantity[|quantity]>] [-DFX_B=<...>]
+# [-DFIXTURE_TOOL=<rd_fixture_tool> -DFIXTURES=<folder> -DFIXTURE_HELPERS=<file>]
+# [-DSKIP_UNLESS=<regex>: a dump whose
+# first run prints no line matching it is skipped, not compared (a frame
+# without VU commands: 0 pre-passes, nothing for a floor to skip; a listed
+# fixture so skipped at every setting fails, unchecked)]
+# [-DFORBID_B=<regex>: the B run's output must have no line matching it
+# (rd_vu_rec_size_ab: no growth in play past the record made at start-up)]
+include("${CMAKE_CURRENT_LIST_DIR}/rd_vu_inputs.cmake")
+set(dumps "")
+set(first 0)
+if(DUMP AND EXISTS "${DUMP}")
+  list(APPEND dumps "${DUMP}")
+  set(first 1)
+endif()
+if(LIST)
+  rd_vu_inputs("${LIST}")
+  list(APPEND dumps ${vuDumps})
+endif()
+list(LENGTH dumps ndumps)
+if(ndumps EQUAL 0)
+  message(STATUS "SKIP: no dump is here")
+  return()
+endif()
+string(REPLACE "|" ";" envA "${ENV_A}")
+string(REPLACE "|" ";" envB "${ENV_B}")
+
+set(settings "orig" "enh2x169")
+set(args_orig --aspect 4:3)
+set(args_enh2x169 --enhanced --aspect 16:9 --resolution 2x)
+set(compared 0)
+set(failures 0)
+set(index 0)
+foreach(dump IN LISTS dumps)
+  math(EXPR index "${index} + 1")
+  foreach(s IN LISTS settings)
+    set(dirA "${OUT}/${index}-${s}-a")
+    set(dirB "${OUT}/${index}-${s}-b")
+    file(REMOVE_RECURSE "${dirA}" "${dirB}")
+    file(MAKE_DIRECTORY "${dirA}" "${dirB}")
+    execute_process(COMMAND "${CMAKE_COMMAND}" -E env ICO_RD_BLEND=fixed ${envA}
+                            "${TOOL}" "${dump}" /dev/null --pass-dump "${dirA}" --stats ${args_${s}}
+                    RESULT_VARIABLE rcA OUTPUT_VARIABLE outA ERROR_VARIABLE errA)
+    if(rcA EQUAL 77)
+      message(STATUS "SKIP: no device: ${errA}")
+      return()
+    endif()
+    if(NOT rcA EQUAL 0 AND "${errA}" MATCHES "cannot show")
+      message(STATUS "${dump} ${s}: skipped (${errA})")
+      continue()
+    endif()
+    if(SKIP_UNLESS AND NOT "${outA}" MATCHES "${SKIP_UNLESS}")
+      # a dump the comparison cannot speak about (the list's 2D-only frames
+      # have no VU command: 0 pre-passes either way): skipped, not failed
+      message(STATUS "${dump} ${s}: skipped (no line matching \"${SKIP_UNLESS}\")")
+      continue()
+    endif()
+    execute_process(COMMAND "${CMAKE_COMMAND}" -E env ICO_RD_BLEND=fixed ${envB}
+                            "${TOOL}" "${dump}" /dev/null --pass-dump "${dirB}" --stats ${args_${s}}
+                    RESULT_VARIABLE rcB OUTPUT_VARIABLE outB ERROR_VARIABLE errB)
+    if(NOT rcA EQUAL 0 OR NOT rcB EQUAL 0)
+      message(SEND_ERROR "${dump} ${s}: exit ${rcA} (${ENV_A}) and ${rcB} (${ENV_B}):\n${errA}\n${errB}")
+      math(EXPR failures "${failures} + 1")
+      continue()
+    endif()
+    string(REPLACE ";" "," flatA "${outA}\n${errA}")
+    string(REPLACE ";" "," flatB "${outB}\n${errB}")
+    if(NOT flatA MATCHES "${REQ_A}")
+      message(SEND_ERROR "${dump} ${s}: the ${ENV_A} run has no line matching \"${REQ_A}\":\n${outA}")
+      math(EXPR failures "${failures} + 1")
+    endif()
+    if(NOT flatB MATCHES "${REQ_B}")
+      message(SEND_ERROR "${dump} ${s}: the ${ENV_B} run has no line matching \"${REQ_B}\":\n${outB}")
+      math(EXPR failures "${failures} + 1")
+    endif()
+    # the path ran: each arm's declared quantities of the list's fixture
+    # (FX_A, FX_B; rd_fixture_require)
+    math(EXPR fx "${index} - ${first}")
+    if(FX_A AND fx GREATER 0)
+      string(REPLACE "|" ";" q "${FX_A}")
+      rd_vu_require(${fx} "${outA}\n${errA}" ${q})
+    endif()
+    if(FX_B AND fx GREATER 0)
+      string(REPLACE "|" ";" q "${FX_B}")
+      rd_vu_require(${fx} "${outB}\n${errB}" ${q})
+    endif()
+    if(FORBID_B AND flatB MATCHES "${FORBID_B}")
+      message(SEND_ERROR "${dump} ${s}: the ${ENV_B} run has a line matching \"${FORBID_B}\"")
+      math(EXPR failures "${failures} + 1")
+    endif()
+    file(GLOB pngs RELATIVE "${dirA}" "${dirA}/*.png")
+    list(LENGTH pngs npng)
+    if(npng EQUAL 0)
+      message(SEND_ERROR "${dump} ${s}: no target written")
+      math(EXPR failures "${failures} + 1")
+    endif()
+    foreach(png IN LISTS pngs)
+      if(NOT EXISTS "${dirB}/${png}")
+        message(SEND_ERROR "${dump} ${s}: ${png} written under ${ENV_A} only")
+        math(EXPR failures "${failures} + 1")
+        continue()
+      endif()
+      execute_process(COMMAND "${CMAKE_COMMAND}" -E compare_files "${dirA}/${png}" "${dirB}/${png}"
+                      RESULT_VARIABLE same)
+      math(EXPR compared "${compared} + 1")
+      if(NOT same EQUAL 0)
+        message(SEND_ERROR "${dump} ${s}: ${png} differs between ${ENV_A} and ${ENV_B}")
+        math(EXPR failures "${failures} + 1")
+      endif()
+    endforeach()
+  endforeach()
+endforeach()
+rd_vu_inputs_done(failures)
+if(failures GREATER 0)
+  message(FATAL_ERROR "${NAME}: ${failures} failures over ${ndumps} dumps")
+endif()
+message(STATUS "${NAME}: ${compared} targets equal over ${ndumps} dumps at 2 settings "
+               "(${ENV_A} against ${ENV_B})")

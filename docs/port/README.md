@@ -12,7 +12,11 @@ In reading order.
 | File | What it answers |
 | --- | --- |
 | [ARCHITECTURE.md](ARCHITECTURE.md) | What runs, what stands in for each PS2 component, and the Terms glossary. |
-| [PLATFORM.md](PLATFORM.md) | Entry points, fibers and the scheduler, the host loop, the arena, the game data ranges, save states, folders, diagnostics, Android graphics driver packages and the Steam shortcut. |
+| [PLATFORM.md](PLATFORM.md) | Entry points, fibers and the scheduler, the host loop, the arena, the game data ranges, save states, folders, diagnostics and the Steam shortcut. |
+| [PLATFORM_DIAGNOSTICS.md](PLATFORM_DIAGNOSTICS.md) | The log, the heartbeat and watchdog, crash and bug reports, the loss ladder and the lines the window prints. |
+| [ANDROID_DRIVERS.md](ANDROID_DRIVERS.md) | Android graphics driver packages: the picker, the drivers folder, the driver page, the fallback to the phone's own driver. |
+| [ANDROID_DIAGNOSTICS.md](ANDROID_DIAGNOSTICS.md) | Android's log diagnostics: the kernel GPU driver's sampler on its own thread, the thermal state and screen recording from the Java side. |
+| [ANDROID_DIAGNOSTICS_LEDGERS.md](ANDROID_DIAGNOSTICS_LEDGERS.md) | Android's diagnostics, continued: the issue and attempt ledgers, the cost counters and the lines that rank the costs. |
 | [GAME_CODE.md](GAME_CODE.md) | How `ico2/` is compiled: the sources, options, host paths, layout asserts and audits. |
 | [CONVENTIONS.md](CONVENTIONS.md) | The pre-commit hook, formatting, names, log lines, tests and scripts. |
 | [DATA.md](DATA.md) | The disc layer: the VFS, disc images, `ico.o2r`, the extractor, libcdvd, SIF and the data tables. |
@@ -20,26 +24,38 @@ In reading order.
 | [GS.md](GS.md) | What the port adds under the game's GS layer: the register decoder and the hand-offs to rd. |
 | [VU1_PROGRAMS.md](VU1_PROGRAMS.md) | The five VU1 microprograms, their shaders, their CPU oracles and the region rule. |
 | [RENDER.md](RENDER.md) | rd: recording, state, the replay, the device profile, camera blending, performance records, dumps and the replay tool. |
+| [RENDER_PERF.md](RENDER_PERF.md) | rd's performance record: the GPU timestamps, the 10 s lines built from it and the measurements kept from the phones. |
 | [RENDER_POST.md](RENDER_POST.md) | rd's post passes: the fades fold, the motion blur, above 1x, shadows, water blocks, the fog path and crack filling. |
+| [DISPLAY_LAYER.md](DISPLAY_LAYER.md) | The display layer under a temporal upscaler: the game's 2D drawn over the upscaled picture at the display scale, keep frames held 1:1, the history resets by reason, the motion blur's pre-upscale copy, its lines and tests. |
 | [PIPELINES.md](PIPELINES.md) | the pipeline key and blend paths, the start-up set, the fallback entries, the vertex and triangle pre-passes. |
+| [VU_SKIN_CHECK.md](VU_SKIN_CHECK.md) | The skinned draws' bone-block check: a skinned draw probed beside the picture every 100 ms against the CPU, its variants, the box check, the start-up probe, the decision table and its lines. |
 | [MSAA.md](MSAA.md) | The MSAA resolve: where the multisampled part of a frame ends, the covered-majority rule, one resolve a picture, its lines and tests. |
 | [WORK_BUFFERS.md](WORK_BUFFERS.md) | The post effects' work buffers: sizes per frame width, the glow chain's rects, its left edge on a wide frame, what stays across frames and the work clear. |
 | [TEXTURES.md](TEXTURES.md) | Texture decodes off the game thread: the decode pool, the job a store makes, the settle, its bound, key, lines and tests. |
 | [DISPLAY.md](DISPLAY.md) | The native frame, the video options and presets, pacing and the vsync lock, presentation, interpolation and the CRT filter. |
 | [RHI.md](RHI.md) | The render hardware interface and its Vulkan, Direct3D 12, Direct3D 11, OpenGL and MoltenVK backends. |
 | [BACKENDS.md](BACKENDS.md) | The four backends as the renderer sees them: its branches, limits and policies, the OpenGL and Direct3D 11 profile rows, the window and the fallback order. |
+| [DEVICE_TABLE.md](DEVICE_TABLE.md) | The device table: the hardware rows that set renderer-internal choices, how a choice is resolved, the start-up lines, adding a row and the generated list of rows. |
 | [SHADERS.md](SHADERS.md) | The HLSL sources, how they are compiled and embedded, the binding scheme and the shared constants. |
 | [AUDIO.md](AUDIO.md) | The software SPU2, libsd, the sound driver as a host server, streams, mixing and the output. |
 | [FMV.md](FMV.md) | The movie player: the PSS demuxer, the MPEG-2 decoder, pacing and the picture on screen. |
 | [INPUT.md](INPUT.md) | Devices, bindings, the virtual pad and libpad, pad scripts and recordings, mouse and touch. |
-| [SAVES.md](SAVES.md) | The memory cards as folders, where they live and the PS2 save importer. |
+| [SAVES.md](SAVES.md) | The memory cards as folders, where they live, each save's difficulty and the PS2 save importer. |
+| [APP_ICON.md](APP_ICON.md) | The application icon: the files under the user folder, the stamp, the two-frame matte, the .ico writer and the tests. |
 | [CONFIG.md](CONFIG.md) | Every key of `config.toml` and `ico-pc.ini`, which layer wins and when the files are written. |
 | [UI.md](UI.md) | The port's menus: the layout extension, the Settings menu, strings, the font, popups, touch and mouse. |
 | [GAME_FEATURES.md](GAME_FEATURES.md) | Gameplay options and their hooks, achievements, photo mode, the model viewer, gallery and credits. |
+| [HARD_MODE.md](HARD_MODE.md) | The difficulty's levers and presets: every row by Customize page with its mechanism and discs, the knock-down limit, Permadeath and the presets as shipped. |
+| [SCENE_LEDGER.md](SCENE_LEDGER.md) | The scene ledger: what each stage contained and what was left out of its pictures, by model and reason, its lines, the report's entry, its cost, the drop sites' gate and what it does not see yet. |
 | [PACKS.md](PACKS.md) | Texture and model packs: names, loading, formats, log lines and dumping. |
 | [TESTING.md](TESTING.md) | The test framework, the render gates, the suites per backend, the disc tests, switches, dumps, traces, audits and CI. |
+| [TESTING_FIXTURES.md](TESTING_FIXTURES.md) | The committed test frames: what a fixture keeps and holds not, the patterns and rules, the generated geometry, declared properties, making one, the checks. |
 | [TESTING_PROGRAMS.md](TESTING_PROGRAMS.md) | Every test program by area: what it checks and its ctest names. |
+| [TESTING_PROGRAMS_2.md](TESTING_PROGRAMS_2.md) | Test programs, continued: cases added to programs listed there (another build's load counting its untranslated words by place). |
+| [TESTING_PROGRAMS_RENDER.md](TESTING_PROGRAMS_RENDER.md) | The renderer's test programs (the port/render/test section in its own file). |
+| [TESTING_PROGRAMS_RENDER_2.md](TESTING_PROGRAMS_RENDER_2.md) | The renderer's test programs, continued (the store plan to the glow light entries). |
 | [DIVERGENCES.md](DIVERGENCES.md) | Every known way the port's behaviour or output differs from the PS2 game. |
+| [UNUSED_CONTENT_AUDIT.md](UNUSED_CONTENT_AUDIT.md) | What each retail disc holds that the game never reaches, generated from the images: one section per disc. |
 
 ## Elsewhere
 

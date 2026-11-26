@@ -12,11 +12,17 @@ window paces and presents is [DISPLAY.md](DISPLAY.md).
 | path | what it holds |
 | --- | --- |
 | `port/rhi/rhi.h` | the interface: handles, formats, resources, bind groups, pipelines, passes, commands, stats, timing, backend selection |
+| `port/rhi/rhi_native.h` | the native handles external compute needs (device, texture, command list, the external begin/end bracket, compute capabilities), [Native handles for external compute](#native-handles-for-external-compute) |
 | `port/rhi/rhi_pipeline_pool.h` | the pipeline pool's size, which both backends and the renderer's cache read |
 | `port/rhi/rhi_backend.h` | the backend table (`RHI_BACKEND_FUNCS`, `RhiBackendTable`, `RHI_BACKEND_DEFINE`) |
 | `port/rhi/rhi_backend_names.h` | the renaming of every entry point to `rhi_<prefix>_*` inside a backend |
 | `port/rhi/rhi_backend.c` | the real `rhi_*` functions, forwarding to the selected table; the layer classifiers |
 | `port/rhi/rhi_driver_version.h`, `rhi_driver_version.c` | a Vulkan `driverVersion` decoded the way its vendor writes it, for the adapter log line |
+| `port/rhi/rhi_pass_row.h`, `rhi_pass_row.c` | the render pass driver rows (Intel's Windows driver at Vulkan 1.3.215 or older, and Qualcomm's own driver, issue 123, take `VkRenderPass` objects) and the `[dev] legacy_passes` override's words, pure ([Vulkan](#vulkan), **Render passes**) |
+| `port/rhi/rhi_tile_rule.h`, `rhi_tile_rule.c` | the barrier scopes, the submission wait and the phones' pre-pass rung a Vulkan start runs (a tile-based phone GPU, `rhi_tile_phone`; the loss ladder; the tests' `ICO_VK_FAKE_SCOPES`) and their lines' words, pure ([Barrier scopes and the submission wait](#barrier-scopes-and-the-submission-wait)) |
+| `port/rhi/rhi_device_table.h`, `rhi_device_table.c`, `vk/vk_device_table.c` | the device table: the hardware rows that set renderer-internal choices, pure, and the Vulkan backend's one evaluation of the picked device (with the tests' fakes) and its start-up lines ([DEVICE_TABLE.md](DEVICE_TABLE.md)) |
+| `port/rhi/rhi_traffic.h`, `rhi_traffic.c` | the attachment bytes each render pass asks to load, store and clear and the texture copies' bytes, counted on the CPU in `rhi_backend.c`'s forwarders (a table of the textures' formats by handle), summed into `RhiStats.pass*Bytes`, pure ([ANDROID_DIAGNOSTICS.md](ANDROID_DIAGNOSTICS.md#the-performance-lines-issues-179-211-and-123)) |
+| `port/rhi/rhi_pass_crumb.h`, `rhi_pass_crumb.c` | the render pass the backend last began, stored before the driver's begin call and printed by the crash report (library `ico_pass_crumb`; [Device loss](#device-loss), **The crash report's pass**) |
 | `port/rhi/rhi_adapter.h`, `rhi_adapter.c` | the `[video] adapter` name match and the device-list line's text, linked by the Vulkan and Direct3D backends |
 | `port/rhi/CMakeLists.txt` | the libraries, SDL3's prefix per target, the tests |
 | `port/rhi/vk/rhi_vk.h` | Vulkan extras for tests and tools only |
@@ -25,12 +31,19 @@ window paces and presents is [DISPLAY.md](DISPLAY.md).
 | `port/rhi/vk/vk_swapchain.c` | the swapchain on SDL3's surface, the present-wait thread, the surface poll |
 | `port/rhi/vk/vk_pipeline.c` | bind group layouts, bind groups, pipelines, the pipeline cache file |
 | `port/rhi/vk/vk_cmd.c` | frames, command lists, submission, barriers, passes, draws, copies, readback |
+| `port/rhi/vk/vk_native.c` | `rhi_native.h` on Vulkan: the device, a texture's `VkImage` and layouts, the `VkCommandBuffer`, the capability answer |
 | `port/rhi/vk/vk_resource.c` | buffers, textures, samplers, shaders, deferred destruction |
+| `port/rhi/vk/vk_spirv_scan.c`, `vk_spirv_scan.h` | whether a SPIR-V module is a fragment shader that declares a storage buffer (the buffer barriers' first scopes), pure |
+| `port/rhi/vk/vk_tsclock.c` | the recycled slot's clock (`rhi_read_timestamp_clock`): submit times, calibrated timestamps, the polled wait's trace |
+| `port/rhi/vk/vk_range.c` | the indexed draws' and copies' ranges against their resources (what robust access does not cover), logged |
 | `port/rhi/vk/vk_enums.h`, `vk_internal.h` | the enum tables; the backend's shared state |
 | `port/rhi/vk/vk_surface_android.c` | the window surface on Android |
+| `port/rhi/ffx/CMakeLists.txt`, `ffx/sc/CMakeLists.txt` | the FidelityFX FSR 3.1 upscaler built from the fetched SDK (`ICO_FFX`): the host shader compiler `ico_ffx_sc`, the Vulkan permutation headers, `ico_ffx_upscaler`, `ffx_link_test` ([BUILDING.md](../BUILDING.md#fidelityfx-upscaler-fsr-31)) |
+| `port/rhi/ffx/ico_ffx_compat.h`, `ico_ffx_provider.cpp` | the MSVC library names the SDK calls, forced into its sources; ffx-api's provider table with the FSR 3.1 upscaler alone |
 | `port/rhi/d3d12/rhi_d3d12.h` | D3D12 extras for tests only |
 | `port/rhi/d3d12/d3d12_device.c` | runtime loading, adapter pick, device, debug layer, heaps, limits, the stats entry points |
 | `port/rhi/d3d12/d3d12_plan.h`, `d3d12_plan.c` | the bookkeeping that needs no D3D12 header |
+| `port/rhi/d3d12/d3d12_native.c` | `rhi_native.h` on D3D12: the device and queue, a texture's resource and states, the command list, the capability answer |
 | `port/rhi/d3d12/d3d12_swapchain.c` | the DXGI flip-model swapchain, the waitable object, frame statistics |
 | `port/rhi/d3d12/d3d12_cmd.c`, `d3d12_pipeline.c`, `d3d12_resource.c` | commands and fences; root signatures and pipeline states; committed resources |
 | `port/rhi/d3d12/d3d12_enums.h`, `d3d12_internal.h` | the enum tables; the backend's shared state |
@@ -38,6 +51,9 @@ window paces and presents is [DISPLAY.md](DISPLAY.md).
 | `port/rhi/gl/gl_internal.h` | the OpenGL backend's shared state, its records and which file defines which entry point |
 | `port/rhi/gl/gl_loader.h`, `gl_loader.c` | the OpenGL entry points, fetched through `SDL_GL_GetProcAddress` |
 | `port/rhi/gl/gl_device.c` | the context, the version and extension checks, the debug output, limits, frames, timestamps, the stats entry points |
+| `port/rhi/gl/gl_compile.c` | the shader compiles: the compile thread with a context of the device's share group, the window's pump between the waits, the limit and the abandoned compile, the parallel-compile poll |
+| `port/rhi/gl/gl_start_screen.c` | the progress screen while the start-up shaders compile: scissored clears of the window's framebuffer, no shader, its block letters |
+| `port/rhi/gl/gl_sync_wait.h`, `gl_sync_wait.c` | the fence wait held to a limit in slices, apart from GL for its test |
 | `port/rhi/gl/gl_resource.c` | buffers, textures, samplers, separable programs, bind group layouts and bind groups, deferred deletes, readback |
 | `port/rhi/gl/gl_swapchain.c` | the backbuffer texture, its blit to the window and the swap |
 | `port/rhi/gl/gl_pipeline.c` | pipelines: program pipeline objects, vertex array objects, the fixed-function state; the enum maps |
@@ -57,7 +73,8 @@ window paces and presents is [DISPLAY.md](DISPLAY.md).
 
 `rhi.h` keeps the surface small: fourteen shader files, a reachable set of a few hundred to about
 1150 pipelines (held under `RD_PIPELINE_REACHABLE_MAX`, 2048, `port/render/rd_state.h`), about twenty render
-targets, ring buffers for per-frame data and no compute. Its rules for additions: nothing
+targets, ring buffers for per-frame data and one compute use, the VU record's dispatches
+([Compute dispatch (the VU record)](#compute-dispatch-the-vu-record)). Its rules for additions: nothing
 Vulkan-only (no input attachments, no framebuffer feedback loops, no push descriptors; anything
 added must be expressible in D3D12 and Metal); explicit state transitions (`rhi_cmd_barrier`: the
 caller knows the frame graph and records every texture transition; a backend adds none of its own
@@ -103,17 +120,22 @@ acquires B's image and records B's list. The device line is followed by `rhi_vk:
 | state | written by | how it stays apart |
 | --- | --- | --- |
 | `frameIndex`, slot B's command pool, lists, descriptor pools, sets, deferred destroys, query pools, submit tag, acquire record | the recording thread | a list's handle tag names its slot (`VkrFrame.gen`, `vkr_get_cmd`), the list carries it (`VkrCmdList.slot`); nothing of the submit thread asks for the current frame (`vkr_cur_frame`) |
-| slot A's lists (their end), `waitValue` and acquire record (`VkrAcquire`) | the submit thread | the slot guard lets the recording thread recycle slot A only when no job of A is queued or running |
+| slot A's lists (their end, unless the recording thread ended one before the hand-over), `waitValue` and acquire record (`VkrAcquire`) | the submit thread | the slot guard lets the recording thread recycle slot A only when no job of A is queued or running |
 | `hzEpoch`, `stats`, `tsResult`, `occResult`, the textures' and buffers' tracking state | the recording thread | the submit thread's end, submit and present touch none of them |
 | the counters an end, a submit and a present add | either | `VkrState.late`, atomic adds; `rhi_get_stats` adds them in, so the recording thread reads live counters while the submit thread works |
 | the submission counter `timelineValue`, the submit history | the submit thread (any thread while it is idle) | the counter stored and read with `__atomic`; the history read only by the loss report |
 | the queue (`vkQueueSubmit`, `vkQueuePresentKHR`, `vkDeviceWaitIdle`) | the submit thread while it works | every call that submits or waits idle is a call the guard holds until the submit thread is idle; `rhi_cmd_begin_occlusion`'s first use (its reset submit) waits for the guard first |
 | the swapchain's acquire and present | the recording thread's acquire, the submit thread's present | the swapchain's lock (`vkr_swap_lock`); the present on the submit thread leaves a rebuild, a size change, the surface poll's size and a lost surface to the next acquire (`VKR_DEFER_*`, `vkr_take_deferred`, after the guard's wait), with the line `a present on the submit thread found <what>: the swapchain made again at the next acquire (N times so far)` (first 8, then every 100th) |
+| the wait before the present (`rhi_wait_submitted`: the submit thread's job waits for its submissions to finish on the GPU before it presents, Frame rate Original on Android, `port/render/rd_submit_thread.h` "the GPU's end first", issue 179) | the submit thread | outside the swapchain's lock, so the recording thread's acquire runs beside it; the timeline sync only (`vkWaitSemaphores` and the counter read need no lock); it writes a progress pair of its own (`progPresentFor`; `rhi_gpu_progress` gives the older of it and the recording thread's fence wait, so the GPU hang limit counts it), `progFinished` by compare and swap, never `stats`; a failure logs `rhi_vk: the wait before the present waited S s for submission N (sync timeline); the GPU reached M` and is noted as any wait's loss; the other backends answer false; the verdict's samples before it read `rhi_submitted_finished` for the previous present job's number just before each call and, after a call of 2 ms or more that began with it still running (or the read failed), wait with `rhi_wait_value_ns` (one unbounded `vkr_sync_wait` for the previous present job's `rhi_last_submitted` number, never the job's own, no counter read first, the same progress pair; 0, `RHI_WAIT_NONE` on the fence ring and the other backends: the rule never decides there, or the wait's VkResult) and log `rhi_submitted_finished` (the timeline counter, read once, no wait) in their first 8 lines only |
 | the object pools, the pipeline cache, the framebuffer and render pass caches | the recording thread | read only by the submit thread (a swapchain image's entry); a creation or destroy is not a slot call |
 
 The slot calls the guard lets through (`rhi.h` `rhi_set_slot_guard`, `port/rhi/rhi_backend.c`
 `RHI_GUARD_SLOT`): `rhi_wait_frame` (for the slot it recycles), `rhi_begin_commands`,
-`rhi_create_bind_group`, `rhi_map_buffer`, `rhi_unmap_buffer`, `rhi_read_timestamps`,
+`rhi_end_commands` (the renderer ends a picture's scene list before it begins the present's own,
+[RENDER.md](RENDER_PERF.md#the-presents-own-list); an end touches only its list's command buffer, of
+its own slot's pool, and the atomic late counters, so it waits only while the other thread has a
+job of its slot; `threadSlotsCell` ends a list beside the other thread's end and submit of the
+other slot without a wait, and its submit, not a slot call, waits once), `rhi_create_bind_group`, `rhi_map_buffer`, `rhi_unmap_buffer`, `rhi_read_timestamps`,
 `rhi_read_timestamps_busy`, `rhi_read_occlusion` and `rhi_acquire_backbuffer`, each when the slot
 guard's `free` says the calling thread is the render thread, keeps no list of its own for the submit
 thread and the submit thread has no job of that slot. Every other call that changes the device's
@@ -130,7 +152,8 @@ replay gave up in a slot with no job is taken over by the next acquire with its 
 anything of picture N+1 (the render thread submits nothing beside the submit thread), so every
 picture's bytes are those of one thread; a slot is recycled only after its own jobs were submitted
 and its fence passed; a command buffer is used by one thread at a time (recorded by the render
-thread, ended by the submit thread after the hand-over's lock). Tests: `rhi_test_common.c`
+thread, ended by the submit thread after the hand-over's lock, or by the render thread before it
+hands the list over). Tests: `rhi_test_common.c`
 `threadSlotsCell` (`rhi_vk*`), `rd_submit_queue`, `rd_thread_ab` (`--repeat 3`), and the TSan
 tree's `rd_tex_test`.
 
@@ -151,7 +174,17 @@ formats).
 **Resources.** Buffers have a usage mask and a memory kind: DEVICE (static meshes), UPLOAD (the
 per-frame ring, persistently mapped) or READBACK. Textures take a size, mip levels, a format, a
 usage mask and a sample count (2, 4 or 8 from `RhiLimits.msaaCounts`: multisampled targets are never
-copied or read back, only resolved by `rhi_cmd_resolve_color` or read by a shader). STORAGE and
+copied or read back, only resolved by `rhi_cmd_resolve_color` or read by a shader). **The in-pass
+resolve** (`RhiLimits.resolveInPass`): a colour attachment's `resolve` texture (single-sampled, its
+format and size) takes the mean of each pixel's samples at the pass's end, inside the pass, so the
+multisampled one can be `RHI_STORE_DONT_CARE`; `RHI_TEX_TRANSIENT` makes an attachment that lives in
+its passes only (never loaded, stored, sampled, copied or read back). Vulkan with dynamic rendering
+and 4 samples: `VkRenderingAttachmentInfo.resolveMode` AVERAGE, `VK_IMAGE_USAGE_TRANSIENT_ATTACHMENT_BIT`
+in lazily allocated memory where the device has it (`vk_resource.c`); the VkRenderPass path (no
+resolve attachments), OpenGL, Direct3D 11 and 12 say false (the caller asks for neither there).
+`RhiLimits.standardSampleLocations` is Vulkan's `standardSampleLocations`. Used by the lamps'
+`lowresms` alone ([RENDER_POST.md](RENDER_POST.md#the-lamps-glow-for-less)); the scene's MSAA is
+unchanged. STORAGE and
 INPUT_ATTACHMENT usages exist for the destination read and the [local read](#local-read).
 `rhi_buffer_note_written(b, hi)` tells the backend that the CPU wrote nothing at or past byte `hi`
 of an UPLOAD buffer since the frame slot began (the frame's first call sets the mark, later ones
@@ -194,6 +227,245 @@ into the copy's own hazard barrier and holds its visibility back as a memory bar
 copy or command issues with its own (`VkrCmdList.pendMemDst`); D3D12 moves the buffer to
 COPY_DEST and back to GENERIC_READ around the copy (`port/rhi/rhi.h`, commands
 (`rhi_cmd_copy_texture_to_buffer`); `port/rhi/vk/vk_cmd.c` (`vkr_hz_copy`, `vkr_flush_barriers`)).
+The one other buffer write is a vertex shader's store into a buffer made with
+`RHI_BUF_STORAGE_WRITE` and bound as `RHI_BIND_STORAGE_BUFFER_RW` (the VU record written by the
+pre-pass's vertex shaders, [PIPELINES.md](PIPELINES.md#the-vertex-and-triangle-pre-passes), the record's two writes), only where
+`RhiLimits.vertexStores`; the passes that store are bracketed by `rhi_cmd_buffer_store_begin` (the
+stores after every earlier read, copy and store of the buffer) and `rhi_cmd_buffer_store_end` (the
+stores visible to every later vertex, index, uniform, storage and copy read). On Vulkan each is a
+memory barrier held back with the list's deferred barriers (`pendMemDst`, with
+`VK_ACCESS_SHADER_WRITE_BIT` in `pendMemSrc`), so the end of one store pass and the begin of the
+next go out as one barrier with the next pass's own; the first scope of a pipeline barrier holds
+every command submitted before it, so the other frame slot's reads are ordered too. D3D12,
+Direct3D 11 and OpenGL report `vertexStores` false in this release and their bracket returns false
+(Direct3D 11 for good: feature level 11_0 has no vertex shader UAVs; D3D12 would need the buffer's
+UNORDERED_ACCESS transitions and UAV barriers, OpenGL `glMemoryBarrier`) (`port/rhi/rhi.h`, commands
+(`rhi_cmd_buffer_store_begin`); `port/rhi/vk/vk_cmd.c` (`rhi_cmd_buffer_store_begin`)).
+`RhiLimits.validationLayer` says the Khronos validation layer is loaded (Vulkan only), for the
+ordering only its synchronisation checks need (the record's draws each in a pass of their own,
+its dispatches each in a bracket of their own,
+[PIPELINES.md](PIPELINES.md#the-vertex-and-triangle-pre-passes)). The same record written by
+compute dispatches where the vertex shaders cannot store has the compute twin of this bracket,
+below.
+
+### Barrier scopes and the submission wait
+
+Issues 179 and 211: a Mali-G52 MC2 (Arm's driver r32p1) and an Adreno 710 (Qualcomm's driver
+512.800.80) lost the graphics device at the first pictures of the first 3D scene, three starts in
+a row each, on the release that narrowed the buffer barriers and brought the polled submission
+wait. The Mali ran the release before without a loss (its log); there is no log of the Adreno 710
+on the release before. No cause is proven. Those two changes are each a switch, chosen once a
+device is picked and before it is made (`vk_device.c` `vkr_tile_rule_apply`, the pure rule in
+`rhi_tile_rule.c`):
+
+- **The barrier scopes** (`VkrState.tile.wide`, `RhiLimits.wideBarriers`). `narrow` is the next
+  section's: each buffer barrier names only the stages that can touch the buffer, the opening
+  barrier only attachments, the copies' half of the order between lists in the closing barrier,
+  and the renderer's texture uploads and fog table after the VU pre-pass. `wide` is the order
+  before the narrowing, field for field: every buffer barrier's earlier and later stages are
+  vertex input, the vertex and fragment shaders, the compute shader where the compute record
+  exists and the transfer stage, with every read access and the transfer's writes
+  (`vkr_buf_wide_stages`, `VKR_BUF_WIDE_ACCESS`), a buffer copy's wait always holds the transfer
+  stage, a copy into a buffer shaders read waits at the shader stages and vertex input alone
+  (`vkr_hz_copy`; the transfer stage only for a hazard of the list), a buffer copy keeps the list's
+  texture-copy hazard record (a later texture copy of either buffer makes its own buffer barrier),
+  the opening barrier holds colour output, the depth tests and the transfer stage on both sides
+  with their writes and reads, the closing barrier the host's read alone, and the renderer records
+  the texture uploads and the fog's table before the meshes and the pre-pass
+  (`port/render/rd_upload_late.h`, `rd__upload_late_reserve`). `rhi_vk_scope.c` checks the wide
+  barriers field for field through the tests' barrier trace (`rhi_vk.h`
+  `vkr_test_barrier_trace`). The picture is the same either way (ordering only; `rd_scope_ab`,
+  `rd_scope_ab_tiler`).
+- **The submission wait** (`VkrState.tile.polled`, `RhiLimits.polledWait`). `polled`: a frame
+  slot's recycle wait that blocks past 50 ms becomes 4 ms timed waits reading the slot's query
+  results and the submission counter while its work is in flight (`vk_tsclock.c`, the trace of
+  issue 123's stalls), and `VK_KHR`/`VK_EXT_calibrated_timestamps` enabled where offered.
+  `single`: one wait without a time limit, nothing of the slot read while its work runs, the
+  extension not enabled (`vkr_tsclock_pick`; `ICO_VK_CALIBRATED_TIMESTAMPS=0` still turns it off
+  alone). What the stall diagnostics lose with it: the `rd: GPU clock` line of a stalled replay has
+  no trace (which of its stamps were written while the CPU waited, the longest stretch with
+  nothing new, a second run of its first list), and the replay's start is placed from its wait's
+  end instead of on the CPU's clock. The CPU's times of the wait, the counter restarts and the
+  unwritten stamps are still measured.
+
+There is no setting: both are `wide` and `single` on every tile-based phone GPU
+(`rhi_tile_phone`: every Android GPU, and iOS through MoltenVK; the device table's `TILE_PHONE`,
+rows `android` and `ios`, [DEVICE_TABLE.md](DEVICE_TABLE.md)) and `narrow` with the polled wait
+elsewhere, Macs (MoltenVK on macOS, whatever the GPU) and Qualcomm or Turnip desktops included. The
+loss ladder (`ICO_LOSS_ROW` from `port/platform/diag_host.c`, the line `ico_pc: loss ladder:
+...`; never written to the settings): on a desktop a start after a lost one runs the wide scopes,
+after two lost starts in a row the single wait too; on a phone, whose scopes and wait are those
+already, a start after one or more lost starts draws without the VU pre-pass
+(`RhiTileRule.noPrepass`, `RhiLimits.vuPrepassLoss`, what the Adreno 740's device-table row does;
+the renderer's `rd: VU pre-pass: off by the loss ladder (...)`; `[dev] vu_prepass = true` written
+in the file passes it, as it passes the table). Direct3D 11, Direct3D 12 and OpenGL (ES) change
+nothing. The start-up loss bisect replays under the lost start's row (one less than this start's;
+`window_host.c`). The lines, at the device's start, that the reporter's next log is read by:
+
+    rhi_vk: barriers: wide (a tile-based phone GPU, Arm, vendor 0x13B5): every buffer barrier waits for ...
+    rhi_vk: submission wait: single (a tile-based phone GPU, Arm, vendor 0x13B5): one wait without a time limit for a frame slot, ... (a stalled replay's start is placed from its wait's end, not on the CPU's clock)
+    rhi_vk: timestamps: 48 valid bits, ...; calibrated with the CPU's clock: off (the single submission wait: single (tile-based phone)) ...
+    rhi_vk: VU pre-pass: off for this start on a tile-based phone GPU (Arm, vendor 0x13B5; the previous start lost the graphics device; nothing written to the settings): ...
+
+(the last only after a lost start; on a desktop after a lost start: `wide (the previous start lost
+the graphics device: this start only, nothing written to the settings)`), and the summary's
+profile words end `, barriers wide (tile-based phone), submission wait single (tile-based
+phone)`. With both present and no loss, one of the two was the cause. The tests alone pick a path:
+`ICO_VK_FAKE_VENDOR=<id>` (`0x13B5`) makes the device that vendor's phone GPU for this rule alone,
+nothing else, and `ICO_VK_FAKE_SCOPES=wide` or `narrow` the scopes alone (the wait stays the
+device's) (`rhi_vk_scopes_arm`, `rhi_vk_scopes_wide`, `rhi_vk_scopes_arm_narrow`,
+`rhi_vk_scopes_mac`, `rhi_vk_clock_arm`, `rd_scope_ab`, `rd_scope_ab_tiler`,
+`rd_vuprepass_selftest_lossrung`).
+
+`RhiLimits.tilePhone` carries the phone decision to the renderer, whose other changes of the
+narrowing release in that scene also run as the release before ran them there: the VU skin check issues no ring stamp, no stamp clear
+value and no careful compiles ([VU_SKIN_CHECK.md](VU_SKIN_CHECK.md)). `RhiLimits.storePassTarget`
+(the Intel driver row, `rhi_pass_row.h`, or the subpass read on) is where the VU record's store
+passes begin on their throwaway target (`port/render/rd_vu_rec_sink.h`); elsewhere, phones
+included, they begin without an attachment, as before.
+
+### Buffer barriers' scopes
+
+The narrow scopes (where the GPU is not a tile-based phone GPU;
+[the section above](#barrier-scopes-and-the-submission-wait)): every Vulkan buffer barrier names
+only the stages that can have touched that buffer, and a command list's opening barrier only the
+attachment stages (issue 179). A pipeline barrier's
+first scope is every command recorded or submitted before it at the stages its source mask names,
+whatever they used, and its second scope holds every later command at its destination stages: a
+fragment-side stage in the first and a vertex, compute or transfer stage in the second make all
+later vertex, compute and copy work, the next picture's included, wait for every pixel before it.
+On a tile-based GPU that is the overlap of a picture's uploads, VU record and vertex work with the
+picture before's fragment work. With the fragment stage in the compute bracket's begin and in a
+buffer copy's wait, and colour output and the transfer stage on both sides of one opening barrier,
+each would join the two: on the Mali-G52 of issue 179 the record's dispatches and every vertex
+after them would wait for the previous picture's last pixel.
+
+- **Earlier uses** (a copy's wait, a bracket's begin; `vkr_buf_earlier_stages`): vertex input for a
+  buffer made as a vertex or index buffer; the vertex shader (and the compute shader where
+  `computeStores`) for a uniform or storage buffer; the fragment shader for a uniform buffer, and for
+  a storage buffer only once a fragment module that declares one has been made
+  (`VkrState.fragmentStorage`, set by `rhi_create_shader` through `vk_spirv_scan.c`, before the
+  module can be in any pipeline; the line `buffer barriers: fragment shader NAME declares a storage
+  buffer: from here ...`); the transfer stage once a copy has touched the buffer
+  (`VkrBuffer.copied`). Binding a buffer as any of those needs its usage bit (`VkrBuffer.vkUsage`),
+  and a shader reaches a storage buffer only through a resource its module declares. None of
+  `port/shaders`' 105 fragment modules declares one (they read the frame's and the draw's uniform
+  blocks; the VU programs hand the record's planes to the pixel side as flat varyings), so the mesh
+  arena and the VU record are reached by vertex input, the vertex and the compute shaders alone. The
+  uniform ring and the bone ring are host-written mapped memory per frame slot: no GPU barrier is
+  theirs.
+- **Later uses** (a copy's or a bracket end's visibility; `vkr_buf_later_stages`): the usage's,
+  fragment shader included (a later module may read the buffer); a fragment stage there holds only
+  later fragment work.
+- **A buffer copy's wait** (`rhi_cmd_copy_buffer`) holds the transfer stage only when a copy between
+  a texture and either buffer is pending in the list (its hazard record), and always on the global
+  barrier path (`ICO_VK_GLOBAL_BARRIERS=1`, which keeps no hazard record): an earlier buffer copy's
+  own second barrier holds the transfer stage, the stores' bracket end holds it, and earlier lists
+  end with it. That alone does not keep a copy from waiting for earlier fragment work: an execution
+  dependency covers every command in its scopes, so a barrier with the fragment shader in its first
+  scope and the transfer stage in its second (a texture upload over a sampled texture,
+  `SHADER_READ` to `COPY_DST`) holds every later copy of the list, and the copy's own second barrier
+  passes the wait on to the vertex and compute work that reads its destination. So the renderer
+  records the mesh uploads and the VU pre-pass before its texture uploads and the fog's table
+  (`port/render/rd_upload_late.h`; `rhi_vk_scopes`' list G: that hold recorded before the record in
+  the old order, none in the new). What can still hold the record: the closing barrier of the list
+  before orders its copies before this list's transfers, so a copy out of a render target at the
+  end of the picture before (its own barrier waits for colour output) holds the mesh copies, and the
+  record after them, behind that pass's fragment work; the hold lines name such barriers. The gain
+  on the Mali of issue 179 is a hypothesis until its log shows it.
+- **Between lists**: attachment writes and reads are ordered by the opening barrier (colour output
+  and the depth tests on both sides), transfer writes and reads by the barrier every list ends with
+  (`rhi_end_commands`: the transfer stage on both sides beside the host read; not counted in
+  `barriers`, as before). The barrier counts are unchanged (`rd_perf`'s exact counts).
+- **The count** (`RhiStats.fragmentHolds`, `vk_cmd.c` `vkr_hold_note`): every `vkCmdPipelineBarrier`
+  whose first scope holds a fragment-side stage (or a mask holding all) and whose second holds a
+  stage before them. Counted where each barrier is recorded, a few dozen a picture, none a draw,
+  by kind and site (`RhiStats.holdSites`): the kind `RHI_HOLD_KIND_VERTEX` when the second scope
+  holds the top of the pipe, indirect, vertex input, a pre-rasterisation shader or compute (the
+  picture's VU record and vertex work wait), `RHI_HOLD_KIND_COPY` when it holds the transfer stage
+  alone (later copies wait; vertex work only where a copy's own barrier passes it on; every copy out
+  of a render target is one). Each site and kind logs its first 8, then nothing, with the masks:
+  `rhi_vk: barriers: one holds every later vertex, compute and copy command (the next picture's
+  too) behind the fragment work before it: SITE (first scope 0xS, second 0xD, N image barriers); K
+  of this kind at this site (the first 8 of each said; the counts in the 10 s summary)`, or `... one
+  holds every later copy (vertex and compute work only through a copy's own barrier) ...`; the 10 s
+  summary's `window: CPU walk ms ...` line ends with `; barriers holding fragment work per replay: V
+  before vertex or compute work, C before copies only (vertex/copy by site: the passes' and copies'
+  own 0.00/1.00, ...)` (`port/render/rd_perf.c`, only sites with any). The sites:
+  the opening barrier, the held-back barriers sent before a command, a pass's or copy's own barrier,
+  a buffer copy's wait, the global barriers, the external compute's bracket. Expected ones: a
+  texture upload over a sampled texture (the copy waits for the sampling), the copies of a snapshot
+  or readback after a pass, FidelityFX's bracket (`ALL_COMMANDS` on both sides). One to read with
+  care: the held-back bracket end joined in one call to a transition out of `SHADER_READ` (the
+  pass's barrier then holds both); the renderer keeps the record's end apart with the timestamp it
+  writes before list 0 (`RD_PERF_TS_LISTS` sends the held-back barriers), so it appears only on a
+  device without timestamps. On a device with vertex stores the second store pass's barrier also
+  joins the bracket to the throwaway target's attachment hazard (colour output to colour output,
+  `rd_vu_rec_sink.c`): a hold there each replay with one target, so the store passes take two
+  throwaway targets in turn (no store pass of a list begins on a target written before in it: a
+  release replay makes two, pass V and pass T). Measured on lavapipe under the validation layer
+  (`rd_display_change_2x`, six replays after its 2x switch, four store passes a replay there: the
+  layer's runs give each record draw a pass of its own): 33 holds with one target, 25 with two, 17
+  with four; the release run's two passes need two.
+- **Validation.** The layer's synchronisation checks with their default settings (layer 1.4.309)
+  take no shader's buffer read into account: a copy over a buffer a fragment shader read, with no
+  barrier at all, passes. `rhi_vk_scopes*` run with `VK_KHRONOS_VALIDATION_SYNCVAL_SHADER_ACCESSES_HEURISTIC=true`,
+  under which that write after read is reported (checked with the fragment stage taken out of the
+  copy's wait) and the narrowed scopes are clean.
+
+(`port/rhi/vk/vk_cmd.c` ("Buffer barriers", `vkr_open_barrier`, `rhi_end_commands`,
+`rhi_cmd_copy_buffer`, `vkr_store_open`, `vkr_hold_note`); `vk_resource.c`
+(`vkr_note_fragment_storage`); `vk_spirv_scan.c`; `port/rhi/test/rhi_vk_scope.c`.)
+
+### Compute dispatch (the VU record)
+
+The RHI's one compute use (issue 179: the Mali-G52 MC2 under driver r32p1 offers no
+`vertexPipelineStoresAndAtomics`, so the record stores above never engaged there and the record
+went on through three `RGBA32_UINT` targets and six copies, 14.6 of 64 ms GPU a picture). A
+compute shader's storage writes need no feature bit, and the pre-pass's entries have no vertex
+input, so the same entries run as compute entries and store the same words
+([PIPELINES.md](PIPELINES.md#the-vertex-and-triangle-pre-passes), the record's three writes).
+
+- **The pipeline.** `RhiPipelineDesc.compute` (a shader made with `RHI_STAGE_COMPUTE`) makes a
+  compute pipeline from the same description, layouts alone (every fixed-function field left
+  zero): the same `RhiPipeline` handle, pool, cache file and debug name as a graphics one, so the
+  renderer's pipeline cache, `rhi_create_pipelines*` and the crash notes need nothing new. Vulkan:
+  `vkCreateComputePipelines` under the same compile lock, `VkrPipeline.bindPoint` COMPUTE;
+  `vkr_pipeline_fits` counts the compute stage's descriptors for it and refuses one without
+  `computeStores` (`computeStores` in the log's limit name).
+- **Bind slots.** `RhiBindSlot.stages` may name `1 << RHI_STAGE_COMPUTE`; Vulkan maps it to
+  `VK_SHADER_STAGE_COMPUTE_BIT`; Direct3D 12 (`dx_visibility` masks the vertex and fragment bits),
+  Direct3D 11 (`d11_bind_entry` binds by those bits) and OpenGL (no stages) ignore it. The
+  renderer's group 0 and the pre-pass's group 1 name it beside the vertex stage, so one layout
+  serves both kinds.
+- **The bind point.** Vulkan binds pipelines and descriptor sets per bind point, and the list's
+  bind cache is one per list: `rhi_cmd_set_pipeline` marks every group dirty when the bind point
+  changes (else the first graphics draw after the record would find the graphics bind point's sets
+  as they were before it), descriptor binds and `rhi_cmd_external_end`'s rebind use the pipeline's
+  bind point, and a draw with a compute pipeline bound is skipped. `rhi_test_compute.c` checks it
+  (a store draw after a dispatch must store into its own group's buffer).
+- **The dispatch.** `rhi_cmd_dispatch(cl, gx, gy, gz)` outside render passes, the list's deferred
+  barriers and dirty groups flushed first; refused (logged, the first 8) inside a pass or without
+  a compute pipeline; counted in `RhiStats.dispatches` (not in `draws`).
+- **The bracket.** `rhi_cmd_buffer_compute_begin` / `_end` are the store bracket with the compute
+  shader as the writing stage, held back the same way (the first dispatch or `set_pipeline` flushes
+  the begin; V's end and T's begin go out as one call). Wherever the compute stores are offered the
+  stages that can touch a uniform or storage buffer include the compute shader ([Buffer barriers'
+  scopes](#buffer-barriers-scopes), `vk_cmd.c` `vkr_buf_earlier_stages`): the compute builds read
+  the arena's stream (t0) and the ring (t5), and their stores are read by the next vertex shaders.
+- **The offer.** `RhiLimits.computeStores` (with `computeStoresOff`, why not): Vulkan where the
+  graphics queue's family takes compute work, never gated on the external compute's
+  `RhiComputeCaps.ok` (subgroups and storage image formats are not needed here);
+  `ICO_VK_FAKE_NO_COMPUTE_STORES=1` reports it absent; the device table's `COMPUTE_RECORD_OFF`
+  (`vk_device.c` `vkr_vu_plain_only`) is the hook for a driver whose compute builds misbehave (no row).
+  The device line: `compute record stores: offered (queue compute yes, vertex stores no)` or `not
+  offered: <why> (...)`. Direct3D 12, Direct3D 11 and OpenGL report false in this release (their
+  bracket refuses, a dispatch is a no-op logged once: D3D12 compute pipelines and UAV barriers,
+  Direct3D 11 CS 5.0 and OpenGL 4.3 compute are later work; the renderer never asks there).
+
+(`port/rhi/rhi.h` (`RhiPipelineDesc.compute`, `RhiLimits.computeStores`, `rhi_cmd_dispatch`);
+`port/rhi/vk/vk_pipeline.c` (`vkr_pipe_prepare`), `vk_cmd.c` (`rhi_cmd_set_pipeline`,
+`rhi_cmd_dispatch`, `rhi_cmd_buffer_compute_begin`), `vk_device.c` (`vkr_compute_stores`).)
 
 **Bind groups.** One fixed slot model for every program: group 0 the per-frame uniforms (b0), group
 1 the per-draw uniforms (b1; the VU programs' b2, b3), the VU vertex stream (t0) and the vertex
@@ -202,7 +474,10 @@ textures t1..t4 and samplers s1..s4. Backends map these onto descriptor sets or 
 never sees the mapping. Binding types: uniform buffer, storage buffer, sampled texture, sampler, a
 dynamic uniform buffer whose offset is given at bind time (`rhi_cmd_set_bind_group_offsets`, at most
 `RHI_MAX_DYNAMIC_OFFSETS` (4) a layout, so one group serves every draw reading a block of one size
-from one buffer), storage texture and input attachment. Bind groups are transient: valid for the
+from one buffer), storage texture, input attachment, and a storage buffer vertex shaders write
+(`RHI_BIND_STORAGE_BUFFER_RW`, a u register: Vulkan a storage buffer descriptor at binding 48 +
+slot, D3D12 a UAV range, OpenGL the SSBO binding 16 + slot, where `tools/spirv_to_glsl.py` moves the
+SPIR-V's 48 + u; Direct3D 11 refuses the layout). Bind groups are transient: valid for the
 current frame only (`port/rhi/rhi.h`, bind groups).
 
 **Pipelines and passes.** `RhiPipelineDesc` carries the two shaders, the layouts, vertex bindings
@@ -212,7 +487,13 @@ pass one target) blend states with dual-source factors (`RHI_BF_SRC1_*`, only wi
 `RhiLimits.dualSourceBlend`), the depth-stencil state (depth grows with GS Z: GS GEQUAL is GEQUAL),
 colour and depth formats, a sample count and `dstRead`: NONE, STORAGE (the target bound as a
 rasterizer-ordered storage texture, no colour target) or ATTACHMENT (colour attachment 0 read as an
-input attachment in rasterization order, Vulkan only). Culling is always off: the GS has none. A
+input attachment in rasterization order, Vulkan only), and `noRaster`: no rasterization, no
+fragment shader and no colour target, the vertex shader's stores the pipeline's whole work (Vulkan
+`rasterizerDiscardEnable`, OpenGL `GL_RASTERIZER_DISCARD` while it is bound and off again at the pass's end, since it makes `glClear` a no-op, ignored by D3D12 and
+Direct3D 11, which never report vertex stores), drawn in a pass without attachments (a size and
+nothing else; the legacy path's subpass without attachments) or in one whose colour target the
+pipeline names with a write mask of 0 (the renderer's store passes: `port/render/rd_vu_rec_sink.h`,
+no pass of its begins without an attachment). Culling is always off: the GS has none. A
 render pass names its colour and depth attachments with load ops (LOAD, CLEAR, DONT_CARE) and store
 ops (STORE, or DONT_CARE so a tile-based GPU can skip the write-back) (`port/rhi/rhi.h`, pipelines,
 passes), its size, and optionally an area inside it (`RhiRenderPassDesc.area`, x, y, w, h; w or h 0,
@@ -242,6 +523,28 @@ careful start-up set taking 1 ([RENDER.md](PIPELINES.md#the-start-up-set)). `rhi
 (`port/rhi/rhi.h` (`rhi_create_pipelines`); `port/rhi/vk/vk_pipeline.c`,
 `port/rhi/d3d12/d3d12_pipeline.c`).
 
+**One compile at a time.** On a driver whose compiler is not thread-safe
+(`rhi_driver_compiler_serial` in `port/rhi/rhi_driver_version.c`, the device table's row
+`powervr-b-series`, [DEVICE_TABLE.md](DEVICE_TABLE.md): Imagination's PowerVR, vendor
+0x1010, whose driver text names the B-Series, at any Vulkan version; issue 188,
+Moto G54 with a BXM-8-256 on driver 1.15@6133110, where Imagination's answer on that driver is to
+keep shader module and pipeline creation off two threads at once) Vulkan compiles on one thread
+(`vkr_pipe_threads_for`: the start-up set, the careful set and the background finisher alike) and
+holds one SDL mutex around every `vkCreateShaderModule` (`vk_resource.c`) and
+`vkCreateGraphicsPipelines` (`vk_pipeline.c` `vkr_pipe_compile`), so a pipeline a draw makes on
+first use on its own thread waits for a background compile in flight instead of running beside
+it; the compile time logged is the call's own, not the wait. The pipeline cache object is the
+compiles' too, so its reads (`vkGetPipelineCacheData` in `rhi_pipeline_cache_save`, the exit's write
+and `rhi_pipeline_cache_size`) take the same lock when it is free and are left out when a compile
+holds it, never waiting for one (the lazy tick and the set's end save again; the size is the last
+one read): `rhi_vk: pipeline cache: not written now, a pipeline is being compiled (one at a time
+on this driver; N times)`, the first 8, then every 100th. `RhiLimits.serialPipelines` names the
+reason (NULL elsewhere and on the other backends), and the device's start logs `rhi_vk: pipelines:
+one at a time (PowerVR B-Series: the driver's compiler is not thread-safe)`; the window then gives
+the driver 60 s per creation before the game starts ([PLATFORM.md](PLATFORM.md#diagnostics)).
+`ICO_VK_FAKE_SERIAL=1` takes the rule on any Vulkan device (`rhi_vk_serial`). The D-Series DXT-48
+(driver 26.1, Vulkan 1.4) keeps the parallel compiles.
+
 **Several pipelines while the caller goes on.** `rhi_create_pipelines_begin(descs, n, maxThreads,
 lowPriority)` makes on the calling thread what `rhi_create_pipelines` makes there before its workers
 start, starts the workers (at most `maxThreads`, each at `SDL_THREAD_PRIORITY_LOW` with
@@ -265,29 +568,37 @@ whole texture synchronously for dumps and tests (`port/rhi/rhi.h`, commands, ver
 target, dual-source blending (optional: without it rd blends in two passes), `depth32Attachment` (D32F can be a depth attachment; false on a Vulkan driver without the bit), depth readback and
 sampling of the depth-stencil format, copy pitch and offset alignment (D3D12 256 and 512, Vulkan 1
 and 4), mips and anisotropy, dynamic uniforms and the storage range, BC textures, `tiler` (a
-tile-based phone GPU: Qualcomm, ARM, Imagination, Samsung, Apple, Broadcom or any Android device;
-false on D3D12), the MSAA counts every renderer target supports and sample-rate shading, and the
+tile-based phone GPU: Qualcomm, ARM, Imagination, Samsung, Apple, Broadcom or any Android device,
+the device table's `TILER`, [DEVICE_TABLE.md](DEVICE_TABLE.md); false on D3D12), the MSAA counts every renderer target supports and sample-rate shading, and the
 destination read's three bits: `fragmentInterlock` (Vulkan), `rov` (D3D12) and
 `rasterOrderAttachment` (Vulkan), and `rasterOrderOff`, why the attachment read is off on a device
 that has it (`attachment read off: Qualcomm driver <version>`, NULL otherwise), and
 `colorBytesPerPixel`, the bytes one pixel of a pass's colour targets may take together: 0 (no
 bound) on D3D12 and Vulkan, under MoltenVK the Apple GPU's Metal implicit image block (below),
 `dynamicDepth` and `dynamicBlend` ([Dynamic state](#dynamic-state)), and the device table's two
-reasons (Vulkan, `kVuPlainOnly` in `port/rhi/vk/vk_device.c`; NULL elsewhere and on D3D12):
+reasons (Vulkan, its `adreno-740-qualcomm` row, read by `vkr_vu_plain_only` in `port/rhi/vk/vk_device.c`; NULL elsewhere and on D3D12):
 `vuFallbackPlain`, why the renderer's VU fallback takes the plain program entries on this device,
 and `carefulPipelines`, why its start-up set is made under the careful policy
-([RENDER.md](PIPELINES.md#the-fallback-entries), [RENDER.md](PIPELINES.md#the-start-up-set))
-(`port/rhi/rhi.h` (`RhiLimits`)).
+([RENDER.md](PIPELINES.md#the-fallback-entries), [RENDER.md](PIPELINES.md#the-start-up-set)),
+and `serialPipelines`, why its compiles run one at a time (Vulkan, `rhi_driver_compiler_serial`;
+**One compile at a time**, above) (`port/rhi/rhi.h` (`RhiLimits`)).
 
 **Device and swapchain.** Each Vulkan swapchain creation that changes the mode, image count or size logs one `rhi_vk: swapchain` line (extent, images asked and got, present mode, surface format and colour space, composite alpha, pre-transform, the window's pixel size, SDL's video driver) and the first also a `rhi_vk: surface formats` line, so a driver-side mismatch reads from a log alone; the device report keeps the latest of the swapchain line. `rhi_init` takes an `SDL_Window` (NULL: headless, no swapchain),
 [vsync](ARCHITECTURE.md#terms), debug layers and the app name. `rhi_device_lost` turns true once the
 device is gone; the backend logs the reason and its [loss report](#device-loss) once and the window
 ends the session.
 `rhi_resize_swapchain`, `rhi_swapchain_size` (the backend rebuilds on its own at the surface's size,
-and the renderer follows it at each acquire), `rhi_acquire_backbuffer` (id 0: rebuild needed),
+and the renderer follows it at each acquire), `rhi_swapchain_rotation` (the quarter turns the
+images are in: Vulkan on a surface the system shows turned makes its swapchain in that turn, the
+images `rhi_swapchain_size` turned, and the renderer turns its picture into them last; 0 on every
+other surface and backend; a headless Vulkan device answers `ICO_VK_FAKE_TRANSFORM`'s for the
+tests; [DISPLAY.md](DISPLAY.md#the-turned-swapchain)), `rhi_acquire_backbuffer` (id 0: rebuild needed),
 `rhi_present`, `rhi_present_shown` (false after a [present](ARCHITECTURE.md#terms) that did nothing
-or a D3D12 present the OS reported occluded), and the Android lifecycle's `rhi_release_surface` and
-`rhi_recreate_surface` (`port/rhi/rhi.h`, device).
+or a D3D12 present the OS reported occluded), `rhi_wait_present_room` (the wait for room in the
+present queue the next acquire would make, made now: Direct3D 11's frame latency wait, which the
+render thread makes at the end of a picture so the next picture's reads do not hold it,
+[PLATFORM.md](PLATFORM.md#the-render-thread); false and nothing done on the other backends), and the
+Android lifecycle's `rhi_release_surface` and `rhi_recreate_surface` (`port/rhi/rhi.h`, device).
 
 **Stats** (`RhiStats`) are cumulative since `rhi_init`; the caller takes differences. The `*Ns`
 fields are CPU time blocked in the backend: `fenceWaitNs` on GPU completion (`rhi_wait_frame`,
@@ -318,13 +629,21 @@ grants this process, its current usage, and what it can still reserve), in bytes
 at most every 250 ms (`d11_video_memory`, `dx_video_memory`: the query is a kernel call, and
 `rhi_get_stats` runs every replay); the adapter is queried for `IDXGIAdapter3` once at start, and
 when it is not offered (or answers a budget of 0) the fields read 0 and the init log says
-`video memory budget: not reported by this adapter`. 0 on Vulkan and OpenGL. The window prints them
+`video memory budget: not reported by this adapter`. On Vulkan the same three come from
+`VK_EXT_memory_budget` where the device offers it (enabled for nothing else; vk_device.c
+`vkr_budget_read`): the budget and the use of the device-local heaps summed, the free part the
+budget less the use, read at most every 250 ms (a physical-device query, not after a loss); not
+asked on a tile-based phone GPU (`RhiLimits.tilePhone`; the device table's `MEMORY_BUDGET_OFF`), whose device is made as before and whose
+free memory is the system's own measure. One line at the device's start: `rhi_vk: memory budget:
+VK_EXT_memory_budget: the device-local heaps' budget B MB, U MB in use, F MB free: ...`, or `...:
+not asked (a tile-based phone GPU: ...)` / `not offered (...)`. 0 on OpenGL. The window prints them
 in the 10 s `window: memory:` line, in `window: slow replay` lines whose fence wait is over 50 ms,
 and once a block when the usage reaches 90 % of the budget (`port/platform/window_lines.c`;
 [WORK_BUFFERS.md](WORK_BUFFERS.md#the-upload-ring-shrinks) for the other half of issue 126's
 memory finding).
 The Vulkan-only fields read 0 on D3D12: the memory gauges (live and peak allocations, their bytes,
-the device's limit), `memoryAllocs`, `memoryFrees`, `memoryFallbacks`, `orderBarriers`
+the device's limit), `memoryAllocs`, `memoryFrees`, `memoryFallbacks`, `orderBarriers`,
+`fragmentHolds` ([Buffer barriers' scopes](#buffer-barriers-scopes))
 (`port/rhi/rhi.h` (`RhiStats`); `port/rhi/vk/vk_swapchain.c` (`rhi_acquire_backbuffer`,
 `rhi_present`); `port/rhi/d3d12/d3d12_device.c` (`rhi_get_stats`); `port/rhi/d3d12/d3d12_cmd.c`
 (`dx_wait_fence`, the draw, pass, bind and copy calls)). `createNs` is the CPU time in
@@ -335,7 +654,7 @@ reads real numbers on both backends.
 
 **Timestamps.** `RHI_MAX_TIMESTAMPS` (256) a [frame slot](ARCHITECTURE.md#terms): the
 renderer's list and effect stamps take the first 32 and a replay timed pass by pass one more per
-pass ([RENDER.md](RENDER.md#the-per-pass-timing)); a pool or heap of 256 is 2 KB a slot. The
+pass ([RENDER.md](RENDER_PERF.md#the-per-pass-timing)); a pool or heap of 256 is 2 KB a slot. The
 indices written are bit sets of `RHI_TIMESTAMP_WORDS` words (`rhi_ts_has`, `rhi_ts_add` in
 `port/rhi/rhi.h`), and Vulkan reads a slot's results only up to the highest index written
 (`port/rhi/vk/vk_cmd.c` (`vkr_collect_timestamps`)).
@@ -354,7 +673,7 @@ frequency and every slot got its heap and buffer; otherwise the device log says 
 them off for a test of the fallback.
 
 **Occlusion queries.** `RHI_MAX_OCCLUSION` (8192) a frame slot, a count of their own beside the
-timestamps', for the replay tool's hidden-draw measurement ([RENDER.md](RENDER.md#culling);
+timestamps', for the replay tool's hidden-draw measurement ([RENDER.md](RENDER_PERF.md#culling);
 `port/render/rd_occlusion.c`). `rhi_cmd_begin_occlusion(cl, i)` and `rhi_cmd_end_occlusion(cl, i)`
 around draws inside one render pass count the samples that passed the depth and stencil tests;
 one query is open at a time, each index once a slot; a begin outside a pass, a second begin of an
@@ -363,12 +682,17 @@ it first. `rhi_read_occlusion` hands back the slot `rhi_wait_frame` last recycle
 `rhi_read_timestamps` does: the count, or `RHI_OCCLUSION_NONE` for an index the frame did not
 write; it returns 1 + the highest index written. Vulkan only (`port/rhi/vk/vk_cmd.c`
 (`vkr_occ_make`, `vkr_collect_occlusion`)): a `VK_QUERY_TYPE_OCCLUSION` pool a slot made at the
-first begin of the run (the game never asks for one, so it pays nothing), the current slot's pool
-reset by a one-time submit at that begin and every slot's in its first command list from then on,
+first begin of the run, or by `rhi_occlusion_prepare(count)` outside any recording (the skin
+check's start-up probe on an Adreno, [VU_SKIN_CHECK.md](VU_SKIN_CHECK.md): 80; elsewhere the game
+never asks for one, so it pays nothing), the current slot's pool reset by a one-time submit then
+and every slot's in its first command list from then on, over the range in use: `count` queries
+after a prepare (a later call widens it; a begin past a slot's reset range is dropped, logged once
+`rhi_vk: occlusion queries: query I is past the N reset a frame: dropped; ...`, and the whole pool
+is reset from each slot's next use), the whole pool after a first begin;
 `VK_QUERY_CONTROL_PRECISE_BIT` where the device has `occlusionQueryPrecise` (enabled at device
 creation; without it a count is exact only as zero or not zero, which is all the measurement
-reads). The first begin logs `rhi_vk: occlusion queries: on (8192 a frame slot, precise sample
-counts|not precise: ...)`. Direct3D 12, Direct3D 11 and OpenGL report `rhi_occlusion_supported`
+reads). The pools' making logs `rhi_vk: occlusion queries: on (8192 a frame slot, N of them reset a
+frame, precise sample counts|not precise: ...)`. Direct3D 12, Direct3D 11 and OpenGL report `rhi_occlusion_supported`
 false, the calls do nothing and the read is 0 (their forms would be an occlusion query heap
 resolved like the timestamps, `D3D11_QUERY_OCCLUSION`, `GL_SAMPLES_PASSED`).
 
@@ -378,7 +702,10 @@ swapchain has. `rhi_present_fifo_fallback(true)` makes every later swapchain FIF
 and the mailbox preference ask, with the surface's minimum image count; the flag is kept across
 `rhi_init` like the preference and `rhi_present_fifo_fallback_on` returns it (Vulkan only; D3D12,
 D3D11 and OpenGL ignore it). The window sets it when presents keep blocking under mailbox
-([DISPLAY.md](DISPLAY.md#the-fifo-fallback)). `RhiStats.swapImages` is the current swapchain's
+([DISPLAY.md](DISPLAY.md#the-fifo-fallback)). `rhi_present_fifo_start(fn)` gives the Vulkan
+backend a question (`fn(vendorId, driverText)`, kept across `rhi_init`, NULL asks nothing): with
+vsync off a swapchain whose device answers yes is FIFO at the fewest images from the first one
+(Qualcomm's own driver, the device table's `FIFO_FROM_START`, row `qualcomm-text-android`, [DEVICE_TABLE.md](DEVICE_TABLE.md); the window asks only on Android; the other backends ignore it). `RhiStats.swapImages` is the current swapchain's
 image count (Vulkan; 0 elsewhere). `rhi_present_timing`, `rhi_present_timing_use`, `rhi_present_last_id` and
 `rhi_present_timing_next` are the display's timing of presents (Vulkan's present wait, below; D3D12:
 false, nothing, 0, -1).
@@ -399,12 +726,14 @@ variables as the loader does (`port/rhi/rhi.h`; `port/rhi/rhi_backend.c`).
 
 Each backend keeps its pipelines in a handle pool of `RHI_PIPELINE_POOL_MAX` slots
 (`port/rhi/rhi_pipeline_pool.h`; `port/rhi/vk/vk_device.c` and `port/rhi/d3d12/d3d12_device.c`
-(`rhi_init`)), 4160: `RHI_PIPELINE_POOL_CACHE` (4096), the renderer's whole pipeline cache
+(`rhi_init`)), 4192: `RHI_PIPELINE_POOL_CACHE` (4096), the renderer's whole pipeline cache
 (`port/render/rd_state.h` (`RD_PIPELINE_CACHE_MAX`) is that number), and
-`RHI_PIPELINE_POOL_HEADROOM` (64) for what the renderer holds outside the cache at once: one batch
+`RHI_PIPELINE_POOL_HEADROOM` (96) for what the renderer holds outside the cache at once: one batch
 of the start-up set's or a replay's gathered keys (`RD_PIPE_BATCH`, 32: their ids are held until
-the batch ends and its duplicates are destroyed), the COLCLAMP 0 pipelines (`RD_WRAP_PIPES`, 16)
-and the movie's three (`port/render/rd_video.c`: two outputs, the field pipeline), 51 in all; a
+the batch ends and its duplicates are destroyed), the COLCLAMP 0 pipelines (`RD_WRAP_PIPES`, 16),
+Motion blur: Smooth's two, the movie's three (`port/render/rd_video.c`: two outputs, the field
+pipeline) and the skin check's 33 (`RD_VU_SKIN_PIPES`: the probe's three, c2's three, column 3's
+three, 16 box checks and twin C's 8; [VU_SKIN_CHECK.md](VU_SKIN_CHECK.md)), 86 in all; a
 static assert in `port/render/rd_pipeline.c` holds the sum under the headroom and the cache plus
 the headroom to the pool. So no pipeline the renderer's cache can keep is refused by the pool. A
 handle indexes `2^20 - 1` slots (`port/rhi/vk/vk_internal.h` (`VKR_INDEX_BITS`),
@@ -426,8 +755,8 @@ renderer reads them around a creation to name the failure's reason in its line
 and then every 100th, with the running count (Vulkan `vkr_pool_alloc`, any pool; D3D12 at the
 pipeline's allocation, `dx_pipe_finish`):
 
-    rhi_vk: pipeline pool full (4160); 9 refused so far
-    rhi_d3d12: pipeline pool full (4160); 100 refused so far
+    rhi_vk: pipeline pool full (4192); 9 refused so far
+    rhi_d3d12: pipeline pool full (4192); 100 refused so far
 
 the 8th ending `; from here every 100th is written`. The window's 10 s `memory:` line ends with the
 pool's numbers (`port/platform/window_host.c` (`perf_log`); [PLATFORM.md](PLATFORM.md#diagnostics)):
@@ -616,7 +945,73 @@ Between the pass's writes and a read, and between the read and the next writes o
 `RHI_LOCAL_READ_COLOR` colour attachment output and its writes to the fragment shader's input
 attachment reads, `RHI_LOCAL_READ_DEPTH` the early and late fragment tests and their depth-stencil
 writes to the same reads, `RHI_LOCAL_READ_BACK` those reads to the next draws' depth-stencil and
-colour writes. Outside a pass, or without local read, it records nothing. The exact blend's
+colour writes. Outside a pass, or without local read, it records nothing.
+
+**The subpass read** (`RhiLimits.localReadSubpass`; `port/rhi/vk/vk_renderpass.c`, header comment;
+issue 179). **Decided per device class and driver at the device's start** ([The subpass read's
+probe](#the-subpass-reads-probe) below): its shape costs every `RGBA8_UNORM` render target of the
+device `GENERAL` and the input-attachment usage, which a driver may answer by keeping its framebuffer
+compression off, so it is on only where an earlier start's probe kept it, or for the start that
+probes it; elsewhere none of it exists (no usage, no layout, no self-dependency, DATE through its
+snapshot). `[dev] subpass_read = on` (`ICO_VK_SUBPASS_READ=1`, [CONFIG.md](CONFIG.md)) forces it
+without the probe, `= off` forces it off. With it on, on the
+Vulkan `VkRenderPass` path (a device without dynamic rendering, the Mali-G52 of
+issue 179 at Vulkan 1.1) `RhiLimits.localRead` is the same read through Vulkan 1.0's input
+attachments, for the colour of a pass with one `RGBA8_UNORM` colour target, single-sampled, and a
+depth target: such a pass's subpass names its colour attachment 0 also as input attachment 0 (the
+shaders' `[[vk::input_attachment_index(0)]]`), both references in `GENERAL`, and has one
+self-dependency, subpass 0 to 0, `BY_REGION`, between the framebuffer-space stages (early and late
+fragment tests, the fragment shader, colour output) with the colour and depth-stencil writes and the
+input attachment read on both sides, the superset of every `rhi_cmd_local_read_barrier` recorded in
+it. The Vulkan specification's rules it follows: an in-pass `vkCmdPipelineBarrier` needs a
+self-dependency whose scopes contain its own and whose `BY_REGION` matches
+(`VUID-vkCmdPipelineBarrier-None-07889`, `-07891`; `VUID-VkSubpassDependency-srcSubpass-02243`,
+`-06809`); an input attachment's reference must not be `COLOR_ATTACHMENT_OPTIMAL`
+(`VUID-VkSubpassDescription-attachment-06912`) and one attachment's references share their layout
+(`VUID-VkSubpassDescription-layout-02519`), so `GENERAL`; the framebuffer's image needs the
+input-attachment usage (`VUID-VkFramebufferCreateInfo-pAttachments-00879`); the descriptor's view is
+the framebuffer's (the chapter "Fragment Input Attachment Compatibility"); and the Render Pass
+chapter's "Synchronization Options": "A vkCmdPipelineBarrier inside a subpass can synchronize prior
+attachment writes in the subpass with subsequent input attachment reads". Input attachment
+references and dependencies are part of render pass compatibility ("Render Pass Compatibility"), and
+a pipeline knows only its formats and sample count, so the class decides: every pass of one
+`RGBA8_UNORM` colour target with a depth target has the shape, readable or not, and every
+single-sampled `RGBA8_UNORM` render target that is not a swapchain image is made with the
+input-attachment usage and sits in `GENERAL` as a render target (`VkrTexture.subpassRead`,
+`vkr_texture_layout`; `RHI_STATE_RENDER_TARGET_READ` is `GENERAL` too). A swapchain image is never
+drawn with a depth target; a pass of the class on a texture outside it is begun without the input
+attachment and logged (`rhi_vk: render pass: the subpass read's class ... on a colour swapchain
+image ...: begun without its input attachment; the class's pipelines do not match it (N so far)`,
+none by construction; the probe's plain twin, made with `RHI_TEX_NO_SUBPASS_READ`, is a texture
+outside it that is never drawn with a depth target). Colour-only passes and other formats keep the
+old shape, so
+`rhi_cmd_local_read_barrier` in one is skipped (no self-dependency there):
+`rhi_vk: render pass: a local-read barrier in a pass without the subpass read (no depth target, or
+not one RGBA8 colour): skipped, and a read after it is not ordered (N so far)` (first 8, then every
+100th). A readable depth is refused on it (`a readable depth target without local read (the subpass
+read reads the colour only), or read-only`): the fog's depth read stays dynamic rendering's (its
+shader's input attachment has no index, which only dynamic rendering's mapping gives it). On a
+`VkRenderPass` path (the device's own, the Intel driver row's, Qualcomm's row's, `[dev]
+legacy_passes`') without local read the probe's verdict decides, the rows' fixes unchanged; `[dev]
+subpass_read = on` (`ICO_VK_SUBPASS_READ=1`) turns it on on any of them, not under
+`ICO_VK_FAKE_NO_DST`. The device line on that path says which and why, with the device and driver's
+key: `rhi_vk: render passes: the subpass read off (refused by the probe of an earlier start (probe:
+the read slower, ...); device and driver 13b5:72120000:80200000): a read of a pass's own colour ends
+the pass for a copy (DATE's snapshot)` (or `([dev] subpass_read = off (ICO_VK_SUBPASS_READ=0); ...)`,
+`(no GPU timestamps: the probe cannot time it, so DATE keeps its R8 snapshot; ...)`, and on a class
+off by default `the subpass read off by default (off on this driver this release: ...; ...)`), or `rhi_vk:
+render passes: the subpass read: a pass of one RGBA8 colour target and a depth target names its colour
+as its subpass's input attachment 0, in GENERAL, with a by-region self-dependency (Vulkan 1.0), so a
+read of the pass's own colour (DATE's stencil setup) does not end the pass (kept by the probe of an
+earlier start (probe: the read 0.412 vs the snapshot 0.530 ms, ...); device and driver ...)` (or
+`(no verdict for this device and driver yet: on for this start's probe ...)`, `([dev] subpass_read =
+on (ICO_VK_SUBPASS_READ=1): no probe, DATE's self-test still decides)`), and at the first pass made with it `rhi_vk: render passes: the first with the subpass read:
+its colour (format 37) also input attachment 0, ...`. The renderer uses it for DATE's stencil setup
+alone, and only where DATE's self-test passes on the device ([RENDER.md](RENDER.md), the device
+profile). Checked on lavapipe (`rhi_vk_subpass*`): without the self-dependency the layer reports
+`VUID-vkCmdPipelineBarrier-None-07889`; without the barrier the layer's synchronisation checks
+report nothing (they do not model a read of an input attachment after a write in the same subpass),
+so the barrier rests on the specification alone. The exact blend's
 attachment read (`RHI_DST_READ_ATTACHMENT`) reads the colour in rasterization order instead and
 needs no barrier between draws, nor between the triangles of one draw (the order guarantees a
 fragment's read sees every earlier fragment's write of the pixel, primitive by primitive); the
@@ -628,6 +1023,157 @@ readable pass: [PIPELINES.md](PIPELINES.md#gs-state-as-data); `port/render/rd_re
 (`rhi_cmd_begin_render_pass`, `rhi_cmd_local_read_barrier`); `port/rhi/vk/vk_pipeline.c`
 (`rhi_create_bind_group`); `port/rhi/vk/vk_resource.c` (`createTexture`)). The renderer reads the
 fog's depth and DATE's alpha this way ([RENDER.md](RENDER.md#the-replay)).
+
+### The subpass read's probe
+
+The subpass read's shape is the device's for the whole run (render pass compatibility puts it in
+every pipeline of the class), so it is decided when the device is made
+(`port/rhi/vk/vk_device.c` (`vkr_subpass_read_decide`), `port/rhi/rhi_subpass_verdict.h`), on a
+`VkRenderPass` path without local read (`RhiLimits.subpassRoute`), in this order:
+
+| what | decision |
+| --- | --- |
+| `[dev] subpass_read = off` / `ICO_VK_FAKE_NO_DST` / `= on` | off / off / on without a probe (DATE's self-test still decides) |
+| local read on the device | off (not its route) |
+| no verdict file (no pipeline cache file: the tools and the tests, unless `ICO_VK_SUBPASS_VERDICT` names one) | off |
+| no GPU timestamps on the game's queue (the PowerVR B-Series) | off: the probe cannot time it |
+| the device's class this release (`RHI_SUBPASS_PROBE_INTEL_DEFAULT` 1, `_ARM_DEFAULT` 0, `_QCOM_DEFAULT` 0, `_OTHER_DEFAULT` 0; `ICO_VK_SUBPASS_PROBE_CLASS=1\|0` the tests' override) | the Intel driver row: on to the verdict below; Arm (vendor 0x13B5, the Mali-G52) and Qualcomm's own driver: off by default, `off on this driver this release: a new kind of GPU work at start-up on a driver that lost the device before; one pass a picture` (both lost the device before); any other: off by default, `probed on the Intel driver row only this release`. No probe, no shape, the file neither read nor written |
+| the file's verdict for this device and driver: `kept` / `refused` | on / off, its words quoted in the device line |
+| `probing` (the start that probed it ended before its verdict: a device loss, a GPU hang, a crash, the system ending the app) | off, and the file rewritten `refused` for good |
+| none (no file, another device or driver, another format) | on for this start's probe: the mark `probing` written and flushed to the disc first |
+
+The file is `ico-subpass-read.txt` beside the pipeline cache file (Android: the app's cache folder;
+a cache the system empties loses the verdict, and the next start probes again), one line `v1
+<vendor:device:driverVersion> <state>: <words>`; a driver update probes again. The renderer's probe
+(`port/render/rd_subpass_probe.c`, [RENDER.md](RENDER.md#the-subpass-reads-probe)) writes `kept` or
+`refused` over the mark after DATE's self-test; a clean shutdown of a start that made the shape for
+its probe and never reached it takes the mark away (`rhi_vk: render passes: the subpass read's probe
+did not run at this start (no verdict): its mark taken away, the next start probes`), and a shutdown
+after a device loss keeps it. A GPU hang inside the probe is ended by the watchdog's GPU hang limit
+(half its timeout, 15 s by default: `port/platform/gpu_hang.h`), which ends the process without a
+shutdown, so the mark stays. `RHI_TEX_NO_SUBPASS_READ` makes a render target without the shape while
+the device has it (the probe's plain twin; never drawn with a depth target). The run's loss bookkeeping knows the
+probe as a named phase (the renderer's hook `rd_set_probe_fn`, the window's
+`ico_diag_set_probe` in `port/platform/diag_host.h`): from the renderer's start on a probe's start
+until the verdict, a device loss, GPU hang or end counts on no loss step (not on the loss ladder,
+Android's robust start or the watchdog's mark; the desktop game starts again as a fresh start), and
+the next start logs `ico_pc: the previous run (version V) ended while the subpass read's probe was
+running: ...`. Tests:
+`rhi_subpass_verdict` (the decision's order, the file's line, its path, a write, read and remove, no
+device), `rhi_vk_subpass_verdict` (the decision on lavapipe's 1.1 profile from each state of the
+file).
+
+## Native handles for external compute
+
+The RHI's own compute is the one use above (the VU record's dispatches, where the vertex shaders
+cannot store); everything else that brings compute pipelines (AMD
+FidelityFX through its Vulkan and Direct3D 12 backends) works from the RHI's native objects instead,
+recorded into the RHI's own command list. `port/rhi/rhi_native.h` is additive: a caller that never
+asks sees every texture, barrier and pipeline exactly as before.
+
+What is exposed (every call answers false and writes zeros on Direct3D 11 and OpenGL, and on a
+device without the feature):
+
+| call | gives |
+| --- | --- |
+| `rhi_native_device` | Vulkan: `VkInstance`, `VkDevice`, `VkPhysicalDevice`, the graphics `VkQueue` and its family, the API version, `vkGetInstanceProcAddr` and `vkGetDeviceProcAddr`. D3D12: `ID3D12Device*` and the direct `ID3D12CommandQueue*`. Borrowed until `rhi_shutdown`. |
+| `rhi_native_texture` | the `VkImage` (a `uint64_t`) and `VkFormat`, or the `ID3D12Resource*` and the resource's `DXGI_FORMAT` (typeless for the colour formats); the extent, mips and samples; `storage` (the texture was granted `RHI_TEX_STORAGE`); `nativeState[RhiState]`, the layout or resource state of each RHI state; D3D12 also `state`, the state recorded after the barriers recorded so far (Vulkan keeps no layouts: `stateTracked` is false) |
+| `rhi_native_command_list` | the `VkCommandBuffer` or `ID3D12GraphicsCommandList*` an `RhiCommandList` records into, until it is submitted |
+| `rhi_cmd_external_begin`, `rhi_cmd_external_end` | the bracket around external recording, below |
+| `rhi_device_compute_caps` | what the device offers external compute, below |
+
+`RHI_TEX_STORAGE` is the destination read's and external compute's: it is accepted on any single-sampled
+RGBA8, RGBA16F or D32F texture the device can use as a storage image, with or without the
+fragment interlock or ROV (Vulkan `VK_IMAGE_USAGE_STORAGE_BIT` where the format has the storage
+feature; D3D12 `ALLOW_UNORDERED_ACCESS` for RGBA8 and RGBA16F). D32F is accepted but never granted
+on D3D12, where a depth-stencil resource takes no UAV, and on most Vulkan devices (the grant
+follows the format's storage feature); `RhiNativeTexture.storage` says what was granted. A bind
+group's `RHI_BIND_STORAGE_TEXTURE` stays the destination read's RGBA8 view. A texture made without
+the flag is made as before.
+
+**The state contract.** The renderer transitions every input texture to `RHI_STATE_SHADER_READ` and
+the output to `RHI_STATE_STORAGE` with `rhi_cmd_barrier` before the external dispatch, and back
+after it. The external code is given those native states (`nativeState[RHI_STATE_SHADER_READ]`,
+`nativeState[RHI_STATE_STORAGE]`; for FidelityFX they go in `FfxApiResource.state`) and must leave
+every texture in the state it was given. `RHI_STATE_STORAGE` is the Vulkan `GENERAL` layout and the
+D3D12 `UNORDERED_ACCESS` state; its Vulkan barrier scope now includes the compute stage (stage
+`COMPUTE_SHADER`, accesses `SHADER_READ|SHADER_WRITE`) where the graphics queue takes compute
+work, so a compute dispatch can read and write between two of the RHI's barriers (D3D12's
+`UNORDERED_ACCESS` and `SHADER_READ` already cover every shader stage). Vulkan's `SHADER_READ`
+barrier scope stays fragment-only; `rhi_cmd_external_begin`'s memory barrier carries the compute
+read.
+
+**The external bracket.** `rhi_cmd_external_begin(cl)` is refused (false, a log line, the first 8
+and none after) inside a render pass, when already open, or on a device without compute
+capabilities. Between begin and `rhi_cmd_external_end(cl)` the caller records anything into the
+native list; the RHI records nothing and tracks nothing for it.
+
+- Vulkan begin: the RHI's pending image barriers go out, then one memory barrier from every
+  earlier stage's writes to the compute stage's reads and writes. End: one memory barrier from
+  every stage to every stage, then the cached bindings are lost (the bind cache's viewport,
+  scissor, index buffer, stencil reference, blend constant and vertex buffer knowledge, the dynamic
+  depth and blend state, every descriptor set marked dirty) and the graphics pipeline bound at
+  that point is bound again. Both barriers are counted in `RhiStats.barriers`. The next render
+  pass records its own viewport and scissor; the next draw binds the sets and dynamic state its
+  pipeline uses, so the draw after the pair needs no set call the draw before did not.
+- D3D12 begin and end: the cached root signature, topology, root arguments, vertex buffer views,
+  viewport, scissor and index buffer are forgotten (the next draw sets them); end sets the two
+  descriptor heaps again (the external code sets its own) and the pipeline state again (one slot
+  serves graphics and compute). The resource barriers are the caller's own `rhi_cmd_barrier`
+  calls, already in the list.
+
+**Capabilities.** `rhi_device_compute_caps` fills `RhiComputeCaps` (`ok` is the conjunction; `why`
+names the first missing part). Vulkan: an API version of 1.1 or later (the one the RHI uses, so
+`ICO_VK_FAKE_API` lowers it), a graphics queue family that takes compute work, subgroup basic and
+arithmetic operations in compute shaders, `RGBA16F` and `RGBA16 UNORM` as storage images, and
+`shaderStorageImageReadWithoutFormat` and `...WriteWithoutFormat`, which the device is now made with
+where they are offered. `float16` reports `shaderFloat16` as offered (Vulkan 1.2 features); the
+device is made with it only with the FidelityFX extensions below. D3D12: shader model 6.2 or later (asked down from 6.7), `WaveOps`, typed
+UAV loads of `R16G16B16A16_FLOAT` and `_UNORM` (`TypedUAVLoadAdditionalFormats` and the formats' own
+bits); `float16` is `Native16BitShaderOpsSupported` at 6.2 or later. The answer is logged once at
+device creation (`external compute: offered|not offered...`), the log line to read from a
+reporter's log. The renderer reads it before offering anything built on external compute.
+
+**The FidelityFX extensions.** FidelityFX's Vulkan backend decides what to use from the device's
+extension *list* (`vkEnumerateDeviceExtensionProperties`), not from what the device was made with,
+and calls the entry points of what it finds: a listed `VK_KHR_dedicated_allocation` left off made
+it call a NULL `vkGetBufferMemoryRequirements2KHR` (FFXFETCH's finding). So in a build with the
+upscaler (`ICO_FFX`, `port/rhi/ffx/CMakeLists.txt` defines it for `ico_rhi_vulkan`) the device of a
+Vulkan 1.2 or later driver is made with each extension of the set it acts on that the driver
+lists, with the one feature the upscaler uses from it:
+
+| extension | feature enabled with it |
+| --- | --- |
+| `VK_KHR_shader_float16_int8` | `shaderFloat16` (through `VkPhysicalDeviceVulkan12Features`) and the base feature `shaderInt16`: the backend reads `shaderFloat16` from the physical device, not from what was enabled, and then builds its 16-bit shader permutations, whose SPIR-V declares the Int16 capability as well |
+| `VK_EXT_subgroup_size_control` | `subgroupSizeControl` |
+| `VK_KHR_synchronization2` | `synchronization2` |
+| `VK_EXT_descriptor_indexing` | `shaderStorageBufferArrayNonUniformIndexing` (through `VkPhysicalDeviceVulkan12Features`) |
+| `VK_KHR_dedicated_allocation`, `VK_KHR_get_memory_requirements2` | none |
+| `VK_AMD_buffer_marker` | none |
+| `VK_AMD_device_coherent_memory` | `deviceCoherentMemory` |
+
+The list read is the driver's own, not the one `ICO_VK_FAKE_API` shortens (the backend would see
+the extension anyway; a faked 1.1 or 1.0 device takes none of the set); an extension the RHI already enabled for itself is not named
+twice. `RhiComputeCaps.externalExts` is true when the set is whole; a driver listing
+`VK_KHR_dedicated_allocation` without `VK_KHR_get_memory_requirements2` leaves it false, and so
+does one reporting `shaderFloat16` without `shaderInt16` (the upscaler is then not offered: its
+16-bit shaders could not be made). The RHI's own pipelines use none of these. One line at device
+creation names what was enabled: `external compute extensions: enabled KHR_shader_float16_int8,
+... (features: float16 on, int16 on, ...)`, and the `external compute:` line ends with `the FidelityFX
+extensions enabled yes|no`. Builds without the upscaler (`ICO_FFX` off: Android, macOS, iOS,
+arm64 Linux, the clang presets) make the device as before. `rhi_native_test` checks the set is
+whole on a 1.2 device in an `ICO_FFX` build and absent otherwise.
+
+**MoltenVK.** The Vulkan code path is the same; Metal has compute, storage images and subgroup
+operations, but FidelityFX's Vulkan backend has not run on MoltenVK anywhere: may work; unverified.
+The capability check above is the gate; a macOS test has to confirm it before anything relies on it there.
+
+(`port/rhi/rhi_native.h`; `port/rhi/vk/vk_native.c`, `vk_cmd.c` (`rhi_cmd_external_begin`,
+`rhi_cmd_external_end`, `vkr_state_scope`), `vk_device.c` (`vkr_probe_compute`, the FidelityFX
+extensions in `vkr_create_device`), `vk_resource.c`
+(`rhi_create_texture`); `port/rhi/d3d12/d3d12_native.c`, `d3d12_cmd.c`, `d3d12_device.c`
+(`dx_probe_compute`), `d3d12_plan.c` (`d3dp_storage_texture_ok`, `d3dp_compute_caps`,
+`d3dp_external_rebind`).)
 
 ## Backends in one build
 
@@ -672,6 +1218,44 @@ rather than a blob, and `d3d11_shader_compile` (`port/rhi/d3d11/d3d11_shader.c`)
 DXBC with `d3dcompiler_47.dll`, cached on disk per shader. The route, the cache file, its key and
 its log lines are in [SHADERS.md](SHADERS.md#direct3d-11-run-time-compile).
 
+### Wait hooks
+
+`rhi_set_wait_hooks(&hooks)` (the dispatcher's, kept across `rhi_create_backend` as the wanted card
+is) gives every later `rhi_init` the window's part in a driver call that may take long
+(`RhiWaitHooks`, handed over as `RhiDeviceDesc.waits` when the caller leaves it NULL): `pump(ctx,
+what, heldNs)` about every 50 ms while the calling thread waits, `stalled(ctx, what, heldNs)` once
+when the call passed `limitNs` and the backend gave up on it, and `made(ctx)`, which the dispatcher
+calls after every `rhi_create_shader` and `rhi_create_pipeline` on every backend. Only OpenGL waits
+this way: its shader compiles and its fence waits ([OpenGL](#opengl)); the Vulkan and Direct3D
+backends read nothing of it. The window sets them once before its first `rd_init`
+(`port/platform/window_switch.c` (`ico_window_switch_wait_hooks`)): the pump takes the window's
+events with `SDL_PumpEvents` when the waiting thread is the window's own (the render thread's waits
+take none), `stalled` keeps the shader's name for the switch's box, `made` is progress for the
+switch's watchdog limit ([PLATFORM.md](PLATFORM.md#diagnostics)), and `limitNs` is the GPU hang
+limit (`ico_diag_gpu_hang_limit`: half `watchdog=`, 15 s by default, 0 none). The tests and tools
+set none, so their OpenGL compiles run on the calling thread.
+
+`rhi_set_create_hook(fn)` (the dispatcher's, every backend) calls `fn(kind, debugName, bytes)` after
+every `rhi_create_pipeline` and `rhi_create_buffer` that made one, on the thread that made it
+(`RHI_CREATE_PIPELINE`, `RHI_CREATE_BUFFER`; a buffer's size, 0 for a pipeline); the batches
+(`rhi_create_pipelines`, `_begin`) do not call it. The renderer sets it at `rd_init` to name what
+play makes outside its key cache ([RENDER_POST.md](RENDER_POST.md#start-up)); NULL is none.
+
+**The start-up shader set** (`rhi_plan_shaders`, `rhi_plan_progress`, `rhi_plan_end`; the
+dispatcher's). `rhi_init` starts a device with no plan. The renderer counts the shaders
+`rd__gpu_init` is about to make before its loops (`port/render/rd_shader_plan.c` `rd__shader_plan`:
+the vertex entries, the fragment entries with their `_nodual` and destination-read twins, each name
+`rd__make_shader` would hand over in this backend's form) and adds the parts decided later (the VU
+policy's ten plain modules, the pre-pass's batch builds, the draw merge's modules) where they are
+decided; `rd_init` ends the set after `rd__gpu_init` (`rhi_plan_end`), and the first
+`rhi_begin_commands` ends one left open. While it is open the dispatcher numbers each
+`rhi_create_shader` (`RhiShaderDesc.planIndex` from 1, `planTotal` the count so far, never below
+the number made) for the backend's progress screen (OpenGL's, below), and `rhi_plan_progress`
+gives the window's made hook the count (its `window: shaders:` steps, [DISPLAY.md](DISPLAY.md)).
+The end calls the made hook once more with the count at 0 and 0. A count apart from the number made
+writes `rhi: the start-up shader set ended with N made of the M planned (...)`: only the screens
+counted wrong.
+
 ### Choosing the device
 
 `rhi_adapter_list(out, max)` (a table entry) copies the devices the backend's last `rhi_init`
@@ -702,6 +1286,16 @@ names and ignores the name (the system's driver picks the device). Windows' per-
 preference does not reach the pick: Vulkan's score reads the device type and Direct3D asks for
 `DXGI_GPU_PREFERENCE_HIGH_PERFORMANCE`, so Automatic is the same on every start and the Options
 row ([OPTIONS.md](../OPTIONS.md#choosing-the-graphics-card)) is how a player picks another card.
+
+After the device line the Vulkan backend evaluates the device table once for the picked device,
+with the tests' fakes (`vk_device_table.c`, `g_vkr.devTable`: the tile rule, the dynamic state, the
+memory budget, the driver rows, the subpass class, the attachment read, the robustness ask, the VU
+rows and the serial compiles read it), and prints its lines: the rows in force
+out of the table's count, then one line a row with what it sets, its issue, the release it came in
+and the condition to revisit it. OpenGL, Direct3D 11 and Direct3D 12 print the same lines after
+theirs (no row is keyed on them). The renderer's summary ends with the rows' count; the header names
+them, and is a key line of `report.txt`
+([DEVICE_TABLE.md](DEVICE_TABLE.md#the-start-up-lines-and-the-summary)).
 
 ## Vulkan
 
@@ -759,7 +1353,8 @@ read is not offered on Qualcomm's own Adreno driver (vendor 0x5143, `VkDriverId`
 `QUALCOMM_PROPRIETARY` or unknown; not Mesa's Turnip): its reads return wrong colours (issue 89,
 Adreno 830 on driver 512.800.72), and the device line says `rasterization-order attachment read off
 on this driver (Qualcomm driver <version>: wrong results on Adreno; ICO_VK_ATTACHMENT_READ=1 tries
-it)` (`port/rhi/rhi_driver_version.h` (`rhi_driver_is_qualcomm_proprietary`);
+it)` (`port/rhi/rhi_driver_version.h` (`rhi_driver_is_qualcomm_proprietary`); the device table's
+`ATTACHMENT_READ_OFF`, row `qualcomm`, [DEVICE_TABLE.md](DEVICE_TABLE.md);
 [RENDER.md](RENDER.md#destination-reads-and-blend-paths)). The scene's
 depth-stencil is D32_SFLOAT_S8_UINT, or D24_UNORM_S8_UINT when only that has the sampled and
 transfer features (`vkr_choose_depth_stencil`).
@@ -772,16 +1367,23 @@ transfer features (`vkr_choose_depth_stencil`).
 | `ICO_VK_FAKE_LIMITS=moltenvk` | no limit clamped: the device is reported as MoltenVK (`RhiLimits.moltenvk`) without the attachment read (`rd_blend_selftest_moltenvk_storage`) |
 | `ICO_VK_FAKE_D24S8` | 1 takes D24S8 where the device has it |
 | `ICO_VK_FAKE_NO_DUAL` | 1 leaves dual-source blending off |
+| `ICO_VK_FAKE_NO_VERTEX_STORES` | 1 leaves `vertexPipelineStoresAndAtomics` off (`RhiLimits.vertexStores` false: the VU record by compute dispatches or render targets) |
+| `ICO_VK_FAKE_NO_COMPUTE_STORES` | 1 reports no compute stores (`RhiLimits.computeStores` false, `computeStoresOff` names it; the line `compute record stores: not offered: ICO_VK_FAKE_NO_COMPUTE_STORES (...)`): the compute bracket refuses, a dispatch records nothing ([Compute dispatch (the VU record)](#compute-dispatch-the-vu-record); `rhi_vk_nocompute`, `rd_vuprepass_selftest_nocompute_fallback`) |
 | `ICO_VK_FAKE_NO_D32F_ATTACHMENT` | 1 hides the D32F depth-attachment bit: the device is still picked, `RhiLimits.depth32Attachment` is false (`rhi_vk_vk10_nod32f`) |
 | `ICO_VK_FAKE_NO_DYNAMIC` | 1 leaves the dynamic depth and blend state off, `blend` the blend alone ([Dynamic state](#dynamic-state)) |
 | `ICO_VK_FAKE_NO_MSAA` | 1 reports single sampling only |
 | `ICO_VK_FAKE_NO_DST` | 1 reports no destination read and no local read |
 | `ICO_VK_FAKE_ADRENO` | 1 takes the Qualcomm driver's branch: the attachment read not offered |
-| `ICO_VK_FAKE_API` | `1.1` uses the device as a stock Vulkan 1.1 driver (Adreno 618 class): the instance and the device held to 1.1 (the KHR and EXT names of what is core later), and `VK_KHR_timeline_semaphore`, `VK_KHR_dynamic_rendering_local_read`, `VK_KHR_driver_properties`, `VK_KHR_image_format_list`, `VK_KHR_load_store_op_none`, `VK_EXT_load_store_op_none` and `VK_QCOM_render_pass_store_ops` reported absent (`vkr_fake_hidden`): the fence ring ([Bindings and synchronisation](#vulkan)), no local read, the driver unnamed; `VK_KHR_dynamic_rendering` is hidden too (`VKR_LEGACY_PASSES`), so the passes are `VkRenderPass` objects ([Render passes](#vulkan)) and the device line says `render passes legacy`; the line `ICO_VK_FAKE_API=1.1: the device is used as a Vulkan 1.1 driver without timeline semaphores, dynamic rendering, local read, driver properties, image format list or store op none`. `1.1ext` holds the versions to 1.1 and hides nothing (a 1.1 driver with the extensions: the timeline through `VK_KHR_timeline_semaphore`, dynamic rendering through `VK_KHR_dynamic_rendering`), local read off (it needs 1.3). `1.0` (issue 158) creates the instance at Vulkan 1.0 with `VK_KHR_get_physical_device_properties2`, as a 1.0 loader would, uses the device at 1.0 with `VK_KHR_maintenance1` and `VK_KHR_maintenance2`, hides what `1.1` hides, and clears volk's core 1.1 entry points after the instance and the device are made (`vkr_fake_10_entry_points`: the system's loader still hands out the instance-level ones at 1.0, so a core 1.1 call left unguarded stops the test at a NULL call); the line `ICO_VK_FAKE_API=1.0: the device is used as a Vulkan 1.0 driver (a 1.0 instance with VK_KHR_get_physical_device_properties2) without ...` (`rhi_vk_vk10`, `rhi_vk_swapchain_vk10`, the render twins `rd_*_vk10`, all with `ICO_VK_FAKE_NO_DYNAMIC=1` as on Android, label `vk10`: [TESTING.md](TESTING.md#the-render-suite-on-a-vulkan-10-driver)). `1.0bare` is `1.0` on a loader without `VK_KHR_get_physical_device_properties2`: the instance is made without it and the device without the extended queries (`rhi_vk_vk10bare`, review finding 5). All compose with `ICO_VK_FAKE_LIMITS=mali`; the device line ends `; ICO_VK_FAKE_API=<profile>`; another value is logged and hides nothing (`rhi_vk_vk11`, `rhi_vk_swapchain_vk11`, the render twins `rd_*_vk11` and `rd_pixel_vk11ext`, `rd_present_vk11ext`, label `vk11`: [TESTING.md](TESTING.md#the-render-suite-on-a-vulkan-11-driver)) |
+| `ICO_VK_FAKE_API` | `1.1` uses the device as a stock Vulkan 1.1 driver (Adreno 618 class): the instance and the device held to 1.1 (the KHR and EXT names of what is core later), and `VK_KHR_timeline_semaphore`, `VK_KHR_dynamic_rendering_local_read`, `VK_KHR_driver_properties`, `VK_KHR_image_format_list`, `VK_KHR_load_store_op_none`, `VK_EXT_load_store_op_none` and `VK_QCOM_render_pass_store_ops` reported absent (`vkr_fake_hidden`): the fence ring ([Bindings and synchronisation](#vulkan)), no dynamic rendering local read (the [subpass read](#local-read) instead), the driver unnamed; `VK_KHR_dynamic_rendering` is hidden too (`VKR_LEGACY_PASSES`), so the passes are `VkRenderPass` objects ([Render passes](#vulkan)) and the device line says `render passes legacy`; the line `ICO_VK_FAKE_API=1.1: the device is used as a Vulkan 1.1 driver without timeline semaphores, dynamic rendering, local read, driver properties, image format list or store op none`. `1.1ext` holds the versions to 1.1 and hides nothing (a 1.1 driver with the extensions: the timeline through `VK_KHR_timeline_semaphore`, dynamic rendering through `VK_KHR_dynamic_rendering`), local read off (it needs 1.3). `1.0` (issue 158) creates the instance at Vulkan 1.0 with `VK_KHR_get_physical_device_properties2`, as a 1.0 loader would, uses the device at 1.0 with `VK_KHR_maintenance1` and `VK_KHR_maintenance2`, hides what `1.1` hides, and clears volk's core 1.1 entry points after the instance and the device are made (`vkr_fake_10_entry_points`: the system's loader still hands out the instance-level ones at 1.0, so a core 1.1 call left unguarded stops the test at a NULL call); the line `ICO_VK_FAKE_API=1.0: the device is used as a Vulkan 1.0 driver (a 1.0 instance with VK_KHR_get_physical_device_properties2) without ...` (`rhi_vk_vk10`, `rhi_vk_swapchain_vk10`, the render twins `rd_*_vk10`, all with `ICO_VK_FAKE_NO_DYNAMIC=1` as on Android, label `vk10`: [TESTING.md](TESTING.md#the-render-suite-on-a-vulkan-10-driver)). `1.0bare` is `1.0` on a loader without `VK_KHR_get_physical_device_properties2`: the instance is made without it and the device without the extended queries (`rhi_vk_vk10bare`, review finding 5). All compose with `ICO_VK_FAKE_LIMITS=mali`; the device line ends `; ICO_VK_FAKE_API=<profile>`; another value is logged and hides nothing (`rhi_vk_vk11`, `rhi_vk_swapchain_vk11`, the render twins `rd_*_vk11` and `rd_pixel_vk11ext`, `rd_present_vk11ext`, label `vk11`: [TESTING.md](TESTING.md#the-render-suite-on-a-vulkan-11-driver)) |
 | `ICO_VK_ATTACHMENT_READ` | 1 offers the attachment read on Qualcomm's driver too; ico-pc.ini `attachment_read` |
+| `ICO_VK_LEGACY_PASSES` | 1 records the render passes as `VkRenderPass` objects on any device (the Intel driver row's path, `rd_display_change_2x_legacy`), 0 keeps dynamic rendering on a device of the row; unset, the row; ico-pc.ini `[dev] legacy_passes` ([Vulkan](#vulkan), **Render passes**) |
+| `ICO_VK_FAKE_PASS_ROW` | tests only: `qualcomm` puts the device on Qualcomm's driver row alone (its passes `VkRenderPass` objects, `RhiLimits.passObjectsRow` set; nothing else of the driver faked): `rhi_vk_qcom_passes`, `_off`, `rd_pass_objects_ab` ([Vulkan](#vulkan), **Render passes**) |
+| `ICO_VK_SUBPASS_READ` | `[dev] subpass_read`: 1 turns [the subpass read](#local-read) on without its probe on any `VkRenderPass` path (the device's own, the driver rows' and `[dev] legacy_passes`': `rhi_vk_subpass_vk11`, `_legacy_on`); 0 off; unset, [the probe's verdict](#the-subpass-reads-probe) decides |
+| `ICO_VK_SUBPASS_PROBE_CLASS` | tests only: 1 runs [the subpass read's probe](#the-subpass-reads-probe) on a class off by default this release (Arm's under `ICO_VK_FAKE_VENDOR=0x13B5`, lavapipe's own), 0 keeps it off on any class: `rhi_vk_subpass_verdict`, `rd_subpass_probe_*` |
+| `ICO_VK_SUBPASS_VERDICT` | tests only: the subpass read's verdict file (the game's is `ico-subpass-read.txt` beside its pipeline cache file; without either the read is off): `rhi_vk_subpass_verdict`, `rd_subpass_probe_*` |
 | `ICO_VK_STORAGE_BARRIERS` | 1 puts the by-region barrier before a destination-read draw that only the validation layer needs |
 | `ICO_VK_GLOBAL_BARRIERS` | 1 records a global barrier before every render pass and copy (`vk_cmd.c`) |
-| `ICO_VK_DEPTH_ALWAYS` | 1 makes every depth test compare `ALWAYS`, static and dynamic (`vk_pipeline.c`, `rhi_cmd_set_depth_state`), with the line `ICO_VK_DEPTH_ALWAYS: every depth test passes (...)`: the occlusion measurement's run without the depth ([RENDER.md](RENDER.md#culling)); the picture is not the game's |
+| `ICO_VK_DEPTH_ALWAYS` | 1 makes every depth test compare `ALWAYS`, static and dynamic (`vk_pipeline.c`, `rhi_cmd_set_depth_state`), with the line `ICO_VK_DEPTH_ALWAYS: every depth test passes (...)`: the occlusion measurement's run without the depth ([RENDER.md](RENDER_PERF.md#culling)); the picture is not the game's |
 | `ICO_VK_PRESENT_WAIT` | 1 uses `VK_KHR_present_id` and `VK_KHR_present_wait` where offered (off otherwise) |
 | `ICO_VK_FIFO_LATEST_READY` | 1 uses `VK_PRESENT_MODE_FIFO_LATEST_READY_EXT` where FIFO would be taken, when offered |
 | `ICO_VK_POLL_SURFACE` | 1 polls the surface size after presents, as Android always does (`vk_swapchain.c`) |
@@ -792,7 +1394,7 @@ transfer features (`vkr_choose_depth_stencil`).
 `port/rhi/vk/vk_cmd.c`; `port/rhi/vk/vk_swapchain.c` (`vkr_poll_surface_on`)).
 
 **Present mode** (`port/rhi/vk/vk_present_mode.c`, pure so its test compiles it alone). Under the
-FIFO fallback (`forceFifo`, `s_fifoFallback` in `port/rhi/vk/vk_swapchain.c`, which also asks for exactly `minImageCount` images, two at least, and adds `, fifo fallback` to the `rhi_vk: swapchain` line): FIFO. With vsync:
+FIFO fallback (`forceFifo`, `s_fifoFallback` in `port/rhi/vk/vk_swapchain.c`, which also asks for exactly `minImageCount` images, two at least, and adds `, fifo fallback` to the `rhi_vk: swapchain` line): FIFO; the same from the first swapchain when `rhi_present_fifo_start`'s question says yes for the device with vsync off (`, fifo from the start` on that line): FIFO. With vsync:
 mailbox when preferred and offered; FIFO latest ready when asked for and offered; else FIFO. Without
 vsync: immediate wherever offered (the picture tears where the compositor lets it), then mailbox,
 then FIFO (`vkr_choose_present_mode`). `vkr_present_wait_wanted` is true only when
@@ -801,12 +1403,31 @@ can run the thread.
 
 **Swapchain** (`port/rhi/vk/vk_swapchain.c`). BGRA8 UNORM (else RGBA8) in sRGB-nonlinear colour
 space, so the game's colours are written as they are; `minImageCount + 1` images, held to the
-surface's maximum; the identity transform where offered (the compositor rotates). A rebuild keeps
+surface's maximum; on a surface whose current transform is ROTATE_90, 180 or 270 (an Android phone
+held sideways) that transform as the preTransform, the images the extent turned and
+`VkrState.swapTurns` the quarter turns (`vkr_prerotate_turns`; `[dev] prerotate = false`,
+`ICO_VK_PREROTATE=0`, keeps identity), else the identity transform where offered (the compositor
+rotates; [DISPLAY.md](DISPLAY.md#the-turned-swapchain)). A rebuild keeps
 the old swapchain until the first present on the new one succeeds, so the screen keeps its last
 picture (`vkr_swapchain_create`). An out-of-date acquire returns id 0 and the presenter rebuilds; a
 lost surface makes a new surface and swapchain. On Android (or with `ICO_VK_POLL_SURFACE=1`) the
 surface's size is polled at every present for 15 s after a swapchain is made, then once a second,
-since the driver can go on returning success while the surface changes size (`vkr_poll_surface`).
+since the driver can go on returning success while the surface changes size (`vkr_poll_surface`); the
+poll and Android's suboptimal present also rebuild when the surface's turn changed (the phone turned
+over, `vkr_swap_differs`).
+
+**The display's times read back.** On Android alone (the screen's rule and the on-glass line, which use the times, are Android's; on the desktop and the Mac the extension is not enabled, the start line says `off (not on this platform: ...)` and the driver's present path is the one without the extension), where the device offers `VK_GOOGLE_display_timing` on a window,
+the extension is enabled and, while the renderer presents pictures as made (`rhi_present_glass_use`, set by `rd_present_as_made`: vsync off, Frame rate Uncapped, the render thread on; an atomic flag each present reads once, its id saying which way it went), every present chains a `VkPresentTimeGOOGLE` with an id and a
+`desiredPresentTime` of 0 (the specification: zero "specifies that the presentation engine may
+display the image at any time"), so which pictures are shown and when is as without it, in every
+present mode (in every other mode nothing is chained and nothing read: capped and vsync presents are made as without the extension); after each present that carried an id, on the presenting thread under the swapchain's lock,
+`vkGetPastPresentationTimingGOOGLE` (no wait: it returns what the driver has) fills a 256-time ring
+and `vkGetRefreshCycleDurationGOOGLE` gives the refresh for each new swapchain and again every second (a rate pin or an LTPO screen changes it without a new swapchain; a failed read keeps the period known before and is tried again 100 ms later, `display timing (read back): the display's refresh could not be read (VkResult R, N ns; failure K): ...`; a change is logged, `display timing (read back): the display's refresh is now P ms (was Q ms; change K)`, both the first 8 then every 100th, and the screen's model starts its grid and latch again from the first sample with the new period, counted on the on-glass line); `rhi_present_glass`
+gives the calling thread's last present's id and takes the times (`port/rhi/vk/vk_glass.c`; the
+start line `rhi_vk: display timing (read back): VK_GOOGLE_display_timing on (read only: ...)` or
+`off (...)`). A swapchain made again by the present itself is not read after it is destroyed.
+`VK_EXT_present_timing` is not used. OpenGL and Direct3D give none. The renderer's on-glass line
+reads it ([PLATFORM_DIAGNOSTICS.md](PLATFORM_DIAGNOSTICS.md#the-on-glass-line)). The one exception to the desired time of 0: `rhi_present_desire(ns)` sets the calling thread's next present's `desiredPresentTime` (then 0 again), on the clock of `actualPresentTime` (the display's own: the extension's times are in ns of a monotonic clock, `CLOCK_MONOTONIC` on Android, the same the read-back gives, so no mapping is made); only the even cadence calls it, off by default, so no present asks a time in a default build ([DISPLAY.md](DISPLAY.md#interpolation-between-ticks)). Elsewhere it does nothing.
 
 **The present-wait thread.** With `ICO_VK_PRESENT_WAIT=1` a thread waits on each present's id in
 turn (`vkWaitForPresentKHR`, 4 ms a wait) and notes when it returned on `SDL_GetTicksNS`'s clock in
@@ -837,8 +1458,14 @@ line each: `pipeline cache: dropped <name> (made for other shaders, or named aft
 (`port/rhi/vk/vk_pipeline.c` (`vkr_cache_drop_others`); not done for a path whose file name does
 not start `pipelines` and end `.vkcache`). It then loads the file when the file is 32 bytes to 64 MB and its
 header (`VkPipelineCacheHeaderVersionOne`: header size, version one, vendor id, device id,
-`pipelineCacheUUID`) names this device; anything else logs "is for another device or driver" and
-starts empty, as does data the driver refuses. Every pipeline is created through it, and
+`pipelineCacheUUID`) names this device; anything else starts empty with the part that differs
+(issue 123): "is not a
+cache this driver reads (header N bytes, version V)", "is for another device (vendor 0x.. device
+0x..; this one 0x.. 0x..)", or, the same GPU with another cache id, "is from another driver for
+this GPU (the driver's cache id differs: a driver update, or another driver picked; the shader set
+is the same)"; data the driver refuses starts empty too. When no file of this shader set is there
+and the drop removed an older set's, `pipeline cache: the shader set changed with this version (N
+older files dropped): the cache starts empty once` follows the `starting empty` line. Every pipeline is created through it, and
 `rhi_shutdown` writes it back to `<path>.tmp` and renames it over the file, not synced to the disk
 (`pipeline cache: N bytes written to <path> at exit in T ms`), and not at all when its data's size
 is the one this run loaded or last wrote (`pipeline cache unchanged, not written (N bytes in
@@ -872,7 +1499,53 @@ present batch's wait for the previous number (the semaphore signal already cover
 submission on the queue), and the timeline path's submits are as before, field for field. The
 watchdog and the loss report read the counter on both paths (`vkr_sync_init`, `vkr_sync_submit`,
 `vkr_sync_reached`, `vkr_sync_wait`; `rhi_vk_vk11`'s sync cell: 24 submissions three times around
-the ring, the last clear read back, every one seen finished). Every buffer and
+the ring, the last clear read back, every one seen finished).
+
+**The recycled slot's clock (issue 123).** `rhi_read_timestamp_clock` (rhi.h) hands back, with the
+stamps of the slot `rhi_wait_frame` recycled, what the CPU saw of that slot's GPU work
+(`port/rhi/vk/vk_tsclock.c`): its submissions' CPU times (`vkr_tsclock_note_submit`, from
+`vkr_submit_batch`); the recycle's wait, when it blocked; the indices recorded and those that came
+back available; and, where `VK_KHR_calibrated_timestamps` or `VK_EXT_calibrated_timestamps` is
+offered with the device's and the CPU's time domains (CLOCK_MONOTONIC, the performance counter on
+Windows; both need `VK_KHR_get_physical_device_properties2` or Vulkan 1.1), one calibrated pair read
+at the recycle: at a device's first recycle, at one whose wait blocked past `RHI_TS_TRACE_AFTER_MS`
+and at the `RHI_FRAMES_IN_FLIGHT + 1` recycles after it (the replays in flight through the stall,
+among them the one whose counter restarted: every restart in issue 123's logs came with such a
+stall), not at every recycle (the driver call each replay was not needed by any line).
+`recorded` holds the stamps of the slot's submitted lists only, so a list recorded and never
+submitted cannot read as unwritten stamps; such lists are counted in `listsUnsubmitted` (the
+`GPU clock` line's `N of the slot's lists with stamps were recorded and not submitted`). Enabling the extension also orders timestamps across submissions: without it the
+specification orders only writes "in the same submission" ("Timestamp Queries"), and the renderer
+compares the scene's and the present's lists and replay with replay. A recycle's wait that blocks
+past `RHI_TS_TRACE_AFTER_MS` (50 ms) becomes timed waits of `RHI_TS_TRACE_STEP_MS` (4 ms) between
+which the slot's query results are read without the wait bit (allowed: "may return VK_NOT_READY if
+there are queries in the unavailable state", "Query Operation"), one trace point at each change:
+which recorded stamps were available, whether they were still the slot's previous use's (its reset,
+the first command of its first list, had not run: the GPU had not begun it), how far its submissions
+had finished; the longest stretch with no change; and `again` when the available count fell after
+the slot's own results had begun to come (its queries reset a second time: its first list ran
+again, which a driver's reset and replay of the work in flight does). The wait returns when the
+same number finishes as before, nothing is recorded, the picture is the same (the 123 dumps
+replay byte-identical on lavapipe). Device line: `rhi_vk: timestamps: 64 valid bits, 52.083 ns a
+tick; calibrated with the CPU's clock: on (VK_KHR_calibrated_timestamps, the device and
+CLOCK_MONOTONIC)` or `...: not offered (a slow replay's start is placed from its wait instead)`;
+`ICO_VK_CALIBRATED_TIMESTAMPS=0` keeps the extension off. On lavapipe a query read waits for the
+queue, so its trace has one point, after the work; a phone's driver need not. The renderer's use:
+[ANDROID_DIAGNOSTICS.md](ANDROID_DIAGNOSTICS.md#issue-123-what-the-gpu-did-during-a-stall).
+
+**What robust access does not cover (issue 123).** Robust buffer access bounds shader reads and the
+vertex input ("access to vertex input data is bounds checked against the bound vertex buffer
+range", "Robust Buffer Access"); the index fetch and the transfer commands are valid-usage rules
+only, which a driver may fault on. `port/rhi/vk/vk_range.c` checks every indexed draw's
+`(firstIndex + indexCount) * index size` against the bound index buffer's bytes from its offset,
+every buffer copy's source and destination, every buffer-to-texture and texture-to-buffer copy's
+buffer rows (the last row its own texels; BC blocks) and texture region, and every texture copy's
+regions against their mip; one past them is recorded as before and logged: `rhi_vk: a command past
+its resource: an indexed draw's indices reaches 68 of 64 (replay R, frame F; N such commands this
+run): robust access does not cover it, a GPU may fault on it` (the first 8, then every 100th). Every
+device; nothing changes where nothing is past.
+
+Every buffer and
 texture has its own `VkDeviceMemory` (`port/rhi/vk/vk_resource.c`, header comment). Each memory kind
 tries an ordered list of memory types, and a type the driver refuses (a full heap) passes the
 allocation to the next: uploads go to a device-local, host-visible type first, but one whose heap is
@@ -886,9 +1559,44 @@ state tracking put it in, the load and store ops, the clear; the area and the fr
 issues the hazard barriers from it and records it with `vkr_pass_begin`: with dynamic rendering the
 `VkRenderingInfo` it always recorded, field for field; on a device without it
 (`VkrState.legacyPasses`, the device line's `render passes legacy`) `vkCmdBeginRenderPass` with a
-cached `VkRenderPass` (one subpass, no dependencies, every attachment's initial, subpass and final
-layout the one it is already in, so the pass makes no transition and the barriers before it order
-it; a pass without attachments a subpass without them) and a cached `VkFramebuffer`. A read-only
+cached `VkRenderPass` (one subpass, no dependency but [the subpass read](#local-read)'s, every
+attachment's initial, subpass and final layout the one it is already in, so the pass makes no
+transition and the barriers before it order it; a pass without attachments a subpass without them)
+and a cached `VkFramebuffer`. The path is
+also taken by a device of the driver row (`port/rhi/rhi_pass_row.h`: Intel's own Windows driver,
+vendor 0x8086 with `VK_DRIVER_ID_INTEL_PROPRIETARY_WINDOWS` or no driver id on a Windows build, at
+Vulkan 1.3.215 or older, the final drivers for 6th to 10th gen graphics, whose `vkCmdBeginRendering`
+crashed in the first picture after a live switch from 1x to 2x: issue 123's Intel HD 530 report,
+`igvk64.dll+0x5cfab9` reading 0x68, and other ports' reports on the same drivers) and by any device
+with `[dev] legacy_passes = true` (`ICO_VK_LEGACY_PASSES=1`); `legacy_passes = false` (`0`) keeps
+dynamic rendering wherever the device offers it (`vk_device.c` (`vkr_pass_row_apply`)). Both rows
+are the device table's `PASS_OBJECTS` (`intel-windows-1.3.215` and `qualcomm-android`,
+[DEVICE_TABLE.md](DEVICE_TABLE.md)). A second
+row (`rhi_vk_pass_row_qualcomm`, issue 123; on Android alone, its evidence's platform: on Windows on Snapdragon the driver keeps dynamic rendering and the device start says `render passes: dynamic rendering on Qualcomm's own driver: its row (VkRenderPass objects, issue 123) is Android's alone, ...`) takes it on Qualcomm's own driver (vendor 0x5143 with
+`VK_DRIVER_ID_QUALCOMM_PROPRIETARY` or no driver id; every Adreno, every version; Turnip keeps
+dynamic rendering): the Adreno 740 of issue 123 and the Adreno 710 of issue 211 hang inside a pass
+about once in 500 pictures, every such run on dynamic rendering, and the `VkRenderPass` path removes
+that path as a cause with the same attachments, ops, layouts and barriers, so the same picture
+(`rd_pass_objects_ab`: 0 bytes differ on the stage 12, opening and Mali dumps; the analysis in
+[ANDROID_DIAGNOSTICS.md](ANDROID_DIAGNOSTICS.md#issue-123-the-hang-detector-and-the-pass-path)).
+Unlike the Intel row it leaves the VU record's store passes without an attachment
+(`RhiLimits.storePassTarget` stays the Intel row's and the subpass read's); `RhiLimits.passObjectsRow`
+holds its reason while it holds the device's passes and `RhiStats.passObjects` counts the passes
+begun as `VkRenderPass` objects (on any `VkRenderPass` path), for the attempt's line
+(`rd_replay_tool --stats`: `render passes: N begun, M as VkRenderPass objects`, M = N under a
+row, 0 with dynamic rendering; `rd_pass_objects_ab` holds both). Its line:
+`rhi_vk: render passes: VkRenderPass objects, not dynamic rendering: Intel's Windows driver at
+Vulkan 1.3.215 or older (...); [dev] legacy_passes = false (ICO_VK_LEGACY_PASSES=0) gives dynamic
+rendering`, and the device line's `render passes legacy (<the reason>)`. Such a 1.3 device keeps
+everything else of 1.3 (the timeline, `STORE_OP_NONE`, the dynamic depth state); dynamic
+rendering's local read is off on that path (those Intel drivers offer none), and so is the subpass
+read unless `[dev] subpass_read = on` asks for it (off by default everywhere). Before either path's
+driver call `vkr_pass_begin` stores the pass's shape for the crash report ([Device
+loss](#device-loss)); the dynamic path's `pColorAttachments` is NULL when the pass has no colour
+target and its attachment array is zeroed. `rhi_cmd_begin_render_pass` refuses a target without an
+attachment view before any barrier or driver call, the pass's draws skipped (`rhi_vk: render pass:
+target without an attachment view (colour 0, WxH, format F; the pass's draws are skipped; N so
+far)`, the first 8 then every 100th; nothing in the RHI makes such a texture today). A read-only
 depth stores with `STORE_OP_NONE` at 1.3 or where `VK_KHR_load_store_op_none`,
 `VK_EXT_load_store_op_none` or `VK_QCOM_render_pass_store_ops` gave it (`storeOpNone`), else with
 `STORE` (dynamic rendering keeps its 1.3 check). A pipeline on that path names the render pass of
@@ -905,6 +1613,20 @@ idle), and `vkr_release_all_objects` destroys both caches first. The first pass 
 render passes: VkRenderPass objects (no dynamic rendering), the first with N colour target(s)...;
 read-only depth stored with STORE_OP_NONE|STORE (no store op none)`; a pass whose objects could not be
 made is not begun (`rhi_vk: render pass: no VkRenderPass or framebuffer for ...`).
+
+**Queue priority.** The game's one queue is made at the driver's default global priority on every
+device: no `VkDeviceQueueGlobalPriorityCreateInfo` is chained and no global priority extension is
+enabled. The previous release asked high on Qualcomm's own driver under Android (issue 123's
+second attempt); it was taken off (issues 215 and 123: the issue 123 tablet's hangs did not change
+and its reporter saw the whole tablet slow down while the game ran, and it was new on the issue 215
+handheld that ends at every start). A read-only start line keeps the device's offer in the log:
+`rhi_vk: queue priority: the driver's default (medium), not asked: global queue priority KHR and
+EXT offered (the game's queue family 0's priorities: 3: low, medium, high); the game asks no device
+for a global priority (the high priority asked on Qualcomm's own driver under Android taken off,
+issues 215 and 123)`, beside the offer line's `the game's one queue made at priority 1.0 with no
+global priority asked (the driver's default, medium)`. The ctests `rhi_vk_qprio_none` (lavapipe on
+Qualcomm's row, passing on that line) and `rhi_vk_qprio_source` (no source under `port/` names the
+structure) hold it.
 
 **Android surface.** With a driver the app loaded itself the instance belongs to another loader, so
 `vk_surface_android.c` makes the surface through the `vkGetInstanceProcAddr` given to volk instead
@@ -1059,6 +1781,16 @@ buffers** below)
 A failed call logs `rhi_d3d11: <call> failed (HRESULT 0x...) at <file>:<line>`; a lost device is
 logged once with its removed reason and the last eight submissions (`d11_check`).
 
+**Driver text (Vulkan).** `vkr_driver_text` reads VK_KHR_driver_properties into the device line
+(`; device vvvv:dddd; driver <name> <info>, version <v>`) and, for a Mesa driver, appends `, Mesa
+25.3.0-devel`: the Mesa version `rhi_mesa_version_parse` finds in `driverInfo` (`Mesa 25.3.0-devel
+(git-bbdd688)`; tolerant of case, `-`, `_` and `v` after the word; `RhiMesaVersion` in
+`rhi_driver_version.h` holds major, minor, patch and a devel flag for `-devel`). The summary line carries
+the same text. `RhiLimits` also holds `driverName`, `driverVersion`, `driverId`, `apiMajor`, `apiMinor`
+and `mesa` for the Android Graphics driver page's last-seen line and the profile line's `turnip:` note;
+the other backends leave them empty. No behaviour reads the Mesa version yet (the plain VU set stays
+for every Turnip, `rd__vu_set_choose`).
+
 **Limits** (`d11_fill_limits`). As D3D12's except: `copyRowPitchAlign` 1 and `copyOffsetAlign` 4
 (uploads to textures are `UpdateSubresource` from the CPU copy), `maxDynamicUniforms` 4, `rov`
 false (Direct3D 11.3 has rasterizer-ordered views; they stay off, untested), and
@@ -1170,7 +1902,7 @@ holds one reference each until `rhi_shutdown` (`d11_pipelines_release`); Direct3
 4096 of a kind, and past that a pipeline is not created
 (`rhi_d3d11: pipeline: 4095 distinct <kind> states, the most Direct3D 11 keeps; ...`, once). The
 pool is `RHI_PIPELINE_POOL_MAX` with the other backends' line
-(`rhi_d3d11: pipeline pool full (4160); N refused so far`, the first 8 then every 100th); a
+(`rhi_d3d11: pipeline pool full (4192); N refused so far`, the first 8 then every 100th); a
 pipeline whose shader failed logs `rhi_d3d11: pipeline <name> not created: vertex|pixel shader
 <name>: <reason> (N so far)` on the same schedule and counts in `pipelineFailures`
 (`pipelineLastError` the `CreateInputLayout` HRESULT where that failed, else 0). A destroyed
@@ -1283,7 +2015,12 @@ FLIP_SEQUENTIAL`; where that is refused too while it asks for the frame latency 
 latency waitable object refused (HRESULT 0x...): without it`) and Present waits for the display. Under the flip model buffer 0 is always the one to draw, so it is the one RHI
 texture; its RTV is made again after every `ResizeBuffers`. Creation logs
 `rhi_d3d11: swapchain WxH, 3 buffers, flip discard|flip sequential, frame latency N (waitable)` or
-`..., no waitable object`.
+`..., no waitable object`. The frame latency wait (up to 50 ms, in `acquireNs`) is made once a
+present: by the acquire, or ahead of it by `rhi_wait_present_room` after the present
+(`frameLatencyWaited`, then the acquire does not wait again; a new waitable object clears it); none
+after a present that queued nothing (failed or occluded) or with a backbuffer still acquired. The
+WARP job's swapchain run (`rhi_d3d11_test` part 3) asks it twice after each present (the same
+answer) and once with a backbuffer acquired (false).
 
 **The shader cache folder** (`d3d11_device.c`, `d11_cache_setup`). The window's pipeline cache path
 `<pref>/pipelines-<key>.vkcache` becomes the folder `<pref>/pipelines-<key>.d3d11`, one DXBC
@@ -1367,8 +2104,8 @@ whether the device runs on WARP, and the feature level.
 
 OpenGL 4.3 core with `ARB_clip_control` and `ARB_buffer_storage` (both core in 4.5), on Windows and
 Linux. The backend links no GL library: SDL3 makes the context and `SDL_GL_GetProcAddress` gives
-every entry point (`port/rhi/gl/gl_loader.h` `GL_FUNCS`: 139, the 4.3 core ones required, clip
-control, buffer storage and texture barrier optional), called as `glf.Name` (not `gl`, the
+every entry point (`port/rhi/gl/gl_loader.h` `GL_FUNCS`: 141, the 4.3 core ones required, clip
+control, buffer storage, texture barrier, multi bind and `glMaxShaderCompilerThreadsKHR` optional), called as `glf.Name` (not `gl`, the
 backend's `RHI_BACKEND_PREFIX`).
 
 **Context** (`port/rhi/gl/gl_device.c` (`gl_create_context`)). With a window, the window must have
@@ -1386,8 +2123,11 @@ from a 4.3 driver with `rhi_gl: the driver has no glName (OpenGL 4.3 core)`. The
 `rhi_gl: <renderer> (OpenGL M.m core|compatibility, <GL_VERSION>; GLSL <version>)[, headless];
 index values up to N`, followed by `rhi_gl: limits: uniform align N, dual-source yes|no, MSAA
 1|2|4|8, interlock yes|no (image units N), texture barrier yes|no, BC yes|no, anisotropy N, max
-texture N, entry points 139 (N optional missing), debug output on|off, clip origin lower left (vertex
-y negated)`.
+texture N, entry points 141 (N optional missing), debug output on|off, clip origin lower left (vertex
+y negated)`. With a window, `rhi_gl: creating the OpenGL 4.3 core context on the window` comes
+before the context is asked for, and these start lines (the context's failure lines too) are
+written out at once (`GL_LOG_DIRECT`: stderr is fully buffered on Windows and flushed by the host
+loop, so a hang in the driver's start would keep them).
 
 **Clip space** (`gl_defaults`). `glClipControl(GL_LOWER_LEFT, GL_ZERO_TO_ONE)` with every vertex
 program's `gl_Position.y` negated after its `main` (`gl_resource.c` `gl_flip_vertex_y`: a
@@ -1441,11 +2181,90 @@ commands queued with it but may hand its name out again at once, and a bind grou
 the frame holds names. `rhi_readback_texture` waits with `glFinish` and reads level 0 through a
 scratch framebuffer with `glReadPixels` (depth as 32-bit floats), the rows from the top.
 
+**Shader compiles** (`port/rhi/gl/gl_compile.c`). OpenGL compiles a program on the thread that asks
+for it, inside `glCreateShaderProgramv` (or at the link status read after it), so a driver that
+takes long holds that thread: Options > Graphics > Apply to OpenGL on an RTX 3090 (driver 610.88)
+left the window's thread inside NVIDIA's GLSL compiler on `sprite_aa1_ps`, the window black and
+"Not Responding" (a Task Manager dump; the whole switch is in [PLATFORM.md](PLATFORM.md#the-renderer-switched-from-the-menu)). With
+the window's [wait hooks](#wait-hooks) the compiles move to a thread of their own:
+
+- At `rhi_init`'s end (`gl_compile_init`) a second context is made with
+  `SDL_GL_SHARE_WITH_CURRENT_CONTEXT` (the device's share group, so a program it makes is the
+  device's) and the device's context made current again at once; a thread `ico_gl_compile` makes
+  the new one current without a surface where SDL allows it (EGL with
+  `KHR_surfaceless_context`) and on the game's window otherwise (WGL, GLX: a drawable may be current
+  in two contexts on two threads). The thread keeps its own copies of the five entry points it
+  calls (`rhi_shutdown` clears `glf`). Its context current within 5 s, or the thread is left.
+- `rhi_create_shader` hands it the text (`gl_compile_program`); the thread makes the program, reads
+  its link status and its log, and calls `glFinish` so the program is complete before the device's
+  context uses it. The calling thread waits in 50 ms slices with the hooks' pump between them.
+- One compile is held to `limitNs`. Past it the compile is abandoned: the thread stays inside the
+  driver (a thread blocked in a driver call cannot be stopped safely), its context and state block
+  are never freed, the thread is detached, and the OpenGL library is loaded once more
+  (`SDL_GL_LoadLibrary`: SDL unloads it with the last OpenGL window, which would unmap the code the
+  thread runs in), all for the rest of the run. Should the compile return later the thread deletes
+  the program, logs it and ends. The device's start fails: every later compile returns no program
+  at once, `rd_init` fails, and the switch goes back with a box naming the shader.
+- Without a thread (`ICO_GL_COMPILE_THREAD=0`, or no shared context) and with
+  `KHR_parallel_shader_compile` or `ARB_parallel_shader_compile`, `glMaxShaderCompilerThreadsKHR`
+  is set to the driver's choice and the calling thread polls `GL_COMPLETION_STATUS_KHR` with the
+  same pump and limit (the program deleted past it); a driver that compiles inside
+  `glCreateShaderProgramv` anyway still holds the thread. Without either the compile blocks.
+
+Lines (written at once): `rhi_gl: shaders: compiled on a thread of their own (a context of the
+same share group, without a surface|on the window); the window takes its events meanwhile; one
+compile may take N s (the GPU hang limit|no limit), past it OpenGL does not start`, or `rhi_gl:
+shaders: no compile thread (<why>); the driver's parallel compile ... is polled ...|each compile
+blocks the window until it returns`; `rhi_gl: shader <name>: compiling for 2.0 s (the window takes
+its events meanwhile; the limit N s)` once a compile; `rhi_gl: shader <name>: compiled in N s` at
+2 s or more; `rhi_gl: shader <name>: the graphics driver has compiled it for N s, past the limit of
+N s (the GPU hang limit): the compile is abandoned on its thread (left inside the driver; its
+context and the OpenGL library are kept for the rest of the run), and OpenGL does not start`;
+`rhi_gl: shader <name>: not made (the driver stalled compiling <name>; OpenGL does not start)` (the
+first 8, then every 100th); `rhi_gl: the abandoned compile of <name> returned after N s; its thread
+ends`; at `rhi_shutdown` `rhi_gl: shaders: N compiled in N s, the longest <name> N ms (on the
+compile thread)`. Not verified on NVIDIA (nothing here runs on it); the window build's switch test
+runs the thread on llvmpipe ([TESTING_PROGRAMS.md](TESTING_PROGRAMS.md)).
+
+**The start screen** (`port/rhi/gl/gl_start_screen.c`). A report: the switch to OpenGL on
+an RTX 3090 finished after a long while (NVIDIA's compiler is slow on the set, not stuck), the
+window black for the whole compile, which reads as a hang. The renderer's "Preparing graphics"
+screen draws with its own shaders and pipelines (`sprite_ui_vs`, `sprite_ps`, `font_ps`), which are
+among those being made, and a frame needs the rest of `rd_init`, so the backend draws one of its own
+with no shader: the window's framebuffer 0 cleared black, the bar of the renderer's screen at its
+place on the 4:3 layout grid (120..520 x 250..266) in its frame, track and fill colours, and the
+line `Preparing graphics for OpenGL: N of M shaders` above it in 5 x 7 block letters, every shape a
+scissored `glClearBufferfv` (the scissor box kept, the colour mask opened through the command code's
+cache, framebuffer 0 left bound as the present leaves it), then `SDL_GL_SwapWindow`. N is the set's
+shaders made, M its size (the dispatcher's numbering above). Drawn when a shader of the set begins
+and between the compile's 50 ms slices, the first after 250 ms of the set, then at most every
+100 ms (the renderer's screen's timing); only with the hooks set, a surface, no stalled compile,
+and before the first command list or pipeline (`gl_start_screen_end`). A draw during a compile that
+takes 250 ms or more (a driver whose clear waits for the compile on the other context) turns the
+draws during compiles off for the rest of the set, so the pump keeps running; between compiles the
+screen still moves. Without a compile thread or the parallel poll it moves between compiles only.
+`ICO_GL_START_SCREEN=0` turns it off. Lines (direct): `rhi_gl: start screen: drawn after N s at
+shader N of M (WxH; scissored clears, no shader: ...); then every 0.1 s at most, between compiles
+and during one|between compiles only (each compile blocks the window)`; `rhi_gl: start screen: a
+draw during the compile of shader N took N s (the driver held it for the compile): drawn between
+compiles only for the rest of the set`; `rhi_gl: start screen: over at shader N of M after N s, N
+screens drawn (the slowest N ms[, between compiles only after a slow one]); the renderer's own
+screen from here on`; or `rhi_gl: start screen: not drawn (N shaders in N s: under 0.25 s, or no
+window to draw in)`; `rhi_gl: start screen: off (ICO_GL_START_SCREEN=0) ...`. Not verified on any
+hardware: whether a clear and a swap on the device's context during a compile on the shared
+context waits on NVIDIA or Windows drivers is what the slow-draw line would show.
+
 **Frames** (`gl_device.c`). Command lists execute while they are recorded; `rhi_submit` places the
 slot's fence (`gl_frame_fence`: `glFenceSync`, then `glFlush`). `rhi_wait_frame` moves to the next
 slot, waits for its fence (`glClientWaitSync`, counted into `fenceWaits` and `fenceWaitNs` when it
-blocks; after 2 s it logs `rhi_gl: a frame's fence has not signalled after 2 s; still waiting`),
-then runs the slot's deletes, resets its bind group arena and reads its timestamps. A
+blocks; after 2 s it logs `rhi_gl: a frame's fence has not signalled after 2.0 s; still waiting`).
+The wait is held to the hooks' `limitNs`, else `ICO_GPU_HANG_LIMIT`'s seconds where set, else none
+(the tests), in 50 ms slices with the pump between them where the hooks are set (1 s slices
+otherwise; `gl_sync_wait_limited`); past the limit the device counts as lost (`rhi_device_lost`,
+the window's loss path, or an OpenGL switch going back when it happens during its start), no wait
+is made again and `rhi_wait_idle`'s and `rhi_shutdown`'s `glFinish` are skipped: `rhi_gl: a frame's
+fence has not signalled after N s (the limit N s, the GPU hang limit): the GPU or its driver
+stopped; the device counts as lost from now on (replay R, frame F)`. Then it runs the slot's deletes, resets its bind group arena and reads its timestamps. A
 `glFenceSync` that fails (`rhi_gl: glFenceSync failed (N so far): the frame slot waits with
 glFinish`) leaves the slot without a fence; unless a later submit of the slot places one, its
 recycle waits with `glFinish` (`GlFrame.needFinish`). GPU timestamps
@@ -1494,7 +2313,7 @@ their lines are the other backends':
 attachment read always; the storage image without `fragmentInterlock` or with a colour target),
 `... no vertex shader`, and `... dual-source blend factors without dual-source blending`; a GL
 error at creation gives `rhi_gl: pipeline <name> not created: GL error 0x....` with the error in
-`pipelineLastError`; a full pool `rhi_gl: pipeline pool full (4160); N refused so far` (the first 8,
+`pipelineLastError`; a full pool `rhi_gl: pipeline pool full (4192); N refused so far` (the first 8,
 then every 100th). A vertex shader input that no attribute feeds (OpenGL would read (0, 0, 0, 1))
 is logged, not refused: `rhi_gl: pipeline <name>: the vertex shader reads location N, which no
 vertex attribute feeds (N so far)` (the first 8, then every 100th). As on Vulkan, `RHI_DYN_DEPTH`
@@ -1617,6 +2436,8 @@ shader storage blocks N (3 needed), texture units N (21 needed); the draws that 
 | `ICO_GL_FAKE_NO_DST` | 1 reports no fragment interlock |
 | `ICO_GL_FAKE_NO_MSAA` | 1 reports single sampling only |
 | `ICO_GL_FAKE_NO_TIMESTAMPS` | 1 turns GPU timestamps off |
+| `ICO_GL_START_SCREEN` | 0: no start screen while the start-up shaders compile, the window black as before ([The start screen](#opengl)) |
+| `ICO_GL_COMPILE_THREAD` | 0 makes no compile thread with the window's hooks set: the parallel-compile poll where offered, else the compile blocks ([Shader compiles](#opengl)) |
 
 The debug output counts the driver's errors and undefined-behaviour messages
 (`rhi_gl_debug_error_count`) and prints `rhi_gl: debug: <type> #N (id 0x...): <message>` for the
@@ -1648,7 +2469,13 @@ renderer's [pass ring](RENDER.md#the-pass-ring) after it, before the message box
   command lists and whether it signalled a present; the report marks each finished or not against
   the value the GPU reached, or "state unknown" when that value cannot be read (a failed Vulkan
   counter read; a removed D3D12 device's fence, which reads `UINT64_MAX`); the Vulkan header line
-  names the submission sync (`sync timeline` or `sync fences`). A Vulkan wait that fails first logs
+  names the submission sync (`sync timeline` or `sync fences`). `rhi_gpu_progress` hands the same history
+  to the renderer (issue 179): `lostReplay`/`lostFrame` the tag of the submission whose wait failed and
+  `openReplay`/`openFrame` the tag of the first of the newest seven above the finished count (the
+  eighth slot is the one a submit in progress overwrites, never read; the seven read again when the
+  count moved during the read), which the loss dump takes to name the lost frame ([The loss dump](RENDER.md#the-loss-dump)); a `vkQueueSubmit`
+  that fails has no number yet, so neither names it (Vulkan only; the other backends track nothing).
+  A Vulkan wait that fails first logs
   how long it waited, the submission it waited for, the last one submitted, the sync and the one the
   GPU reached; once the device is lost no wait is
   made again (`port/rhi/vk/vk_cmd.c` (`vkr_wait_value`, `vkr_note_submit`); `port/rhi/vk/vk_device.c`
@@ -1666,6 +2493,21 @@ renderer's [pass ring](RENDER.md#the-pass-ring) after it, before the message box
   the report names the resource holding the address, or the nearest below it
   (`port/rhi/vk/vk_resource.c` (`vkr_alloc_note`, `vkr_alloc_bound`, `vkr_alloc_nearest`);
   `port/rhi/vk/vk_device.c` (`vkr_report_fault`, `vkr_bind_callback`)).
+- **The crash report's pass** (Vulkan). A crash is not a device loss: the driver can fault inside a
+  command's recording (issue 123's Intel HD 530 report: an access violation in `igvk64.dll` inside
+  `vkCmdBeginRendering`, the stack naming nothing). `vkr_pass_begin` stores the pass it is about to
+  begin (`port/rhi/rhi_pass_crumb.h`: its number on this device, the last marker
+  `rhi_cmd_checkpoint` was given, kept with the checkpoints off too, which is the renderer's pass
+  ring sequence number; each colour target's format and size, the depth's format and layout, stencil
+  and read-only, a target without a view, the area and the framebuffer, the path), marks it begun
+  after the call and ended at `vkr_pass_end`; on the `VkRenderPass` path its phase is first
+  `making its VkRenderPass or framebuffer (a crash here is in vkCreateRenderPass or
+  vkCreateFramebuffer, before the begin)`, then inside the begin, and `not begun: no VkRenderPass
+  or framebuffer could be made (its draws skipped)` when they could not be made; the crash block prints it (`ico_pc: the last render
+  pass begun: #N (the renderer's pass ring M), dynamic rendering (vkCmdBeginRendering), 1 colour
+  (format 37 1024x896), no depth, area 0,0 1024x896, framebuffer 1024x896; inside the driver's begin
+  call (a crash here is in the begin)`) and the renderer's last 16 pass ring entries after it
+  (`port/platform/diag_host.c` (`report_gpu_passes`); [RENDER.md](RENDER.md#the-pass-ring)).
 - **Checkpoints** (`gpu_checkpoints`). `rhi_cmd_checkpoint(cl, marker)` records
   `vkCmdSetCheckpointNV` where `VK_NV_device_diagnostic_checkpoints` is offered; the renderer gives
   every render pass, copy, snapshot, exact blend, upload batch and present a marker, the pass ring's
@@ -1685,7 +2527,12 @@ report the device lost. `rhi_gpu_progress` gives another thread the GPU's progre
 submitting thread last saw it, without a call into the driver: the newest submission's number
 (the counter's, on either sync path), when it was made and its `rhi_set_submit_tag` replay and frame, the newest value seen
 finished (a wait that returned, a counter read before one, `rhi_wait_idle`), and the value a wait
-in progress blocks on with how long it has blocked. The submitting thread stores them with
+in progress blocks on with how long it has blocked, and with a wait in progress above the newest
+seen finished, how long ago a finish was last seen (`headKnown`, `headNs`: the time
+`vkr_progress_finished` last raised the value, stamped after the raise so a reader between the two
+sees a head time too long, never too short; unknown before the first finish and on the other
+backends), which the renderer's loss keep counts instead of a wait queued behind the picture
+before ([RENDER.md](RENDER.md#the-loss-dump)). The submitting thread stores them with
 `__atomic` stores in `vkr_note_submit`, `vkr_wait_value` and `rhi_wait_idle`; a wait in progress
 for a value above the newest seen finished is work the GPU has not finished. The watchdog reads it
 to tell a GPU hang from a freeze ([PLATFORM.md](PLATFORM.md#diagnostics)). Three other
@@ -1753,12 +2600,16 @@ bound), so the renderer leaves the VU vertex pre-pass (48 bytes a pixel) off on 
 | --- | --- |
 | `rhi_test_common.c`, `rhi_test_common.h` | headless rendering on any backend, texel by texel: a 64x32 target in eight cells (dual-source blending, stencil wrap, reversed depth, colour mask, a copied texture drawn indexed), the fill rule (`fillRuleCell`: two quads with every edge through pixel centres, the top and left edges' pixels taken and the bottom and right ones left, the shared edge's row once), an RGBA8 UINT target, R8 copies and same-state ordering, a device-local buffer, depth readback, three frames; seven of the cells' pipelines come from one `rhi_create_pipelines` call with an uncreatable description among them (only that one fails, the ids are distinct, the finished count never goes back); the dynamic state cell (`dynamicCell`: sixteen cells of the renderer's depth tests, Z writes, blends and masks drawn with every state static, from one `rhi_create_pipelines` batch with `maxThreads` 1 on one thread, then with the device's dynamic groups set after each bind: texel-equal, three commands a group after each static bind, none for a repeat; skipped but for the static pass without dynamic state; then `dualLeftoverCell`, an opaque draw after a SRC1 lerp on one dynamic-blend pipeline: 2 commands, `blendEqOffSets` and `dualLeftovers` +1, the colour exact on an even and an odd column; skipped without dual-source blending or dynamic blend; the repeats' sets counted in `stateSetsSkipped`, every command of their groups); the bind cache cell (`bindCacheCell`, [The bind cache](#the-bind-cache)): one list recorded with every bind once, then with each bind and state set given three times in a row: the same exact pictures, the same `pipelineBinds` and `bindGroupBinds`, and exactly 6 pipeline, 8 bind group and 16 state skips more; in both, the group bound again at another dynamic offset draws that offset's value, a second pass binding the first pass's texture group draws the texture, and a pipeline destroyed in the list with a new one made in its pool slot (a new id) draws with the new one's write mask; with the bind cache off (`ICO_RHI_BIND_CACHE=0`: `rhi_vk_nobindcache`, `rhi_gl_nobindcache`) no skip counted, the repeats' pipeline binds recorded, the same pictures, and the dynamic state cells' repeats sent again |
 | `rhi_vk_test.c` | the common cells on Vulkan, a hazard-tracking cell, the render-area check (a pass wider than its colour target, one taller than its depth: each clamped and counted, no validation error; a fitting pass untouched), and the pipeline cache file (written while up by `rhi_pipeline_cache_save` and at shutdown, read back, another device's or garbage ignored; the drop of other builds' cache files in a temporary folder: the current file, its `.tmp` and unrelated names stay), and the pipeline pool filled (`poolCell`, [The pipeline pool](#the-pipeline-pool); not under the fake switches); ctest `rhi_vk`, and `rhi_vk_nodual`, `rhi_vk_d24s8`, `rhi_vk_mali` under the fake switches, `rhi_vk_nobindcache` with the bind cache off ([The bind cache](#the-bind-cache)) |
-| `rhi_vk_swapchain_test.c` | the window path on SDL's offscreen driver: frames, readback order, surface release and recreation, suboptimal and lost presents, resizes, the surface poll, submits per frame, the present-wait stand-in and a hanging wait; ctest `rhi_vk_swapchain` |
+| `rhi_vk_subpass.c` | a pass's own colour read in it with a depth target bound, DATE's setup's shape ([Local read](#local-read)): a draw, the COLOR barrier, a draw through `ps_subpass` reading what it covers, the BACK barrier, a draw; a colour-only readable pass's barrier (skipped and counted on the subpass read); a target made without the input usage drawn with the same pipeline; every texel exact, 0 validation errors with the shader access analysis; through dynamic rendering's local read or the subpass read, whichever the device has; also inside `rhi_vk`'s run; ctests `rhi_vk_subpass`, `_vk11`, `_vk10`, `_mali_vk11`, `_legacy` (the Intel row's path: not run), `_legacy_on` |
+| `rhi_vk_scope.c` | the buffer barriers' scopes ([Buffer barriers' scopes](#buffer-barriers-scopes)): seven lists under synchronisation validation with the shader access analysis, counted by `RhiStats.fragmentHolds`: a picture's mesh upload, VU record (compute and stores) and pass after the picture before's hold no fragment work (0), a texture upload over a sampled texture 1, the bracket's held-back end joined to a transition out of `SHADER_READ` 1 (0 on the global path), and after a fragment shader that declares a storage buffer the copy and the bracket wait for fragment work (2) and a copy over a buffer that shader read is clean; the record read back word for word; also inside `rhi_vk`'s run; ctests `rhi_vk_scopes`, `_vk11`, `_global`, `_novs` |
+| `rhi_vk_spirv_scan_test.c` | `vk_spirv_scan.c` over the tests' modules, a fragment shader that reads a storage buffer (`rhi_vk_ps_storage.h`, with its vertex shader) and hand-built and unreadable modules; ctest `rhi_vk_spirv_scan` |
+| `rhi_native_test.c`, `rhi_test_native.c` | `rhi_native.h`: `rhi_test_native.c` runs inside the common cells on every backend (Vulkan and D3D12 hand out a device, a queue and, with a device-level loader or the command list, the handles; Direct3D 11 and OpenGL answer "not offered" with zeroed outputs, a reason for the capability query, and refuse a null and a real texture and list); `rhi_native_test.c` on Vulkan (lavapipe): the device handles, a vkCmdPipelineBarrier recorded through the `getDeviceProcAddr` handed out, RGBA16F and RGBA8 textures granted storage with their image, format, extent and layouts (a texture without the flag reports none, D32F with it is accepted), the storage barriers passing the layer's synchronisation checks, the external begin refused inside a pass and twice, and a two-pass picture byte-identical without the pair, around an empty stretch and around a native barrier (the second pass drawing with no pipeline or vertex buffer call after the pair), the pair counting two barriers; ctest `rhi_native` (exit 77 without a device; a validation message fails it) |
+| `rhi_vk_swapchain_test.c` | the window path on SDL's offscreen driver: frames, readback order, surface release and recreation, suboptimal and lost presents, resizes, the surface poll, submits per frame, the present-wait stand-in and a hanging wait; the display's times read back by the stand-in (`vkr_test_fake_glass`: ids one apart, 8 times of 12 presents, a refresh of 8333333 ns) and by the driver where it offers `VK_GOOGLE_display_timing` (ids one apart, times oldest first with presented ids and a desired time of 0, no validation error); ctest `rhi_vk_swapchain` |
 | `rhi_vk_present_mode_test.c` | `vkr_choose_present_mode` over the mode sets drivers offer, and `vkr_present_wait_wanted`; ctest `rhi_vk_present_mode` |
 | `rhi_vk_enum_test.c` | every `rhi.h` enumeration has a Vulkan mapping; the layer classifiers and `rhi_layer_switched_on`; ctest `rhi_vk_enum` |
 | `rhi_driver_version_test.c` | the driver version text of each vendor's encoding; ctest `rhi_driver_version` |
 | `rhi_adapter_match_test.c` | the `[video] adapter` name match and the device-list text; ctest `rhi_adapter_match` |
-| `rhi_d3d12_plan_test.c` | `d3d12_plan.c` on every host; with the shader table, every vertex shader's DXIL inputs against its SPIR-V locations and every DXIL blob signed; ctest `rhi_d3d12_plan` |
+| `rhi_d3d12_plan_test.c` | `d3d12_plan.c` on every host (the storage grant by format and sample count, the states a dispatch is told, the barrier plan around an external dispatch, the capability answer for each missing part, what the external end puts back); with the shader table, every vertex shader's DXIL inputs against its SPIR-V locations and every DXIL blob signed; ctest `rhi_d3d12_plan` |
 | `rhi_d3d11_shader_plan_test.c` | `d3d11_shader.c`'s portable part on every host: the macros text, the include lookup, the flat-register rule over the game's sources and `rhi_test_hlsl.h` (checked against `rhi_test.hlsl`), the cache key over every table entry, the cache file's round trip and the corrupt files it refuses, the failure log's limit; ctest `rhi_d3d11_shader_plan` |
 | `rhi_gl_test.c` | the common cells on OpenGL with the driver's debug output failing the run, the copies the cells do not make (a colour region into a vertex-read device buffer and on into a readback buffer, a D32F_S8 depth as floats, RGBA32_UINT words, each at a wider row pitch; a target made after one whose framebuffer was dropped), and six swapchain frames on SDL's offscreen driver with a resize; ctest `rhi_gl`, and `rhi_gl_nodual` under `ICO_GL_FAKE_NO_DUAL=1`, both on llvmpipe (`LIBGL_ALWAYS_SOFTWARE=1`, `SDL_VIDEO_DRIVER=offscreen`), skipped without a context |
 | `rhi_d3d12_test.c` | Windows, double-clickable: the cells on WARP, on the hardware adapter, the swapchain on a hidden window, then Vulkan for comparison; writes `rhi_d3d12_test.log` and shows a message box (`--console` for ctest); ctest `rhi_d3d12` |

@@ -5,6 +5,12 @@
 //   blit_ps      single colour output; colour = texture function(texel, tint)
 //   blit_depth_ps blit_ps plus SV_Depth from the scene's depth (the present's
 //                effects depth)
+//   blit_tone_ps, blit_depth_tone_ps the two with the colour adjustment
+//                (tone.hlsli; DrawCB.g_param: rd__tone_params), for the
+//                present's box blit when a Picture tone row is not 50
+//   blit_scene_ps the present's box blit reading SCENE where the reduction
+//                was not drawn, and DISPLAY drawn from SCENE on demand
+//                (port/render/rd_present_scene.c)
 //   aa_reduce_ps the supersampled DISPLAY box-averaged to the present box
 //   msaa_resolve_ps, depth_resolve_ps, depth_upsample_ps the MSAA epoch
 //   crack_fill_ps, crack_count_ps the crack filler above 1x (rd_crack_fill.c)
@@ -12,6 +18,7 @@
 // Texture function flags are DrawCB.g_mode.x: with DF_TEXTURED clear the
 // pass writes the tint colour alone (fade, letterbox).
 #include "common.hlsli"
+#include "tone.hlsli"
 
 struct BlitVSOut {
     float4 pos : SV_Position;
@@ -23,6 +30,21 @@ BlitVSOut blit_vs(uint id : SV_VertexID)
     BlitVSOut o;
     float2 t;
     fullscreen_triangle(id, o.pos, t);
+    // The present into a pre-rotated swapchain (port/render/rd_prerotate.c):
+    // g_aux1.w quarter turns clockwise, 0 in every other blit.  t is the
+    // image's own 0..1 position (U, V), V down; the source is read where
+    // the unturned picture has that pixel: 1 (V, 1 - U), 2 (1 - U, 1 - V),
+    // 3 (1 - V, U) (VkSurfaceTransformFlagBitsKHR: ROTATE_90 turns the
+    // content 90 degrees clockwise).  An affine map of t, so the vertices'
+    // values interpolate to it at every pixel
+    const uint q = g_aux1.w;
+    if (q == 1u) {
+        t = float2(t.y, 1.0 - t.x);
+    } else if (q == 2u) {
+        t = float2(1.0, 1.0) - t;
+    } else if (q == 3u) {
+        t = float2(1.0 - t.y, t.x);
+    }
     o.uv = (g_uvRect.xy + t * (g_uvRect.zw - g_uvRect.xy)) * g_tex.zw;
     return o;
 }
@@ -44,6 +66,16 @@ uint4 blit_color(float2 uv)
 float4 blit_ps(BlitVSOut i) : SV_Target0
 {
     return float4(blit_color(i.uv)) * (1.0 / 255.0);
+}
+
+// blit_tone_ps (rd_present.c blit): blit_ps's colour through the colour
+// adjustment, g_param its four factors (brightness, contrast, saturation,
+// gamma; tone.hlsli), clamped to 0..1. Alpha as blit_ps's
+float4 blit_tone_ps(BlitVSOut i) : SV_Target0
+{
+    float4 c = float4(blit_color(i.uv)) * (1.0 / 255.0);
+    c.rgb = saturate(tone_adjust(c.rgb, g_param));
+    return c;
 }
 
 // blit_depth_ps (rd_present.c): blit_ps's colour, and
@@ -71,6 +103,72 @@ BlitDepthOut blit_depth_ps(BlitVSOut i)
     p = min(p, int2(int(w) - 1, int(h) - 1));
     o.d = g_sceneDepth.Load(int3(p, 0));
     return o;
+}
+
+// blit_depth_tone_ps: blit_depth_ps with blit_tone_ps's colour (the depth
+// read written out again rather than shared, so blit_depth_ps's module
+// stays the one it was)
+BlitDepthOut blit_depth_tone_ps(BlitVSOut i)
+{
+    BlitDepthOut o;
+    o.c = float4(blit_color(i.uv)) * (1.0 / 255.0);
+    o.c.rgb = saturate(tone_adjust(o.c.rgb, g_param));
+    uint w, h;
+    g_sceneDepth.GetDimensions(w, h);
+    int2 p = int2(floor(saturate(i.uv) * float2(w, h)));
+    p = min(p, int2(int(w) - 1, int(h) - 1));
+    o.d = g_sceneDepth.Load(int3(p, 0));
+    return o;
+}
+
+// blit_scene_ps (port/render/rd_present_scene.c; docs/port/RENDER_POST.md
+// "The present from SCENE"): DISPLAY's colour where the reduction was not
+// drawn, from SCENE (t1).  The reduction's sample of DISPLAY texel x, y is
+// SCENE texel x + g_scale.x, y + g_scale.y (a whole offset), and its texel
+// is g of that SCENE texel: the fades fold's steps (DF_FOLD: g_aux0 the
+// steps, g_aux1.x their count and rounding, g_aux1.y their alphas, as
+// sprite.hlsl sprite_fold takes them; no bar steps here, so every row takes
+// every step), then the texture function with the tint (g_col, g_mode.x's
+// TFX and TCC bits, as sprite_ps).  g_scale.z not 0: one texel a pixel by
+// Load, DISPLAY itself drawn (the fragment's texel plus the offset, clamped
+// to SCENE as the reduction's CLAMP holds it).  Else the present's box blit:
+// uv (blit_vs, g_tex DISPLAY's size) is the place in DISPLAY the box blit
+// would have sampled, clamped to DISPLAY's texel centres (its CLAMP
+// sampler's edge), moved by the offset and sampled in SCENE with the box
+// blit's filter; then g.  Within a level of the DISPLAY sample where the
+// filter weighs the taps alike (g affine but for its rounding, the weights
+// summing to one).  g_mode.w bit 0: the colour adjustment after it, as
+// blit_tone_ps (g_param).
+float4 blit_scene_ps(BlitVSOut i) : SV_Target0
+{
+    uint w, h;
+    g_texture.GetDimensions(w, h);
+    const float2 size = float2(max(w, 1u), max(h, 1u));
+    uint4 t;
+    [branch] if (g_scale.z != 0.0) {
+        const int2 q = clamp(int2(i.pos.xy) + int2(g_scale.xy), int2(0, 0),
+                             int2(size) - int2(1, 1));
+        t = uint4(floor(g_texture.Load(int3(q, 0)) * 255.0 + 0.5));
+    } else {
+        const float2 p =
+            clamp(i.uv * g_tex.xy, float2(0.5, 0.5), g_tex.xy - float2(0.5, 0.5)) + g_scale.xy;
+        t = uint4(floor(g_texture.SampleLevel(g_sampler, p / size, 0.0) * 255.0 + 0.5));
+    }
+    [branch] if ((g_mode.x & DF_FOLD) != 0u) {
+        const uint meta = g_aux1.x, alphas = g_aux1.y;
+        const int r = (meta & 8u) != 0u ? 64 : 0;
+        [loop] for (uint k = 0u; k < (meta & 7u); k++) {
+            // step k without a dynamic index into the constant block (FXC)
+            const uint s = k == 0u ? g_aux0.x : (k == 1u ? g_aux0.y : (k == 2u ? g_aux0.z : g_aux0.w));
+            t = uint4(gs_fold_ch(s, 0u, t.r, r), gs_fold_ch(s, 1u, t.g, r),
+                      gs_fold_ch(s, 2u, t.b, r), (alphas >> (8u * k)) & 255u);
+        }
+    }
+    float4 c = float4(gs_texture_function(t, g_col, g_mode.x)) * (1.0 / 255.0);
+    [branch] if ((g_mode.w & 1u) != 0u) {
+        c.rgb = saturate(tone_adjust(c.rgb, g_param));
+    }
+    return c;
 }
 
 // box_reduce_ps (rd_replay.c doShadowResolve): the exact box
@@ -262,6 +360,106 @@ float depth_upsample_ps(BlitVSOut i) : SV_Depth
     return g_ssDepth.Load(int3(int2(i.pos.xy), 0));
 }
 
+// depth_down_ps: SCENE's depth (t1, a scaled target) at the GS frame's own size, into the
+// lamps' WORK2 depth above 1x (port/render/rd_lamps.c RD_LAMPS_LOWRES), a depth-only pass.
+// The GS samples pixel p at its integer coordinate; the port draws a GS integer coordinate
+// on a pixel's centre at 1x and on the centre of its block's first texel on a scaled target
+// (rd_replay.c rd__frame_group_ex: origin 0.5 / scale), so WORK2 texel p's sample point is
+// SCENE texel index at = p * k - crop + g_scale.xy (g_param.xy k, SCENE's texels per WORK2
+// texel: SCENE's scale over WORK2's, WORK2 at the GS size or twice it (lowres2x); g_param.z
+// SCENE's Full pixel crop ox; g_scale.xy 0: a jittered frame moves WORK2 by the same GS
+// distance as SCENE, rd_jitter.c; g_tex.xy SCENE's size).  The lamps
+// test GEQUAL (a larger depth is nearer: gs_z_to_depth), so a smaller depth passes more.
+// Where at is a texel's own centre on both axes (a whole-number scale and crop, no jitter)
+// and g_param.w is 1, that texel's depth: the 1x lamp's own sample point, the original's
+// own test (exact).  Elsewhere g_uvRect.x picks the form, g_uvRect.w a constant allowance
+// (a few GS Z units in depth):
+//   0  bilinear: SCENE's depth interpolated at at (a plane's depth interpolates exactly, so
+//      a lamp drawn over the very surface it lights, issue 163's gate, compares equal up to
+//      rounding), less the allowance; at an occluder's edge the four taps mix two surfaces
+//      over less than one SCENE texel (under 1 / scale GS pixels): a lamp behind the
+//      occluder there passes only where it lies nearer than the mixed depth;
+//   1  the slope bias: the depth at the texel nearest at, less per axis the surface's slope
+//      there (the smaller of the forward and backward differences, in depth per GS pixel)
+//      times that texel's distance from at plus g_uvRect.y GS pixels, all times g_uvRect.z,
+//      less the allowance;
+//   2  the farthest of the four texels around at;
+//   3  the depth at the texel nearest at, less the allowance (a point compare);
+//   4  bilinear where the texels around at lie on one plane (their second differences
+//      within twice the allowance), else the nearest texel's, less the allowance.
+float depth_down_load(int2 t, int2 size)
+{
+    return g_ssDepth.Load(int3(clamp(t, int2(0, 0), size - 1), 0));
+}
+
+float depth_down_at(float2 at);
+
+float depth_down_ps(BlitVSOut i) : SV_Depth
+{
+    const float2 p = floor(i.pos.xy);
+    return depth_down_at(float2(p.x * g_param.x - g_param.z, p.y * g_param.y) + g_scale.xy);
+}
+
+// depth_down_ms_ps: depth_down_ps per sample, into the lamps' multisampled WORK2 depth
+// (rd_lamps.c RD_LAMPS_LOWRESMS: 4 samples, drawn first in the lamps' pass, sample-rate
+// shading by SV_SampleIndex).  Sample s of WORK2 pixel p lies at the standard 4-sample
+// location o_s of the pixel (Vulkan's, RhiLimits.standardSampleLocations), GS position
+// p + o_s - 0.5 (a GS integer coordinate is a pixel's centre), so its SCENE texel index is
+// (p + o_s - 0.5) * k - crop, k and the crop as depth_down_ps's; the same forms there.
+// g_scale.z the sample count: 4, or 8 (lowresms8: the standard 8-sample locations).
+static const float2 kDownMs4[4] = {float2(0.375, 0.125), float2(0.875, 0.375),
+                                   float2(0.125, 0.625), float2(0.625, 0.875)};
+static const float2 kDownMs8[8] = {float2(0.5625, 0.3125), float2(0.4375, 0.6875),
+                                   float2(0.8125, 0.5625), float2(0.3125, 0.1875),
+                                   float2(0.1875, 0.8125), float2(0.0625, 0.4375),
+                                   float2(0.6875, 0.9375), float2(0.9375, 0.0625)};
+
+float depth_down_ms_ps(BlitVSOut i, uint s : SV_SampleIndex) : SV_Depth
+{
+    const float2 o = g_scale.z == 8.0 ? kDownMs8[s & 7u] : kDownMs4[s & 3u];
+    const float2 q = floor(i.pos.xy) + o - 0.5;
+    return depth_down_at(float2(q.x * g_param.x - g_param.z, q.y * g_param.y) + g_scale.xy);
+}
+
+float depth_down_at(float2 at)
+{
+    const int2 size = int2(g_tex.xy);
+    const float w = g_uvRect.w;
+    const int2 n = clamp(int2(floor(at + 0.5)), int2(0, 0), size - 1);
+    const float zn = depth_down_load(n, size);
+    const uint form = uint(g_uvRect.x);
+    if (form == 3u || (g_param.w != 0.0 && all(at == floor(at)))) {
+        return max(zn - w, 0.0);
+    }
+    const int2 t0 = int2(floor(at));
+    const float2 f = at - floor(at);
+    const float a = depth_down_load(t0, size);
+    const float b = depth_down_load(t0 + int2(1, 0), size);
+    const float d = depth_down_load(t0 + int2(0, 1), size);
+    const float e = depth_down_load(t0 + int2(1, 1), size);
+    if (form == 2u) {
+        return min(min(a, b), min(d, e));
+    }
+    const float bil = lerp(lerp(a, b, f.x), lerp(d, e, f.x), f.y);
+    if (form == 0u) {
+        return max(bil - w, 0.0);
+    }
+    const float l = depth_down_load(n - int2(1, 0), size);
+    const float r = depth_down_load(n + int2(1, 0), size);
+    const float u = depth_down_load(n - int2(0, 1), size);
+    const float v = depth_down_load(n + int2(0, 1), size);
+    if (form == 4u) {
+        const bool plane = abs(l - 2.0 * zn + r) <= 2.0 * w && abs(u - 2.0 * zn + v) <= 2.0 * w &&
+                           abs(a - b - d + e) <= 2.0 * w;
+        return max((plane ? bil : zn) - w, 0.0);
+    }
+    const float gx = min(abs(r - zn), abs(zn - l)) * g_param.x;
+    const float gy = min(abs(v - zn), abs(zn - u)) * g_param.y;
+    const float2 reach = abs(float2(n) - at) / g_param.xy + g_uvRect.y;
+    const float bias = (gx * reach.x + gy * reach.y) * g_uvRect.z + w;
+    return max(zn - bias, 0.0);
+}
+
 // The crack filler above 1x (port/render/rd_crack_fill.c; docs/port/RENDER_POST.md,
 // "Crack filling above 1x"), behind blit_vs over SCENE's texels, before the
 // fog. The VU truncates each part's vertices to the GS's 1/16 pixel grid
@@ -292,6 +490,20 @@ float depth_upsample_ps(BlitVSOut i) : SV_Depth
 //   g_param.xy  the reach across columns and across rows, 0..3 texels
 //               (ceil(scale / 2) on an axis above 1x, else 0)
 //   g_param.z   the share (1 / RD_CRACK_BEHIND)
+//   g_param.w   crack_fill_ps: the texel the test is made at, as columns
+//               right of the pixel's (0 but for a held fill's draws over
+//               SCENE's repeated border columns, each at its source column:
+//               rd_crack_fill.c fillDrawHeld); a whole number
+//   g_mode.x    crack_fill_ps's mode (rd_crack_fill.c CRACK_MODE_*): bit 0 COPY,
+//               a texel that is no crack takes its own snapshot texel instead of
+//               being discarded (the swap: the attachment is the old snapshot
+//               texture, holding nothing of this picture); bit 1 KEEP_A, with
+//               COPY every texel's alpha its own snapshot texel's (the fill
+//               writes RGB alone after the glow's alpha); bit 2 EARLY, the
+//               general shader at a reach of at most 2 on both axes: a texel
+//               with neither immediate neighbour in front on an axis whose reach
+//               is at least 1 is no crack at once (a run of at most 2 texels has
+//               an end at distance 1: the verdict is crack_at's); 0 in the count
 // crack_count_ps: the same test over a 16 x 16 block of SCENE's depth (t1
 // there) per output texel, the count n of cracks written as (n & 255,
 // n >> 8) / 255 in R and G of an RGBA8 target (the filled pixels, read back
@@ -386,6 +598,17 @@ bool crack_at(Texture2D<float> z, int2 p, int2 size, int2 reach, float share, ou
 {
     from = p;
     float dp = crack_depth(z, p, size);
+    if ((g_mode.x & 4u) != 0u) {
+        // EARLY (g_mode.x bit 2; the CPU sets it at a reach of at most 2): no
+        // end at distance 1 on an axis, no run on it
+        bool nx = reach.x >= 1 && (crack_front(crack_depth(z, p + int2(-1, 0), size), dp, share) ||
+                                   crack_front(crack_depth(z, p + int2(1, 0), size), dp, share));
+        bool ny = reach.y >= 1 && (crack_front(crack_depth(z, p + int2(0, -1), size), dp, share) ||
+                                   crack_front(crack_depth(z, p + int2(0, 1), size), dp, share));
+        if (!nx && !ny) {
+            return false;
+        }
+    }
     int run = CRACK_REACH_MAX + 1;
     float da, db;
     int l = crack_end(z, p, int2(-1, 0), reach.x, size, dp, share, da);
@@ -410,12 +633,20 @@ float4 crack_fill_ps(BlitVSOut i) : SV_Target0
 {
     uint w, h;
     g_sceneDepth.GetDimensions(w, h);
-    int2 p = int2(i.pos.xy);
+    int2 p = int2(i.pos.xy) + int2(int(g_param.w), 0);
     int2 from;
+    const bool copy = (g_mode.x & 1u) != 0u;
     if (!crack_at(g_sceneDepth, p, int2(int(w), int(h)), int2(g_param.xy), g_param.z, from)) {
-        discard;
+        if (!copy) {
+            discard;
+        }
+        from = p; // COPY: the texel's own (crack_at leaves from at p)
     }
-    return g_texture.Load(int3(from, 0));
+    float4 c = g_texture.Load(int3(from, 0));
+    if (copy && (g_mode.x & 2u) != 0u) {
+        c.a = g_texture.Load(int3(p, 0)).a; // KEEP_A
+    }
+    return c;
 }
 
 float4 crack_count_ps(BlitVSOut i) : SV_Target0
@@ -493,6 +724,13 @@ float4 camera_probe_ps(BlitVSOut i) : SV_Target0
 // that is added is the term box_reduce_ps adds, in its order. The stencil
 // is read by gathers, four texels a read, the same texels in the same order
 // (shadow_count_gather), unless g_mode.y asks for the loads.
+// shadow_count_load_ps is this entry built with SHADOW_COUNT_LOAD: the loads
+// alone, no gather anywhere in the module, for a backend whose stencil view
+// takes no gather (RhiLimits.stencilGather: Direct3D's
+// X32_TYPELESS_G8X24_UINT, where the D3D11 debug layer stops a draw whose
+// shader merely holds the gather) and wherever the loads are in force
+// (rd_shadow_one.c). The stencil it reads is always single-sampled: SCENE's
+// own depth, the MSAA epoch resolved before the count (rd_replay.c msaaEnd).
 Texture2D<uint4> g_shadowStencil : ICO_REG(t1, 2);
 Texture2D<float4> g_shadowTable : ICO_REG(t2, 2);
 
@@ -510,6 +748,7 @@ uint shadow_count_m(int x, int y)
 // sampler is nearest and clamps, and a texel past the stencil's edge is
 // never used: the box stops at it), as font.hlsl's sheet_cov4.  Gather's
 // order: x (x, y + 1), y (x + 1, y + 1), z (x + 1, y), w (x, y).
+#ifndef SHADOW_COUNT_LOAD
 uint4 shadow_count_gather(int x, int y, float2 inv)
 {
     float2 uv = float2(float(x + 1), float(y + 1)) * inv;
@@ -522,6 +761,7 @@ uint4 shadow_count_gather(int x, int y, float2 inv)
 // held in registers): 6 texels at the phone's 4.62x, 4 at 2.8125x; a wider
 // box (scale above 7) takes the loads
 #define SHADOW_GATHER_SPAN 8
+#endif
 
 float4 shadow_count_ps(BlitVSOut i) : SV_Target0
 {
@@ -532,6 +772,7 @@ float4 shadow_count_ps(BlitVSOut i) : SV_Target0
     float4 sum = float4(0.0, 0.0, 0.0, 0.0);
     float4 v = float4(0.0, 0.0, 0.0, 0.0);
     uint held = 64u; // the m whose table texel v holds; 64: none (m < 64)
+#ifndef SHADOW_COUNT_LOAD
     if (g_mode.y == 0u && last.x - first.x <= SHADOW_GATHER_SPAN) {
         // the same terms in the same order as the loads below (row by row,
         // each row's texels left to right), each texel's m from a gather:
@@ -572,6 +813,7 @@ float4 shadow_count_ps(BlitVSOut i) : SV_Target0
         }
         return sum / (g_param.x * g_param.y);
     }
+#endif
     for (int y = first.y; y < last.y; y++) {
         float wy = min(hi.y, float(y + 1)) - max(lo.y, float(y));
         for (int x = first.x; x < last.x; x++) {
@@ -587,4 +829,91 @@ float4 shadow_count_ps(BlitVSOut i) : SV_Target0
         }
     }
     return sum / (g_param.x * g_param.y);
+}
+
+// The shadow tiles (port/render/rd_shadow_tile.c): the shadow composites'
+// dead tiles marked in the stencil's bit 7, so the composite and its DATE
+// set-up's stencil write are culled there by the stencil test.
+//
+// v wrapped into 0 .. n - 1 without % on a negative value (GLSL leaves its
+// sign undefined): exact for |v| under 2^24 and n up to 4096
+int shadow_tile_wrap(int v, int n)
+{
+    return v - n * int(floor(float(v) / float(n)));
+}
+//
+// shadow_tile_mask_ps: the mask of a shadow level t1 (RGBA8, at scale 1),
+// drawn into an RGBA8 target of ceil(w / B) x ceil(h / B) texels: texel (i,
+// j) is 1 where any texel of the level in [B i - M, B i + B - 1 + M] x
+// [B j - M, B j + B - 1 + M] holds alpha above 0, each index clamped to the
+// level or wrapped as the composite's sampler (g_aux1.x, g_aux1.y: 1 on a
+// repeated axis), else 0. g_aux0 = (B, M, w, h). Integer loads of the
+// level's texels: an 8-bit alpha above 0 reads above 0.0 exactly.
+float4 shadow_tile_mask_ps(BlitVSOut i) : SV_Target0
+{
+    const int b = int(g_aux0.x);
+    const int m = int(g_aux0.y);
+    const int w = int(g_aux0.z);
+    const int h = int(g_aux0.w);
+    const int2 p = int2(i.pos.xy);
+    const int x0 = p.x * b - m;
+    const int y0 = p.y * b - m;
+    const int n = b + 2 * m;
+    float hit = 0.0;
+    for (int dy = 0; dy < n; dy++) {
+        int y = y0 + dy;
+        if (g_aux1.y != 0u) {
+            y = shadow_tile_wrap(y, h);
+        } else {
+            y = clamp(y, 0, h - 1);
+        }
+        for (int dx = 0; dx < n; dx++) {
+            int x = x0 + dx;
+            if (g_aux1.x != 0u) {
+                x = shadow_tile_wrap(x, w);
+            } else {
+                x = clamp(x, 0, w - 1);
+            }
+            if (g_texture.Load(int3(x, y, 0)).a > 0.0) {
+                hit = 1.0;
+            }
+        }
+    }
+    return float4(hit, hit, hit, hit);
+}
+
+// shadow_tile_mark_ps: before a composite, over its DATE set-up's area (the
+// scissor), the pixel's UV in the level's texels as the composite's sprite
+// maps the target's texels (g_param: u = pos.x * x + y, v = pos.y * z + w),
+// its texel clamped or wrapped as the composite's sampler (g_aux1.x,
+// g_aux1.y), its block of the mask t1 (g_aux0 = (B, mask width, mask
+// height, level width), g_aux1.z the level's height): kept where the mask
+// holds 0 (the pipeline's stencil, RD_STENCIL_TILE_MARK, writes 1 into bit 7
+// there), discarded where it holds 1. No colour output (colour mask 0).
+void shadow_tile_mark_ps(BlitVSOut i)
+{
+    const float u = i.pos.x * g_param.x + g_param.y;
+    const float v = i.pos.y * g_param.z + g_param.w;
+    const int b = int(g_aux0.x);
+    const int mw = int(g_aux0.y);
+    const int mh = int(g_aux0.z);
+    const int lw = int(g_aux0.w);
+    const int lh = int(g_aux1.z);
+    int tx = int(floor(u));
+    int ty = int(floor(v));
+    if (g_aux1.x != 0u) {
+        tx = shadow_tile_wrap(tx, lw);
+    } else {
+        tx = clamp(tx, 0, lw - 1);
+    }
+    if (g_aux1.y != 0u) {
+        ty = shadow_tile_wrap(ty, lh);
+    } else {
+        ty = clamp(ty, 0, lh - 1);
+    }
+    const int bx = min(tx / b, mw - 1);
+    const int by = min(ty / b, mh - 1);
+    if (g_texture.Load(int3(bx, by, 0)).x > 0.0) {
+        discard;
+    }
 }

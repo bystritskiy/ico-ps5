@@ -24,7 +24,8 @@
  * at scale 1, the reduced count above it: rd__shadow_count_read) is read
  * back each time.  The one draw stays when its count equals the seven
  * draws' byte for byte and every band's centre holds the count's colour
- * (rd__shadow_table_texel of n mod 64 under the step); otherwise, or when
+ * (rd__shadow_table_texel of n mod 64 under the step, read inside the
+ * frame's exact width: rd__frame_wexact); otherwise, or when
  * the test cannot run (no SCENE, no frame), the flag goes off
  * (rd__profile_self_test_off: "(self-test)") and the seven draws resolve
  * the count.  The one draw is replayed twice, its stencil read four
@@ -32,6 +33,11 @@
  * g_rd.shadowLoad): the gathers stay where their count is the seven
  * draws' byte for byte and every centre right, else the loads where
  * theirs is (the result below is then the loads'), else the seven draws.
+ * Where the stencil view takes no gather (RhiLimits.stencilGather false:
+ * Direct3D) the gathers' replay is not run (their module would put a
+ * gather on a view that has none) and the loads are the one draw's form:
+ *   shadow count: the stencil read a texel a load, as the backend's
+ *     stencil view takes no gather
  * MSAA is held off for the replays (the count's pass closes the epoch in
  * the game; here SCENE's colour is the count target).  The lines:
  *   shadow count: one draw (self-test: equal to the seven draws over
@@ -55,11 +61,18 @@
 #include <string.h>
 
 #include "rd_internal.h"
+#include "rd_volume_fs.h" /* the frame and its replay, for the volumes' self-test */
 
 #define SB_BANDS 70
 
-/* GS TEST: ZTE, ZTST ALWAYS: every face counts */
+/* GS TEST: ZTE, ZTST ALWAYS: every face counts.  The volumes' own self-test
+ * (rd_volume_fs.c) builds the frame under the game's Z GEQUAL too: then the
+ * frame clears SCENE's depth to GS Z SB_ZCLEAR first, and the odd bands'
+ * rectangles lie at Z 0 (behind it: they fail the test and count nothing)
+ * while the even bands' lie at SB_ZFRONT (they pass) */
 #define SB_TEST RD_TEST_Z_ALWAYS
+#define SB_ZCLEAR 0x8000u
+#define SB_ZFRONT 0x10000u
 
 /* a GS pixel coordinate in 1/16 pixels on a w x h frame (XYOFFSET at
  * 2048 - w / 2) */
@@ -98,7 +111,8 @@ static void quad(RdScreenVtx *o, int32_t x0, int32_t y0, int32_t x1, int32_t y1)
     }
 }
 
-static bool buildFrame(RdFrame *f, uint32_t scene, uint32_t w, uint32_t h, uint32_t step)
+static bool buildFrame(RdFrame *f, uint32_t scene, uint32_t w, uint32_t h, uint32_t step,
+                       uint64_t test)
 {
     memset(f, 0, sizeof(*f));
     rd__reset_state_block(&f->startState);
@@ -108,10 +122,20 @@ static bool buildFrame(RdFrame *f, uint32_t scene, uint32_t w, uint32_t h, uint3
      * (rd_internal.h RDC_SHADOW_RESET) */
     const uint8_t b0 = (uint8_t)(step == 8 ? 8 : 0);
     RdCmd *rc = NULL;
-    bool ok = rd__st_target(f, 3, scene, w, h) && rd__st_push(f, 3, RDC_TEXTURE_OFF) &&
-              rd__st_push1(f, 3, RDC_ABE, 0) && rd__st_test(f, 3, SB_TEST) &&
-              rd__st_push1(f, 3, RDC_ZWRITE, RD_ZWRITE_OFF) &&
-              (rc = rd__st_push(f, 3, RDC_SHADOW_RESET)) != NULL;
+    const bool zt = test != SB_TEST; /* the Z GEQUAL frame (above) */
+    bool ok = rd__st_target(f, 3, scene, w, h);
+    if (ok && zt) {
+        RdCmd *cl = rd__st_push(f, 3, RDC_CLEAR); /* colour 0, depth SB_ZCLEAR */
+        if (cl) {
+            cl->u[0] = scene;
+            cl->b[4] = 1;
+            cl->u[1] = SB_ZCLEAR;
+        }
+        ok = cl != NULL;
+    }
+    ok = ok && rd__st_push(f, 3, RDC_TEXTURE_OFF) && rd__st_push1(f, 3, RDC_ABE, 0) &&
+         rd__st_test(f, 3, test) && rd__st_push1(f, 3, RDC_ZWRITE, RD_ZWRITE_OFF) &&
+         (rc = rd__st_push(f, 3, RDC_SHADOW_RESET)) != NULL;
     if (rc) {
         rc->b[0] = b0;
     }
@@ -128,6 +152,14 @@ static bool buildFrame(RdFrame *f, uint32_t scene, uint32_t w, uint32_t h, uint3
         quad(&v[(k - 1) * 6], left, top, right, bottom);
         quad(&v[inc + (k - 1) * 12], left, mid, right, bottom);
         quad(&v[inc + (k - 1) * 12 + 6], left, mid, right, bottom);
+        if (zt) {
+            const uint32_t z = (k & 1) ? 0u : SB_ZFRONT;
+            for (int i = 0; i < 6; i++) {
+                v[(k - 1) * 6 + i].z = z;
+                v[inc + (k - 1) * 12 + i].z = z;
+                v[inc + (k - 1) * 12 + 6 + i].z = z;
+            }
+        }
     }
     const uint32_t off = rd__frame_payload(f, v, (inc + dec) * (uint32_t)sizeof(*v));
     free(v);
@@ -164,15 +196,42 @@ static bool run(const RdFrame *f, uint32_t scene, uint8_t *px, size_t size, uint
            rw == w && rh == h;
 }
 
+bool rd__shadow_selftest_frame(RdFrame *f, uint32_t scene, uint32_t w, uint32_t h, uint32_t step,
+                               uint64_t test)
+{
+    return buildFrame(f, scene, w, h, step, test);
+}
+
+bool rd__shadow_selftest_replay(const RdFrame *f, uint32_t scene, uint8_t *px, size_t size,
+                                uint32_t w, uint32_t h)
+{
+    return run(f, scene, px, size, w, h);
+}
+
 /* the band centres the one draw got right: band k's centre column, the
- * middle of each half */
-static int centresOk(const uint8_t *px, uint32_t w, uint32_t h, uint32_t step, int *bad)
+ * middle of each half.  A cropped frame (rd__frame_cropped: 624 wide at
+ * 16:10, exact 614.40) leaves (w - wexact) / 2 columns at each side out of
+ * the picture, and the last band's centre lands in them: the centre is the
+ * middle of the band's columns inside the exact width, and a band with none
+ * there is not read (its centres count as right: the byte-for-byte
+ * comparison covers the columns) */
+static int centresOk(const uint8_t *px, uint32_t w, uint32_t h, uint32_t step, float wexact,
+                     int *bad)
 {
     int ok = 0;
     *bad = -1;
+    const float crop = wexact < (float)w ? ((float)w - wexact) / 2.0f : 0.0f;
+    const uint32_t cropUp = (uint32_t)crop + ((float)(uint32_t)crop < crop ? 1u : 0u);
+    const uint32_t lo = cropUp, hi = w - cropUp;
     for (int k = 0; k <= SB_BANDS; k++) {
-        const uint32_t x0 = bandEdge(w, k) / 16u + 1u;
-        const uint32_t x1 = (k == SB_BANDS ? w * 16u : bandEdge(w, k + 1)) / 16u;
+        uint32_t x0 = bandEdge(w, k) / 16u + 1u;
+        uint32_t x1 = (k == SB_BANDS ? w * 16u : bandEdge(w, k + 1)) / 16u;
+        x0 = x0 < lo ? lo : x0;
+        x1 = x1 > hi ? hi : x1;
+        if (x0 >= x1) {
+            ok += 2;
+            continue;
+        }
         const uint32_t x = (x0 + x1) / 2u;
         for (int half = 0; half < 2; half++) {
             const uint32_t y = half ? h * 3u / 4u : h / 4u;
@@ -212,7 +271,7 @@ bool rd__shadow_selftest(void)
     uint8_t *one = malloc(size), *load = malloc(size), *seven = malloc(size);
     static RdFrame f;
     const uint32_t step = rd__shadow_disc_step();
-    if (!one || !load || !seven || !buildFrame(&f, scene, w, h, step)) {
+    if (!one || !load || !seven || !buildFrame(&f, scene, w, h, step, SB_TEST)) {
         free(one);
         free(load);
         free(seven);
@@ -231,9 +290,10 @@ bool rd__shadow_selftest(void)
     g_rd.msaaBlocked = true; /* SCENE's colour is this count's target */
     /* the one draw twice: the stencil four texels a gather, then a texel a
      * load (shadow_count_ps's g_mode.y), each against the seven draws */
+    const bool gatherAsked = rhi_limits()->stencilGather;
     g_rd.shadowLoad = false;
-    const bool doneOne = run(&f, scene, one, size, w, h);
-    const bool tookOne = g_rdPerf.shadowOne > 0; /* the replay's own record (rd__perf_begin) */
+    const bool doneOne = gatherAsked && run(&f, scene, one, size, w, h);
+    const bool tookOne = doneOne && g_rdPerf.shadowOne > 0; /* the replay's own record */
     g_rd.shadowLoad = true;
     const bool doneLoad = rhi_limits()->stencilView && run(&f, scene, load, size, w, h);
     const bool tookLoad = doneLoad && g_rdPerf.shadowOne > 0;
@@ -264,8 +324,10 @@ bool rd__shadow_selftest(void)
         }
     }
     int bad = -1, badLoad = -1;
-    const int centres = doneOne ? centresOk(one, w, h, step, &bad) : 0;
-    const int centresLoad = doneLoad ? centresOk(load, w, h, step, &badLoad) : 0;
+    /* the frame's exact width, read after the replays (they set gsW) */
+    const float wexact = rd__frame_wexact();
+    const int centres = doneOne ? centresOk(one, w, h, step, wexact, &bad) : 0;
+    const int centresLoad = doneLoad ? centresOk(load, w, h, step, wexact, &badLoad) : 0;
     const int want = 2 * (SB_BANDS + 1);
     const bool gatherOk = doneOne && doneSeven && tookOne && diff == 0 && centres == want;
     const bool loadOk = doneLoad && doneSeven && tookLoad && diffLoad == 0 && centresLoad == want;
@@ -312,7 +374,9 @@ bool rd__shadow_selftest(void)
     if (passed) {
         /* how the one draw reads the stencil, and the gathers' outcome */
         char why[160] = "the gathers' count off at a band centre";
-        if (!doneOne || !tookOne) {
+        if (!gatherAsked) {
+            snprintf(why, sizeof why, "the backend's stencil view takes no gather");
+        } else if (!doneOne || !tookOne) {
             snprintf(why, sizeof why, "the gathers' count %s",
                      !doneOne ? "not read back" : "not drawn");
         } else if (diff) {

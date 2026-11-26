@@ -20,6 +20,13 @@ or shipped). The SPIR-V binding map the HLSL sources are compiled to
                        (SPIRV-Cross writes the SPIR-V's 48 + u; the script
                        takes 48 off: OpenGL 4.3 guarantees only 8 image
                        units, so unit 48 would exist on no driver)
+  written storage      layout(binding = 16 + u, std430)    SSBO binding 16 + u
+  buffer               (an HLSL RWStructuredBuffer at u: the VU record's store
+                       builds, ICO_VU_REC_STORES; SPIRV-Cross writes 48 + u,
+                       the script moves it beside the read storage buffers,
+                       where port/rhi/gl/gl_internal.h gl_bind_point binds
+                       RHI_BIND_STORAGE_BUFFER_RW: OpenGL 4.3 guarantees 8
+                       SSBO bindings, 48 + u would bind on few drivers)
   dual-source output   layout(location = 0, index = 1)
 
 A module that queries a multisampled texture's sample count (OpImageQuerySamples:
@@ -27,7 +34,11 @@ textureSamples(), GLSL 4.50 or ARB_texture_query_samples) is written as #version
 450; a driver below 4.5 refuses it and the renderer treats it as missing.
 A module GLSL cannot express (an input attachment: an OpTypeImage whose Dim is
 SubpassData) gets an EMPTY output file, which embed_shaders.py reads as "no
-GLSL" (the file must exist: it is a custom command's OUTPUT). Checks on the
+GLSL" (the file must exist: it is a custom command's OUTPUT); so does a
+compute module (an OpEntryPoint of the GLCompute model: the VU record's
+compute builds, vu_*_pre_cs), which the OpenGL backend never asks for (it
+has no compute dispatches in this release: RhiLimits.computeStores false),
+whatever SPIRV-Cross could write. Checks on the
 text: it starts with #version 430, and every NoContraction decoration of the
 SPIR-V (OpDecorate ... 42) surfaces as `precise` (a module with the
 decoration and no `precise` fails). The extensions a module needs are listed
@@ -48,21 +59,26 @@ OP_DECORATE = 71
 DIM_SUBPASS_DATA = 6
 DEC_NO_CONTRACTION = 42
 OP_IMAGE_QUERY_SAMPLES = 107
+OP_ENTRY_POINT = 15
+MODEL_GLCOMPUTE = 5
 
 
 def scan(spv):
-    """(has_subpass_input, no_contraction_count, queries_samples) of a SPIR-V
-    module."""
+    """(has_subpass_input or is_compute, no_contraction_count, queries_samples)
+    of a SPIR-V module: the first is the reason for no GLSL ("input
+    attachment" or "compute"), else None."""
     if len(spv) < 20 or len(spv) % 4 or struct.unpack("<I", spv[:4])[0] != 0x07230203:
         raise ValueError("not a SPIR-V module")
     w = struct.unpack(f"<{len(spv) // 4}I", spv)
-    i, subpass, nocontr, samples = 5, False, 0, False
+    i, subpass, nocontr, samples = 5, None, 0, False
     while i < len(w):
         n, op = w[i] >> 16, w[i] & 0xFFFF
         if n == 0 or i + n > len(w):
             raise ValueError("truncated SPIR-V instruction")
         if op == OP_TYPE_IMAGE and n >= 4 and w[i + 3] == DIM_SUBPASS_DATA:
-            subpass = True
+            subpass = subpass or "input attachment"
+        elif op == OP_ENTRY_POINT and n >= 2 and w[i + 1] == MODEL_GLCOMPUTE:
+            subpass = "compute"
         elif op == OP_DECORATE and n >= 3 and w[i + 2] == DEC_NO_CONTRACTION:
             nocontr += 1
         elif op == OP_IMAGE_QUERY_SAMPLES:
@@ -119,16 +135,41 @@ def remap_images(text):
     return text
 
 
+SSBO_BASE = 16  # the -fvk-t-shift: a read storage buffer's binding, 16 + t
+SSBO_DECL = re.compile(r"^layout\(binding = (\d+), std430\) ((?:readonly |writeonly |restrict |coherent |volatile )*buffer\b.*)$",
+                       re.M)
+SSBO_ANY = re.compile(r"^.*\blayout\s*\([^)]*\bbinding\s*=\s*(\d+)[^)]*\)[^;{]*\bbuffer\b.*$", re.M)
+
+
+def remap_written_buffers(text):
+    """A storage buffer at a u register (48 + u, an HLSL RWStructuredBuffer)
+    becomes SSBO binding 16 + u (port/rhi/gl/gl_internal.h gl_bind_point);
+    the t registers' buffers keep 16 + t (the shaders use no t and u of one
+    number in a group, port/shaders/reg.hlsli)."""
+    def sub(m):
+        b = int(m.group(1))
+        if b >= IMAGE_BASE:
+            b = b - IMAGE_BASE + SSBO_BASE
+        return f"layout(binding = {b}, std430) {m.group(2)}"
+    text = SSBO_DECL.sub(sub, text)
+    for m in SSBO_ANY.finditer(text):
+        if int(m.group(1)) >= IMAGE_BASE:
+            sys.exit(f"spirv_to_glsl: a storage buffer still at binding {m.group(1)} after the "
+                     f"remap (a declaration form SSBO_DECL does not match): {m.group(0).strip()}")
+    return text
+
+
 def translate(exe, src, out):
-    """Returns (text, nocontraction, precise, extensions) or None for a module
-    GLSL cannot express (the output is then an empty file)."""
+    """Returns (text, nocontraction, precise, extensions), or the reason as a
+    string for a module GLSL cannot express or no OpenGL run asks for (the
+    output is then an empty file)."""
     with open(src, "rb") as f:
         spv = f.read()
     subpass, nocontr, samples = scan(spv)
     if subpass:
         if out:
             open(out, "wb").close()
-        return None
+        return subpass
     # textureSamples() (a Texture2DMS GetDimensions sample count) is GLSL 4.50
     # or ARB_texture_query_samples; a 4.3 driver without the extension cannot
     # take the module, so it is written as #version 450 (core there) and a
@@ -142,6 +183,7 @@ def translate(exe, src, out):
     if not text.startswith(f"#version {version}"):
         sys.exit(f"spirv_to_glsl: {src}: output does not start with #version {version}")
     text = remap_images(text)
+    text = remap_written_buffers(text)
     precise = len(re.findall(r"\bprecise\b", text))
     if nocontr and not precise:
         sys.exit(f"spirv_to_glsl: {src}: {nocontr} NoContraction decorations, no `precise` in the GLSL")
@@ -168,8 +210,8 @@ def main():
     for src in a.inp:
         name = os.path.splitext(os.path.basename(src))[0]
         res = translate(exe, src, a.out)
-        if res is None:
-            msg = f"{name}\tno GLSL (input attachment)"
+        if isinstance(res, str):
+            msg = f"{name}\tno GLSL ({res})"
             print(msg, file=sys.stdout if a.list else sys.stderr)
             continue
         text, nocontr, precise, exts = res

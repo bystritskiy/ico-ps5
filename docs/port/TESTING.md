@@ -21,13 +21,22 @@ tests a change needs. Every test program, by area, is
 | `port/render/test/*.cmake` | script tests over the replay tool and the fog self-test |
 | `tools/native_frame_check.py`, `tools/native_frame_dumps.txt`, `docs/native_frame_baseline.json` | the native-frame gates, their dump list and their baseline |
 | `tools/coverage_check.py`, `tools/coverage_corpus.txt` | the regression renders and their corpus |
+| `tools/sweep_cameras.txt`, `tools/sweep_baseline.txt` | the disc-wide cull sweep's cameras (each a stage and a captured frame's view and zoom as numbers) and its stored counts (`gsb_cull_sweep`, [TESTING_PROGRAMS.md](TESTING_PROGRAMS.md)) |
+| `tools/cmp_dirs_band.py` | the side bands' before/after compare: the 4:3 band byte for byte, the side columns reported, a side pixel changed only over the fog (`rd_sideband_ab` on `port/render/test/fixtures/lists/wide.txt`, [TESTING_PROGRAMS.md](TESTING_PROGRAMS.md)) |
+| `tools/region_camera_report.py` | the camera rule against the PS2's region rule on saved frames: both rules' pass dumps, every SCENE pixel the camera rule changes held to `rd_replay_tool --region-mask`, a markdown report and the camera rule's baselines; `--feedback-off` / `--feedback-nops` leave out the draws that sample a render target (`rd_region_camera_ab`, `rd_sideband_ab`, [VU1_PROGRAMS.md](VU1_PROGRAMS.md#the-camera-rule)) |
+| `tools/band_seam.py` | the mean luminance step across each edge of the 4:3 picture on a wide present, against a bound (`rd_sideband_cards`, issue 189, [TESTING_PROGRAMS.md](TESTING_PROGRAMS.md)) |
 | `port/render/tools/rd_replay_tool.c` | the replay tool |
+| `port/render/test/draw_pattern/*.txt`, `port/render/test/rd_draw_pattern.cmake` | the draw pattern gate's tables, a faked device profile each, and its script ([The draw pattern gate](#the-draw-pattern-gate)) |
+| `port/render/test/fixtures/`, `port/render/rd_fixture.h`, `port/render/tools/rd_fixture_tool.c` | the committed test frames, their format and tool ([TESTING_FIXTURES.md](TESTING_FIXTURES.md)) |
+| `tools/check_test_paths.py`, `tools/check_test_paths_allow.txt`, `tools/rdfix_check.py` | no test names a path outside the repository, its allow-list of the lists not converted yet, a fixture holds no art |
 | `tools/vu_variant_diff.py`, `tools/vu_variant_equiv.py`, `tools/test/vu1/` | the June 2001 demo's VU1 programs against the retail ones: the diff, its per-hunk table, the symbolic comparison |
 | `port/platform/hotkeys.h`, `port/platform/dump_zip.h`, `port/render/rd_dump.c` | F12, the aspect sweep, the dump format |
 | `port/input/pad_script.h`, `port/input/input_record.h`, `port/platform/trace_host.h` | pad scripts, recordings, the trace |
 | `tools/dev_build.sh` | build a few targets of one checkout and run a few tests |
 | `tools/check_docs.py`, `tools/check_docs_allow.txt` | the documentation gate and its allow-list |
-| `.github/workflows/ci.yml`, `ios.yml` | CI |
+| `.github/workflows/ci.yml`, `ios.yml`, `apple-build.yml` | CI |
+| `tools/apple_precheck.py` | the Apple builds' Vulkan backend (linked to MoltenVK) compiled on a Linux host, before a push ([../BUILDING.md](../BUILDING.md#continuous-integration)) |
+| `tools/ci_shard.py`, `tools/ci_costs/*.txt`, `tools/ci_costs_update.py` | CI's split of a ctest suite into shards, the guard that every test has a cost, the cost tables (one a suite) and the script that fills and refreshes them |
 
 ## The framework
 
@@ -60,7 +69,8 @@ prints `name: ok` or the failure count and returns the exit code. The Settings t
 A slow program lists its cases once with a weight in seconds (`IcoShardCase k_cases[]`), starts
 `main` with `ico_shard_start` and wraps each case in `ico_shard_take("name")`. Cases go heaviest
 first to the shard with the least weight so far, so ownership is a pure function of the table and
-N; a run with no `--shard` owns every case. `ico_shard_take` stops the program when a call does not
+N; a run with no `--shard` owns every case, and `--only <name>` runs that one case alone (a twin
+of one case under another environment: `rd_blur_glow_fold_tile`). `ico_shard_take` stops the program when a call does not
 match the table's next entry, and `ico_shard_finish` fails when a case was never reached, so the
 table cannot drift from `main` (`port/test/ico_shard.h`, header comment).
 `ico_add_sharded_test(<name> <N> PROGRAM <target> ...)` registers `<name>.1ofN` to `<name>.NofN`
@@ -77,9 +87,11 @@ Every test program, one entry each by directory, is in [TESTING_PROGRAMS.md](TES
 ## Render gates
 
 The frame gates replay saved [.rddump](ARCHITECTURE.md#terms) files with the replay tool. Dumps
-hold game assets and are never committed, so the dump lists name paths on one machine; a missing
-file is reported and skipped, and every gate exits 77 when it has nothing to run
-(`tools/native_frame_check.py`, `tools/coverage_check.py`, docstrings).
+hold game assets and are never committed: `native_frame_gate_a` replays committed fixtures
+([TESTING_FIXTURES.md](TESTING_FIXTURES.md)); `native_frame_gate_b`, `coverage_corpus` and
+`rd_boot_present` are local-only validation on the game's own captures, kept outside the
+repository: labelled `local` (`ctest -L local`), they never gate, and each skips (77) with a line
+saying what it lacks and how many inputs it found when its input variable is unset (below).
 
 `tools/native_frame_check.py` has four commands (`tools/native_frame_check.py`, docstring):
 
@@ -88,20 +100,69 @@ file is reported and skipped, and every gate exits 77 when it has nothing to run
   each target's pixels to `docs/native_frame_baseline.json` with the harness commit
   (`cmd_baseline`).
 - `gate-a` renders again and compares with the manifest exactly, reporting dump, settings, target
-  and, with `--ref-dir`, the first differing pixel; exit 1 on any mismatch (ctest
-  `native_frame_gate_a`).
+  and, with `--ref-dir`, the first differing pixel; exit 1 on any mismatch. The ctest
+  `native_frame_gate_a` (`port/render/test/native_frame_gate_a.cmake`) runs it on the committed
+  fixtures of `port/render/test/fixtures/lists/native_frame.txt` (the three 2026-10-07 VU
+  captures, `fx-vu-3086`, `fx-vu-3112`, `fx-vu-1985`, and the title castle `fx-boot-0200`),
+  expanded into the build folder, against `docs/native_frame_baseline.json`: the release before's
+  pictures of those fixtures, every target at both settings, and the expansions' own SHA-256;
+  the path ran (one `--stats` replay a fixture: `prepass_vertices` or `shadow_volume_draws` as it
+  declares) and every one of the 144 targets checked. It held the real pictures of those
+  captures before; that manifest, made 2026-10-17, differed from the release before's own
+  pictures on 66 of its 396 targets (SCENE, DISPLAY and the present of all 11 captures at both
+  settings) while the ctest skipped without `ICO_DUMPS`, and the release being made equalled the
+  release before on all 396, so nothing of the game's look rode on it; now the pin is the release
+  before's picture of a frame with the game's command structure and generic art.
 - `gate-b` takes one game state captured at 4:3, 16:9, 32:9, 48:9 and 60:9 (an aspect sweep: a
   zip, a folder or PNGs with the aspect in the name, or `ICO_SWEEPS`) and checks the centre
   columns of every aspect equal the 4:3 picture byte for byte, with `--effects R` allowing a band
-  of R pixels at each edge of the 4:3 picture (ctest `native_frame_gate_b`).
+  of R pixels at each edge of the 4:3 picture. The ctest `native_frame_gate_b` is local-only: a
+  sweep is the game's own captures (a fixture holds one camera at one aspect and cannot make
+  one); without `ICO_SWEEPS` it skips with `SKIP: local-only validation: ICO_SWEEPS names no
+  aspect sweep (0 sweeps to check)`.
 - `selftest` checks the gate-b logic on synthetic pictures (ctest `native_frame_check_selftest`).
 
-The list is `tools/native_frame_dumps.txt`, or the list or folder `ICO_DUMPS` names; the ctests
-skip unless `ICO_DUMPS` is set. The baseline is updated by running `baseline` after a change whose
-pictures are accepted and committing the new manifest.
+The pictures these gates hold are the PS2's region rule's: `native_frame_check.py` replays under
+`ICO_RD_REGION_RULE=ps2` unless the environment names a rule, so gate-a's manifest stays the
+console's picture. The camera rule, the renderer's default ([VU1_PROGRAMS.md](VU1_PROGRAMS.md#the-camera-rule),
+[DIVERGENCES.md](DIVERGENCES.md) VD-29), differs from it only inside the triangles the PS2 dropped:
+`tools/region_camera_report.py --tool T --out DIR --list LIST --report FILE [--keep-camera DIR]
+[--setting NAME=ARGS]...` replays each dump under both rules and holds every SCENE pixel that
+changes to the CPU oracle's mask (`rd_replay_tool --region-mask`), every target byte for byte
+where the mask is empty, and writes the per-dump report; ctest `rd_region_camera_ab` runs it over
+the committed fixtures of `port/render/test/fixtures/lists/wide.txt` and checks the camera rule's verdicts are the same under the Original
+preset and Enhanced. With `ICO_RD_REGION_RULE=camera` gate-a lists the camera rule's changed
+targets (a report, not a gate).
 
-`tools/coverage_check.py` (ctest `coverage_corpus`, `coverage_check_selftest`) renders every dump
-of `tools/coverage_corpus.txt` at its own aspect, `--enhanced --present 1376x896`, once with
+Two more gates cover the wide frame's side bands (issue 29), under `ICO_RD_REGION_RULE=ps2`. `tools/cmp_dirs_band.py` compares two
+folders of the same dumps' pictures, one drawn with the side bands off (`ICO_RD_VU_BESIDE=0`) and
+one with them on: the centre 512-texel band (the 4:3 picture) must be identical byte for byte, hard;
+the side columns are reported, and a side pixel that changed must be one the picture without the
+bands left at the fog colour (never lose what was drawn). The ctest `rd_sideband_ab` runs it over
+the committed fixtures of `port/render/test/fixtures/lists/wide.txt`, made with the placement rule
+`@scene drops` ([TESTING_FIXTURES.md](TESTING_FIXTURES.md#the-placement-rules-opt-in)): a floor
+across the eye plane, which the PS2 drops behind the eye and the side bands draw beside the picture
+(at least one SCENE side pixel must change), and a card beyond the GS window, each facing the eye
+and facing away. `rd_sideband_cards` holds issue 189's frame made with `@scene cards`
+(`fx-cards-189`), whose only drops are its two cards, byte for byte with the side bands off and on,
+and its picture's edges within 1.5 levels by `tools/band_seam.py`; under the camera rule the
+facing card drawn over the whole frame, the other kept, and the edges again within 1.5 levels. The
+disc-wide sweep `gsb_cull_sweep.*` (`gsb_cull_test --sweep`, main only, it needs the disc image)
+counts per stage and aspect the triangles the box cull, the blend span and the PS2's region rule
+leave out (the CPU oracle's `vu1ref_region_draw`: the camera rule is not swept; its drops are the
+back faces alone), against the stored counts of `tools/sweep_baseline.txt`; a count above its line fails, and the
+run prints "baseline can be lowered" when it falls ([TESTING_PROGRAMS.md](TESTING_PROGRAMS.md)).
+
+By hand, the tool's list is the list or folder `--dumps` or `ICO_DUMPS` names (default
+`tools/native_frame_dumps.txt`, machine-local). The ctest's manifest is updated, after a change
+whose pictures are accepted, by expanding the fixtures of `lists/native_frame.txt` and running
+`baseline --dumps <their list> --tool <the release's rd_replay_tool>` (with `ICO_RD_SHADOW_FINE=0`,
+the ctest's environment) and committing it.
+
+`tools/coverage_check.py` (ctest `coverage_corpus`, local-only; `coverage_check_selftest`) renders
+every dump of a corpus list (`--corpus` or `ICO_COVERAGE_CORPUS`; the ctest skips with `SKIP:
+local-only validation: ICO_COVERAGE_CORPUS names no corpus list (0 dumps to render)` without one)
+at its own aspect, `--enhanced --present 1376x896`, once with
 `--aa off` and once with `--aa msaa4`, plus the interpolated frame of a dump that names a `PREV`,
 and compares with the previous run: any mesh drawn fewer times than before fails, and more than
 `pixels` percent of pixels changed by more than `tol` fails (defaults 0.5 and 8). The previous
@@ -114,15 +175,111 @@ reports it. `seed` overwrites every baseline after a build that is accepted
 The script tests under `port/render/test/` run the tool or a test program and check its output:
 `rd_replay_tool_list.cmake`, `rd_replay_tool_pass_dump.cmake`,
 `rd_replay_tool_loss_bisect.cmake`, `rd_replay_tool_pass_split.cmake`,
-`rd_replay_tool_pass_merge.cmake` and `rd_replay_tool_snap_swap.cmake` on the dump `rd_pixel` leaves behind, `rd_replay_tool_glow_hold.cmake` and `rd_replay_tool_save_blended.cmake` on two godrays dumps, `rd_depth_copy_dump.cmake` on a player dump with the depth fog (`ICO_FOG_DUMP`), and
+`rd_replay_tool_pass_merge.cmake` and `rd_replay_tool_snap_swap.cmake` on the dump `rd_pixel` leaves behind, `rd_replay_tool_velocity.cmake` on the one `rd_velocity` leaves (and `rd_pixel`'s), `rd_replay_tool_still.cmake`, `rd_replay_tool_glow_hold.cmake`, `rd_replay_tool_save_blended.cmake` and `rd_depth_copy_dump.cmake` on committed fixtures ([TESTING_FIXTURES.md](TESTING_FIXTURES.md)), and
 `rd_fog_selftest.cmake`, which matches the `fog: depth path` line of the self-test, and
 `rd_blend_selftest.cmake`, which matches the `blend: ... (self-test: ...)` line of the blend's,
 and `rd_vuprepass_selftest.cmake`, which matches the `VU pre-pass: on|off (self-test ...)` line
 of the pre-passes', and `rd_crack.cmake`, which matches the crack filler's `crack fill:` lines,
-and `rd_vustage_ab.cmake` and `rd_vubatch_ab.cmake` over the dump corpus (`port/render/CMakeLists.txt`). The ctest `rd_replay_tool` renders `rd_pixel`'s dump with
+and `rd_vustage_ab.cmake` and `rd_vubatch_ab.cmake` over the dump corpus, and `rd_cull_ab.cmake`
+over the fixtures of `test/fixtures/lists/cull.txt` ([TESTING_FIXTURES.md](TESTING_FIXTURES.md)): the scene draws'
+visibility test (`ICO_RD_CULL=frustum`, and `full` with list 0's occlusion test) against every draw
+replayed (`off`) under `ICO_RD_BLEND=fixed`, `--pass-dump --stats` at Original 4:3 presented at
+640x480, Enhanced 4:3 2x, Enhanced 2x at a wide dump's own aspect and once with `--aa msaa4`: every
+target's PNG of both runs byte for byte the off run's, the stats line's `cull off: 0 of 0`, `cull
+frustum: N of M` and `cull full: N of M (F frustum, O occluded)` with F the frustum run's N, and
+draws skipped over the corpus ([RENDER.md](RENDER_PERF.md#culling)), and `rd_vis_hiz_corpus.cmake` over
+the rows of `port/render/test/rd_vis_hiz_corpus.txt` (the occlusion corpus at three settings):
+the occlusion test's fast collect (with `ICO_RD_CULL_HIZ_CHECK=1`) against its plain pass
+(`ICO_RD_CULL_HIZ_FAST=0`) and the table, the same 26 counts, no check wrong
+(`port/render/CMakeLists.txt`). The ctest `rd_replay_tool` renders `rd_pixel`'s dump with
 `--present 640x480`; it requires `rd_pixel` to have run first (`FIXTURES_REQUIRED rd_dump`), as
 does `rd_replay_tool_downsample`, which adds `--enhanced --resolution 2x --downsample --stats` and
-passes on `present: downsample 1024x512 -> 512x256, window reduce off`.
+passes on `present: downsample 1024x512 -> 512x256, window reduce off`, `rd_replay_tool_traffic_stats`
+(`port/render/rd_perf_clock.cmake`), which passes on the `stats: traffic:` line's MB loaded, stored,
+cleared and copied (each copy once) and its passes, and `rd_replay_tool_fsr1`,
+which presents at `--present 960x720` with `--fsr1 --stats` and passes on `present: fsr1 512x512 ->
+960x720` (the dump's 1x picture line-doubled and upscaled by FSR 1.0 to the box), and
+`rd_replay_tool_jitter` (`port/render/test/rd_replay_tool_jitter.cmake`): at Original 1x and
+Enhanced 2x, `--pass-dump` with `--present 640x480 --stats` without `--jitter`, with `--jitter
+0,0`, with `--jitter 0.25,0.25` and with `ICO_RD_JITTER_TEST=0.25,0.25`: 0,0 every target and the
+present byte for byte the run without, 0.25,0.25 SCENE and the present different, the
+environment's run byte for byte the `--jitter` one, each run's `jitter` stats line read; a
+`--jitter` outside -0.5..0.5 exits 1 ([RENDER.md](RENDER.md#jitter)), and
+`rd_replay_tool_upscale_test`, which replays the dump at `--enhanced --resolution 3x
+--upscale-test 1.5 --upscale-phases 8 --present 960x720 --stats` and passes on `upscale point:
+SCENE 1024x1024 -> UPSCALED 1536x1536 (render scale 2x2, display scale 3x3)` with a marker
+dispatched, none refused and a reduction remapped ([RENDER.md](RENDER.md#the-upscale-point)),
+`rd_replay_tool_upscale_keep` and `rd_replay_tool_fsr3_keep` (`port/render/test/rd_replay_tool_keep.cmake`),
+which replay `rd_pixel_keep.rddump` 20 times after `--prev rd_pixel_frame.rddump` under the test's
+upscaler at 1.5 or FSR 3.1 Quality and pass on one dispatch and `keep frames held 20 (keep copies
+20, no keep sprite 0)` with nothing refused ([DISPLAY_LAYER.md](DISPLAY_LAYER.md#keep-frames)), and
+`rd_replay_tool_fsr3`, which replays the dump at `--enhanced --fsr3 quality [sharpness 0..100] --present 1280x960
+--stats` under the validation layer and passes on `upscale: fsr3 ran N presents (context render WxH
+-> display WxH, ..., refused 0, failed 0, ...), validation errors 0` (FSR 3.1 dispatched by the
+FidelityFX upscaler; 77 only where it cannot be expected: a build without it, not Vulkan, a device
+below Vulkan 1.2; a build with it on a 1.2 device that refuses it exits 1 with the reason, and
+`rd_present`'s FSR 3.1 cases fail there too; [DISPLAY.md](DISPLAY.md#fsr-31-upscaling)).
+
+### The draw pattern gate
+
+A change can alter how a phone draws every scene without changing a picture on lavapipe: the
+two-pass blend's pairs in one pass on a device without dual-source blending (issue 179, taken out
+again) turned code 36's fused pairs into pairs kept apart and a Mali-G52 frame's 300 GPU draws of
+its VU draws into 931 under the Mali fakes, every picture on lavapipe the same, and the phone drew
+broken pictures. Nothing looked at those counts. The draw pattern gate pins them per faked device
+profile, so a change of pattern on a device nobody here owns fails until its table is updated on
+purpose.
+
+`rd_draw_pattern_mali`, `rd_draw_pattern_powervr`, `rd_draw_pattern_adreno` and
+`rd_draw_pattern_desktop` (`port/render/rd_draw_pattern.cmake`, script
+`port/render/test/rd_draw_pattern.cmake`) replay each fixture of
+`port/render/test/fixtures/lists/draw_pattern.txt` once under the profile with
+`rd_replay_tool --stats --game-selftests` and compare these counts, exactly, with the profile's
+table `port/render/test/draw_pattern/<profile>.txt` (a line a fixture, `COUNT=N` words): the GPU
+draws and render passes, the VU draws, the GPU draws they took, those merged and alone (the draw
+merge), code 36's pairs fused, kept apart and kept apart by each reason, and under one pipeline
+already, the draws the two-pass blend drew twice, their VU triangles and those drawn once through
+its colour pass, and the pipelines the run made. `--game-selftests` runs the game window's
+start-up self-tests in its order (`rd_blend_selftest`, `rd_vuprepass_selftest`, `rd_fog_selftest`),
+so a rule a self-test turns on is in force as on the device: without it the tool runs only the
+crack fill's swap, the turn fold and the self-tests a variable asks for.
+
+| profile | the fakes | the setting |
+| --- | --- | --- |
+| `mali` | `ICO_VK_FAKE_LIMITS=mali ICO_VK_FAKE_VENDOR=0x13B5 ICO_VK_FAKE_API=1.1 ICO_VK_FAKE_NO_DUAL=1 ICO_VK_FAKE_NO_VERTEX_STORES=1 ICO_RD_VU_RECORD=compute ICO_VK_FAKE_NO_DST=1 ICO_VK_FAKE_NO_DYNAMIC=1` (issue 179's Mali-G52) | `--resolution 1x --present 1612x720` |
+| `powervr` | `ICO_VK_FAKE_LIMITS=moltenvk ICO_VK_FAKE_VENDOR=0x1010 ICO_RD_VU_PREPASS=0 ICO_VK_FAKE_NO_INTERLOCK=1` (the PowerVR phone as `rd_lamps_ab` fakes it) | `--enhanced --resolution 2364x1080 --full-height --full-pixel --present 2364x1080` |
+| `adreno` | `ICO_VK_FAKE_VENDOR=0x5143 ICO_VK_FAKE_PASS_ROW=qualcomm ICO_VK_FAKE_API=1.1 ICO_VK_FAKE_NO_DYNAMIC=1 ICO_RD_VU_PLAIN=row ICO_VK_FAKE_NO_PREPASS=1 ICO_VK_FAKE_NO_INTERLOCK=1` (an Adreno on Qualcomm's own driver: the plain VU set, the pre-pass off) | `--enhanced --resolution 2x --present 1920x1080` |
+| `desktop` | `ICO_RD_LOCAL_PROBE_SABOTAGE=fast ICO_VK_FAKE_NO_INTERLOCK=1` (lavapipe's own profile; the local-read probe's timing would otherwise decide) | `--enhanced --resolution 2x --present 1280x960` |
+
+The interlock is off in every profile (the Mali's through `ICO_VK_FAKE_NO_DST`): lavapipe has it
+from Mesa 25.2 and not on Mesa 25.0.7, and no reporter's phone has it, so the tables hold on both.
+The fixtures: `fx-pattern-mali-frame` and `fx-pattern-mali-slow541` (issue 179's Mali-G52 frame
+and opening capture with every VU texture `date_split`, so the alpha plan proves the LERP As VU
+draws' alpha at most 128, as the disc's own textures did in the reporter's frame: shadow volumes,
+skinned draws, the two-pass blend's pairs), `fx-mobile-164` (code 36's pairs that fuse) and
+`fx-phone-2199` (the PowerVR phone's frame: fused pairs, the merge's runs). The path ran: each
+run names the profile's fakes in its log and prints the game self-tests' line and every count's
+stats line; where the profile runs the VU pre-pass (`mali`, `desktop`) each fixture's declared
+`prepass_vertices` holds; under `mali` the two-pass blend drew some draw twice over the list. No
+device: SKIP.
+
+A count that differs fails with each count's table and run values and the sentence "the draw
+pattern of profile <p> changed: if it is intended, update <file> in the same commit and name the
+change in the release notes' device checklist". When the change is intended:
+
+1. write the tables from a build of the change: `cmake --build <build dir> --target
+   rd_draw_pattern_tables` (the script with `-DWRITE=1` for each profile; never run by `ctest`),
+   on lavapipe;
+2. read `git diff port/render/test/draw_pattern/`: every count that moved is a change of how that
+   device class draws, and none of those devices is here;
+3. commit the tables with the change, and put the change in the release's device checklist (the
+   list of what each reporter's device should show in the next log) as new on a device nobody
+   here owns: the device, the counts that moved and why, so the owner knows which reporter's next
+   log and pictures answer for it before the release.
+
+A table holding the word `ungenerated` fails with the command that writes it. The table's
+`# device:` line is the device line of the run that wrote it; a failure on another device says
+both.
 
 ## The render suite on OpenGL
 
@@ -156,9 +313,10 @@ Not twinned: any test whose environment holds `ICO_VK_FAKE_*` or `ICO_VK_ATTACHM
 game or work on the replay tool's files (`rd_replay_tool*`, `rd_fog_depth_copy_dump*`,
 `rd_vustage_ab`, `rd_vubatch_ab`, `rd_fades_fold_ab`, the frame gates, `coverage_corpus`; the compare below covers the dumps), and the
 tests with no device (`rd_alpha_plan`, `rd_fx_frame`, `rd_vu_frac`, `rd_fades_fold`, `rd_mip`, `rd_passring`,
-`rd_filter`, `rd_bisect_plan`, `rd_cache_name`, `rd_stream_audit`, `rd_local_probe_rule`, `fog_lut*`, `gsb_cull*`, `texpack*`, `gltf`).
+`rd_filter`, `rd_bisect_plan`, `rd_cache_name`, `rd_stream_audit`, `rd_local_probe_rule`, `rd_subpass_probe_rule`, `fog_lut*`, `gsb_cull*`, `texpack*`, `gltf`).
 The two-pass blend copies (`*_nodual`, `ICO_RD_NO_DUAL=1`, the renderer's own switch) are
-twinned. The sources decide what else skips: `ctest -L gl` output lists the skipped ones.
+twinned, and so is `rd_cull_ab` (`rd_cull_ab_gl`: the replay tool takes `ICO_RHI_BACKEND`, so the
+visibility test's byte identity is proven on both backends). The sources decide what else skips: `ctest -L gl` output lists the skipped ones.
 
 The tolerance table is `ICO_RD_GL_TOLERANCE` (entries `<name>_gl|<VARIABLE>=<value>`, added to
 that twin's environment). It may name only a test's own tolerance switch on a filtered or float
@@ -230,11 +388,13 @@ static, as on an Android 8 phone; [RHI.md](RHI.md#vulkan), variable table), fold
 (its pass and barrier counts are `rd_perf`'s) and `rd_mesh_vk10.1of4` to `rd_mesh_vk10.4of4`.
 Under `ICO_VK_FAKE_NO_D32F_ATTACHMENT=1` (the D32F depth-attachment bit hidden, an Adreno 505 on a 1.0.61
 driver) the twins `rd_pixel_vk10_nod32f`, `rd_present_vk10_nod32f` and `rd_interp_vk10_nod32f` run with
-the same expectations; `rd_present`'s `checkNoD32Keys` finds the effects depth's two keys in the
-reachable set exactly where `RhiLimits.depth32Attachment` is true, and its effects-depth cell finds the
-forced pass not drawn when it is false.
+the same expectations; `rd_present`'s `checkNoD32Keys` finds the effects depth's four keys (both
+outputs, with and without the colour adjustment) in the reachable set exactly where
+`RhiLimits.depth32Attachment` is true, and its effects-depth cells (`checkEffectsDepth`,
+`checkToneDepth`) find the forced pass not drawn when it is false.
 `rd_present`'s `checkReduceKey` finds the present's box average (`aa_reduce_ps`, RGBA8) in the
-reachable set in both blend modes on every device.
+reachable set in both blend modes on every device, and `checkTone` the colour adjustment's box blit
+(`blit_tone_ps`, both outputs).
 With `port/rhi`'s `rhi_vk_vk10` and `rhi_vk_swapchain_vk10` they are `ctest -j1 -L vk10`; CI's
 full `ctest` runs them. The shaders are SPIR-V 1.0 for every device (`spirv_check`'s version gate,
 [SHADERS.md](SHADERS.md)), so the validation layer sees no module newer than the device. A real
@@ -270,11 +430,13 @@ draw:
 | `rd_vumerge_fallback.cmake` | on `rd_pixel_vu.rddump`, as ctest's `rd_vumerge_fallback` | the fallback on Direct3D 11: under `ICO_RD_FAKE_MERGE_FAIL=1` one faked failure line naming the merge build, one `rd: VU merge: off: the driver could not compile ... (Direct3D 11)` line, and the `--time 3` replays after it drawing what `ICO_RD_VU_MERGE=0` draws (more than the merge) |
 | `rd_replay_tool <rd_pixel_vu.rddump> <png> --stats --backend d3d11` | the frame of 64 code-32 draws; its log must have the stats line `VU pre-pass on: 1 or 2 passes, ... 0 mesh and grid draws the old way` and no refused copy (the row `rd_replay_tool_vu_record`), and the backend's line `texture-to-buffer copies into storage buffers: a compute shader (cs_5_0` (the row `rd_replay_tool_vu_compute_copy`); the first replay's log `rd: VU pre-pass: on: ` (the row `rd_replay_tool_prepass_on`) | the record path in the replay tool on Direct3D 11 |
 | `rd_vustage_ab.cmake` | on the same three dumps, as ctest's `rd_vustage_ab_pixel`; some line `N targets equal over 3 dumps at 2 settings` (the row `rd_vustage_ab_compared`) | the pre-pass on Direct3D 11 against the programs' own entries (`ICO_RD_VU_PREPASS=0`): every target byte for byte at Original 4:3 1x and Enhanced 4:3 2x, every VU command through the record, no debug-layer error and no refused record copy in either run |
+| `rd_vu_flat0_ab.cmake` | on the same three dumps with `-DBACKEND=d3d11`, as ctest's `rd_vu_flat0_ab_pixel`; some line `rd_vu_flat0_ab (d3d11): N targets compared` with N above 0 (the row `rd_vu_flat0_ab_compared`) | the main shader's flat outputs at the provoking corner on Direct3D 11: every target byte for byte between `ICO_RD_VU_FLAT0=0` (the twins) and `=1`, merged and one draw a command, no debug-layer error (the 16:9 setting skips for 4:3 frames) |
 | `rd_vufuse_ab.cmake` | on the same three dumps with `-DEXTRA=` (no phone frames), as ctest's `rd_vufuse_ab_pixel` | the fused scissor pair on Direct3D 11: every target byte for byte between `ICO_RD_VU_FUSE=0` and the fuse, the merge on in both runs (the phone and 16:9 settings skip for 4:3 frames; Enhanced 4:3 2x through the entries and the record runs) |
 | `rd_present_test <work>` | as ctest's `rd_present` | the presenter's frames |
 | `rd_msaa_test` | as ctest's `rd_msaa` | multisampling and its resolve |
 | `rd_crt_test <work>` | as ctest's `rd_crt` | the CRT passes |
 | `rd_mirror_test` | as ctest's `rd_mirror` | the mirror mode |
+| `rd_video_test` | as ctest's `rd_video` (the Vulkan validation count is read on the Vulkan backend only) | the movie's colour conversion against the CPU's IPU arithmetic: the `flat` and `ramp` cases, the field pass, the overlay; `flat` and `ramp` fail here when a colour constant is read unsigned (FXC and a hex literal) |
 
 Every log goes to the artifact `d3d11-warp-logs` (with `summary.md`, also the job's step summary:
 the device line and each test's verdict, time and debug-layer error count). A failed test prints,
@@ -284,7 +446,10 @@ draw: ...`, [RHI.md](RHI.md#direct3d-11)) and its last 150 lines. A test's exit 
 device") is a failure here, since WARP is always there, and so is a `SKIP:` line or any debug-layer
 error or corruption line in a test's log, whatever its exit status (the runtime drops the call the
 error names, so a program can pass its own checks while drawing less than it should); a test runs
-at most 2400 s.
+at most 2400 s. One more row, `d3d11_shader_warnings`, fails the job when any log holds an FXC
+warning line other than the `X3556` and `X4000` hints ([SHADERS.md](SHADERS.md#integer-forms)): FXC
+compiles every shader at run time and the backend logs each distinct warning text once, so the gate
+covers the whole shader set the suite draws.
 
 Not run there: the variants whose environment holds a Vulkan fake (`ICO_VK_FAKE_*`,
 `ICO_VK_ATTACHMENT_READ`: Direct3D 11 ignores them), the variants whose expected results name a
@@ -305,17 +470,21 @@ These cache variables point the tests at the player's files ([../BUILDING.md](..
 has their defaults; the registrations are in `port/*/CMakeLists.txt`):
 
 - `ICO_DISC_IMAGE`, the PAL image. Without it `vfs_disc`, `archive_disc`, `appearance_disc`,
-  `fmv_fields`, `gsb_cull_stage`, `texpack_disc`, `texpack_export_disc`, `df_index_disc`,
+  `fmv_fields`, `gsb_cull_stage`, `gsb_cull_sweep.*`, `texpack_disc`, `texpack_export_disc`, `df_index_disc`,
   `menu_look`, `menu_text`, `gallery`,
-  `content_table_chains` and the headless game runs below skip; `sndn2`, `fmv`, `shadow_spawn` and
+  `content_table_chains`, `unused_content_audit` and the headless game runs below skip; `sndn2`, `fmv`, `shadow_spawn` and
   `rd_mesh` run only their synthetic part, and `tables_loader` reads the base ELF instead.
 - `ICO_DISC_IMAGE_KOR`, the Korean image (`baserom/Ico_KOR.iso`). Without it `vfs_disc_kor`,
-  `archive_disc_kor`, `archive_manifest_kor`, `menu_look_kor` and `content_table_chains_kor` skip,
+  `archive_disc_kor`, `archive_manifest_kor`, `menu_look_kor`, `content_table_chains_kor` and `unused_content_audit_kor` skip,
   and `gallery_kor` leaves out the disc checks, as the Japanese rows below do.
 - `ICO_DISC_IMAGE_JPN`, the Japanese image (`baserom/Ico_JPN.iso`). Without it `vfs_disc_jpn`,
   `vfs_disc_jpn_bin`, `vfs_disc_jpn_cue`, `vfs_disc_jpn_chd`, `archive_disc_jpn`,
-  `archive_manifest_jpn`, `menu_look_jpn` and `content_table_chains_jpn` skip, and `gallery_jpn`
-  leaves out the disc checks.
+  `archive_manifest_jpn`, `menu_look_jpn`, `content_table_chains_jpn` and `unused_content_audit_jpn` skip,
+  and `gallery_jpn` leaves out the disc checks.
+- `ICO_DISC_IMAGE_NTSC`, `ICO_DISC_IMAGE_AUG6`, `ICO_DISC_IMAGE_JUN26` and `ICO_DISC_IMAGE_CN` (the
+  North American, August 2001, June 2001 and Asian images, `baserom/Ico_USA.iso`, `Ico_AUG6.iso`,
+  `Ico_JUN26.iso`, `Ico_CN.iso`): only `unused_content_audit_ntsc`, `_aug6`, `_jun26` and `_cn` use
+  them here, and skip without them.
 - `ICO_BASE_ELF`, the PAL base ELF: with pyelftools, `tables_loader` and `tables_manifest` are
   built from it (`port/data/CMakeLists.txt`); `gallery` reads its tables.
 - `ICO_BASE_ELF_JPN` and `ICO_DISC_IMAGE_JPN`, the Japanese base ELF and image (defaults
@@ -328,10 +497,11 @@ has their defaults; the registrations are in `port/*/CMakeLists.txt`):
   pyelftools) check the model viewer's Japanese column, which the Korean disc shares.
 - `ICO_TEXPACK_DIR`, a PCSX2 pack's replacements folder: `texpack_disc`, `texpack_e2e`,
   `texpack_pack_files`.
-- `ICO_FOG_DUMP`, a player dump with the depth fog: `rd_fog_depth_copy_dump` and `_d24s8` (skipped
-  without it).
-- `ICO_BOOT_DUMP_DIR`, a start-up's frame dumps: `rd_boot_present`; `ICO_BOOT_DUMP_OLD` sets
-  `ICO_BOOT_OLD=1` for dumps whose frames 118 to 120 draw stage 1 (`port/render/CMakeLists.txt`).
+- `ICO_BOOT_DUMP_DIR`, a start-up's frame dumps: `rd_boot_present` (local-only: it needs the nine
+  consecutive frames 115 to 123 of a start-up dumped with `dump_every=1`, which no fixture holds;
+  without them it skips with `SKIP: local-only validation: ... 0 of the 9 frames 115-123`);
+  `ICO_BOOT_DUMP_OLD` sets `ICO_BOOT_OLD=1` for dumps whose frames 118 to 120 draw stage 1
+  (`port/render/CMakeLists.txt`).
 
 Five tests start the headless game itself, each in a fresh folder with its own `ico-pc.ini` and a
 pad script, `RUN_SERIAL` and with a long timeout:
@@ -388,7 +558,15 @@ EE address, which a heap block or a model's records hold. `tools/state_region_di
 
 The variants that force GPU paths a desktop driver does not take are in
 [../BUILDING.md](../BUILDING.md#tests)'s table (`ICO_RD_NO_DUAL`, `ICO_VK_FAKE_NO_DUAL`,
-`ICO_VK_FAKE_D24S8`, `ICO_VK_FAKE_LIMITS=mali|min|moltenvk`, `ICO_RD_BLEND=storage|fixed`). The other
+`ICO_VK_FAKE_D24S8`, `ICO_VK_FAKE_LIMITS=mali|min|moltenvk`, `ICO_RD_BLEND=storage|fixed`). The
+switches that stand for a device (`ICO_VK_FAKE_VENDOR`, `ICO_VK_FAKE_PASS_ROW`,
+`ICO_VK_FAKE_ADRENO`, `ICO_VK_FAKE_SERIAL`, `ICO_VK_FAKE_NO_PREPASS`,
+`ICO_RD_VU_COMPACT_ARM`, `ICO_VK_FAKE_LIMITS=moltenvk`) fake one choice or one identity field of
+the device table, each with the scope it had before the table; the rows they stand for, and the
+proof that the table gives every device what the old rules gave (`rhi_device_table_equiv`), are in
+[DEVICE_TABLE.md](DEVICE_TABLE.md#the-tests-fakes). The platform's device rules (the free-memory
+floor's driver class, the present fallback's drivers, the Android build's stock driver hint) have
+no fake: `memory_floor_test` and `present_fallback_test` hand their predicates the ids and texts. The other
 switches the tests and their registrations use:
 
 | variable | read in | effect |
@@ -398,57 +576,138 @@ switches the tests and their registrations use:
 | `ICO_VK_FAKE_NO_MSAA` | `vk_device.c` | single sampling only |
 | `ICO_VK_FAKE_NO_INTERLOCK` | `vk_device.c` | the fragment shader interlock off, the attachment read kept (the `rd_blend_selftest*` ctests: lavapipe has the interlock from Mesa 25.2, their expectations are a device without it) |
 | `ICO_VK_FAKE_LIMITS=moltenvk` | `vk_device.c` | MoltenVK: `RhiLimits.moltenvk` set, no attachment read, the interlock the device's own (`rd_blend_selftest_moltenvk_storage`: `ICO_RD_BLEND=storage` keeps the interlock; run without `ICO_VK_FAKE_NO_INTERLOCK`; it skips on a device without the interlock, as Mesa before 25.2's lavapipe) |
-| `ICO_VK_FAKE_ADRENO` | `vk_device.c` | Qualcomm's Adreno driver: the attachment read not offered (`rd_blend_selftest_adreno`) |
+| `ICO_VK_FAKE_PASS_ROW=qualcomm` | `vk_device_table.c` (once, at the pick: the device table's fakes, [DEVICE_TABLE.md](DEVICE_TABLE.md#the-tests-fakes)) | the device on Qualcomm's driver row alone (`rhi_pass_row.h` `rhi_vk_pass_row_qualcomm`, issue 123): its passes `VkRenderPass` objects, `RhiLimits.passObjectsRow` set, nothing else of Qualcomm's driver faked (`rhi_vk_qcom_passes`, `_off`, `rd_pass_objects_ab`) |
+| `ICO_VK_FAKE_SERIAL` | `vk_device_table.c` (once, at the pick) | 1 takes the rule of one compile at a time (one compile thread, the lock around module and pipeline creation; a PowerVR B-Series driver's, issue 188) on any device (`rhi_vk_serial`) |
+| `ICO_VK_FAKE_ADRENO` | `vk_device_table.c` (once, at the pick) | Qualcomm's Adreno driver: the attachment read not offered (`rd_blend_selftest_adreno`) |
 | `ICO_VK_ATTACHMENT_READ` | `vk_device.c` | 1 offers the attachment read under `ICO_VK_FAKE_ADRENO` too (`rd_blend_selftest_adreno_forced`) |
 | `ICO_VK_VALIDATION` | `vk_device.c` | the validation layer; the render and RHI tests set it with `VK_ADD_LAYER_PATH` when the layer is in the toolchain |
 | `ICO_VK_GLOBAL_BARRIERS` | `vk_cmd.c` | a global barrier before every pass instead of hazard tracking, for A/B runs |
-| `ICO_VK_DEPTH_ALWAYS` | `vk_cmd.c`, `vk_pipeline.c` | 1: every depth test passes; the occlusion measurement's run without the depth (`tools/occlusion_corpus.py`, `rhi_vk`'s occlusion cell; [RENDER.md](RENDER.md#culling)) |
+| `ICO_VK_DEPTH_ALWAYS` | `vk_cmd.c`, `vk_pipeline.c` | 1: every depth test passes; the occlusion measurement's run without the depth (`tools/occlusion_corpus.py`, `rhi_vk`'s occlusion cell; [RENDER.md](RENDER_PERF.md#culling)) |
 | `ICO_RD_FOG_PATH` | `rd_fog_path.c`, `rd_profile.c` | `local` (the profile's `fogLocal` on where the device has local read), `inplace`, `copy` or `buffer` forces the fog's depth path; `test` makes the self-test try every path (`rd_fog_local`, `rd_fog_selftest_local`) |
 | `ICO_RD_DATE_PATH` | `rd_profile.c`, `rd_date_selftest.c` | `stencil` DATE through the stencil bit wherever the device has local read, kept whatever the self-test finds; `snapshot` the R8 snapshot (`rd_date_selftest`) |
 | `ICO_RD_BLUR_FOLD` | `rd_profile.c` | 1 folds the staticBlur pairs (`fx_blur2_ps`) on any device, 0 never (the A/B of the replay tool's `--pass-dump`) |
 | `ICO_RD_DEPTH_COPY` | `rd_fog_path.c` | 0 samples the depth in place, 1 copies it |
 | `ICO_RD_LOCAL_PROBE` | `rd_profile.c`, `rd_local_probe.c` | in a headless run (no window), 1 the game's desktop local reads and their start-up probe where the self-tests run, 0 the local reads without the probe; unset there, the desktop class keeps the snapshots (`rd_local_probe_kept`, `rd_local_probe_off`) |
+| `ICO_RD_WATER_SCALE` | `rd_core.c` (`rd_init`, `g_rd.waterPs2`) | `0`: the render-to-texture blocks that are not scene-sized (the reflections in water, the queen barrier's copy) at their GS size at every scale, the retired Water reflections row's Original byte for byte (`rd_replay_tool_ripple_436_ps2`, `rd_replay_tool_ripple_436_1x_ps2`; the replay tool's `--water-ps2` sets it, for a dump made under Original); unset or anything else: the port's rule, the blocks at the scene's scale (the row's Sharp; [RENDER_POST.md](RENDER_POST.md#water-and-render-to-texture-blocks)); no config key |
+| `ICO_RD_BLOCK_CLAMP` | `rd_water.c` (`rd__block_keeps_repeat`) | `1`: the tests' sabotage of issue 106's fix: no block read kept on REPEAT, every read of a render-to-texture block clamped under an open border as before the fix (logged once: `water: ICO_RD_BLOCK_CLAMP=1 (the tests' sabotage) ...`), so the water tests show their picture would see the defect (`rd_replay_tool_ripple`, `rd_replay_tool_ripple_436` and `_436_1x`: a second replay under it must draw a different picture); unset or anything else: the fix; no config key |
 | `ICO_RD_LOCAL_PROBE_SABOTAGE` | `rd_local_probe.c` | `slow` counts the local reads' probe time 4 times (turned off), `fast` a quarter (kept) (`rd_local_probe_off`, `rd_local_probe_kept`) |
+| `ICO_RD_SUBPASS_PROBE_SABOTAGE` | `rd_subpass_probe.c` | `slow` counts the subpass read's probe time of the read 4 times (refused), `fast` a quarter (kept), `plain` the shaped plain pass's 4 times (refused), `end` ends the process with exit 86 right after DATE's self-test, as a GPU hang inside the probe would (the mark `probing` left) (`rd_subpass_probe_refused`, `_kept`, `_plain`, `_end`) |
+| `ICO_VK_SUBPASS_PROBE_CLASS` | `vk_device.c` (`rhi_subpass_verdict.h`) | 1 runs the subpass read's probe on a class off by default this release (Arm's, Qualcomm's, lavapipe's), 0 keeps it off on any class: `rhi_vk_subpass_verdict`, `rd_subpass_probe_*` (under the Arm fakes) |
+| `ICO_TEST_EXIT_INFO` | `exit_info.c` (off Android only) | a file holding Android's exit records as `IcoActivity.exitRecords` answers (`exit_info.h`'s record text): the start reads it as the system's records (`exit_info`); unset or empty, the system keeps none |
+| `ICO_TEST_PROBE` | `diag_test.c` | the `actlossnext` child marks the subpass read's probe as running (`ico_diag_set_probe`) before its loss: the next start counts no loss step (`diag`) |
+| `ICO_VK_SUBPASS_VERDICT` | `vk_device.c` (`rhi_subpass_verdict.h`) | the subpass read's verdict file for a run without the game's pipeline cache file (the tools and tests decide nothing without one): `rhi_vk_subpass_verdict`, `rd_subpass_probe_*` ([RHI.md](RHI.md#the-subpass-reads-probe)) |
 | `ICO_RD_FOG_SABOTAGE` | `rd_fog_path.c` | makes named paths fail the self-test (`rd_fog_selftest_fallback`; `local`: `rd_fog_selftest_local_sabotage`) |
 | `ICO_RD_SHADOW_ONE` | `rd_profile.c` | 0: the shadow count's seven stencil-tested draws (and the box reduction above 1x) instead of the one draw ([dev] `shadow_one`); 1 the one draw where the backend has the stencil view, kept whatever the self-test finds |
 | `ICO_RD_SHADOW_BSPLINE` | `rd_profile.c` | 1: the shadow composites above 1x through the cubic B-spline instead of one bilinear tap ([dev] `shadow_bspline`; `rd_fx_plan.c` `rd__sprite_above1x`); `rd_shadow_test` flips `RdProfile.shadowBspline` itself |
+| `ICO_RD_SHADOW_FINE` | `rd_shadowres.c` | `0`: the shadow's levels at the PS2's sizes at every scale (the PS2-size chain's picture above 1x, byte for byte the release before's: the A/B's other half, `rd_shadow_fine_ab`, and the tests whose expectations are that chain, pinned in `rd_shadowres.cmake`); `force`: the levels at the scene's scale at 1x too (S 1 on both axes: the GS's own step, the tent the identity; `rd_shadow_fine_ab`'s `force`); unset or anything else: the rule, the levels at the scene's scale wherever it is above 1 on an axis ([RENDER_POST.md](RENDER_POST.md#the-shadows-levels-above-1x)) |
+| `ICO_RD_SHADOW_COUNT_FORM` | `rd_shadow_count.c` | `stencil`, `full` or `seven`: above 1x the shadow's full-size count in that form for the run (the first level's step from the stencil, the full-size pass, the seven stencil-tested draws), no check and no trial; unset or anything else: the full-size pass until the check at the first shadowed scene passes, then each device times the three and keeps the stencil step unless another is cheaper by the margin (`rd_shadow_fine_ab` check 9, [WORK_BUFFERS.md](WORK_BUFFERS.md#the-count-from-the-stencil)) |
+| `ICO_RD_SHADOW_COUNT_SABOTAGE` | `rd_shadow_count.c` | `1`: the first level's step from the stencil reads an empty box (every texel 0), so the check at the first shadowed scene finds it different and keeps the full-size pass for the run (`rd_shadow_count_check_sabotage`) |
+| `ICO_RD_SHADOW_COUNT_TOUCH` | `rd_shadow_one.c` | `1`: the depth touched (a transition to DEPTH_READ) right before each first level's step from the stencil, so the guard draws the full-size pass after all (`rd_shadow_fine_ab`'s guard run) |
+| `ICO_RD_SHADOW_FINE_CUTS` | `rd_shadowres.c` | `0`: the shadow's levels at the scene's scale drawn whole, nine passes over every texel (no box, no empty-area skip, the tent in two passes), the other half of `rd_shadow_fine_ab`'s cuts A/B; unset or anything else: the cuts ([RENDER_POST.md](RENDER_POST.md#the-shadows-levels-above-1x)) |
 | `ICO_RD_SHADOW_SABOTAGE` | `rd_shadow_one.c`, `rd_shadow_selftest.c` | 1: the one draw's table is wrong at m = 1, so the shadow count's self-test fails and the seven draws resolve the count (`rd_shadow_selftest_sabotage`) |
 | `ICO_RD_DATE_SABOTAGE` | `rd_replay_tiler.c`, `rd_date_selftest.c` | 1: DATE's setup writes 0 into the stencil bit where the alpha's MSB is 1, so the self-test fails (`rd_date_selftest_sabotage`) |
-| `ICO_RD_BLEND_SABOTAGE` | `rd_blend_selftest.c` | makes named blend modes read white in the blend's self-test (`rd_blend_selftest_sabotage*`) |
-| `ICO_RD_VU_PREPASS_SABOTAGE` | `rd_vuprepass_selftest.c`, `rd_replay_vu.c` | 1: the pre-passes' self-test draws its first command's vertex records a texel off; `tri`: its triangles' slot A a slot off; `ticks`: the tick stage's tick 1 at tick 0's camera; each fails it and the pre-pass is turned off (`rd_vuprepass_selftest_sabotage`, `_sabotage_tri`, `_ticks`) |
-| `ICO_RD_VU_PLAIN` | `rd_pipeline.c` | 1: every VU draw with the VU vertex shaders' plain variants, as on a device of the table (`kVuPlainOnly`); the replay tool's pictures at a wide aspect then show the plain-only picture ([RENDER.md](PIPELINES.md#the-fallback-entries)) |
+| `ICO_RD_BLEND_SABOTAGE` | `rd_blend_selftest.c` | makes named blend modes read white in the blend's self-test (`rd_blend_selftest_sabotage*`); set, `rd_vuprepass_selftest_test` runs the blend's self-test first as the game does (`rd_vuprepass_selftest_nodiscard_fallback`: `fixed`, the two-pass fallback on a device with dual-source blending) |
+| `ICO_RD_VU_PREPASS_SABOTAGE` | `rd_vuprepass_selftest.c`, `rd_replay_vu.c` | 1: the pre-passes' self-test draws its first command's vertex records a texel off; `tri`: its triangles' slot A a slot off; `ticks`: the tick stage's tick 1 at tick 0's camera; `stale`: the record's copies left out from the self-test's second replay on (only its later replays can see it); each fails it and the pre-pass is turned off (`rd_vuprepass_selftest_sabotage`, `_sabotage_tri`, `_ticks`, `_sabotage_straddle`, `_mali_sabotage_straddle`) |
+| `ICO_RD_VU_PLAIN` | `rd_pipeline.c` | 1: every VU draw with the VU vertex shaders' plain variants, as on a device of the table (its `adreno-740-qualcomm` row); the replay tool's pictures at a wide aspect then show the plain-only picture ([RENDER.md](PIPELINES.md#the-fallback-entries)); `row`: the same with the drops as that row and Turnip keep them (`g_rd.vuNoBeside`: no side bands, the skinned draws' drops kept, the static meshes and grids by the camera rule; `rd_plain_camera_ab`) |
 | `ICO_RD_VU_EXTENDED` | `rd_pipeline.c` | 1: the extended variants whatever the device table or `ICO_RD_VU_PLAIN` says |
 | `ICO_RD_VU_SET` | `rd_pipeline.c` | `plain` or `extended`: as `ICO_RD_VU_PLAIN=1` or `ICO_RD_VU_EXTENDED=1` (`[dev] vu_set`); `auto` or unset: the device table's |
+| `ICO_RD_VU_BONES` | `rd_pipeline.c` | `ring`: the cluster entries' ring builds in place of their plain variants (the bones through t5; the plain set only), `cbuffer` or unset: VuBoneCB (`[dev] vu_bones`, issue 123's ladder; [VU_SKIN_CHECK.md](VU_SKIN_CHECK.md#the-ladder)); `ICO_RD_VU_BONES_BY` the mark the start line repeats |
 | `ICO_RD_SHEET_SHADER` | `rd_core.c` | 1: the menus' sheet text through `font_sheet_ps` at every scale, no bake (`[dev] sheet_shader = true`; the bake's A/B) |
+| `ICO_RD_ACQUIRE_AHEAD` | `rd_thread.c` | 0: with the render thread submitting (Direct3D 11), the next picture's wait for room in the present queue stays in its acquire, inside its reads (`[dev] acquire_ahead = false`; the display's wait ahead's A/B) |
 | `ICO_RD_PASS_AREA` | `rd_pass_area.c` | 1: a render pass on SCENE whose draws are all 2D with a known place takes the render area of the tiles they touch, 0: every pass its whole target, `auto` or unset: the profile's (on on a tile-based GPU; `[dev] pass_area`; `rd_pass_area_ab`, `rd_state` `testPassArea`) |
 | `ICO_RD_CLEAR_CARRY` | `rd_pass_cut.c` | 1: a pending clear carried past a source's barrier into the next pass on its target, 0: flushed as before, `auto` or unset: the profile's (on on a tile-based GPU; `[dev] clear_carry`; `rd_pass_cut_ab`, `rd_pass_cut`) |
 | `ICO_RD_CLEAR_SKIP` | `rd_pass_cut.c` | 1: a clear of AURA_WORK or AURA_TAP whose only reader is a constant read not drawn (drawn later where read), 0: drawn, `auto` or unset: the profile's (on on a tile-based GPU; `[dev] clear_skip`; `rd_pass_cut_ab`, `rd_pass_cut`) |
+| `ICO_RD_GLOW_LIGHT` | `rd_glow_light.c` | 0: the glow's chain drawn whole at every scale (the light plan off; `rd_glow_light_ab`'s baseline, the runs of `rd_glow_cheap_ab`, whose cuts and mask fold need the chain drawn, and those of `rd_crack_late_ab`, whose goldens were made with the chain drawn whole); unset or 1: the plan, the default on every device (no config key; [RENDER_POST.md](RENDER_POST.md#the-glow-where-it-adds-light)) |
 | `ICO_RD_LAST_STORE` | `rd_pass_cut.c` | 1: the depth store of the pass holding its last touch dropped where the walk keeps that pass open to the touch, 0: stored, `auto` or unset: the profile's (on on a tile-based GPU; `[dev] last_store`; `rd_pass_cut_ab`, `rd_pass_cut`) |
+| `ICO_RD_SHADOW_TILE` | `rd_shadow_tile.c` | 0: the shadow composites drawn whole, 1: over the GPU tile mask whatever the class and the self-test (DATE through the stencil bit still needed), unset: off (`RD_SHADOW_TILE_DEFAULT` 0 in rd_shadow_tile.c: no keys, no self-test; no setting: `rd_shadow_tile_ab`, `rd_shadow_tile`) |
+| `ICO_RD_SHADOW_BOX` | `rd_shadow_box.c` | 0: the shadow count's one draw and the shadow composites drawn whole, 1 or unset: over the volumes' box (no setting: `rd_shadow_box_ab`) |
+| `ICO_RD_NO_VOLUME` | `rd_no_volume.c` | 0: a shadow window with no volume drawn as before (the count's, the levels' and list 3's passes), 1: SCENE's pass kept open and the count and levels written as zero clears whatever the class (the scan's and DATE's conditions still hold), unset: off (`RD_NO_VOLUME_DEFAULT` 0: the PowerVR phone flickered with it on; with the constant 1 the PowerVR class and MoltenVK under Vulkan; no setting: `rd_no_volume_ab`, `rd_no_volume`; [RENDER_POST.md](RENDER_POST.md#a-shadow-window-with-no-volume)) |
+| `ICO_RD_NO_VOLUME_BREAK` | `rd_no_volume.c` | 1: a shadow window with no volume taken with SCENE's pass ended at the resolve as before, the reset and the merged stencil store as before, no count, level or composite drawn, the count and levels written as zero clears (none for a target that holds the last replay's zero) whatever the class (the scan's and DATE's conditions still hold; it goes before `ICO_RD_NO_VOLUME`), 0: off; unset: `RD_NO_VOLUME_BREAK_DEFAULT` 1, on the PowerVR D-Series DXT-48-1536 only (the rest of the PowerVR class and MoltenVK off by default; no setting: `rd_no_volume_break_ab`; [RENDER_POST.md](RENDER_POST.md#a-shadow-window-with-no-volume)) |
+| `ICO_RD_PACE_GPU` | `rd_pace_gpu_live.c` | 1: with pictures as made the moment drawn is the predicted GPU end less the mean latency; 0 or unset: computed and reported, not drawn (`RD_PACE_GPU_DEFAULT` 0; no setting; [DISPLAY.md](DISPLAY.md#interpolation-between-ticks)) |
+| `ICO_RD_AS_MADE_TIMER` | `rd_as_made_timer.c` | 1: with pictures as made the moment drawn otherwise (where the screen's rule does not place a picture) is the own timer's (over `ICO_RD_PACE_GPU`) on every platform; 0: computed and reported, not drawn; unset: `RD_AS_MADE_TIMER_DEFAULT` 1, drawn on Android only (`rd_as_made_timer_decide`; no setting) |
+| `ICO_RD_PACE_SCREEN` | `rd_pace_screen_live.c` | 1: with pictures as made the moment drawn is the screen's predicted refresh where it can predict (over `ICO_RD_AS_MADE_TIMER` and `ICO_RD_PACE_GPU`; where it cannot, theirs) on every platform; 0: computed and reported, not drawn; unset: `RD_PACE_SCREEN_DEFAULT` 1, drawn on Android only (`rd_pace_screen_decide`; no setting; [DISPLAY.md](DISPLAY.md#interpolation-between-ticks)) |
+| `ICO_RD_PACE_EVEN` | `rd_pace_even_live.c` | 1: with pictures as made on a display that gives its times back, the even cadence: every picture shown for the same whole number of refreshes, the window's pacer holding each hand-over, the content the screen's rule's for that refresh (it lowers the pictures a second); 0 or unset: off (`RD_PACE_EVEN_DEFAULT` 0: three phone release candidates did not land pictures on their refresh; off, nothing of it runs; no setting; [DISPLAY.md](DISPLAY.md#interpolation-between-ticks)) |
+| `ICO_RD_TURN_FOLD` | `rd_turn_fold.c` | 1: on a pre-rotated swapchain (or the headless twin, `ICO_VK_FAKE_TRANSFORM`) a present that draws the box blit alone, one texel a pixel, draws it turned into the image and no turn pass, once its start-up self-test passed; 0 or unset: the turn pass (`RD_TURN_FOLD_DEFAULT` 0: the user decides after a phone rc; no setting: `rd_turn_fold_ab`; [RENDER_POST.md](RENDER_POST.md#the-turn-in-the-presents-blit-off-by-default-until-a-phone-rc)) |
+| `ICO_RD_PASTE_SPEC` | `rd_paste_spec.c` | 0: the glow's paste (every premultiplied add of the fx plan) drawn by `fx_frame_ps`; 1: by `fx_paste_ps` where its gate takes the DrawCB, whatever `RD_PASTE_SPEC_DEFAULT` (the module, Vulkan alone, and its start-up self-test still decide); `sabotage`: the self-test's own `fx_paste_ps` draw given another FIX, so it must refuse; unset: the build's default (`RD_PASTE_SPEC_DEFAULT` 1: on where the self-test passes; no setting: `rd_paste_spec_ab`; [RENDER_POST.md](RENDER_POST.md#the-glows-paste-by-its-own-entry)) |
+| `ICO_RD_VOLUME_FS` | `rd_volume_fs.c` | 0: the shadow volumes drawn by `sprite_ps`; 1: by `date_clear_ps` (no colour output, no discard) whatever `RD_VOLUME_FS_DEFAULT` (Vulkan, single-sampled passes and its start-up self-test still decide); `sabotage`: the self-test's own `date_clear_ps` replays draw each increment as a decrement, so it must refuse; set to any value, `rd_replay_tool` runs the self-test after `rd_init` (unset it does not, and the volumes keep `sprite_ps` there; the game always runs it). No setting: `rd_volume_fs_ab`, `rd_volume_fs_sabotage` |
+| `ICO_RD_COMP_SPEC` | `rd_comp_spec.c` | 0: the shadow composites and levels drawn by `sprite_ps`; 1: by `sprite_comp_ps` where the gate takes the key and the DrawCB, whatever `RD_COMP_SPEC_DEFAULT` (the module, Vulkan alone, the dual-source blend, single-sampled passes and the start-up self-test still decide); `sabotage`: the self-test's second arm draws one band with its vertex alpha one lower, so it must refuse; set to any value, `rd_replay_tool` runs the self-test after `rd_init` (unset it does not, and the composites keep `sprite_ps` there; the game always runs it); unset: the build's default (`RD_COMP_SPEC_DEFAULT` 1; no setting: `rd_comp_spec_ab`; [RENDER_POST.md](RENDER_POST.md#the-shadow-composites-by-their-own-entry)) |
+| `ICO_RD_VU_COMPUTE_CLASS` | `rd_vu_class.c` | 1: the VU record by compute dispatches in place of the vertex stores on any device that offers both (the PowerVR class's rule; a `[dev] vu_record` asked for by name wins), 0: off; unset: `RD_VU_COMPUTE_CLASS_DEFAULT` (1: on the PowerVR D-Series DXT-48-1536 alone, the rest of the PowerVR class under Vulkan off by default) (no setting: `rd_vurecord_ab_compute_class`; [RENDER_POST.md](RENDER_POST.md#the-vu-record-by-compute-on-the-powervr-d-series-dxt)) |
+| `ICO_RD_NO_VOLUME_POISON` | `rd_no_volume.c` | 1: the zero clears a window with no volume owes are written magenta and none is left out for a target that holds zero, so any reader of the count or a level the walk does not draw shows in the picture (`rd_no_volume_break_ab`'s phonepoison row: every PNG but SHADOW0-2 the same bytes) |
+| `ICO_RD_EMPTY_SKIP` | `rd_shadow_box.c` | 0: a shadow composite whose level's box is empty drawn as before (its DATE snapshot or stencil set-up taken, nothing drawn), 1 or unset: skipped with its set-up on every device (no setting: `rd_empty_skip_ab`, `rd_date_one`; `rd_shadow_box_ab` pins 0; [RENDER_POST.md](RENDER_POST.md#one-date-set-up-for-the-shadow-composites)) |
+| `ICO_RD_DATE_ONE` | `rd_date_one.c` | 0: every shadow composite takes its own DATE snapshot or stencil set-up, 1 or unset: a composite after one that cannot set the alpha's top bit (the bound checked a picture) uses that one's, on every device, `force`: the same ignoring the bound (the sabotage test: the pictures may differ; `rd_date_one`) (no setting: `rd_date_one_ab`, `rd_date_one`; `rd_date_cut_ab` pins 0; [RENDER_POST.md](RENDER_POST.md#one-date-set-up-for-the-shadow-composites)) |
+| `ICO_RD_STENCIL_PACKED` | `rd_stencil_selftest.c` | 1: every pass on a depth loads and stores its stencil with the depth, 0: inside the shadow window only whatever the class and the fog's path (the self-test still runs where the renderer runs its self-tests), unset: the decision (the window only on the in-place path, and on the local read on the PowerVR class after its self-test; no setting: `rd_stencil_ab`, `rd_stencil_selftest`) |
+| `ICO_RD_AURA_PASTE` | `rd_aura_paste.c` | 0: the aura's paste drawn whole; unset or 1: as the alpha alone over the SCENE rows that read only FEED128 rows proven alpha 0, the paste over the band, on every device with the local read (no config key: `rd_aura_paste_ab`; [RENDER_POST.md](RENDER_POST.md#the-auras-paste-as-its-constant-part)) |
+| `ICO_RD_CRACK_SWAP` | `rd_crack_fill.c` | 0: the crack fill's snapshot copied; unset or 1: SCENE's colour swapped with its snapshot texture where the fill takes it (no copy, the fill's pass not loaded, every texel drawn), where the start-up self-test passed and the draw is not held (no config key: `rd_crack_work_ab`, `rd_crack_test`; [RENDER_POST.md](RENDER_POST.md#the-crack-fills-snapshot-by-the-swap)) |
+| `ICO_RD_CRACK_TAP2` | `rd_crack_fill.c` | 0: the general crack shader reads every tap; unset or 1: at a reach of at most 2 it leaves a texel with neither immediate neighbour in front on an axis at once (the same verdicts; no config key: `rd_crack_work_ab`, `rd_crack_test`) |
+| `ICO_RD_FILL11` | `rd_fill11.c` | 0: the crack fill keeps its own pass where it is due (its depth twins' self-test still runs and is logged); 1: its draw held to list 11's first screen draw on SCENE and drawn as that pass's first draw over a scratch depth where nothing between touches SCENE, on any device class where the self-test passes; unset: off (the default in this release, `RD_FILL11_DEFAULT`; with it on, the class's: the PowerVR phone and the desktop classes where the self-test passes, not the Arm, Qualcomm and Apple classes; the same bytes; no config key: `rd_fill11_ab`, `rd_fill11_gl`, `rd_crack_test` forces it; [RENDER_POST.md](RENDER_POST.md#the-crack-fill-in-list-11s-pass)) |
+| `ICO_RD_FILL11_POISON` | `rd_fill11.c`, `rd_crack_fill.c` | 1: what the crack fill in list 11's pass leaves undefined is made garbage, as a tile-based GPU leaves it and lavapipe does not: its passes' colour loaded DONT_CARE cleared to magenta (every texel must be written), the scratch depth and stencil cleared to 0.5 and 0x5A (no draw may depend on them); unset: as the device does (no config key: `rd_crack_fill11*`, `rd_fill11_ab`; [RENDER_POST.md](RENDER_POST.md#the-crack-fill-in-list-11s-pass)) |
+| `ICO_RD_LATE_PASS` | `rd_late_pass.c` | 0: the late passes on SCENE off (the crack fill drawn where `rd__crack_fill_place` puts it, in its own pass after the glow's alpha; list 11's draws with SCENE's depth); 1 or `all`: every part on, `fill`: the crack fill's draw held to the aura's paste pass under the glow's DARK plan, `defer`: the glow's paste under LAMPS and WHOLE drawn in the aura's paste pass, `join`: list 11's draws that use no depth in the open pass without it, each on any device and backend; unset: the profile's (every part on a tile-based GPU under Vulkan, the join alone elsewhere, where the fx plan reads by the local read; the join an accepted divergence, DIVERGENCES.md VD-31; no config key: `rd_late_pass_ab`, `rd_late_pass_gl`; [RENDER_POST.md](RENDER_POST.md#the-late-passes-on-scene)) |
+| `ICO_RD_SCENE_HOLD` | `rd_hold.c` | 0: the paused scene's hold off (every paused picture drawn in full); `paused`: `rd_replay_tool` marks its frame paused (the `--repeat` ticks of one fixture; the start-up self-tests' own frames are not), its replays that present nothing (`--pass-dump`) taken as pictures, the hold's own rules and device checks still in force; unset: on where they hold, frames paused by the game's own pause (no config key: `rd_hold_ab`; [RENDER.md](RENDER.md#the-paused-scenes-hold)) |
+| `ICO_RD_LAMPS` | `rd_lamps.c` | 0: every part off (under the glow's lamps plan the lamps' pass on WORK2 drawn whole and WORK2_PAD's band drawn as recorded; under the dark plan WORK0's alpha sprite a clear at the chain's place; under the whole plan the band drawn); 1 or `all`: every part, or words joined by `,` or `+`: `area` the lamps' pass over the lamps' tiles and the region the last lamps frame lit, `pad` the band a lazy clear, `owed` the dark plan's WORK0 alpha sprite a lazy clear where nothing later touches WORK0, `wholepad` the band a lazy clear under the whole plan, `fold4` two staticBlur pairs a pass, `lowres` WORK2 at the GS frame's size above 1x with its own depth and the GS bilinear's reduction (not byte-identical, DIVERGENCES.md VD-32; read once a run, never in `1` or `all`), `lowresbox` the same with the above-1x box's reduction, `lowresbias` with the slope bias at a fractional sample point, `lowreshy` with bilinear on a plane and the nearest texel off it, `lowres4` with the farthest of four texels for its depth, `lowresp` with the nearest texel's alone, `lowres2x` WORK2 at twice the GS size with the box (four samples a GS pixel), `lowresms` WORK2 at the GS size resolved in the pass from 4 samples (where the device and its self-test allow, else lowres off), `lowresms8` the same with 8, `fillpaste` the crack fill's snapshot taken where it lands in the paste's pass (exact; the tile class under Vulkan with lowres; `rd_lamps_fillpaste_ab`), `fillhold` the crack fill's hold past the lamps under `lowres`, `glowblur` the glow's ten blur pairs as two passes of float filtering in lamps and whole frames at every scale, Original 1x included (not byte-identical, DIVERGENCES.md VD-33; never in `1` or `all`; the value `noglowblur` alone: the class's default with the glow blur pinned off whatever `RD_GLOW_BLUR_DEFAULT`, for the tests that compare with the game's exact chain: `rd_glow_light_ab`, `tools/native_frame_check.py`; `rd_glow_blur_ab`, [RENDER_POST.md](RENDER_POST.md#the-glows-blur-in-two-passes)), each on any class and backend (the area and the fold only where their start-up self-tests passed, under Vulkan); unset: the profile's (the band, owed and wholepad everywhere, fillhold nowhere, the area on the PowerVR and desktop classes under Vulkan where the pass area is on, the fold nowhere, lowresms on the PowerVR class under Vulkan where its checks and self-test pass (`RD_LAMPS_MS_DEFAULT` 1), the plain lowres where the build's `RD_LAMPS_LOWRES_DEFAULT` is 1, glowblur where the build's `RD_GLOW_BLUR_DEFAULT` is 1 (0 in v0.11.5); no config key: `rd_lamps_ab`, `rd_lamps_gl`, `rd_lamps_lowres_ab`; [RENDER_POST.md](RENDER_POST.md#the-lamps-glow-for-less)) |
+| `ICO_RD_LAMPS_POISON` | `rd_lamps.c`, `rd_replay_tiler.c` | 1: WORK2 cleared to magenta before every lamps pass drawn whole, so a pass that relied on WORK2's earlier contents where it should not shows it on lavapipe, and WORK0's swapped-in colour cleared to magenta before every pass of two blur pairs, so a texel that pass does not write shows (`rd_lamps_ab`'s phonep runs); under `lowres` WORK2's own depth cleared to 0.375 before `depth_down_ps` writes it (`rd_lamps_lowres_ab`'s poison row); under `glowblur` WORK0 cleared to magenta between the two passes, so a texel the down pass does not write shows (`rd_glow_blur_ab`'s poison row) |
+| `ICO_RD_DATE_CUT` | `rd_date_cut.c` | 0: every DATE snapshot's pass begun with its target's depth, 1 or unset: a pass whose draws neither test nor write the depth begun without it (the DATE snapshot path only; no setting: `rd_date_cut_ab`, `rd_date_cut`) |
 | `ICO_RD_AURA_BOX` | `rd_aura_box.c` | 1: the aura's read of SCENE into FEED128 above 1x in two passes (ROWBOX, then FEED128's sum), 0: in one, `auto` or unset: the profile's (on on a tile-based GPU; `[dev] aura_box`; `rd_aura_box_ab`, `rd_blur` case `aura_box`) |
 | `ICO_RD_SHADOW_MERGE` | `rd_shadow_merge.c` | 1: the shadow volumes drawn in the scene's open pass where it cleared the stencil and the count target's new-target clear left undrawn where nothing reads it before its resolve, 0: in a pass of their own and cleared, unset: the profile's (on on a tile-based GPU; no `[dev]` key; `rd_shadow_merge_ab`, `rd_shadow` case m) |
 | `ICO_RD_AURA_KERNEL` | `rd_aura_kernel.c` | `gs`: the aura's read of SCENE into FEED128 with the GS's own taps instead of the box above 1x, a measurement (`[dev] aura_kernel = gs`; the picture differs) |
 | `ICO_RD_VU_PREPASS` | `rd_replay_vu.c` | 0: no VU vertex pre-pass, every VU draw the old way (`[dev] vu_prepass = false`); the tests switch it with `rd__set_vu_prepass` ([RENDER.md](PIPELINES.md#the-vertex-and-triangle-pre-passes)) |
 | `ICO_RD_VU_PREPASS_BATCH` | `rd_replay_vu.c` | 0: the VU pre-pass's draws one an entry and stage instead of batched (`[dev] vu_prepass_batch = false`; `rd_vubatch_ab`, `rd_vuprepass_selftest_unbatched`; [VU1_PROGRAMS.md](VU1_PROGRAMS.md#the-pre-passs-batches)) |
 | `ICO_RD_VU_MERGE` | `rd_replay_vu.c` | 0: every VU draw a GPU draw of its own instead of the draw merge (`[dev] vu_merge = false`; `rd_vumerge_ab`, `rd_vuprepass_selftest_unmerged`; [VU1_PROGRAMS.md](VU1_PROGRAMS.md#the-draw-merge)) |
+| `ICO_RD_VU_FLAT0` | `rd_vu_flat0.c` | 0: `vu_main_vs` and `vu_merge_main_vs` replaced by their twins built with `ICO_VU_FLAT0=0` (`vu_all_main_vs`, `vu_merge_all_main_vs`, also `ICO_VU_EARLY=0`: every corner computing the flat outputs and a culled triangle computed in full, the shader before both changes); unset, empty or 1: the shipped build (the planes read at the provoking corner alone); no setting (`rd_vu_flat0_ab`, `rd_vu_flat0`; [PIPELINES.md](PIPELINES.md#flat-outputs-at-the-provoking-corner)) |
+| `ICO_RD_VU_SHARE` | `rd_vu_share.c` | 0 (or `off`): every VU draw keeps its original index list (no shared vertices); unset, empty or 1: the shipped behaviour (a clip-mode-none mesh draw through the record takes its mesh's shared list); no setting (`rd_vu_share_ab`, `rd_vu_share_gl`, `rd_vu_share`; [PIPELINES.md](PIPELINES.md#shared-vertices-for-clip-mode-none)) |
+| `ICO_RD_VU_ZERO` | `rd_vu_zero_run.c` | 0: the zero-area cull off; 1: on without its start-up self-test (the replay tool runs none by default; its zero build made at the first need), every entry of every replay checked against the CPU's answers; unset: off until the self-test passes; the loss ladder (`ICO_LOSS_ROW`) and the install's mark (`ICO_VU_ZERO_BLOCK`) turn it off over either; no setting (`rd_vu_zero_ab`, `rd_vu_zero_gl`, `rd_vu_zero`; [PIPELINES.md](PIPELINES.md#the-zero-area-cull)) |
+| `ICO_RD_VU_ZERO_SABOTAGE` | `rd_vu_zero_run.c` | `lattice`: the zero build given a lattice half a texel off (the self-test must refuse the cull and release it); `check`: the tests' check answers from no lattice (every culled triangle differs: off for the run); `missing`: no record copied (the self-test reads no answer); `picture`: one byte of the self-test's picture without the cull altered before the compare (off for the run by the picture branch, the mark `failed`); tests only (`rd_vuprepass_selftest_zero_lattice`, `rd_vu_zero_fault`, `rd_vuprepass_selftest_zero_missing`, `rd_vuprepass_selftest_zero_picture`) |
+| `ICO_VU_ZERO_BLOCK`, `ICO_VU_ZERO_MARK`, `ICO_VU_ZERO_VERSION` | `vu_zero_mark.c` (set), `rd_vu_zero_run.c` (read) | set by the platform at the start from `logs/vu-zero-mark.txt` (the zero-area cull off on this install, its words; the mark's path; the running version, written with each stage word); a test sets `ICO_VU_ZERO_BLOCK` alone to fake a mark (`rd_vuprepass_selftest_zero_marked`), or the path and a version in the build folder to read what the renderer wrote (`rd_vuprepass_selftest_zero_refused`, `_zero_picture`, `_zero_switch`); no setting |
+| `ICO_RD_AB` | `rd_ab_run.c` (`rd_ab.c` `rd_ab_mode_of`) | the in-play judge (its five subjects, the zero-area cull, the discard-free twins, the fast pixel build, the twins' camera rule class and the one-pass blend): `on` every replay with each attempt, `off` every replay at each one's off arm (the cull: no entry given a word, the rule stage's build without it; the twins: every pass through its *_nodual build), `alt` every replay with, without, without, with from the first (no stage needed, no trial, no verdict); unset or another word: the judge (a trial 2 s into each stage the cull had work in; the replay tool has no stage, so no trial and today's path); no setting (`rd_ab_zero_ab`, `rd_ab_zero_stop`; [PIPELINES.md](PIPELINES.md#the-zero-area-cull-timed-in-play)) |
+| `ICO_RD_AB_FAKE_LOSS` | `rd_ab_run.c` | N: a device loss faked at the start of the run's replay N (1 the first): every trial stopped for the run, every replay from there at the off arm, logged (`rd_ab_zero_stop`); unset or 0: none; no setting |
+| `ICO_RD_VU_NODISCARD` | `rd_nodiscard_run.c` | 0: the discard-free twins off; 1: on without their start-up self-test (the replay tool runs none), their modules made at the first pass that wants one and their pipelines at the next replay's start, the whole queue a batch at a time, waited for; unset: held until the self-test passes (`rd_nodiscard_ab`; [PIPELINES.md](PIPELINES.md#the-discard-free-twins)); no setting |
+| `ICO_RD_VU_FASTPS` | `rd_fastps_run.c` | 0: the fast pixel build off; 1: on without its start-up self-test (the replay tool runs none), its modules made at the first pass that wants one and its pipelines at the next replay's start, waited for; unset: held until the self-test passes (`rd_fastps_ab`; [PIPELINES.md](PIPELINES.md#the-fast-pixel-build)); no setting |
+| `ICO_RD_VU_FASTPS_SABOTAGE` | `rd_fastps_run.c` | `decal`: the CPU's rule does not look at DECAL, so a DECAL pass draws through the build, which reads MODULATE, and the self-test must catch it (`rd_vuprepass_selftest_fastps_sabotage`); `module`: its modules not made; no setting |
+| `ICO_FASTPS_BLOCK`, `ICO_FASTPS_MARK`, `ICO_FASTPS_VERSION` | `fastps_mark.c` (set), `rd_fastps_run.c` (read) | set by the platform at the start from `logs/fastps-mark.txt` (the fast pixel build off on this install, its words; the mark's path; the version to write in it); the tests set them by hand (`rd_vuprepass_selftest_fastps_marked`, `fastps_mark`) |
+| `ICO_RD_ONEPASS` | `rd_onepass_run.c` | 0: the one-pass blend off; `plain` or `full`: on without its device check (the replay tool runs none), the plain class or both classes, its pipelines made in the draw (`rd_onepass_ab`); unset: the shipped behaviour (held until the check, [PIPELINES.md](PIPELINES.md#the-one-pass-blend)); no setting |
+| `ICO_RD_ONEPASS_SABOTAGE` | `rd_onepass_run.c`, `rd_onepass_selftest.c` | `constant`: the blend constant's alpha 127/255 in the check's arms A and C, which must differ (`rd_vuprepass_selftest_onepass_sabotage`); `cut`: the same in arm C on the code 36 frames alone, so the plain class alone is used (`_onepass_cut`); `unmade`: every one-pass pipeline taken as not made in the check, its arms not checked and no verdict (`_onepass_unchecked`); `sliver`: arm C's picture given a texel on the code 36 frames today's two passes drew nothing on, so C must differ (`_onepass_sliver`); `read`: the first frame's reference read taken as failed without a device loss, not checked and no verdict (`_onepass_readfail`); no setting |
+| `ICO_ONEPASS_BLOCK`, `ICO_ONEPASS_MARK`, `ICO_ONEPASS_VERSION` | `onepass_mark.c` (set), `rd_onepass_run.c` (read) | set by the platform at the start from `logs/onepass-mark.txt` (the one-pass blend off on this install, its words; the mark's path; the version to write); the tests set them (`rd_vuprepass_selftest_onepass*`); no setting |
+| `ICO_RD_VU_NODISCARD_TRACE` | `rd_nodiscard_selftest.c` | `1`: the clipper check's trace, per case: its draw as the replay set it up (the draw word, the drops' mode, its mesh's facing, the clip mode: `rd_replay_vu.c` `rd__vu_trace`), the culler's reasons (`rd__vis_why`), each triangle's corners' h and facing computed on the CPU (`vu1ref_region_facing`) with the fate the draw's flags give, and the pass's state once (`rd_vuprepass_selftest_nodiscard*`); no setting |
+| `ICO_RD_RATECARD` | `rd_ratecard_run.c` | `1`: the rate card runs without a results file (the game's `ICO_RATECARD_FILE`) and without its 1.5 s budget (lavapipe draws on the CPU): `rd_ratecard_*` ([RENDER_PERF.md](RENDER_PERF.md#the-rate-card)); no setting |
+| `ICO_RD_RATECARD_SABOTAGE` | `rd_ratecard_run.c` | `end`: the start ends inside the rate card (exit 87) after its file says `measuring`, as a hang there would (`rd_ratecard_end`); no setting |
+| `ICO_RATECARD_FILE`, `ICO_RATECARD_VERSION` | `diag_host.c` (set), `rd_ratecard_run.c` (read) | set by the platform at start: the rate card's results file (`logs/ratecard.txt`) and the version its key holds; the tests set them to a file and a version of their own |
+| `ICO_RD_VU_NODISCARD_SABOTAGE` | `rd_nodiscard_run.c` | `empty`: the clipper check's first case moved off the frame, so it draws nothing and the check must say not clean (`rd_vuprepass_selftest_nodiscard_empty`); `unmade`: every twin the clipper check's frames ask for taken as not made, its retry's too, so the check must say not checked, never not clean (`rd_vuprepass_selftest_nodiscard_unchecked`); `clipper`: the clipper check's first case's picture through the twins with one byte altered, so the check must say not clean (`rd_vuprepass_selftest_nodiscard_clipper`); `alpha`: the CPU's proof does not look at the alpha test, so a pass whose test can fail draws through a twin and the self-test's pictures differ (`rd_vuprepass_selftest_nodiscard_sabotage`: off for the run, released, the mark `failed`); `module`: the twins' modules not made |
+| `ICO_RD_VU_NODISCARD_CLIPPER` | `rd_nodiscard_run.c` | `clean`: the discard-free twins' clipper check's verdict taken as clean whatever it measures (logged with what it measured; under `ICO_RD_VU_NODISCARD=1` without the self-test, the verdict from the start): `rd_vuprepass_selftest_nodiscard_clean` and `rd_nodiscard_clean` (lavapipe measures not clean) ([PIPELINES.md](PIPELINES.md#the-discard-free-twins)); no setting |
+| `ICO_NODISCARD_BLOCK`, `ICO_NODISCARD_MARK`, `ICO_NODISCARD_VERSION` | `nodiscard_mark.c` (set), `rd_nodiscard_run.c` (read) | set by the platform at the start from `logs/nodiscard-mark.txt` (the discard-free twins off on this install, its words; the mark's path; the version to write in it); the tests set them by hand (`rd_vuprepass_selftest_nodiscard_marked`, `nodiscard_mark`) |
+| `ICO_RD_VU_COMPACT` | `rd_vu_compact.c` | 1 (or `on`): the index compaction wherever the record is written by compute dispatches, whatever the class's define; 0 (or `off`): off; unset: `RD_VU_COMPACT_ARM_DEFAULT` on the Mali-G52 (by its device name; 1, in its own form tried by its own start-up test: the form before it left every 3D picture unfinished there, issue 179) and `RD_VU_COMPACT_DEFAULT` on the PowerVR D-Series DXT-48-1536 (1), the start-up self-test deciding (one that never ran: off), off by default on every other device (lavapipe: the rows set 1); no setting (`rd_vu_compact_ab`, `rd_vuprepass_selftest_compact*`; [PIPELINES.md](PIPELINES.md#the-index-compaction)) |
+| `ICO_RD_VU_AUDIT` | `rd_vu_audit.c` | 1: the VU record path's bounds audit: every recorded command's slots and index values, the index compaction's lists read back after their fence and every draw of the record's fourth plane checked on the CPU, one line a violation (`rd: VU audit: violation: ...`, the first 32) and the run's line at the replay tool's `--stats` (`rd: VU audit: ... N violations`), a line a render pass and the worst pass's of the Arm estimate (`rd: VU audit: pass: ...`, `rd: VU audit: worst pass: ...`: the indexed VU draws' index ranges summed, at 164 and 64 bytes a vertex, against Mali's 180 MB region); the picture unchanged (`rd_vu_audit`) |
+| `ICO_RD_VU_COMPACT_SABOTAGE` | `rd_vu_compact.c` | 1: the keep stage writes every triangle as a filler, so the start-up self-test with the compaction fails and refuses it (`rd_vuprepass_selftest_compact_refused`); `lists`: the Mali-G52's form's lists the CPU writes first written one triangle off (each triangle as the next one's), so its own test's lists' check finds values neither the CPU's nor a filler (`rd_vuprepass_selftest_compact_mali_lists`); `readback`: one filler of its own test's read-back taken back to its corner 0, so the check finds a filler store lost (`rd_vuprepass_selftest_compact_mali_readback`); `unchecked`: its own test's lists never copied back, so the test says not checked and removes its mark (`rd_vuprepass_selftest_compact_mali_unchecked`) |
+| `ICO_COMPACT_BLOCK`, `ICO_COMPACT_MARK`, `ICO_COMPACT_VERSION` | `compact_mark.c` (set), `rd_vu_compact.c` (read) | set by the platform at the start from `logs/compact-mark.txt` (the index compaction's Mali-G52 form off on this install, its words; the mark's path; the version to write in it); the tests set them by hand (`rd_vuprepass_selftest_compact_mali*`, `compact_mark`) |
+| `ICO_RD_VU_COMPACT_ARM` | `rd_vu_compact.c` | 1: the index compaction takes the Mali-G52's class (`RD_VU_COMPACT_ARM_DEFAULT`) on any device, and with it the class's form, the lists written by the CPU first (lavapipe: `RhiLimits.vendorId` and the device name are the device's own, which `ICO_VK_FAKE_VENDOR` does not change; `rd_vuprepass_selftest_compact_mali*`, `rd_vu_compact_ab`'s `mali` profile) |
 | `ICO_RD_STORE_PLAN` | `rd_profile.c`, `rd_store_plan.c` | 0: every depth store kept (`[dev] store_plan = false`); 1 the store plan (the default); `all`: every depth store dropped, a wrong plan for `rd_store_plan_ab` ([WORK_BUFFERS.md](WORK_BUFFERS.md#the-store-plan)) |
 | `ICO_RD_STORE_POISON` | `rd_store_plan.c` | 1: a depth or stencil load the store plan leaves undefined clears to 0.5 and 0x5A instead, and the shadow count's colour load it drops clears the colour to 0x5A, the garbage a tile-based GPU may leave (`rd_store_plan_ab`, `rd_shadow_test` case p) |
+| `ICO_RD_HEALTH_FAKE` | `rd_health_live.c` | `selftest`: every record collected inside the index compaction's start-up self-test reads as one with its stamps unwritten (the GPU's own sign of a reset), so that self-test fails and refuses the compaction (`rd_vuprepass_selftest_compact_stamps`); `play`: every record with VU draws collected outside the self-tests reads so, so the index compaction's Mali-G52 form is turned off in play and its mark written failed (`rd_vu_compact_play`); any other value is said and ignored. No setting |
 | `ICO_RD_FAKE_MERGE_FAIL` | `rd_pipeline.c` | 1: the first pipeline made with a draw merge build is destroyed and kept as failed, as a build the driver refused; the merge goes off from the next replay (`rd_vumerge_fallback`; [VU1_PROGRAMS.md](VU1_PROGRAMS.md#the-draw-merge)) |
 | `ICO_RD_VU_FUSE` | `rd_replay_vu.c` | 0: code 36's kick draws under their own pipelines instead of the fused scissor pair (`[dev] vu_fuse = false`; `rd_vufuse_ab`; [VU1_PROGRAMS.md](VU1_PROGRAMS.md#the-fused-scissor-pair)) |
+| `ICO_RD_VU_SKIN_CHECK` | `rd_vu_skin_check.c`, `vk_device.c` | unset: the skinned draws' bone-block check on only on an Adreno with a window; 0 (`false`, `off`, `no`): off (`[dev] vu_skin_check = false`); 1 (`true`, `on`, `yes`): on on any device, headless or not (`[dev] vu_skin_check = true`; `rd_vu_skin_check_robust`); 2: every skinned command of every replay (`rd_vu_skin_check_ab`); the device enables `VK_EXT_pipeline_robustness` only where the check can run ([VU_SKIN_CHECK.md](VU_SKIN_CHECK.md)) |
+| `ICO_RD_VU_SKIN_SABOTAGE` | `rd_vu_skin_check.c` | `A`: the check's own probe reads the bone at VU address A as zeros, the draw's bytes right (H1's form); `A,ring`: the bone zeroed in the ring after the check kept the bytes, the draw and the probe both reading zeros (H2's form) (`rd_vu_skin_check_probe`, `_ring`, `rd_vu_skin_check_163`; [VU_SKIN_CHECK.md](VU_SKIN_CHECK.md)) |
+| `ICO_RD_CULL` | `rd_vis.c` | `off` (or 0): every scene draw replayed; `full` (or 2, `true`; the default on an immediate-mode GPU, `frustum` is the default on a tile-based profile): `frustum` with list 0's occlusion test; `frustum` (or 1): a mesh, skinned or grid command of lists 0 to 10 wholly off its target or behind the eye replayed as an `RDC_NOP`; `full`: list 0's occlusion test too, a mesh or grid draw of list 0 wholly behind the depth the opaque draws before it wrote replayed as an `RDC_NOP` (`rd_vis_hiz.c`) (`[dev] cull`; `rd_cull_ab`; the replay tool's `--cull`, and its `--occlusion` sets 0; [RENDER.md](RENDER_PERF.md#culling)) The glow's fixture lists replay a lamps room with `off` (their `nocull` word: [TESTING_FIXTURES.md](TESTING_FIXTURES.md#a-lists-own-properties)); `rd_glow_cheap_ab`'s count run sets `ICO_RD_FX_PLAN=0` and `ICO_RD_CLEAR_CARRY=0`, its before run the second |
+| `ICO_RD_CULL_HIZ_TRIS` | `rd_vis.c` | under `ICO_RD_CULL=full`: the occluder triangles a picture rasterises into the occlusion test's record, the largest screen boxes first (a count up to 1000000, 0 none; default 12000; the stats line's `past the budget`; [RENDER.md](RENDER_PERF.md#culling)) |
+| `ICO_RD_CULL_HIZ_FAST` | `rd_vis.c` | `0` (or `off`): the occlusion test's collect without its shortcuts (no batch or triangle screen box before the vertex pass, no verdicts handed to the walk, no scan memo, no collect cache): the plain pass, a comparison; the same occluders either way (read at `rd__vis_init`; `rd_vis_hiz`, `rd_vis_hiz_corpus`; [RENDER.md](RENDER_PERF.md#culling)) |
+| `ICO_RD_CULL_HIZ_CHECK` | `rd_vis.c` | `1`: with the fast collect, every triangle it leaves and every collect cache hit worked out in full as well, a difference counted (`rd_replay_tool --stats`'s `stats: cull occlusion cost: ... check: N checked, W wrong`; `rd_vis_hiz`, `rd_vis_hiz_corpus`) |
+| `ICO_RD_CULL_RANGE` | `rd_vis.c` | `0` (or `off`): a draw of part of a mesh is tested with the whole stream's box alone, not its batches' box (a comparison; read at `rd_init`; [RENDER.md](RENDER_PERF.md#culling)) |
+| `ICO_RD_PRESENT_SCENE` | `rd_present_scene.c` | 1: the present from SCENE on (the reduction not drawn where only the present reads DISPLAY), 0: off, the default; unset: the default (`RD_PRESENT_SCENE_DEFAULT`, off until the owner has seen the measurement); the A/B's switch, no config key (`rd_present_scene_ab`; [RENDER_POST.md](RENDER_POST.md#the-present-from-scene-off-by-default-until-measured)) |
 | `ICO_RD_CONSTANT_READS` | `rd_const_read.c` | 0: a post sprite whose source target holds only its last clear reads the target as before instead of being drawn in the clear's colour (`[dev] constant_reads = false`; `rd_constant_reads_ab`; [WORK_BUFFERS.md](WORK_BUFFERS.md#a-cleared-source-read-as-its-colour)) |
 | `ICO_RD_NO_SPRITE_PLANES` | `rd_screen_planes.c` | 1: the sprite planes builds off for the run, the screen-prim triangles through the plain sprite builds, as `[dev] pipeline_skip` makes it on a device whose driver stopped creating them (issue 161; `rd_noplanes_ab`; [WORK_BUFFERS.md](WORK_BUFFERS.md#without-the-sprite-planes)) |
-| `ICO_RD_PERF_LIST_STAMPS` | `rd_perf.c` | 0: no list or effect timestamp (`[dev] perf_list_stamps = false`); `rd_perf_test` switches it with `rd__set_perf_list_stamps` ([RENDER.md](RENDER.md#the-per-pass-timing)) |
-| `ICO_RD_PERF_PASSES` | `rd_perf.c` | 1: every replay timed pass by pass (`[dev] perf_passes = true`; the window writes `ico-pc-passes.csv`); `rd_perf_test` and the replay tool's `--pass-times` switch it with `rd__set_perf_passes` ([RENDER.md](RENDER.md#the-per-pass-timing)) |
+| `ICO_RD_PERF_LIST_STAMPS` | `rd_perf.c` | 0: no list or effect timestamp (`[dev] perf_list_stamps = false`); `rd_perf_test` switches it with `rd__set_perf_list_stamps` ([RENDER.md](RENDER_PERF.md#the-per-pass-timing)) |
+| `ICO_RD_PERF_PASSES` | `rd_perf.c` | 1: every replay timed pass by pass (`[dev] perf_passes = true`; the window writes `ico-pc-passes.csv`); `rd_perf_test` and the replay tool's `--pass-times` switch it with `rd__set_perf_passes` ([RENDER.md](RENDER_PERF.md#the-per-pass-timing)) |
 | `ICO_RHI_BACKEND`, `ICO_VK_DEVICE`, `ICO_D3D12_ADAPTER` | `rhi_backend.c`, `vk_device.c`, `d3d12_device.c` | pick the backend, the Vulkan device, the D3D12 adapter (`warp`) |
 | `ICO_FIXED_CLOCK` | `clock.c` | the wall clock fixed at 2002-01-01 unless `0` |
 | `ICO_GALLERY_PLAY` | `gallery.c` | a play script for the music gallery |
 | `ICO_UI_POPUP_TEST` | `ui_host.c` | the test popup at [Main tick](ARCHITECTURE.md#terms) 100 and every 150 ticks after (`[dev] popup_test`) |
 | `ICO_START_STAGE` | `ico2/common/src/debug.c` (`debug_TryToGetStartStage`), `gamestate.c` | `[dev] start_stage` handed over: a stage 2 to the disc's last (105 on the European disc, 103 on the 104-row discs, 102 on the June 2001 demo: `ico_region_start_stage`) to start in, which suspends achievements; another value logs `start_stage N refused` |
+| `ICO_RD_SHOT_LATE=1`, `=0` | `rd_present.c` | the state picture read at its frame slot's recycle (the tile-based GPUs' path, `rd_shot_late.h`) forced on or off on Vulkan (`rd_present`'s late-read case) |
 | `ICO_TTY` | `kernel_host.c` | the game's `scePrintf` to stdout |
 | `ICO_FMV_DECODE` | `movie.c` | 0 skips decoding in any build; the timing is unchanged |
 | `ICO_RD_DUMP_EVERY`, `_DIR`, `_INTERP`, `_FROM` | `rd_core.c` | the frame dumps `ico-pc.ini` hands to rd |
 | `ICO_VU_REF_AT` | `rd_replay_tool.c` | the kicked triangles containing a GS point |
 | `ICO_BOOT_DUMPS`, `ICO_BOOT_OLD` | `rd_boot_present_test.c` | the start-up dumps (the folder when no argument is given), and `ICO_BOOT_OLD=1` for dumps whose frames 118 to 120 draw stage 1 |
-| `ICO_DUMPS`, `ICO_SWEEPS`, `ICO_COVERAGE_DIR`, `ICO_REPLAY_LOCK` | the gate tools | the dump list, the aspect sweeps, the coverage state, the lock |
+| `ICO_DUMPS`, `ICO_SWEEPS`, `ICO_COVERAGE_CORPUS`, `ICO_COVERAGE_DIR`, `ICO_REPLAY_LOCK` | the gate tools | the dump list, the aspect sweeps (`native_frame_gate_b`, local only), the corpus list (`coverage_corpus`, local only), the coverage state, the lock |
+| `ICO_FIXTURE_SOURCES` | `rd_fixture_tool selfcheck-dir` (`rd_fixtures_selfcheck`) | the developer's folder of the dumps the fixtures were made from; unset: the window check skips ([TESTING_FIXTURES.md](TESTING_FIXTURES.md#the-checks)) |
 
 **Running the storage tests on a lavapipe with the interlock (no root).** The CI runners' Mesa 25.2 lavapipe has the fragment shader interlock, so `rd_pixel_storage`, `rd_fog_storage`, `rd_present_storage`, `rd_replay_tool_pass_merge` and `rd_blend_selftest_moltenvk_storage` run the exact storage path there (banner `blend exact (interlock)`); a lavapipe before 25.2 keeps the fixed-function blend and passes without exercising it. To reproduce on a machine with an older Mesa: download from snapshot.debian.org the trixie-backports `mesa-vulkan-drivers` and `mesa-libgallium` 25.2.6-1~bpo13+1 `.deb`s (into `build-host/tmp/lvp-interlock/deb/`; sid's 26.x needs a newer glibc), `dpkg-deb -x` both into `build-host/tmp/lvp-interlock/root`, copy `root/usr/share/vulkan/icd.d/lvp_icd*.json` and rewrite its `library_path` to the extracted `root/usr/lib/x86_64-linux-gnu/libvulkan_lvp.so`, then run the test from its build directory with `ICO_RD_BLEND=storage VK_ICD_FILENAMES=<that json> LD_LIBRARY_PATH=<root>/usr/lib/x86_64-linux-gnu` (the log's `blend:` line names the mode in force).
 
@@ -501,10 +760,24 @@ listed in [RENDER.md](RENDER.md#dumps-and-the-replay-tool). For tests the useful
 `--pass-dump DIR` (every named target from one run), `--occlusion` with `--nop @FILE` (the
 hidden-draw measurement and the replay without the hidden draws; `tools/occlusion_corpus.py` runs
 them over `tools/occlusion_corpus.txt` with `--stats --gpu-repeat K`, under the replay lock it takes
-for each run, and writes the report and the culling gate's verdict, [RENDER.md](RENDER.md#culling)), `--list --no-device` (the commands without a
+for each run, and writes the report and the culling gate's verdict, [RENDER.md](RENDER_PERF.md#culling)), `--list --no-device` (the commands without a
 GPU), `--present WxH`, `--aspect`, `--enhanced`, `--aa`, `--interp T PREV` and with it
 `--save-blended DUMP` (the frame between the two written as F12's blended present's frame)
 (`port/render/tools/rd_replay_tool.c`, usage).
+
+### The culler over the corpus, and the phone's logs
+
+`tools/cull_corpus.py` ([RENDER.md](RENDER_PERF.md#culling)) runs `rd_replay_tool --stats --gpu-repeat K
+--time K` under `--cull off`, `frustum` and `full` for every dump of `tools/occlusion_corpus.txt`
+and `tools/native_frame_dumps.txt` that is here (Original 4:3, Enhanced 4:3 2x, and Enhanced 2x at
+the dump's own aspect for a dump wider than 4:3), and `--occlusion` once, under the replay lock for
+each run. The report `build-host/tmp/v0101/evidence/perf/cull.md` has a row a dump and setting
+(scene draws, skipped and its share, list 0's GPU median and the CPU walk by mode, the culler's own
+ms, the share hidden for any reason and what the skip leaves of it, the largest reasons a command
+was replayed), the reasons summed, the medians and one verdict line; `--selftest` parses built-in
+sample lines. `tools/cull_log_compare.py BASELINE.log NEW.log` (or `--pair ROOM=BASELINE:NEW`, once
+a room) prints the 10 s lines' medians of the `cull:` piece, list 0's GPU ms, the render thread's
+walk and CPU ms and their change; `--selftest` as above.
 
 ### Replaying a phone's loss dump as the phone drew it
 
@@ -550,7 +823,7 @@ headless build replays a player's session with `pad_script=<the file>`; it is on
 window build, in `logs/input-<time>.txt`, and off headless (`input_record=`). Its header records
 the values of `video.video_mode`, `game.language`, `gameplay.mirror`, `gameplay.stick_fix`,
 `gameplay.yorda_safe`, `gameplay.developer_mode`, `dev.start_stage`, `gameplay.door_fix`, `gameplay.yorda_trips`,
-`video.anti_aliasing`, `gameplay.hold_type`, `gameplay.hold_type_chosen` and `gameplay.skip_opening` (the boot's ticks), the eight `variants.*` keys (the barrier's is `(unset)` until chosen), and the native frame's width and aspect (`port/platform/sim_keys.c`
+`video.anti_aliasing`, `gameplay.hold_type`, `gameplay.hold_type_chosen` and `gameplay.skip_opening` (the boot's ticks), the eight `variants.*` keys (the barrier's is `(unset)` until chosen), `gameplay.shadows_together`, `gameplay.zoom_type`, `gameplay.camera_reset`, `gameplay.yorda_look`, and the native frame's width and aspect (`port/platform/sim_keys.c`
 `ICO_SIM_KEYS`; `port/platform/main_host.c` `record_header`; `ico_input_record_frame_lines`).
 
 The trace (`trace=` or `--trace FILE`) writes a header naming its columns and then one line per Main
@@ -600,6 +873,10 @@ download from `tools/fetch_deps.sh`, the committed file byte for byte the tool's
 `font_subset_zh` (`tools/subset_font_zh.py --check`, the same for the Chinese font) and
 `content_table_chains`, `content_table_chains_jpn` (`--version jpn`: the Japanese disc's boot
 ELF, tables and groups) and `content_table_chains_kor` (`--version kor`; `port/test/CMakeLists.txt`),
+`unused_content_audit_<disc>` for the seven discs (`tools/unused_content_audit.py --slug <disc>
+--check`: the disc's section of [UNUSED_CONTENT_AUDIT.md](UNUSED_CONTENT_AUDIT.md) is what the image
+and its boot ELF give; skipped, 77, without the image; the section is regenerated by the tool's
+`--write`, never by hand),
 `data_desc_fresh` (with the audit of MotionDef's bit reads), `tables_manifest`,
 `tables_manifest_jpn` and `tables_manifest_kor`, `ee_layout_fresh_jpn`, `ee_layout_fresh_kor`, `ee_layout_fresh_ntsc`, `ee_layout_fresh_aug6` and `ee_layout_fresh_jun26` (each disc's `ee_layout` file is what its recorded upstream revision gives),
 `data_desc_fresh_ntsc`, `data_desc_fresh_aug6` and `data_desc_fresh_jun26` (`gen_data_desc.py --check --version ntsc|aug6|jun26`: the USA, August 2001 and June 2001 sets, written before `config/regions.txt` lists their rows, are what the table with the pending rows up to each gives; [DATA.md](DATA.md#the-usa-discs-set), [DATA.md](DATA.md#the-august-2001-preview-discs-set), [DATA.md](DATA.md#the-june-2001-magazine-demos-set)), `data_map_selftest` (`gen_ee_layout.py --selftest`: the version-block readers and `record_map`'s rules on a made-up record, each map row with and without it: a moved bit-field copied from the disc's bit, a shorter array with its `default ... =0` row, a wider integer with its `narrow` row, a missing field's default, a host-only field the disc lacks left to the record clear, a `rename` row (a field under another name) and a scalar array gathered from separately named fields, an unsigned bit-field held narrower, and the error for each row taken away, for a rename of some elements only and for a row that settles nothing; [DATA.md](DATA.md#the-map-rows))
@@ -630,12 +907,30 @@ player guides, TODOs, and the package's list of player guides; `tools/check_docs
 the allowed exceptions (top-level `CMakeLists.txt`, `docs_check`; `tools/check_docs.py`,
 docstring). `python3 -I tools/check_docs.py` runs it without a build.
 
+`test_paths_check` runs `tools/check_test_paths.py`: no test list, test script or test registration
+(the lists under `tools/` and `port/**/test/`, every CMake file, the C and Python test sources'
+string literals) names an absolute path, a home folder, a path that climbs out of the tree or a
+machine-local dump folder; each hit is printed with its file and line. Its allow-list,
+`tools/check_test_paths_allow.txt`, names the files not converted to fixtures yet, and a listed file
+that names no such path any more fails too (the list only shrinks). `test_paths_selftest` runs its
+rules on fixed lines. `rdfix_check` runs `tools/rdfix_check.py --all`: every committed fixture
+parses with no art section ([TESTING_FIXTURES.md](TESTING_FIXTURES.md#the-checks)). All three need
+Python only, and the first runs in the pre-commit hook and CI's hygiene steps.
+
 `rc_tools_gate` runs `tools/check_rc_text.py --selftest`: the rc label rule (`-rc[0-9]+$`), the
 text search in a plain file and in a zip's inflated entries (UTF-8; UTF-16 for the absent check),
 `--label`, `--expect`, `--cmake-flag` and `--gradle-flag`, `strings_en.c`'s row text inside `#if
 ICO_RC_TOOLS`, `CMakeLists.txt`'s and `build.gradle`'s defaults and release-label refusals, the
 manifest's provider enabled by the placeholder, and each `tools/package_*.sh` taking its switch from
-the checker and checking its program with `--label`, never turning the tooling on itself.
+the checker and checking its program with `--label`, never turning the tooling on itself, and the
+opening's capture compiled in an rc build on Android alone: every `window_capture_*` call in
+`window_host.c` and every code line of `window_capture.c` and `.h` inside `#if ICO_RC_TOOLS`
+(not its `#else`; comments blanked, string literals kept), and `window_capture.c` and
+`capture_trigger.c` named in `CMakeLists.txt` inside `if(ICO_RC_TOOLS AND ANDROID)` alone (a
+test program's `add_executable(<name>_test ...)` apart), with the scanners' own cases; the bench
+the same (`window_bench_*` calls, `window_bench.c` and `.h`; `window_bench.c`, `bench_plan.c` and
+`rd_bench_run.c` in that `if()`), and the absent check looking for the bench's line marks
+`window: bench: ` and `bench: frame ` too.
 `rc_tools_binary` runs `tools/check_rc_text.py --expect absent` on this build's `ico_pc` (`present`
 in a window build with `ICO_RC_TOOLS` on; not on Android or a cross build)
 ([BUILDING.md](../BUILDING.md#release-candidate-tools)).
@@ -657,7 +952,8 @@ FXC's X4000 "potentially uninitialized variable" error class; that shows in a Wi
 (`<build>/shaders/*.spv`): a vertex shader has no vector of booleans, no `any()`/`all()` and no
 boolean select, and uses only the opcodes of the envelope's set (a loop, `dot()`, a
 logical-not-equal or an undefined value named), every module stays within its stage's size budget
-in words, no module carries an array as a value (a whole-array load, store, construct, insert,
+in words (the sheet text entries `font_sheet_*` within their own, a tenth above their largest:
+[SHADERS.md](SHADERS.md#branches-from--and-)), no module carries an array as a value (a whole-array load, store, construct, insert,
 phi, select or copy), no vertex shader keeps a local array
 ([SHADERS.md](SHADERS.md#the-envelope)) and every module's header is SPIR-V 1.0 (the Vulkan 1.0
 target, [SHADERS.md](SHADERS.md)); the log lists each module's words, instructions, blocks,
@@ -670,6 +966,38 @@ bits are a denormal float a driver may flush; issues 163/164,
 read through `float4` loads give 84 findings, the current ones none. `python3 -I tools/check_spirv.py --sizes <build>/shaders` runs it by
 hand; on single files (`check_spirv.py a.spv b.spv`) it skips the variants gate.
 
+### The save states' carry-over guard
+
+`tools/state_carry_check.py check` judges a shipped program and its symbol file with the tree's own
+save code ([PLATFORM.md](PLATFORM.md#the-carry-over-guard): what it checks, the classes, the exit
+statuses, where the packages and CI run it). By hand, on a staged Android library:
+
+```
+python3 -I tools/state_carry_check.py check --binary dist/stage/android/libmain.so \
+    --syms dist/stage/android/libmain.syms.gz --workdir build-host/tmp/carry \
+    [--probe build-host/linux-x64/port/platform/state_carry_probe | --cc gcc]
+```
+
+The last line of its report is the verdict (`CARRIES`, `PINNED`, `NEVER` or `UNJUDGED`); above it
+each class's count and its unnamed targets. A `PINNED` verdict lists every unnamed initialised
+pointer: name it in the save's rules (`state_xbuild.c`), or move the pointer out of the game's
+data. Its tests: `state_carry_check` (the self-test over `state_carry_fixture.c` in every layout
+the host's compilers make), `state_carry_image` (the loader mirror against
+`ico_state_image_range`) and `state_carry_xbuild` (two real links of one program carrying a state
+both ways); [TESTING_PROGRAMS.md](TESTING_PROGRAMS.md#portplatformtest) says what each holds.
+
+`android_syms_layout_rows` (`tools/test/android_syms_layout_rows_test.py`, no build) covers the
+Windows layout gate's cause line and the start pad
+([PLATFORM.md](PLATFORM.md#game-data-ranges)). It reads `port/state_legacy/layout-windows-x64.txt`
+(the start, the largest alignment and the game's sections in ascending order) and checks that
+`game_data_range.c`'s pad has that alignment and puts the `a` bracket at the recorded start's
+residue wherever the port's `.data` before it ends. A GNU ld map made from the rows must read back
+as the rows (`layout-rows`). Against another hash, `layout ... MAP` must print `the same objects
+at other offsets: the range's start alignment` with the first moved object and the residue when
+the sections from a 64-aligned one on stand 0x20 earlier. It must name the object when one size
+differs, and say that an item inside an object changed when the offsets are the same. The
+recorded hash must pass with no cause line.
+
 ## Which tests a change needs
 
 - A new Options row: `ctest -L ui`. `settings` builds every page and compares its rows with fixed
@@ -677,7 +1005,10 @@ hand; on single files (`check_spirv.py a.spv b.spv`) it skips the variants gate.
   settings cases go in `port/ui/test/settings_extra_test.c` (its header). `settings_render` draws
   every screen, `menu_text` the rows in the sheets' look, and `font_audit` (every code point inside the
   font subsets, `tools/font_audit.py`) and `font_coverage` (a glyph for each) check the row's text
-  in the eight languages; `strings_complete` fails until every table has the new strings. A new
+  in the eight languages; `strings_complete` fails until every table has the new strings, and
+  `strings_sync` until every community table has the new row's line in its end block with the
+  current English quoted (`tools/strings_sync.py --write` / `--refresh-comments`;
+  `strings_sync_selftest` checks the tool's parse on fixed inputs). A new
   Japanese character needs `tools/subset_font_ja.py` run again (`font_subset_ja` fails until it
   is), a new Hangul syllable `tools/subset_font_ko.py` (`font_subset_ko`), a new character of the Chinese
   table `tools/subset_font_zh.py` (`font_subset_zh`), a community translation's character outside
@@ -696,7 +1027,11 @@ Arimo's ranges `tools/subset_font_arimo.py` (`font_subset_arimo`). A gameplay op
   that does not pass, the game side's texture calls do not wait, the next picture takes that slot,
   as the device has it, with `ICO_RD_SUBMIT_THREAD=0` and with `ICO_RD_SLOT_AHEAD=0`; its
   `threadFair`: a call waiting for one picture's reads runs before the next picture's begin, the
-  wait counted in the walk; and `rd_tex_test` under
+  wait counted in the walk; its `threadRoomAhead`: the display's wait for room in the present
+  queue made at the end of the picture before, held there without a read wait, taken by the next
+  acquire, with `ICO_RD_ACQUIRE_AHEAD=0` never made; its `threadOriginal`: Frame rate Original's
+  frames handed over by `rd_end_frame`, the gate on the game thread, the pixels byte for byte the
+  thread-off run's, with `ICO_RD_ORIGINAL_ASYNC=0` inside the step; and `rd_tex_test` under
   the tsan build), `rd_present` (the deferred state picture, the slot waits by whose), `rd_replay_tool_save_blended` (the
   interpolation on the render thread); the device runs are the window's, with `[dev]
   render_thread = sync` against `off` for the same pictures ([PLATFORM.md](PLATFORM.md#the-render-thread)).
@@ -730,20 +1065,239 @@ Arimo's ranges `tools/subset_font_arimo.py` (`font_subset_arimo`). A gameplay op
 - A port site that names a layout, menu row, story flag, stage or pad bit: `region_literals_check`
   (the number goes through `port/core/region.h`, or into the allow list with each disc's number).
 - A change to these documents: `docs_check`.
+- A change to a test list, a test script or a test's registration: `test_paths_check` (no path outside
+  the repository); to a fixture, its manifest or its tools: `rd_fixture_format`, `rd_fixtures_check`,
+  `rdfix_check`, and the tests that list it ([TESTING_FIXTURES.md](TESTING_FIXTURES.md)).
 
 ## CI
 
 | workflow | job | runner | what it runs |
 | --- | --- | --- | --- |
-| `ci.yml` | `linux` | `ubuntu-24.04` | the hygiene checks (no disc data, format, no `ICO_HOST` conditional, no region block, stack-layout, struct-cast and call-type audits, generated files fresh), then `linux-x64` headless and window builds with `ctest`, `linux-x64-clang` with `ctest`, and the `win-x64` cross build (tests built; the renderer's Direct3D 11 set uploaded for `windows`) |
+| `ci.yml` | `linux` | `ubuntu-24.04` | the hygiene checks (no disc data, format, no `ICO_HOST` conditional, no region block, stack-layout, struct-cast and call-type audits, the shard split's self-test, generated files fresh), then the `win-x64` cross build (tests built; the renderer's Direct3D 11 set uploaded for `windows`) |
+| `ci.yml` | `tests` | `ubuntu-24.04` | sixteen runners: the `linux-x64` headless suite in 4 shards, `linux-x64` window in 2, `linux-x64-clang` in 2, `asan` in 6, `fptrap` in 2; each builds its preset's `all tests`, checks the suite's cost table and runs one shard of its `ctest`; the tests that replay the committed fixtures run in `linux-x64` and `asan` only ([below](#the-ci-shards)) |
 | `ci.yml` | `windows` | `windows-2022` | after `linux`: the renderer's tests from the `win-x64` build on Direct3D 11 through WARP, the debug layer tried ([above](#the-render-suite-on-direct3d-11-warp)) |
-| `ci.yml` | `extra` | `ubuntu-24.04` | a matrix of `asan` and `fptrap` (build `all tests`, `ctest`) and the `win-x64-clang` cross build |
-| `ci.yml` | `linux-arm64` | `ubuntu-24.04-arm` | the no-disc-data check, the `linux-arm64` preset with `ctest`, the filtered-pixel render tests in a step that does not gate, the arm64 package on release tags |
+| `ci.yml` | `extra` | `ubuntu-24.04` | the `win-x64-clang` cross build |
+| `ci.yml` | `linux-arm64` | `ubuntu-24.04-arm` | the no-disc-data check, the `linux-arm64` preset with `ctest` (without the filtered-pixel render tests and the tests that replay the committed fixtures), the arm64 package on release tags (kept as an artifact and attached to the tag's release) |
+| `ci.yml` | `linux-arm64-filtered` | `ubuntu-24.04-arm` | the filtered-pixel render tests the `linux-arm64` job leaves out, in 2 shards, not gating (never run for a dispatched package) |
+| `ci.yml` | `linux-arm64-fixtures` | `ubuntu-24.04-arm` | the tests that replay the committed fixtures, which the `linux-arm64` job leaves out, in 4 gating shards, without the filtered-pixel names (never run for a dispatched package) |
 | `ci.yml` | `android` | `ubuntu-24.04` | the debug APK (`assembleDebug`), `tools/check_android_flags.sh`, the APK structure checks |
-| `ios.yml` | `build`, `publish` | `macos-15`, `ubuntu-24.04` | the unsigned iPhone IPA for a published release, attached to it |
-| `ios.yml` | `build-macos`, `publish-macos` | `macos-15`, `ubuntu-24.04` | the macOS app for a published release, attached to it |
+| `ci.yml` | `apple` (`macos`, `ios`) | `macos-15` | the macOS app and the unsigned iPhone IPA built and packaged (`apple-build.yml`), nothing kept; no test runs on the Mac |
+| `ios.yml` | `build-ios`, `publish-ios` | `macos-15`, `ubuntu-24.04` | the unsigned iPhone IPA for a published release (`apple-build.yml`), attached to it |
+| `ios.yml` | `build-macos`, `publish-macos` | `macos-15`, `ubuntu-24.04` | the macOS app for a published release (`apple-build.yml`), attached to it |
+| `ios.yml`, dispatched with `check_only` | `build-ios`, `build-macos` | `macos-15` | the dispatched branch's IPA and macOS app as the run's artifacts, no release, nothing attached |
 
-(`.github/workflows/ci.yml`, jobs `linux`, `windows`, `extra`, `linux-arm64`, `android`;
-`.github/workflows/ios.yml`.)
+(`.github/workflows/ci.yml`, jobs `linux`, `tests`, `windows`, `extra`, `linux-arm64`, `linux-arm64-filtered`, `linux-arm64-fixtures`, `android`, `apple`;
+`.github/workflows/ios.yml`; `.github/workflows/apple-build.yml`, the Apple build both call.)
 
 The triggers, steps and caches are [../BUILDING.md](../BUILDING.md#continuous-integration)'s.
+
+### The CI shards
+
+A `tests` runner lists its build's tests with `ctest --show-only=json-v1`, checks them against its
+suite's cost table (`tools/ci_shard.py check`, the guard below), and
+`tools/ci_shard.py split --shards N --index K --parallel 4` writes shard K's names for
+`ctest --tests-from-file`. The split is a pure function of the test list, the cost table, N and the
+parallel level, so the N runners of a suite agree without talking: tests that share a fixture
+(`FIXTURES_SETUP`, `FIXTURES_REQUIRED`: `rd_pixel` with the `rd_replay_tool*` and `rd_vu*_ab_pixel`
+tests that read its dump, `state_recover_files` with its readers, `texpack_disc` with its) form one
+group, so ctest never runs a setup twice; groups go heaviest first to the shard whose estimated
+time grows least, a shard's time at `--parallel 4` being the larger of a quarter of its seconds
+and its longest test (a 50-minute test gets a shard of its own plus small tests in the other three
+slots, rather than a shard of average seconds that then waits on it); a test the table does not
+name counts at the table's median. `--cost-data` also writes the shard's tests and seconds as the
+build's `Testing/Temporary/CTestCostData.txt`, which ctest reads to start the costliest tests first
+under `--parallel` (CMake's `COST` test property: "tests in the test set will be run in descending
+order of cost"), so a long test does not start last and finish alone. Each runner prints every
+shard's test count, seconds, longest test and estimated minutes, and the tests the table lacked
+(`tools/ci_shard.py`, header). `--selftest` (the `linux` job) checks that every test lands in
+exactly one shard, a fixture's tests together, the same split twice, the parallel estimate, the
+selection switches and the guard, and that each committed table parses.
+
+Selection: `--include RE` and `--exclude RE` (repeatable; an empty one excludes nothing) split
+only the matching or the other tests, and `--fixture-tests run|skip|only` keeps, leaves out or
+splits alone the tests that replay the committed fixtures (a `-DFIXTURES=` argument in the test's
+command, [TESTING_FIXTURES.md](TESTING_FIXTURES.md)). What each suite runs is one field a
+`tests` matrix line, `fixture_tests`, plus two workflow variables:
+
+| suite | the fixture tests | why |
+| --- | --- | --- |
+| `linux-x64` | run | the reference: every test once |
+| `asan` | run | AddressSanitizer and UBSan find a different class of defect (memory errors, undefined behaviour) on the paths only the fixture replays reach: glow chains, DATE cuts, shadow tiles, the VU record paths |
+| `linux-x64-window` | skip | a fixture test compares two render paths on lavapipe; the answer is the same under gcc, clang and the window build, so a second compiler or the window link adds no coverage of it |
+| `linux-x64-clang` | skip | the same |
+| `fptrap` | skip | the same; the float traps stay on every other test |
+| `linux-arm64` | skip | its gating tests and a release tag's package stay about 25 minutes |
+| `linux-arm64-fixtures` | only, in 4 gating shards | arm64's own float and lavapipe build on the fixture replays |
+| `linux-arm64-filtered` | the filtered-pixel names alone (`rd_present_scene_ab` is one), not gating | lavapipe on arm64 misses their comparisons by an LSB or two |
+
+Every other test runs in every suite. A skipping suite keeps every non-fixture test, the
+synthetic render tests among them; what it loses is that compiler's or that build's run of the
+fixture replays. To change a suite, flip its `fixture_tests` on each of its matrix lines and rerun
+`plan` for its shard count.
+
+`ICO_CI_EXCLUDE` (a regular expression in `ci.yml`'s `env`, passed as `--exclude` to every
+`tests` shard and the three `linux-arm64` jobs) names the tests left out of CI in every suite; they
+stay registered and run locally, and the guard still wants their lines. Today it names
+`rd_lamps_lowres_ab`: two of its rules are stale against the game's own frames (they fail with
+the renderer as it was before the fixtures too: "fillhold holds one crack fill more", which cannot hold where the late pass is
+the join alone, and lowresms's WORK3 bound of 48 levels, which the opening's sun frame exceeds at
+61), and it is the longest test (an assumed 1200 s locally, about 34 minutes in `linux-x64` and 56
+under `asan`). The repair of those rules removes it from `ICO_CI_EXCLUDE`.
+`ICO_ARM64_FILTERED` is the filtered-pixel names the two gating `linux-arm64` jobs leave out.
+
+Three tests are local-only by design and need no exclusion: `native_frame_gate_b`,
+`coverage_corpus` and `rd_boot_present` (label `local`) exit 77 with a `SKIP: local-only
+validation: ...` line naming the input they lack (`ICO_SWEEPS`, `ICO_COVERAGE_CORPUS`,
+`ICO_BOOT_DUMP_DIR`), which ctest reports as skipped (`SKIP_RETURN_CODE 77`), not failed.
+
+The cost tables `tools/ci_costs/<suite>.txt` (one each for `linux-x64`, `linux-x64-window`,
+`linux-x64-clang`, `asan`, `fptrap` and `linux-arm64`) are `<name> <seconds>` per test, from that
+suite's own job logs of a green CI run (the run is named in the table's second line,
+`--parallel 4`). One table for all suites misbalanced them: the same test costs about 1.4 to 1.7
+times as much under asan as in the plain build (CI run 43558388684, the render tests), and the
+first sharded run's shards of a plain suite ran 21 to 36 minutes apart. A line ending in
+`# estimate: ...` is not a CI measurement: it is a test's newest passing time in the merge checks'
+logs (`build-host/tmp/release/logs/merge-*.{first,rest,lvp}.log`) times the suite's host-to-CI
+ratio, written by `tools/ci_costs_update.py` for a test CI has not timed yet (a new test, or a
+test that replays the committed fixtures and skipped in CI while it read a machine-local dump).
+The ratio is measured on the tests the table and the logs both time (at least 5 s in each): the
+sum of their CI seconds over the sum of their local seconds, one for the render tests and one for
+the rest. On the build host (4 cores, lavapipe, `-j1`, while other work runs) against CI run
+43558388684 and the merge checks up to 2026-11-16 it is 1.69 for `linux-x64` (118 tests, the
+per-test quartiles 1.25 to 2.10), 2.00 for the window build, 2.00 for clang, 2.82 for asan, 1.79
+for fptrap and 1.54 for `linux-arm64`.
+
+The guard: `tools/ci_shard.py check` fails a `tests` runner (and the `linux-arm64` job) when a test
+of the build has no line in the suite's table, or a test that replays the committed fixtures has
+less than 1 s in it (the `0.00` a test keeps from a CI run where it skipped). Such a test would otherwise be
+split by a guess, and one slow guess unbalances a suite. A package that adds or converts a test
+adds its lines:
+
+```
+python3 -I tools/ci_costs_update.py update --build-dir build-host/int-linux-x64 --write
+```
+
+which reads the build's `CTestTestfile.cmake` files (nothing is run), keeps every measured line,
+estimates the missing ones from the merge checks' logs (`--local-log` names other logs,
+`--assume NAME=SECONDS` gives a local time no log has, such as a by-hand measurement), prints each
+suite's ratio and the tests it could not time (a fixture test with no time gets the median of the
+other fixture estimates, any other test the table's median), and rewrites the tables.
+`tools/ci_costs_update.py plan --build-dir ...` then prints each suite's total, its shards'
+estimated minutes for the workflow's counts, and the fewest shards that keep a shard under a
+target (`--target-min`, default 25) or reach the suite's longest test, over the tests the workflow
+gives the suite: it reads each suite's `fixture_tests`, the `linux-arm64-fixtures` shards and
+`ICO_CI_EXCLUDE` from `ci.yml` (`--fixture-tests` and `--exclude` override them).
+
+After the first green CI run that times the new tests, measure the tables from it:
+
+```
+python3 -I tools/ci_costs_update.py fetch-ci <run id> build-host/tmp/ci-logs/<run id>
+python3 -I tools/ci_costs_update.py update --build-dir build-host/int-linux-x64 \
+    --ci-logs build-host/tmp/ci-logs/<run id> --write
+```
+
+(`fetch-ci` saves the `tests`, `linux-arm64`, `linux-arm64-filtered` and `linux-arm64-fixtures` job
+logs with read-only `gh` queries; `update --ci-logs` takes every line from them, the largest time
+of a test that appears twice, and estimates only what that run did not time.) Refresh the tables
+this way when a suite's shape changes: a new slow test, or a shard far over its siblings in the
+printed minutes. The build tree's own `Testing/Temporary/CTestCostData.txt` is not a source: its
+averages cover every run since the tree was made, most of them before a test's present cost (on
+the development machine on 2026-11-03 it gave `settings_render` 0.26 s over 215 runs where the
+last run took 57 s).
+
+Expected wall time. A shard's tests take about a quarter of the summed seconds of its tests (CI run
+43558388684: 23.0 minutes of step for 22.5 of estimate, 27.9 for 26.8), at least its longest test,
+and a shard's fixed part is about 2.5 minutes (job setup and host packages about 40 s, the venv,
+the cache restores, the build from ccache 60 to 120 seconds). GitHub runs at most 20 jobs of the
+account at once on the Free plan ("Job concurrency limits for GitHub-hosted runners",
+docs.github.com/en/actions/reference/limits; macOS at most 5 of them), and a push's run has 31
+jobs, so the run's wall time is set by its total job-minutes over 20 runners as much as by its
+longest job; more shards add 2.5 fixed minutes each and help only while the run stays under 20
+jobs. Estimated test totals a suite, in minutes of `--parallel 4` time over the tests the
+workflow gives it (the tables above; `plan`, 2026-11-16, `ICO_CI_EXCLUDE` left out): `linux-x64`
+190, window 77, clang 77, `asan` 315, `fptrap` 69 (the last three without the fixture tests),
+`linux-arm64`'s fixture tests 115; the longest test in the run is `rd_glow_light_ab`, about 33
+minutes in `linux-x64`, 55 under `asan` and 30 on arm64. So the shards are (a job adds its fixed
+part, and the shard estimate times 1.04, the step-to-estimate factor above):
+
+| suite | shards | tests a shard (estimate) | job (model) |
+| --- | --- | --- | --- |
+| `linux-x64` | 4 | 47.5 min | about 52 min |
+| `linux-x64-window` | 2 | 38.7 min | about 43 min |
+| `linux-x64-clang` | 2 | 38.3 min | about 42 min |
+| `asan` | 6 | 54.5 min (its longest test: more shards do not shorten it; 5 would be 62.9) | about 59 min |
+| `fptrap` | 2 | 34.6 min | about 39 min |
+| `linux-arm64` (build, gating tests without the fixture tests) | 1 | | about 25 min, a release tag adds the packaging |
+| `linux-arm64-filtered` | 2 | | about 24 min |
+| `linux-arm64-fixtures` | 4 | 29.8 min (its longest test) | about 35 min |
+| `linux` | | | about 6 |
+| `windows` (after `linux`) | | | about 11 |
+
+The run is 29 jobs and about 1060 job-minutes, so 20 runners need at least 53 minutes, and the
+`asan` shards' floor (their longest test) puts it at least at 59. A simulation of the queue (jobs
+started in the workflow's order as runners free) gives about 61 minutes for these counts; one more
+or one fewer shard in `asan` or `linux-arm64-fixtures` gives 68 to 82, because a long job then
+waits for a runner. With every suite running the fixture tests the model gave about 76 minutes.
+Before the fixture tests ran (runs of 2026-11-09 to 2026-11-14) it was 560 to 820 job-minutes and
+42 to 70 minutes. A `tests` job's timeout is 120 minutes. A shard much longer than its siblings
+means its table is stale.
+
+## Release process
+
+A push to main restarts every CI job, so a release pushes once, after every test that can run
+locally has run. The maintainer's scripts for it are in `build-host/tmp/release/` (outside the
+repository, like the rest of `build-host/`); each prints its usage when run without arguments. The
+sequence:
+
+1. **Each package at its merge.** `merge-check.sh <branch> "<regex>"` merges the package branch
+   into the integration branch's worktree (`INT_WT`), builds `all tests` in its own build
+   directory `build-host/int-linux-x64` (configured once from that worktree with the `linux-x64`
+   preset and `-DICO_LINK_EXE=ON`, no disc when the worktree has no `baserom/`) and runs the
+   package's own tests: the CPU half of the regex (every label but `render`, `rhi`, `gl`, `vk10`,
+   `vk11`, `mali`) at `-j2`, then the lavapipe/llvmpipe half at `-j1`, the six game-starting tests
+   left out. A failed build, a failed test or a regex that selects nothing resets the integration
+   branch to its commit before the merge: the package goes back to its author with the log, and
+   no other package waits on it.
+2. **The new tests under the sanitizers.** `asan-new-tests.sh "<regex>"` builds the
+   `linux-x64-asan` preset (CI's asan suite: gcc 14, `-O1`,
+   `-fsanitize=address,undefined -fno-sanitize-recover=undefined`, the program linked) from the
+   integration worktree into `build-host/int-linux-x64-asan` and runs the named tests the same
+   two ways, so CI's asan shards are never a new test's first UBSan run. The regex is every test
+   the release added or changed.
+3. **The chain, once.** With main at the integration branch, `chain.sh <tag>` builds main's
+   `linux-x64`, runs `gate.sh` (every test but the game-starting ones as two `ctest` runs at the
+   same time: the lavapipe half at `-j1` and the CPU half at `-j3`, which share no
+   `RESOURCE_LOCK` and no fixture; then the native-frame gate-a and the `--pass-dump` byte
+   compare of the corpus; for a release that changes the picture beyond the 4:3 band, also the
+   band compare `rd_sideband_ab` over the wide captures and the disc-wide sweep
+   `gsb_cull_sweep.*`, whose printed counts are lowered into `tools/sweep_baseline.txt` when they
+   fall), then the window build, `offset_audit` on it and the fortify compile of
+   the C files changed since the last tag. On the cost data of 2026-11-03 (the suite 10,215 s at
+   `-j1`; the lavapipe half 96 % of it by CI's asan times) the lavapipe half is the chain's length,
+   about 2.7 hours at `-j1`; the CPU half ends within minutes. `LVP_J` sets the lavapipe half's
+   parallelism: CI runs the whole suite at `--parallel 4` on a 4-core runner in about 55 minutes,
+   so `LVP_J=3` brings the chain toward an hour where the machine has the memory for three
+   lavapipe tests at once.
+4. **One push.** Every fix found in steps 1 to 3 is collected first; the push gate
+   (`build-host/tmp/push-check.sh`) passes; main is pushed once. A fix is never pushed while
+   another is still expected, since each push restarts CI.
+5. **CI.** About 30 minutes a run with the shards ([The CI shards](#the-ci-shards)): the
+   longest job is an `asan` shard. The release waits for main's run to finish green, every job
+   counted: the Apple jobs green on main before the release (the `apple` matrix, `macos` and
+   `ios`, the same build and packaging the release's Apple packages run does). A branch's Apple builds
+   can be seen before it reaches main with the check-only dispatch
+   (`gh workflow run ios.yml -R nathanialf/ico-pc --ref <branch> -f check_only=true`, the branch
+   pushed first) and, earlier still, `tools/apple_precheck.py` on this host
+   ([../BUILDING.md](../BUILDING.md#continuous-integration)).
+6. **The release.** The packages from the release commit, the tag, `gh release create`; the
+   tag's own run adds the arm64 packages ([../BUILDING.md](../BUILDING.md#packages)): its
+   `linux-arm64` job keeps the six files (`linux-arm64.tar.gz`, `linux-arm64-portable.tar.gz`,
+   `linux-aarch64.AppImage`, each with its `.sha256`) as the run's artifact and attaches them to
+   the tag's release with `gh release upload --clobber` (`contents: write` for that job only). It
+   waits up to 20 minutes for the release to exist and then fails, saying so: create the release
+   before the tag's run reaches its packaging, or re-run the job after. A dispatched run
+   (`gh workflow run ci.yml -f tag=<tag>`) attaches nothing and prints the upload command for its
+   artifact's files.
+   Publishing the release starts the Apple packages workflow (`ios.yml`), which attaches the IPA
+   and the macOS zip and dmg; the release is finished when that run is green and the three files
+   are on it ([../BUILDING.md](../BUILDING.md#packages)).

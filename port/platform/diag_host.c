@@ -37,13 +37,26 @@
 #include <string.h>
 #include "fiber.h"
 #include "gpu_hang.h"
+#include "pipeline_skip.h"
 #include "memory_floor.h"
 #include "host_fs.h"
+#include "last_run.h"
+#include "mem_breakdown.h"
+#include "mem_watch.h"
+#include "set_size.h" /* set_size_first_picture */
 #include "rd_bisect_plan.h"
+#include "rd_passring.h"
 #include "report.h"
+#include "rhi_pass_crumb.h"
 #include "sched.h"
 #include "startup_retry.h"
 #include "symmap.h"
+#include "vu_zero_mark.h"   /* the zero-area cull's mark (issue 179) */
+#include "nodiscard_mark.h" /* the discard-free twins' */
+#include "fastps_mark.h"    /* the fast pixel build's */
+#include "compact_mark.h"   /* the index compaction's */
+#include "onepass_mark.h"   /* the one-pass blend's */
+#include "ratecard_env.h"
 
 #ifdef _WIN32
 #ifndef WIN32_LEAN_AND_MEAN
@@ -136,6 +149,16 @@ static volatile int movie_playing;
 static char activity[640];
 /* ico_diag_set_pipelines: the start-up set's count and its longest compile */
 static volatile unsigned int pipes_done, pipes_total, pipes_longest_ms;
+/* ico_diag_step: the last step's line (the switch's and the start's), and
+   the switch's watch (ico_diag_watchdog_switch): its limit in seconds (0
+   off), its progress count (steps, shaders and pipelines made), what it
+   switches to, and the uptime it began; written by the main thread (the
+   progress count by any), read by the watchdog's */
+static char step_line[256];
+static volatile unsigned int sw_limit_s;
+static volatile unsigned int sw_progress;
+static char sw_what[96];
+static volatile double sw_since;
 /* ico_diag_present_enter/leave (diag_host.h): when the main thread entered
    the present it is in (0 = not inside one), and the capped time of the
    presents that finished, both in ico_diag_now_ns */
@@ -169,6 +192,9 @@ static const char *(*volatile gpu_hang_note_fn)(void);
    the picture and the time it was counted */
 static int (*volatile render_beat_fn)(unsigned long long *seq, unsigned long long *done);
 static volatile int render_hang;
+/* the reset stop fired (gpu_hang.h ico_gpu_reset_step): the hang's end at
+   once, its words on the disc first, no loss dump */
+static volatile int reset_stop;
 static unsigned long long render_hang_seq;
 static double render_hang_s;
 static void (*exit_hook)(const char *reason);
@@ -521,6 +547,15 @@ void ico_diag_set_pipelines(unsigned int done, unsigned int total, unsigned int 
     pipes_done = done;
     pipes_longest_ms = longest_ms;
     pipes_total = total;
+    last_run_set_pipelines(done, total);
+    mem_watch_set_pipelines(done, total); /* the system's memory over the set (issue 215) */
+}
+
+void ico_diag_set_pipelines_over(unsigned int made)
+{
+    pipes_done = pipes_longest_ms = pipes_total = 0;
+    last_run_set_pipelines_over(made);
+    mem_watch_set_pipelines_over(made);
 }
 
 void ico_diag_set_exit_hook(void (*fn)(const char *reason))
@@ -625,6 +660,11 @@ static const char *thread_name(int id, char *tmp, size_t size)
         snprintf(tmp, size, "fn %s", d);
     }
     return tmp;
+}
+
+const char *ico_diag_thread_name(int id, char *tmp, size_t size)
+{
+    return thread_name(id, tmp, size);
 }
 
 /* --- Thread lines -------------------------------------------------------------- */
@@ -920,6 +960,42 @@ static void fatal_ui_serve(void)
 
 #endif
 
+/* Android, issue 215: a device that restarts keeps only what reached the
+   disc (the log came back full size, all zero bytes). The writer asks
+   after its line is written (a start-up step, a heartbeat, a stall, a
+   loss); the watchdog thread serves the ask at its next poll (250 ms):
+   the stderr pipe drained into the file first (fatal_flush), then one
+   fdatasync, so never on the render or submit thread and at most four
+   a second however many lines ask */
+#ifdef __ANDROID__
+static volatile int log_sync_want;
+
+static void log_sync_ask(void)
+{
+    __atomic_store_n(&log_sync_want, 1, __ATOMIC_RELEASE);
+}
+
+static void log_sync_serve(int force)
+{
+    if (__atomic_exchange_n(&log_sync_want, 0, __ATOMIC_ACQ_REL) == 0 && !force) {
+        return;
+    }
+    if (fatal_flush != NULL) {
+        fatal_flush();
+    }
+    if (log_fd >= 0) {
+        (void)fdatasync(log_fd);
+    }
+}
+#else
+static void log_sync_ask(void) {}
+#endif
+
+void ico_diag_log_sync_ask(void)
+{
+    log_sync_ask();
+}
+
 #ifdef __ANDROID__
 
 /* the box's words: what happened, the saves, and the log to send */
@@ -1051,10 +1127,12 @@ static char last_body[1024];
 
 static unsigned int same_beats;
 
+static void last_run_beat_now(void); /* logs/last-run.txt (last_run.h), below */
+
 static void heartbeat(int fatal_path)
 {
     static char body[1024];
-    static char mem[288];
+    static char mem[640];
     IcoDiagGpu gpu;
     heartbeat_body(body, sizeof body);
     if (strcmp(body, last_body) == 0) {
@@ -1077,6 +1155,16 @@ static void heartbeat(int fatal_path)
             snprintf(mem + n, sizeof mem - n, " | in %s %.0f s", os_wait_name(), cur);
         }
     }
+    if (sw_limit_s != 0) {
+        /* the renderer's switch in progress (ico_diag_watchdog_switch), and
+           its last step, outside the comparison too */
+        char st[sizeof step_line];
+        const size_t n = strlen(mem);
+        memcpy(st, step_line, sizeof st);
+        st[sizeof st - 1] = '\0';
+        snprintf(mem + n, sizeof mem - n, " | %s for %.0f s, last step: %s", sw_what,
+                 ico_diag_uptime() - sw_since, st);
+    }
     if (gpu_state(&gpu) && gpu.waiting_for != 0 && gpu.waiting_s >= 1.0) {
         /* a wait for the GPU (the watchdog's GPU hang), outside the
            comparison too */
@@ -1094,6 +1182,10 @@ static void heartbeat(int fatal_path)
     } else {
         ico_diag_log("ico_pc: heartbeat %.1f s | %s%s", ico_diag_uptime(), body, mem);
     }
+    if (!fatal_path) {
+        last_run_beat_now(); /* not on a crash's path: it formats and locks */
+        log_sync_ask();      /* issue 215: the beat's line on the disc */
+    }
 }
 
 /* --- Milestones and the game's hooks --------------------------------------------- */
@@ -1107,6 +1199,71 @@ static void prefix(char *out, size_t size)
              thread_name(cur, tmp, sizeof tmp));
 }
 
+void ico_diag_step(const char *fmt, ...)
+{
+    char msg[sizeof step_line];
+    va_list ap;
+    va_start(ap, fmt);
+    vsnprintf(msg, sizeof msg, fmt, ap);
+    va_end(ap);
+    /* what stdout and stderr hold goes first, so the log keeps its order
+       (Windows: fully buffered, host_config.c; a no-op where unbuffered) */
+    fflush(stdout);
+    fflush(stderr);
+    ico_diag_log("%s", msg);
+    log_sync_ask(); /* issue 215: a step's line survives the device restarting inside it */
+    memcpy(step_line, msg, sizeof step_line);
+    sw_progress++;
+    last_run_step(msg);
+}
+
+const char *ico_diag_last_step(void)
+{
+    return step_line;
+}
+
+void ico_diag_switch_progress(void)
+{
+    sw_progress++;
+}
+
+void ico_diag_shader_set(unsigned made, unsigned total, double secs)
+{
+    /* the set's last made count and the last quarter written */
+    static unsigned s_made, s_quarter;
+    unsigned q;
+
+    if (total == 0) {
+        if (s_made != 0) {
+            ico_diag_step("window: shaders: the start-up set is over, %u made in %.1f s", s_made,
+                          secs);
+        }
+        s_made = s_quarter = 0;
+        return;
+    }
+    if (made == s_made || made == 0) {
+        return; /* a pipeline made, or none of the set yet */
+    }
+    s_made = made;
+    if (made == 1) {
+        s_quarter = 0;
+        ico_diag_step("window: shaders: the start-up set begins, 1 of %u (the progress screen "
+                      "counts them)",
+                      total);
+        return;
+    }
+    q = (unsigned)((unsigned long long)made * 4u / total);
+    if (made < total && q > s_quarter) {
+        s_quarter = q;
+        ico_diag_step("window: shaders: %u of %u made in %.1f s", made, total, secs);
+    }
+}
+
+double ico_diag_gpu_hang_limit(void)
+{
+    return (double)gpu_hang_limit_ms / 1000.0;
+}
+
 void ico_diag_milestone(const char *fmt, ...)
 {
     char p[160];
@@ -1118,6 +1275,7 @@ void ico_diag_milestone(const char *fmt, ...)
     prefix(p, sizeof p);
     flush_stdio_if_main();
     ico_diag_log("ico_pc: %s %s", p, msg);
+    last_run_milestone(msg); /* trace_host.c's stage lines: play */
 }
 
 void ico_host_milestone(const char *what)
@@ -1380,13 +1538,22 @@ static int act_prev_careful;
 /* this start's set stopped at the system's low-memory signal
    (ico_diag_startup_activity_budget_stop after ico_diag_low_memory_stop):
    the file's line after the note for the rest of the run, with the level
-   ("set: stopped at the system's low-memory signal (running critical)");
-   the previous run's, read by begin, makes this start lazy
-   (ICO_DIAG_PIPESET_LAZY_LOW_MEMORY) */
-static char act_low_memory[160];
+   ("set: stopped at the system's low-memory signal (running critical)"),
+   and where the set stopped for the next start's resume (issue 123,
+   pipe_resume.h: "; resume at pipeline N of M, batches of B, stop K,
+   <date>", ico_diag_startup_set_resume_part); the previous run's, read by
+   begin, is ICO_DIAG_PIPESET_LAZY_LOW_MEMORY, which the window turns into
+   the set resumed there (window_pipe_finish.c) */
+static char act_low_memory[256];
 static const char act_set_low_memory[] = "set: stopped at the system's low-memory signal";
 static int act_prev_low_memory;
 static char act_prev_low_memory_line[sizeof act_low_memory];
+/* this start retries the set after the previous one stopped at the
+   free-memory floor (ico_diag_startup_floor_retry): a stop line it writes
+   ends with ICO_MEMORY_FLOOR_RETRIED_MARK, so the next start does not retry
+   again.  The window no longer calls the retry (v0.11.2 resumes the set,
+   ico_diag_startup_resume), so this stays 0 outside diag_test */
+static int act_floor_retried;
 static const char act_loss_none[] = "graphics device lost, no loss dump";
 /* a GPU hang's loss (watchdog_fire, loss_hang set): its own line, counted
    as a loss (loss_count_prev) and its dump attached to a report, but never
@@ -1401,6 +1568,9 @@ static char loss_prev_hang[1024];
 /* the loss dump the previous run left for this one's bisect
    (ico_diag_startup_activity_begin), "" none */
 static char loss_pending[1024];
+/* this run's slow-scene dump (ico_diag_note_slow_scene), "" none: a report
+   carries it beside the loss dump */
+static char slow_scene_zip[1024];
 /* the bisect's note: a run ended during it is not bisected again */
 static const char act_bisect[] = "replaying the lost frame pass by pass (the loss bisect)";
 /* the second level's note (ico_diag_loss_bisect2): the same; its state file
@@ -1491,6 +1661,7 @@ static int act_sync_note(const char *note)
     }
 #endif
     return strncmp(note, "creating pipelines ", 19) == 0 || startup_retry_note_has_vu_pre(note) ||
+           startup_retry_note_has_skin_probe(note) ||
            (act_mode == ICO_DIAG_ACTIVITY_LAZY && strncmp(note, "creating pipeline ", 18) == 0);
 }
 
@@ -1642,6 +1813,7 @@ void ico_diag_set_activity(const char *fmt, ...)
     vsnprintf(activity, sizeof activity, fmt, ap);
     va_end(ap);
     activity_seq++;
+    last_run_set_note(activity); /* copied, written with the next write */
     /* the start-up set's own "(i of m)" notes between two pipelines are
        left out: the pipeline's note names its place in the set, and this
        halves the writes */
@@ -1659,6 +1831,7 @@ void ico_diag_clear_activity(void)
 {
     activity[0] = '\0';
     activity_seq++;
+    last_run_set_note("");
     /* the start-up set's mode keeps the last note: a frame the progress
        screen presents between two of its pipelines clears it, and the
        next one follows at once */
@@ -1712,6 +1885,17 @@ static char act_bg_path[1024 + 16];
    (ico_diag_startup_stall_end); a start of another version deletes it */
 static char act_stall_path[1024 + 16];
 static int act_prev_stall;
+/* "-watchdog.txt": the mark of a run the watchdog ended with the main
+   thread not waiting for the GPU (ico_diag_startup_prev_watchdog) */
+static char act_wd_path[1024 + 16];
+static int act_prev_wd;
+/* "-probe.txt": the mark of a run whose device ran a first-start probe (the
+   subpass read's, ico_diag_set_probe): set from the device's start until
+   the probe's verdict; the previous run's, read by begin */
+static char act_probe_path[1024 + 16];
+static int act_prev_probe;
+static char act_prev_probe_line[200];
+static volatile int act_probe_on;
 static char act_prev_stall_note[sizeof activity];
 /* the previous run's mark (ico_diag_startup_activity_begin) */
 static int act_prev_background;
@@ -1736,9 +1920,17 @@ static void act_sibling(char *out, size_t size, const char *suffix)
 /* the counts file's slots: the kinds (ICO_DIAG_END_*), then the mark of a
    start that ran with robust access on for a loss
    (ico_diag_startup_end_persist), which the next start's loss_count_prev
-   reads and clears */
+   reads and clears, then the lost starts in a row of the desktop's loss
+   order (its relaunched runs, which count nothing in the loss slot: the
+   loss ladder's count there, loss_count_prev) */
 #define ACT_END_ROBUST_ONCE 3
-#define ACT_END_SLOTS 4
+#define ACT_END_LOSS_CHAIN 4
+/* the loss ladder's row: the starts in a row that lost the device, each
+   one, fresh or a restart of the desktop's loss order (loss_count_prev);
+   the loss slot is the robust step's count, which a start that ran robust
+   without a loss keeps */
+#define ACT_END_LOSS_ROW 5
+#define ACT_END_SLOTS 6
 
 /* the counts by kind (ICO_DIAG_END_*), 0 when none or unreadable; an
    older version's "vu_ext <n>" (the retired extended VU kind) is dropped */
@@ -1746,7 +1938,7 @@ static void ends_read(unsigned int n[ACT_END_SLOTS])
 {
     char line[64];
     FILE *f;
-    n[0] = n[1] = n[2] = n[3] = 0;
+    memset(n, 0, sizeof(unsigned int) * ACT_END_SLOTS);
     if (act_ends_path[0] == '\0' || (f = ico_fopen(act_ends_path, "rb")) == NULL) {
         return;
     }
@@ -1756,6 +1948,10 @@ static void ends_read(unsigned int n[ACT_END_SLOTS])
             n[ICO_DIAG_END_PIPELINES] = v > 9 ? 9 : v;
         } else if (sscanf(line, "vu_pre %u", &v) == 1) {
             n[ICO_DIAG_END_VU_PRE] = v > 9 ? 9 : v;
+        } else if (sscanf(line, "loss_chain %u", &v) == 1) {
+            n[ACT_END_LOSS_CHAIN] = v > 9 ? 9 : v;
+        } else if (sscanf(line, "loss_row %u", &v) == 1) {
+            n[ACT_END_LOSS_ROW] = v > 9 ? 9 : v;
         } else if (sscanf(line, "loss_robust %u", &v) == 1) {
             n[ACT_END_ROBUST_ONCE] = v != 0;
         } else if (sscanf(line, "loss %u", &v) == 1) {
@@ -1775,14 +1971,18 @@ static void ends_write(const unsigned int n[ACT_END_SLOTS])
     if (act_ends_path[0] == '\0') {
         return;
     }
-    if (n[0] == 0 && n[1] == 0 && n[2] == 0 && n[3] == 0) {
+    if (n[0] == 0 && n[1] == 0 && n[2] == 0 && n[3] == 0 && n[4] == 0 && n[5] == 0) {
         (void)ico_remove(act_ends_path);
         return;
     }
     f = ico_fopen(act_ends_path, "wb");
+    /* loss_chain and loss_row only when set (a file an older version reads
+       the same) */
     ok = f != NULL &&
          fprintf(f, "pipelines %u\nvu_pre %u\nloss %u\nloss_robust %u\n", n[ICO_DIAG_END_PIPELINES],
-                 n[ICO_DIAG_END_VU_PRE], n[ICO_DIAG_END_LOSS], n[ACT_END_ROBUST_ONCE]) > 0;
+                 n[ICO_DIAG_END_VU_PRE], n[ICO_DIAG_END_LOSS], n[ACT_END_ROBUST_ONCE]) > 0 &&
+         (n[ACT_END_LOSS_CHAIN] == 0 || fprintf(f, "loss_chain %u\n", n[ACT_END_LOSS_CHAIN]) > 0) &&
+         (n[ACT_END_LOSS_ROW] == 0 || fprintf(f, "loss_row %u\n", n[ACT_END_LOSS_ROW]) > 0);
     if (f != NULL && fclose(f) != 0) {
         ok = 0;
     }
@@ -1858,8 +2058,12 @@ static void ends_count_prev(const char *prev, int relaunched)
         return;
     }
     /* a pipeline of the vertex pre-pass or the record path first (the
-       next start draws without them), then any other */
-    if (startup_retry_note_has_vu_pre(prev)) {
+       next start draws without them), then any other; the skin check's
+       start-up probe is neither (the next start runs without the check,
+       window_host.c): it breaks the row */
+    if (startup_retry_note_has_skin_probe(prev)) {
+        kind = -1;
+    } else if (startup_retry_note_has_vu_pre(prev)) {
         kind = ICO_DIAG_END_VU_PRE;
     } else if (note_is_pipelines(prev)) {
         kind = ICO_DIAG_END_PIPELINES;
@@ -1905,6 +2109,72 @@ static void ends_clean(void)
     }
 }
 
+/* The loss ladder (port/rhi/rhi_tile_rule.h, issues 179 and 211): the lost
+   starts in a row before this one, on every device, whatever robust access
+   is (a hand-set gpu_robust no longer clears the row,
+   ico_diag_startup_end_persist): Android's and a fresh start's from the
+   loss slot, a run of the desktop's loss order (relaunched) from the chain
+   slot.  Handed to the graphics backend as ICO_LOSS_ROW (unset when 0):
+   after one, the v0.11.2 barrier scopes, after two the single submission
+   wait too; the backend's lines say which ran.  Nothing is written to the settings. */
+static unsigned int act_loss_row;
+
+/* the ladder line's words for a phone (Android, iOS: every GPU there is a
+   tile-based phone GPU to rhi_tile_rule.h); ICO_TEST_LADDER_PHONE gives
+   them to diag_test on a desktop */
+static int ladder_phone(void)
+{
+#if defined(__ANDROID__) || defined(ICO_IOS)
+    return 1;
+#else
+    const char *t = getenv("ICO_TEST_LADDER_PHONE");
+    return t != NULL && t[0] == '1';
+#endif
+}
+
+static void loss_ladder_export(int relaunched)
+{
+    char v[16];
+    if (act_loss_row == 0) {
+#ifdef _WIN32
+        _putenv_s("ICO_LOSS_ROW", "");
+#else
+        unsetenv("ICO_LOSS_ROW");
+#endif
+        return;
+    }
+    snprintf(v, sizeof v, "%u", act_loss_row);
+#ifdef _WIN32
+    _putenv_s("ICO_LOSS_ROW", v);
+#else
+    setenv("ICO_LOSS_ROW", v, 1);
+#endif
+    if (ladder_phone()) {
+        /* a tile-based phone GPU (rhi_tile_rule.h): its scopes and wait are
+           the wide and single ones already, the rung is the pre-pass */
+        ico_diag_log("ico_pc: loss ladder: %u start%s in a row lost the graphics device before "
+                     "this one: on Vulkan this start draws without the VU pre-pass (a tile-based "
+                     "phone GPU, whose barrier scopes and submission wait are the wide and "
+                     "single ones already; the graphics backend's VU pre-pass line says what "
+                     "ran; OpenGL ES changes nothing); nothing is written to the settings",
+                     act_loss_row, act_loss_row == 1 ? "" : "s");
+        return;
+    }
+    ico_diag_log("ico_pc: loss ladder: %u start%s in a row lost the graphics device before this "
+                 "one%s: on Vulkan this start runs the wide barrier scopes%s (the graphics "
+                 "backend's barriers%s line says what ran; Direct3D and OpenGL change nothing); "
+                 "nothing is written to the settings",
+                 act_loss_row, act_loss_row == 1 ? "" : "s",
+                 relaunched ? " (this game's restarts after a loss)" : "",
+                 act_loss_row >= 2 ? " and the single submission wait" : "",
+                 act_loss_row >= 2 ? " and submission wait" : "");
+}
+
+unsigned int ico_diag_startup_loss_row(void)
+{
+    return act_loss_row;
+}
+
 /* ico_diag_startup_activity_begin: the previous run's device loss
    (prev_loss: its file's loss line) into the row of starts that lost it.
    A loss counts one more, whatever the version or the note; a start
@@ -1918,23 +2188,63 @@ static void loss_count_prev(int prev_loss, int relaunched)
 {
     unsigned int n[ACT_END_SLOTS], was[ACT_END_SLOTS];
     act_end_n[ICO_DIAG_END_LOSS] = 0;
-    if (relaunched || act_ends_path[0] == '\0') {
+    act_loss_row = 0;
+    if (act_ends_path[0] == '\0') {
+        loss_ladder_export(relaunched);
         return;
     }
     ends_read(n);
     memcpy(was, n, sizeof was);
+    if (relaunched) {
+        /* the desktop's loss order: the chain of its restarts (the loss
+           slot is a fresh start's, as before) */
+        n[ACT_END_LOSS_CHAIN] =
+            prev_loss ? (n[ACT_END_LOSS_CHAIN] < 9 ? n[ACT_END_LOSS_CHAIN] + 1 : 9) : 0;
+        /* the row: the fresh start's own row (the losses before it) and the
+           chain's losses since */
+        act_loss_row = n[ACT_END_LOSS_CHAIN] == 0 ? 0u
+                       : n[ACT_END_LOSS_ROW] + n[ACT_END_LOSS_CHAIN] > 9u
+                           ? 9u
+                           : n[ACT_END_LOSS_ROW] + n[ACT_END_LOSS_CHAIN];
+        if (memcmp(n, was, sizeof was) != 0) {
+            ends_write(n);
+        }
+        loss_ladder_export(relaunched);
+        return;
+    }
+    /* the ladder's row (its own slot: the loss slot is the robust step's
+       count, kept across a start that ran robust without a loss, which is
+       no row): a loss after a restart chain of the desktop's loss order
+       counts the chain's losses too (1 + chain), so the ladder does not fall
+       back to its first rung when the loss order runs out */
+    const unsigned int chain = n[ACT_END_LOSS_CHAIN];
+    n[ACT_END_LOSS_CHAIN] = 0;
+    unsigned int row = 0;
     if (prev_loss) {
+        const unsigned int sum = n[ACT_END_LOSS_ROW] + 1u + chain;
+        row = sum > 9u ? 9u : sum;
         n[ICO_DIAG_END_LOSS]++;
         act_end_n[ICO_DIAG_END_LOSS] = n[ICO_DIAG_END_LOSS];
-        ico_diag_log("ico_pc: starts in a row that lost the graphics device: %u",
-                     n[ICO_DIAG_END_LOSS]);
+        if (row != n[ICO_DIAG_END_LOSS]) {
+            ico_diag_log("ico_pc: starts in a row that lost the graphics device: %u (%u counted "
+                         "for robust access)",
+                         row, n[ICO_DIAG_END_LOSS]);
+        } else {
+            ico_diag_log("ico_pc: starts in a row that lost the graphics device: %u", row);
+        }
     } else if (!n[ACT_END_ROBUST_ONCE]) {
         n[ICO_DIAG_END_LOSS] = 0;
     }
+    n[ACT_END_LOSS_ROW] = row;
     n[ACT_END_ROBUST_ONCE] = 0;
     if (memcmp(n, was, sizeof was) != 0) {
         ends_write(n);
     }
+    /* the ladder: the losses in a row before this start (a start that ran
+       robust because of the row and did not lose it ends the ladder's row,
+       and is not a loss: 0 here) */
+    act_loss_row = row;
+    loss_ladder_export(relaunched);
 }
 
 /* the mark's file written whole from act_bg_text (under the lock) */
@@ -2023,6 +2333,7 @@ static void bg_mark(int before)
 
 void ico_diag_startup_activity_background(int background)
 {
+    last_run_background(background);
     if (!background) {
         act_in_bg = 0;
         if (act_bg && bg_remove()) {
@@ -2160,9 +2471,36 @@ static volatile int floor_driver = ICO_MEMORY_FLOOR_DRIVER_UNKNOWN;
    pipeline is made; ico_diag_note_low_memory), 0 none */
 static volatile int bg_signal_level;
 
-void ico_diag_set_memory_floor_driver(unsigned vendor_id, const char *driver_text)
+void ico_diag_set_memory_floor_driver(unsigned vendor_id, unsigned driver_id,
+                                      const char *driver_text)
 {
-    floor_driver = ico_memory_floor_driver(vendor_id, driver_text);
+    floor_driver = ico_memory_floor_driver(vendor_id, driver_id, driver_text);
+}
+
+/* issue 188: the driver's compiles one at a time (the longer pipeline limit
+   before the game starts), and the self-tests in progress */
+static char pipe_serial_why[64];
+static volatile int pipe_serial;
+static volatile int in_selftest;
+
+void ico_diag_set_pipe_compiler_serial(const char *why)
+{
+    const int on = why != NULL && why[0] != '\0';
+    if (on && (!pipe_serial || strcmp(pipe_serial_why, why) != 0)) {
+        snprintf(pipe_serial_why, sizeof pipe_serial_why, "%s", why);
+#ifdef __ANDROID__ /* the limit is the Android watchdog's */
+        ico_diag_log("ico_pc: the pipeline limit before the game starts: %.0f s (%s: its compiles "
+                     "run one at a time), %.0f s in play",
+                     ico_pipe_stall_limit_s(0, 1), pipe_serial_why, ico_pipe_stall_limit_s(1, 1));
+#endif
+    }
+    pipe_serial = on;
+}
+
+void ico_diag_set_selftest(int on)
+{
+    in_selftest = on != 0;
+    last_run_selftest(on);
 }
 
 int ico_diag_memory_floor_driver(void)
@@ -2190,6 +2528,41 @@ static long floor_setting_read(void)
     return floor_setting;
 }
 #endif
+
+static void last_run_beat_now(void)
+{
+    LastRunBeat b;
+    char note[sizeof activity];
+    memcpy(note, activity, sizeof note);
+    note[sizeof note - 1] = '\0';
+    b.ticks = ticks_fn != NULL ? ticks_fn() : 0u;
+    b.pipesMade = pipes_made;
+    b.note = note;
+    {
+        /* one read of each /proc file, the system's split with them (issue 215;
+           the /sys figures the last full read's: none read on this thread) */
+        MemBreakdown m;
+        (void)mem_breakdown_read("", MEM_BD_PROC, &m, NULL);
+        b.rssKb = m.rssKb;
+        b.peakKb = m.hwmKb;
+        b.availKb = m.availKb;
+        b.totalKb = m.totalKb;
+        if (b.availKb < 0 || b.totalKb < 0) {
+            b.availKb = b.totalKb = -1;
+        }
+        mem_breakdown_last_run_text(&m, b.memText, sizeof b.memText);
+    }
+    b.floorMb = -1;
+#ifdef __ANDROID__
+    /* the start-up set's floor (memory_floor.h): the setting once the set
+       read it, else the default */
+    if (b.totalKb > 0) {
+        b.floorMb = ico_memory_floor_mb(b.totalKb / 1024, floor_setting >= -1 ? floor_setting : -1,
+                                        floor_driver);
+    }
+#endif
+    last_run_beat(&b);
+}
 
 static int memory_floor_stop(void)
 {
@@ -2332,6 +2705,8 @@ void ico_diag_note_low_memory(int level)
     snprintf(line, sizeof line, "%s (%s; signal %u of this run) %s; %s", trim_kind(level), lv, nth,
              pipes, mem);
     ico_diag_log("ico_pc: the system asked the app to free memory: %s", line);
+    mem_watch_trim(level); /* what holds the memory then (issue 215) */
+    last_run_trim(level, level >= 0 ? trim_name(level) : "no level given");
     /* 20 and above: the app left the foreground (the lifecycle's event may
        come later, or not reach a held main thread); the line goes into the
        mark at once, from this thread */
@@ -2439,9 +2814,107 @@ int ico_diag_startup_stall_end(void)
     return act_prev_stall;
 }
 
+/* ico_diag_startup_activity_begin: the watchdog mark read and deleted */
+static void watchdog_mark_read(void)
+{
+    char buf[sizeof act_version + 1 + 256];
+    char *nl;
+    size_t k;
+    FILE *f = act_wd_path[0] != '\0' ? ico_fopen(act_wd_path, "rb") : NULL;
+    if (f == NULL) {
+        return;
+    }
+    k = fread(buf, 1, sizeof buf - 1, f);
+    fclose(f);
+    buf[k] = '\0';
+    (void)ico_remove(act_wd_path);
+    nl = strchr(buf, '\n');
+    act_prev_wd = 1;
+    ico_diag_log("ico_pc: the previous run (version %.*s) was ended by the watchdog: %.*s",
+                 nl != NULL ? (int)(nl - buf) : (int)strcspn(buf, "\r"), buf,
+                 nl != NULL ? (int)strcspn(nl + 1, "\r\n") : 0, nl != NULL ? nl + 1 : "");
+}
+
+int ico_diag_startup_prev_watchdog(void)
+{
+    /* a watchdog end inside a probe is the probe's (ico_diag_set_probe) */
+    return act_prev_wd && !act_prev_probe;
+}
+
+/* ico_diag_startup_activity_begin: the probe's mark read and deleted */
+static void probe_mark_read(void)
+{
+    char buf[sizeof act_version + 1 + 256];
+    FILE *f = act_probe_path[0] != '\0' ? ico_fopen(act_probe_path, "rb") : NULL;
+    if (f == NULL) {
+        return;
+    }
+    const size_t k = fread(buf, 1, sizeof buf - 1, f);
+    fclose(f);
+    buf[k] = '\0';
+    (void)ico_remove(act_probe_path);
+    const char *nl = strchr(buf, '\n');
+    const int vlen = nl != NULL ? (int)(nl - buf) : (int)strcspn(buf, "\r");
+    snprintf(act_prev_probe_line, sizeof act_prev_probe_line, "%.*s",
+             nl != NULL ? (int)strcspn(nl + 1, "\r\n") : 0, nl != NULL ? nl + 1 : "");
+    act_prev_probe = 1;
+    ico_diag_log("ico_pc: the previous run (version %.*s) ended while %s was running: its end "
+                 "is not counted on the loss ladder, the robust step or the watchdog's mark "
+                 "(the graphics backend keeps that read off on this driver)",
+                 vlen, buf, act_prev_probe_line[0] != '\0' ? act_prev_probe_line : "a probe");
+}
+
+int ico_diag_startup_prev_probe(void)
+{
+    return act_prev_probe;
+}
+
+void ico_diag_set_probe(const char *name)
+{
+    FILE *f;
+    if (name == NULL) {
+        if (act_probe_on) {
+            act_probe_on = 0;
+            if (act_probe_path[0] != '\0') {
+                (void)ico_remove(act_probe_path);
+            }
+        }
+        return;
+    }
+    act_probe_on = 1;
+    if (act_probe_path[0] == '\0' || (f = ico_fopen(act_probe_path, "wb")) == NULL) {
+        return;
+    }
+    fprintf(f, "%s\n%.180s\n", act_version, name);
+    (void)fflush(f);
+#ifndef _WIN32
+    (void)fsync(fileno(f));
+#endif
+    (void)fclose(f);
+    ico_diag_log("ico_pc: %s runs at this start: a device loss, GPU hang or end before its "
+                 "verdict counts on no loss step",
+                 name);
+}
+
+/* the watchdog mark written (the watchdog's thread, a main-thread end) */
+static void watchdog_mark_write(const char *reason)
+{
+    FILE *f;
+    if (act_wd_path[0] == '\0' || (f = ico_fopen(act_wd_path, "wb")) == NULL) {
+        return;
+    }
+    fprintf(f, "%s\n%.200s\n", act_version, reason != NULL ? reason : "");
+    (void)fclose(f);
+}
+
 const char *ico_diag_startup_activity_prev(void)
 {
     return act_prev;
+}
+
+static void last_run_log(const char *line)
+{
+    ico_diag_log("ico_pc: %s", line);
 }
 
 int ico_diag_startup_activity_begin(const char *path, int relaunched)
@@ -2469,23 +2942,43 @@ int ico_diag_startup_activity_begin(const char *path, int relaunched)
     act_low_memory[0] = '\0';
     act_prev_low_memory = 0;
     act_prev_low_memory_line[0] = '\0';
+    act_floor_retried = 0;
     act_saw_vu_pre = 0;
     act_unsynced = 0;
     act_end_n[0] = act_end_n[1] = act_end_n[2] = 0;
+    act_loss_row = 0;
     act_prev_background = 0;
     act_prev_bg_line[0] = '\0';
     act_ends_path[0] = '\0';
     act_bg_path[0] = '\0';
     act_stall_path[0] = '\0';
     act_prev_stall = 0;
+    act_wd_path[0] = '\0';
+    act_prev_wd = 0;
+    act_probe_path[0] = '\0';
+    act_prev_probe = 0;
+    act_prev_probe_line[0] = '\0';
     if (path == NULL || strlen(path) >= sizeof act_path) {
         return 0;
     }
     memcpy(act_path, path, strlen(path) + 1);
+    last_run_begin(act_path, act_version, last_run_log); /* "the previous run: ..." first */
+    (void)compact_mark_begin(act_path, act_version, last_run_log); /* first: reads theirs */
+    /* the zero-area cull's mark (vu_zero_mark.h): its line; a bad end turns
+       the cull off, never the pre-pass (the loss count below is the rung's) */
+    (void)vu_zero_mark_begin(act_path, act_version, last_run_log);
+    (void)nodiscard_mark_begin(act_path, act_version, last_run_log); /* the twins' */
+    (void)fastps_mark_begin(act_path, act_version, last_run_log);    /* the fast build's */
+    (void)onepass_mark_begin(act_path, act_version, last_run_log);   /* the one-pass blend's */
+    ratecard_env_begin(act_path, act_version); /* the rate card's file (ratecard_env.h) */
     act_sibling(act_ends_path, sizeof act_ends_path, "-ends.txt");
     act_sibling(act_bg_path, sizeof act_bg_path, "-background.txt");
     act_sibling(act_stall_path, sizeof act_stall_path, "-stall.txt");
     stall_read();
+    act_sibling(act_wd_path, sizeof act_wd_path, "-watchdog.txt");
+    watchdog_mark_read();
+    act_sibling(act_probe_path, sizeof act_probe_path, "-probe.txt");
+    probe_mark_read();
     /* the previous run's background mark: its line, and the system's lines
        that came there (logged below unless the activity file has them) */
     static char bgbuf[ACT_BG_TEXT];
@@ -2599,7 +3092,8 @@ int ico_diag_startup_activity_begin(const char *path, int relaunched)
     snprintf(act_prev, sizeof act_prev, "%.*s", (int)(sizeof act_prev - 1), prev);
     act_remove();
     ends_count_prev(prev, relaunched);
-    loss_count_prev(loss != NULL &&
+    /* a loss inside a probe is the probe's (ico_diag_set_probe): no step */
+    loss_count_prev(!act_prev_probe && loss != NULL &&
                         (strcmp(loss, act_loss_none) == 0 ||
                          strncmp(loss, act_loss_prefix, sizeof act_loss_prefix - 1) == 0 ||
                          strcmp(loss, act_loss_hang_none) == 0 ||
@@ -2631,7 +3125,12 @@ int ico_diag_startup_activity_begin(const char *path, int relaunched)
     } else if (loss != NULL && strncmp(loss, act_loss_prefix, sizeof act_loss_prefix - 1) == 0 &&
                loss[sizeof act_loss_prefix - 1] != '\0') {
         const char *zip = loss + sizeof act_loss_prefix - 1;
-        if (strcmp(ver, act_version) != 0) {
+        if (act_prev_probe) {
+            /* lost inside a probe: no game frame to replay */
+            ico_diag_log("ico_pc: the previous run lost the graphics device inside %s; its loss "
+                         "dump %s is not replayed",
+                         act_prev_probe_line[0] != '\0' ? act_prev_probe_line : "a probe", zip);
+        } else if (strcmp(ver, act_version) != 0) {
             /* the bisect replays the dump on the renderer that lost it */
             ico_diag_log("ico_pc: the previous run (version %s) lost the graphics device; its "
                          "loss dump %s is not replayed on %s",
@@ -2722,10 +3221,11 @@ int ico_diag_startup_activity_begin(const char *path, int relaunched)
         (strcmp(prev, act_lazy_exit) == 0 || strcmp(prev, act_between) == 0)) {
         /* issue 128: the set stopped at the system's low-memory signal and
            the run went on lazily (exited, or was ended between two
-           creations): this start makes no set
-           (ICO_DIAG_PIPESET_LAZY_LOW_MEMORY) */
+           creations): ICO_DIAG_PIPESET_LAZY_LOW_MEMORY, which the window
+           makes the set resumed where it stopped (issue 123,
+           window_pipe_finish.c: its line says where and how) */
         ico_diag_log("ico_pc: the previous start stopped preparing the graphics when the system "
-                     "ran low on memory (%s); this start prepares them as the game needs them",
+                     "ran low on memory (%s); this start resumes them where it stopped",
                      prev);
         return 1;
     }
@@ -2769,7 +3269,9 @@ int ico_diag_startup_pipeline_set(int relaunched, int file_lazy, const char *set
     /* an end inside the vertex pre-pass's (or the record path's) pipelines
        makes a start without it the rule instead
        (ico_diag_startup_vu_prepass), and that start builds the set */
-    if (startup_retry_note_has_vu_pre(act_prev)) {
+    if (startup_retry_note_has_vu_pre(act_prev) || startup_retry_note_has_skin_probe(act_prev)) {
+        /* ... as an end inside the skin check's start-up probe makes a
+           start without the check (window_host.c) */
         return careful ? ICO_DIAG_PIPESET_CAREFUL_SETTING : ICO_DIAG_PIPESET_FULL;
     }
     /* a restart after a crash report takes its own step (startup_retry.h);
@@ -2807,10 +3309,69 @@ int ico_diag_startup_pipeline_set(int relaunched, int file_lazy, const char *set
     return ICO_DIAG_PIPESET_LAZY_ONCE;
 }
 
+int ico_diag_startup_prev_floor_stop(void)
+{
+    return act_prev_low_memory && ico_memory_floor_line_is_floor(act_prev_low_memory_line);
+}
+
+void ico_diag_startup_floor_retry(void)
+{
+    /* this start makes the set again: its file does not say "stopped"
+       until it stops (ico_diag_startup_activity_budget_stop), and then
+       says it was a retry */
+    act_low_memory[0] = '\0';
+    act_floor_retried = 1;
+}
+
+void ico_diag_startup_resume(void)
+{
+    /* this start makes the set again from where the last one stopped: its
+       file does not say "stopped" until it stops itself
+       (ico_diag_startup_activity_budget_stop, then the window's
+       ico_diag_startup_set_resume_part) */
+    act_low_memory[0] = '\0';
+    act_floor_retried = 0;
+}
+
+const char *ico_diag_startup_prev_low_memory_line(void)
+{
+    return act_prev_low_memory ? act_prev_low_memory_line : "";
+}
+
+int ico_diag_startup_set_resume_part(const char *part)
+{
+    size_t n, k;
+
+    if (act_low_memory[0] == '\0' || part == NULL) {
+        return 0;
+    }
+    n = strlen(act_low_memory);
+    k = strlen(part);
+    if (n + k >= sizeof act_low_memory) {
+        k = sizeof act_low_memory - 1 - n;
+    }
+    memcpy(act_low_memory + n, part, k);
+    act_low_memory[n + k] = '\0';
+    if (act_mode != 0) {
+        act_write(act_current());
+    }
+    return 1;
+}
+
+int ico_diag_startup_prev_floor_retried(void)
+{
+    return act_prev_low_memory && ico_memory_floor_line_retried(act_prev_low_memory_line);
+}
+
 int ico_diag_startup_vu_prepass(void)
 {
     const unsigned int n = act_end_n[ICO_DIAG_END_VU_PRE];
     return n > 2 ? 2 : (int)n;
+}
+
+int ico_diag_startup_vu_store(void)
+{
+    return act_end_n[ICO_DIAG_END_VU_PRE] != 0 && startup_retry_note_has_vu_store(act_prev);
 }
 
 int ico_diag_startup_end_persist(int kind, const char *table, int (*persist)(void),
@@ -2819,7 +3380,12 @@ int ico_diag_startup_end_persist(int kind, const char *table, int (*persist)(voi
     const char *cfg = config_name != NULL ? config_name : "config.toml";
     const int pre = kind == ICO_DIAG_END_VU_PRE;
     const int loss = kind == ICO_DIAG_END_LOSS;
-    const char *setting = pre ? "[dev] vu_prepass = false" : "[dev] pipeline_set = \"lazy\"";
+    /* inside a build of the record stored by the vertex shaders: the rung
+       before (the render targets' record, the pre-pass kept) */
+    const int store = pre && ico_diag_startup_vu_store();
+    const char *setting = store ? "[dev] vu_record = \"targets\""
+                          : pre ? "[dev] vu_prepass = false"
+                                : "[dev] pipeline_set = \"lazy\"";
     const char *rule = pre ? "the device already draws without the 3D vertex pre-pass"
                            : "the device table already makes the pipelines as the game needs "
                              "them on this device";
@@ -2830,15 +3396,22 @@ int ico_diag_startup_end_persist(int kind, const char *table, int (*persist)(voi
     if (table != NULL) {
         /* the rule already holds here: the setting would be redundant, and
            it would outlive a change of the rule; the row is cleared, and a
-           lazy run follows the rule, not "this start only" */
-        ends_clear_kind(kind);
+           lazy run follows the rule, not "this start only".  Not a loss's
+           row: robust access set by hand (or by the game for good) rules
+           robust access, but the starts that lost the device still count
+           (the loss ladder, loss_ladder_export; before v0.11.4 the row went
+           back to 0 every start, so "starts in a row that lost the
+           graphics device: 1" was all such a log could say) */
+        if (!loss) {
+            ends_clear_kind(kind);
+        }
         if (kind == ICO_DIAG_END_PIPELINES) {
             act_once = 0;
         }
         if (loss) {
-            ico_diag_log("ico_pc: the previous start lost the graphics device; nothing is counted "
-                         "or written to %s: robust access is as the settings say (%s)",
-                         cfg, table);
+            ico_diag_log("ico_pc: the previous start lost the graphics device (%u in a row); "
+                         "nothing is written to %s: robust access is as the settings say (%s)",
+                         act_loss_row, cfg, table);
         } else if (act_end_n[kind] >= 2) {
             ico_diag_log("ico_pc: the second start in a row ended while preparing the graphics "
                          "(%s); %s is not written to %s: %s (%s)",
@@ -2860,6 +3433,14 @@ int ico_diag_startup_end_persist(int kind, const char *table, int (*persist)(voi
                          "nothing is written to %s); if a start loses it again before one runs "
                          "without a loss, [dev] gpu_robust = true is written for good",
                          cfg);
+        } else if (store) {
+            ico_diag_log("ico_pc: the previous start ended while the graphics driver compiled the "
+                         "3D vertex pre-pass's record stores (%s); this start only draws the "
+                         "record into render targets instead, the pre-pass kept "
+                         "(ICO_RD_VU_RECORD=targets; nothing is written to %s); if a start that "
+                         "compiles them ends there again, [dev] vu_record = \"targets\" is "
+                         "written for good",
+                         act_prev, cfg);
         } else if (pre) {
             ico_diag_log("ico_pc: the previous start ended while the graphics driver compiled the "
                          "3D vertex pre-pass's shaders (%s); this start only draws without it "
@@ -2885,8 +3466,13 @@ int ico_diag_startup_end_persist(int kind, const char *table, int (*persist)(voi
     saved = persist != NULL && persist() == 0;
     if (saved) {
         /* the setting is the rule from now; a deleted setting starts the
-           count again */
-        ends_clear_kind(kind);
+           count again.  Not a loss's row: the loss ladder counts on
+           (loss_ladder_export; before v0.11.4 the row went back to 0 at the
+           start that wrote [dev] gpu_robust, and the next said "1 in a
+           row") */
+        if (!loss) {
+            ends_clear_kind(kind);
+        }
     } else if (kind == ICO_DIAG_END_PIPELINES) {
         /* not written: this start only, so its lazy run's notes say so
            and the next start tries the set again; the count stays, so a
@@ -2902,6 +3488,12 @@ int ico_diag_startup_end_persist(int kind, const char *table, int (*persist)(voi
                      "every start after it check the bounds of every buffer and image read ([dev] "
                      "gpu_robust = true in %s%s); delete that line to turn it off again",
                      cfg, saved ? "" : ", which could not be written: this start only");
+    } else if (store) {
+        ico_diag_log("ico_pc: the previous start ended while the graphics driver compiled the 3D "
+                     "vertex pre-pass's record stores (%s); this start and every start after it "
+                     "draw the record into render targets, the pre-pass kept ([dev] vu_record = "
+                     "\"targets\" in %s%s); delete that line to try the stores again",
+                     act_prev, cfg, saved ? "" : ", which could not be written: this start only");
     } else if (pre) {
         ico_diag_log("ico_pc: the previous start ended while the graphics driver compiled the 3D "
                      "vertex pre-pass's shaders (%s); this start and every start after it draw "
@@ -2920,6 +3512,10 @@ int ico_diag_startup_end_persist(int kind, const char *table, int (*persist)(voi
 
 void ico_diag_startup_activity_exit(void)
 {
+    last_run_end_clean();
+    if (act_loss[0] == '\0') {
+        ico_diag_set_probe(NULL); /* an exit without a loss: no probe ended the run */
+    }
     if (act_mode == ICO_DIAG_ACTIVITY_LAZY) {
         /* the file keeps a line saying the run exited lazy (for this
            start only: the next tries the start-up set again) */
@@ -3007,11 +3603,13 @@ void ico_diag_startup_activity_budget_stop(void)
         if (!ico_diag_low_memory_stop(lv, sizeof lv)) {
             snprintf(lv, sizeof lv, "a level not named");
         }
-        snprintf(act_low_memory, sizeof act_low_memory, "%s (%s)", act_set_low_memory, lv);
+        snprintf(act_low_memory, sizeof act_low_memory, "%s (%s)%s", act_set_low_memory, lv,
+                 act_floor_retried && floor_why[0] != '\0' ? ICO_MEMORY_FLOOR_RETRIED_MARK : "");
         act_once = 0;
         ico_diag_log(
-            "ico_pc: the start-up set stopped at %s (%s); the next start makes the "
-            "pipelines as the game needs them, with no start-up set",
+            "ico_pc: the start-up set stopped at %s (%s); this start makes the rest as the game "
+            "needs them, and the next start resumes the set where this one stopped, in smaller "
+            "batches",
             floor_why[0] != '\0' ? "the free-memory floor" : "the system's low-memory signal", lv);
     } else {
         act_nbatches = 0;
@@ -3030,6 +3628,8 @@ void ico_diag_note_device_loss(const char *dump_zip)
     } else {
         snprintf(act_loss, sizeof act_loss, "%s", hang ? act_loss_hang_none : act_loss_none);
     }
+    last_run_end_words(hang ? "the graphics driver stopped responding (a GPU hang)"
+                            : "graphics device lost");
     /* written now, the run's note kept (the process may be ended before
        its exit) */
     if (act_mode == ICO_DIAG_ACTIVITY_LAZY) {
@@ -3039,6 +3639,26 @@ void ico_diag_note_device_loss(const char *dump_zip)
     } else {
         act_write("");
     }
+    log_sync_ask(); /* issue 215: the loss's lines on the disc */
+}
+
+void ico_diag_note_device_loss_at_wait(const char *where)
+{
+    static int s_noted;
+    if (s_noted) {
+        return;
+    }
+    s_noted = 1;
+    ico_diag_log("ico_pc: the graphics device was lost at %s; counted now as a start that lost "
+                 "it (the system may end the app there before the game notices; the next start "
+                 "takes the loss steps)",
+                 where != NULL ? where : "a wait for the GPU");
+    ico_diag_note_device_loss(NULL);
+}
+
+void ico_diag_note_slow_scene(const char *zip)
+{
+    snprintf(slow_scene_zip, sizeof slow_scene_zip, "%s", zip != NULL ? zip : "");
 }
 
 const char *ico_diag_loss_dump(void)
@@ -3527,6 +4147,9 @@ static int retry_cache_loaded;
 static char retry_cache_path[1024];
 /* ico_diag_set_vu_prepass: the run draws with the VU vertex pre-pass */
 static int retry_prepass_on;
+/* ico_diag_set_vu_record_stores: ... its record stored by the vertex
+   shaders */
+static int retry_stores_on;
 /* ico_diag_set_robust_off_default: robust access off by the device's
    default */
 static int retry_robust_off;
@@ -3565,6 +4188,11 @@ void ico_diag_set_vu_prepass(int on)
     retry_prepass_on = on != 0;
 }
 
+void ico_diag_set_vu_record_stores(int on)
+{
+    retry_stores_on = on != 0;
+}
+
 void ico_diag_set_robust_off_default(int on)
 {
     retry_robust_off = on != 0;
@@ -3600,6 +4228,11 @@ void ico_diag_set_pipeline_cache(int loaded, const char *path)
 #endif
     }
     retry_cache_loaded = loaded != 0 && retry_cache_path[0] != '\0';
+}
+
+const char *ico_diag_pipeline_cache_path(void)
+{
+    return retry_cache_path;
 }
 
 /* ico_diag_prepare_relaunch: everything the relaunch needs, made at
@@ -3850,6 +4483,7 @@ static void driver_crash_plan(void)
         .blendExplicit = retry_blend_explicit != 0,
         .dstPipeline = startup_retry_note_has_dst(activity),
         .prepassPipeline = startup_retry_note_has_vu_pre(activity),
+        .storePipeline = startup_retry_note_has_vu_store(activity),
         .backendName = retry_backend,
     };
     relaunch_value[0] = '\0';
@@ -3924,10 +4558,20 @@ int ico_diag_device_lost_restart(int blend_was_fixed)
         .blendExplicit = retry_blend_explicit != 0,
         .blendWasFixed = blend_was_fixed != 0,
         .prepassWasOn = retry_prepass_on != 0,
+        .storesWereOn = retry_stores_on != 0,
         .robustOffDefault = retry_robust_off != 0,
         .backendName = retry_backend,
     };
     loss_value[0] = '\0';
+    if (act_probe_on && run.canRelaunch) {
+        /* a loss inside a first-start probe (ico_diag_set_probe): the game
+           starts again as a fresh start, no loss step (the probe's verdict
+           keeps the read off on this driver) */
+        plain_restart = 1;
+        ico_diag_log("ico_pc: the graphics card stopped responding while a first-start probe "
+                     "was running; the game starts again as a fresh start, with no loss step");
+        return 1;
+    }
     if (retry_trial[0] != '\0') {
         ico_diag_log("ico_pc: the graphics card stopped responding on the %s renderer applied "
                      "from the menu and not kept yet: the game does not start again; the next "
@@ -4419,6 +5063,7 @@ static void report_file(const char *what, int fatal)
         in.memory = mem;
     }
     in.uptime_s = ico_diag_uptime();
+    in.slow_zip = slow_scene_zip[0] != '\0' ? slow_scene_zip : NULL;
     /* this run's loss dump, else the one the previous run left */
     if (strncmp(act_loss, act_loss_prefix, np) == 0) {
         in.loss_zip = act_loss + np;
@@ -4435,15 +5080,19 @@ static void report_file(const char *what, int fatal)
     }
 #endif
     if (ico_report_write(&in, name, sizeof name) == 0) {
+        /* its size: a report over GitHub's 25 MB attachment limit cannot be
+           attached (a stored loss dump taken stored made 28 MB, report.c) */
+        const double mb = (double)ico_report_last_bytes() / (1024.0 * 1024.0);
+
         snprintf(report_name, sizeof report_name, "%s", name);
         if (fatal) {
-            flog("ico_pc: report: %s in the logs folder (this log, the previous one, the "
-                 "settings and a summary): the file to attach to an issue",
-                 name);
+            flog("ico_pc: report: %s (%.1f MB) in the logs folder (this log, the previous one, "
+                 "the settings and a summary): the file to attach to an issue",
+                 name, mb);
         } else {
-            ico_diag_log("ico_pc: report: %s in the logs folder (this log, the previous one, the "
-                         "settings and a summary): the file to attach to an issue",
-                         name);
+            ico_diag_log("ico_pc: report: %s (%.1f MB) in the logs folder (this log, the previous "
+                         "one, the settings and a summary): the file to attach to an issue",
+                         name, mb);
         }
     } else if (fatal) {
         flog("ico_pc: report: not written (%s)", name);
@@ -4641,6 +5290,39 @@ static void finish(const char *reason, const char *box_text, int code)
 #endif
 }
 
+/* The GPU work being recorded when the crash came (issue 123's Intel HD 530
+   report: a crash inside the driver's vkCmdBeginRendering, which the
+   stack could not name): the render pass the Vulkan backend last began
+   (rhi_pass_crumb.h, "inside the driver's begin call" when the crash is in
+   it) and the renderer's last REPORT_PASSRING_LAST pass ring entries
+   (rd_passring.h, numbers only), oldest first.  Nothing when neither has
+   anything (another backend, a crash before the first replay). */
+#define REPORT_PASSRING_LAST 16u
+
+static void report_gpu_passes(char *line, size_t n)
+{
+    const RhiPassCrumb *pc = rhi_pass_crumb_last();
+    if (pc->seq != 0) {
+        rhi_pass_crumb_format(pc, line, n);
+        flog("ico_pc: %s", line);
+    }
+    const uint32_t count = rd_passring_count();
+    if (count == 0) {
+        return;
+    }
+    const uint32_t from = count > REPORT_PASSRING_LAST ? count - REPORT_PASSRING_LAST : 0u;
+    flog("ico_pc: the renderer's last %u passes recorded, oldest first (the pass ring; the "
+         "newest is the one being recorded):",
+         count - from);
+    for (uint32_t i = from; i < count; i++) {
+        const RdPassRec *e = rd_passring_get(i);
+        if (e != NULL) {
+            rd_passring_format(e, NULL, line, n);
+            flog("ico_pc:   %s", line);
+        }
+    }
+}
+
 /* the crash block in the log, without the end */
 static void report_crash_block(void)
 {
@@ -4655,6 +5337,9 @@ static void report_crash_block(void)
     flog("ico_pc: CRASH: %s (0x%lx) at %s", crash.what, crash.code, where);
     if (activity[0] != '\0') {
         flog("ico_pc: while: %s", activity);
+    }
+    if (step_line[0] != '\0') {
+        flog("ico_pc: the last step: %s", step_line);
     }
     if (crash.fault_kind >= 0) {
         flog("ico_pc: the faulting access: %s address 0x%llx",
@@ -4674,6 +5359,7 @@ static void report_crash_block(void)
     if (failure[0] != '\0') {
         flog("ico_pc: last failure message: %s", failure);
     }
+    report_gpu_passes(line, sizeof line);
     if (crash.stack_hi > crash.stack_lo) {
         scan_stack((const unsigned char *)crash.stack_lo, (const unsigned char *)crash.stack_hi);
     }
@@ -4976,6 +5662,9 @@ static unsigned long long present_excused(unsigned long long d)
 void ico_diag_present_enter(void)
 {
     present_since_ns = ico_diag_now_ns();
+    if (last_run_present()) {     /* the first picture after the start (one compare after it) */
+        set_size_first_picture(); /* issue 215: its free memory, once */
+    }
 }
 
 void ico_diag_present_leave(void)
@@ -5092,13 +5781,44 @@ static const char *os_wait_name(void)
    (window_host.c window_pipeline_skip), and the stall mark makes every
    start of this version take the VU programs' plain entries
    (act_stall_path).  The longest creation any log has shown is 3.4 s (a VU
-   pipeline on a PowerVR phone).  The limit is PIPE_STALL_START_S before the
-   first Main tick (the start-up set) and PIPE_STALL_PLAY_S in play (a lazy
+   pipeline on a PowerVR phone).  The limit is ICO_PIPE_STALL_START_S before the
+   first Main tick (the start-up set) and ICO_PIPE_STALL_PLAY_S in play (a lazy
    run's first-use creation: a Vulkan 1.0-era compiler may take longer than
-   10 s on a VU merge shader; review finding 2). */
-#define PIPE_STALL_START_S 10.0
-#define PIPE_STALL_PLAY_S 30.0
+   10 s on a VU merge shader; review finding 2); before the game starts 60 s
+   on a driver whose compiles run one at a time (issue 188, a PowerVR
+   B-Series driver: ico_diag_set_pipe_compiler_serial), gpu_hang.h
+   ico_pipe_stall_limit_s.  On every driver the limit does not count while
+   the process's memory grew by 2 MB or more since the last heartbeat (the
+   compiler at work, gpu_hang.h ico_pipe_mem_moving: the issue 188 phone
+   went 147, 251, 275, 296 MB before it stood still), for at most three
+   times the limit in one creation, and never with the free memory under
+   the floor or a low-memory level from the system (gpu_hang.h
+   ico_pipe_mem_hold: a call that never returns and keeps growing would
+   otherwise hold it until Android's low-memory killer ended the run). */
 static volatile int pipe_stall;
+/* the heartbeat's memory rule (watchdog thread): the last heartbeat's
+   resident KB, whether it grew past the rule's step, by how much, and the
+   times a creation was held by it (the line's first 8, then every 100th) */
+static long pipe_mem_prev_kb = -1;
+static int pipe_mem_moving;
+static long pipe_mem_grew_kb;
+static unsigned pipe_mem_beat, pipe_mem_logged_beat, pipe_mem_holds;
+/* whether the next start prepares the graphics another way (watchdog_fire's
+   box), set with pipe_stall */
+static int pipe_stall_differs = 1;
+
+/* at each heartbeat (the watchdog's thread) */
+static void pipe_mem_heartbeat(void)
+{
+    long rss = -1, peak = -1;
+    if (ico_diag_process_memory(&rss, &peak) != 0) {
+        rss = -1;
+    }
+    pipe_mem_moving = ico_pipe_mem_moving(pipe_mem_prev_kb, rss);
+    pipe_mem_grew_kb = rss >= 0 && pipe_mem_prev_kb >= 0 ? rss - pipe_mem_prev_kb : 0;
+    pipe_mem_prev_kb = rss;
+    pipe_mem_beat++;
+}
 
 /* the stall mark written (the watchdog's thread; the main thread is inside
    the driver) */
@@ -5119,12 +5839,41 @@ static void stall_mark_write(void)
    progress too, and its note counts only while some have not returned
    (ico_pipe_note_creating), so a movie or a load that presents no
    picture to take a finished batch is not a stall */
-static double pipe_stall_step(double now, int counted, const IcoDiagGpu *g)
+static double pipe_stall_step(double now, int counted, const IcoDiagGpu *g, double limit_s)
 {
     static IcoPipeStallWatch w;
+    static unsigned refused;
     const int creating = act_mode != 0 && ico_pipe_note_creating(activity, g->bg_pipes_left);
-    return ico_pipe_stall_step(&w, now, creating, counted, gpu_hang_limit_ms != 0, activity_seq,
-                               pipes_done, g->bg_pipes_done);
+    const int on = gpu_hang_limit_ms != 0;
+    /* the free memory under the floor, or the system's low-memory level:
+       read here, inside the creation, not only by the set between batches
+       (ico_diag_background_memory has no side effect on the set's stop) */
+    char low[128];
+    const int memoryLow =
+        creating && pipe_mem_moving && on && ico_diag_background_memory(low, sizeof low) != 0;
+    const int hold = ico_pipe_mem_hold(&w, now, creating, pipe_mem_moving, on, memoryLow, limit_s);
+    if (creating && pipe_mem_moving && on && pipe_mem_logged_beat != pipe_mem_beat) {
+        pipe_mem_logged_beat = pipe_mem_beat;
+        if (hold) {
+            /* the compiler at work: the limit waits (issue 188) */
+            pipe_mem_holds++;
+            if (pipe_mem_holds <= 8 || pipe_mem_holds % 100 == 0) {
+                ico_diag_log("ico_pc: a pipeline creation in progress, the process grew %ld MB "
+                             "since the last heartbeat (the driver's compiler at work): the "
+                             "pipeline limit waits (%u times; %.0f s held of at most %.0f s)",
+                             pipe_mem_grew_kb / 1024, pipe_mem_holds, w.held_s,
+                             ICO_PIPE_MEM_HOLD_LIMITS * limit_s);
+            }
+        } else if (++refused <= 8 || refused % 100 == 0) {
+            ico_diag_log("ico_pc: a pipeline creation in progress, the process grew %ld MB since "
+                         "the last heartbeat, but the pipeline limit does not wait for it (%s; "
+                         "%u times)",
+                         pipe_mem_grew_kb / 1024, memoryLow ? low : "held for its longest already",
+                         refused);
+        }
+    }
+    return ico_pipe_stall_step(&w, now, creating, counted && !hold, on, activity_seq, pipes_done,
+                               g->bg_pipes_done);
 }
 #endif
 
@@ -5147,12 +5896,31 @@ static void watchdog_fire(const char *reason)
     hang = (tracked && gpu_hung(&gpu)) || render_hang;
     flog("ico_pc: ======================================================================");
     flog("ico_pc: WATCHDOG: %s", reason);
+    if (reset_stop) {
+        /* issue 215: the device may go down with the GPU: the end's words
+           and the log on the disc before anything else */
+        last_run_end_words("the graphics driver stopped responding (a GPU hang, the kernel's "
+                           "driver resetting the GPU)");
+#ifdef __ANDROID__
+        log_sync_serve(1);
+#endif
+    }
     if (render_hang) {
         flog("ico_pc: the graphics driver did not finish the picture (the render thread has been "
              "inside picture %llu's submit and present for %.0f s; the main thread waits for it); "
              "this end counts as a device loss (the loss dump; the next start counts the loss "
              "and does not replay the frame)",
              render_hang_seq, render_hang_s);
+        if (tracked && gpu.submitted != 0) {
+            /* the backend's count as the watchdog sees it: whether the
+               GPU is behind (a wait in progress above finished) or the
+               driver's submit or present call has not returned */
+            flog("ico_pc: the GPU: the newest submission is %llu (replay %u, frame %u, made %.0f s "
+                 "ago), the newest seen finished %llu; %s",
+                 gpu.submitted, gpu.replay, gpu.frame, gpu.submitted_ago_s, gpu.finished,
+                 gpu.waiting_for != 0 ? "a wait for one in progress"
+                                      : "no wait for it in progress");
+        }
     } else if (hang) {
         flog("ico_pc: the graphics driver did not finish the picture (submission %llu has not "
              "finished after a %.0f s wait)",
@@ -5205,6 +5973,19 @@ static void watchdog_fire(const char *reason)
     if (activity[0] != '\0') {
         flog("ico_pc: while: %s", activity);
     }
+    if (step_line[0] != '\0') {
+        /* the steps other than a renderer switch's are the start's, the
+           last "window: start: up in T s; the game runs" once it is over
+           (issue 123: a hang in the game said "the last step: ... the fog
+           self-test", which reads as a hang there); the hung wait's
+           submission, finished and seconds are in the GPU lines above */
+        flog("ico_pc: the last %sstep: %s",
+             strncmp(step_line, "window: switch", 14) == 0 ||
+                     strncmp(step_line, "window: backend switch", 22) == 0
+                 ? ""
+                 : "start-up ",
+             step_line);
+    }
     if (failure[0] != '\0') {
         flog("ico_pc: last failure message: %s", failure);
     }
@@ -5220,7 +6001,11 @@ static void watchdog_fire(const char *reason)
            dump when none was noted */
         void (*dump)(void) = gpu_dump_fn;
         loss_hang = 1;
-        if (dump != NULL) {
+        if (reset_stop) {
+            /* no pass ring and no loss dump: the run ends before the device
+               does (a loss without a dump for the next start) */
+            flog("ico_pc: no loss dump at a reset stop: the run ends at once");
+        } else if (dump != NULL) {
             dump();
         }
 #ifdef __ANDROID__
@@ -5247,6 +6032,9 @@ static void watchdog_fire(const char *reason)
                      gpu.waiting_for, gpu.waiting_s);
         } else {
             snprintf(what, sizeof what, "the watchdog: %s", reason);
+            /* not a clean start for the robust step (review 2 N5) */
+            watchdog_mark_write(reason);
+            last_run_end_words(what);
         }
         report_file(what, 1);
     }
@@ -5260,14 +6048,18 @@ static void watchdog_fire(const char *reason)
         const char *note = hang && notefn != NULL ? notefn() : NULL;
 
         snprintf(box, sizeof box, "%s%s%s",
-                 pipe_stall ? "The graphics driver stopped while preparing the graphics, so the "
-                              "game has to close.\n\nStart the game again: it prepares them "
-                              "another way."
-                 : hang     ? "The graphics driver stopped responding while the game was drawing, "
-                              "so the game has to close.\n\nStart the game again. If this "
-                              "happens every time at the same place, please report it at "
-                              "github.com/nathanialf/ico-pc/issues."
-                            : "ICO stopped responding, so it has to close.",
+                 pipe_stall && pipe_stall_differs
+                     ? "The graphics driver stopped while preparing the graphics, so the "
+                       "game has to close.\n\nStart the game again: it prepares them "
+                       "another way."
+                 : pipe_stall ? "The graphics driver stopped while preparing the graphics, so "
+                                "the game has to close.\n\nIf this happens at every start, "
+                                "please report it at github.com/nathanialf/ico-pc/issues."
+                 : hang ? "The graphics driver stopped responding while the game was drawing, "
+                          "so the game has to close.\n\nStart the game again. If this "
+                          "happens every time at the same place, please report it at "
+                          "github.com/nathanialf/ico-pc/issues."
+                        : "ICO stopped responding, so it has to close.",
                  note != NULL && note[0] != '\0' ? "\n\n" : "", note != NULL ? note : "");
         if (note != NULL && note[0] != '\0') {
             flog("ico_pc: the box names the graphics driver route (the device's own Qualcomm "
@@ -5283,6 +6075,9 @@ static void watchdog_fire(const char *reason)
 #ifdef __linux__
     watchdog_ending = 1;
 #endif
+#endif
+#ifdef __ANDROID__
+    log_sync_serve(1); /* issue 215: the report on the disc before the box waits */
 #endif
     finish(hang ? "the graphics driver stopped responding (watchdog)" : "watchdog", box,
            EXIT_WATCHDOG);
@@ -5302,6 +6097,29 @@ void ico_diag_watchdog_pause(int paused)
     }
     wd_paused = paused != 0;
     ico_diag_log("ico_pc: diagnostics: watchdog %s", paused ? "paused" : "running again");
+}
+
+int ico_diag_watchdog_paused(void)
+{
+    return wd_paused != 0;
+}
+
+void ico_diag_watchdog_switch(unsigned int seconds, const char *what)
+{
+    if (seconds != 0) {
+        snprintf(sw_what, sizeof sw_what, "%s", what != NULL ? what : "a switch");
+        sw_since = ico_diag_uptime();
+        sw_progress++;
+        ico_diag_log("ico_pc: diagnostics: watchdog: %s; its limit is %u s without a step, a "
+                     "shader or a pipeline made (the game's own limits wait)",
+                     sw_what, seconds);
+        sw_limit_s = seconds;
+    } else if (sw_limit_s != 0) {
+        sw_limit_s = 0;
+        ico_diag_log("ico_pc: diagnostics: watchdog: %s over after %.1f s; the game's limits "
+                     "count again",
+                     sw_what, ico_diag_uptime() - sw_since);
+    }
 }
 
 void ico_diag_main_thread_end(void)
@@ -5350,8 +6168,15 @@ static void watchdog_loop(void)
     /* the GPU hang limit's watch (gpu_hang.h): the wait it counts, and the
        render thread's picture it counts the same way */
     IcoGpuHangWatch hang_watch;
+    IcoGpuResetWatch reset_watch;
     IcoRenderHangWatch render_watch;
+    /* the switch's watch (ico_diag_watchdog_switch): on, the progress and
+       pipeline counts last seen, when either last moved */
+    int sw_on = 0;
+    unsigned int sw_seen = 0, sw_pipes = 0;
+    double sw_alive = start;
     memset(&hang_watch, 0, sizeof hang_watch);
+    memset(&reset_watch, 0, sizeof reset_watch);
     memset(&render_watch, 0, sizeof render_watch);
     for (;;) {
         double now;
@@ -5365,6 +6190,7 @@ static void watchdog_loop(void)
         double poll_dt;
         int poll_counted;
         unsigned int hang_ms;
+        unsigned int sw_lim;
         if (epoch != __atomic_load_n(&wd_epoch, __ATOMIC_ACQUIRE)) {
             /* the limits were just set (ico_diag_start): both count from now */
             epoch = __atomic_load_n(&wd_epoch, __ATOMIC_ACQUIRE);
@@ -5387,6 +6213,9 @@ static void watchdog_loop(void)
         nanosleep(&ts, NULL);
         /* a crashing thread's flush and box (fatal_ui_*) */
         fatal_ui_serve();
+#ifdef __ANDROID__
+        log_sync_serve(0); /* issue 215: the lines that asked, on the disc */
+#endif
 #endif
         if (fatal_once || !main_alive) {
             continue;
@@ -5398,8 +6227,22 @@ static void watchdog_loop(void)
             os_gap = 0.0;
         }
         poll_dt = now - last_poll;
-        poll_counted = poll_dt <= SUSPEND_GAP_S && !wd_paused;
-        if (now - last_poll > SUSPEND_GAP_S || wd_paused) {
+        sw_lim = sw_limit_s;
+        poll_counted = poll_dt <= SUSPEND_GAP_S && !wd_paused && sw_lim == 0;
+        if (sw_lim != 0 && !sw_on) {
+            /* a switch begins: its own clock from now */
+            sw_on = 1;
+            sw_seen = sw_progress;
+            sw_pipes = pipes_done;
+            sw_alive = now;
+        } else if (sw_lim == 0) {
+            sw_on = 0;
+        }
+        if (sw_on && (now - last_poll > SUSPEND_GAP_S || wd_paused)) {
+            /* the system slept, or a box paused the watchdog: not the switch's time */
+            sw_alive += now - last_poll;
+        }
+        if (now - last_poll > SUSPEND_GAP_S || wd_paused || sw_on) {
             /* the clock jumped between two polls: the system slept (Windows'
                GetTickCount64 counts sleep and hibernation) or the process was
                stopped (a debugger, SIGSTOP); or the watchdog is paused (the
@@ -5420,9 +6263,40 @@ static void watchdog_loop(void)
             last_beat = now;
             continue;
         }
+        if (sw_on) {
+            /* Options > Graphics > Apply's switch (ico_diag_watchdog_switch):
+               neither of the game's limits counts (the device's start is not
+               a hang of the game), but the switch's own does: no step, no
+               shader and no pipeline made for its time ends the run with the
+               report, the main thread's stack sampled where it stands
+               (inside the driver, when it hung there); only while a limit
+               is in force, as the GPU hang limit */
+            if (sw_progress != sw_seen || pipes_done != sw_pipes) {
+                sw_seen = sw_progress;
+                sw_pipes = pipes_done;
+                sw_alive = now;
+            }
+            if (now - last_beat >= HEARTBEAT_S) {
+                last_beat = now;
+                heartbeat(0);
+            }
+            if ((first_s != 0 || later_s != 0) && now - sw_alive >= (double)sw_lim) {
+                char st[sizeof step_line];
+                memcpy(st, step_line, sizeof st);
+                st[sizeof st - 1] = '\0';
+                snprintf(reason, sizeof reason,
+                         "%.60s: nothing moved for %u s (the last step: %.90s)", sw_what, sw_lim,
+                         st);
+                watchdog_fire(reason);
+            }
+            continue;
+        }
         if (now - last_beat >= HEARTBEAT_S) {
             last_beat = now;
             heartbeat(0);
+#ifdef __ANDROID__
+            pipe_mem_heartbeat(); /* the pipeline limit's memory rule */
+#endif
         }
         /* alive while either moves: a Main tick, or the progress a long
            stretch inside one Main tick reports (a movie plays whole inside
@@ -5491,6 +6365,24 @@ static void watchdog_loop(void)
         hang_ms = gpu_hang_limit_ms;
         if (hang_ms != 0 && (first_s != 0 || later_s != 0)) {
             IcoDiagGpu g;
+            /* the reset stop (gpu_hang.h, issue 215): the same wait with
+               the kernel driver resetting the GPU under it ends now, before
+               the device goes down with it */
+            if (gpu_state(&g) &&
+                ico_gpu_reset_step(&reset_watch, g.waiting_for, g.finished, poll_dt, poll_counted,
+                                   (int)last_run_gpu_resets_now())) {
+                static char why[256];
+                reset_stop = 1;
+                snprintf(why, sizeof why,
+                         "the GPU: submission %llu not finished after %u ms with the kernel's GPU "
+                         "driver resetting the GPU under it (%d to %d resets); the newest is "
+                         "%llu, the newest seen finished %llu",
+                         g.waiting_for, (unsigned)(reset_watch.counted_s * 1000.0),
+                         reset_watch.resets0, (int)last_run_gpu_resets_now(), g.submitted,
+                         g.finished);
+                watchdog_fire(why);
+                continue;
+            }
             if (gpu_state(&g) &&
                 ico_gpu_hang_step(&hang_watch, (double)hang_ms / 1000.0, g.waiting_for, g.finished,
                                   poll_dt, poll_counted)) {
@@ -5534,16 +6426,31 @@ static void watchdog_loop(void)
                (pipe_stall_step), in force before the game starts too */
             IcoDiagGpu bg;
             (void)gpu_state(&bg);
-            const double stalled = pipe_stall_step(now, poll_counted, &bg);
-            const double stall_lim = ticks == 0 ? PIPE_STALL_START_S : PIPE_STALL_PLAY_S;
+            const double stall_lim = ico_pipe_stall_limit_s(ticks != 0, pipe_serial);
+            const double stalled = pipe_stall_step(now, poll_counted, &bg, stall_lim);
             if (stalled >= stall_lim) {
+                /* the box's "another way" only when the next start does
+                   something else (issue 188: the self-test's pipeline came
+                   first at every start, and every start ended the same) */
+                const int lazyRun = act_mode == ICO_DIAG_ACTIVITY_LAZY;
+                const int skipFam = pipeline_skip_family_of_note(activity) != PIPELINE_SKIP_NONE;
+                const int vuNote = strstr(activity, "vu_") != NULL;
+                pipe_stall_differs = ico_pipe_stall_next_differs(in_selftest, lazyRun, skipFam,
+                                                                 vuNote, act_prev_stall);
                 ico_diag_log("ico_pc: the graphics driver has not returned from creating a "
                              "pipeline for %.0f s (pipelines %u of %u; the background set's "
-                             "compiles: %u returned, %u not; the limit %.0f s %s): the run ends "
-                             "now, in order, so the next start can prepare the graphics another "
-                             "way",
+                             "compiles: %u returned, %u not; the limit %.0f s %s%s%s%s): the run "
+                             "ends now, in order, %s",
                              stalled, pipes_done, pipes_total, bg.bg_pipes_done, bg.bg_pipes_left,
-                             stall_lim, ticks == 0 ? "before the game starts" : "in play");
+                             stall_lim, ticks == 0 ? "before the game starts" : "in play",
+                             pipe_serial ? ", " : "", pipe_serial ? pipe_serial_why : "",
+                             in_selftest ? "; inside the start's self-tests" : "",
+                             pipe_stall_differs
+                                 ? "so the next start can prepare the graphics another way"
+                             : lazyRun ? "and the next start prepares them the same way (this "
+                                         "run made them on first use already)"
+                                       : "and the next start prepares them the same way (the "
+                                         "self-tests run first at every start)");
                 snprintf(reason, sizeof reason,
                          "a pipeline creation has not returned for %.0f s (limit %.0f s)", stalled,
                          stall_lim);
@@ -5790,6 +6697,7 @@ static void crash_from_exception(EXCEPTION_POINTERS *ep)
     }
     crash.what = exception_name(r->ExceptionCode);
     crash.code = r->ExceptionCode;
+    last_run_end_crash(r->ExceptionCode);
     crash.pc = (uintptr_t)r->ExceptionAddress;
 #if defined(_M_X64) || defined(__x86_64__)
     crash.sp = (uintptr_t)c->Rsp;
@@ -5985,6 +6893,7 @@ ICO_ENTRY static void crash_handler(int sig, siginfo_t *si, void *ucv)
     }
     crash.what = signal_name(sig);
     crash.code = (unsigned long)sig;
+    last_run_end_crash((unsigned long)sig); /* async-signal-safe */
 #if defined(__APPLE__) && defined(__aarch64__)
     crash.pc = (uintptr_t)uc->uc_mcontext->__ss.__pc;
     crash.sp = (uintptr_t)uc->uc_mcontext->__ss.__sp;

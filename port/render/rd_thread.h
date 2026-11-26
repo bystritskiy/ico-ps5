@@ -26,6 +26,14 @@
  *                   here ends with its walk, and the next picture's
  *                   interpolation runs while the submit thread works; its
  *                   first graphics call waits for that thread.
+ *   Original        with Frame rate Original (no interpolation) the
+ *                   frame rd_end_frame closes is handed over the same way
+ *                   (rd__replay_frame_post below): the game step never
+ *                   waits for its present.  The window's gate skips a
+ *                   frame whose picture would find the render thread or
+ *                   the submit thread still busy with the one before, so
+ *                   a picture's acquire never waits behind a present while
+ *                   the game thread waits for its reads.
  *   one picture     a picture waits for the one before to finish (the
  *                   drain: the render thread's job, not the submit
  *                   thread's); a picture whose capture or blended dump is
@@ -111,6 +119,16 @@ bool rd_thread_on_render(void);
  * thread; on the render thread the submit thread's alone, its list kept
  * for it included; 0 and nothing done without a host); the ns waited */
 uint64_t rd_thread_drain(void);
+/* The reads of the pictures handed over ended (the game thread: the wait
+ * its calls that change the renderer's state make, rd__texlock_wait,
+ * counted as one in the 10 s line's read waits); the rest of the render
+ * thread's jobs and the submit thread's work (the submits, the presents,
+ * a wait for the GPU) are not waited for.  What a dump reads is then the
+ * game thread's alone (the hand-over above): rd_dump.c's copies on the
+ * game thread (the loss keep, the slow-scene dump) wait here, not in
+ * rd_thread_drain.  The ns waited (0: none open, no host, or on the
+ * render thread) */
+uint64_t rd_thread_reads_wait(void);
 /* The result of the last picture rd_present_post or rd__replay_frame_async
  * handed over, once a drain after it returned (the replay tool) */
 bool rd_thread_last_ok(void);
@@ -161,7 +179,15 @@ typedef enum RdReadPhase {
 /* aheads: the pictures whose job ended by waiting for the next picture's
  * frame slot (the slot ahead, rd__slot_ahead_take: outside the hand-over), with the waits' sum
  * and longest in ms; fenceInside: the pictures handed over that waited for
- * their own slot inside their reads (no slot waited for ahead) */
+ * their own slot inside their reads (no slot waited for ahead).
+ * roomAheads: the pictures whose job ended by making the next picture's
+ * wait for room in the present queue (the display's wait ahead,
+ * rd__room_ahead_take: Direct3D 11's frame latency wait), with the waits'
+ * sum and longest in ms; roomDrains: the game thread's presents whose
+ * drain waited for one (the part of the drain inside it, summed in ms:
+ * the present's own wait, counted as the display's); roomInside: the
+ * pictures handed over whose acquire found none made ahead where the
+ * backend has the wait (it waited inside their reads) */
 typedef struct RdThreadBlock {
     unsigned pictures;
     double interpMs, walkMs, submitMs, waitMs;
@@ -174,6 +200,8 @@ typedef struct RdThreadBlock {
     double freshWaitMs, furtherWaitMs;
     unsigned aheads, fenceInside;
     double aheadMs, aheadMaxMs;
+    unsigned roomAheads, roomDrains, roomInside;
+    double roomAheadMs, roomAheadMaxMs, roomDrainMs;
 } RdThreadBlock;
 
 void rd_thread_block_take(RdThreadBlock *out);
@@ -182,7 +210,12 @@ void rd_thread_block_take(RdThreadBlock *out);
  * clause after "read waits N (...)": "; the render thread as each began: the hand-over N
  * (X ms), ...; the next picture's frame slot waited for at the end of the
  * one before N times (...), N pictures waited for their slot inside their
- * reads" (the split left out with no read wait); out always terminated */
+ * reads" (the split left out with no read wait), then where the backend
+ * has a display's wait made ahead "; the display's wait for room in the
+ * present queue made at the end of the picture before N times (X ms in
+ * all, longest Y ms; the presents waited for it N times, X ms, as the
+ * display's wait), N pictures waited for it inside their reads" (left out
+ * with none of those); out always terminated */
 void rd_thread_read_waits_text(const RdThreadBlock *b, char *out, size_t cap);
 
 /* The render thread, after a picture's job: how long the picture held the
@@ -206,6 +239,18 @@ uint64_t rd_thread_take_present_ns(void);
  * taken as above.  The window predicts a further picture's reads by the
  * reads less those waits (render_thread.c, pace_policy.h PaceRtPipe). */
 void rd_thread_take_reads_parts(uint64_t *waitNs, uint64_t *interpNs);
+/* The render thread, after a picture's job: how long its slot ahead waited
+ * (rd_thread.c slotAhead: the next picture's frame slot waited for at the
+ * job's end, the GPU's end of the picture before it), in ns; 0 when none was
+ * made.  Taken as above.  The window takes the job's end for that GPU end
+ * when the wait blocked (render_thread.c, pace_policy.h pace_rt_pipe_idle). */
+uint64_t rd_thread_take_ahead_ns(void);
+/* Whether a picture's job ends with the slot ahead (not under
+ * ICO_RD_SLOT_AHEAD=0, nor with the submit thread on and the frame slots
+ * not apart): a present handed over after it waits in its drain for the
+ * GPU's end of the picture before the one in progress (pace_policy.h
+ * PaceRtAsk.slotAhead) */
+bool rd_thread_slot_ahead_on(void);
 /* The game thread's waits for a picture's reads in all since the start,
  * ns (the 10 s line's read waits, summed): the window takes a step's
  * share out of its own time and counts the steps that started late by
@@ -252,6 +297,21 @@ void rd__thread_phase(RdReadPhase phase);
  * one waited for ahead, its fence and its jobs then done; false: wait as
  * before. */
 bool rd__slot_ahead_take(void);
+/* The display's wait ahead: the render thread, at the end of a picture's
+ * job handed over that presented (after the slot ahead), makes the next
+ * picture's wait for room in the present queue (rhi_wait_present_room:
+ * Direct3D 11's frame latency wait), so the next picture's reads begin
+ * without the display's wait inside them; the game thread's next present
+ * waits for what is left of it in its drain, as the display's wait.  Not
+ * with the submit thread on, not under ICO_RD_ACQUIRE_AHEAD=0 ([dev]
+ * acquire_ahead = false).  rd__room_ahead_take (rd__present_acquire, any
+ * thread): the record taken, and on the render thread in a picture's
+ * reads where the backend has the wait and none was made ahead, counted
+ * as a wait inside the reads (the backend's acquire then waits itself). */
+void rd__room_ahead_take(void);
+/* The tests' seam (rd_tex_test): fn() in place of rhi_wait_present_room
+ * in the display's wait ahead (its answer the backend's); NULL: none */
+void rd__thread_room_hook(bool (*fn)(void));
 /* The tests' seam (rd_tex_test): fn(at) on the render thread inside a
  * picture's open hand-over as it enters phase `at` (RdReadPhase), and with
  * at = RD_READ_PHASES in the slot ahead before its wait; NULL: none */
@@ -276,13 +336,59 @@ bool rd__render_call(void (*fn)(void *arg), void *arg);
  * thread's present (rd__replay_frame_async: rd_present, rd_reshow.c) */
 bool rd__replay_frame_here(const RdFrame *f, int keep, bool present);
 bool rd__replay_frame_async(const RdFrame *f, int keep, bool present);
+/* Frame rate Original's hand-over (rd_core.c rd_end_frame with the
+ * window's gate set, rd.h RdReplayGate).  rd__replay_frame_post_ok: a
+ * picture would be handed over (the host on, not on the render thread, not
+ * under [dev] original_async = false (ICO_RD_ORIGINAL_ASYNC=0), and no
+ * picture that waits: sync, rd_submit_hold, a capture or blended dump
+ * armed).  rd__thread_picture_busy: the gate's busy input, false unless
+ * rd__replay_frame_post_ok: the job of the picture it posted last has not
+ * ended (its walk, its acquire, its slot ahead), or the submit thread has
+ * a job unfinished (that picture's submit and present: the next acquire
+ * would wait for its present inside the reads), but for a job that waits
+ * for its picture's GPU end before its present with none behind it (the
+ * GPU's end first, rd_submit_thread.h: no lock held, the next picture
+ * records beside it).  rd__replay_frame_post:
+ * frame f replayed and presented as a picture handed over (the overlay's
+ * layers collected here first, Motion blur: Smooth armed at one present a
+ * tick there, as rd_end_frame's replay inside the step did), after the
+ * picture before ended (its present too: waitMs, a no-op unless the gate
+ * presented a keep frame while busy; counted as a new frame's slot wait;
+ * not the submit thread's job in its GPU wait with none behind it, which
+ * this picture's job follows: counted, rd_thread_gpu_wait_posts_take),
+ * rd_last_present_info noted for f after that wait (rd__note_frame_present);
+ * true when posted, false when not taken (the reasons above, or the host
+ * refused: nothing is posted and the caller replays it inside the step on
+ * the host's stack; never here on the game's fiber stack). */
+bool rd__replay_frame_post_ok(void);
+/* (its value: what was busy, rd.h RD_BUSY_*, 0 RD_BUSY_NONE; with the ahead
+ * order in effect the submit thread's job is not busy, rd_submit_thread.h
+ * "ahead") */
+int rd__thread_picture_busy(void);
+bool rd__replay_frame_post(const RdFrame *f, int keep, double *waitMs);
+/* The tests' read (rd_tex_test): the render thread's part of
+ * rd__thread_picture_busy alone, the job of the picture posted last not
+ * ended; the submit thread's part is rd_thread_submit_unfinished */
+bool rd__thread_picture_busy_render(void);
+/* The render thread inside the job of a picture Frame rate Original
+ * handed over (rd__replay_frame_post): its list's job waits for the GPU's
+ * end before its present where that rule is on (rd_submit_thread.h "the
+ * GPU's end first", rd__submit_defer) */
+bool rd__thread_original_job(void);
+/* rd_end_frame's replay inside the game's step runs on the calling thread
+ * (set around it, on whichever thread runs it): RdPerfRecord.presentThread
+ * RD_PRESENT_IN_STEP (rd_perf.c) */
+void rd__thread_in_step(bool on);
+bool rd__thread_in_step_now(void);
 /* a picture of the game thread's begins: the one before it finished (its
  * wait counted for rd_submit_waited_ns; rd_present's start) */
 void rd__thread_picture_begin(void);
-/* rd_present's value of the present clock (rd_interp.c s_clockRaw): the
- * one the game thread took when it posted the present, on the render
- * thread; else the clock's own, taken (NAN after) */
-double rd__thread_clock_raw(void);
+/* rd_present's value of the present clock (rd_present_clock.c), with
+ * gap[0] its time since the present before and gap[1] its tick (0 when the
+ * clock did not time the present): the ones the game thread took when it
+ * posted the present, on the render thread; else the clock's own, taken
+ * (NAN and 0 after) */
+double rd__thread_clock(double gap[2]);
 /* rd_get_stats on the game thread with a host: the counts as above */
 const struct RdStats *rd__thread_stats(void);
 /* RdStats the calling thread counts into: the render thread's own inside

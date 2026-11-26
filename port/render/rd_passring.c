@@ -72,8 +72,18 @@ void rd__passring_pipeline_hold(int on)
     s_pipeHold = on ? 1u : 0u;
 }
 
+static RdPassringPipeHook s_pipeHook;
+
+void rd__passring_pipeline_hook(RdPassringPipeHook fn)
+{
+    s_pipeHook = fn;
+}
+
 void rd__passring_pipeline(uint32_t id, uint8_t vs, uint8_t fs, uint8_t dst)
 {
+    if (s_pipeHook != NULL) {
+        s_pipeHook(id, vs, fs, dst);
+    }
     if (!s_seq || s_pipeHold) {
         return;
     }
@@ -214,12 +224,20 @@ static void entryText(const RdPassRec *e, const char *(*postName)(int), EntryTex
                  (unsigned)e->dh);
         break;
     case RD_PASSK_VU_PRE:
-        snprintf(t->target, sizeof(t->target), "%u vertices into the record (%ux%u)",
-                 (unsigned)e->dw, (unsigned)e->cw, (unsigned)e->ch);
+        /* color: the record's write (rd_vu_record.h): 0 targets, 1 stores,
+           2 compute dispatches */
+        snprintf(t->target, sizeof(t->target), "%u vertices into the record (%ux%u)%s",
+                 (unsigned)e->dw, (unsigned)e->cw, (unsigned)e->ch,
+                 e->color == 2u ? " (compute)"
+                 : e->color     ? " (stores)"
+                                : "");
         break;
     case RD_PASSK_VU_TRI:
-        snprintf(t->target, sizeof(t->target), "%u triangle slots into the record (%ux%u)",
-                 (unsigned)e->dw, (unsigned)e->cw, (unsigned)e->ch);
+        snprintf(t->target, sizeof(t->target), "%u triangle slots into the record (%ux%u)%s",
+                 (unsigned)e->dw, (unsigned)e->cw, (unsigned)e->ch,
+                 e->color == 2u ? " (compute)"
+                 : e->color     ? " (stores)"
+                                : "");
         break;
     default:
         if (e->depth) {

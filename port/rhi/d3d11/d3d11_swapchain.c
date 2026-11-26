@@ -89,6 +89,7 @@ static void d11_frame_latency_open(void)
     d11_frame_latency_close();
     g_d11.frameLatencyTimeoutLogged = false;
     g_d11.frameLatencySkipWait = false;
+    g_d11.frameLatencyWaited = false; /* a new object: its own count */
     if (!g_d11.frameLatency || !g_d11.swapchain2) {
         return;
     }
@@ -222,11 +223,84 @@ void rhi_surface_poll_restart(void)
     /* DXGI's size follows the window at each present; nothing to poll */
 }
 
+/* rhi.h: the images are never turned here (the desktop's surfaces are not) */
+uint32_t rhi_swapchain_rotation(void)
+{
+    return 0;
+}
+
 static bool s_presentShown;
 
 bool rhi_present_shown(void)
 {
     return s_presentShown;
+}
+
+/* rhi.h: the present is not timed apart here */
+bool rhi_present_split(RhiPresentSplit *out)
+{
+    memset(out, 0, sizeof(*out));
+    return false;
+}
+
+/* the waitable swap chain's wait for room in the queue (as
+ * d3d12_swapchain.c, 50 ms at most), counted as the acquire's */
+static void d11_frame_latency_wait(void)
+{
+    const uint64_t t0 = d11_now_ns();
+    const DWORD r = WaitForSingleObjectEx(g_d11.frameLatencyEvent, 50, TRUE);
+    g_d11.acquireNs += d11_now_ns() - t0;
+    if (r == WAIT_TIMEOUT && !g_d11.frameLatencyTimeoutLogged) {
+        g_d11.frameLatencyTimeoutLogged = true;
+        D11_LOG("the frame latency wait took over 50 ms: going on without it (once)");
+    }
+}
+
+/* rhi.h: the wait the next acquire would make, made now (the render
+ * thread, after a picture's present).  The object is a count, one for each
+ * picture the queue lets go: one wait a present, so a wait made here is
+ * the acquire's, which then skips its own (frameLatencyWaited); none after
+ * a Present that queued nothing (frameLatencySkipWait, the acquire's rule)
+ * or with a backbuffer still acquired (its wait was made) */
+bool rhi_wait_present_room(void)
+{
+    if (!g_d11.swapchain || !g_d11.swapTexture || !g_d11.frameLatencyEvent || g_d11.swapAcquired ||
+        g_d11.frameLatencySkipWait) {
+        return false;
+    }
+    if (!g_d11.frameLatencyWaited) {
+        d11_frame_latency_wait();
+        g_d11.frameLatencyWaited = true;
+    }
+    return true;
+}
+
+/* rhi.h: no wait before the present (this backend takes every call on one
+ * thread: no submit thread, port/render/rd_submit_thread.h) */
+bool rhi_wait_submitted(void)
+{
+    return false;
+}
+
+/* rhi.h: not known here (the GPU's end first stays off) */
+int rhi_submitted_finished(uint64_t *value)
+{
+    (void)value;
+    return -1;
+}
+
+/* rhi.h: no submission numbers here */
+uint64_t rhi_last_submitted(void)
+{
+    return 0;
+}
+
+/* rhi.h: no such wait here (the GPU's end first stays off) */
+int32_t rhi_wait_value_ns(uint64_t value, uint64_t *ns)
+{
+    (void)value;
+    *ns = 0;
+    return RHI_WAIT_NONE;
 }
 
 RhiTexture rhi_acquire_backbuffer(void)
@@ -238,18 +312,13 @@ RhiTexture rhi_acquire_backbuffer(void)
     }
     if (!g_d11.swapAcquired) {
         /* the waitable swap chain: wait before the replay for room in the
-         * queue (as d3d12_swapchain.c, 50 ms at most; not after a Present
-         * that queued nothing) */
-        if (g_d11.frameLatencyEvent && !g_d11.frameLatencySkipWait) {
-            const uint64_t t0 = d11_now_ns();
-            const DWORD r = WaitForSingleObjectEx(g_d11.frameLatencyEvent, 50, TRUE);
-            g_d11.acquireNs += d11_now_ns() - t0;
-            if (r == WAIT_TIMEOUT && !g_d11.frameLatencyTimeoutLogged) {
-                g_d11.frameLatencyTimeoutLogged = true;
-                D11_LOG("the frame latency wait took over 50 ms: going on without it (once)");
-            }
+         * queue (not after a Present that queued nothing, nor again after
+         * rhi_wait_present_room made the wait) */
+        if (g_d11.frameLatencyEvent && !g_d11.frameLatencySkipWait && !g_d11.frameLatencyWaited) {
+            d11_frame_latency_wait();
         }
         g_d11.frameLatencySkipWait = false;
+        g_d11.frameLatencyWaited = false;
         g_d11.swapAcquired = true;
     }
     out.id = g_d11.swapTexture;

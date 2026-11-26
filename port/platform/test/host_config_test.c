@@ -538,11 +538,32 @@ static void test_dev_env(void)
     CHECK(strcmp(ico_dev_env_value("blend", "attachment"), "attachment") == 0);
     CHECK(strcmp(ico_dev_env_value("blend", "storage"), "storage") == 0);
     CHECK(ico_dev_env_value("blend", "auto") == NULL); /* the default: nothing set */
+    /* the display's wait ahead (rd_thread.c): its switch as a bool */
+    CHECK(strcmp(ico_dev_env_name("acquire_ahead"), "ICO_RD_ACQUIRE_AHEAD") == 0);
+    CHECK(strcmp(ico_dev_env_value("acquire_ahead", "false"), "0") == 0);
+    CHECK(strcmp(ico_dev_env_value("acquire_ahead", "true"), "1") == 0);
+    CHECK(ico_dev_env_value("acquire_ahead", "later") == NULL);
+    /* Frame rate Original's hand-over (rd_thread.c): its escape as a bool */
+    CHECK(strcmp(ico_dev_env_name("original_async"), "ICO_RD_ORIGINAL_ASYNC") == 0);
+    CHECK(strcmp(ico_dev_env_value("original_async", "false"), "0") == 0);
+    CHECK(strcmp(ico_dev_env_value("original_async", "true"), "1") == 0);
+    CHECK(ico_dev_env_value("original_async", "later") == NULL);
     /* the attachment read on Qualcomm's driver (vk_device.c) */
     CHECK(strcmp(ico_dev_env_name("attachment_read"), "ICO_VK_ATTACHMENT_READ") == 0);
     CHECK(strcmp(ico_dev_env_value("attachment_read", "true"), "1") == 0);
     CHECK(strcmp(ico_dev_env_value("attachment_read", "0"), "0") == 0);
     CHECK(ico_dev_env_value("attachment_read", "maybe") == NULL);
+    /* the render passes as VkRenderPass objects (vk_device.c, the Intel
+       driver row of port/rhi/rhi_pass_row.h) */
+    CHECK(strcmp(ico_dev_env_name("legacy_passes"), "ICO_VK_LEGACY_PASSES") == 0);
+    CHECK(strcmp(ico_dev_env_value("legacy_passes", "true"), "1") == 0);
+    CHECK(strcmp(ico_dev_env_value("legacy_passes", "false"), "0") == 0);
+    CHECK(ico_dev_env_value("legacy_passes", "maybe") == NULL);
+    /* the subpass read (vk_device.c vkr_subpass_read_decide: an experiment, off by default) */
+    CHECK(strcmp(ico_dev_env_name("subpass_read"), "ICO_VK_SUBPASS_READ") == 0);
+    CHECK(strcmp(ico_dev_env_value("subpass_read", "on"), "1") == 0);
+    CHECK(strcmp(ico_dev_env_value("subpass_read", "off"), "0") == 0);
+    CHECK(ico_dev_env_value("subpass_read", "maybe") == NULL);
     /* fog_path: the four paths as they are (local: the device profile's
        fogLocal, port/render/rd_profile.c) */
     CHECK(strcmp(ico_dev_env_value("fog_path", "local"), "local") == 0);
@@ -567,6 +588,15 @@ static void test_dev_env(void)
     CHECK(strcmp(ico_dev_env_value("bind_cache", "off"), "0") == 0);
     CHECK(ico_dev_env_value("bind_cache", "sometimes") == NULL);
     CHECK(strcmp(ico_config_ini_key("dev.bind_cache"), "bind_cache") == 0);
+    /* prerotate: the Vulkan swapchain in the surface's own turn
+       (port/rhi/vk/vk_swapchain.c vkr_prerotate_on), true (the default) or
+       false; the default branch's 1 / 0 */
+    CHECK(strcmp(ico_dev_env_name("prerotate"), "ICO_VK_PREROTATE") == 0);
+    CHECK(strcmp(ico_dev_env_value("prerotate", "true"), "1") == 0);
+    CHECK(strcmp(ico_dev_env_value("prerotate", "false"), "0") == 0);
+    CHECK(strcmp(ico_dev_env_value("prerotate", "no"), "0") == 0);
+    CHECK(ico_dev_env_value("prerotate", "sideways") == NULL);
+    CHECK(strcmp(ico_config_ini_key("dev.prerotate"), "prerotate") == 0);
     /* the switches: on and off words, anything else nothing */
     CHECK(strcmp(ico_dev_env_value("gpu_checkpoints", "true"), "1") == 0);
     CHECK(strcmp(ico_dev_env_value("gpu_checkpoints", "1"), "1") == 0);
@@ -677,7 +707,10 @@ static void test_dev_env(void)
        rd__vu_prepass_init) */
     CHECK(strcmp(ico_dev_env_name("vu_prepass"), "ICO_RD_VU_PREPASS") == 0);
     CHECK(strcmp(ico_dev_env_value("vu_prepass", "false"), "0") == 0);
-    CHECK(strcmp(ico_dev_env_value("vu_prepass", "true"), "1") == 0);
+    /* written true: "on", over the device table's row too (issue 123) */
+    CHECK(strcmp(ico_dev_env_value("vu_prepass", "true"), "on") == 0);
+    CHECK(strcmp(ico_dev_env_value("vu_prepass", "1"), "on") == 0);
+    CHECK(strcmp(ico_dev_env_value("vu_prepass", "off"), "0") == 0);
     CHECK(ico_dev_env_value("vu_prepass", "maybe") == NULL);
     CHECK(strcmp(ico_config_ini_key("dev.vu_prepass"), "vu_prepass") == 0);
     /* vu_prepass_batch: the pre-pass's batches' A/B switch
@@ -686,6 +719,63 @@ static void test_dev_env(void)
     CHECK(strcmp(ico_dev_env_value("vu_prepass_batch", "false"), "0") == 0);
     CHECK(strcmp(ico_dev_env_value("vu_prepass_batch", "true"), "1") == 0);
     CHECK(strcmp(ico_config_ini_key("dev.vu_prepass_batch"), "vu_prepass_batch") == 0);
+    /* the VU record's write and the pre-pass's floor (port/render/rd_vu_record.c) */
+    CHECK(strcmp(ico_dev_env_name("vu_record"), "ICO_RD_VU_RECORD") == 0);
+    CHECK(strcmp(ico_dev_env_value("vu_record", "stores"), "stores") == 0);
+    CHECK(strcmp(ico_dev_env_value("vu_record", "targets"), "targets") == 0);
+    CHECK(strcmp(ico_dev_env_value("vu_record", "auto"), "auto") == 0);
+    CHECK(strcmp(ico_dev_env_value("vu_record", "compute"), "compute") == 0);
+    CHECK(ico_dev_env_value("vu_record", "computes") == NULL);
+    CHECK(ico_dev_env_value("vu_record", "true") == NULL);
+    CHECK(strcmp(ico_config_ini_key("dev.vu_record"), "vu_record") == 0);
+    CHECK(strcmp(ico_dev_env_name("vu_prepass_min"), "ICO_RD_VU_PREPASS_MIN") == 0);
+    CHECK(strcmp(ico_dev_env_value("vu_prepass_min", "4096"), "4096") == 0);
+    CHECK(strcmp(ico_dev_env_value("vu_prepass_min", "off"), "0") == 0);
+    CHECK(ico_dev_env_value("vu_prepass_min", "-1") == NULL);
+    CHECK(ico_dev_env_value("vu_prepass_min", "lots") == NULL);
+    CHECK(strcmp(ico_config_ini_key("dev.vu_prepass_min"), "vu_prepass_min") == 0);
+    /* velocity_test and velocity_sign: the temporal upscaler's motion vectors
+       and their sign (port/render/rd_velocity.c) */
+    CHECK(strcmp(ico_dev_env_name("velocity_test"), "ICO_RD_VELOCITY") == 0);
+    CHECK(strcmp(ico_dev_env_value("velocity_test", "true"), "1") == 0);
+    CHECK(strcmp(ico_dev_env_value("velocity_test", "false"), "0") == 0);
+    CHECK(strcmp(ico_config_ini_key("dev.velocity_test"), "velocity_test") == 0);
+    CHECK(strcmp(ico_dev_env_name("velocity_sign"), "ICO_RD_VELOCITY_SIGN") == 0);
+    CHECK(strcmp(ico_dev_env_value("velocity_sign", "-1"), "-1") == 0);
+    CHECK(strcmp(ico_dev_env_value("velocity_sign", "1"), "1") == 0);
+    CHECK(ico_dev_env_value("velocity_sign", "true") == NULL);
+    CHECK(strcmp(ico_config_ini_key("dev.velocity_sign"), "velocity_sign") == 0);
+    /* upscale_test: the upscale point's test (port/render/rd_upscale.c) */
+    CHECK(strcmp(ico_dev_env_name("upscale_test"), "ICO_RD_UPSCALE_TEST") == 0);
+    CHECK(strcmp(ico_dev_env_value("upscale_test", "true"), "1") == 0);
+    CHECK(strcmp(ico_dev_env_value("upscale_test", "false"), "0") == 0);
+    CHECK(strcmp(ico_config_ini_key("dev.upscale_test"), "upscale_test") == 0);
+    /* display_layer: the display layer's A/B (port/render/rd_layer.c) */
+    CHECK(strcmp(ico_dev_env_name("display_layer"), "ICO_RD_DISPLAY_LAYER") == 0);
+    CHECK(strcmp(ico_dev_env_value("display_layer", "false"), "0") == 0);
+    CHECK(strcmp(ico_dev_env_value("display_layer", "true"), "1") == 0);
+    CHECK(strcmp(ico_config_ini_key("dev.display_layer"), "display_layer") == 0);
+    /* fsr3_fp16: FSR 3.1 in full precision unless on (issue 203;
+       tools/ffx/patches/0004): on exports 1, off and auto (the old default's
+       word, now the default) 0; unset, the patch and rd_fsr3.c take full
+       precision */
+    CHECK(strcmp(ico_dev_env_name("fsr3_fp16"), "ICO_RD_FSR3_FP16") == 0);
+    CHECK(strcmp(ico_dev_env_value("fsr3_fp16", "on"), "1") == 0);
+    CHECK(strcmp(ico_dev_env_value("fsr3_fp16", "true"), "1") == 0);
+    CHECK(strcmp(ico_dev_env_value("fsr3_fp16", "off"), "0") == 0);
+    CHECK(strcmp(ico_dev_env_value("fsr3_fp16", "false"), "0") == 0);
+    CHECK(strcmp(ico_dev_env_value("fsr3_fp16", "auto"), "0") == 0);
+    CHECK(ico_dev_env_value("fsr3_fp16", "half") == NULL);
+    CHECK(strcmp(ico_config_ini_key("dev.fsr3_fp16"), "fsr3_fp16") == 0);
+    /* upscale_debug_view, upscale_debug_checks: FSR 3.1's debug view and
+       input checks (port/render/rd_fsr3.c) */
+    CHECK(strcmp(ico_dev_env_name("upscale_debug_view"), "ICO_RD_UPSCALE_DEBUG_VIEW") == 0);
+    CHECK(strcmp(ico_dev_env_value("upscale_debug_view", "true"), "1") == 0);
+    CHECK(strcmp(ico_dev_env_value("upscale_debug_view", "off"), "0") == 0);
+    CHECK(strcmp(ico_config_ini_key("dev.upscale_debug_view"), "upscale_debug_view") == 0);
+    CHECK(strcmp(ico_dev_env_name("upscale_debug_checks"), "ICO_RD_UPSCALE_DEBUG_CHECKS") == 0);
+    CHECK(strcmp(ico_dev_env_value("upscale_debug_checks", "yes"), "1") == 0);
+    CHECK(strcmp(ico_config_ini_key("dev.upscale_debug_checks"), "upscale_debug_checks") == 0);
     /* vu_merge: the draw merge's A/B switch (port/render/rd_replay_vu.c
        vuMergeInit) */
     CHECK(strcmp(ico_dev_env_name("vu_merge"), "ICO_RD_VU_MERGE") == 0);
@@ -700,6 +790,67 @@ static void test_dev_env(void)
     CHECK(strcmp(ico_dev_env_value("vu_fuse", "true"), "1") == 0);
     CHECK(ico_dev_env_value("vu_fuse", "maybe") == NULL);
     CHECK(strcmp(ico_config_ini_key("dev.vu_fuse"), "vu_fuse") == 0);
+    /* vu_skin_check: the skinned draws' bone-block check's A/B switch
+       (port/render/rd_vu_skin_check.c, issue 163) */
+    CHECK(strcmp(ico_dev_env_name("vu_skin_check"), "ICO_RD_VU_SKIN_CHECK") == 0);
+    CHECK(strcmp(ico_dev_env_value("vu_skin_check", "false"), "0") == 0);
+    CHECK(strcmp(ico_dev_env_value("vu_skin_check", "true"), "1") == 0);
+    CHECK(ico_dev_env_value("vu_skin_check", "maybe") == NULL);
+    CHECK(strcmp(ico_config_ini_key("dev.vu_skin_check"), "vu_skin_check") == 0);
+    /* cull: the scene draws' visibility test (port/render/rd_vis.c
+       rd__vis_init reads ICO_RD_CULL: off, frustum or full) */
+    CHECK(strcmp(ico_dev_env_name("cull"), "ICO_RD_CULL") == 0);
+    CHECK(strcmp(ico_dev_env_value("cull", "off"), "off") == 0);
+    CHECK(strcmp(ico_dev_env_value("cull", "frustum"), "frustum") == 0);
+    CHECK(strcmp(ico_dev_env_value("cull", "full"), "full") == 0);
+    CHECK(strcmp(ico_dev_env_value("cull", "false"), "off") == 0);
+    CHECK(strcmp(ico_dev_env_value("cull", "0"), "off") == 0);
+    CHECK(strcmp(ico_dev_env_value("cull", "true"), "frustum") == 0);
+    CHECK(ico_dev_env_value("cull", "occlusion") == NULL);
+    CHECK(ico_dev_env_value("cull", "") == NULL);
+    CHECK(strcmp(ico_config_ini_key("dev.cull"), "cull") == 0);
+    /* region_rule: the camera decides or the PS2's drops (port/render/
+       rd_pipeline.c rd__region_camera reads ICO_RD_REGION_RULE) */
+    CHECK(strcmp(ico_dev_env_name("region_rule"), "ICO_RD_REGION_RULE") == 0);
+    CHECK(strcmp(ico_dev_env_value("region_rule", "camera"), "camera") == 0);
+    CHECK(strcmp(ico_dev_env_value("region_rule", "ps2"), "ps2") == 0);
+    CHECK(ico_dev_env_value("region_rule", "true") == NULL);
+    CHECK(ico_dev_env_value("region_rule", "0") == NULL);
+    CHECK(ico_dev_env_value("region_rule", "") == NULL);
+    CHECK(strcmp(ico_config_ini_key("dev.region_rule"), "region_rule") == 0);
+    /* jitter_test: the scene's sub-pixel jitter, x,y each -0.5..0.5, as it is
+       (port/render/rd_jitter.c reads ICO_RD_JITTER_TEST) */
+    CHECK(strcmp(ico_dev_env_name("jitter_test"), "ICO_RD_JITTER_TEST") == 0);
+    CHECK(strcmp(ico_dev_env_value("jitter_test", "0.25,0.25"), "0.25,0.25") == 0);
+    CHECK(strcmp(ico_dev_env_value("jitter_test", "-0.5, 0.5"), "-0.5, 0.5") == 0);
+    CHECK(strcmp(ico_dev_env_value("jitter_test", "0,0"), "0,0") == 0);
+    CHECK(ico_dev_env_value("jitter_test", "0.75,0") == NULL);
+    CHECK(ico_dev_env_value("jitter_test", "0.25") == NULL);
+    CHECK(ico_dev_env_value("jitter_test", "0.1,0.2,0.3") == NULL);
+    CHECK(ico_dev_env_value("jitter_test", "true") == NULL);
+    CHECK(ico_dev_env_value("jitter_test", "") == NULL);
+    CHECK(strcmp(ico_config_ini_key("dev.jitter_test"), "jitter_test") == 0);
+    /* vu_bones and its mark: issue 123's ladder, step 1 (port/render/
+       rd_pipeline.c rd__vu_policy_init reads ICO_RD_VU_BONES, rd_vu_bones.c
+       the mark from ICO_RD_VU_BONES_BY for the start line; window_bones.c
+       writes both) */
+    CHECK(strcmp(ico_dev_env_name("vu_bones"), "ICO_RD_VU_BONES") == 0);
+    CHECK(strcmp(ico_dev_env_value("vu_bones", "ring"), "ring") == 0);
+    CHECK(strcmp(ico_dev_env_value("vu_bones", "cbuffer"), "cbuffer") == 0);
+    CHECK(ico_dev_env_value("vu_bones", "true") == NULL);
+    CHECK(ico_dev_env_value("vu_bones", "1") == NULL);
+    CHECK(ico_dev_env_value("vu_bones", "") == NULL);
+    CHECK(strcmp(ico_config_ini_key("dev.vu_bones"), "vu_bones") == 0);
+    CHECK(strcmp(ico_dev_env_name("vu_bones_by"), "ICO_RD_VU_BONES_BY") == 0);
+    CHECK(strcmp(ico_dev_env_value("vu_bones_by",
+                                   "vu_skin_check 0.10.5 frame 812; 3 of 5200 twins differed"),
+                 "vu_skin_check 0.10.5 frame 812; 3 of 5200 twins differed") == 0);
+    CHECK(ico_dev_env_value("vu_bones_by", "") == NULL);
+    CHECK(strcmp(ico_config_ini_key("dev.vu_bones_by"), "vu_bones_by") == 0);
+    /* turnip_debug (step 2) is read from config.toml by the Android driver
+       loader alone (android/gpu_driver_android.c): no variable */
+    CHECK(ico_dev_env_name("turnip_debug") == NULL);
+    CHECK(ico_dev_env_value("turnip_debug", "nobin") == NULL);
     /* constant_reads: a cleared source read as its colour, the A/B switch
        (port/render/rd_const_read.c rd__const_reads_on) */
     CHECK(strcmp(ico_dev_env_name("constant_reads"), "ICO_RD_CONSTANT_READS") == 0);
@@ -753,6 +904,13 @@ static void test_dev_env(void)
     CHECK(strcmp(ico_dev_env_value("glow_redraw", "true"), "1") == 0);
     CHECK(strcmp(ico_dev_env_value("glow_redraw", "false"), "0") == 0);
     CHECK(strcmp(ico_config_ini_key("dev.glow_redraw"), "glow_redraw") == 0);
+    /* glow_fold: the glow's mask computed in its reduction, the A/B switch
+       (rd_glow_fold.c rd__glow_fold_on) */
+    CHECK(strcmp(ico_dev_env_name("glow_fold"), "ICO_RD_GLOW_FOLD") == 0);
+    CHECK(strcmp(ico_dev_env_value("glow_fold", "false"), "0") == 0);
+    CHECK(strcmp(ico_dev_env_value("glow_fold", "true"), "1") == 0);
+    CHECK(ico_dev_env_value("glow_fold", "maybe") == NULL);
+    CHECK(strcmp(ico_config_ini_key("dev.glow_fold"), "glow_fold") == 0);
     /* present_fallback: the FIFO fallback auto, off or fifo (window_host.c
        ico_window_open, present_fallback.c) */
     CHECK(strcmp(ico_dev_env_name("present_fallback"), "ICO_PRESENT_FALLBACK") == 0);
@@ -763,6 +921,25 @@ static void test_dev_env(void)
     CHECK(ico_dev_env_value("present_fallback", "true") == NULL);
     CHECK(ico_dev_env_value("present_fallback", "mailbox") == NULL);
     CHECK(strcmp(ico_config_ini_key("dev.present_fallback"), "present_fallback") == 0);
+    /* frame_rate_pin: the Android frame rate pin auto or off
+       (window_display_rate.c, display_rate.h) */
+    CHECK(strcmp(ico_dev_env_name("frame_rate_pin"), "ICO_FRAME_RATE_PIN") == 0);
+    CHECK(strcmp(ico_dev_env_value("frame_rate_pin", "auto"), "auto") == 0);
+    CHECK(strcmp(ico_dev_env_value("frame_rate_pin", "off"), "off") == 0);
+    CHECK(strcmp(ico_dev_env_value("frame_rate_pin", "false"), "off") == 0);
+    CHECK(strcmp(ico_dev_env_value("frame_rate_pin", "no"), "off") == 0);
+    CHECK(ico_dev_env_value("frame_rate_pin", "true") == NULL);
+    CHECK(ico_dev_env_value("frame_rate_pin", "60") == NULL);
+    CHECK(strcmp(ico_config_ini_key("dev.frame_rate_pin"), "frame_rate_pin") == 0);
+    /* submit_thread: the submit thread on (true, the default) or off, the
+       render thread submitting and presenting (rd_submit_thread.c reads
+       ICO_RD_SUBMIT_THREAD=0; issue 123's A/B) */
+    CHECK(strcmp(ico_dev_env_name("submit_thread"), "ICO_RD_SUBMIT_THREAD") == 0);
+    CHECK(strcmp(ico_dev_env_value("submit_thread", "off"), "0") == 0);
+    CHECK(strcmp(ico_dev_env_value("submit_thread", "false"), "0") == 0);
+    CHECK(strcmp(ico_dev_env_value("submit_thread", "true"), "1") == 0);
+    CHECK(ico_dev_env_value("submit_thread", "auto") == NULL);
+    CHECK(strcmp(ico_config_ini_key("dev.submit_thread"), "submit_thread") == 0);
     /* render_thread: the window's render thread, read through the store
        (render_thread.c), not exported */
     CHECK(strcmp(ico_config_ini_key("dev.render_thread"), "render_thread") == 0);
@@ -873,6 +1050,8 @@ static void test_dev_env(void)
     CHECK(strcmp(ico_config_ini_key("dev.gpu_robust"), "gpu_robust") == 0);
     CHECK(strcmp(ico_config_ini_key("dev.pass_split"), "pass_split") == 0);
     CHECK(strcmp(ico_config_ini_key("dev.attachment_read"), "attachment_read") == 0);
+    CHECK(strcmp(ico_config_ini_key("dev.legacy_passes"), "legacy_passes") == 0);
+    CHECK(strcmp(ico_config_ini_key("dev.subpass_read"), "subpass_read") == 0);
 
     for (i = 0; i < sizeof(vars) / sizeof(vars[0]); i++) {
         unset_env(vars[i]);
@@ -916,6 +1095,48 @@ static void test_dev_env(void)
     ico_ini_parse(&ini, "[dev]\nvu_set = maybe\n");
     ico_ini_export(&ini, "dev-env-test.ini", 0);
     CHECK(env_is("ICO_RD_VU_SET", NULL));
+    /* ... and cull is exported as its word (rd_vis.c reads it) */
+    unset_env("ICO_RD_CULL");
+    ico_ini_parse(&ini, "[dev]\ncull = off\n");
+    ico_ini_export(&ini, "dev-env-test.ini", 0);
+    CHECK(env_is("ICO_RD_CULL", "off"));
+    unset_env("ICO_RD_CULL");
+    ico_ini_parse(&ini, "[dev]\ncull = maybe\n");
+    ico_ini_export(&ini, "dev-env-test.ini", 0);
+    CHECK(env_is("ICO_RD_CULL", NULL));
+    /* ... and vu_bones as its word with its mark as it is (rd_pipeline.c,
+       rd_vu_bones.c read them) */
+    unset_env("ICO_RD_VU_BONES");
+    unset_env("ICO_RD_VU_BONES_BY");
+    ico_ini_parse(&ini, "[dev]\nvu_bones = ring\n"
+                        "vu_bones_by = vu_skin_check 0.10.5 frame 812; 3 of 5200 twins differed\n");
+    ico_ini_export(&ini, "dev-env-test.ini", 0);
+    CHECK(env_is("ICO_RD_VU_BONES", "ring"));
+    CHECK(env_is("ICO_RD_VU_BONES_BY", "vu_skin_check 0.10.5 frame 812; 3 of 5200 twins differed"));
+    unset_env("ICO_RD_VU_BONES");
+    unset_env("ICO_RD_VU_BONES_BY");
+    ico_ini_parse(&ini, "[dev]\nvu_bones = sometimes\n");
+    ico_ini_export(&ini, "dev-env-test.ini", 0);
+    CHECK(env_is("ICO_RD_VU_BONES", NULL));
+    CHECK(env_is("ICO_RD_VU_BONES_BY", NULL));
+    /* ... and region_rule as its word (rd_pipeline.c reads it) */
+    unset_env("ICO_RD_REGION_RULE");
+    ico_ini_parse(&ini, "[dev]\nregion_rule = ps2\n");
+    ico_ini_export(&ini, "dev-env-test.ini", 0);
+    CHECK(env_is("ICO_RD_REGION_RULE", "ps2"));
+    unset_env("ICO_RD_REGION_RULE");
+    ico_ini_parse(&ini, "[dev]\nregion_rule = sometimes\n");
+    ico_ini_export(&ini, "dev-env-test.ini", 0);
+    CHECK(env_is("ICO_RD_REGION_RULE", NULL));
+    /* ... and jitter_test as its x,y (rd_jitter.c reads it) */
+    unset_env("ICO_RD_JITTER_TEST");
+    ico_ini_parse(&ini, "[dev]\njitter_test = 0.25,-0.25\n");
+    ico_ini_export(&ini, "dev-env-test.ini", 0);
+    CHECK(env_is("ICO_RD_JITTER_TEST", "0.25,-0.25"));
+    unset_env("ICO_RD_JITTER_TEST");
+    ico_ini_parse(&ini, "[dev]\njitter_test = 2,2\n");
+    ico_ini_export(&ini, "dev-env-test.ini", 0);
+    CHECK(env_is("ICO_RD_JITTER_TEST", NULL));
     /* blend=attachment and attachment_read=true (config.toml's [dev]) */
     ico_ini_parse(&ini, "[dev]\nblend = attachment\nattachment_read = true\n");
     ico_ini_export(&ini, "dev-env-test.ini", 0);
@@ -1050,7 +1271,8 @@ static void test_retry_blend(void)
 /* ICO_RD_VU_PREPASS in a restart: 0 at the crash order's noprepass step
    and every step after it (fixedblend, d3d12, lazy) and at every loss
    step (lossnoprepass without the fixed blend), over the ini's
-   vu_prepass=; the cache step and a first run keep the ini's */
+   vu_prepass=; the cache step and a first run keep the ini's ("on": the
+   key written true, over the device table's row) */
 static void test_retry_prepass(void)
 {
     static const struct {
@@ -1061,7 +1283,7 @@ static void test_retry_prepass(void)
         {"d3d12:d3d12", "0", NULL},         {"lazy:vulkan", "0", NULL},
         {"lossnoprepass:d3d12", "0", NULL}, {"robust:vulkan", "0", NULL},
         {"blend:vulkan", "0", "fixed"},     {"backend:d3d12", "0", "fixed"},
-        {"cache:vulkan", "1", NULL},        {NULL, "1", NULL},
+        {"cache:vulkan", "on", NULL},       {NULL, "on", NULL},
     };
 
     IcoIni ini;
@@ -1070,7 +1292,7 @@ static void test_retry_prepass(void)
     CHECK(strcmp(ico_dev_env_export_value("vu_prepass", "true", "noprepass:vulkan"), "0") == 0);
     CHECK(strcmp(ico_dev_env_export_value("vu_prepass", NULL, "lossnoprepass:vulkan"), "0") == 0);
     CHECK(ico_dev_env_export_value("vu_prepass", NULL, "cache:vulkan") == NULL);
-    CHECK(strcmp(ico_dev_env_export_value("vu_prepass", "true", "cache:vulkan"), "1") == 0);
+    CHECK(strcmp(ico_dev_env_export_value("vu_prepass", "true", "cache:vulkan"), "on") == 0);
     CHECK(ico_dev_env_export_value("blend", NULL, "lossnoprepass:vulkan") == NULL);
     CHECK(ico_dev_env_export_value("blend", NULL, "noprepass:vulkan") == NULL);
     for (size_t i = 0; i < sizeof(runs) / sizeof(runs[0]); i++) {
@@ -1093,6 +1315,66 @@ static void test_retry_prepass(void)
     unset_env("ICO_STARTUP_RETRY");
     unset_env("ICO_RD_VU_PREPASS");
     unset_env("ICO_RD_BLEND");
+    unset_env("ICO_GPU_ROBUST"); /* the robust step's */
+}
+
+/* ICO_RD_VU_RECORD in a restart: "targets" at the crash order's targets
+   step and the loss order's losstargets, over the ini's vu_record=, the
+   pre-pass kept (the ini's vu_prepass=); every other step and a first run
+   keep the ini's record (the steps after them draw without the pre-pass) */
+static void test_retry_record(void)
+{
+    static const struct {
+        const char *retry;
+        const char *record, *prepass;
+    } runs[] = {
+        {"targets:vulkan", "targets", "on"},
+        {"losstargets:vulkan", "targets", "on"},
+        {"noprepass:vulkan", "stores", "0"},
+        {"lossnoprepass:vulkan", "stores", "0"},
+        {"cache:vulkan", "stores", "on"},
+        {"robust:vulkan", "stores", "0"},
+        {NULL, "stores", "on"},
+    };
+
+    IcoIni ini;
+
+    /* the pure rule */
+    CHECK(strcmp(ico_dev_env_export_value("vu_record", NULL, "targets:vulkan"), "targets") == 0);
+    CHECK(strcmp(ico_dev_env_export_value("vu_record", "stores", "losstargets:d3d12"), "targets") ==
+          0);
+    CHECK(ico_dev_env_export_value("vu_record", NULL, "noprepass:vulkan") == NULL);
+    CHECK(strcmp(ico_dev_env_export_value("vu_record", "stores", "cache:vulkan"), "stores") == 0);
+    CHECK(ico_dev_env_export_value("vu_prepass", NULL, "targets:vulkan") == NULL);
+    CHECK(ico_dev_env_export_value("vu_prepass", NULL, "losstargets:vulkan") == NULL);
+    CHECK(ico_dev_env_export_value("blend", NULL, "losstargets:vulkan") == NULL);
+    CHECK(ico_dev_env_export_value("gpu_robust", NULL, "losstargets:vulkan") == NULL);
+    for (size_t i = 0; i < sizeof(runs) / sizeof(runs[0]); i++) {
+        unset_env("ICO_RD_VU_RECORD");
+        unset_env("ICO_RD_VU_PREPASS");
+        if (runs[i].retry != NULL) {
+            set_env("ICO_STARTUP_RETRY", runs[i].retry);
+        } else {
+            unset_env("ICO_STARTUP_RETRY");
+        }
+        ico_ini_parse(&ini, "vu_prepass=true\nvu_record=stores\n");
+        ico_ini_export(&ini, "dev-env-test.ini", 0);
+        if (!env_is("ICO_RD_VU_RECORD", runs[i].record) ||
+            !env_is("ICO_RD_VU_PREPASS", runs[i].prepass)) {
+            fprintf(stderr, "retry %s:\n", runs[i].retry != NULL ? runs[i].retry : "(none)");
+        }
+        CHECK(env_is("ICO_RD_VU_RECORD", runs[i].record));
+        CHECK(env_is("ICO_RD_VU_PREPASS", runs[i].prepass));
+    }
+    /* no ini: the restart's alone */
+    unset_env("ICO_RD_VU_RECORD");
+    set_env("ICO_STARTUP_RETRY", "losstargets:vulkan");
+    memset(&ini, 0, sizeof(ini));
+    ico_ini_export(&ini, "dev-env-test.ini", -1);
+    CHECK(env_is("ICO_RD_VU_RECORD", "targets"));
+    unset_env("ICO_STARTUP_RETRY");
+    unset_env("ICO_RD_VU_RECORD");
+    unset_env("ICO_RD_VU_PREPASS");
     unset_env("ICO_GPU_ROBUST"); /* the robust step's */
 }
 
@@ -1318,6 +1600,7 @@ int main(void)
     test_dev_env();
     test_retry_blend();
     test_retry_prepass();
+    test_retry_record();
     test_logs_override();
 #if defined(__linux__) && !defined(__ANDROID__)
     test_appimage();

@@ -57,7 +57,10 @@
  *               ended while"), deletes it and is lazy; a lazy run keeps its
  *               notes and a line between them, and keeps the file at a
  *               clean exit (the next start is lazy); a normal end of the
- *               set deletes it; the creation limit's stall mark (review
+ *               set deletes it; the watchdog's mark (review 2 N5: a
+ *               spinning child ended by the watchdog writes it, the next
+ *               start reads it, says so and deletes it); the creation
+ *               limit's stall mark (review
  *               finding 2) makes every start of its version take the plain
  *               VU entries, and a start of another version deletes it;
  *               a restart after a driver crash logs it but
@@ -170,10 +173,12 @@
 #include <string.h>
 #include <eekernel.h>
 #include "diag_host.h"
+#include "memory_floor.h"
 #include "miniz.h"
 #include "rd_bisect_plan.h"
 #include "report.h"
 #include "sched.h"
+#include "set_size.h"
 #include "startup_retry.h"
 #include "symmap.h"
 
@@ -186,6 +191,7 @@ __declspec(dllimport) void __stdcall RaiseException(unsigned long code, unsigned
 
 #include <dirent.h>
 #include <pthread.h>
+#include <signal.h>
 #include <sys/stat.h>
 #include <sys/types.h>
 #include <sys/wait.h>
@@ -274,6 +280,13 @@ static void segv_thread(void *arg)
     "creating pipelines 297-328 of 702: program 0 blend 0 vs 31 fs 41 fmt 3/0 msaa 0 dst 0 pre "   \
     "to program 0 blend 4 vs 30 fs 19 fmt 1/8 msaa 0 dst 0 ext 0; vertex vu_prelit_pre_vs 1820 "   \
     "words, vu_tri_plain_vs 19519 words; largest fragment vu_texa_ps 21000 words"
+/* a batch of the pre-pass's record stored by the vertex shaders
+   (rd_pipeline.c keyVsName names the store builds): the pre-pass's kind,
+   with the targets' rung first (startup_retry_note_has_vu_store) */
+#define VU_STORE_NOTE                                                                              \
+    "creating pipelines 297-310 of 730: program 0 blend 0 vs 31 fs 41 fmt 0/0 msaa 0 dst 0 pre "   \
+    "to program 0 blend 0 vs 38 fs 41 fmt 0/0 msaa 0 dst 0 pre; vertex "                           \
+    "vu_prelit_batch_store_pre_vs 2000 words; largest fragment vu_pre_ps 300 words"
 /* a batch of the record path's drawing shaders (rd_pipeline.c
    batchModules: vu_main_vs, made only with the pre-pass): the pre-pass's
    kind */
@@ -281,6 +294,10 @@ static void segv_thread(void *arg)
     "creating pipelines 201-208 of 220: program 0 blend 12 vs 41 fs 5 fmt 1/8 msaa 0 dst 0 to "    \
     "program 0 blend 4 vs 41 fs 19 fmt 1/8 msaa 0 dst 0; vertex vu_main_vs 20000 words (4000 "     \
     "instructions); largest fragment vu_texa_ps 11666 words; compiler E031.41.03.47"
+/* the skin check's start-up probe compiling its pipelines
+   (rd_vu_skin_selftest.c): neither the pre-pass's kind nor the set's */
+#define SKIN_PROBE_NOTE                                                                            \
+    "creating pipeline rd vu skin probe (the VU skin check's start-up probe: its three pipelines)"
 #define VU_PLAIN_NOTE                                                                              \
     "creating pipelines 297-328 of 702: program 0 blend 12 vs 4 fs 5 fmt 1/8 msaa 0 dst 0 ext 0 "  \
     "to program 0 blend 4 vs 4 fs 19 fmt 1/8 msaa 0 dst 0 ext 0; vertex vu_prelit_plain_vs "       \
@@ -370,6 +387,64 @@ static void progress_child(int progress)
         ico_diag_log("test: progress kept it alive (%u)", ico_diag_progress());
     }
     pause_ms(5000);
+    exit(0);
+}
+
+/* The renderer's switch (Options > Graphics > Apply), with diag_test
+   --switch (ctest diag_switch):
+   "step": stderr as the window build has it on Windows (the log, fully
+   buffered: host_config.c), a buffered line, the step (ico_diag_step), a
+   second buffered line, then a stub step that never returns; the parent
+   kills the child, and the log must hold the first line, then the step's,
+   and not the second (the buffer a kill loses);
+   "switchhang": the switch's watch (2 s) on, a step, then nothing moves:
+   the watchdog ends the run naming the switch and the step, the main
+   thread's stack sampled, and not by the game's own later limit (1 s);
+   "switchok": the same watch while shaders and pipelines are made
+   (ico_diag_switch_progress) for 4 s, past both limits: no end; the watch
+   ended, the run exits 0.  The shaders as the start-up set the window's
+   made hook reports (ico_diag_shader_set: 16 planned, a pipeline's call in
+   between with the same count, the set's end with total 0) and then the
+   pipeline set's step: the log holds the progress phases' lines in order,
+   the set's first, its three quarters, its end, the pipeline set, and no
+   line for the shaders between the quarters. */
+static void switch_child(const char *mode, const char *log)
+{
+    int i;
+    if (strcmp(mode, "step") == 0) {
+        if (freopen(log, "a", stderr) == NULL) {
+            exit(2);
+        }
+        setvbuf(stderr, NULL, _IOFBF, 64 * 1024);
+        fprintf(stderr, "window: a buffered line before the step\n");
+        ico_diag_step("window: switch to opengl: a stub step that never returns");
+        fprintf(stderr, "window: a buffered line after the step\n");
+        for (;;) {
+            pause_ms(1000);
+        }
+    }
+    fake_ticks = 1;
+    ico_diag_start(0, 1);
+    ico_diag_watchdog_switch(2, "switching the renderer from vulkan to opengl (test)");
+    if (strcmp(mode, "switchhang") == 0) {
+        ico_diag_step("window: switch to opengl: a stub step that never returns");
+        pause_ms(10000);
+        exit(0);
+    }
+    ico_diag_step("window: switch to opengl: starting the renderer (the device and its shaders)");
+    for (i = 0; i < 16; i++) {
+        pause_ms(250);
+        ico_diag_switch_progress();
+        ico_diag_shader_set((unsigned)i + 1u, 16u, 0.25 * (i + 1));
+        /* a pipeline made: the same count again, no line */
+        ico_diag_shader_set((unsigned)i + 1u, 16u, 0.25 * (i + 1));
+    }
+    ico_diag_shader_set(0u, 0u, 4.0);
+    ico_diag_shader_set(0u, 0u, 4.1); /* after the end: nothing more */
+    ico_diag_step("window: switch to opengl: the pipeline set");
+    ico_diag_watchdog_switch(0, NULL);
+    ico_diag_log("test: switch done");
+    pause_ms(300);
     exit(0);
 }
 
@@ -562,6 +637,13 @@ static int persist_pre_stub(void)
     return getenv("ICO_TEST_PERSIST_FAIL") != NULL ? -1 : 0;
 }
 
+/* window_host.c vu_record_persist, stubbed the same way */
+static int persist_record_stub(void)
+{
+    ico_diag_log("test: config write dev.vu_record = targets");
+    return getenv("ICO_TEST_PERSIST_FAIL") != NULL ? -1 : 0;
+}
+
 /* The run after the policy (ICO_TEST_THEN): "die" ends it without a word
    inside a pipeline, "between" between two creations of a lazy run
    ("betweenbg": there in the background), "clean" ends it cleanly (a lazy
@@ -606,6 +688,12 @@ static void pipeset_then(int set)
            window's budget_stop, then the frames' first-use pipelines */
         ico_diag_set_activity(NOTE_2D);
         ico_diag_startup_activity_budget_stop();
+        /* the window's resume part (issue 123): not for a stop for this
+           start only */
+        ico_diag_log(
+            "test: resume part %d",
+            ico_diag_startup_set_resume_part(
+                "; resume at pipeline 144 of 568, batches of 8, stop 1, 2026-11-09 20:45"));
         ico_diag_set_activity("creating pipeline fog test");
         if (strcmp(then, "budget") == 0) {
             _exit(0);
@@ -625,6 +713,12 @@ static void pipeset_then(int set)
         ico_diag_log("test: low memory stop %d (%s)", stop, why);
         ico_diag_set_pipelines(0, 0, 0);
         ico_diag_startup_activity_budget_stop();
+        /* the window's resume part (issue 123, window_pipe_finish.c):
+           where the set stopped, for the next start */
+        ico_diag_log(
+            "test: resume part %d",
+            ico_diag_startup_set_resume_part(
+                "; resume at pipeline 144 of 568, batches of 8, stop 1, 2026-11-09 20:45"));
         ico_diag_set_activity("creating pipeline fog test");
         if (strcmp(then, "lowmemdie") == 0) {
             _exit(0);
@@ -633,6 +727,39 @@ static void pipeset_then(int set)
         if (strcmp(then, "lowmem") == 0) {
             _exit(0);
         }
+        ico_diag_startup_activity_exit();
+        return;
+    } else if (strcmp(then, "setsize") == 0) {
+        /* issue 215: the set's size rule stopped the set (set_size.h: the
+           issue 215 handheld's start, 15 MB a 2D pipeline from 7249 MB with
+           the floor 1915 MB, as the window feeds it before each batch):
+           not a low-memory stop, so for this start only; the window's
+           budget_stop and resume part, then a clean exit */
+        static SetSizeRun run;
+        static const long freeMb[] = {7249, 7129, 7009, 6889};
+        char line[SET_SIZE_LINE_MAX];
+        unsigned m = 0, b;
+        set_size_begin(&run, 7249, 1915);
+        for (b = 0; b < 4u; b++) {
+            SetSizeAsk a;
+            memset(&a, 0, sizeof a);
+            a.freeMb = freeMb[b];
+            a.made[0] = b * 8u;
+            a.left[0] = 442u - b * 8u;
+            a.left[1] = 242u;
+            a.needMb = 32;
+            a.place = b * 8u;
+            a.total = 684u;
+            m = set_size_ask(&run, &a, line, sizeof line, NULL, 0);
+        }
+        ico_diag_log("test: set size stop %u at pipeline %u", m, run.placeAtStop[0] + 1u);
+        ico_diag_set_activity(NOTE_2D);
+        ico_diag_startup_activity_budget_stop();
+        ico_diag_log("test: resume part %d",
+                     ico_diag_startup_set_resume_part(
+                         "; resume at pipeline 25 of 684, batches of 8, stop 1, 2026-11-16 20:55"));
+        ico_diag_set_activity("creating pipeline fog test");
+        ico_diag_clear_activity();
         ico_diag_startup_activity_exit();
         return;
     } else if (strcmp(then, "cleanvupre") == 0) {
@@ -737,15 +864,18 @@ static void activity_child(const char *mode, const char *log)
         ico_diag_startup_activity_record(0);
         child_quit(0);
     } else if (strcmp(mode, "actvuext") == 0 || strcmp(mode, "actvuplain") == 0 ||
-               strcmp(mode, "actvupre") == 0 || strcmp(mode, "actvumain") == 0) {
+               strcmp(mode, "actvupre") == 0 || strcmp(mode, "actvumain") == 0 ||
+               strcmp(mode, "actskinprobe") == 0 || strcmp(mode, "actvustore") == 0) {
         /* the start-up set ended without a word inside a VU batch (the
            device froze): the batch's note is in the file */
         ico_diag_startup_activity_record(ICO_DIAG_ACTIVITY_STARTUP);
         ico_diag_set_activity(BATCH_NOTE);
-        ico_diag_set_activity(strcmp(mode, "actvuext") == 0    ? VU_EXT_NOTE
-                              : strcmp(mode, "actvupre") == 0  ? VU_PRE_NOTE
-                              : strcmp(mode, "actvumain") == 0 ? VU_MAIN_NOTE
-                                                               : VU_PLAIN_NOTE);
+        ico_diag_set_activity(strcmp(mode, "actvuext") == 0       ? VU_EXT_NOTE
+                              : strcmp(mode, "actvupre") == 0     ? VU_PRE_NOTE
+                              : strcmp(mode, "actvumain") == 0    ? VU_MAIN_NOTE
+                              : strcmp(mode, "actvustore") == 0   ? VU_STORE_NOTE
+                              : strcmp(mode, "actskinprobe") == 0 ? SKIN_PROBE_NOTE
+                                                                  : VU_PLAIN_NOTE);
         _exit(0);
     } else if (strcmp(mode, "actvutimes") == 0) {
         /* the plain batches compiled (their times kept as the file's
@@ -846,8 +976,8 @@ static void activity_child(const char *mode, const char *log)
            the window passes none) */
         const int relaunch = strcmp(mode, "actpipesetrelaunch") == 0;
         const int pre = relaunch ? 0 : ico_diag_startup_vu_prepass();
-        const int set = ico_diag_startup_pipeline_set(relaunch, pre > 0 ? 0 : lazy,
-                                                      getenv("ICO_TEST_PIPESET"), "config.toml");
+        int set = ico_diag_startup_pipeline_set(relaunch, pre > 0 ? 0 : lazy,
+                                                getenv("ICO_TEST_PIPESET"), "config.toml");
         if (set == ICO_DIAG_PIPESET_LAZY_ONCE || set == ICO_DIAG_PIPESET_LAZY_NOW ||
             set == ICO_DIAG_PIPESET_CAREFUL_ONCE) {
             (void)ico_diag_startup_end_persist(ICO_DIAG_END_PIPELINES,
@@ -855,11 +985,25 @@ static void activity_child(const char *mode, const char *log)
                                                "config.toml");
         }
         if (pre >= 1) {
-            (void)ico_diag_startup_end_persist(ICO_DIAG_END_VU_PRE, NULL, persist_pre_stub,
+            /* the window's choice: the record stores' rung first */
+            (void)ico_diag_startup_end_persist(ICO_DIAG_END_VU_PRE, NULL,
+                                               ico_diag_startup_vu_store() ? persist_record_stub
+                                                                           : persist_pre_stub,
                                                "config.toml");
         }
         ico_diag_log("test: vu prepass %d", pre);
+        ico_diag_log("test: vu store %d", ico_diag_startup_vu_store());
         ico_diag_log("test: pipeline set %d", set);
+        ico_diag_log("test: prev floor stop %d", ico_diag_startup_prev_floor_stop());
+        ico_diag_log("test: prev floor retried %d", ico_diag_startup_prev_floor_retried());
+        ico_diag_log("test: prev low memory line [%s]", ico_diag_startup_prev_low_memory_line());
+        if (set == ICO_DIAG_PIPESET_LAZY_LOW_MEMORY && getenv("ICO_TEST_RESUME") != NULL) {
+            /* the window's resume (issue 123, window_pipe_floor_retry): the
+               set made again from where it stopped */
+            ico_diag_startup_resume();
+            ico_diag_log("test: resumed");
+            set = ICO_DIAG_PIPESET_FULL;
+        }
         pipeset_then(set);
         child_quit(0);
     } else if (strcmp(mode, "actlossnext") == 0) {
@@ -878,16 +1022,43 @@ static void activity_child(const char *mode, const char *log)
                      n == 0 || getenv("ICO_TEST_ROBUST_SAID") != NULL ? "as set"
                      : saved                                          ? "for good"
                                                                       : "this start");
+        /* the loss ladder's count and the backend's variable (rhi_tile_rule.h) */
+        ico_diag_log("test: loss row %u, ICO_LOSS_ROW %s", ico_diag_startup_loss_row(),
+                     getenv("ICO_LOSS_ROW") != NULL ? getenv("ICO_LOSS_ROW") : "unset");
+        /* the subpass read's probe as a phase (ico_diag_set_probe): the
+           previous run's, and this run's with ICO_TEST_PROBE */
+        ico_diag_log("test: prev probe %d", ico_diag_startup_prev_probe());
         ico_diag_startup_activity_record(ICO_DIAG_ACTIVITY_STARTUP);
         ico_diag_startup_activity_record(0);
+        if (getenv("ICO_TEST_PROBE") != NULL) {
+            ico_diag_set_probe("the subpass read's probe");
+        }
         if (getenv("ICO_TEST_THEN") != NULL && strcmp(getenv("ICO_TEST_THEN"), "loss") == 0) {
             ico_diag_note_device_loss(NULL);
+            _exit(0);
+        }
+        /* issue 179: the app to the background, the lifecycle's GPU wait
+           finding the device lost (window_host.c lc_gpu_wait_idle), then the
+           system ending the process there before the main loop's
+           device_lost_quit ("bgloss"); or ending it there with no loss
+           ("bgkill") */
+        if (getenv("ICO_TEST_THEN") != NULL && strcmp(getenv("ICO_TEST_THEN"), "bgloss") == 0) {
+            ico_diag_startup_activity_background(1);
+            ico_diag_note_device_loss_at_wait("the GPU wait as the app went to the background");
+            _exit(0);
+        }
+        if (getenv("ICO_TEST_THEN") != NULL && strcmp(getenv("ICO_TEST_THEN"), "bgkill") == 0) {
+            ico_diag_startup_activity_background(1);
             _exit(0);
         }
         child_quit(0);
     } else if (strcmp(mode, "actstall") == 0) {
         /* review finding 2: the stall mark read at the start */
         ico_diag_log("test: stall end %d", ico_diag_startup_stall_end());
+        child_quit(0);
+    } else if (strcmp(mode, "actwd") == 0) {
+        /* review 2 N5: the watchdog mark read at the start */
+        ico_diag_log("test: watchdog end %d", ico_diag_startup_prev_watchdog());
         child_quit(0);
     } else if (strcmp(mode, "actclean") == 0) {
         ico_diag_startup_activity_record(ICO_DIAG_ACTIVITY_STARTUP);
@@ -1021,6 +1192,8 @@ static void hang_child(const char *mode, const char *log)
                                         : NULL);
     ico_diag_set_fatal_ui(loss_box, NULL);
     fake_ticks = 1;
+    /* the start's last step (window_host.c ico_window_open's end) */
+    ico_diag_step("window: start: up in 1.0 s; the game runs");
     if (strcmp(mode, "hanglimit") == 0) {
         ico_diag_set_gpu_hang_limit(2.0);
         ico_diag_start(0, 60);
@@ -1106,6 +1279,21 @@ static void run_child(const char *mode, const char *log)
     } else if (strncmp(mode, "pump", 4) == 0) {
         pump_child(mode);
     } else if (strcmp(mode, "segv") == 0) {
+        /* the performance lines the report keeps by scene (report.c
+           perf_line: the latest ranked and profile line of each) */
+        ico_diag_log("window: perf ranked: stage 3 play: 16.8 of 25.0 fps, the older one");
+        ico_diag_log("window: performance profile: stage 3 play: 3 blocks (30 s)");
+        ico_diag_log("window: perf ranked: stage 4 scene: 12.0 of 25.0 fps");
+        ico_diag_log("window: perf ranked: stage 3 play: 15.0 of 25.0 fps, the newer one");
+        ico_diag_log("window: performance profile (the run's end, 2 scenes, profile 1):");
+        /* 15 scenes more, keyed past 48 bytes (the stage's name on every
+           kind): the table's 16 full, the scene seen longest ago (stage 4
+           scene) gives its place to the last */
+        for (int k = 0; k < 15; k++) {
+            ico_diag_log("window: perf ranked: stage %d other (st%02da (THE LONG NAME OF A ROOM)) "
+                         "(keep frames): 30.0 of 120.0 fps",
+                         10 + k, 10 + k);
+        }
         fn = segv_thread;
     } else if (strcmp(mode, "segvnote") == 0) {
         /* a crash inside the graphics driver's pipeline build; this child
@@ -1130,7 +1318,19 @@ static void run_child(const char *mode, const char *log)
         fn = segv_thread;
     } else if (strcmp(mode, "abort") == 0) {
         fn = abort_thread;
+    } else if (strcmp(mode, "step") == 0 || strcmp(mode, "switchhang") == 0 ||
+               strcmp(mode, "switchok") == 0) {
+        switch_child(mode, log);
     } else if (strcmp(mode, "watchdog") == 0) {
+        fn = spin_thread;
+        ico_diag_start(1, 2);
+    } else if (strcmp(mode, "wdmark") == 0) {
+        /* review 2 N5: the watchdog's end with the activity file's path
+           known writes its mark beside it */
+        char path[300];
+        act_path(path, sizeof path, log);
+        ico_diag_set_version("test 1");
+        (void)ico_diag_startup_activity_begin(path, 0);
         fn = spin_thread;
         ico_diag_start(1, 2);
     } else if (strcmp(mode, "progress") == 0 || strcmp(mode, "stall") == 0) {
@@ -1172,11 +1372,62 @@ static char *read_file(const char *path)
     return buf;
 }
 
+/* a child left running until its log holds `until` (at most 5 s), then
+   killed (SIGKILL: no exit handler, no stdio flush, as Task Manager's end
+   of a hung game) */
+static int run_killed(const char *self, const char *mode, const char *log, const char *until)
+{
+    pid_t pid;
+    int st, i;
+    remove(log);
+    pid = fork();
+    if (pid == 0) {
+        execl(self, self, mode, log, (char *)NULL);
+        _exit(99);
+    }
+    if (pid < 0) {
+        return -1;
+    }
+    for (i = 0; i < 100; i++) {
+        FILE *f = fopen(log, "rb");
+        char buf[4096];
+        size_t n = 0;
+        if (f != NULL) {
+            n = fread(buf, 1, sizeof buf - 1, f);
+            fclose(f);
+        }
+        buf[n] = '\0';
+        if (strstr(buf, until) != NULL) {
+            break;
+        }
+        usleep(50 * 1000);
+    }
+    usleep(200 * 1000);
+    kill(pid, SIGKILL);
+    if (waitpid(pid, &st, 0) != pid) {
+        return -1;
+    }
+    return WIFSIGNALED(st) ? 128 + WTERMSIG(st) : WEXITSTATUS(st);
+}
+
 static int run(const char *self, const char *mode, const char *log)
 {
     pid_t pid;
     int st;
     remove(log);
+    {
+        /* each child starts without logs/last-run.txt (last_run.h): the
+           children share the log's folder, and one child's end words (a
+           watchdog's reason, a GPU hang's) in the next one's "the previous
+           run: ..." lines would meet its checks for their absence */
+        const char *slash = strrchr(log, '/');
+        const int dir = slash != NULL ? (int)(slash - log + 1) : 0;
+        char p[600];
+        snprintf(p, sizeof p, "%.*slast-run.txt", dir, log);
+        remove(p);
+        snprintf(p, sizeof p, "%.*slast-run-previous.txt", dir, log);
+        remove(p);
+    }
     pid = fork();
     if (pid == 0) {
         execl(self, self, mode, log, (char *)NULL);
@@ -1511,11 +1762,110 @@ static void benign_cases(void)
     CHECK(!ico_diag_benign_exception(0));
 }
 
+#if !defined(_WIN32)
+
+/* how many times needle is in s */
+static int count_of(const char *s, const char *needle)
+{
+    int n = 0;
+    while (s != NULL && (s = strstr(s, needle)) != NULL) {
+        n++;
+        s += strlen(needle);
+    }
+    return n;
+}
+
+/* diag_test --switch (ctest diag_switch): the step lines and the switch's
+   watch (switch_child) */
+static int switch_cases(const char *self)
+{
+    char log[256];
+    char *s;
+    const char *a, *b;
+    int r;
+
+    snprintf(log, sizeof log, "diag_switch_%d.log", (int)getpid());
+    r = run_killed(self, "step", log, "a stub step that never returns");
+    s = read_file(log);
+    CHECK(r == 128 + SIGKILL);
+    a = strstr(s, "window: a buffered line before the step\n");
+    b = strstr(s, "window: switch to opengl: a stub step that never returns\n");
+    CHECK(a != NULL && b != NULL && a < b);
+    /* the hazard the step's own write avoids: a buffered line is lost */
+    CHECK(strstr(s, "a buffered line after the step") == NULL);
+
+    r = run(self, "switchhang", log);
+    s = read_file(log);
+    CHECK(r == 4);
+    CHECK(strstr(s, "ico_pc: diagnostics: watchdog: switching the renderer from vulkan to opengl "
+                    "(test); its limit is 2 s") != NULL);
+    CHECK(strstr(s, "WATCHDOG: switching the renderer from vulkan to opengl (test): nothing moved "
+                    "for 2 s (the last step: window: switch to opengl: a stub step that never "
+                    "returns)") != NULL);
+    CHECK(strstr(s, "no new Main tick") == NULL);
+    CHECK(strstr(s, "ico_pc: the main thread was at ") != NULL);
+    CHECK(strstr(s, "ico_pc: the last step: window: switch to opengl: a stub step") != NULL);
+    /* the heartbeat went on during the switch, naming it */
+    CHECK(strstr(s, "| switching the renderer from vulkan to opengl (test) for ") != NULL);
+
+    r = run(self, "switchok", log);
+    s = read_file(log);
+    CHECK(r == 0);
+    CHECK(strstr(s, "test: switch done") != NULL);
+    CHECK(strstr(s, "WATCHDOG") == NULL);
+    CHECK(strstr(s, "watchdog: switching the renderer from vulkan to opengl (test) over after ") !=
+          NULL);
+    {
+        /* the progress phases, in order */
+        static const char *const phases[] = {
+            "\nwindow: switch to opengl: starting the renderer (the device and its shaders)\n",
+            ("\nwindow: shaders: the start-up set begins, 1 of 16 (the progress screen counts "
+             "them)\n"),
+            "\nwindow: shaders: 4 of 16 made in 1.0 s\n",
+            "\nwindow: shaders: 8 of 16 made in 2.0 s\n",
+            "\nwindow: shaders: 12 of 16 made in 3.0 s\n",
+            "\nwindow: shaders: the start-up set is over, 16 made in 4.0 s\n",
+            "\nwindow: switch to opengl: the pipeline set\n",
+            "\ntest: switch done\n"};
+        const char *at = s;
+        size_t k;
+        for (k = 0; k < sizeof(phases) / sizeof(phases[0]); k++) {
+            const char *p = at != NULL ? strstr(at, phases[k]) : NULL;
+            if (p == NULL) {
+                printf("diag_test --switch: phase line %u missing or out of order: %s", (unsigned)k,
+                       phases[k]);
+            }
+            CHECK(p != NULL);
+            /* its own newline is the next line's start */
+            at = p != NULL ? p + strlen(phases[k]) - 1 : NULL;
+        }
+        /* the first, three quarters and the end, nothing for the shaders
+           between the quarters (a pipeline's call, the count again); each
+           at a line's start (the heartbeat repeats the last step inside its
+           own line) */
+        CHECK(count_of(s, "\nwindow: shaders: ") == 5);
+        CHECK(count_of(s, "\nwindow: shaders: the start-up set begins") == 1);
+        CHECK(count_of(s, "\nwindow: shaders: the start-up set is over") == 1);
+        CHECK(strstr(s, "\nwindow: shaders: 2 of 16") == NULL);
+    }
+    remove(log);
+    if (fails != 0) {
+        printf("diag_test --switch: %d check(s) failed\n", fails);
+        return 1;
+    }
+    printf("diag_test --switch: the step lines and the switch's watch passed\n");
+    return 0;
+}
+
+#endif
+
 int main(int argc, char **argv)
 {
 #if defined(_WIN32)
-    (void)argc;
-    (void)argv;
+    if (argc == 2 && strcmp(argv[1], "--switch") == 0) {
+        printf("diag_test --switch: skipped (POSIX only: fork)\n");
+        return 77;
+    }
     benign_cases();
     {
         /* the thread-name exception with the handlers installed returns and
@@ -1543,6 +1893,9 @@ int main(int argc, char **argv)
     if (argc == 3) {
         run_child(argv[1], argv[2]);
         return 0;
+    }
+    if (argc == 2 && strcmp(argv[1], "--switch") == 0) {
+        return switch_cases(argv[0]);
     }
     benign_cases();
     snprintf(log, sizeof log, "diag_test_%d.log", (int)getpid());
@@ -1608,6 +1961,26 @@ int main(int argc, char **argv)
             CHECK(strstr(txt, "ico_pc: CRASH: SIGSEGV") != NULL);
             CHECK(strstr(txt, "ico_pc: symbols from diag_test.map") != NULL);
             CHECK(strstr(txt, "achievements.toml: (no stages line)") != NULL);
+            /* the performance lines by scene: the newer ranking, the
+               profile, the scenes in the order they came; no header line */
+            CHECK(strstr(txt, "the performance lines by scene (the latest ranking and profile "
+                              "of each):\n  window: perf ranked: stage 3 play: 15.0 of 25.0 "
+                              "fps, the newer one\n  window: performance profile: stage 3 "
+                              "play: 3 blocks (30 s)\n  window: perf ranked: stage 10 other "
+                              "(st10a (THE LONG NAME OF A ROOM)) (keep frames): 30.0 of 120.0 "
+                              "fps\n") != NULL);
+            {
+                /* the 16 kept: the latest scene in, the one seen longest ago out */
+                const char *sec = strstr(txt, "the performance lines by scene");
+                const char *end = sec != NULL ? strstr(sec, "the last ico_pc:/window:/rd:") : NULL;
+                const char *last =
+                    sec != NULL ? strstr(sec, "perf ranked: stage 24 other (st24a") : NULL;
+                const char *gone = sec != NULL ? strstr(sec, "perf ranked: stage 4 scene") : NULL;
+                CHECK(end != NULL && last != NULL && last < end);
+                CHECK(gone == NULL || gone > end);
+            }
+            CHECK(strstr(txt, "the older one") == NULL ||
+                  strstr(txt, "the older one") > strstr(txt, "the last ico_pc:/window:/rd:"));
             if (ex != NULL) {
                 fputs(txt, ex);
                 fclose(ex);
@@ -1948,6 +2321,9 @@ int main(int argc, char **argv)
         CHECK(strstr(s, " | waiting for the GPU 60 s (submission 263; the newest 263, the newest "
                         "seen finished 262)") != NULL);
         CHECK(strstr(s, "test: hang dump\n") != NULL);
+        /* the step it repeats is the start's last, named as one (issue 123) */
+        CHECK(strstr(s, "ico_pc: the last start-up step: window: start: up in 1.0 s; the game "
+                        "runs\n") != NULL);
         CHECK(strstr(s, "ico_pc: report: report-") != NULL);
         CHECK(strstr(s, "test: hang dump\n") < strstr(s, "ico_pc: report: report-"));
         CHECK(strstr(s, "ico_pc: the run ended: the graphics driver stopped responding "
@@ -1992,6 +2368,8 @@ int main(int argc, char **argv)
         CHECK(strstr(s, "test: loss dump (none)\n") != NULL);
         CHECK(strstr(s, "test: bisect -1\n") != NULL);
         CHECK(strstr(s, "loss bisect:") == NULL);
+        /* a GPU hang is a loss, not the watchdog's mark (review 2 N5) */
+        CHECK(strstr(s, "was ended by the watchdog") == NULL);
         CHECK(strstr(s, "test: bisect stub") == NULL);
         CHECK(strstr(read_file(ends), "loss 1\n") != NULL);
         if (fails) {
@@ -2045,6 +2423,19 @@ int main(int argc, char **argv)
         CHECK(strstr(s, "test: box: ICO PC stopped responding, so it was closed.") != NULL);
 #endif
         CHECK(read_file(act)[0] == '\0');
+        {
+            /* a freeze, not a hang: the watchdog's mark beside the file
+               (review 2 N5); a GPU hang above wrote none (it is a loss) */
+            char wdm[320];
+            FILE *wf;
+            snprintf(wdm, sizeof wdm, "%s-watchdog.txt", act);
+            wf = fopen(wdm, "rb");
+            CHECK(wf != NULL);
+            if (wf != NULL) {
+                fclose(wf);
+            }
+            remove(wdm);
+        }
         if (fails) {
             printf("--- hangnot log ---\n%s\n", read_file(log));
         }
@@ -2222,6 +2613,37 @@ int main(int argc, char **argv)
             }
             r = run(argv[0], "actstall", log);
             CHECK(strstr(read_file(log), "test: stall end 0\n") != NULL);
+            remove(act);
+        }
+        /* review 2 N5: a run the watchdog ended (the game stopped
+           responding, no GPU wait) leaves its mark; the next start reads
+           it (the robust step counts it as an unclean end), says so and
+           deletes it */
+        {
+            char wd[320];
+            FILE *f;
+            snprintf(wd, sizeof wd, "%s-watchdog.txt", act);
+            remove(wd);
+            r = run(argv[0], "wdmark", log);
+            CHECK(r == 4);
+            f = fopen(wd, "rb");
+            CHECK(f != NULL);
+            if (f != NULL) {
+                fclose(f);
+            }
+            r = run(argv[0], "actwd", log);
+            s = read_file(log);
+            CHECK(r == 0);
+            CHECK(strstr(s, "test: watchdog end 1\n") != NULL);
+            CHECK(strstr(s, "ico_pc: the previous run (version test 1) was ended by the "
+                            "watchdog: no Main tick 1 s after boot started") != NULL);
+            f = fopen(wd, "rb");
+            CHECK(f == NULL);
+            if (f != NULL) {
+                fclose(f);
+            }
+            r = run(argv[0], "actwd", log);
+            CHECK(strstr(read_file(log), "test: watchdog end 0\n") != NULL);
             remove(act);
         }
         /* a lazy run's clean exit keeps the file: the next start of the
@@ -2733,6 +3155,9 @@ int main(int argc, char **argv)
         s = read_file(act);
         CHECK(strcmp(s, "test 1\ncreating pipeline fog test\nset: careful") == 0);
         CHECK(read_file(ends)[0] == '\0');
+        /* the careful set's own budget: for this start only, no resume
+           part (issue 123) */
+        CHECK(strstr(read_file(log), "test: resume part 0\n") != NULL);
         r = run(argv[0], "actpipeset", log);
         s = read_file(log);
         CHECK(strstr(s, "ico_pc: starts in a row that ended while preparing the graphics (the "
@@ -2750,6 +3175,42 @@ int main(int argc, char **argv)
         s = read_file(log);
         CHECK(strstr(s, "this one tries the start-up set again") != NULL);
         CHECK(strstr(s, "test: pipeline set 6\n") != NULL);
+        remove(act);
+        /* issue 215: a set the size rule stopped (set_size.h) is not resumed
+           by the next start: after a v0.11.7-style low-memory stop the next
+           start resumes, its set is stopped by the rule (2D at pipeline 25:
+           6270 MB of rest against 4942 MB), no resume part is kept, and the
+           two starts after it make the whole set again and stop at the same
+           place under the same measurement */
+        remove(ends);
+        setenv("ICO_TEST_THEN", "lowmemclean", 1);
+        r = run(argv[0], "actpipeset", log);
+        CHECK(strstr(read_file(log), "test: resume part 1\n") != NULL);
+        setenv("ICO_TEST_THEN", "setsize", 1);
+        setenv("ICO_TEST_RESUME", "1", 1);
+        r = run(argv[0], "actpipeset", log);
+        unsetenv("ICO_TEST_RESUME");
+        s = read_file(log);
+        CHECK(r == 0);
+        CHECK(strstr(s, "test: pipeline set 7\n") != NULL && strstr(s, "test: resumed\n") != NULL);
+        CHECK(strstr(s, "test: set size stop 1 at pipeline 25\n") != NULL);
+        CHECK(strstr(s, "test: resume part 0\n") != NULL);
+        s = read_file(act);
+        CHECK(strstr(s, "set: stopped at the system's low-memory signal") == NULL);
+        CHECK(strstr(s, "exited with the pipelines created as the frames needed them for that "
+                        "start only") != NULL);
+        for (int again = 0; again < 2; again++) {
+            r = run(argv[0], "actpipeset", log);
+            s = read_file(log);
+            CHECK(r == 0);
+            CHECK(strstr(s, "this one tries the start-up set again") != NULL);
+            CHECK(strstr(s, "this start resumes them where it stopped") == NULL);
+            CHECK(strstr(s, "test: pipeline set 0\n") != NULL);
+            CHECK(strstr(s, "test: set size stop 1 at pipeline 25\n") != NULL);
+            CHECK(strstr(s, "test: resume part 0\n") != NULL);
+        }
+        unsetenv("ICO_TEST_THEN");
+        CHECK(read_file(ends)[0] == '\0');
         remove(act);
         /* issue 128: the signals that stop the set */
         remove(ends);
@@ -2780,19 +3241,27 @@ int main(int argc, char **argv)
         CHECK(r == 0);
         CHECK(strstr(s, "test: low memory stop 1 (running critical)\n") != NULL);
         CHECK(strstr(s, "ico_pc: the start-up set stopped at the system's low-memory signal "
-                        "(running critical); the next start makes the pipelines as the game "
-                        "needs them, with no start-up set\n") != NULL);
+                        "(running critical); this start makes the rest as the game needs them, "
+                        "and the next start resumes the set where this one stopped, in smaller "
+                        "batches\n") != NULL);
+        CHECK(strstr(s, "test: resume part 1\n") != NULL);
         s = read_file(act);
-        CHECK(strncmp(s,
-                      "test 1\nexited with the pipelines created as the frames needed them\nset: "
-                      "careful\nset: stopped at the system's low-memory signal (running "
-                      "critical)\nsystem: low memory (onTrimMemory level 15, running critical; "
-                      "signal 1 of this run) at pipelines 144 of 568 of the start-up set; memory ",
-                      strlen("test 1\nexited with the pipelines created as the frames needed "
-                             "them\nset: careful\nset: stopped at the system's low-memory signal "
-                             "(running critical)\nsystem: low memory (onTrimMemory level 15, "
-                             "running critical; signal 1 of this run) at pipelines 144 of 568 of "
-                             "the start-up set; memory ")) == 0);
+        CHECK(
+            strncmp(
+                s,
+                "test 1\nexited with the pipelines created as the frames needed them\nset: "
+                "careful\nset: stopped at the system's low-memory signal (running "
+                "critical)"
+                "; resume at pipeline 144 of 568, batches of 8, stop 1, 2026-11-09 20:45\nsystem: low memory (onTrimMemory level 15, "
+                "running critical; signal 1 of this run) at pipelines 144 of 568 of the "
+                "start-up set; memory ",
+                strlen(
+                    "test 1\nexited with the pipelines created as the frames needed "
+                    "them\nset: careful\nset: stopped at the system's low-memory signal "
+                    "(running critical)"
+                    "; resume at pipeline 144 of 568, batches of 8, stop 1, 2026-11-09 20:45\nsystem: low memory (onTrimMemory level 15, "
+                    "running critical; signal 1 of this run) at pipelines 144 of 568 of "
+                    "the start-up set; memory ")) == 0);
         CHECK(read_file(ends)[0] == '\0');
         setenv("ICO_TEST_THEN", "clean", 1);
         r = run(argv[0], "actpipeset", log);
@@ -2800,14 +3269,23 @@ int main(int argc, char **argv)
         s = read_file(log);
         CHECK(strstr(s, "ico_pc: the previous start stopped preparing the graphics when the system "
                         "ran low on memory (exited with the pipelines created as the frames "
-                        "needed them); this start prepares them as the game needs them\n") != NULL);
+                        "needed them); this start resumes them where it stopped\n") != NULL);
         CHECK(strstr(s, "test: lazy 1\n") != NULL);
         CHECK(strstr(s, "test: pipeline set 7\n") != NULL);
+        CHECK(
+            strstr(s,
+                   "test: prev low memory line [set: stopped at the system's low-memory "
+                   "signal (running critical)"
+                   "; resume at pipeline 144 of 568, batches of 8, stop 1, 2026-11-09 20:45]\n") !=
+            NULL);
         CHECK(strstr(s, "test: config write") == NULL);
         s = read_file(act);
-        CHECK(strcmp(s, "test 1\nexited with the pipelines created as the frames needed "
-                        "them\nset: stopped at the system's low-memory signal (running "
-                        "critical)") == 0);
+        CHECK(strcmp(s,
+                     "test 1\nexited with the pipelines created as the frames needed "
+                     "them\nset: stopped at the system's low-memory signal (running "
+                     "critical)"
+                     "; resume at pipeline 144 of 568, batches of 8, stop 1, 2026-11-09 20:45") ==
+              0);
         /* ... that lazy start ended inside a first-use pipeline: the first
            end in a row, stepping from no set (lazy for that start only),
            not back to the careful set */
@@ -2818,9 +3296,13 @@ int main(int argc, char **argv)
         CHECK(strstr(s, "test: pipeline set 7\n") != NULL);
         r = run(argv[0], "actpipeset", log);
         s = read_file(log);
-        CHECK(strstr(s, "ico_pc: the previous start had stopped preparing the graphics when the "
-                        "system ran low on memory (set: stopped at the system's low-memory signal "
-                        "(running critical))\n") != NULL);
+        CHECK(
+            strstr(s,
+                   "ico_pc: the previous start had stopped preparing the graphics when the "
+                   "system ran low on memory (set: stopped at the system's low-memory signal "
+                   "(running critical)"
+                   "; resume at pipeline 144 of 568, batches of 8, stop 1, 2026-11-09 20:45)\n") !=
+            NULL);
         CHECK(strstr(s, "ico_pc: starts in a row that ended while preparing the graphics (the "
                         "pipelines): 1\n") != NULL);
         CHECK(strstr(s, "test: pipeline set 4\n") != NULL);
@@ -2840,6 +3322,92 @@ int main(int argc, char **argv)
         r = run(argv[0], "actpipeset", log);
         s = read_file(log);
         CHECK(strstr(s, "test: pipeline set 4\n") != NULL);
+        /* issue 123: the signal's stop is not a floor stop; a stop at the
+           free-memory floor (its figures in the line) is, and still no set
+           for the start (7): the window's retry (memory_floor.h) decides on
+           the driver and the cache file */
+        s = read_file(log);
+        CHECK(strstr(s, "test: prev floor stop 0\n") != NULL);
+        remove(ends);
+        {
+            FILE *f = fopen(act, "wb");
+            CHECK(f != NULL);
+            if (f != NULL) {
+                fputs("test 1\nexited with the pipelines created as the frames needed them\n"
+                      "set: stopped at the system's low-memory signal (1940 MB available of 11453 "
+                      "MB, floor 1947 MB)",
+                      f);
+                fclose(f);
+            }
+        }
+        setenv("ICO_TEST_THEN", "clean", 1);
+        r = run(argv[0], "actpipeset", log);
+        unsetenv("ICO_TEST_THEN");
+        s = read_file(log);
+        CHECK(strstr(s, "test: pipeline set 7\n") != NULL);
+        CHECK(strstr(s, "test: prev floor stop 1\n") != NULL);
+        CHECK(strstr(s, "test: prev floor retried 0\n") != NULL);
+        remove(act);
+        /* ... a start that was itself the retry and stopped at the floor
+           again (its line's mark): a floor stop, and no second retry in a
+           row (window_pipe_finish.c gives ico_memory_floor_retry the mark) */
+        remove(ends);
+        {
+            FILE *f = fopen(act, "wb");
+            CHECK(f != NULL);
+            if (f != NULL) {
+                fputs("test 1\nexited with the pipelines created as the frames needed them\n"
+                      "set: stopped at the system's low-memory signal (1940 MB available of 11453 "
+                      "MB, floor 1947 MB)" ICO_MEMORY_FLOOR_RETRIED_MARK,
+                      f);
+                fclose(f);
+            }
+        }
+        setenv("ICO_TEST_THEN", "clean", 1);
+        r = run(argv[0], "actpipeset", log);
+        unsetenv("ICO_TEST_THEN");
+        s = read_file(log);
+        CHECK(strstr(s, "test: pipeline set 7\n") != NULL);
+        CHECK(strstr(s, "test: prev floor stop 1\n") != NULL);
+        CHECK(strstr(s, "test: prev floor retried 1\n") != NULL);
+        remove(act);
+        /* issue 123: the window resumes the set of a start whose set
+           stopped for memory (ICO_TEST_RESUME: window_pipe_floor_retry's
+           ico_diag_startup_resume): that start records as a start-up set,
+           its file without the stop line until it stops itself; a resumed
+           set that finishes deletes the file (the next start makes the
+           full set), one that stops again writes its own line */
+        remove(ends);
+        remove(act);
+        setenv("ICO_TEST_THEN", "lowmemclean", 1);
+        r = run(argv[0], "actpipeset", log);
+        setenv("ICO_TEST_RESUME", "1", 1);
+        setenv("ICO_TEST_THEN", "clean", 1);
+        r = run(argv[0], "actpipeset", log);
+        s = read_file(log);
+        CHECK(strstr(s, "test: pipeline set 7\n") != NULL);
+        CHECK(strstr(s, "test: resumed\n") != NULL);
+        CHECK(read_file(act)[0] == '\0');
+        r = run(argv[0], "actpipeset", log);
+        s = read_file(log);
+        CHECK(strstr(s, "test: pipeline set 6\n") != NULL);
+        CHECK(strstr(s, "test: prev low memory line []\n") != NULL);
+        remove(act);
+        setenv("ICO_TEST_THEN", "lowmemclean", 1);
+        r = run(argv[0], "actpipeset", log);
+        r = run(argv[0], "actpipeset", log);
+        s = read_file(log);
+        CHECK(strstr(s, "test: resumed\n") != NULL);
+        CHECK(strstr(s, "test: resume part 1\n") != NULL);
+        s = read_file(act);
+        CHECK(strstr(s,
+                     "\nset: stopped at the system's low-memory signal (running critical)"
+                     "; resume at pipeline 144 of 568, batches of 8, stop 1, 2026-11-09 20:45\n") !=
+              NULL);
+        CHECK(strstr(s, ")" ICO_MEMORY_FLOOR_RETRIED_MARK) == NULL);
+        unsetenv("ICO_TEST_RESUME");
+        unsetenv("ICO_TEST_THEN");
+        remove(act);
         /* ... another version tries the set again */
         remove(ends);
         setenv("ICO_TEST_THEN", "lowmemclean", 1);
@@ -2863,6 +3431,56 @@ int main(int argc, char **argv)
                         "vertex pre-pass): 1\n") != NULL);
         CHECK(strstr(s, "test: vu prepass 1\n") != NULL);
         CHECK(strstr(s, "test: pipeline set 0\n") != NULL);
+        remove(ends);
+        /* an end inside the skin check's start-up probe (issue 163): not
+           an end while making the pipelines nor the pre-pass's (the window
+           turns the check off, window_host.c), the set as usual */
+        remove(act);
+        run(argv[0], "actskinprobe", log);
+        r = run(argv[0], "actpipeset", log);
+        s = read_file(log);
+        CHECK(strstr(s, "ico_pc: the previous run ended while: " SKIN_PROBE_NOTE) != NULL);
+        CHECK(strstr(s, "starts in a row that ended while preparing the graphics") == NULL);
+        CHECK(strstr(s, "test: vu prepass 0\n") != NULL);
+        CHECK(strstr(s, "test: pipeline set 0\n") != NULL);
+        CHECK(startup_retry_note_has_skin_probe(SKIN_PROBE_NOTE));
+        remove(act);
+        remove(ends);
+        /* issue 179: the loss at the lifecycle's GPU wait as the app went
+           to the background, the process then ended there by the system
+           (the reporter's 5-minute v0.11.6 run: "no lost start" at the
+           next): counted at the wait, so the next start takes the loss
+           steps; the system ending the app in the background without a
+           loss counts nothing */
+        remove(act);
+        remove(ends);
+        setenv("ICO_TEST_THEN", "bgkill", 1);
+        run(argv[0], "actlossnext", log);
+        unsetenv("ICO_TEST_THEN");
+        CHECK(read_file(act)[0] == '\0'); /* the set's end removed it, nothing wrote it again */
+        run(argv[0], "actlossnext", log);
+        s = read_file(log);
+        CHECK(strstr(s, "test: losses 0, robust as set\n") != NULL);
+        CHECK(strstr(s, "lost the graphics device: ") == NULL);
+        setenv("ICO_TEST_THEN", "bgloss", 1);
+        run(argv[0], "actlossnext", log);
+        unsetenv("ICO_TEST_THEN");
+        CHECK(strstr(read_file(log),
+                     "ico_pc: the graphics device was lost at the GPU wait as the app went to the "
+                     "background; counted now as a start that lost it (the system may end the "
+                     "app there before the game notices; the next start takes the loss "
+                     "steps)\n") != NULL);
+        CHECK(strcmp(read_file(act), "test 1\n\ngraphics device lost, no loss dump") == 0);
+        r = run(argv[0], "actlossnext", log);
+        s = read_file(log);
+        CHECK(r == 0);
+        CHECK(strstr(s, "ico_pc: starts in a row that lost the graphics device: 1\n") != NULL);
+        CHECK(strstr(s, "test: losses 1, robust this start\n") != NULL);
+        CHECK(strstr(s, "test: loss row 1, ICO_LOSS_ROW 1\n") != NULL);
+        if (fails) {
+            printf("--- background loss log ---\n%s\n", read_file(log));
+        }
+        remove(act);
         remove(ends);
         /* Android's next start after a device loss: robust access for that
            start only; its end without a loss leaves the row, the start
@@ -2899,14 +3517,21 @@ int main(int argc, char **argv)
         CHECK(strstr(read_file(ends), "loss_robust 0\n") != NULL);
         r = run(argv[0], "actlossnext", log);
         s = read_file(log);
-        CHECK(strstr(s, "ico_pc: starts in a row that lost the graphics device: 2\n") != NULL);
+        /* the start between ran robust without a loss: for the loss ladder
+           the losses are not in a row (1), for robust access the second (2) */
+        CHECK(strstr(s, "ico_pc: starts in a row that lost the graphics device: 1 (2 counted for "
+                        "robust access)\n") != NULL);
+        CHECK(strstr(s, "test: loss row 1, ICO_LOSS_ROW 1\n") != NULL);
         CHECK(strstr(s, "test: config write dev.gpu_robust = true\n") != NULL);
         CHECK(strstr(s, "ico_pc: the graphics device was lost in two starts in a row; this start "
                         "and every start after it check the bounds of every buffer and image "
                         "read ([dev] gpu_robust = true in config.toml); delete that line to turn "
                         "it off again\n") != NULL);
         CHECK(strstr(s, "test: losses 2, robust for good\n") != NULL);
-        CHECK(read_file(ends)[0] == '\0');
+        /* the row stays at the start that wrote the setting (review M5:
+           before v0.11.4 it went back to 0 there) */
+        CHECK(strstr(read_file(ends), "loss 2\n") != NULL);
+        CHECK(strstr(read_file(ends), "loss_row 1\n") != NULL);
         /* ... the robust start itself losing it is the second too */
         setenv("ICO_TEST_THEN", "loss", 1);
         run(argv[0], "actlossnext", log);
@@ -2917,6 +3542,7 @@ int main(int argc, char **argv)
         s = read_file(log);
         CHECK(strstr(s, "ico_pc: starts in a row that lost the graphics device: 2\n") != NULL);
         CHECK(strstr(s, "test: losses 2, robust for good\n") != NULL);
+        CHECK(strstr(s, "test: loss row 2, ICO_LOSS_ROW 2\n") != NULL);
         /* ... a start without a loss that did not run robust breaks the
            row: the start after the robust one keeps it (that one ran with
            robust access), the start after that one clears it */
@@ -2945,28 +3571,198 @@ int main(int argc, char **argv)
         CHECK(strstr(s, "test: losses 2, robust this start\n") != NULL);
         CHECK(strstr(read_file(ends), "loss 2\n") != NULL);
         remove(ends);
-        /* ... the player set gpu_robust: nothing counted or written */
+        /* ... the player set gpu_robust: nothing written, robust access as
+           set, but the row counts on (since v0.11.4: before it the row went
+           back to 0 every start, so the loss ladder could never pass one)
+           and the ladder's count reaches the backend, 1 then 2 */
         setenv("ICO_TEST_THEN", "loss", 1);
         run(argv[0], "actlossnext", log);
-        unsetenv("ICO_TEST_THEN");
+        s = read_file(log);
+        CHECK(strstr(s, "test: loss row 0, ICO_LOSS_ROW unset\n") != NULL);
+        CHECK(strstr(s, "loss ladder") == NULL);
         setenv("ICO_TEST_ROBUST_SAID", "[dev] gpu_robust", 1);
+        r = run(argv[0], "actlossnext", log);
+        s = read_file(log);
+        CHECK(strstr(s, "ico_pc: starts in a row that lost the graphics device: 1\n") != NULL);
+        CHECK(strstr(s, "ico_pc: the previous start lost the graphics device (1 in a row); nothing "
+                        "is written to config.toml: robust access is as the settings say ([dev] "
+                        "gpu_robust)\n") != NULL);
+        CHECK(strstr(s, "ico_pc: loss ladder: 1 start in a row lost the graphics device before "
+                        "this one: on Vulkan this start runs the wide barrier scopes (the graphics "
+                        "backend's barriers line says what ran; Direct3D and OpenGL change "
+                        "nothing); nothing is written to the settings\n") != NULL);
+        CHECK(strstr(s, "test: loss row 1, ICO_LOSS_ROW 1\n") != NULL);
+        CHECK(strstr(s, "test: config write") == NULL);
+        CHECK(strstr(read_file(ends), "loss 1\n") != NULL);
+        unsetenv("ICO_TEST_THEN"); /* the next one sees the loss and ends without one */
+        r = run(argv[0], "actlossnext", log);
+        s = read_file(log);
+        CHECK(strstr(s, "ico_pc: starts in a row that lost the graphics device: 2\n") != NULL);
+        CHECK(strstr(s, "ico_pc: the previous start lost the graphics device (2 in a row); nothing "
+                        "is written to config.toml") != NULL);
+        CHECK(strstr(s, "ico_pc: loss ladder: 2 starts in a row lost the graphics device before "
+                        "this one: on Vulkan this start runs the wide barrier scopes and the "
+                        "single submission wait (the graphics backend's barriers and submission "
+                        "wait line says what ran; Direct3D and OpenGL change nothing); nothing is "
+                        "written to the settings\n") != NULL);
+        CHECK(strstr(s, "test: loss row 2, ICO_LOSS_ROW 2\n") != NULL);
+        CHECK(strstr(s, "test: config write") == NULL);
+        CHECK(strstr(read_file(ends), "loss 2\n") != NULL);
+        /* ... a start without a loss ends the row: the ladder's count 0 */
         r = run(argv[0], "actlossnext", log);
         unsetenv("ICO_TEST_ROBUST_SAID");
         s = read_file(log);
-        CHECK(strstr(s, "ico_pc: the previous start lost the graphics device; nothing is counted "
-                        "or written to config.toml: robust access is as the settings say ([dev] "
-                        "gpu_robust)\n") != NULL);
-        CHECK(strstr(s, "test: config write") == NULL);
+        CHECK(strstr(s, "test: losses 0, robust as set\n") != NULL);
+        CHECK(strstr(s, "test: loss row 0, ICO_LOSS_ROW unset\n") != NULL);
+        CHECK(read_file(ends)[0] == '\0');
+        /* ... a loss inside a first-start probe (ico_diag_set_probe: the
+           subpass read's) counts on no loss step: the next start says the
+           probe was running, its loss row and robust count stay 0 (the
+           graphics backend's verdict file refuses the read, port/rhi
+           rhi_vk_subpass_verdict); the same loss without the probe counts
+           as before (row 1) */
+        setenv("ICO_TEST_ROBUST_SAID", "[dev] gpu_robust", 1);
+        setenv("ICO_TEST_THEN", "loss", 1);
+        setenv("ICO_TEST_PROBE", "1", 1);
+        run(argv[0], "actlossnext", log);
+        unsetenv("ICO_TEST_PROBE");
+        unsetenv("ICO_TEST_THEN");
+        CHECK(strstr(read_file(log), "ico_pc: the subpass read's probe runs at this start: a "
+                                     "device loss, GPU hang or end before its verdict counts on "
+                                     "no loss step\n") != NULL);
+        r = run(argv[0], "actlossnext", log);
+        s = read_file(log);
+        CHECK(strstr(s, "ico_pc: the previous run (version test 1) ended while the subpass "
+                        "read's probe was running: its end is not counted on the loss ladder, "
+                        "the robust step or the watchdog's mark") != NULL);
+        CHECK(strstr(s, "test: prev probe 1\n") != NULL);
+        CHECK(strstr(s, "test: losses 0, robust as set\n") != NULL);
+        CHECK(strstr(s, "test: loss row 0, ICO_LOSS_ROW unset\n") != NULL);
+        CHECK(strstr(s, "lost the graphics device: ") == NULL);
+        CHECK(read_file(ends)[0] == '\0');
+        setenv("ICO_TEST_THEN", "loss", 1);
+        run(argv[0], "actlossnext", log);
+        unsetenv("ICO_TEST_THEN");
+        r = run(argv[0], "actlossnext", log);
+        s = read_file(log);
+        CHECK(strstr(s, "test: prev probe 0\n") != NULL);
+        CHECK(strstr(s, "ico_pc: starts in a row that lost the graphics device: 1\n") != NULL);
+        CHECK(strstr(s, "test: loss row 1, ICO_LOSS_ROW 1\n") != NULL);
+        /* ... and a start without a loss ends that row again */
+        r = run(argv[0], "actlossnext", log);
+        unsetenv("ICO_TEST_ROBUST_SAID");
+        s = read_file(log);
+        CHECK(strstr(s, "test: loss row 0, ICO_LOSS_ROW unset\n") != NULL);
         CHECK(read_file(ends)[0] == '\0');
         /* ... a restart after a loss (the desktop's loss order) counts
-           nothing */
+           nothing in the loss row, but the ladder's chain counts it: 1,
+           then 2 for a restart after the restart lost it too, 0 again after
+           a fresh start */
         setenv("ICO_TEST_THEN", "loss", 1);
         run(argv[0], "actlossnext", log);
         unsetenv("ICO_TEST_THEN");
         r = run(argv[0], "actrelaunch", log);
         s = read_file(log);
         CHECK(strstr(s, "lost the graphics device: ") == NULL);
+        CHECK(strstr(s, "ico_pc: loss ladder: 1 start in a row lost the graphics device before "
+                        "this one (this game's restarts after a loss): ") != NULL);
+        CHECK(strstr(read_file(ends), "loss 0\n") != NULL);
+        CHECK(strstr(read_file(ends), "loss_chain 1\n") != NULL);
+        {
+            /* the restart lost it too (its file's loss line, as
+               ico_diag_note_device_loss writes it) */
+            FILE *af = fopen(act, "wb");
+            CHECK(af != NULL);
+            if (af != NULL) {
+                fputs("test 1\n\ngraphics device lost, no loss dump", af);
+                fclose(af);
+            }
+        }
+        r = run(argv[0], "actrelaunch", log);
+        s = read_file(log);
+        CHECK(strstr(s, "ico_pc: loss ladder: 2 starts in a row lost the graphics device before "
+                        "this one (this game's restarts after a loss): ") != NULL);
+        CHECK(strstr(read_file(ends), "loss_chain 2\n") != NULL);
+        r = run(argv[0], "actlossnext", log);
+        s = read_file(log);
+        CHECK(strstr(s, "test: loss row 0, ICO_LOSS_ROW unset\n") != NULL);
         CHECK(read_file(ends)[0] == '\0');
+        /* ... the loss order ran out (review M5): a fresh start after a
+           start and its two restarts all lost it is the third in a row,
+           not the first: the chain's losses count in the row */
+        setenv("ICO_TEST_THEN", "loss", 1);
+        run(argv[0], "actlossnext", log);
+        unsetenv("ICO_TEST_THEN");
+        for (int k = 0; k < 2; k++) {
+            run(argv[0], "actrelaunch", log);
+            FILE *af = fopen(act, "wb");
+            CHECK(af != NULL);
+            if (af != NULL) {
+                fputs("test 1\n\ngraphics device lost, no loss dump", af);
+                fclose(af);
+            }
+        }
+        CHECK(strstr(read_file(ends), "loss_chain 2\n") != NULL);
+        r = run(argv[0], "actlossnext", log);
+        s = read_file(log);
+        CHECK(strstr(s, "ico_pc: starts in a row that lost the graphics device: 3 (1 counted for "
+                        "robust access)\n") != NULL);
+        CHECK(strstr(s, "ico_pc: loss ladder: 3 starts in a row lost the graphics device before "
+                        "this one: ") != NULL);
+        CHECK(strstr(s, "test: loss row 3, ICO_LOSS_ROW 3\n") != NULL);
+        CHECK(strstr(read_file(ends), "loss_row 3\n") != NULL);
+        /* ... a restart of that start counts on from the row */
+        {
+            FILE *af = fopen(act, "wb");
+            CHECK(af != NULL);
+            if (af != NULL) {
+                fputs("test 1\n\ngraphics device lost, no loss dump", af);
+                fclose(af);
+            }
+        }
+        r = run(argv[0], "actrelaunch", log);
+        s = read_file(log);
+        CHECK(strstr(s, "ico_pc: loss ladder: 4 starts in a row lost the graphics device before "
+                        "this one (this game's restarts after a loss): ") != NULL);
+        remove(act);
+        remove(ends);
+        /* ... the setting written at the second loss (review M5): the start
+           that wrote it losing it too is the third in a row for the ladder,
+           with gpu_robust then set (ICO_TEST_ROBUST_SAID) */
+        run(argv[0], "actlossnext", log);
+        remove(ends);
+        setenv("ICO_TEST_THEN", "loss", 1);
+        run(argv[0], "actlossnext", log);
+        run(argv[0], "actlossnext", log);
+        r = run(argv[0], "actlossnext", log);
+        unsetenv("ICO_TEST_THEN");
+        CHECK(strstr(read_file(log), "test: losses 2, robust for good\n") != NULL);
+        setenv("ICO_TEST_ROBUST_SAID", "[dev] gpu_robust", 1);
+        r = run(argv[0], "actlossnext", log);
+        unsetenv("ICO_TEST_ROBUST_SAID");
+        s = read_file(log);
+        CHECK(strstr(s, "ico_pc: the previous start lost the graphics device (3 in a row); nothing "
+                        "is written to config.toml") != NULL);
+        CHECK(strstr(s, "test: loss row 3, ICO_LOSS_ROW 3\n") != NULL);
+        /* ... the ladder's words on a phone (Android, iOS; faked here): the
+           rung is the VU pre-pass */
+        remove(ends);
+        setenv("ICO_TEST_THEN", "loss", 1);
+        run(argv[0], "actlossnext", log);
+        unsetenv("ICO_TEST_THEN");
+        setenv("ICO_TEST_LADDER_PHONE", "1", 1);
+        r = run(argv[0], "actlossnext", log);
+        unsetenv("ICO_TEST_LADDER_PHONE");
+        s = read_file(log);
+        CHECK(strstr(s, "ico_pc: loss ladder: 1 start in a row lost the graphics device before "
+                        "this one: on Vulkan this start draws without the VU pre-pass (a "
+                        "tile-based phone GPU, whose barrier scopes and submission wait are the "
+                        "wide and single ones already; the graphics backend's VU pre-pass line "
+                        "says what ran; OpenGL ES changes nothing); nothing is written to the "
+                        "settings\n") != NULL);
+        CHECK(strstr(s, "test: loss row 1, ICO_LOSS_ROW 1\n") != NULL);
+        CHECK(strstr(s, "wide barrier scopes (the graphics") == NULL);
+        run(argv[0], "actlossnext", log);
         remove(act);
         remove(ends);
         /* a batch of the vertex pre-pass's: this
@@ -3008,6 +3804,48 @@ int main(int argc, char **argv)
         s = read_file(log);
         CHECK(strstr(s, "test: config write") == NULL);
         CHECK(strstr(s, "test: vu prepass 1\n") != NULL);
+        CHECK(strstr(s, "test: vu store 0\n") != NULL);
+        remove(ends);
+        /* inside a build of the record stored by the vertex shaders: the
+           rung before (the window draws the record into render targets, the
+           pre-pass kept); the second such end writes [dev] vu_record =
+           "targets", which clears the row, so a later end in the targets'
+           own pre-pass pipelines starts its count again */
+        run(argv[0], "actvustore", log);
+        setenv("ICO_TEST_THEN", "clean", 1);
+        r = run(argv[0], "actpipeset", log);
+        unsetenv("ICO_TEST_THEN");
+        s = read_file(log);
+        CHECK(strstr(s, "ico_pc: starts in a row that ended while preparing the graphics (the "
+                        "vertex pre-pass): 1\n") != NULL);
+        CHECK(strstr(s, "ico_pc: the previous start ended while the graphics driver compiled the "
+                        "3D vertex pre-pass's record stores (" VU_STORE_NOTE "); this start only "
+                        "draws the record into render targets instead, the pre-pass kept "
+                        "(ICO_RD_VU_RECORD=targets; nothing is written to config.toml); if a "
+                        "start that compiles them ends there again, [dev] vu_record = "
+                        "\"targets\" is written for good\n") != NULL);
+        CHECK(strstr(s, "test: config write") == NULL);
+        CHECK(strstr(s, "test: vu prepass 1\n") != NULL);
+        CHECK(strstr(s, "test: vu store 1\n") != NULL);
+        CHECK(strstr(s, "test: pipeline set 0\n") != NULL);
+        run(argv[0], "actvustore", log);
+        r = run(argv[0], "actpipeset", log);
+        s = read_file(log);
+        CHECK(strstr(s, "test: config write dev.vu_record = targets\n") != NULL);
+        CHECK(strstr(s, "test: config write dev.vu_prepass") == NULL);
+        CHECK(strstr(s, "ico_pc: the previous start ended while the graphics driver compiled the "
+                        "3D vertex pre-pass's record stores (" VU_STORE_NOTE "); this start and "
+                        "every start after it draw the record into render targets, the pre-pass "
+                        "kept ([dev] vu_record = \"targets\" in config.toml); delete that line "
+                        "to try the stores again\n") != NULL);
+        CHECK(strstr(s, "test: vu prepass 2\n") != NULL);
+        CHECK(strstr(s, "test: vu store 1\n") != NULL);
+        run(argv[0], "actvupre", log);
+        r = run(argv[0], "actpipeset", log);
+        s = read_file(log);
+        CHECK(strstr(s, "test: config write") == NULL);
+        CHECK(strstr(s, "test: vu prepass 1\n") != NULL);
+        CHECK(strstr(s, "test: vu store 0\n") != NULL);
         remove(ends);
         /* no file: the set; the setting "lazy": none, nothing written */
         r = run(argv[0], "actpipeset", log);
@@ -3100,7 +3938,7 @@ int main(int argc, char **argv)
     CHECK(strstr(s, "the game starts again at the title when this run has closed, with "
                     "ICO_STARTUP_RETRY=blend:vulkan: ") != NULL);
     CHECK(strstr(s, "test: restart 1\n") != NULL);
-    CHECK(strstr(s, "test: relaunch ICO_STARTUP_RETRY=blend:vulkan (parse 0, step 8, backend "
+    CHECK(strstr(s, "test: relaunch ICO_STARTUP_RETRY=blend:vulkan (parse 0, step 10, backend "
                     "vulkan, blend fixed)\n") != NULL);
     /* the normal quit path first, then the relaunch */
     CHECK(strstr(s, "test: restart 1") != NULL && strstr(s, "test: the end-of-run steps") != NULL &&
@@ -3120,7 +3958,7 @@ int main(int argc, char **argv)
     s = read_file(log);
     CHECK(r == 0);
     CHECK(strstr(s, "test: restart 1\n") != NULL);
-    CHECK(strstr(s, "test: relaunch ICO_STARTUP_RETRY=backend:d3d12 (parse 0, step 9, backend "
+    CHECK(strstr(s, "test: relaunch ICO_STARTUP_RETRY=backend:d3d12 (parse 0, step 11, backend "
                     "d3d12, blend fixed)\n") != NULL);
     CHECK(strstr(s, "ico_pc: started the game again") != NULL);
     if (fails) {
@@ -3134,7 +3972,7 @@ int main(int argc, char **argv)
     s = read_file(log);
     CHECK(r == 0);
     CHECK(strstr(s, "test: restart 1\n") != NULL);
-    CHECK(strstr(s, "test: relaunch ICO_STARTUP_RETRY=robust:vulkan (parse 0, step 7, backend "
+    CHECK(strstr(s, "test: relaunch ICO_STARTUP_RETRY=robust:vulkan (parse 0, step 9, backend "
                     "vulkan, blend not fixed)\n") != NULL);
     if (fails) {
         printf("--- lossrobust log ---\n%s\n", s);

@@ -2,6 +2,7 @@
  * destruction for the Vulkan backend.  Every buffer and texture has its own
  * VkDeviceMemory (vkr_allocate); there is no suballocation. */
 #include "vk_internal.h"
+#include "vk_spirv_scan.h"
 #include <stdlib.h>
 #include <string.h>
 
@@ -442,7 +443,8 @@ static RhiBuffer createBuffer(const RhiBufferDesc *desc)
     if (desc->usage & RHI_BUF_UNIFORM) {
         usage |= VK_BUFFER_USAGE_UNIFORM_BUFFER_BIT;
     }
-    if (desc->usage & RHI_BUF_STORAGE_READ) {
+    if (desc->usage & (RHI_BUF_STORAGE_READ | RHI_BUF_STORAGE_WRITE)) {
+        /* read or written by shaders: one usage bit (rhi.h RHI_BUF_STORAGE_WRITE) */
         usage |= VK_BUFFER_USAGE_STORAGE_BUFFER_BIT;
     }
     if (desc->usage & RHI_BUF_COPY_SRC) {
@@ -489,9 +491,11 @@ static RhiBuffer createBuffer(const RhiBufferDesc *desc)
     b->memSize = req.size;
     b->size = desc->size;
     b->kind = desc->memory;
+    b->vkUsage = usage; /* the stages that can reach it (vk_cmd.c barriers) */
     /* a device buffer a shader reads: a texture copied into it is made
      * visible to those reads (vk_cmd.c rhi_cmd_copy_texture_to_buffer) */
-    const uint32_t reads = RHI_BUF_VERTEX | RHI_BUF_INDEX | RHI_BUF_UNIFORM | RHI_BUF_STORAGE_READ;
+    const uint32_t reads = RHI_BUF_VERTEX | RHI_BUF_INDEX | RHI_BUF_UNIFORM | RHI_BUF_STORAGE_READ |
+                           RHI_BUF_STORAGE_WRITE;
     b->shaderRead = desc->memory == RHI_MEM_DEVICE && (desc->usage & reads) != 0;
     if (desc->memory != RHI_MEM_DEVICE) {
         if (!VKR_CHECK(vkMapMemory(g_vkr.device, b->memory, 0, VK_WHOLE_SIZE, 0, &b->mapped))) {
@@ -651,9 +655,20 @@ static RhiTexture createTexture(const RhiTextureDesc *desc)
     }
     /* the destination read (RhiDstRead): asked for only where the device
      * has the path (RhiLimits), ignored elsewhere */
-    if ((desc->usage & RHI_TEX_STORAGE) && g_vkr.interlock && desc->format == RHI_FMT_RGBA8_UNORM &&
-        desc->samples <= 1u) {
-        usage |= VK_IMAGE_USAGE_STORAGE_BIT;
+    bool storage = false;
+    if ((desc->usage & RHI_TEX_STORAGE) && desc->samples <= 1u &&
+        (desc->format == RHI_FMT_RGBA8_UNORM || desc->format == RHI_FMT_RGBA16F ||
+         desc->format == RHI_FMT_D32F)) {
+        /* any of the three formats where the device takes them as storage
+         * images (the interlock path's RGBA8 was this test already:
+         * vkr_create_device), for the destination read and for external
+         * compute (rhi_native.h) alike */
+        VkFormatProperties fp;
+        vkGetPhysicalDeviceFormatProperties(g_vkr.phys, vkFmt, &fp);
+        if (fp.optimalTilingFeatures & VK_FORMAT_FEATURE_STORAGE_IMAGE_BIT) {
+            usage |= VK_IMAGE_USAGE_STORAGE_BIT;
+            storage = true;
+        }
     }
     /* an attachment its pass reads as an input attachment: the colour
      * (the exact blend's attachment read, DATE's stencil setup) or the
@@ -663,8 +678,39 @@ static RhiTexture createTexture(const RhiTextureDesc *desc)
         (desc->usage & (RHI_TEX_RENDER_TARGET | RHI_TEX_DEPTH_STENCIL))) {
         usage |= VK_IMAGE_USAGE_INPUT_ATTACHMENT_BIT;
     }
+    /* the subpass read (vk_internal.h vkr_subpass_class): every
+     * single-sampled RGBA8_UNORM render target, asked or not, since a pass
+     * of its class names its colour as an input attachment whichever
+     * texture it is (VUID-VkFramebufferCreateInfo-pAttachments-00879: the
+     * usage on every image a framebuffer's input attachment is); not one
+     * asked without it (RHI_TEX_NO_SUBPASS_READ: the probe's plain twin,
+     * port/render/rd_subpass_probe.c, never drawn with a depth target) */
+    const bool subpassRead = g_vkr.subpassRead && (desc->usage & RHI_TEX_RENDER_TARGET) &&
+                             !(desc->usage & RHI_TEX_NO_SUBPASS_READ) &&
+                             vkFmt == VK_FORMAT_R8G8B8A8_UNORM && desc->samples <= 1u;
+    if (subpassRead) {
+        usage |= VK_IMAGE_USAGE_INPUT_ATTACHMENT_BIT;
+    }
     /* rhi_readback_texture works on any texture */
     usage |= VK_IMAGE_USAGE_TRANSFER_SRC_BIT;
+    /* a transient attachment (rhi.h RHI_TEX_TRANSIENT): its attachment
+     * usage alone with the transient bit (VUID-VkImageCreateInfo-usage-00963:
+     * no other usage beside the attachment ones), never read back */
+    const bool transient = (desc->usage & RHI_TEX_TRANSIENT) != 0u;
+    if (transient) {
+        if (!g_vkr.limits.resolveInPass ||
+            (desc->usage & ~(uint32_t)(RHI_TEX_RENDER_TARGET | RHI_TEX_DEPTH_STENCIL |
+                                       RHI_TEX_TRANSIENT)) != 0u ||
+            !(desc->usage & (RHI_TEX_RENDER_TARGET | RHI_TEX_DEPTH_STENCIL))) {
+            VKR_LOG("rhi_create_texture %s: a transient attachment refused (no in-pass resolve, "
+                    "or a usage beside the attachment's)",
+                    desc->debugName ? desc->debugName : "");
+            return out;
+        }
+        usage = (usage & (VK_IMAGE_USAGE_COLOR_ATTACHMENT_BIT |
+                          VK_IMAGE_USAGE_DEPTH_STENCIL_ATTACHMENT_BIT)) |
+                VK_IMAGE_USAGE_TRANSIENT_ATTACHMENT_BIT;
+    }
 
     VkrTexture *t = NULL;
     uint32_t id = vkr_pool_alloc(&g_vkr.textures, (void **)&t);
@@ -718,12 +764,28 @@ static RhiTexture createTexture(const RhiTextureDesc *desc)
     }
     VkMemoryRequirements req;
     vkGetImageMemoryRequirements(g_vkr.device, t->image, &req);
+    if (transient) {
+        /* lazily allocated memory where the device has it (a tiler's tile
+         * memory: no backing store is touched); else the device's own */
+        uint32_t lazy = 0;
+        for (uint32_t i = 0; i < g_vkr.memProps.memoryTypeCount && i < 32u; i++) {
+            if ((req.memoryTypeBits & (1u << i)) && (g_vkr.memProps.memoryTypes[i].propertyFlags &
+                                                     VK_MEMORY_PROPERTY_LAZILY_ALLOCATED_BIT)) {
+                lazy |= 1u << i;
+            }
+        }
+        if (lazy) {
+            req.memoryTypeBits = lazy;
+        }
+    }
     if (!vkr_allocate(&req, RHI_MEM_DEVICE, &t->memory, NULL, VKR_H(t->image), desc->debugName) ||
         !VKR_CHECK(vkBindImageMemory(g_vkr.device, t->image, t->memory, 0))) {
         goto fail;
     }
     t->memSize = req.size;
     t->format = vkFmt;
+    t->storage = storage;
+    t->subpassRead = subpassRead;
     t->rhiFormat = desc->format;
     t->aspects = fm->aspect;
     t->width = desc->width;
@@ -920,6 +982,31 @@ void rhi_destroy_sampler(RhiSampler h)
 }
 
 /* --------------------------------------------------------------- shaders */
+/* The first fragment module that can read a storage buffer
+ * (vk_spirv_scan.h; one that cannot be read whole counts as one): the
+ * buffer barriers made after it wait for fragment work too
+ * (VkrState.fragmentStorage, vk_cmd.c vkr_buf_earlier_stages).  The flag is
+ * set before the module's handle is returned, so before any pipeline that
+ * holds it exists or any draw of it is recorded.  Said once a device. */
+static void vkr_note_fragment_storage(const RhiShaderDesc *desc)
+{
+    VkrSpirvUse use;
+    const bool read =
+        vkr_spirv_scan((const uint32_t *)desc->bytecode, desc->bytecodeSize / 4u, &use);
+    const bool fragment = desc->stage == RHI_STAGE_FRAGMENT || use.fragment;
+    if (!fragment || (read && !use.storageBuffers) ||
+        __atomic_load_n(&g_vkr.fragmentStorage, __ATOMIC_ACQUIRE)) {
+        return;
+    }
+    if (!__atomic_exchange_n(&g_vkr.fragmentStorage, true, __ATOMIC_ACQ_REL)) {
+        VKR_LOG("buffer barriers: fragment shader %s %s: from here the barriers before a "
+                "copy into or a store to a storage buffer wait for the fragment work before "
+                "them too",
+                desc->debugName ? desc->debugName : "?",
+                read ? "declares a storage buffer" : "could not be read whole");
+    }
+}
+
 RhiShader rhi_create_shader(const RhiShaderDesc *desc)
 {
     RhiShader out = {0};
@@ -940,13 +1027,19 @@ RhiShader rhi_create_shader(const RhiShaderDesc *desc)
         .codeSize = desc->bytecodeSize,
         .pCode = desc->bytecode,
     };
-    if (!VKR_CHECK(vkCreateShaderModule(g_vkr.device, &ci, NULL, &s->module))) {
+    /* under the compile lock where the driver's compiler is not
+       thread-safe (vk_pipeline.c vkr_compile_lock, issue 188) */
+    vkr_compile_lock();
+    const VkResult r = vkCreateShaderModule(g_vkr.device, &ci, NULL, &s->module);
+    vkr_compile_unlock();
+    if (!vkr_check(r, "vkCreateShaderModule", __FILE__, __LINE__)) {
         vkr_pool_release(&g_vkr.shaders, id);
         return out;
     }
     s->stage = desc->stage;
     snprintf(s->entry, sizeof(s->entry), "%s", desc->entryPoint ? desc->entryPoint : "main");
     vkr_set_name(VK_OBJECT_TYPE_SHADER_MODULE, VKR_H(s->module), desc->debugName);
+    vkr_note_fragment_storage(desc);
     out.id = id;
     return out;
 }

@@ -33,7 +33,14 @@
  *   unknown  an unknown figure (below 0) never stops;
  *   rule     the log lines' words for each class, the setting and off;
  *   setting  "", "auto" unset; "0" off; "2048" 2048; "-1", "x", "12 MB"
- *            not read.
+ *            not read;
+ *   retry    issue 123 (ico_memory_floor_retry): the next start's set again
+ *            only after a stop at the floor, on Qualcomm's own driver, with a
+ *            cache file that is not empty and that the renderer loaded,
+ *            and not after a start that was itself a retry (the stop line's
+ *            mark); the activity line told from the system's own signal by
+ *            its floor figures, the retried line by its mark; the reporter's
+ *            1940 MB of 11453 MB against the floor of 1947 MB.
  */
 #include <stdio.h>
 #include <string.h>
@@ -90,14 +97,23 @@ static void testFloor(void)
 
 static void testDriver(void)
 {
-    CHECK(ico_memory_floor_driver(0x5143u, "driver Qualcomm 512.676.53, version 512.676.53") == Q);
-    CHECK(ico_memory_floor_driver(0x5143u, NULL) == Q);
-    CHECK(ico_memory_floor_driver(0x5143u, "turnip Mesa driver") == O);
-    CHECK(ico_memory_floor_driver(0x5143u, "Turnip Mesa 26.3.0") == O);
-    CHECK(ico_memory_floor_driver(0x5143u, "Mesa 25.1.0") == O);
-    CHECK(ico_memory_floor_driver(0x1010u, "PowerVR D-Series Vulkan Driver 26.1@7036548") == O);
-    CHECK(ico_memory_floor_driver(0x13B5u, "Mali-G52") == O);
-    CHECK(ico_memory_floor_driver(0u, "anything") == U);
+    CHECK(ico_memory_floor_driver(0x5143u, 8u, "driver Qualcomm 512.676.53, version 512.676.53") ==
+          Q);
+    CHECK(ico_memory_floor_driver(0x5143u, 8u, NULL) == Q);
+    CHECK(ico_memory_floor_driver(0x5143u, 0u, "turnip Mesa driver") == O);
+    CHECK(ico_memory_floor_driver(0x5143u, 0u, "Turnip Mesa 26.3.0") == O);
+    CHECK(ico_memory_floor_driver(0x5143u, 0u, "Mesa 25.1.0") == O);
+    CHECK(ico_memory_floor_driver(0x1010u, 0u, "PowerVR D-Series Vulkan Driver 26.1@7036548") == O);
+    CHECK(ico_memory_floor_driver(0x13B5u, 0u, "Mali-G52") == O);
+    CHECK(ico_memory_floor_driver(0u, 0u, "anything") == U);
+    /* issue 209: a renamed Turnip build is another driver by its Vulkan
+       driver id (18), whatever its text; by the text alone it reads as
+       Qualcomm's own */
+    CHECK(ico_memory_floor_driver(0x5143u, 18u,
+                                  "device 5143:43050a01; driver PurpleVK public driver PurpleVK "
+                                  "26.3.0-devel (git-62ac221a33), version 26.2.99") == O);
+    CHECK(ico_memory_floor_driver(0x5143u, 0u, "driver PurpleVK public driver PurpleVK") == Q);
+    CHECK(ico_memory_floor_driver(0x5143u, 18u, NULL) == O);
     CHECK(strcmp(ico_memory_floor_driver_words(Q), "Qualcomm's own driver") == 0);
     CHECK(strcmp(ico_memory_floor_driver_words(O), "another driver than Qualcomm's own") == 0);
     CHECK(strcmp(ico_memory_floor_driver_words(U), "the driver not known yet") == 0);
@@ -171,6 +187,66 @@ static void testSetting(void)
     CHECK(ico_memory_floor_setting("12 MB") == -2);
 }
 
+static void testRetry(void)
+{
+    char why[200];
+    const char *floorLine = "set: stopped at the system's low-memory signal (1940 MB available "
+                            "of 11453 MB, floor 1947 MB)";
+    const char *sigLine = "set: stopped at the system's low-memory signal (running critical)";
+
+    CHECK(ico_memory_floor_line_is_floor(floorLine));
+    CHECK(!ico_memory_floor_line_is_floor(sigLine));
+    CHECK(!ico_memory_floor_line_is_floor(""));
+    CHECK(!ico_memory_floor_line_is_floor(NULL));
+    /* the reporter: floor stop, Qualcomm's own, the 1.4 MB cache file */
+    CHECK(ico_memory_floor_stops(1940, 11453, -1, ICO_MEMORY_FLOOR_DRIVER_QUALCOMM));
+    CHECK(ico_memory_floor_retry(1, 0, ICO_MEMORY_FLOOR_DRIVER_QUALCOMM, 1400000, 1, why,
+                                 sizeof why) == 1);
+    CHECK(strstr(why, "on disk") != NULL);
+    /* no file, an empty file */
+    CHECK(ico_memory_floor_retry(1, 0, ICO_MEMORY_FLOOR_DRIVER_QUALCOMM, -1, 1, why, sizeof why) ==
+          0);
+    CHECK(strstr(why, "missing or empty") != NULL);
+    CHECK(ico_memory_floor_retry(1, 0, ICO_MEMORY_FLOOR_DRIVER_QUALCOMM, 0, 1, why, sizeof why) ==
+          0);
+    /* the system's own signal, another driver, a driver not known */
+    CHECK(ico_memory_floor_retry(0, 0, ICO_MEMORY_FLOOR_DRIVER_QUALCOMM, 1400000, 1, why,
+                                 sizeof why) == 0);
+    CHECK(strstr(why, "did not stop") != NULL);
+    CHECK(ico_memory_floor_retry(1, 0, ICO_MEMORY_FLOOR_DRIVER_OTHER, 1400000, 1, why,
+                                 sizeof why) == 0);
+    CHECK(strstr(why, "not Qualcomm") != NULL);
+    CHECK(ico_memory_floor_retry(1, 0, ICO_MEMORY_FLOOR_DRIVER_UNKNOWN, 1400000, 1, why,
+                                 sizeof why) == 0);
+    /* no words wanted; a small buffer cuts */
+    CHECK(ico_memory_floor_retry(1, 0, ICO_MEMORY_FLOOR_DRIVER_QUALCOMM, 5, 1, NULL, 0) == 1);
+    CHECK(ico_memory_floor_retry(1, 0, ICO_MEMORY_FLOOR_DRIVER_QUALCOMM, 5, 1, why, 8) == 1);
+    CHECK(strlen(why) == 7);
+    /* the cache file on disk but refused by the renderer (another driver
+       after a system update, another shader set): no retry */
+    CHECK(ico_memory_floor_retry(1, 0, ICO_MEMORY_FLOOR_DRIVER_QUALCOMM, 1400000, 0, why,
+                                 sizeof why) == 0);
+    CHECK(strstr(why, "did not load") != NULL);
+    /* at most one retry in a row: the previous start was a retry that
+       stopped at the floor again */
+    CHECK(ico_memory_floor_retry(1, 1, ICO_MEMORY_FLOOR_DRIVER_QUALCOMM, 1400000, 1, why,
+                                 sizeof why) == 0);
+    CHECK(strstr(why, "already a retry") != NULL);
+    /* the mark on the stop line (diag_host.c writes it after the floor's
+       figures on a retried start) */
+    {
+        const char *retried = "set: stopped at the system's low-memory signal (1940 MB available "
+                              "of 11453 MB, floor 1947 MB)" ICO_MEMORY_FLOOR_RETRIED_MARK;
+
+        CHECK(ico_memory_floor_line_is_floor(retried));
+        CHECK(ico_memory_floor_line_retried(retried));
+        CHECK(!ico_memory_floor_line_retried(floorLine));
+        CHECK(!ico_memory_floor_line_retried(sigLine));
+        CHECK(!ico_memory_floor_line_retried(NULL));
+        CHECK(strlen(retried) < 160); /* diag_host.c act_low_memory */
+    }
+}
+
 int main(void)
 {
     testFloor();
@@ -181,6 +257,7 @@ int main(void)
     testUnknown();
     testRule();
     testSetting();
+    testRetry();
     printf("memory_floor_test: %s\n", failures ? "FAILED" : "ok");
     return failures ? 1 : 0;
 }

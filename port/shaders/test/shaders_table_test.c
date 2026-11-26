@@ -9,18 +9,21 @@
 #include <string.h>
 
 static const char *const expected[] = {
-    "blend_int_ps",    "blend_int_vs",     "blit_depth_ps",    "blit_ps",
-    "blit_vs",         "box_reduce_ps",    "camera_probe_ps",  "crt_bloom_ps",
-    "crt_blur_ps",     "crt_ps",           "crt_vs",           "date_snap_ps",
-    "fog_lut_ps",      "font_ps",          "font_sheet_ps",    "fx_rect_vs",
-    "fx_sprite_ps",    "sprite_aa1_ps",    "sprite_aa1_ui_vs", "sprite_aa1_world_vs",
-    "sprite_ps",       "sprite_stq_ps",    "sprite_stq_ui_vs", "sprite_stq_world_vs",
-    "sprite_texa_ps",  "sprite_ui_vs",     "sprite_world_vs",  "vu_grid_lit_vs",
-    "vu_grid_spec_vs", "vu_grid_vs",       "vu_lit_spec_vs",   "vu_lit_vs",
-    "vu_particle_vs",  "vu_prelit_vs",     "vu_probe_ps",      "vu_ps",
-    "vu_reflect_vs",   "vu_skin_debug_vs", "vu_skin_spec_vs",  "vu_skin_vs",
-    "vu_texa_ps",      "wrap_acc_ps",      "wrap_resolve_ps",  "yuv_field_ps",
-    "yuv_ps",          "yuv_vs",           "shadow_count_ps", /* the shadow count in one draw (rd_shadow_one.c) */
+    "blend_int_ps",     "blend_int_vs",     "blit_depth_ps",    "blit_ps",
+    "blit_vs",          "box_reduce_ps",    "camera_probe_ps",  "crt_bloom_ps",
+    "crt_blur_ps",      "crt_ps",           "crt_vs",           "date_snap_ps",
+    "fog_lut_ps",       "font_ps",          "font_sheet_ps",    "fx_rect_vs",
+    "fx_sprite_ps",     "sprite_aa1_ps",    "sprite_aa1_ui_vs", "sprite_aa1_world_vs",
+    "sprite_ps",        "sprite_stq_ps",    "sprite_stq_ui_vs", "sprite_stq_world_vs",
+    "sprite_texa_ps",   "sprite_ui_vs",     "sprite_world_vs",  "vu_grid_lit_vs",
+    "vu_grid_spec_vs",  "vu_grid_vs",       "vu_lit_spec_vs",   "vu_lit_vs",
+    "vu_particle_vs",   "vu_prelit_vs",     "vu_probe_ps",      "vu_ps",
+    "vu_reflect_vs",    "vu_skin_debug_vs", "vu_skin_spec_vs",  "vu_skin_vs",
+    "vu_texa_ps",       "wrap_acc_ps",      "wrap_resolve_ps",  "yuv_field_ps",
+    "yuv_ps",           "yuv_vs",           "shadow_count_ps", /* the shadow count in one draw (rd_shadow_one.c) */
+    "depth_down_ps",    /* the lamps' WORK2 depth at the GS frame's size (rd_lamps.c) */
+    "depth_down_ms_ps", /* the same per sample (rd_lamps.c RD_LAMPS_LOWRESMS) */
+    "fx_glowblur_ps",   /* the glow's blur chain in two passes (rd_glow_blur.c) */
 };
 
 /* the screen-prim triangles with their colour and STQ planes
@@ -48,18 +51,22 @@ static const char *const expectedPlanes[] = {
 /* the staticBlur sprites' UINT-view twin (fx_sprite.hlsl ICO_UINT_SRC; rd_replay.c doBlurSpriteDraw) */
 static const char *const expectedUint[] = {"fx_sprite_u_ps"};
 
-/* the tiler passes (rd_replay_tiler.c): DATE's stencil bit, the fog's local read and the folded blur pair */
-static const char *const expectedTiler[] = {"date_clear_ps", "date_stencil_ps", "fog_lut_local_ps",
-                                            "fog_lut_local_ps_nodual", "fx_blur2_ps"};
+/* the tiler passes (rd_replay_tiler.c): DATE's stencil bit, the fog's local read, the folded blur
+ * pair and two pairs in one pass */
+static const char *const expectedTiler[] = {"date_clear_ps",    "date_stencil_ps",
+                                            "fog_lut_local_ps", "fog_lut_local_ps_nodual",
+                                            "fx_blur2_ps",      "fx_blur4_ps"};
 
 /* the pixel-diet builds: vu_ps and vu_texa_ps without the planes' inputs
  * (ICO_VU_NO_PLANES, with their two-pass twins, and vu_np_ps's attachment
  * read twin for GS state as shader data, port/render/rd_uber.c) and
  * fx_sprite_ps's frame-size and local-read forms (ICO_FX_FRAME,
- * ICO_FX_DST_LOCAL) */
+ * ICO_FX_DST_LOCAL), fx_frame_ps for the glow's paste alone (ICO_FX_PASTE;
+ * port/render/rd_paste_spec.c) and sprite_ps for the shadow composites and
+ * levels alone (ICO_SPRITE_COMP; port/render/rd_comp_spec.c) */
 static const char *const expectedDiet[] = {
-    "vu_np_ps",    "vu_np_ps_nodual", "vu_texa_np_ps",  "vu_texa_np_ps_nodual",
-    "fx_frame_ps", "fx_local_ps",     "vu_np_ps_dstatt"};
+    "vu_np_ps",    "vu_np_ps_nodual", "vu_texa_np_ps", "vu_texa_np_ps_nodual", "fx_frame_ps",
+    "fx_local_ps", "vu_np_ps_dstatt", "fx_paste_ps",   "sprite_comp_ps"};
 
 /* Motion blur: Smooth's accumulator (fx_sprite.hlsl; port/render/rd_blur_smooth.c) */
 static const char *const expectedSmooth[] = {"fx_acc_ps", "fx_acc_resolve_ps"};
@@ -67,16 +74,49 @@ static const char *const expectedSmooth[] = {"fx_acc_ps", "fx_acc_resolve_ps"};
 /* the crack filler above 1x (blit.hlsl; port/render/rd_crack_fill.c) */
 static const char *const expectedCrack[] = {"crack_fill_ps", "crack_count_ps", "crack_fill1_ps"};
 
+/* the shadow count's loads-only build (blit.hlsl SHADOW_COUNT_LOAD: no gather
+ * in the module, for Direct3D's stencil view; port/render/rd_shadow_one.c) */
+static const char *const expectedShadowLoad[] = {"shadow_count_load_ps"};
+
 /* the aura's feedback read in two passes (fx_sprite.hlsl; port/render/rd_aura_box.c) */
 static const char *const expectedAuraBox[] = {"fx_aura_rows_ps", "fx_aura_sum_ps"};
+
+/* the present's box blit with the colour adjustment (blit.hlsl, tone.hlsli;
+ * port/render/rd_tone.h) */
+static const char *const expectedTone[] = {"blit_tone_ps", "blit_depth_tone_ps"};
+
+/* the present from SCENE (blit.hlsl; port/render/rd_present_scene.c) */
+static const char *const expectedPresentScene[] = {"blit_scene_ps"};
+/* the shadow tiles' mask and mark (blit.hlsl; port/render/rd_shadow_tile.c) */
+static const char *const expectedShadowTile[] = {"shadow_tile_mask_ps", "shadow_tile_mark_ps"};
+
+/* Upscaling: FSR 1.0's two passes (fsr1.hlsl over port/third_party/fsr1;
+ * port/render/rd_fsr1.c) */
+static const char *const expectedFsr1[] = {"fsr1_easu_ps", "fsr1_rcas_ps"};
+/* the shadow levels' step and tent above 1x (port/render/rd_shadowres.c,
+ * shadowres.hlsl), pixel shaders on every backend */
+static const char *const expectedShadowFine[] = {"shadowres_step_ps", "shadowres_tent_ps",
+                                                 "shadowres_tent2_ps", "shadowres_step_stencil_ps"};
 
 /* the mesh programs' entries' plain variants (ICO_VU_PLAIN, vu_common.hlsli:
  * the fallback's on a device of the table) */
 static const char *const expectedPlain[] = {
-    "vu_prelit_plain_vs",     "vu_lit_plain_vs",  "vu_lit_spec_plain_vs",
-    "vu_reflect_plain_vs",    "vu_skin_plain_vs", "vu_skin_spec_plain_vs",
-    "vu_skin_debug_plain_vs", "vu_grid_plain_vs", "vu_grid_lit_plain_vs",
+    "vu_prelit_plain_vs",
+    "vu_lit_plain_vs",
+    "vu_lit_spec_plain_vs",
+    "vu_reflect_plain_vs",
+    "vu_skin_plain_vs",
+    "vu_skin_spec_plain_vs",
+    "vu_skin_debug_plain_vs",
+    "vu_grid_plain_vs",
+    "vu_grid_lit_plain_vs",
     "vu_grid_spec_plain_vs",
+    /* the cluster entries' plain variants with the bones read through the
+     * ring (ICO_VU_BONES_RING: issue 123's ladder, rd_pipeline.c
+     * rd__vu_policy_init under [dev] vu_bones = ring, rd_vu_bones.c) */
+    "vu_skin_ring_plain_vs",
+    "vu_skin_spec_ring_plain_vs",
+    "vu_skin_debug_ring_plain_vs",
 };
 
 /* the vertex and triangle pre-passes (vu_tri.hlsl, vu_particle.hlsl;
@@ -101,6 +141,9 @@ static const char *const expectedPrepass[] = {
     "vu_particle_pre_vs",
     "vu_main_vs",
     "vu_particle_main_vs",
+    /* vu_main_vs's twin with every corner computing the flat outputs
+     * (ICO_VU_FLAT0=0: the tests' A/B, port/render/rd_vu_flat0.c) */
+    "vu_all_main_vs",
 };
 
 /* the pre-pass's batch builds (ICO_VU_PRE_BATCH, vu_common.hlsli: the
@@ -114,10 +157,54 @@ static const char *const expectedBatch[] = {
     "vu_tri_planes_batch_pre_vs", "vu_particle_batch_pre_vs",
 };
 
+/* the record's store builds (ICO_VU_REC_STORES, vu_common.hlsli: the
+ * pre-pass entries storing their slots into the frame slot's record buffer
+ * from the vertex shader, no render target; rd_vu_record.h), one for the
+ * one-entry draw and one for the batch */
+static const char *const expectedStore[] = {
+    "vu_prelit_store_pre_vs",
+    "vu_lit_store_pre_vs",
+    "vu_lit_spec_store_pre_vs",
+    "vu_reflect_store_pre_vs",
+    "vu_skin_store_pre_vs",
+    "vu_skin_spec_store_pre_vs",
+    "vu_skin_debug_store_pre_vs",
+    "vu_grid_store_pre_vs",
+    "vu_grid_lit_store_pre_vs",
+    "vu_grid_spec_store_pre_vs",
+    "vu_tri_rule_store_pre_vs",
+    "vu_tri_tick_store_pre_vs",
+    "vu_tri_planes_store_pre_vs",
+    "vu_particle_store_pre_vs",
+    "vu_prelit_batch_store_pre_vs",
+    "vu_lit_batch_store_pre_vs",
+    "vu_lit_spec_batch_store_pre_vs",
+    "vu_reflect_batch_store_pre_vs",
+    "vu_skin_batch_store_pre_vs",
+    "vu_skin_spec_batch_store_pre_vs",
+    "vu_skin_debug_batch_store_pre_vs",
+    "vu_grid_batch_store_pre_vs",
+    "vu_grid_lit_batch_store_pre_vs",
+    "vu_grid_spec_batch_store_pre_vs",
+    "vu_tri_rule_batch_store_pre_vs",
+    "vu_tri_tick_batch_store_pre_vs",
+    "vu_tri_planes_batch_store_pre_vs",
+    "vu_particle_batch_store_pre_vs",
+};
+
+/* the record's compute builds (ICO_VU_REC_COMPUTE, vu_common.hlsli
+ * VU_PRE_CS: each store build's entry called by a compute entry, one
+ * invocation a point; rd_vu_record.h, the record written by compute
+ * dispatches where the vertex shaders cannot store): compute stage, no
+ * GLSL (tools/spirv_to_glsl.py), one for the one-entry dispatch and one for
+ * the batch */
+static unsigned computeCount;
+
 /* the draw merge's builds (ICO_VU_MERGE, vu_common.hlsli: the mesh and grid
  * programs' entries, both variants, and vu_main_vs reading every draw's
  * VuCB and VuBoneCB from the ring at t5 for a draw of many; rd_replay_vu.c
- * vuDraw, g_rd.vuMerge) */
+ * vuDraw, g_rd.vuMerge), and vu_merge_main_vs's ICO_VU_FLAT0=0 twin (the
+ * tests' A/B, port/render/rd_vu_flat0.c) */
 static const char *const expectedMerge[] = {
     "vu_prelit_merge_vs",         "vu_lit_merge_vs",
     "vu_lit_spec_merge_vs",       "vu_reflect_merge_vs",
@@ -126,7 +213,7 @@ static const char *const expectedMerge[] = {
     "vu_lit_merge_plain_vs",      "vu_lit_spec_merge_plain_vs",
     "vu_reflect_merge_plain_vs",  "vu_grid_merge_plain_vs",
     "vu_grid_lit_merge_plain_vs", "vu_grid_spec_merge_plain_vs",
-    "vu_merge_main_vs",
+    "vu_merge_main_vs",           "vu_merge_all_main_vs",
 };
 
 /* entries the record path retired: the triangle stage of the vertex
@@ -137,6 +224,23 @@ static const char *const retired[] = {"vu_tri_vs", "vu_legacy_ps", "vu_legacy_te
 /* the 1x sheet text from the texels the renderer baked on the CPU
  * (font.hlsl font_sheet_baked_ps; rd_tex.c rd__sheet_bake_rect) */
 static const char *const expectedBaked[] = {"font_sheet_baked_ps"};
+
+/* the velocity pass (vu_velocity.hlsl; rd_velocity.c makes them only while
+ * the temporal upscaler's switch is on): the draw again from the record,
+ * with its motion, and the motion in pixels into VELOCITY */
+/* the zero-area cull's rule-stage builds (rd_vu_zero_run.c makes them only
+   once the cull is tried): four vertex builds and two compute ones */
+static const char *const expectedZero[] = {
+    "vu_tri_rule_zero_pre_vs",
+    "vu_tri_rule_zero_batch_pre_vs",
+    "vu_tri_rule_zero_store_pre_vs",
+    "vu_tri_rule_zero_batch_store_pre_vs",
+};
+static const char *const expectedZeroCompute[] = {
+    "vu_tri_rule_zero_compute_pre_cs",
+    "vu_tri_rule_zero_batch_compute_pre_cs",
+};
+static const char *const expectedVelocity[] = {"vu_velocity_main_vs", "velocity_ps"};
 
 /* the anti-aliasing's (rd_present.c, rd_replay.c's MSAA epoch) */
 static const char *const expectedAa[] = {"aa_reduce_ps", "depth_resolve_ps", "depth_upsample_ps",
@@ -156,6 +260,14 @@ static const char *const expectedNoDual[] = {
     "vu_ps_nodual",         "vu_texa_ps_nodual",
     "font_sheet_ps_nodual", "font_sheet_baked_ps_nodual",
 };
+
+/* the discard-free twins of the VU *_nodual entries (ICO_VU_NODISCARD;
+ * port/render/rd_nodiscard.h makes them only once they are tried) */
+static const char *const expectedNoDiscard[] = {"vu_ps_nodual_nd", "vu_texa_ps_nodual_nd"};
+
+/* vu_ps_nodual's fast-set build (ICO_VU_FAST; port/render/rd_fastps.h makes
+ * it only once it is tried) */
+static const char *const expectedFast[] = {"vu_ps_nodual_fast", "vu_ps_nodual_fast_nd"};
 
 /* the gs_dual_out entries computing the GS blend from the destination
  * (ICO_DST_READ: rasterizer-ordered view, attachment read) */
@@ -254,7 +366,8 @@ int main(void)
         }
         glslCount += b->glsl != NULL;
         {
-            int expectNone = 0;
+            /* the listed entries, and every compute build */
+            int expectNone = b->stage == ICO_SHADER_STAGE_COMPUTE;
             for (size_t k = 0; k < sizeof expectedNoGlsl / sizeof expectedNoGlsl[0]; k++) {
                 expectNone |= strcmp(expectedNoGlsl[k], b->name) == 0;
             }
@@ -287,32 +400,41 @@ int main(void)
             }
         }
 #endif
-        if (b->stage != ICO_SHADER_STAGE_VERTEX && b->stage != ICO_SHADER_STAGE_FRAGMENT) {
+        if (b->stage != ICO_SHADER_STAGE_VERTEX && b->stage != ICO_SHADER_STAGE_FRAGMENT &&
+            b->stage != ICO_SHADER_STAGE_COMPUTE) {
             printf("FAIL %s: stage\n", b->name);
             failures++;
         }
+        computeCount += b->stage == ICO_SHADER_STAGE_COMPUTE;
         if (!b->entry || !b->entry[0] || ico_find_shader(b->name) != b) {
             printf("FAIL %s: entry or lookup\n", b->name);
             failures++;
         }
         size_t n = strlen(b->name);
         int suffixVs = n > 3 && strcmp(b->name + n - 3, "_vs") == 0;
-        if (suffixVs != (b->stage == ICO_SHADER_STAGE_VERTEX)) {
+        int suffixCs = n > 3 && strcmp(b->name + n - 3, "_cs") == 0;
+        if (suffixVs != (b->stage == ICO_SHADER_STAGE_VERTEX) ||
+            suffixCs != (b->stage == ICO_SHADER_STAGE_COMPUTE)) {
             printf("FAIL %s: stage does not match the name\n", b->name);
             failures++;
         }
         printf("  %-16s %-8s spirv %6zu B  dxil %6zu B  glsl %6zu B (%6zu B text)  %s %s\n",
-               b->name, b->stage == ICO_SHADER_STAGE_VERTEX ? "vertex" : "fragment", b->spirv_len,
-               b->dxil_len, b->glsl_len, b->glsl_text_len, b->hlslFile, b->defines);
+               b->name,
+               b->stage == ICO_SHADER_STAGE_VERTEX    ? "vertex"
+               : b->stage == ICO_SHADER_STAGE_COMPUTE ? "compute"
+                                                      : "fragment",
+               b->spirv_len, b->dxil_len, b->glsl_len, b->glsl_text_len, b->hlslFile, b->defines);
     }
 #ifndef ICO_SHADERS_NO_GLSL
     if (glslCount == 0) {
         printf("FAIL: a table built with GLSL has no GLSL\n");
         failures++;
     }
-    printf("GLSL: %u entries with, %u without (expected without: %zu)\n", glslCount,
-           g_icoShaderCount - glslCount, sizeof expectedNoGlsl / sizeof expectedNoGlsl[0]);
-    if (g_icoShaderCount - glslCount != sizeof expectedNoGlsl / sizeof expectedNoGlsl[0]) {
+    printf("GLSL: %u entries with, %u without (expected without: %zu and %u compute builds)\n",
+           glslCount, g_icoShaderCount - glslCount,
+           sizeof expectedNoGlsl / sizeof expectedNoGlsl[0], computeCount);
+    if (g_icoShaderCount - glslCount !=
+        sizeof expectedNoGlsl / sizeof expectedNoGlsl[0] + computeCount) {
         printf("FAIL: the entries without GLSL are not the expected set\n");
         failures++;
     }
@@ -349,6 +471,13 @@ int main(void)
             failures++;
         }
     }
+    for (size_t i = 0; i < sizeof(expectedVelocity) / sizeof(expectedVelocity[0]); i++) {
+        const IcoShaderBlob *b = ico_find_shader(expectedVelocity[i]);
+        if (!b || b->stage != (i == 0 ? ICO_SHADER_STAGE_VERTEX : ICO_SHADER_STAGE_FRAGMENT)) {
+            printf("FAIL %s: not in the table or of another stage\n", expectedVelocity[i]);
+            failures++;
+        }
+    }
     const size_t nAa = sizeof(expectedAa) / sizeof(expectedAa[0]);
     for (size_t i = 0; i < nAa; i++) {
         if (!ico_find_shader(expectedAa[i])) {
@@ -360,6 +489,26 @@ int main(void)
     for (size_t i = 0; i < nNoDual; i++) {
         if (!ico_find_shader(expectedNoDual[i])) {
             printf("FAIL %s: not in the table\n", expectedNoDual[i]);
+            failures++;
+        }
+    }
+    const size_t nNoDiscard = sizeof(expectedNoDiscard) / sizeof(expectedNoDiscard[0]);
+    for (size_t i = 0; i < nNoDiscard; i++) {
+        const IcoShaderBlob *d = ico_find_shader(expectedNoDiscard[i]);
+        if (!d || d->stage != ICO_SHADER_STAGE_FRAGMENT || !d->defines ||
+            !strstr(d->defines, "ICO_VU_NODISCARD=1")) {
+            printf("FAIL %s: not in the table, not a fragment build or without ICO_VU_NODISCARD\n",
+                   expectedNoDiscard[i]);
+            failures++;
+        }
+    }
+    const size_t nFast = sizeof(expectedFast) / sizeof(expectedFast[0]);
+    for (size_t i = 0; i < nFast; i++) {
+        const IcoShaderBlob *d = ico_find_shader(expectedFast[i]);
+        if (!d || d->stage != ICO_SHADER_STAGE_FRAGMENT || !d->defines ||
+            !strstr(d->defines, "ICO_VU_FAST=1") || !strstr(d->defines, "ICO_NO_DUAL=1")) {
+            printf("FAIL %s: not in the table, not a fragment build or without ICO_VU_FAST\n",
+                   expectedFast[i]);
             failures++;
         }
     }
@@ -412,6 +561,13 @@ int main(void)
             failures++;
         }
     }
+    const size_t nShadowLoad = sizeof(expectedShadowLoad) / sizeof(expectedShadowLoad[0]);
+    for (size_t i = 0; i < nShadowLoad; i++) {
+        if (!ico_find_shader(expectedShadowLoad[i])) {
+            printf("FAIL %s: not in the table\n", expectedShadowLoad[i]);
+            failures++;
+        }
+    }
     const size_t nAuraBox = sizeof(expectedAuraBox) / sizeof(expectedAuraBox[0]);
     for (size_t i = 0; i < nAuraBox; i++) {
         if (!ico_find_shader(expectedAuraBox[i])) {
@@ -419,6 +575,73 @@ int main(void)
             failures++;
         }
     }
+    const size_t nTone = sizeof(expectedTone) / sizeof(expectedTone[0]);
+    for (size_t i = 0; i < nTone; i++) {
+        if (!ico_find_shader(expectedTone[i])) {
+            printf("FAIL %s: not in the table\n", expectedTone[i]);
+            failures++;
+        }
+    }
+    const size_t nPresentScene = sizeof(expectedPresentScene) / sizeof(expectedPresentScene[0]);
+    for (size_t i = 0; i < nPresentScene; i++) {
+        const IcoShaderBlob *b = ico_find_shader(expectedPresentScene[i]);
+        if (!b || b->stage != ICO_SHADER_STAGE_FRAGMENT) {
+            printf("FAIL %s: not in the table as a fragment shader\n", expectedPresentScene[i]);
+            failures++;
+        }
+    }
+    const size_t nShadowTile = sizeof(expectedShadowTile) / sizeof(expectedShadowTile[0]);
+    for (size_t i = 0; i < nShadowTile; i++) {
+        const IcoShaderBlob *b = ico_find_shader(expectedShadowTile[i]);
+        if (!b || b->stage != ICO_SHADER_STAGE_FRAGMENT) {
+            printf("FAIL %s: not in the table as a fragment shader\n", expectedShadowTile[i]);
+            failures++;
+        }
+    }
+    const size_t nVelocity = sizeof(expectedVelocity) / sizeof(expectedVelocity[0]);
+    for (size_t i = 0; i < nVelocity; i++) {
+        const IcoShaderBlob *b = ico_find_shader(expectedVelocity[i]);
+        if (!b) {
+            printf("FAIL %s: not in the table\n", expectedVelocity[i]);
+            failures++;
+        } else if (b->stage != (i == 0 ? ICO_SHADER_STAGE_VERTEX : ICO_SHADER_STAGE_FRAGMENT)) {
+            printf("FAIL %s: the wrong stage\n", expectedVelocity[i]);
+            failures++;
+        }
+    }
+    for (size_t i = 0; i < sizeof(expectedShadowFine) / sizeof(expectedShadowFine[0]); i++) {
+        const IcoShaderBlob *b = ico_find_shader(expectedShadowFine[i]);
+        if (!b || b->stage != ICO_SHADER_STAGE_FRAGMENT) {
+            printf("FAIL %s: not in the table as a fragment shader\n", expectedShadowFine[i]);
+            failures++;
+        }
+    }
+    const size_t nFsr1 = sizeof(expectedFsr1) / sizeof(expectedFsr1[0]);
+    for (size_t i = 0; i < nFsr1; i++) {
+        const IcoShaderBlob *b = ico_find_shader(expectedFsr1[i]);
+        if (!b) {
+            printf("FAIL %s: not in the table\n", expectedFsr1[i]);
+            failures++;
+        } else if (b->stage != ICO_SHADER_STAGE_FRAGMENT) {
+            printf("FAIL %s: not a pixel shader\n", expectedFsr1[i]);
+            failures++;
+        }
+    }
+#ifndef ICO_SHADERS_NO_HLSL_SOURCE
+    /* the vendored headers fsr1.hlsl includes, embedded by base name for
+     * the Direct3D 11 compile (cmake/IcoShaders.cmake ICO_SHADER_THIRD_PARTY_DIRS) */
+    static const char *const fsr1Headers[] = {"ffx_a.h", "ffx_fsr1.h"};
+    for (size_t i = 0; i < 2; i++) {
+        int found = 0;
+        for (unsigned k = 0; k < g_icoShaderSourceCount; k++) {
+            found |= strcmp(g_icoShaderSources[k].name, fsr1Headers[i]) == 0;
+        }
+        if (!found) {
+            printf("FAIL %s: not among the embedded sources\n", fsr1Headers[i]);
+            failures++;
+        }
+    }
+#endif
     const size_t nPlain = sizeof(expectedPlain) / sizeof(expectedPlain[0]);
     for (size_t i = 0; i < nPlain; i++) {
         if (!ico_find_shader(expectedPlain[i])) {
@@ -440,6 +663,44 @@ int main(void)
             failures++;
         }
     }
+    /* the record's store builds (ICO_VU_REC_STORES, vu_common.hlsli
+     * vu_rec_store; port/render/rd_vu_record.c): each batch build's name
+     * vu_X_batch_pre_vs gives vu_X_store_pre_vs and vu_X_batch_store_pre_vs */
+    for (size_t i = 0; i < nBatch; i++) {
+        const char *b = expectedBatch[i];
+        const size_t n = strlen(b) - strlen("_batch_pre_vs");
+        char one[64], batch[64];
+        snprintf(one, sizeof(one), "%.*s_store_pre_vs", (int)n, b);
+        snprintf(batch, sizeof(batch), "%.*s_batch_store_pre_vs", (int)n, b);
+        if (!ico_find_shader(one) || !ico_find_shader(batch)) {
+            printf("FAIL %s or %s: not in the table\n", one, batch);
+            failures++;
+        }
+        /* and the compute builds: vu_X_compute_pre_cs, vu_X_batch_compute_pre_cs
+           (compute stage, entry vu_X_pre_cs) */
+        char cOne[64], cBatch[64], cEntry[64];
+        snprintf(cOne, sizeof(cOne), "%.*s_compute_pre_cs", (int)n, b);
+        snprintf(cBatch, sizeof(cBatch), "%.*s_batch_compute_pre_cs", (int)n, b);
+        snprintf(cEntry, sizeof(cEntry), "%.*s_pre_cs", (int)n, b);
+        const IcoShaderBlob *c1 = ico_find_shader(cOne), *c2 = ico_find_shader(cBatch);
+        if (!c1 || !c2 || c1->stage != ICO_SHADER_STAGE_COMPUTE ||
+            c2->stage != ICO_SHADER_STAGE_COMPUTE || strcmp(c1->entry, cEntry) != 0 ||
+            strcmp(c2->entry, cEntry) != 0) {
+            printf("FAIL %s or %s: not in the table, not compute or not entry %s\n", cOne, cBatch,
+                   cEntry);
+            failures++;
+        }
+    }
+    /* the index compaction's keep stage (vu_tri.hlsl vu_tri_keep_cs,
+       port/render/rd_vu_compact.c): compute, entry vu_tri_keep_cs */
+    {
+        const IcoShaderBlob *k = ico_find_shader("vu_tri_keep_compute_cs");
+        if (!k || k->stage != ICO_SHADER_STAGE_COMPUTE || strcmp(k->entry, "vu_tri_keep_cs") != 0) {
+            printf("FAIL vu_tri_keep_compute_cs: not in the table, not compute or not entry "
+                   "vu_tri_keep_cs\n");
+            failures++;
+        }
+    }
     const size_t nMerge = sizeof(expectedMerge) / sizeof(expectedMerge[0]);
     for (size_t i = 0; i < nMerge; i++) {
         if (!ico_find_shader(expectedMerge[i])) {
@@ -453,6 +714,32 @@ int main(void)
             failures++;
         }
     }
+    const size_t nStore = sizeof(expectedStore) / sizeof(expectedStore[0]);
+    for (size_t i = 0; i < nStore; i++) {
+        if (!ico_find_shader(expectedStore[i])) {
+            printf("FAIL %s: not in the table\n", expectedStore[i]);
+            failures++;
+        }
+    }
+    /* the record's compute builds: two for each batch build's entry (checked
+       by name above), the index compaction's keep stage and the zero-area
+       cull's two: the only compute-stage entries of the table */
+    const size_t nZero = sizeof(expectedZero) / sizeof(expectedZero[0]);
+    const size_t nZeroCompute = sizeof(expectedZeroCompute) / sizeof(expectedZeroCompute[0]);
+    for (size_t i = 0; i < nZero + nZeroCompute; i++) {
+        const char *name = i < nZero ? expectedZero[i] : expectedZeroCompute[i - nZero];
+        const IcoShaderBlob *z = ico_find_shader(name);
+        const int want = i < nZero ? ICO_SHADER_STAGE_VERTEX : ICO_SHADER_STAGE_COMPUTE;
+        if (!z || (int)z->stage != want) {
+            printf("FAIL %s: not in the table or not its stage\n", name);
+            failures++;
+        }
+    }
+    const size_t nCompute = 2 * nBatch + 1 + nZeroCompute;
+    if (computeCount != nCompute) {
+        printf("FAIL %u compute-stage entries, expected %zu\n", computeCount, nCompute);
+        failures++;
+    }
     const size_t nDst = sizeof(expectedDst) / sizeof(expectedDst[0]);
     for (size_t i = 0; i < nDst; i++) {
         if (!ico_find_shader(expectedDst[i])) {
@@ -460,9 +747,12 @@ int main(void)
             failures++;
         }
     }
-    const size_t nAll = sizeof(expected) / sizeof(expected[0]) + nAa + nNoDual + nVariants + nDst +
-                        nUint + nTiler + nDiet + nPlanes + nPlain + nPrepass + nBatch + nMerge +
-                        nSmooth + nCrack + nAuraBox + nBaked;
+    const size_t nAll = sizeof(expected) / sizeof(expected[0]) + nAa + nNoDual + nNoDiscard +
+                        nFast + nVariants + nDst + nUint + nTiler + nDiet + nPlanes + nPlain +
+                        nPrepass + nBatch + nMerge + nSmooth + nCrack + nShadowLoad + nAuraBox +
+                        nBaked + nTone + nFsr1 + nVelocity + nStore + nCompute + nZero +
+                        nPresentScene + nShadowTile +
+                        sizeof(expectedShadowFine) / sizeof(expectedShadowFine[0]);
     if (g_icoShaderCount != nAll) {
         printf("FAIL table has %u entries, expected %zu\n", g_icoShaderCount, nAll);
         failures++;

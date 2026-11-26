@@ -9,13 +9,17 @@
 
 #include "host_android.h"
 #include "diag_host.h"
+#include "ico_thread.h" /* ico_thread_now_ms: the log thread's write times */
 #include "report.h"
+#include "thermal_text.h"
 #include <android/asset_manager.h>
 #include <android/asset_manager_jni.h>
 #include <android/log.h>
 #include <errno.h>
 #include <fcntl.h>
+#include <math.h>
 #include <poll.h>
+#include <sys/ioctl.h>
 #include <stdio.h>
 #include <string.h>
 #include <sys/stat.h>
@@ -158,6 +162,26 @@ static int s_log_fd = -1;
 static SDL_Mutex *s_mirror_lock;
 static char s_line[1024];
 static size_t s_line_len;
+/* the log thread's own cost (host_android.h ico_android_log_mirror_take) */
+static SDL_SpinLock s_statLock;
+static IcoLogMirrorStats s_stat;
+
+/* the first words of a chunk, up to the second ':' (the line's family:
+   "window: perf classes", "rd: GPU clock") */
+static void chunk_family(const char *b, size_t n, char *out, size_t size)
+{
+    size_t k = 0;
+    int colons = 0;
+
+    while (k < n && k + 1 < size && b[k] != '\n') {
+        if (b[k] == ':' && ++colons == 2) {
+            break;
+        }
+        out[k] = b[k];
+        k++;
+    }
+    out[k] = '\0';
+}
 
 static void logcat_line(void)
 {
@@ -170,6 +194,7 @@ static void logcat_line(void)
 static void mirror_chunk(const char *b, size_t n)
 {
     size_t i, off = 0;
+    const double t0 = ico_thread_now_ms();
 
     while (off < n) {
         ssize_t w = write(s_log_fd, b + off, n - off);
@@ -179,6 +204,7 @@ static void mirror_chunk(const char *b, size_t n)
         }
         off += (size_t)w;
     }
+    const double t1 = ico_thread_now_ms();
     for (i = 0; i < n; i++) {
         if (b[i] == '\n') {
             logcat_line();
@@ -189,6 +215,25 @@ static void mirror_chunk(const char *b, size_t n)
             }
         }
     }
+    const double t2 = ico_thread_now_ms();
+    SDL_LockSpinlock(&s_statLock);
+    s_stat.bytes += n;
+    s_stat.writes++;
+    s_stat.writeMs += t1 - t0;
+    s_stat.logcatMs += t2 - t1;
+    if (t1 - t0 > s_stat.longestMs) {
+        s_stat.longestMs = t1 - t0;
+        chunk_family(b, n, s_stat.longestFamily, sizeof(s_stat.longestFamily));
+    }
+    if (t1 - t0 >= ICO_LOG_MIRROR_SLOW_MS) {
+        if (s_stat.slowN < ICO_LOG_MIRROR_SLOW_KEEP) {
+            s_stat.slowT0[s_stat.slowN] = t0;
+            s_stat.slowT1[s_stat.slowN] = t1;
+            s_stat.slowN++;
+        }
+        s_stat.slow++;
+    }
+    SDL_UnlockSpinlock(&s_statLock);
 }
 
 /* reads what the pipe holds now (non-blocking), under the lock; 0 at its
@@ -198,6 +243,17 @@ static int mirror_drain(void)
     char buf[4096];
 
     for (;;) {
+        int waiting = 0;
+
+        /* what waits in the pipe before this read: a writer waits only
+           once it holds the pipe's size */
+        if (ioctl(s_pipe_r, FIONREAD, &waiting) == 0 && waiting > 0) {
+            SDL_LockSpinlock(&s_statLock);
+            if ((unsigned)waiting > s_stat.pipeMax) {
+                s_stat.pipeMax = (unsigned)waiting;
+            }
+            SDL_UnlockSpinlock(&s_statLock);
+        }
         ssize_t n = read(s_pipe_r, buf, sizeof(buf));
 
         if (n > 0) {
@@ -221,18 +277,46 @@ static void mirror_flush_locked(void)
     }
 }
 
+/* the log thread's once-a-second work (ico_android_log_mirror_set_tick):
+   run outside the mirror's lock, so a slow ask never holds a flush */
+static void (*volatile s_tick)(void);
+
+void ico_android_log_mirror_set_tick(void (*tick)(void))
+{
+    __atomic_store_n(&s_tick, tick, __ATOMIC_RELEASE);
+}
+
+int ico_android_log_mirror_running(void)
+{
+    return s_pipe_r >= 0 && s_mirror_lock != NULL;
+}
+
 static int SDLCALL mirror_main(void *user)
 {
     struct pollfd pf;
+    double tickAt = 0.0;
 
     (void)user;
     pf.fd = s_pipe_r;
     pf.events = POLLIN;
     for (;;) {
         int more;
+        void (*tick)(void) = __atomic_load_n(&s_tick, __ATOMIC_ACQUIRE);
 
+        if (tick != NULL) {
+            const double now = ico_thread_now_ms();
+
+            if (now - tickAt >= ICO_LOG_MIRROR_TICK_MS) {
+                tickAt = now;
+                tick();
+            }
+        }
         pf.revents = 0;
-        if (poll(&pf, 1, -1) < 0) {
+        const int r = poll(&pf, 1, tick != NULL ? (int)ICO_LOG_MIRROR_TICK_MS : -1);
+        if (r == 0) {
+            continue; /* the tick's time */
+        }
+        if (r < 0) {
             if (errno == EINTR) {
                 continue;
             }
@@ -275,6 +359,13 @@ int ico_android_log_mirror_start(const char *log_path)
         goto fail;
     }
     close(fds[1]);
+#ifdef F_GETPIPE_SZ
+    {
+        const int cap = fcntl(fds[0], F_GETPIPE_SZ);
+
+        s_stat.pipeCap = cap > 0 ? (unsigned)cap : 0u;
+    }
+#endif
     /* each call one write, as on Linux, so lines arrive whole and in order */
     setvbuf(stdout, NULL, _IONBF, 0);
     setvbuf(stderr, NULL, _IONBF, 0);
@@ -312,6 +403,20 @@ void ico_android_log_mirror_flush(void)
     SDL_LockMutex(s_mirror_lock);
     mirror_flush_locked();
     SDL_UnlockMutex(s_mirror_lock);
+}
+
+int ico_android_log_mirror_take(IcoLogMirrorStats *out)
+{
+    if (s_pipe_r < 0) {
+        return -1;
+    }
+    SDL_LockSpinlock(&s_statLock);
+    *out = s_stat;
+    const unsigned cap = s_stat.pipeCap;
+    memset(&s_stat, 0, sizeof(s_stat));
+    s_stat.pipeCap = cap;
+    SDL_UnlockSpinlock(&s_statLock);
+    return 0;
 }
 
 void ico_android_log_mirror_try_flush(void)
@@ -510,6 +615,402 @@ void ico_host_vibrate(int amplitude, int ms)
         (*env)->ExceptionClear(env);
     }
     (*env)->DeleteLocalRef(env, act);
+}
+
+/* --- the recents card's icon (app_icon_window.c) -------------------------- */
+
+/* Calls the static Java method IcoActivity.setTaskIcon(String path) -> String
+   (null when the card's icon was started, else the reason), as ico_host_vibrate
+   calls its method: on SDL's main thread, the method id looked up once (a
+   failed lookup is remembered), every local reference deleted, a pending
+   exception cleared.  Logs the outcome; returns 1 when the icon was started. */
+int ico_android_task_icon(const char *pngPath)
+{
+    static jmethodID s_mid;
+    static int s_failed;
+    JNIEnv *env;
+    jobject act;
+    jclass cls;
+    jstring jpath = NULL;
+    jstring answer = NULL;
+    char reason[160] = "";
+    int ok = 0;
+
+    if (pngPath == NULL || s_failed) {
+        return 0;
+    }
+    env = (JNIEnv *)SDL_GetAndroidJNIEnv();
+    act = env != NULL ? (jobject)SDL_GetAndroidActivity() : NULL;
+    if (env == NULL || act == NULL) {
+        fprintf(stderr, "window: icon: the recents card could not be set (no activity)\n");
+        return 0;
+    }
+    cls = (*env)->GetObjectClass(env, act);
+    if (cls != NULL) {
+        if (s_mid == NULL) {
+            s_mid = (*env)->GetStaticMethodID(env, cls, "setTaskIcon",
+                                              "(Ljava/lang/String;)Ljava/lang/String;");
+            if (s_mid == NULL) {
+                s_failed = 1;
+                snprintf(reason, sizeof(reason), "this app has no IcoActivity.setTaskIcon");
+            }
+        }
+        if (s_mid != NULL) {
+            jpath = (*env)->NewStringUTF(env, pngPath);
+            if (jpath == NULL) {
+                snprintf(reason, sizeof(reason), "no memory for the file's name");
+            } else {
+                answer = (jstring)(*env)->CallStaticObjectMethod(env, cls, s_mid, jpath);
+                if ((*env)->ExceptionCheck(env)) {
+                    snprintf(reason, sizeof(reason), "a Java exception in setTaskIcon");
+                } else if (answer == NULL) {
+                    ok = 1;
+                } else {
+                    const char *s = (*env)->GetStringUTFChars(env, answer, NULL);
+                    snprintf(reason, sizeof(reason), "%s", s != NULL ? s : "setTaskIcon failed");
+                    if (s != NULL) {
+                        (*env)->ReleaseStringUTFChars(env, answer, s);
+                    }
+                }
+            }
+        }
+    } else {
+        snprintf(reason, sizeof(reason), "no activity class");
+    }
+    if ((*env)->ExceptionCheck(env)) {
+        (*env)->ExceptionClear(env);
+    }
+    if (answer != NULL) {
+        (*env)->DeleteLocalRef(env, answer);
+    }
+    if (jpath != NULL) {
+        (*env)->DeleteLocalRef(env, jpath);
+    }
+    if (cls != NULL) {
+        (*env)->DeleteLocalRef(env, cls);
+    }
+    (*env)->DeleteLocalRef(env, act);
+    if (ok) {
+        fprintf(stderr, "window: icon: the recents card is set from %s\n", pngPath);
+    } else {
+        fprintf(stderr, "window: icon: %s\n", reason);
+    }
+    return ok;
+}
+
+/* --- the phone's thermal state and screen recording (issue 123) ----------- */
+
+/* The static Java methods IcoActivity.thermalHeadroom ()F and thermalStatus
+   ()I, called as ico_host_vibrate calls its method: on SDL's main thread
+   only (the thread SDL_GetAndroidJNIEnv answers for), the method id looked
+   up once, a failed lookup remembered (the app's Java without them, one
+   line, then silence), local references deleted, a pending exception
+   cleared. Returns 0 when the call could not be made. kind 0 float into
+   *f, 1 int into *i. */
+static int call_thermal(const char *name, const char *sig, jmethodID *mid, int *failed, int kind,
+                        float *f, int *i)
+{
+    JNIEnv *env;
+    jobject act;
+    jclass cls;
+    int ok = 0;
+
+    if (*failed) {
+        return 0;
+    }
+    env = (JNIEnv *)SDL_GetAndroidJNIEnv();
+    act = env != NULL ? (jobject)SDL_GetAndroidActivity() : NULL;
+    if (env == NULL || act == NULL) {
+        return 0;
+    }
+    cls = (*env)->GetObjectClass(env, act);
+    if (cls != NULL) {
+        if (*mid == NULL) {
+            *mid = (*env)->GetStaticMethodID(env, cls, name, sig);
+            if (*mid == NULL) {
+                *failed = 1;
+            }
+        }
+        if (*mid != NULL) {
+            if (kind == 0) {
+                *f = (*env)->CallStaticFloatMethod(env, cls, *mid);
+            } else {
+                *i = (*env)->CallStaticIntMethod(env, cls, *mid);
+            }
+            ok = 1;
+        }
+        if ((*env)->ExceptionCheck(env)) {
+            (*env)->ExceptionClear(env);
+            ok = 0;
+        }
+        (*env)->DeleteLocalRef(env, cls);
+    } else if ((*env)->ExceptionCheck(env)) {
+        (*env)->ExceptionClear(env);
+    }
+    (*env)->DeleteLocalRef(env, act);
+    return ok;
+}
+
+/* the last values the Java listeners pushed (nativeThermalStatus,
+   nativeScreenRecording), -1 before the first */
+static SDL_AtomicInt s_thermalPushed = {-1};
+static SDL_AtomicInt s_recordingPushed = {-1};
+
+ThermalState ico_host_thermal(const char **why)
+{
+    static jmethodID s_midHeadroom, s_midStatus;
+    static int s_failedHeadroom, s_failedStatus;
+    /* the headroom asked at most once a second: PowerManager answers NaN
+       when asked more often, and one drain can write several around lines
+       and the block line together; the answer kept is reused between */
+    static Uint64 s_headroomAskedMs;
+    static int s_headroomAsked;
+    static double s_headroom = NAN;
+    const Uint64 nowMs = SDL_GetTicks();
+    ThermalState t = thermal_state_none();
+    float f = 0.0f;
+    int st = -1;
+
+    if (!s_headroomAsked || nowMs - s_headroomAskedMs >= 1000u) {
+        s_headroomAsked = 1;
+        s_headroomAskedMs = nowMs;
+        s_headroom = NAN;
+        if (call_thermal("thermalHeadroom", "()F", &s_midHeadroom, &s_failedHeadroom, 0, &f,
+                         NULL) &&
+            !isnan(f) && f >= 0.0f) {
+            s_headroom = (double)f;
+        }
+    }
+    t.headroom = s_headroom;
+    if (call_thermal("thermalStatus", "()I", &s_midStatus, &s_failedStatus, 1, NULL, &st) &&
+        st >= 0) {
+        t.status = st;
+    } else {
+        t.status = SDL_GetAtomicInt(&s_thermalPushed);
+    }
+    t.recording = SDL_GetAtomicInt(&s_recordingPushed);
+    if (why != NULL) {
+        *why = s_failedHeadroom && s_failedStatus
+                   ? "the app's Java side has no thermal methods"
+                   : "this Android version reports neither a headroom nor a status";
+    }
+    return t;
+}
+
+/* IcoActivity.gameMode ()I: GameManager.getGameMode, for the performance
+   hints' line only (window_perf_hint.c); the same call rules as the thermal
+   asks */
+int ico_android_game_mode(void)
+{
+    static jmethodID s_mid;
+    static int s_failed;
+    int mode = -2;
+
+    if (!call_thermal("gameMode", "()I", &s_mid, &s_failed, 1, NULL, &mode)) {
+        return -2;
+    }
+    return mode;
+}
+
+/* IcoActivity.batteryState ()[I (host_android.h ico_android_battery): the
+   call rules of ico_android_display_modes (the method id once, a failed
+   lookup remembered, local references deleted, an exception cleared), but
+   called from the log thread, which SDL_GetAndroidJNIEnv attaches as it
+   does for the thermal asks */
+int ico_android_battery(int out[4])
+{
+    static jmethodID s_mid;
+    static int s_failed;
+    JNIEnv *env;
+    jobject act;
+    jclass cls;
+    int got = 0;
+
+    if (s_failed) {
+        return 0;
+    }
+    env = (JNIEnv *)SDL_GetAndroidJNIEnv();
+    act = env != NULL ? (jobject)SDL_GetAndroidActivity() : NULL;
+    if (env == NULL || act == NULL) {
+        return 0;
+    }
+    cls = (*env)->GetObjectClass(env, act);
+    if (cls != NULL) {
+        if (s_mid == NULL) {
+            s_mid = (*env)->GetStaticMethodID(env, cls, "batteryState", "()[I");
+            if (s_mid == NULL) {
+                s_failed = 1;
+            }
+        }
+        if (s_mid != NULL) {
+            jintArray arr = (jintArray)(*env)->CallStaticObjectMethod(env, cls, s_mid);
+
+            if (!(*env)->ExceptionCheck(env) && arr != NULL &&
+                (*env)->GetArrayLength(env, arr) >= 4) {
+                jint v[4];
+
+                (*env)->GetIntArrayRegion(env, arr, 0, 4, v);
+                if (!(*env)->ExceptionCheck(env)) {
+                    for (int i = 0; i < 4; i++) {
+                        out[i] = (int)v[i];
+                    }
+                    got = 1;
+                }
+            }
+            if (arr != NULL) {
+                (*env)->DeleteLocalRef(env, arr);
+            }
+        }
+        if ((*env)->ExceptionCheck(env)) {
+            (*env)->ExceptionClear(env);
+            got = 0;
+        }
+        (*env)->DeleteLocalRef(env, cls);
+    } else if ((*env)->ExceptionCheck(env)) {
+        (*env)->ExceptionClear(env);
+    }
+    (*env)->DeleteLocalRef(env, act);
+    return got;
+}
+
+/* --- the display's modes and rate (the frame rate pin) -------------------- */
+
+/* IcoActivity.displayModes ()[F, called as ico_host_vibrate calls its
+   method: on SDL's main thread, the method id looked up once (a failed
+   lookup is remembered), local references deleted, a pending exception
+   cleared */
+int ico_android_display_modes(float *out, int cap)
+{
+    static jmethodID s_mid;
+    static int s_failed;
+    JNIEnv *env;
+    jobject act;
+    jclass cls;
+    int got = -1;
+
+    if (s_failed || out == NULL || cap <= 0) {
+        return -1;
+    }
+    env = (JNIEnv *)SDL_GetAndroidJNIEnv();
+    act = env != NULL ? (jobject)SDL_GetAndroidActivity() : NULL;
+    if (env == NULL || act == NULL) {
+        return -1;
+    }
+    cls = (*env)->GetObjectClass(env, act);
+    if (cls != NULL) {
+        if (s_mid == NULL) {
+            s_mid = (*env)->GetStaticMethodID(env, cls, "displayModes", "()[F");
+            if (s_mid == NULL) {
+                s_failed = 1;
+            }
+        }
+        if (s_mid != NULL) {
+            jfloatArray arr = (jfloatArray)(*env)->CallStaticObjectMethod(env, cls, s_mid);
+
+            if (!(*env)->ExceptionCheck(env) && arr != NULL) {
+                const jsize len = (*env)->GetArrayLength(env, arr);
+                const jsize n = len < (jsize)cap ? len : (jsize)cap;
+
+                (*env)->GetFloatArrayRegion(env, arr, 0, n, (jfloat *)out);
+                got = (*env)->ExceptionCheck(env) ? -1 : (int)n;
+            }
+            if (arr != NULL) {
+                (*env)->DeleteLocalRef(env, arr);
+            }
+        }
+        if ((*env)->ExceptionCheck(env)) {
+            (*env)->ExceptionClear(env);
+            got = -1;
+        }
+        (*env)->DeleteLocalRef(env, cls);
+    } else if ((*env)->ExceptionCheck(env)) {
+        (*env)->ExceptionClear(env);
+    }
+    (*env)->DeleteLocalRef(env, act);
+    return got;
+}
+
+/* the last rate the activity's display listener pushed (its float's bits),
+   the pushes so far and SDL's ticks at the last */
+static SDL_AtomicU32 s_displayHzBits;
+static SDL_AtomicInt s_displaySerial;
+static SDL_AtomicU32 s_displayMs;
+static SDL_AtomicInt s_displayModes;
+
+float ico_android_display_hz(int *serial, unsigned *ms, int *modes)
+{
+    const Uint32 bits = SDL_GetAtomicU32(&s_displayHzBits);
+    float hz;
+
+    if (serial != NULL) {
+        *serial = SDL_GetAtomicInt(&s_displaySerial);
+    }
+    if (ms != NULL) {
+        *ms = (unsigned)SDL_GetAtomicU32(&s_displayMs);
+    }
+    if (modes != NULL) {
+        *modes = SDL_GetAtomicInt(&s_displayModes);
+    }
+    memcpy(&hz, &bits, sizeof hz);
+    return hz;
+}
+
+/* IcoActivity.nativeDisplayRate (a static native method): the display the
+   activity is on has this refresh rate now, or its mode list changed
+   (DisplayManager.DisplayListener.onDisplayChanged, filtered on the Java
+   side to a change of the rate or the list; modes the list's hash), on
+   the activity's thread.  Counted; under Uncapped the window's pump asks
+   the frame rate pin again and the 10 s refresh line writes the change
+   (window_display_rate.c). */
+JNIEXPORT void JNICALL Java_com_defnf_icopc_IcoActivity_nativeDisplayRate(JNIEnv *env, jclass cls,
+                                                                          jfloat hz, jint modes)
+{
+    const float f = (float)hz;
+    Uint32 bits;
+
+    (void)env;
+    (void)cls;
+    memcpy(&bits, &f, sizeof bits);
+    SDL_SetAtomicU32(&s_displayMs, (Uint32)SDL_GetTicks());
+    SDL_SetAtomicInt(&s_displayModes, (int)modes);
+    SDL_SetAtomicU32(&s_displayHzBits, bits);
+    (void)SDL_AddAtomicInt(&s_displaySerial, 1);
+}
+
+/* IcoActivity.nativeThermalStatus (a static native method): the system's
+   thermal status changed (PowerManager.OnThermalStatusChangedListener,
+   Android 10 and later), on the activity's thread. Logged at once. */
+JNIEXPORT void JNICALL Java_com_defnf_icopc_IcoActivity_nativeThermalStatus(JNIEnv *env, jclass cls,
+                                                                            jint status)
+{
+    char line[160];
+    const int old = SDL_SetAtomicInt(&s_thermalPushed, (int)status);
+
+    (void)env;
+    (void)cls;
+    if (old != (int)status) {
+        thermal_change_text(old, (int)status, (double)SDL_GetTicks() / 1000.0, line, sizeof line);
+        ico_diag_log("%s", line);
+    }
+}
+
+/* IcoActivity.nativeScreenRecording (Android 15 and later): 1 when the
+   window is visible in a screen recording, 0 when not; called with the
+   state at registration and at every change. Logged at once. */
+JNIEXPORT void JNICALL Java_com_defnf_icopc_IcoActivity_nativeScreenRecording(JNIEnv *env,
+                                                                              jclass cls,
+                                                                              jint state)
+{
+    char line[160];
+    const int now = state != 0;
+    const int old = SDL_SetAtomicInt(&s_recordingPushed, now);
+
+    (void)env;
+    (void)cls;
+    if (old != now) {
+        thermal_recording_text(now, (double)SDL_GetTicks() / 1000.0, line, sizeof line);
+        ico_diag_log("%s", line);
+    }
 }
 
 /* --- the file picker --------------------------------------------------------- */

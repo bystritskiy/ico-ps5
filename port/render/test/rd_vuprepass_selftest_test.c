@@ -1,11 +1,17 @@
 /* rd_vuprepass_selftest_test.c: the VU vertex and triangle pre-passes'
  * self-test (rd_vuprepass_selftest.c).
  *
- *   rd_vuprepass_selftest_test <on|off|notrun> [plain]
+ *   rd_vuprepass_selftest_test <on|off|notrun> [plain] [switch]
  *
  * <mode> what the self-test must leave: on (it passed), off (it failed:
- * ICO_RD_VU_PREPASS_SABOTAGE=1, tri or ticks) or notrun (the pre-pass
- * already off: ICO_RD_VU_PREPASS=0).  On the backend ICO_RHI_BACKEND names
+ * ICO_RD_VU_PREPASS_SABOTAGE=1, tri, ticks or stale) or notrun (the
+ * pre-pass already off: ICO_RD_VU_PREPASS=0).  stale leaves the record's
+ * copies out from the self-test's second replay on: the v0.10.x self-test
+ * replayed its frame once, in which the record is always fresh, and
+ * passed it; the four moved replays across both frame slots read from
+ * replay 2 on what an earlier replay left in the slot's buffer (or nothing)
+ * and fail it (the log line's replay index, test/rd_vuprepass_selftest.cmake's
+ * LINE).  On the backend ICO_RHI_BACKEND names
  * (Vulkan by default; Direct3D 11 on WARP in CI, tools/ci_d3d11_warp.sh;
  * 77 without a device),
  * at a wide scaled scene (the Enhanced preset, 16:9, Full pixel, scale 2)
@@ -13,7 +19,7 @@
  *   1. rd_vuprepass_selftest leaves the pre-pass on or off as <mode> says
  *      (g_rd.vuPrepass) and returns false only when it turned it off;
  *   2. the summary text (rd_summary_text) says so: "VU pre-pass on
- *      (self-test: ok)", "VU pre-pass off (self-test: the pictures differ"
+ *      (self-test: ok; record stores)" (or compute, targets), "VU pre-pass off (self-test: the pictures differ"
  *      or "VU pre-pass off by the settings"; with it on, its draws batched
  *      (g_rd.vuPreBatch) unless ICO_RD_VU_PREPASS_BATCH=0; the draw merge
  *      on (g_rd.vuMerge, "VU merge on") unless ICO_RD_VU_MERGE=0 (on
@@ -30,13 +36,48 @@
  *      the pre-passes' keys;
  *   4. a frame drawn after it starts SCENE from its clear (no pixel of the
  *      self-test's block is left);
- *   5. no validation error.
+ *   5. no validation error;
+ *   6. (not in notrun) rd__vu_prepass_init's choice on its limits alone,
+ *      called again with the device's limits changed: tiler true and no
+ *      colour-target bound leave the pre-pass on (a tile-based GPU takes
+ *      it since v0.11.0; ICO_VK_FAKE_LIMITS=mali does not set tiler, so no
+ *      other test sees this rule), colorBytesPerPixel 32 (below the
+ *      record's ICO_VU_REC_BYTES) without vertex stores leaves it off with
+ *      the bytes in its why, and with them (rd_vu_record.h: the record
+ *      stored, no colour target) on; the device table's row
+ *      (RhiLimits.vuPrepassOff, issue 123) leaves it off with the row's
+ *      reason unless ICO_RD_VU_PREPASS=on, which does not pass the byte
+ *      bound (without vertex stores); the phones' loss rung
+ *      (RhiLimits.vuPrepassLoss) the same with the loss's words.
+ * notrun with ICO_VK_FAKE_VENDOR=0x13B5 and ICO_LOSS_ROW=1 is the rung on
+ * this device (a phone GPU faked, a start after a lost one): "off by the
+ * loss ladder (a tile-based phone GPU; the previous start lost ...)".
+ * notrun with ICO_VK_FAKE_NO_PREPASS=1 is the row on this device: the
+ * summary says "off by the device table (ICO_VK_FAKE_NO_PREPASS; ...)".
+ * The zero-area cull (rd_vu_zero.h): with ICO_VU_ZERO_MARK set the file is
+ * removed first (a fresh install) and after the self-test its text is
+ * written to stderr ("test: the zero-area cull's mark: counting v0.0.0" or
+ * "none"); with switch the renderer is made again in the process as a
+ * Graphics API switch makes it (rd_suspend, rd_resume) and the self-test
+ * run again: the cull must be on after both, no read back buffer of it
+ * alive after either and more made after the second (made again at each
+ * try, never a handle of the device before), its line on stderr.  The
+ * discard-free twins (rd_nodiscard.h): their mark ICO_NODISCARD_MARK the
+ * same way ("test: the discard-free twins' mark after the self-test: ..."),
+ * the index compaction's ICO_COMPACT_MARK ("test: the index compaction's mark
+ * after the self-test: ...", rd_vu_compact.h) and the one-pass blend's
+ * ICO_ONEPASS_MARK ("test: the one-pass blend's mark after the self-test:
+ * ...").
  * The log lines are matched by test/rd_vuprepass_selftest.cmake. */
 #include <stdio.h>
 #include <stdlib.h>
 #include <string.h>
 
 #include "rd_internal.h"
+#include "rd_nodiscard.h"
+#include "rd_ratecard.h"
+#include "rd_vu_record.h"
+#include "rd_vu_zero.h"
 #include "vk/rhi_vk.h"
 
 static int failures;
@@ -117,6 +158,144 @@ static void checkCleared(void)
           seen);
 }
 
+static void putEnv(const char *name, const char *value)
+{
+#ifdef _WIN32
+    (void)_putenv_s(name, value ? value : "");
+#else
+    if (value) {
+        (void)setenv(name, value, 1);
+    } else {
+        (void)unsetenv(name);
+    }
+#endif
+}
+
+/* 6b. the device table's no-pre-pass row (RhiLimits.vuPrepassOff, issue
+ * 123): off with the row's reason; ICO_RD_VU_PREPASS=on ([dev] vu_prepass
+ * = true written in the file) over the row, never over the colour-target
+ * bound; =0 (the settings) and =1 (the old export of true) do not pass it */
+static void checkTable(RhiLimits *lim)
+{
+    const char *had = getenv("ICO_RD_VU_PREPASS");
+    char saved[64] = "";
+    if (had) {
+        snprintf(saved, sizeof(saved), "%s", had);
+    }
+    lim->vuPrepassOff = "a test row, issue 123";
+    lim->colorBytesPerPixel = 0u;
+
+    static const struct {
+        const char *env;
+        bool on;
+        const char *why;
+    } cases[] = {
+        {NULL, false,
+         "by the device table (a test row, issue 123; [dev] vu_prepass = true draws "
+         "with it anyway)"},
+        {"1", false, "by the device table (a test row, issue 123; "},
+        {"0", false, "by the settings ([dev] vu_prepass = false"},
+        {"on", true, ""},
+    };
+
+    for (size_t i = 0; i < sizeof(cases) / sizeof(cases[0]); i++) {
+        putEnv("ICO_RD_VU_PREPASS", cases[i].env);
+        rd__vu_prepass_init(lim);
+        CHECK(g_rd.vuPrepass == cases[i].on &&
+                  strncmp(g_rd.vuPrepassWhy, cases[i].why, strlen(cases[i].why)) == 0 &&
+                  (cases[i].on || cases[i].why[0] != '\0'),
+              "the device table's row with ICO_RD_VU_PREPASS=%s: the pre-pass %s (\"%s\"), %s "
+              "(\"%s\") expected",
+              cases[i].env ? cases[i].env : "(unset)", g_rd.vuPrepass ? "on" : "off",
+              g_rd.vuPrepassWhy, cases[i].on ? "on" : "off", cases[i].why);
+    }
+    /* on over the row, but not over the colour targets' bound (the record
+       drawn into them: no vertex stores, no compute stores) */
+    const bool stores = lim->vertexStores, compute = lim->computeStores;
+    lim->colorBytesPerPixel = 32u;
+    lim->vertexStores = false;
+    lim->computeStores = false;
+    rd__vu_prepass_init(lim);
+    lim->vertexStores = stores;
+    lim->computeStores = compute;
+    CHECK(!g_rd.vuPrepass && strstr(g_rd.vuPrepassWhy, "hold 32 bytes a pixel") != NULL,
+          "the row with ICO_RD_VU_PREPASS=on and 32 bytes a pixel: the pre-pass %s (%s)",
+          g_rd.vuPrepass ? "on" : "off", g_rd.vuPrepassWhy);
+    putEnv("ICO_RD_VU_PREPASS", had ? saved : NULL);
+}
+
+/* 6c. the phones' loss rung (RhiLimits.vuPrepassLoss, rhi_tile_rule.h: a
+ * start after a lost one on a tile-based phone GPU): off with the loss's
+ * words for this start; ICO_RD_VU_PREPASS=on passes it as it passes the
+ * device table's row, =0 is the settings' own reason; without the rung
+ * (a desktop, or no lost start) on */
+static void checkLossRung(RhiLimits *lim)
+{
+    const char *had = getenv("ICO_RD_VU_PREPASS");
+    char saved[64] = "";
+    if (had) {
+        snprintf(saved, sizeof(saved), "%s", had);
+    }
+    lim->vuPrepassOff = NULL;
+    lim->colorBytesPerPixel = 0u;
+    lim->vuPrepassLoss = "the previous start lost the graphics device";
+
+    static const struct {
+        const char *env;
+        bool on;
+        const char *why;
+    } cases[] = {
+        {NULL, false,
+         "by the loss ladder (a tile-based phone GPU; the previous start lost the graphics "
+         "device: this start only; [dev] vu_prepass = true draws with it anyway)"},
+        {"1", false, "by the loss ladder (a tile-based phone GPU; "},
+        {"0", false, "by the settings ([dev] vu_prepass = false"},
+        {"on", true, ""},
+    };
+
+    for (size_t i = 0; i < sizeof(cases) / sizeof(cases[0]); i++) {
+        putEnv("ICO_RD_VU_PREPASS", cases[i].env);
+        rd__vu_prepass_init(lim);
+        CHECK(g_rd.vuPrepass == cases[i].on &&
+                  strncmp(g_rd.vuPrepassWhy, cases[i].why, strlen(cases[i].why)) == 0 &&
+                  (cases[i].on || cases[i].why[0] != '\0'),
+              "the loss rung with ICO_RD_VU_PREPASS=%s: the pre-pass %s (\"%s\"), %s (\"%s\") "
+              "expected",
+              cases[i].env ? cases[i].env : "(unset)", g_rd.vuPrepass ? "on" : "off",
+              g_rd.vuPrepassWhy, cases[i].on ? "on" : "off", cases[i].why);
+    }
+    putEnv("ICO_RD_VU_PREPASS", had ? saved : NULL);
+    lim->vuPrepassLoss = NULL;
+    rd__vu_prepass_init(lim);
+    CHECK(g_rd.vuPrepass || strstr(g_rd.vuPrepassWhy, "loss ladder") == NULL,
+          "without the rung the pre-pass is off by the loss ladder: %s", g_rd.vuPrepassWhy);
+}
+
+/* an attempt's mark file's first line (its environment variable: the
+   zero-area cull's ICO_VU_ZERO_MARK, the discard-free twins'
+   ICO_NODISCARD_MARK), on stderr for the script */
+static void markLine(const char *env, const char *whose, const char *when)
+{
+    const char *path = getenv(env);
+    if (path == NULL || path[0] == '\0') {
+        return;
+    }
+    char text[128] = "";
+    FILE *f = fopen(path, "rb");
+    if (f != NULL) {
+        const size_t n = fread(text, 1, sizeof(text) - 1, f);
+        text[n] = '\0';
+        fclose(f);
+    }
+    text[strcspn(text, "\r\n")] = '\0';
+    fprintf(stderr, "test: the %s mark %s: %s\n", whose, when, text[0] != '\0' ? text : "none");
+}
+
+static void zeroMarkLine(const char *when)
+{
+    markLine("ICO_VU_ZERO_MARK", "zero-area cull's", when);
+}
+
 int main(int argc, char **argv)
 {
     if (argc < 2) {
@@ -126,6 +305,28 @@ int main(int argc, char **argv)
     const bool wantOn = strcmp(argv[1], "on") == 0;
     const bool notRun = strcmp(argv[1], "notrun") == 0;
     const bool plain = argc > 2 && strcmp(argv[2], "plain") == 0;
+    bool zswitch = false;
+    for (int i = 2; i < argc; i++) {
+        zswitch = zswitch || strcmp(argv[i], "switch") == 0;
+    }
+    {
+        const char *mark = getenv("ICO_VU_ZERO_MARK");
+        if (mark != NULL && mark[0] != '\0') {
+            (void)remove(mark); /* a fresh install */
+        }
+        const char *nd = getenv("ICO_NODISCARD_MARK");
+        if (nd != NULL && nd[0] != '\0') {
+            (void)remove(nd); /* the discard-free twins' (rd_nodiscard.h) */
+        }
+        const char *cm = getenv("ICO_COMPACT_MARK");
+        if (cm != NULL && cm[0] != '\0') {
+            (void)remove(cm); /* the index compaction's (rd_vu_compact.h) */
+        }
+        const char *op = getenv("ICO_ONEPASS_MARK");
+        if (op != NULL && op[0] != '\0') {
+            (void)remove(op); /* the one-pass blend's (rd_onepass.h) */
+        }
+    }
     RdSettings st;
     memset(&st, 0, sizeof(st));
     st.preset = plain ? RD_PRESET_ORIGINAL : RD_PRESET_ENHANCED;
@@ -141,6 +342,18 @@ int main(int argc, char **argv)
     rd__set_not_implemented_fatal(true);
     printf("  the VU shaders' %s variant\n", rd__vu_extended() ? "extended" : "plain");
 
+    /* the game's order (window_host.c): the blend's self-test first where a
+       test fakes its result (ICO_RD_BLEND_SABOTAGE=fixed: the two-pass
+       fallback on a device that has dual-source blending, which the
+       discard-free twins must leave untouched: rd_nodiscard.cmake) */
+    const char *blendSab = getenv("ICO_RD_BLEND_SABOTAGE");
+    if (blendSab != NULL && blendSab[0] != '\0') {
+        (void)rd_blend_selftest();
+        printf("  the blend's self-test first (ICO_RD_BLEND_SABOTAGE=%s): the two-pass fallback "
+               "%s\n",
+               blendSab, rd_no_dual() ? "on" : "off");
+    }
+
     /* 1. */
     const bool before = g_rd.vuPrepass;
     const bool kept = rd_vuprepass_selftest();
@@ -150,14 +363,77 @@ int main(int argc, char **argv)
     CHECK(g_rd.vuPrepass == wantOn, "the pre-pass %s after the self-test, %s expected",
           g_rd.vuPrepass ? "on" : "off", wantOn ? "on" : "off");
     CHECK(kept == (wantOn || notRun), "the self-test returned %s", kept ? "true" : "false");
+    zeroMarkLine("after the self-test");
+    markLine("ICO_NODISCARD_MARK", "discard-free twins'", "after the self-test");
+    markLine("ICO_FASTPS_MARK", "fast pixel build's", "after the self-test");
+    markLine("ICO_COMPACT_MARK", "index compaction's", "after the self-test");
+    markLine("ICO_ONEPASS_MARK", "one-pass blend's", "after the self-test");
+    /* the rate card after the self-tests, as the window runs it after the
+       start-up's (rd_ratecard.h: under ICO_RD_RATECARD=1 or a results
+       file, the tests' rd_ratecard_*) */
+    rd_rate_card();
+    /* the clipper check's verdict and its consequence, from the run's own
+       state (rd__nd_class_on: a prelit code 32 camera rule pass as play's
+       rd__nd_pass judges it), whatever the device measured */
+    fprintf(stderr,
+            "test: the discard-free twins' clipper verdict after the self-test: %s, the camera "
+            "rule's class %s\n",
+            rd__nd_clipper_text(), rd__nd_class_on() ? "on" : "off");
+    if (zswitch) {
+        /* the Graphics API switch's path (window_host.c): the renderer made
+           again in the process, the self-test run again on the new device */
+        uint32_t made1 = 0, made2 = 0;
+        const uint32_t alive1 = rd__vu_zero_check_buffers(&made1);
+        const bool on1 = rd__vu_zero_on();
+        rd_suspend();
+        const uint32_t alive0 = rd__vu_zero_check_buffers(NULL);
+        if (!rd_resume(&st, NULL)) {
+            printf("FAIL: the renderer could not be made again\n");
+            return 1;
+        }
+        rd__set_not_implemented_fatal(true);
+        const bool kept2 = rd_vuprepass_selftest();
+        const uint32_t alive2 = rd__vu_zero_check_buffers(&made2);
+        const bool on2 = rd__vu_zero_on();
+        fprintf(stderr,
+                "test: the renderer made again: the zero-area cull %s before, %s after; its read "
+                "back buffers %u made before the switch, %u after, alive %u, %u, %u\n",
+                on1 ? "on" : "off", on2 ? "on" : "off", (unsigned)made1, (unsigned)made2,
+                (unsigned)alive1, (unsigned)alive0, (unsigned)alive2);
+        CHECK(kept2 && g_rd.vuPrepass, "the pre-pass off after the second self-test");
+        CHECK(on1 && on2, "the zero-area cull %s, %s (on, on expected)", on1 ? "on" : "off",
+              on2 ? "on" : "off");
+        CHECK(alive1 == 0u && alive0 == 0u && alive2 == 0u,
+              "read back buffers alive: %u after the first self-test, %u after the shutdown, %u "
+              "after the second",
+              (unsigned)alive1, (unsigned)alive0, (unsigned)alive2);
+        CHECK(made1 > 0u && made2 > made1,
+              "read back buffers made: %u by the first try, %u by both (made again expected)",
+              (unsigned)made1, (unsigned)made2);
+        zeroMarkLine("after the second self-test");
+    }
 
     /* 2. */
     char sum[2048];
     rd_summary_text(sum, sizeof(sum));
     printf("  summary: %s\n", sum);
-    const char *want = wantOn   ? "; VU pre-pass on (self-test: ok); "
-                       : notRun ? "; VU pre-pass off by the settings ("
-                                : "; VU pre-pass off (self-test: the pictures differ: ";
+    /* ICO_VK_FAKE_NO_PREPASS=1: the device table's no-pre-pass row on
+       this device (the device table's row adreno-740-qualcomm, issue 123) */
+    const char *fakeRow = getenv("ICO_VK_FAKE_NO_PREPASS");
+    const bool tableOff = fakeRow && fakeRow[0] && fakeRow[0] != '0';
+    /* the record's write after the verdict (rd_vu_record.h) */
+    /* the phones' loss rung on this device (rd_vuprepass_selftest_lossrung:
+       Arm's phone GPU faked, ICO_LOSS_ROW=1) */
+    const bool rungOff = rhi_limits()->vuPrepassLoss != NULL;
+    const char *want = wantOn ? "; VU pre-pass on (self-test: ok; record "
+                       : notRun && tableOff
+                           ? "; VU pre-pass off by the device table (ICO_VK_FAKE_NO_PREPASS; [dev] "
+                             "vu_prepass = true draws with it anyway) (self-test not run); "
+                       : notRun && rungOff ? "; VU pre-pass off by the loss ladder (a tile-based "
+                                             "phone GPU; the previous start lost the graphics "
+                                             "device: this start only; "
+                       : notRun            ? "; VU pre-pass off by the settings ("
+                                           : "; VU pre-pass off (self-test: the pictures differ: ";
     CHECK(strstr(sum, want) != NULL, "the summary lacks \"%s\"", want);
     if (wantOn) {
         /* the pre-pass's draws batched unless ICO_RD_VU_PREPASS_BATCH=0
@@ -212,6 +488,62 @@ int main(int argc, char **argv)
     /* 5. */
     CHECK(rhi_vk_validation_error_count() == 0, "%u validation errors",
           rhi_vk_validation_error_count());
+
+    /* 6. (last: it remakes the pre-pass's batch and merge modules; nothing
+       is drawn after it) */
+    if (!notRun) {
+        RhiLimits lim = *rhi_limits();
+        const char *want = "hold 32 bytes a pixel together, the record ";
+
+        lim.tiler = true;
+        lim.colorBytesPerPixel = 0u; /* no bound known (Vulkan off MoltenVK reports 0) */
+        rd__vu_prepass_init(&lim);
+        CHECK(g_rd.vuPrepass, "a tile-based GPU's limits: the pre-pass off (%s)",
+              g_rd.vuPrepassWhy);
+        lim.tiler = false;
+        lim.colorBytesPerPixel = 32u;
+        /* the bound is the render targets' (the record drawn into them):
+           without vertex stores and compute stores the pre-pass is off */
+        const bool stores = lim.vertexStores, compute = lim.computeStores;
+        lim.vertexStores = false;
+        lim.computeStores = false;
+        rd__vu_prepass_init(&lim);
+        CHECK(!g_rd.vuPrepass && strstr(g_rd.vuPrepassWhy, want) != NULL,
+              "32 bytes a pixel of colour targets: the pre-pass %s (%s), off with \"%s\" expected",
+              g_rd.vuPrepass ? "on" : "off", g_rd.vuPrepassWhy, want);
+        CHECK(!rd__vu_record_buffered(), "no vertex or compute stores, yet the record is %s (%s)",
+              rd__vu_record_name(), g_rdRec.why);
+        /* with vertex stores (rd_vu_record.h, unless [dev] vu_record =
+           targets or compute) the record needs no colour target: on,
+           stored; with compute stores alone (the Mali-G52 of issue 179) on,
+           stored by compute dispatches */
+        lim.vertexStores = stores;
+        /* (not with the store passes' targets refused: the stores are off
+           for the run then, rd_vuprepass_selftest_sink_fail) */
+        const char *sinkFail = getenv("ICO_RD_VU_REC_SINK_FAIL");
+        if (stores && g_rdRec.asked != RD_VU_RECORD_TARGETS &&
+            g_rdRec.asked != RD_VU_RECORD_COMPUTE && !(sinkFail && sinkFail[0] == '1')) {
+            rd__vu_prepass_init(&lim);
+            CHECK(g_rd.vuPrepass && g_rdRec.mode == RD_VU_RECORD_STORES,
+                  "32 bytes a pixel with vertex stores: the pre-pass %s, the record %s (%s %s)",
+                  g_rd.vuPrepass ? "on" : "off", rd__vu_record_name(), g_rd.vuPrepassWhy,
+                  g_rdRec.why);
+        }
+        lim.vertexStores = false;
+        lim.computeStores = compute;
+        if (compute && g_rdRec.asked != RD_VU_RECORD_TARGETS) {
+            rd__vu_prepass_init(&lim);
+            CHECK(g_rd.vuPrepass && rd__vu_record_compute() &&
+                      strstr(g_rdRec.why, "stored by compute dispatches") != NULL,
+                  "32 bytes a pixel with compute stores alone: the pre-pass %s, the record %s "
+                  "(%s %s)",
+                  g_rd.vuPrepass ? "on" : "off", rd__vu_record_name(), g_rd.vuPrepassWhy,
+                  g_rdRec.why);
+        }
+        lim.vertexStores = stores;
+        checkTable(&lim);
+        checkLossRung(&lim);
+    }
     rd_shutdown();
     if (failures) {
         printf("rd_vuprepass_selftest_test: %d failures\n", failures);

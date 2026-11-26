@@ -11,9 +11,12 @@
  *                callback skips is left alone; a second write replaces the
  *                file; one write in flight (BUSY until collected)
  *   refusals     every header field the validity compares, changed alone:
- *                platform, build, disc, a simulation key's value, a key
- *                only one side has, the hash alone; platform wins over
- *                build; the detail names what differs
+ *                platform, build, disc; platform wins over build; the
+ *                detail names what differs.  A simulation key's value, a
+ *                key only one side has or the hash alone never refuse (the
+ *                state loads under this run's settings): the header check
+ *                is OK on both checks and ico_state_keys_diff names each
+ *                difference for the load's line
  *   bad files    no file (EMPTY); a wrong magic, a stale version, a changed
  *                header byte (CRC), truncated by one byte, cut to 100
  *                bytes, empty, one byte appended, a flipped byte in a
@@ -23,6 +26,14 @@
  *                leaves no .tmp behind
  *   build id     stable for the same inputs; changes with the commit and
  *                with one more registered block; the text names them
+ *   retired keys a key the saved text lists that this version retired
+ *                (v0.11.3's difficulty rows, ico_state_set_key_retired):
+ *                not a difference at any value; without the function
+ *                such a key is "(now absent)"; a still-listed key that
+ *                differs is named; a key only the state lists that is not
+ *                retired is named; a retired name this run still lists is
+ *                compared as any key; a short buffer keeps the start and
+ *                the whole count; nothing of it refuses a state
  */
 #include <stdint.h>
 #include <stdio.h>
@@ -32,6 +43,7 @@
 #include "../host_fs.h"
 #include "../state_file.h"
 #include "../state_registry.h"
+#include "xxh3.h"
 
 static int fails;
 
@@ -268,31 +280,116 @@ static void test_refusals(void)
     CHECK(ico_state_header_check(&saved, &now, detail, sizeof detail) == ICO_STATE_OTHER_DISC);
     CHECK(strcmp(detail, "ntsc") == 0);
 
+    /* the settings never refuse: each difference named for the log */
+    {
+        char diff[160];
+
+        saved = now;
+        snprintf(saved.keys, sizeof saved.keys,
+                 "video.video_mode=auto\ngameplay.mirror=true\ndev.x=\n");
+        saved.settings_hash ^= 1;
+        CHECK(ico_state_header_check(&saved, &now, detail, sizeof detail) == ICO_STATE_OK);
+        CHECK(detail[0] == '\0');
+        CHECK(ico_state_header_check_other_build(&saved, &now, detail, sizeof detail) ==
+              ICO_STATE_OK);
+        CHECK(ico_state_keys_diff(saved.keys, now.keys, diff, sizeof diff) == 1);
+        CHECK(strcmp(diff, "gameplay.mirror=true (now false)") == 0);
+
+        /* a key the saving build had and this one lacks, and the reverse */
+        saved = now;
+        snprintf(saved.keys, sizeof saved.keys,
+                 "video.video_mode=auto\ngameplay.mirror=false\ndev.x=\nold.key=1\n");
+        CHECK(ico_state_header_check(&saved, &now, detail, sizeof detail) == ICO_STATE_OK);
+        CHECK(ico_state_keys_diff(saved.keys, now.keys, diff, sizeof diff) == 1);
+        CHECK(strcmp(diff, "old.key=1 (now absent)") == 0);
+        saved = now;
+        snprintf(saved.keys, sizeof saved.keys, "video.video_mode=auto\ngameplay.mirror=false\n");
+        CHECK(ico_state_header_check(&saved, &now, detail, sizeof detail) == ICO_STATE_OK);
+        CHECK(ico_state_keys_diff(saved.keys, now.keys, diff, sizeof diff) == 1);
+        CHECK(strcmp(diff, "dev.x=(absent) (now )") == 0);
+
+        /* every difference, this run's keys in their order, then the
+           state's own */
+        saved = now;
+        snprintf(saved.keys, sizeof saved.keys,
+                 "old.key=1\ngameplay.mirror=true\nvideo.video_mode=pal50\n");
+        CHECK(ico_state_header_check(&saved, &now, detail, sizeof detail) == ICO_STATE_OK);
+        CHECK(ico_state_keys_diff(saved.keys, now.keys, diff, sizeof diff) == 4);
+        CHECK(strcmp(diff, "video.video_mode=pal50 (now auto), gameplay.mirror=true (now false), "
+                           "dev.x=(absent) (now ), old.key=1 (now absent)") == 0);
+        /* a short buffer: the start, NUL-terminated; the count whole */
+        CHECK(ico_state_keys_diff(saved.keys, now.keys, diff, 12) == 4 &&
+              strcmp(diff, "video.video") == 0);
+        CHECK(ico_state_keys_diff(saved.keys, now.keys, NULL, 0) == 4);
+
+        /* the texts agree, the hash does not: nothing differs */
+        saved = now;
+        saved.settings_hash ^= 0x100;
+        CHECK(ico_state_header_check(&saved, &now, detail, sizeof detail) == ICO_STATE_OK);
+        CHECK(ico_state_keys_diff(saved.keys, now.keys, diff, sizeof diff) == 0 && diff[0] == '\0');
+        /* no detail buffer */
+        CHECK(ico_state_header_check(&saved, &now, NULL, 0) == ICO_STATE_OK);
+        CHECK(ico_state_keys_diff(NULL, NULL, diff, sizeof diff) == 0 && diff[0] == '\0');
+    }
+}
+
+/* --- retired keys ------------------------------------------------------------- */
+
+/* two retired keys, as sim_keys.h ico_sim_key_retired would name them */
+static int fake_retired(const char *key, size_t key_n)
+{
+    return (key_n == 19 && memcmp(key, "gameplay.yorda_safe", 19) == 0) ||
+           (key_n == 16 && memcmp(key, "variants.one_hit", 16) == 0);
+}
+
+static void keys_set(IcoStateHeader *h, const char *keys)
+{
+    snprintf(h->keys, sizeof h->keys, "%s", keys);
+    h->settings_hash = xxh3_64(h->keys, strlen(h->keys));
+}
+
+static void test_retired_keys(void)
+{
+    IcoStateHeader now, saved;
+    char detail[160], names[160];
+
+    make_header(&now);
+    keys_set(&now, "video.video_mode=auto\ngameplay.mirror=false\n");
     saved = now;
-    snprintf(saved.keys, sizeof saved.keys,
-             "video.video_mode=auto\ngameplay.mirror=true\ndev.x=\n");
+    /* a state of v0.11.2: the difficulty rows among its keys, at any value */
+    keys_set(&saved, "video.video_mode=auto\ngameplay.mirror=false\ngameplay.yorda_safe=true\n"
+                     "variants.one_hit=\n");
+    ico_state_set_key_retired(NULL);
+    CHECK(ico_state_header_check(&saved, &now, detail, sizeof detail) == ICO_STATE_OK);
+    CHECK(ico_state_keys_diff(saved.keys, now.keys, names, sizeof names) == 2);
+    CHECK(strcmp(names, "gameplay.yorda_safe=true (now absent), variants.one_hit= (now absent)") ==
+          0);
+    ico_state_set_key_retired(fake_retired);
+    CHECK(ico_state_header_check(&saved, &now, detail, sizeof detail) == ICO_STATE_OK);
+    CHECK(detail[0] == '\0');
+    CHECK(ico_state_header_check_other_build(&saved, &now, detail, sizeof detail) == ICO_STATE_OK);
+    CHECK(ico_state_keys_diff(saved.keys, now.keys, names, sizeof names) == 0 && names[0] == '\0');
+    /* a damaged hash: still no refusal (the keys text is only read) */
     saved.settings_hash ^= 1;
-    CHECK(ico_state_header_check(&saved, &now, detail, sizeof detail) == ICO_STATE_OTHER_SETTINGS);
-    CHECK(strcmp(detail, "gameplay.mirror=true (now false)") == 0);
-
-    /* a key the saving build had and this one lacks, and the reverse */
-    saved = now;
-    snprintf(saved.keys, sizeof saved.keys,
-             "video.video_mode=auto\ngameplay.mirror=false\ndev.x=\nold.key=1\n");
-    CHECK(ico_state_header_check(&saved, &now, detail, sizeof detail) == ICO_STATE_OTHER_SETTINGS);
-    CHECK(strcmp(detail, "old.key=1 (now absent)") == 0);
-    saved = now;
-    snprintf(saved.keys, sizeof saved.keys, "video.video_mode=auto\ngameplay.mirror=false\n");
-    CHECK(ico_state_header_check(&saved, &now, detail, sizeof detail) == ICO_STATE_OTHER_SETTINGS);
-    CHECK(strcmp(detail, "dev.x=(absent) (now )") == 0);
-
-    /* the texts agree, the hash does not */
-    saved = now;
-    saved.settings_hash ^= 0x100;
-    CHECK(ico_state_header_check(&saved, &now, detail, sizeof detail) == ICO_STATE_OTHER_SETTINGS);
-    CHECK(detail[0] != '\0');
-    /* no detail buffer */
-    CHECK(ico_state_header_check(&saved, &now, NULL, 0) == ICO_STATE_OTHER_SETTINGS);
+    CHECK(ico_state_header_check(&saved, &now, detail, sizeof detail) == ICO_STATE_OK);
+    /* a key still listed that differs: named */
+    keys_set(&saved, "video.video_mode=auto\ngameplay.mirror=true\ngameplay.yorda_safe=true\n");
+    CHECK(ico_state_header_check(&saved, &now, detail, sizeof detail) == ICO_STATE_OK);
+    CHECK(ico_state_keys_diff(saved.keys, now.keys, names, sizeof names) == 1);
+    CHECK(strcmp(names, "gameplay.mirror=true (now false)") == 0);
+    /* a key only the state lists that is not retired: named */
+    keys_set(&saved, "video.video_mode=auto\ngameplay.mirror=false\ngameplay.yorda_safe=true\n"
+                     "old.key=1\n");
+    CHECK(ico_state_header_check(&saved, &now, detail, sizeof detail) == ICO_STATE_OK);
+    CHECK(ico_state_keys_diff(saved.keys, now.keys, names, sizeof names) == 1);
+    CHECK(strcmp(names, "old.key=1 (now absent)") == 0);
+    /* a retired name this run still lists is compared as any key */
+    keys_set(&now, "video.video_mode=auto\ngameplay.mirror=false\ngameplay.yorda_safe=false\n");
+    keys_set(&saved, "video.video_mode=auto\ngameplay.mirror=false\ngameplay.yorda_safe=true\n");
+    CHECK(ico_state_header_check(&saved, &now, detail, sizeof detail) == ICO_STATE_OK);
+    CHECK(ico_state_keys_diff(saved.keys, now.keys, names, sizeof names) == 1);
+    CHECK(strcmp(names, "gameplay.yorda_safe=true (now false)") == 0);
+    ico_state_set_key_retired(NULL);
 }
 
 /* --- bad files ---------------------------------------------------------------- */
@@ -487,6 +584,7 @@ int main(int argc, char **argv)
     test_build_id();
     test_round_trip();
     test_refusals();
+    test_retired_keys();
     test_bad_files();
     test_writes();
     remove(path);

@@ -9,6 +9,7 @@
 #include <stdlib.h>
 #include <string.h>
 
+#include "difficulty.h" /* IcoDifficulty: a state's record, read by its bytes */
 #include "host_fs.h"
 
 int ico_state_on_pause_menu(const IcoStateConds *c)
@@ -24,6 +25,14 @@ IcoStateResult ico_state_conditions(const IcoStateConds *c, int saving, const ch
 
     if (!c->available) {
         r = ICO_STATE_OFF;
+    } else if (c->locked) {
+        /* Permadeath: a game over ends the journey, so no state may take
+           it back to before one: a load is refused, and so is a save (a
+           state of this journey could never be loaded, ico_state_list
+           and the load refuse it by its own record) */
+        r = ICO_STATE_PERMADEATH;
+        w = saving ? "the journey has Permadeath on: a state of it could never be loaded"
+                   : "the journey has Permadeath on";
     } else if (saving && !ico_state_on_pause_menu(c)) {
         r = ICO_STATE_NOT_PAUSED;
     } else if (c->stage_switch != 0) {
@@ -37,6 +46,13 @@ IcoStateResult ico_state_conditions(const IcoStateConds *c, int saving, const ch
     } else if (c->photo || c->credits || c->gallery) {
         r = ICO_STATE_PHOTO;
         w = c->photo ? "photo mode" : c->credits ? "the credits" : "the music gallery";
+    } else if (c->unused) {
+        /* a test room has no save stage, and a state of it would come
+           back without the room's flag; a load there would leave the
+           flag set in normal play (the achievements suspended, a game
+           over's Continue sent to the title): both refused */
+        r = ICO_STATE_PHOTO;
+        w = "a test room";
     }
     if (what != NULL) {
         *what = w;
@@ -81,6 +97,8 @@ const char *ico_state_result_text(IcoStateResult r)
         return "the file could not be written";
     case ICO_STATE_BUSY:
         return "a save or load is in flight";
+    case ICO_STATE_PERMADEATH:
+        return "save states are off on a Permadeath journey";
     }
     return "unknown";
 }
@@ -155,6 +173,24 @@ void ico_state_list_dir(const char *dir, const IcoStateHeader *now,
         }
     }
     free(h);
+}
+
+int ico_state_settings_line(int slot, const char *saved_keys, const char *now_keys, char *out,
+                            size_t size)
+{
+    char diffs[ICO_STATE_KEYS_MAX];
+    const int n = ico_state_keys_diff(saved_keys, now_keys, diffs, sizeof diffs);
+
+    if (out != NULL && size > 0) {
+        out[0] = '\0';
+        if (n > 0) {
+            snprintf(out, size,
+                     "state: slot %d was saved with other settings (%s): it loads under this "
+                     "run's",
+                     slot, diffs);
+        }
+    }
+    return n;
 }
 
 int ico_state_parse_at(const char *s, unsigned int *tick, int *slot)
@@ -355,4 +391,65 @@ void ico_state_thumb_scale(const uint8_t *src, int w, int h, uint8_t *dst, int d
             dst[((size_t)y * (size_t)dw + (size_t)x) * 4 + 3] = 255;
         }
     }
+}
+
+int ico_state_record_permadeath(const unsigned char *reg, uint64_t reg_n, uint64_t off, uint64_t n)
+{
+    IcoDifficulty d;
+
+    if (reg == NULL || n != sizeof d || off > reg_n || reg_n - off < n) {
+        return 0;
+    }
+    memcpy(&d, reg + off, sizeof d);
+    return d.version == ICO_DIFF_VERSION && d.row[ICO_DIFF_PERMADEATH] != 0;
+}
+
+int ico_state_fibers_parse(const void *p, uint64_t n, const void *tables, uint64_t tables_n,
+                           IcoSchedImage *img)
+{
+    const unsigned char *q = (const unsigned char *)p;
+    const unsigned char *end = q + n;
+    int k, i;
+
+    img->tables = tables;
+    img->tables_bytes = (size_t)tables_n;
+    img->n_fibers = 0;
+    if (q == NULL || n < 16) {
+        return -1;
+    }
+    memcpy(&k, q, sizeof k);
+    if (k < 0 || k > ICO_SCHED_MAX_THREADS) {
+        return -1;
+    }
+    q += 16;
+    for (i = 0; i < k; i++) {
+        IcoFiberImage *f = &img->fibers[i];
+        IcoStateFiberRec r;
+
+        if ((size_t)(end - q) < sizeof r) {
+            return -1;
+        }
+        memcpy(&r, q, sizeof r);
+        q += sizeof r;
+        if ((uint64_t)(end - q) < ICO_STATE_PAD16(r.ctrl_bytes) ||
+            (uint64_t)(end - q) - ICO_STATE_PAD16(r.ctrl_bytes) < ICO_STATE_PAD16(r.stack_bytes)) {
+            return -1;
+        }
+        f->slot_base = r.slot_base;
+        f->slot = r.slot;
+        f->ctrl_bytes = r.ctrl_bytes;
+        f->stack_off = r.stack_off;
+        f->stack_bytes = r.stack_bytes;
+        f->ctrl = q;
+        q += ICO_STATE_PAD16(r.ctrl_bytes);
+        f->stack = q;
+        q += ICO_STATE_PAD16(r.stack_bytes);
+    }
+    img->n_fibers = k;
+    return 0;
+}
+
+int ico_state_checkpoint_may_start(const IcoStateConds *c)
+{
+    return ico_state_on_pause_menu(c) || c->stage == c->stage_title;
 }

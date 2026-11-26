@@ -205,7 +205,11 @@ set_source_files_properties("${CMAKE_SOURCE_DIR}/ico2/common/src/main.c" TARGET_
 # for that; tools/check_const_writes.py looks for others).
 set(ICO_DATA_GEN_DIR "${CMAKE_SOURCE_DIR}/port/data/gen")
 include("${ICO_DATA_GEN_DIR}/tables.cmake")
-add_library(ico_data OBJECT ${ICO_TABLE_SOURCES} "${CMAKE_SOURCE_DIR}/port/data/tables.c")
+# port/data/reserved/tables.c holds, in the game's data sections, the room the
+# loader's statics took there (the loader's object name and footprint), so
+# the game's variables after it keep their offsets for save states of
+# earlier versions; it stands last, where the loader stood.
+add_library(ico_data OBJECT ${ICO_TABLE_SOURCES} "${CMAKE_SOURCE_DIR}/port/data/reserved/tables.c")
 ico_include_dirs(sugipon incs)
 # the generated files spell the record headers repo-relative ("ico2/...")
 target_include_directories(ico_data PRIVATE ${incs} "${CMAKE_SOURCE_DIR}/port/data"
@@ -213,10 +217,19 @@ target_include_directories(ico_data PRIVATE ${incs} "${CMAKE_SOURCE_DIR}/port/da
 target_compile_definitions(ico_data PRIVATE ${ICO_GAME_DEFINITIONS})
 target_compile_options(ico_data PRIVATE ${ICO_SEMANTIC_OPTIONS} ${ICO_GAME_LAYOUT_OPTIONS}
                        ${ICO_GAME_WARNINGS})
-# the loader is port code: the port's warning set
-set_source_files_properties("${CMAKE_SOURCE_DIR}/port/data/tables.c" TARGET_DIRECTORY ico_data
-                            PROPERTIES COMPILE_OPTIONS "${ICO_PORT_WARNINGS}")
 list(APPEND ICO_GAME_OBJECT_LIBS ico_data)
+# The loader (port/data/tables.c) is port code with port state (the loaded
+# counts, the set, the CRC table, set once at start-up): outside the game
+# library, so its statics stay out of the game's data sections and a save
+# state neither holds nor restores them (cmake/IcoStateSections.cmake;
+# tools/android_syms_lines.py checks the sections' objects). The program
+# links its objects itself.
+add_library(ico_tables_loader OBJECT "${CMAKE_SOURCE_DIR}/port/data/tables.c")
+target_include_directories(ico_tables_loader PRIVATE ${incs} "${CMAKE_SOURCE_DIR}/port/data"
+                           "${CMAKE_SOURCE_DIR}")
+target_compile_definitions(ico_tables_loader PRIVATE ${ICO_GAME_DEFINITIONS})
+target_compile_options(ico_tables_loader PRIVATE ${ICO_SEMANTIC_OPTIONS} ${ICO_GAME_LAYOUT_OPTIONS}
+                       ${ICO_PORT_WARNINGS})
 
 # --- The platform layer -----------------------------------------------------
 add_library(ico_platform STATIC
@@ -236,9 +249,13 @@ target_link_libraries(ico_platform PUBLIC ico_host_fs)
 # library because the renderer's texture decode pool (port/render
 # rd_tex_decode.c) uses it and ico_render does not link ico_platform.
 # cpu_place.c beside it: the core a thread runs on, sampled by the submit
-# thread (port/render/rd_submit_thread.c) and the window's threads.
+# thread (port/render/rd_submit_thread.c) and the window's threads;
+# thread_stat.c: a thread's time on a core and waiting for one (the
+# window's 10 s game-thread line); attempt_ledger.c: the attempt ledger's
+# rows, which the renderer and the window both count into.
 find_package(Threads REQUIRED)
-add_library(ico_thread STATIC port/platform/ico_thread.c port/platform/cpu_place.c)
+add_library(ico_thread STATIC port/platform/ico_thread.c port/platform/cpu_place.c
+                              port/platform/thread_stat.c port/platform/attempt_ledger.c)
 target_include_directories(ico_thread PUBLIC port/platform PRIVATE "${ICO_COMPAT_DIR}")
 target_compile_options(ico_thread PRIVATE ${ICO_SEMANTIC_OPTIONS} ${ICO_PORT_WARNINGS})
 target_link_libraries(ico_thread PUBLIC Threads::Threads)
@@ -313,10 +330,22 @@ if(ICO_LINK_EXE)
         # host_config.c keeps everything in the app's files folder.
         # iso_import.c: the first start's copy of the disc image chosen in
         # the system's picker (tested on Linux as iso_import).
+        # gpu_sysfs_android.c: the kernel GPU driver's nodes sampled for the
+        # log (port/platform/gpu_sysfs.h; its pure part tested everywhere).
+        # perf_hint_android.c: the NDK's performance hint calls, looked up at
+        # run time (port/platform/perf_hint.h; its pure part tested everywhere).
+        # last_run_android.c: last-run.txt's summary to the system's exit
+        # record (port/platform/last_run.h; its pure part tested everywhere).
+        # exit_info_android.c: Android's exit records through IcoActivity
+        # (port/platform/exit_info.h; its pure part tested everywhere).
         add_library(ico_pc SHARED ${_ico_pc_sources} port/platform/android/main_android.c
                                   port/platform/android/host_android.c
                                   port/platform/android/android_paths.c
-                                  port/platform/android/iso_import.c)
+                                  port/platform/android/iso_import.c
+                                  port/platform/android/gpu_sysfs_android.c
+                                  port/platform/android/perf_hint_android.c
+                                  port/platform/android/last_run_android.c
+                                  port/platform/android/exit_info_android.c)
         set_target_properties(ico_pc PROPERTIES OUTPUT_NAME main)
         target_compile_definitions(ico_pc PRIVATE ICO_HOST_FORCE_PORTABLE=1)
         target_include_directories(ico_pc PRIVATE port/platform/android)
@@ -356,6 +385,8 @@ if(ICO_LINK_EXE)
     endif()
     target_compile_options(ico_pc PRIVATE ${ICO_SEMANTIC_OPTIONS} ${ICO_PORT_WARNINGS})
     target_link_libraries(ico_pc PRIVATE ico_game ico_platform ico_region)
+    # the table loader, outside the game library (above)
+    target_sources(ico_pc PRIVATE $<TARGET_OBJECTS:ico_tables_loader>)
     if(ANDROID)
         target_link_libraries(ico_pc PRIVATE log android m dl)
     elseif(NOT WIN32)
@@ -438,6 +469,35 @@ if(Python3_FOUND)
     # (tools/check_region_literals.py, its allow list; no build, no game)
     add_test(NAME region_literals_check COMMAND "${Python3_EXECUTABLE}" -I "${CMAKE_SOURCE_DIR}/tools/check_region_literals.py")
     add_test(NAME region_literals_selftest COMMAND "${Python3_EXECUTABLE}" -I "${CMAKE_SOURCE_DIR}/tools/test/region_literals_test.py")
+    # no test list or test script names a path outside the repository
+    # (tools/check_test_paths.py, its allow-list of the lists not converted to
+    # committed fixtures yet, docs/port/TESTING_FIXTURES.md; no build, no game)
+    add_test(NAME test_paths_check COMMAND "${Python3_EXECUTABLE}" -I "${CMAKE_SOURCE_DIR}/tools/check_test_paths.py")
+    add_test(NAME test_paths_selftest COMMAND "${Python3_EXECUTABLE}" -I "${CMAKE_SOURCE_DIR}/tools/check_test_paths.py" --selftest)
+    # every committed fixture parses with no art section (tools/rdfix_check.py)
+    add_test(NAME rdfix_check COMMAND "${Python3_EXECUTABLE}" -I "${CMAKE_SOURCE_DIR}/tools/rdfix_check.py" --all)
+    # the earlier Android versions' legacy tables (port/state_legacy, issue 217):
+    # each parses and matches its manifest (files, sizes, SHA-256, counts), the
+    # index names each once; the Python arm64 code hash against xxHash's
+    # vectors, hand-made functions and the twins' corpus
+    # (tools/test/code_hash_a64_corpus.txt; no build, no game)
+    add_test(NAME state_legacy_tables COMMAND "${Python3_EXECUTABLE}" -I "${CMAKE_SOURCE_DIR}/tools/state_legacy_table.py" check)
+    add_test(NAME code_hash_a64_selftest COMMAND "${Python3_EXECUTABLE}" -I "${CMAKE_SOURCE_DIR}/tools/code_hash_a64.py" --selftest)
+    # the Android package gate on the game's code hashes (tools/state_legacy_table.py
+    # gate) over a fake release and new library: a changed game function that can hold
+    # a paused frame fails unless its source changed or code_changes.txt records it; the
+    # linker's erratum patch site passes (no build, no game)
+    add_test(NAME state_legacy_gate COMMAND "${Python3_EXECUTABLE}" -I "${CMAKE_SOURCE_DIR}/tools/test/state_legacy_gate_test.py")
+    # the Apple programs' image base check (tools/macho_image_check.py, issue
+    # 218) on hand-built Mach-O headers (no build, no game)
+    add_test(NAME macho_image_check COMMAND "${Python3_EXECUTABLE}" -I "${CMAKE_SOURCE_DIR}/tools/macho_image_check.py" selftest)
+    # the Android packaging gate on the game data layout hash (tools/android_syms_lines.py
+    # layout against port/state_legacy/layout.txt; no build, no game)
+    add_test(NAME android_syms_layout COMMAND "${Python3_EXECUTABLE}" -I "${CMAKE_SOURCE_DIR}/tools/test/android_syms_layout_test.py")
+    # the Windows layout gate's cause line from the map against
+    # port/state_legacy/layout-windows-x64.txt, and game_data_range.c's start pad
+    # against the recorded start (no build, no game)
+    add_test(NAME android_syms_layout_rows COMMAND "${Python3_EXECUTABLE}" -I "${CMAKE_SOURCE_DIR}/tools/test/android_syms_layout_rows_test.py")
 endif()
 
 # the June 2001 demo's VU1 programs against the retail ones (tools/vu_variant_diff.py,
@@ -510,17 +570,32 @@ else()
     set(ICO_LIBMPEG2_NEON OFF)
 endif()
 
-# ico_copy_sdl3_dll(<target>...): on Windows, SDL3.dll beside each program
-# after it is linked, so it runs from the build directory. SDL3::SDL3-shared
-# is found by port/rhi and made global there, so call this after port/rhi
-# is configured (or from a deferred function).
+# ico_copy_sdl3_dll(<target>...): on Windows, SDL3.dll beside each program,
+# so it runs from the build directory. One copy rule a directory, which the
+# directory's programs depend on: a copy after each program's own link put
+# up to 71 copies of the one file into port/render at once, and one of them
+# failed in CI (run 44413124008, "Error copying file (if different)").
+# SDL3::SDL3-shared is found by port/rhi and made global there, so call this
+# after port/rhi is configured (or from a deferred function).
 function(ico_copy_sdl3_dll)
     if(WIN32 AND TARGET SDL3::SDL3-shared)
         foreach(t IN LISTS ARGN)
-            add_custom_command(TARGET ${t} POST_BUILD
-                               COMMAND "${CMAKE_COMMAND}" -E copy_if_different
-                                       "$<TARGET_FILE:SDL3::SDL3-shared>" "$<TARGET_FILE_DIR:${t}>"
-                               VERBATIM)
+            get_target_property(dir ${t} RUNTIME_OUTPUT_DIRECTORY)
+            if(NOT dir)
+                get_target_property(dir ${t} BINARY_DIR)
+            endif()
+            string(MD5 h "${dir}")
+            string(SUBSTRING "${h}" 0 8 h)
+            set(copy ico_sdl3_dll_${h})
+            if(NOT TARGET ${copy})
+                add_custom_command(OUTPUT "${dir}/SDL3.dll"
+                                   COMMAND "${CMAKE_COMMAND}" -E copy_if_different
+                                           "$<TARGET_FILE:SDL3::SDL3-shared>" "${dir}/SDL3.dll"
+                                   DEPENDS "$<TARGET_FILE:SDL3::SDL3-shared>"
+                                   VERBATIM)
+                add_custom_target(${copy} DEPENDS "${dir}/SDL3.dll")
+            endif()
+            add_dependencies(${t} ${copy})
         endforeach()
     endif()
 endfunction()
@@ -546,7 +621,10 @@ endif()
 # compiles the shaders with D3DCompile at run time, which DXC-built backends
 # do not exercise. Needs only Python.
 if(Python3_FOUND)
-    add_test(NAME hlsl_fxc_check COMMAND "${Python3_EXECUTABLE}" -I "${CMAKE_SOURCE_DIR}/tools/check_hlsl_fxc.py" "${CMAKE_SOURCE_DIR}/port/shaders")
+    # the vendored headers fsr1.hlsl includes are named: the scan of a
+    # directory takes only .hlsl and .hlsli
+    add_test(NAME hlsl_fxc_check COMMAND "${Python3_EXECUTABLE}" -I "${CMAKE_SOURCE_DIR}/tools/check_hlsl_fxc.py" "${CMAKE_SOURCE_DIR}/port/shaders"
+             "${CMAKE_SOURCE_DIR}/port/third_party/fsr1/ffx_a.h" "${CMAKE_SOURCE_DIR}/port/third_party/fsr1/ffx_fsr1.h")
 endif()
 
 # --- port/core: the game region (config/regions.txt) -------------------------
@@ -583,23 +661,48 @@ if(TARGET ico_pc AND NOT ICO_HEADLESS)
     target_sources(ico_pc PRIVATE port/platform/window_host.c port/platform/window_switch.c
                                   port/platform/window_video.c port/platform/window_lines.c
                                   port/platform/window_pipeline_skip.c
+                                  port/platform/window_robust.c
+                                  port/platform/window_loss.c
+                                  port/platform/window_bones.c
                                   port/platform/window_pipe_finish.c
+                                  port/platform/window_display_rate.c
                                   port/platform/window_present_fallback.c
+                                  port/platform/window_stall.c
+                                  port/platform/window_thermal.c
+                                  port/platform/window_perf_rank.c
+                                  port/platform/window_perf_hint.c
+                                  port/platform/window_clock_trap.c
                                   port/platform/window_disc.c port/platform/window_blended.c
+                                  port/platform/window_pause.c
                                   port/platform/window_present.c port/platform/render_thread.c
                                   port/platform/window_sweep.c port/platform/dump_zip.c
-                                  port/platform/backup_host.c)
+                                  port/platform/dump_auto.c port/platform/window_dump_auto.c
+                                  port/platform/window_keep_block.c port/platform/slow_arm.c
+                                  port/platform/upscale_pictures.c
+                                  port/platform/upscale_pictures_arm.c
+                                  port/platform/backup_host.c port/platform/app_icon_host.c
+                                  port/platform/app_icon_window.c)
     if(ICO_RC_TOOLS AND ANDROID)
-        # an rc build's Share a bug report: the files it offers (share_report.h)
-        target_sources(ico_pc PRIVATE port/platform/share_report.c)
+        # an rc build's Share a bug report: the files it offers (share_report.h),
+        # the frames of the opening it saves by itself (window_capture.h) and
+        # the bench that measures kept frames (window_bench.h)
+        target_sources(ico_pc PRIVATE port/platform/share_report.c
+                                      port/platform/window_capture.c
+                                      port/platform/capture_trigger.c
+                                      port/platform/window_bench.c
+                                      port/platform/bench_plan.c
+                                      port/render/rd_bench_run.c)
     endif()
     # The display's vblanks for the vsync lock's log (display_clock.h): a
     # DXGI output's on Windows, none elsewhere
     if(WIN32)
         # and the window's messages for the event pump's long-call lines,
-        # the display and the computer kept awake (window_pump_win.h)
+        # the display and the computer kept awake (window_pump_win.h), and
+        # the exe's own icon: its stamp read at start, the helper
+        # tools/ico_icon_stamp.c started at the end (app_icon_exe.h)
         target_sources(ico_pc PRIVATE port/platform/display_clock_win.c
-                                      port/platform/window_pump_win.c)
+                                      port/platform/window_pump_win.c
+                                      port/platform/app_icon_exe.c port/platform/icon_stamp.c)
     else()
         target_sources(ico_pc PRIVATE port/platform/display_clock_none.c)
     endif()
@@ -609,9 +712,34 @@ if(TARGET ico_pc AND NOT ICO_HEADLESS)
         # Extras > Add to Steam: Windows, Linux and the Steam Deck (window_host.c
         # offers the row on the same platforms)
         target_sources(ico_pc PRIVATE port/platform/steam_shortcut.c)
+    endif()
+    if(UNIX AND NOT ANDROID AND NOT APPLE)
+        # Extras > Add to the applications menu: Linux only in v0.11.0
+        target_sources(ico_pc PRIVATE port/platform/desktop_entry.c)
+    endif()
+    if(NOT ANDROID AND NOT APPLE)
         if(WIN32)
             target_link_libraries(ico_pc PRIVATE advapi32)
         endif()
+    endif()
+    if(APPLE AND NOT CMAKE_SYSTEM_NAME STREQUAL "iOS")
+        # The image base (issue 218; docs/BUILDING.md, "Apple image base"): the
+        # linker puts __TEXT just above the 4 GB __PAGEZERO, so every address
+        # of the program has the upper half 1, and in a later run the save
+        # state scan cannot tell them from the game's pairs of 32-bit numbers
+        # (port/platform/state_reloc.h ICO_STATE_SCAN_HIGH_MIN): a state loaded
+        # in a later run continues from its checkpoint, as on iOS.  Linking
+        # __TEXT alone at a high address (-segaddr,__TEXT,0x2A1D60000000) does
+        # not link: the other segments stay low and the code's ADRPs cannot
+        # reach them (CI run 44165235932: "ADRP out of range"); ld ignores
+        # -image_base for a position-independent program and holds
+        # -pagezero_size to 4 GB with chained fixups.  tools/macho_image_check.py
+        # stays for the day a whole image can be placed high.
+        # The Dock icon of the running program (app_icon_window.h): Objective-C
+        # on AppKit; SDL's Cocoa windows have no icon of their own
+        enable_language(OBJC)
+        target_sources(ico_pc PRIVATE port/platform/macos/app_icon_mac.m)
+        target_link_libraries(ico_pc PRIVATE "-framework AppKit")
     endif()
     if(ANDROID)
         # The player's own graphics driver (Options > Graphics
@@ -640,6 +768,65 @@ if(TARGET ico_pc AND NOT ICO_HEADLESS)
         endif()
         enable_language(CXX)
         add_subdirectory("${ICO_ADRENOTOOLS_SRC}" adrenotools EXCLUDE_FROM_ALL)
+        # liblinkernsbypass finds the linker's internal dlopen by walking the
+        # machine code of libdl's dlopen, and did so in a constructor: at the
+        # load of libmain.so, on every device, whether or not a driver of the
+        # player's is ever opened. On a Pixel 10 Pro Fold's Android 17 preview
+        # (DP11.261030.003) the walk lands on the wrong instruction and the
+        # game ended with SIGILL before its first line (resolve_linker_symbols,
+        # android_linker_ns.cpp:166, called from the linker's
+        # call_constructors). The walk now runs the first time the library is
+        # asked whether it is ready (linkernsbypass_load_status, which
+        # adrenotools_open_libvulkan asks first): only where a driver of the
+        # player's is opened. The pinned source is not changed: the build
+        # compiles a copy with the two places rewritten, and stops if the
+        # pinned text is no longer what this was written against.
+        set(_ico_nsb_src "${ICO_ADRENOTOOLS_SRC}/lib/linkernsbypass/android_linker_ns.cpp")
+        set(_ico_nsb_out "${CMAKE_CURRENT_BINARY_DIR}/ico_linkernsbypass/android_linker_ns.cpp")
+        file(READ "${_ico_nsb_src}" _ico_nsb)
+        set(_ico_nsb_ctor "__attribute__((constructor)) static void resolve_linker_symbols() {")
+        set(_ico_nsb_status "bool linkernsbypass_load_status() {\n    return lib_loaded;\n}")
+        string(FIND "${_ico_nsb}" "${_ico_nsb_ctor}" _ico_nsb_at_ctor)
+        string(FIND "${_ico_nsb}" "${_ico_nsb_status}" _ico_nsb_at_status)
+        if(_ico_nsb_at_ctor LESS 0 OR _ico_nsb_at_status LESS 0)
+            message(FATAL_ERROR "liblinkernsbypass's android_linker_ns.cpp is not the text the "
+                                "load-time constructor's removal was written against "
+                                "(${_ico_nsb_src}): see CMakeLists.txt")
+        endif()
+        string(REPLACE "${_ico_nsb_ctor}" "static void resolve_linker_symbols() {"
+                       _ico_nsb "${_ico_nsb}")
+        string(REPLACE "${_ico_nsb_status}"
+                       "static void resolve_linker_symbols();\nbool linkernsbypass_load_status() {\n    static bool ico_tried;\n    if (!ico_tried) {\n        ico_tried = true; /* once, on the thread that opens the driver */\n        resolve_linker_symbols();\n    }\n    return lib_loaded;\n}"
+                       _ico_nsb "${_ico_nsb}")
+        set(_ico_nsb_old "")
+        if(EXISTS "${_ico_nsb_out}")
+            file(READ "${_ico_nsb_out}" _ico_nsb_old)
+        endif()
+        if(NOT _ico_nsb_old STREQUAL _ico_nsb)
+            file(WRITE "${_ico_nsb_out}" "${_ico_nsb}")
+        endif()
+        # A library of its own for libmain.so (through adrenotools). The
+        # pinned `linkernsbypass` target stays as it is for libhook_impl.so,
+        # which links it too and calls its namespace functions without asking
+        # linkernsbypass_load_status first: there the constructor has to stay
+        # (that library is loaded only while a driver of the player's is
+        # opened, after libmain.so's own search succeeded).
+        add_library(ico_linkernsbypass_lazy STATIC
+                    "${_ico_nsb_out}"
+                    "${ICO_ADRENOTOOLS_SRC}/lib/linkernsbypass/elf_soname_patcher.cpp")
+        target_compile_options(ico_linkernsbypass_lazy PRIVATE -Wall -Wextra)
+        target_link_libraries(ico_linkernsbypass_lazy android dl)
+        target_include_directories(ico_linkernsbypass_lazy PUBLIC
+                                   "${ICO_ADRENOTOOLS_SRC}/lib/linkernsbypass")
+        foreach(_ico_nsb_prop LINK_LIBRARIES INTERFACE_LINK_LIBRARIES)
+            get_target_property(_ico_nsb_libs adrenotools ${_ico_nsb_prop})
+            if(NOT "linkernsbypass" IN_LIST _ico_nsb_libs)
+                message(FATAL_ERROR "libadrenotools no longer links linkernsbypass by that name "
+                                    "(${_ico_nsb_prop}: ${_ico_nsb_libs}): see CMakeLists.txt")
+            endif()
+            list(TRANSFORM _ico_nsb_libs REPLACE "^linkernsbypass$" "ico_linkernsbypass_lazy")
+            set_target_properties(adrenotools PROPERTIES ${_ico_nsb_prop} "${_ico_nsb_libs}")
+        endforeach()
         target_sources(ico_pc PRIVATE port/platform/gpu_driver.c
                                       port/platform/android/gpu_driver_android.c)
         target_link_libraries(ico_pc PRIVATE adrenotools ico_json ico_miniz)

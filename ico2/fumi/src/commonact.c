@@ -425,6 +425,7 @@ static int ChangeMailInLadder(GObj *self, int mail)
 
 /* PC port: port/game/options.c: [gameplay] shadow_speed, the factor 0.75 to 1.5 */
 extern float ico_opt_shadow_speed_factor(void);
+extern float ico_opt_shadow_turn_limit(int kind, int motion, float s);
 /* motionOrientManager.h declares none of the motion tables */
 extern MotionDef motionKind[];
 
@@ -450,6 +451,11 @@ static inline int GetHitDirIdx(GObj *self) /* derived name */
     }
     return 0;
 }
+
+/* PC port: port/game/variants.h: Automatic guard (0: a hit from the front on Ico
+   lands as a hit from behind does; the guard rule of every other actor is the
+   game's) */
+extern int ico_variant_auto_guard(void);
 
 static int _ACTCorrectMsg_jun26(GObj *self, int msg, void *param)
 {
@@ -593,7 +599,8 @@ static int _ACTCorrectMsg_jun26(GObj *self, int msg, void *param)
             }
         }
         if (_AbsRotyGV(test_CURRENTORIENT(self), GOBJ_ACT(self)->attackDir) < 60 &&
-            sk->actMode != 15 && sk->actMode != 20 && GOBJ_ACT(self)->unguardable == 0 &&
+            (self != boyGObj || ico_variant_auto_guard()) && sk->actMode != 15 &&
+            sk->actMode != 20 && GOBJ_ACT(self)->unguardable == 0 &&
             !((int)(sk->flags18.ll >> 45) & 1)) {
             iosOmSendMail(self, 256, param);
             debug_StdPrintfDummy("guard mail\n");
@@ -854,7 +861,8 @@ static int _ACTCorrectMsg_aug6(GObj *self, int msg, void *param)
             }
         }
         if (_AbsRotyGV(test_CURRENTORIENT(self), GOBJ_ACT(self)->attackDir) < 60 &&
-            sk->actMode != 15 && sk->actMode != 20 && GOBJ_ACT(self)->unguardable == 0 &&
+            (self != boyGObj || ico_variant_auto_guard()) && sk->actMode != 15 &&
+            sk->actMode != 20 && GOBJ_ACT(self)->unguardable == 0 &&
             !((int)(sk->flags18.ll >> 46) & 1)) {
             iosOmSendMail(self, 264, param);
             debug_StdPrintfDummy("guard mail\n");
@@ -1137,7 +1145,8 @@ static int _ACTCorrectMsg_ntsc(GObj *self, int msg, void *param)
             }
         }
         if (_AbsRotyGV(test_CURRENTORIENT(self), GOBJ_ACT(self)->attackDir) < 60 &&
-            sk->actMode != 15 && sk->actMode != 20 && GOBJ_ACT(self)->unguardable == 0 &&
+            (self != boyGObj || ico_variant_auto_guard()) && sk->actMode != 15 &&
+            sk->actMode != 20 && GOBJ_ACT(self)->unguardable == 0 &&
             !((int)(sk->flags18.ll >> 46) & 1)) {
             iosOmSendMail(self, 267, param);
             debug_StdPrintfDummy("guard mail\n");
@@ -1443,7 +1452,8 @@ int _ACTCorrectMsg(GObj *self, int msg, void *param)
             }
         }
         if (_AbsRotyGV(test_CURRENTORIENT(self), GOBJ_ACT(self)->attackDir) < 60 &&
-            sk->actMode != 15 && sk->actMode != 20 && GOBJ_ACT(self)->unguardable == 0 &&
+            (self != boyGObj || ico_variant_auto_guard()) && sk->actMode != 15 &&
+            sk->actMode != 20 && GOBJ_ACT(self)->unguardable == 0 &&
             !((int)(sk->flags18.ll >> 51) & 1)) {
             iosOmSendMail(self, 283, param);
             debug_StdPrintfDummy("guard mail\n");
@@ -3581,13 +3591,78 @@ inline void actCommonDamage(GObj *volatile self)
     }
 }
 
+/* PC port: port/game/variants.h: whether the down action keeps the actor
+   invincible (the game's `hit` flag, set every frame he lies).  Ico keeps it
+   only while Shadows wait while Ico is down is On; every other actor always. */
+extern int ico_variant_down_keeps_hit(int is_boy);
+
+/* PC port: port/game/difficulty.h's knock-down limit (the journey's
+   difficulty, Rules > Knock-down limit).  Every copy of actCommonDown asks
+   ico_gs_knockdown (port/game/gamestate.c) at its entry whether this fall is
+   the one that reaches the limit.  A fall counts when the boy was put down
+   by a hit (Act.attacker, which AttackMail sets with the hit's mail and
+   ACTGame_BeforeFunc clears while he stands), not when he lands from a fall
+   the down act began (the European body's mails 55 and 56, which skip its
+   DownFunc) nor when he loses his footing at a ledge (CLIFF_HESITATE's mail
+   into this act, boyact.c).  At the limit the copy runs actDownGameOver
+   after its own DownFunc instead of its loop: he lies as the game's own
+   death lies (actCommonDie: the game over after
+   ((60 - systemStatus[0] * 10) / systemStatus[1]) * 2 frames, 2 s at 50 and
+   60 Hz alike) and is unhittable (hit set every frame, whatever Shadows wait
+   while Ico is down is).  No get-up mail is sent, so only a mail from
+   outside can take him out of the act; actAfterDown then asks for the game
+   over at once, so the limit's game over never goes missing. */
+static void actDownGameOverNow(int why)
+{
+    if (!ico_gs_knock_game_over_take(why)) {
+        return; /* asked for already, or the game over came another way */
+    }
+    if (ICO_JUN26) {
+        /* the demo's death paths: InitSceneObjects_jun26 never clears
+           gameover_layout_flag, so ACT_LAYOUT_GAMEOVER works once a session
+           there */
+        ico_gs_signal_game_over_once();
+        lt_switch_layout(PAL_JPNKORCN_NTSCAUG6JUN26(62, 59, 58));
+        return;
+    }
+    ACT_LAYOUT_GAMEOVER();
+}
+
+static void actDownGameOver(GObj *volatile self)
+{
+    int cnt;
+
+    for (cnt = 0; cnt <= ((60 - systemStatus[0] * 10) / systemStatus[1]) * 2; cnt++) {
+        GOBJ_ACT(self)->hit = 1;
+        _ACTWait(1);
+    }
+    actDownGameOverNow(ICO_GS_KNOCK_LAY_END);
+    while (1) {
+        GOBJ_ACT(self)->hit = 1;
+        _ACTWait(1);
+    }
+}
+
+/* PC port: port/game/gamestate.c's live sampler (the knock-down limit's
+   in-fall latch): the actor's get-up timer, which actAfterDown sets when the
+   down act is left and ACTGame_BeforeFunc counts down */
+int ico_gs_game_down_timer(GObj *self)
+{
+    return GOBJ_ACT(self)->work != 0 ? GOBJ_WORK(self)->downTimer : 0;
+}
+
 static void actCommonDown_ntsc(GObj *volatile self)
 {
     float v[4];
     Act *s = GOBJ_ACT(self);
+    int over;
 
     debug_StdPrintfDummy("enter actCommonDown\n");
     ACT_AFTER_PROC(s) = (void (*)(GObj *))actAfterDown;
+    /* PC port: the knock-down limit (actDownGameOver, above); this disc has
+       no landing re-entry */
+    over = ico_gs_knockdown(self == boyGObj, 0, GOBJ_ACT(self)->attacker != 0,
+                            ico_gs_game_down_timer(self), s->intrKind);
     if (self == boyGObj) {
         brainAddLevelGirl(1000.0f);
     }
@@ -3598,8 +3673,11 @@ static void actCommonDown_ntsc(GObj *volatile self)
         SetMotionDirection(self, GOBJ_ACT(self)->attackDir);
     }
     DownFunc(self);
+    if (over) {
+        actDownGameOver(self); /* PC port: never returns */
+    }
     while (1) {
-        if (self->kind != 4) {
+        if (self->kind != 4 && ico_variant_down_keeps_hit(self == boyGObj)) {
             GOBJ_ACT(self)->hit = 1;
         }
         ACTSendMailCorrect(self, 183);
@@ -3611,9 +3689,14 @@ inline static void actCommonDown_jun26(GObj *volatile self)
 {
     float v[4];
     Act *s = GOBJ_ACT(self);
+    int over;
 
     debug_StdPrintfDummy("enter actCommonDown\n");
     ACT_AFTER_PROC(s) = (void (*)(GObj *))actAfterDown;
+    /* PC port: the knock-down limit (actDownGameOver, above); this disc has
+       no landing re-entry */
+    over = ico_gs_knockdown(self == boyGObj, 0, GOBJ_ACT(self)->attacker != 0,
+                            ico_gs_game_down_timer(self), s->intrKind);
     if (self == girlGObj) {
         sceVu0ScaleVector(v, GOBJ_ACT(self)->attackDir, -1.0f);
         SetMotionDirection(self, v);
@@ -3621,8 +3704,11 @@ inline static void actCommonDown_jun26(GObj *volatile self)
         SetMotionDirection(self, GOBJ_ACT(self)->attackDir);
     }
     DownFunc(self);
+    if (over) {
+        actDownGameOver(self); /* PC port: never returns */
+    }
     while (1) {
-        if (self->kind != 4) {
+        if (self->kind != 4 && ico_variant_down_keeps_hit(self == boyGObj)) {
             GOBJ_ACT(self)->hit = 1;
         }
         ACTSendMailCorrect(self, 177);
@@ -3634,9 +3720,14 @@ static void actCommonDown_aug6(GObj *volatile self)
 {
     float v[4];
     Act *s = GOBJ_ACT(self);
+    int over;
 
     debug_StdPrintfDummy("enter actCommonDown\n");
     ACT_AFTER_PROC(s) = (void (*)(GObj *))actAfterDown;
+    /* PC port: the knock-down limit (actDownGameOver, above); this disc has
+       no landing re-entry */
+    over = ico_gs_knockdown(self == boyGObj, 0, GOBJ_ACT(self)->attacker != 0,
+                            ico_gs_game_down_timer(self), s->intrKind);
     if (self == boyGObj) {
         brainAddLevelGirl(1000.0f);
     }
@@ -3647,8 +3738,11 @@ static void actCommonDown_aug6(GObj *volatile self)
         SetMotionDirection(self, GOBJ_ACT(self)->attackDir);
     }
     DownFunc(self);
+    if (over) {
+        actDownGameOver(self); /* PC port: never returns */
+    }
     while (1) {
-        if (self->kind != 4) {
+        if (self->kind != 4 && ico_variant_down_keeps_hit(self == boyGObj)) {
             GOBJ_ACT(self)->hit = 1;
         }
         ACTSendMailCorrect(self, 180);
@@ -3673,9 +3767,14 @@ void actCommonDown(GObj *volatile self)
     float v[4];
     Act *s = GOBJ_ACT(self);
     int notDamage = s->intrKind != 55 && s->intrKind != 56;
+    int over;
 
     debug_StdPrintfDummy("enter actCommonDown\n");
     ACT_AFTER_PROC(s) = (void (*)(GObj *))actAfterDown;
+    /* PC port: the knock-down limit (actDownGameOver, above); mails 55 and
+       56 are the landing of a fall this act began */
+    over = ico_gs_knockdown(self == boyGObj, !notDamage, GOBJ_ACT(self)->attacker != 0,
+                            ico_gs_game_down_timer(self), s->intrKind);
     if (notDamage) {
         if (self == boyGObj) {
             brainAddLevelGirl(1000.0f);
@@ -3689,8 +3788,11 @@ void actCommonDown(GObj *volatile self)
         DownFunc(self);
     }
     GOBJ_ACT(self)->enemy->liftLevel = 16;
+    if (over) {
+        actDownGameOver(self); /* PC port: never returns */
+    }
     while (1) {
-        if (self->kind != 4) {
+        if (self->kind != 4 && ico_variant_down_keeps_hit(self == boyGObj)) {
             GOBJ_ACT(self)->hit = 1;
         }
         ACTSendMailCorrect(self, 0xC7);
@@ -6888,6 +6990,9 @@ static int SetMotionDirectionSmooze_ntsc(GObj *self, float *dir, float s)
     if ((int)(sub->flags20.ll >> 20) & 1) {
         s = ((ActWork *)sub->work)->lockedMaxRotate;
     }
+    /* PC port: [gameplay] shadow_speed turns a shadow's locomotion as quickly as it moves,
+       so its circle stays the original's size (ico_opt_shadow_turn_limit) */
+    s = ico_opt_shadow_turn_limit(self->kind, GOBJ_SUB(self)->ctrl.motion, s);
     r = _RotyGV(test_CURRENTORIENT(self), dir);
     if ((float)(r < 0 ? -r : r) < s) {
         ret = 1;
@@ -6926,6 +7031,9 @@ static int SetMotionDirectionSmooze_aug6jun26(GObj *self, float *dir, float s)
             s = 30.0f;
         }
     }
+    /* PC port: [gameplay] shadow_speed turns a shadow's locomotion as quickly as it moves,
+       so its circle stays the original's size (ico_opt_shadow_turn_limit) */
+    s = ico_opt_shadow_turn_limit(self->kind, GOBJ_SUB(self)->ctrl.motion, s);
     r = _RotyGV(test_CURRENTORIENT(self), dir);
     if ((float)(r < 0 ? -r : r) < s) {
         ret = 1;
@@ -6972,6 +7080,9 @@ int SetMotionDirectionSmooze(GObj *self, float *dir, float s)
     if ((int)(sub->flags20.ll >> 33) & 1) {
         s = ((ActWork *)sub->work)->lockedMaxRotate;
     }
+    /* PC port: [gameplay] shadow_speed turns a shadow's locomotion as quickly as it moves,
+       so its circle stays the original's size (ico_opt_shadow_turn_limit) */
+    s = ico_opt_shadow_turn_limit(self->kind, GOBJ_SUB(self)->ctrl.motion, s);
     r = _RotyGV(test_CURRENTORIENT(self), dir);
     if ((float)(r < 0 ? -r : r) < s) {
         ret = 1;
@@ -9753,6 +9864,11 @@ inline void actAfterDown(GObj *volatile self)
 {
     GOBJ_WORK(self)->downTimer = ((60 - systemStatus[0] * 10) / systemStatus[1]) *
                                  PAL_JUN26(0x82, 130) / PAL_JUN26(0x3C, 60);
+    /* PC port: the knock-down limit: a mail took Ico out of the down act
+       while the limit's game over was due (actDownGameOver): it comes now */
+    if (self == boyGObj) {
+        actDownGameOverNow(ICO_GS_KNOCK_LEFT_DOWN);
+    }
 }
 
 inline void afterCommonCling(ICO_WORD_PTR(GObj *) volatile self)

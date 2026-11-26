@@ -341,8 +341,8 @@ static void bcCell(const Ctx *c)
                                {bc3, RHI_STATE_COPY_DST, RHI_STATE_SHADER_READ}};
     rhi_cmd_barrier(cl, rd, 2);
     RhiRenderPassDesc rp = {0};
-    rp.color[0] =
-        (RhiColorAttachment){tgt, RHI_LOAD_CLEAR, {0.0f, 0.0f, 0.0f, 0.0f}, RHI_STORE_STORE, false};
+    rp.color[0] = (RhiColorAttachment){
+        tgt, RHI_LOAD_CLEAR, {0.0f, 0.0f, 0.0f, 0.0f}, RHI_STORE_STORE, false, {0}};
     rp.colorCount = 1;
     rp.width = BW;
     rp.height = BH;
@@ -813,8 +813,11 @@ static void threadRecordCell(const Ctx *c)
  * the same time (B waits until this thread has begun list B, then ends and
  * submits A).  The slot guard (rhi.h rhi_set_slot_guard) says the slot
  * calls of this thread are free while B's job is of the other slot, so
- * neither rhi_wait_frame nor rhi_begin_commands waits for B; list B's end,
- * not a slot call, waits for it through the call guard (one wait).  Both
+ * neither rhi_wait_frame, rhi_begin_commands nor list B's end (a slot
+ * call: it touches only list B, of this slot's pool; the renderer ends a
+ * picture's scene list before the present's own begins) waits for B; list
+ * B's submit, not a slot call (the queue is one thread's at a time), waits
+ * for it through the call guard (one wait).  Both
  * targets read back row by row equal to the same two lists made one after
  * the other on this thread, and to the squares each drew (A the fill rule
  * cell's red and green squares, B a blue square of its own).  Skipped where
@@ -965,31 +968,37 @@ static void threadSlotsCell(const Ctx *c)
         slotsRecordB(clB, tgtB, pipe, ring, FS);
     }
     const int waitsRecording = s_guardWaits;
-    /* not a slot call: waits for thread B (the guard's wait joins it) */
+    /* a slot call too (rhi.h rhi_set_slot_guard): the end touches only its
+       own list, of this slot's pool, beside thread B's end and submit of
+       the other slot's (the renderer ends a picture's scene list so before
+       it begins the present's own, port/render/rd_submit.c) */
     if (clB.id) {
         rhi_end_commands(clB);
     }
     const int waitsEnd = s_guardWaits;
+    /* not a slot call: the submit waits for thread B (the guard's wait
+       joins it; the queue is one thread's at a time) */
+    if (clB.id) {
+        rhi_submit(clB);
+    }
+    const int waitsSubmit = s_guardWaits;
     rhi_set_slot_guard(NULL);
     rhi_set_call_guard(NULL);
     if (s_submitThread != NULL) {
         submitGuardWait(NULL); /* the guard did not wait: joined here (a failure below) */
         s_guardWaits--;
     }
-    if (clB.id) {
-        rhi_submit(clB);
-    }
     const bool haveGot = rhi_readback_texture(tgtA, RHI_ASPECT_COLOR, gotA, sizeof(gotA), &qA) &&
                          rhi_readback_texture(tgtB, RHI_ASPECT_COLOR, gotB, sizeof(gotB), &qB);
     if (!haveRef || !haveGot || !clB.id || pA != qA || pB != qB) {
         rhi_test_log("FAIL %s: thread slots readback\n", s_label);
         failures++;
-    } else if (!otherSlot || waitsRecording != 0 || waitsEnd != 1 ||
+    } else if (!otherSlot || waitsRecording != 0 || waitsEnd != 0 || waitsSubmit != 1 ||
                !__atomic_load_n(&job.done, __ATOMIC_ACQUIRE)) {
-        rhi_test_log("FAIL %s: thread slots: the recycle and the next list's recording waited "
-                     "for the other thread (waits %d while recording, %d at the end, other slot "
-                     "%d)\n",
-                     s_label, waitsRecording, waitsEnd, otherSlot ? 1 : 0);
+        rhi_test_log("FAIL %s: thread slots: the recycle, the next list's recording and its end "
+                     "waited for the other thread, or its submit did not (waits %d while "
+                     "recording, %d at the end, %d at the submit, other slot %d)\n",
+                     s_label, waitsRecording, waitsEnd, waitsSubmit, otherSlot ? 1 : 0);
         failures++;
     } else if (!rowsEqual(wantA, gotA, qA, FS, FS) || !rowsEqual(wantB, gotB, qB, FS, FS)) {
         rhi_test_log("FAIL %s: thread slots: a list ended and submitted on another thread while "
@@ -1013,8 +1022,8 @@ static void threadSlotsCell(const Ctx *c)
         if (failures == before) {
             rhi_test_log("%s: thread slots cell passed (slot %d's list ended and submitted on "
                          "thread B while this thread recycled the other slot and recorded its "
-                         "list without waiting; both read back equal to the serial run; the "
-                         "next list's end waited once)\n",
+                         "list and ended it without waiting; both read back equal to the serial "
+                         "run; the next list's submit waited once)\n",
                          s_label, s_slotsJob);
         }
     }
@@ -2120,7 +2129,7 @@ int rhi_test_run_cells(const RhiTestConfig *cfg)
         rhi_test_log("SKIP %s: backend %s is not linked into this build\n", s_label, cfg->backend);
         return 77;
     }
-    RhiDeviceDesc dd = {NULL, false, cfg->debugLayers, s_label};
+    RhiDeviceDesc dd = {NULL, false, cfg->debugLayers, s_label, NULL};
     if (!rhi_init(&dd)) {
         rhi_test_log("SKIP %s: no usable %s device (see messages above)\n", s_label, cfg->backend);
         return 77;
@@ -2166,6 +2175,7 @@ int rhi_test_run_cells(const RhiTestConfig *cfg)
         rhi_test_log("FAIL the destination read faked off but reported\n");
         failures++;
     }
+    failures += rhi_test_native_surface(s_label);
     const uint32_t ua = lim->uniformAlign;
 
     Ctx c;
@@ -2280,6 +2290,24 @@ int rhi_test_run_cells(const RhiTestConfig *cfg)
     const uint32_t batchMade = rhi_create_pipelines(batchDesc, 8, batchPipe, &batch);
     rhi_test_log("%s: rhi_create_pipelines: %u of 8 on %u threads, %u waits\n", s_label, batchMade,
                  batch.threads, bw.calls);
+    /* one compile at a time where the driver's compiler is not thread-safe
+       (RhiLimits.serialPipelines, issue 188; ICO_VK_FAKE_SERIAL=1 on any
+       Vulkan device): one thread, the batch made as anywhere */
+    const char *serial = rhi_limits()->serialPipelines;
+    const char *fakeSerial = getenv("ICO_VK_FAKE_SERIAL");
+    if (rhi_backend() == RHI_BACKEND_VULKAN && fakeSerial != NULL && fakeSerial[0] == '1' &&
+        serial == NULL) {
+        rhi_test_log("FAIL ICO_VK_FAKE_SERIAL=1: RhiLimits.serialPipelines not set\n");
+        failures++;
+    }
+    if (serial != NULL) {
+        rhi_test_log("%s: pipelines one at a time (%s)\n", s_label, serial);
+        if (batch.threads != 1) {
+            rhi_test_log("FAIL rhi_create_pipelines: %u threads under the serial rule (%s)\n",
+                         batch.threads, serial);
+            failures++;
+        }
+    }
     if (batchMade != 7 || batchPipe[4].id != 0 || batch.threads < 1 ||
         batch.threads > RHI_PIPELINE_THREADS_MAX || bw.backwards || bw.last > 8) {
         rhi_test_log("FAIL rhi_create_pipelines: %u made, the failed one %u, %u threads, "
@@ -2322,6 +2350,18 @@ int rhi_test_run_cells(const RhiTestConfig *cfg)
             rhi_test_log("FAIL rhi_create_pipelines_begin: not offered on Vulkan\n");
             failures++;
         } else {
+            if (serial != NULL) {
+                /* a first-use creation on this thread while the background
+                   compiles run: it waits for the lock, then is made */
+                const RhiPipeline mid = rhi_create_pipeline(&batchDesc[0]);
+                if (!mid.id) {
+                    rhi_test_log("FAIL rhi_create_pipeline beside the background set under the "
+                                 "serial rule: not made\n");
+                    failures++;
+                } else {
+                    rhi_destroy_pipeline(mid);
+                }
+            }
             /* not waited: false while a compile goes on, then the end */
             while (!rhi_create_pipelines_end(jobs, false, bgPipe, bgMs, &bgThreads) &&
                    polls < 1000000u) {
@@ -2355,7 +2395,7 @@ int rhi_test_run_cells(const RhiTestConfig *cfg)
                 failures++;
             }
             if (bgMade != 7 || bgPipe[4].id != 0 || bgThreads < 1 || bgThreads > 2 ||
-                bgMs[4] != 0.0f) {
+                (serial != NULL && bgThreads != 1) || bgMs[4] != 0.0f) {
                 rhi_test_log("FAIL rhi_create_pipelines_end: %u made, the failed one %u, %u "
                              "threads\n",
                              bgMade, bgPipe[4].id, bgThreads);
@@ -2561,7 +2601,8 @@ int rhi_test_run_cells(const RhiTestConfig *cfg)
                                  RHI_LOAD_CLEAR,
                                  {64.0f / 255.0f, 64.0f / 255.0f, 64.0f / 255.0f, 64.0f / 255.0f},
                                  RHI_STORE_STORE,
-                                 false};
+                                 false,
+                                 {0}};
         rp.colorCount = 1;
         rp.depth = (RhiDepthAttachment){depth, RHI_LOAD_CLEAR,  RHI_LOAD_CLEAR,  0.0f, 0,
                                         false, RHI_STORE_STORE, RHI_STORE_STORE, false};
@@ -2615,7 +2656,7 @@ int rhi_test_run_cells(const RhiTestConfig *cfg)
 
         RhiRenderPassDesc up2 = {0};
         up2.color[0] = (RhiColorAttachment){
-            utex, RHI_LOAD_CLEAR, {1.0f, 2.0f, 3.0f, 4.0f}, RHI_STORE_STORE, false};
+            utex, RHI_LOAD_CLEAR, {1.0f, 2.0f, 3.0f, 4.0f}, RHI_STORE_STORE, false, {0}};
         up2.colorCount = 1;
         up2.width = 4;
         up2.height = 4;

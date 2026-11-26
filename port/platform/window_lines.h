@@ -19,6 +19,13 @@ void window_slow_replay_line(const RdPerfRecord *r, unsigned vsync, const char *
    process's and the device's memory, the pipeline pool */
 void window_memory_line(void);
 
+/* The block's "window: index compaction: ..." line (port/render/
+   rd_vu_compact.h rd_vu_cmp_block_text): the triangles the compute
+   record's index compaction left out as drawing nothing, a picture, list 0
+   and the others, from the counters read back in the block; nothing where
+   none was read back */
+void window_vu_compact_line(void);
+
 /* Once a block: writes the line "video memory N MB of M MB: the driver may
    be paging; ..." the first time the card's local memory use is at 90 % of
    its budget or more in the block (Direct3D 11 and 12; nothing elsewhere).
@@ -51,26 +58,51 @@ void window_hold_line(double lateMs, unsigned long long heldMs, unsigned decodes
 void window_hold_block_line(unsigned long long heldMs, double stepAvgMs, double stepMaxLateMs,
                             double periodMs, double pictureMs, const char *rateWords);
 
-/* Frame rate Original's late skip (pace_policy.h pace_original_present),
-   kept here so window_host.c stays under the repository's file size cap.
-   window_orig_gate: the replay gate's answer (rd_set_replay_gate) for a
-   frame of the step due at dueNs at the simulation's rate hz (50: 20 ms,
-   else 16.683 ms), counting the frames it leaves out.  window_orig_step:
-   after each Original pace, whether the step ran past its period and a
-   whole frame's replay time (below 0: none replayed in the step).
-   window_orig_words: the 10 s line's "; steps late N (frames not presented
-   M)" (empty unless original; a static buffer).  window_hold_block: at the
-   block's end, window_hold_block_line from the sound held back since the
-   last block (the first: since the open), the steps' time (sum, count,
-   longest, in ms), the picture's time (the Original replays' mean, else
-   replaySumMs / replays) and the frame rate's words; then the counts start
-   again. */
-bool window_orig_gate(int keep, uint64_t nowNs, uint64_t dueNs, int hz);
-void window_orig_step(bool late, double replayMs);
+/* Frame rate Original's skip (pace_policy.h pace_original_gate), kept here
+   so window_host.c stays under the repository's file size cap.
+   window_orig_gate: the replay gate's answer (rd.h rd_set_replay_gate,
+   RD_GATE_*) for a frame of the step due at dueNs at the simulation's rate
+   hz (50: 20 ms, else 16.683 ms), with the render thread busy with the
+   picture before or not, counting the frames it leaves out by reason.
+   window_orig_step: after each Original pace, whether the step ran past
+   its period.  window_orig_words: the 10 s line's "; steps late N (frames
+   not presented M: the step late L, the render thread busy B; frames
+   handed over while the picture before waited for its GPU work G)" (G: rd.h
+   rd_thread_gpu_wait_posts_take, taken at each call; empty unless
+   original; a static buffer).  window_hold_block: at the block's
+   end, window_hold_block_line from the sound held back since the last
+   block (the first: since the open), the steps' time (sum, count,
+   longest, in ms), the picture's time (replaySumMs / replays: the replays'
+   block mean, the submit thread's times in it) and the frame rate's words;
+   then the counts start again. */
+int window_orig_gate(int keep, bool busy, uint64_t nowNs, uint64_t dueNs, int hz);
+void window_orig_step(bool late);
 const char *window_orig_words(bool original);
+/* The block's frames left out because the render thread was busy with the
+   picture before (window_orig_gate's RD_GATE_BUSY), until the block's end:
+   the GPU-bound hint counts them with the late ones (issue 179: a phone
+   whose GPU cannot keep up shows no late skips, only busy ones) */
+unsigned window_orig_skip_busy(void);
 /* PC port: the end of the 10 s GPU lines on a tile-based GPU (where a pass's time and the
  * display wait land; issues 95, 123), "" elsewhere */
 const char *window_tiler_words(void);
+
+/* The logging's own cost a block (log_cost.h): window_log_cost_begin and
+   _end around the 10 s block's prints (window_host.c window_pace_log), the
+   end writing "window: logging: ..."; the block's events: a present that
+   blocked (its call's span, ms on the monotonic clock), an automatic
+   capture's result (its game-thread ms, its worker's span).  The window's
+   thread only; window_hold_line notes the late steps itself */
+void window_log_cost_begin(void);
+/* the print's time since the last part into part (LOG_COST_*); nothing
+   outside the block's print */
+void window_log_cost_part(int part);
+/* the same into the other lines' part, named what (a static string: the
+   lines since the last mark) */
+void window_log_cost_mark(const char *what);
+void window_log_cost_end(void);
+void window_log_cost_present(double t0Ms, double t1Ms);
+void window_log_cost_job(double gameMs, double t0Ms, double t1Ms);
 void window_hold_block(double stepSumMs, unsigned steps, double stepMaxMs, int hz,
                        double replaySumMs, unsigned replays, bool original, const char *rateName);
 

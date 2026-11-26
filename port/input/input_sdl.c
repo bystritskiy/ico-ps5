@@ -18,10 +18,13 @@
 #include <stdio.h>
 #include <string.h>
 #include "../core/region.h" /* ico_region_cur: the disc's confirm */
+#include "ico_rows.h"       /* port/game: ico_hint_ask_note */
+#include "diag_host.h"      /* ico_log_limited */
 #include "host_config.h"
 #include "input.h"
 #include "input_sdl.h"
 #include "mouse_look.h"
+#include "pad_kind.h"
 #include "pointer.h"
 #include "touch.h"
 #include "touch_eaten.h"
@@ -62,6 +65,8 @@ static IcoInputRaw s_pad_raw[MAX_PADS];
 /* the last snapshot's gamepad sources, for the press edges the remap
    screen's capture reads (ico_input_note_press) */
 static unsigned char s_gp_down[ICO_GP_COUNT];
+/* the same per slot, for the kind of the pad pressed last (pad_kind.h) */
+static unsigned char s_slot_gp_down[MAX_PADS][ICO_GP_COUNT];
 static SDL_JoystickID s_pad_id[MAX_PADS];
 static SDL_Gamepad *s_pad[MAX_PADS];
 
@@ -106,6 +111,8 @@ static int s_touchW, s_touchH;
 static int s_safeX, s_safeY, s_safeW, s_safeH; /* s_safeW 0: the whole output */
 static IcoTouchEnv s_touchEnv;                 /* zero: unknown density, no fold */
 static IcoTouchOverlay s_touchSnap;
+static IcoTouchSceneFade s_sceneFade; /* Always, Start only in scenes */
+static int s_touchScene;              /* a scene or a movie plays (window_host.c, once a pump) */
 /* the layout editor (touch_edit.h) while the Edit layout page is open: the
    fingers go to it, not to s_touch.  Everything here runs on the window
    thread: the events (ico_window_pump -> ico_input_sdl_event), the vsync
@@ -226,6 +233,7 @@ static void open_pad(SDL_JoystickID id)
     s_last_high[slot] = s_last_low[slot] = 0;
     s_rumble_age[slot] = 0;
     s_rumble_took[slot] = 0;
+    memset(s_slot_gp_down[slot], 0, sizeof(s_slot_gp_down[slot]));
     fprintf(stderr, "input: gamepad slot %d \"%s\"\n", slot, SDL_GetGamepadName(s_pad[slot]));
 }
 
@@ -420,7 +428,7 @@ static void touch_found(const char *how)
     s_touch.look_decay = s_bind.mouse_decay;
     ico_touch_set_gamepads(&s_touch, open_pads(), SDL_GetTicksNS());
     fprintf(stderr, "input: touch screen (%s); touch controls %s\n", how,
-            ico_touch_mode_names[s_bind.touch_mode >= 0 && s_bind.touch_mode <= 2
+            ico_touch_mode_names[s_bind.touch_mode >= 0 && s_bind.touch_mode <= 3
                                      ? s_bind.touch_mode
                                      : ICO_TOUCH_MODE_AUTO]);
 }
@@ -661,6 +669,9 @@ static void touch_finger(const SDL_Event *e, int kind)
         return; /* a trackpad's fingers (macOS) are not the overlay's */
     }
     touch_found("first touch");
+    if (kind == ICO_TOUCH_DOWN) {
+        ico_input_note_pad_kind(ICO_PAD_KIND_PLAYSTATION, "touch");
+    }
     if (s_touchEdit.active) {
         ico_touch_edit_event(&s_touchEdit, (uint64_t)e->tfinger.fingerID, e->tfinger.x,
                              e->tfinger.y, kind, e->tfinger.timestamp);
@@ -734,6 +745,7 @@ void ico_input_sdl_event(const SDL_Event *e)
             s_raw.key[s_sdl_to_key[e->key.scancode]] = e->type == SDL_EVENT_KEY_DOWN;
             if (e->type == SDL_EVENT_KEY_DOWN && !e->key.repeat) {
                 ico_input_note_press(ICO_SRC_KEY, s_sdl_to_key[e->key.scancode]);
+                ico_input_note_pad_kind(ICO_PAD_KIND_PLAYSTATION, "keyboard");
             }
         }
         break;
@@ -751,6 +763,7 @@ void ico_input_sdl_event(const SDL_Event *e)
             s_raw.mouse[map[e->button.button]] = (unsigned char)down;
             if (down) {
                 ico_input_note_press(ICO_SRC_MOUSE, map[e->button.button]);
+                ico_input_note_pad_kind(ICO_PAD_KIND_PLAYSTATION, "mouse");
             }
             /* the menus' pointer, while it is free: the left button
                clicks (and, pressed over a menu, is not Cross until it is
@@ -837,6 +850,20 @@ void ico_input_sdl_event(const SDL_Event *e)
     default:
         break;
     }
+}
+
+void ico_input_sdl_set_touch_scene(int scene)
+{
+    scene = scene != 0;
+    if (scene != s_touchScene) {
+        /* the first 8, then every 100th; counted in the end-of-run summary */
+        ico_log_limited("touch: scene", "touch: scene %s (touch controls %s)",
+                        scene ? "begins" : "ends",
+                        ico_touch_mode_names[s_bind.touch_mode >= 0 && s_bind.touch_mode <= 3
+                                                 ? s_bind.touch_mode
+                                                 : ICO_TOUCH_MODE_AUTO]);
+    }
+    s_touchScene = scene;
 }
 
 void ico_input_sdl_set_capture(int mode)
@@ -988,6 +1015,68 @@ static void send_rumble(void)
     }
 }
 
+/* SDL_GamepadType's values as pad_kind.h mirrors them (SDL 3.4.18) */
+_Static_assert(ICO_SDLPAD_UNKNOWN == (int)SDL_GAMEPAD_TYPE_UNKNOWN, "pad_kind.h");
+_Static_assert(ICO_SDLPAD_STANDARD == (int)SDL_GAMEPAD_TYPE_STANDARD, "pad_kind.h");
+_Static_assert(ICO_SDLPAD_XBOX360 == (int)SDL_GAMEPAD_TYPE_XBOX360, "pad_kind.h");
+_Static_assert(ICO_SDLPAD_XBOXONE == (int)SDL_GAMEPAD_TYPE_XBOXONE, "pad_kind.h");
+_Static_assert(ICO_SDLPAD_PS3 == (int)SDL_GAMEPAD_TYPE_PS3, "pad_kind.h");
+_Static_assert(ICO_SDLPAD_PS4 == (int)SDL_GAMEPAD_TYPE_PS4, "pad_kind.h");
+_Static_assert(ICO_SDLPAD_PS5 == (int)SDL_GAMEPAD_TYPE_PS5, "pad_kind.h");
+_Static_assert(ICO_SDLPAD_NINTENDO_SWITCH_PRO == (int)SDL_GAMEPAD_TYPE_NINTENDO_SWITCH_PRO,
+               "pad_kind.h");
+_Static_assert(ICO_SDLPAD_NINTENDO_SWITCH_JOYCON_LEFT ==
+                   (int)SDL_GAMEPAD_TYPE_NINTENDO_SWITCH_JOYCON_LEFT,
+               "pad_kind.h");
+_Static_assert(ICO_SDLPAD_NINTENDO_SWITCH_JOYCON_RIGHT ==
+                   (int)SDL_GAMEPAD_TYPE_NINTENDO_SWITCH_JOYCON_RIGHT,
+               "pad_kind.h");
+_Static_assert(ICO_SDLPAD_NINTENDO_SWITCH_JOYCON_PAIR ==
+                   (int)SDL_GAMEPAD_TYPE_NINTENDO_SWITCH_JOYCON_PAIR,
+               "pad_kind.h");
+_Static_assert(ICO_SDLPAD_GAMECUBE == (int)SDL_GAMEPAD_TYPE_GAMECUBE, "pad_kind.h");
+_Static_assert(ICO_SDLPAD_STEAM == (int)SDL_GAMEPAD_TYPE_STEAM, "pad_kind.h");
+_Static_assert(ICO_SDLPAD_COUNT == (int)SDL_GAMEPAD_TYPE_COUNT, "pad_kind.h");
+
+/* Each slot's new presses (the edges note_pad_presses finds on the merged
+   pad, per pad): the kind of the pad that pressed, for the button pictures
+   (ico_input_note_pad_kind); the slots in order, so of two pads pressed in
+   the same vsync the later slot's kind stands. */
+static void note_pad_kind_presses(void)
+{
+    int i, j;
+
+    for (i = 0; i < MAX_PADS; i++) {
+        const IcoInputRaw *raw = &s_pad_raw[i];
+        int pressed = 0;
+
+        if (s_pad[i] == NULL) {
+            continue;
+        }
+        for (j = 1; j < ICO_GP_COUNT; j++) {
+            float v;
+            int down;
+
+            if (j < ICO_GP_BUTTONS) {
+                v = raw->gp[j];
+            } else {
+                const int a = (j - ICO_GP_LX_NEG) / 2; /* lx ly rx ry */
+                const float x = raw->axis[a];
+
+                v = (j - ICO_GP_LX_NEG) % 2 == 0 ? -x : x;
+            }
+            down = s_slot_gp_down[i][j] ? v > 0.25f : v >= 0.5f;
+            pressed |= down && !s_slot_gp_down[i][j];
+            s_slot_gp_down[i][j] = (unsigned char)down;
+        }
+        if (pressed) {
+            const int type = (int)SDL_GetGamepadType(s_pad[i]);
+
+            ico_input_note_pad_kind(ico_pad_kind_of_sdl_type(type), ico_pad_sdl_type_name(type));
+        }
+    }
+}
+
 /* The gamepad's new presses for the remap screen's capture:
    a button, a trigger past half, a stick axis past half (as a direction
    source); release below a quarter re-arms it. */
@@ -1013,6 +1102,7 @@ static void note_pad_presses(void)
         }
         s_gp_down[j] = (unsigned char)down;
     }
+    note_pad_kind_presses();
 }
 
 /* the touch overlay's vsync: the Touch size row's change, the look pad's
@@ -1050,6 +1140,18 @@ static void touch_step(IcoVirtualPad *v)
                      v, now);
     pct = pct < 0 ? 0 : pct > 100 ? 100 : pct;
     s_touchSnap.layout = s_touchLayout;
+    if (!editing) {
+        /* the overlay's copy only: the mapper and the menu-tap failsafe read
+           s_touchLayout, so a faded control still works */
+        const float was = s_sceneFade.hide;
+        const float after =
+            ico_touch_scene_alpha(&s_touchSnap.layout, &s_sceneFade, mode, s_touchScene, now);
+
+        if ((was == 0.0f) != (after == 0.0f) || (was == 1.0f) != (after == 1.0f)) {
+            ico_log_limited("touch: Start-only fade", "touch: Start-only fade %s (%.2f)",
+                            after > was ? "out" : "in", (double)after);
+        }
+    }
     if (editing) {
         /* every control at full strength, nothing pressed or lit */
         memset(&s_touchSnap.info, 0, sizeof(s_touchSnap.info));
@@ -1163,6 +1265,7 @@ void ico_input_sdl_update(void)
         if (swap) {
             swap_mouse_face(&s_bind);
         }
+        ico_hint_ask_note(s_bind.hint_down); /* Ask Yorda for a hint (ico_rows.h) */
         start_src = ico_bindings_start_sources(&s_bind, &s_raw);
         s_raw.mouse[1] = left;
     }

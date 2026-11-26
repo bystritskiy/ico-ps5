@@ -63,6 +63,7 @@
 #include "layout_ext.h"
 #include "../../core/region.h"
 #include "menu_font.h"
+#include "pad_glyphs.h"
 #include "sheet_ref.h"
 #include "popup.h"
 #include "strings.h"
@@ -102,6 +103,13 @@ int layout_boot_flag;
 int title_demo_mode;
 unsigned int stage_after_skipping_demo;
 int mpegPlayReturnStage;
+
+/* port/input's view of the stick for the menus (pad_host.c, not linked
+   here): Mirror mode is off in this program, so the byte as it is */
+unsigned char ico_pad_menu_stick_x(unsigned char x)
+{
+    return x;
+}
 
 static int s_texTransfers;
 
@@ -522,9 +530,9 @@ static void testLayoutExtension(void)
               v[1].rgba[0], v[1].rgba[3]);
         /* the label starts at the row's dispX: x = (dispX - 320) * 16 + 4 in 1/16 px, through
            gif_SpriteSensitiveOffset's 512 / 640; the strip starts its margin
-           (the glyphs' overhang and the rim, UI_MENU_RIM_X 7 since the
-           rim fades out over the sheets' 6 texels: 11 texels at this size,
-           145 measured; 119 with the hard 4-texel rim) before */
+           (the glyphs' overhang and the rim, UI_MENU_RIM_X 7: the rim's
+           tables' reach, ICO_SHEET_RX 6 texels, and one: 11 texels at this
+           size, 145 measured; 119 with the hard 4-texel rim) before */
         int x0 = 0x8000 + ((200 - 320) * 16 + 4) * 512 / 640;
         CHECK(v[0].x < x0 && x0 - v[0].x < 16 * 10, "row %d starts at x %d (box %d)", labels,
               v[0].x, x0);
@@ -601,6 +609,43 @@ static void testPopups(void)
     ui_popup_reset();
     ui_popup_set_dev_test(0);
 
+    /* the shortened messages (the owner, 2026-11-23: less wordy) in every
+       language: each line of each fits the widest panel at the body's size
+       (the Latin texts keep their lines as written), the version numbers
+       put in as the host does; the driver's unreadable answer, a title, at
+       the title's size */
+    {
+        static const UiStrId kBodies[] = {
+            UI_STR_STATES_CKPT_LOADED,   UI_STR_STATES_CKPT_NONE,     UI_STR_STATES_XB_OLD,
+            UI_STR_STATES_XB_CODE,       UI_STR_STATES_XB_DATA,       UI_STR_STATES_XB_PINNED,
+            UI_STR_STATES_REFUSED_CHECK, UI_STR_RESTORE_DONE_RESTART, UI_STR_RESTORE_DONE_CLOSE,
+            UI_STR_RESTORE_CONFIRM_BODY, UI_STR_BACKUP_WHY_WRITE,     UI_STR_BACKUP_WHY_BUSY,
+            UI_STR_BACKUP_WHY_NEWER,     UI_STR_BACKUP_WHY_UNSAFE,    UI_STR_STEAM_FAILED_BODY};
+        const UiLang langWas = ui_get_language();
+        for (int l = 0; l < UI_LANG_COUNT; l++) {
+            ui_set_language((UiLang)l);
+            for (unsigned k = 0; k < sizeof(kBodies) / sizeof(kBodies[0]); k++) {
+                char text[UI_POPUP_TEXT];
+                snprintf(text, sizeof(text), ui_str(kBodies[k]), "0.11.15", "0.11.16");
+                ui_popup_reset();
+                CHECK(ui_popup_push("Save states", text) == 0, "pushed");
+                char body[UI_POPUP_TEXT];
+                snprintf(body, sizeof(body), "%s", ui_popup_body());
+                for (char *ln = strtok(body, "\n"); ln != NULL; ln = strtok(NULL, "\n")) {
+                    const float w = ui_measure_menu_text(UI_POPUP_BODY_SIZE, ln);
+                    CHECK(w <= UI_POPUP_BODY_WIDTH,
+                          "language %d, string %d: the line \"%s\" is %g units wide", l,
+                          (int)kBodies[k], ln, w);
+                }
+            }
+            const float tw =
+                ui_measure_menu_text(UI_POPUP_TITLE_SIZE, ui_str(UI_STR_GPU_DRIVER_UNREADABLE));
+            CHECK(tw <= UI_POPUP_BODY_WIDTH, "language %d: the unreadable title is %g wide", l, tw);
+        }
+        ui_popup_reset();
+        ui_set_language(langWas);
+    }
+
     /* the timing in seconds: 0.3 s in, 4 s held, 0.3 s out at the default
        50 Hz and at 60 Hz (the Japanese disc, and the European one's 60 Hz
        mode) */
@@ -637,16 +682,23 @@ static void testPopups(void)
        (strings.h ui_break_before) and the panel takes the second line; a
        Latin body keeps its one line; a Korean body breaks at a space
        (its lines no wider than the panel), and a Korean word alone wider
-       than the panel between two of its syllables (ui_hangul_char) */
+       than the panel between two of its syllables (ui_hangul_char).  The
+       wide inputs are sized for the body's UI_POPUP_BODY_SIZE (18), where
+       the Japanese achievement line and a 40-syllable word fit one line:
+       that line twice over, and a 60-syllable word */
     {
-        char longWord[40 * 3 + 1];
-        for (int i = 0; i < 40; i++) {
-            memcpy(longWord + 3 * i, "\xEA\xB0\x80", 3); /* U+AC00, 120 bytes of 128 */
+        char longWord[60 * 3 + 1];
+        for (int i = 0; i < 60; i++) {
+            memcpy(longWord + 3 * i, "\xEA\xB0\x80", 3); /* U+AC00, 180 bytes of UI_POPUP_TEXT */
         }
-        longWord[40 * 3] = '\0';
+        longWord[60 * 3] = '\0';
+        char jaTwice[UI_POPUP_TEXT];
+        snprintf(jaTwice, sizeof(jaTwice), "%s%s",
+                 ui_str_in(UI_LANG_JA, UI_STR_ACH_NO_CAPTURE_DESC),
+                 ui_str_in(UI_LANG_JA, UI_STR_ACH_NO_CAPTURE_DESC));
+        CHECK(strlen(jaTwice) + 8u < sizeof(jaTwice), "the Japanese body has room for its breaks");
         float h[5], w[5];
-        const char *bodies[5] = {"B", ui_str_in(UI_LANG_EN, UI_STR_ACH_NO_CAPTURE_DESC),
-                                 ui_str_in(UI_LANG_JA, UI_STR_ACH_NO_CAPTURE_DESC),
+        const char *bodies[5] = {"B", ui_str_in(UI_LANG_EN, UI_STR_ACH_NO_CAPTURE_DESC), jaTwice,
                                  /* the Korean achievement line fits one line; a note
                                     long enough to wrap at its spaces */
                                  ui_str_in(UI_LANG_KO, UI_STR_OPT_AA_NOTE), longWord};
@@ -1108,12 +1160,13 @@ static int toPixY(float gy)
 }
 
 /* the drawn word's bounds: x from the measure, y from the line metrics
-   (the menus' text, menu_font.h), plus the strip's rim and its bilinear
-   read (UI_MENU_RIM_X and UI_MENU_RIM_Y texels: a texel is an x unit and
-   2 y units) and the anchor's snap to whole texels (an x unit, a y unit).
-   Written for a rim of 1 x 1 texels (3 and 5 units); the sheets' survey
-   set 4 x 3, and 44 pixels of rim fell outside the old bounds; the faded
-   rim reaches 6 x 4. */
+   (the menus' text, menu_font.h), plus the strip's margin (UI_MENU_RIM_X
+   and UI_MENU_RIM_Y texels, the rim's tables' reach and one: a texel is an
+   x unit and 2 y units) and the anchor's snap to whole texels (an x unit,
+   a y unit).  Written for a rim of 1 x 1 texels (3 and 5 units); the
+   sheets' survey set 4 x 3, and 44 pixels of rim fell outside the old
+   bounds; the tables reach 6 x 4 (the outline picked in v0.11.1 lights at
+   most 4 x 4 of it). */
 typedef struct Box {
     int x0, y0, x1, y1;
 } Box;
@@ -1633,6 +1686,395 @@ static void testSizeSets(void)
     ui_font_forget_textures();
 }
 
+/* ------------------------------------------------ the button pictures
+ *
+ * testGlyphArt (ctests ui, ui_jpn, ui_kor, ui_cn): the button pictures of
+ * another controller (pad_glyphs.h) where the disc's glyphs are, on the
+ * running disc's own glyph table (port/core/region_<slug>.c), recording only.
+ * The fake tables give each glyph's source row its rectangle and a texture
+ * file, and two more game rows the rectangles of Button Configuration's
+ * second block (the L1 and Square sources' row + 8: the key config's
+ * i * 8 + first + slot rows on every disc); three rows that are not buttons
+ * (a word's rectangle, Cross's rectangle on another file, an arrow's copy).
+ * lt_ext_glyph_of_row finds the buttons and nothing else.  Drawn by the
+ * real layout_texture.c: eight port glyph rows and the two game rows.  With
+ * PlayStation the glyph rows take the texture path (a texture transfer
+ * each, not text rows), and the frame's list is the same after a set was in
+ * force as before; with Xbox, Nintendo and Wii Classic each row is one
+ * sprite from a button pictures' atlas (the texture's name), its cell
+ * inside the atlas with the art in it, the art's aspect on screen, its ink
+ * wholly inside the disc glyph's box (no overhang anywhere, Button
+ * Configuration's copies included) and centred on it (within a tenth of a
+ * unit: under half an output pixel), at its group's fit for that box
+ * (pad_glyphs_fit_box: the four faces, or the four shoulders, one scale,
+ * one of them touching the box), the sprite's colour and the packet's
+ * blend. */
+
+#define ART_ROWS 10
+
+typedef struct ArtSnap {
+    int n;
+    uint32_t tex[64];
+    int texOn[64];
+    uint32_t nv[64];
+    RdScreenVtx v[64][2];
+    RdStateBlock st[64];
+} ArtSnap;
+
+static void artCollect(void *user, int list, uint32_t index, const RdCmd *c, const RdStateBlock *s)
+{
+    ArtSnap *a = user;
+    (void)index;
+    if (list != 11 || c->type != RDC_SCREEN || a->n >= 64) {
+        return;
+    }
+    const RdFrame *f = rd__last_frame();
+    const RdScreenVtx *v = (const RdScreenVtx *)(f->payload + c->u[0]);
+    a->tex[a->n] = s->ds.texEnabled ? s->tex : 0u;
+    a->texOn[a->n] = s->ds.texEnabled;
+    a->nv[a->n] = c->u[1];
+    memset(a->v[a->n], 0, sizeof(a->v[a->n]));
+    memcpy(a->v[a->n], v, sizeof(RdScreenVtx) * (c->u[1] < 2 ? c->u[1] : 2));
+    a->st[a->n] = *s;
+    a->n++;
+}
+
+static void artFrame(ArtSnap *a)
+{
+    layoutFrame();
+    memset(a, 0, sizeof(*a));
+    const RdFrame *f = rd__last_frame();
+    RdStateBlock s = f->startState;
+    rd__walk(f, 0, &s, artCollect, a);
+}
+
+static int isArtTex(uint32_t tex)
+{
+    const RdTexRec *t = tex ? rd__tex_rec(tex) : NULL;
+    return t != NULL && strncmp(t->name, "ui pad glyphs", 13) == 0;
+}
+
+/* GS 12.4 back to the grid (font.c gsX, gsY at the 512 x 512 frame) */
+static float gridX(int32_t x16)
+{
+    return UI_GRID_CX + ((float)x16 - 32768.0f) * 640.0f / (16.0f * 512.0f);
+}
+
+static float gridY(int32_t y16)
+{
+    return UI_GRID_CY + ((float)y16 - 32768.0f) * 224.0f / (8.0f * 512.0f);
+}
+
+static void artRow(LtProperty *e, int x, int y, int w, int h)
+{
+    e->word0 = e->word4 = e->word8 = e->wordC = -1;
+    e->ownerItem = -1;
+    e->up = e->down = e->left = e->right = -1;
+    e->rightItem = e->leftItem = e->downItem = e->upItem = -1;
+    e->dispX = x;
+    e->dispY = y;
+    e->dispW = w;
+    e->dispH = h;
+    e->selectable = 0;
+    e->masked = e->defaultMask = 0;
+}
+
+static void testGlyphArt(const char *slug)
+{
+    enum { FILE_FACE = 7, FILE_SHOULDER = 8, FILE_ARROW = 9 };
+
+    CHECK(ico_region_select(slug) == 0, "the %s disc selected", slug);
+    const IcoRegionInfo *ri = ico_region_cur();
+    memset(texProperty, 0, sizeof(texProperty));
+    memset(texLayout, 0, sizeof(texLayout));
+    lt_ext_reset();
+    pad_glyphs_set_style(ICO_PAD_GLYPHS_PLAYSTATION);
+    for (int g = 0; g < LT_GLYPH_COUNT; g++) {
+        const IcoGlyphRow *k = &ri->glyph[g];
+        LtProperty *e = &texProperty[k->row];
+        e->texU = k->u;
+        e->texV = k->v;
+        e->texW = k->w;
+        e->texH = k->h;
+        e->texFileNo = g <= LT_GLYPH_TRIANGLE ? FILE_FACE
+                       : g <= LT_GLYPH_R2     ? FILE_SHOULDER
+                                              : FILE_ARROW;
+        e->texNo = 1;
+    }
+    /* Button Configuration's second block: L1's and Square's rows + 8 */
+    const int copyRow[2] = {ri->glyph[LT_GLYPH_L1].row + 8, ri->glyph[LT_GLYPH_SQUARE].row + 8};
+    const int copyGlyph[2] = {LT_GLYPH_L1, LT_GLYPH_SQUARE};
+    for (int i = 0; i < 2; i++) {
+        const IcoGlyphRow *k = &ri->glyph[copyGlyph[i]];
+        LtProperty *e = &texProperty[copyRow[i]];
+        *e = texProperty[k->row];
+        artRow(e, 120 + 180 * i, 150, k->w, k->disp_h);
+    }
+    /* not buttons: a word's rectangle, Cross's on another file, an arrow */
+    const IcoGlyphRow *cross = &ri->glyph[LT_GLYPH_CROSS], *left = &ri->glyph[LT_GLYPH_LEFT];
+    texProperty[3].texU = 0;
+    texProperty[3].texV = 80;
+    texProperty[3].texW = 384;
+    texProperty[3].texH = 20;
+    texProperty[3].texFileNo = FILE_FACE;
+    texProperty[4] = texProperty[cross->row];
+    texProperty[4].texFileNo = FILE_FACE + 50;
+    texProperty[5] = texProperty[left->row];
+
+    /* the lookup */
+    for (int g = 0; g < LT_GLYPH_COUNT; g++) {
+        const int want = g < LT_GLYPH_LEFT ? g : -1;
+        CHECK(lt_ext_glyph_of_row(ri->glyph[g].row) == want, "%s: source row %d is button %d (%d)",
+              slug, ri->glyph[g].row, want, lt_ext_glyph_of_row(ri->glyph[g].row));
+    }
+    for (int i = 0; i < 2; i++) {
+        CHECK(lt_ext_glyph_of_row(copyRow[i]) == copyGlyph[i],
+              "%s: Button Configuration's row %d is button %d (%d)", slug, copyRow[i], copyGlyph[i],
+              lt_ext_glyph_of_row(copyRow[i]));
+    }
+    CHECK(lt_ext_glyph_of_row(3) == -1 && lt_ext_glyph_of_row(4) == -1 &&
+              lt_ext_glyph_of_row(5) == -1 && lt_ext_glyph_of_row(6) == -1,
+          "%s: a word, another file's rectangle, an arrow's copy, an empty row: no button", slug);
+    CHECK(lt_ext_glyph_of_row(-1) == -1 && lt_ext_glyph_of_row(LT_GAME_PROPERTY_COUNT) == -1,
+          "%s: indices outside the tables: no button", slug);
+
+    /* the port's rows: eight glyph rows (a prompt line), an arrow, a word */
+    int rows[LT_GLYPH_COUNT];
+    for (int g = 0; g < LT_GLYPH_LEFT; g++) {
+        rows[g] = lt_ext_add_glyph(g, 40 + 64 * g, 60, UI_MENU_TEXT_SIZE);
+    }
+    const int arrow = lt_ext_add_glyph(LT_GLYPH_LEFT, 40, 100, UI_MENU_TEXT_SIZE);
+    LtExtText t = {UI_STR_SECTION_DISPLAY, NULL, 0.0f, UI_ALIGN_LEFT};
+    LtProperty word;
+    memset(&word, 0, sizeof(word));
+    artRow(&word, 40, 120, 200, 40);
+    const int wordRow = lt_ext_add_property(&word, &t);
+    for (int g = 0; g < LT_GLYPH_LEFT; g++) {
+        CHECK(lt_ext_glyph_of_row(rows[g]) == g, "%s: port glyph row %d is button %d", slug,
+              rows[g], g);
+    }
+    CHECK(lt_ext_glyph_of_row(arrow) == -1 && lt_ext_glyph_of_row(wordRow) == -1,
+          "%s: a port arrow and a port word: no button", slug);
+
+    /* available: the disc's texture, or a set in force (never an arrow's) */
+    texProperty[cross->row].texNo = -1;
+    texProperty[left->row].texNo = -1;
+    CHECK(!lt_ext_glyph_available(LT_GLYPH_CROSS) && lt_ext_glyph_available(LT_GLYPH_CIRCLE) &&
+              !lt_ext_glyph_available(LT_GLYPH_LEFT),
+          "%s: PlayStation: available where the disc's texture is", slug);
+    pad_glyphs_set_style(ICO_PAD_GLYPHS_XBOX);
+    CHECK(pad_glyphs_active() && lt_ext_glyph_available(LT_GLYPH_CROSS) &&
+              !lt_ext_glyph_available(LT_GLYPH_LEFT),
+          "%s: Xbox: Cross available without the disc's texture, the arrow not", slug);
+    pad_glyphs_set_style(ICO_PAD_GLYPHS_PLAYSTATION);
+    texProperty[cross->row].texNo = 1;
+    texProperty[left->row].texNo = 1;
+
+    /* drawn: the port layout (the eight glyph rows, no cursor) chained to
+       game layouts 2 and 3 (the two Button Configuration rows) */
+    lt_ext_reset();
+    for (int g = 0; g < LT_GLYPH_LEFT; g++) {
+        rows[g] = lt_ext_add_glyph(g, 40 + 64 * g, 60, UI_MENU_TEXT_SIZE);
+    }
+    LtProp lay;
+    memset(&lay, 0, sizeof(lay));
+    lay.first = rows[0];
+    lay.last = rows[LT_GLYPH_LEFT - 1] + 1;
+    lay.defaultItem = lay.curItem = -1;
+    lay.link = 2;
+    const int portL = lt_ext_add_layout(&lay);
+    for (int i = 0; i < 2; i++) {
+        memset(&texLayout[2 + i], 0, sizeof(texLayout[0]));
+        texLayout[2 + i].first = copyRow[i];
+        texLayout[2 + i].last = copyRow[i] + 1;
+        texLayout[2 + i].defaultItem = texLayout[2 + i].curItem = -1;
+        texLayout[2 + i].link = i == 0 ? 3 : -1;
+    }
+    const LtProperty *drawnRow[ART_ROWS];
+    int drawnGlyph[ART_ROWS];
+    for (int g = 0; g < LT_GLYPH_LEFT; g++) {
+        drawnRow[g] = lt_ext_prop(rows[g]);
+        drawnGlyph[g] = g;
+    }
+    for (int i = 0; i < 2; i++) {
+        drawnRow[8 + i] = &texProperty[copyRow[i]];
+        drawnGlyph[8 + i] = copyGlyph[i];
+    }
+
+    if (!rd__init_record_only(512, 512)) {
+        CHECK(0, "rd__init_record_only");
+        return;
+    }
+    ui_font_forget_textures();
+    ui__set_record_hook(gif_HostFlush);
+    dl_Init();
+    GlobalStageSetting.reductionCol[0] = GlobalStageSetting.reductionCol[1] =
+        GlobalStageSetting.reductionCol[2] = 0x80;
+    current_layout_id = portL;
+    memset(pad, 0, sizeof(pad));
+    pad[0].ana[0] = pad[0].ana[1] = pad[0].ana[2] = pad[0].ana[3] = 128;
+
+    static ArtSnap before, snap;
+    /* the fade settled (a layout with no fade-in time is at once) */
+    for (int i = 0; i < 60 && lt_fade_status() != 2; i++) {
+        layoutFrame();
+    }
+    CHECK(lt_fade_status() == 2, "%s: the layout settled", slug);
+    for (int i = 0; i < 3; i++) {
+        s_texTransfers = 0;
+        artFrame(&before);
+    }
+    int artBatches = 0;
+    for (int i = 0; i < before.n; i++) {
+        artBatches += isArtTex(before.tex[i]);
+    }
+    int textRows = 0;
+    for (int r = 0; r < ART_ROWS; r++) {
+        textRows += lt_ext_is_text_row(drawnRow[r]);
+    }
+    CHECK(s_texTransfers == ART_ROWS && artBatches == 0 && textRows == 0,
+          "%s: PlayStation: %d texture transfers (%d), %d sprites from an atlas, %d text rows "
+          "(none)",
+          slug, s_texTransfers, ART_ROWS, artBatches, textRows);
+    CHECK(pad_glyphs_atlas_count() == 0, "%s: PlayStation made no atlas (%d)", slug,
+          pad_glyphs_atlas_count());
+
+    static const int kStyles[] = {ICO_PAD_GLYPHS_XBOX, ICO_PAD_GLYPHS_NINTENDO,
+                                  ICO_PAD_GLYPHS_WII_CLASSIC};
+    for (size_t si = 0; si < sizeof(kStyles) / sizeof(kStyles[0]); si++) {
+        const int style = kStyles[si];
+        const char *name = pad_glyphs_style_name(style);
+        pad_glyphs_set_style(style);
+        CHECK(pad_glyphs_style() == style && pad_glyphs_active(), "%s: %s in force", slug, name);
+        for (int i = 0; i < 2; i++) {
+            s_texTransfers = 0;
+            artFrame(&snap);
+        }
+        textRows = 0;
+        for (int r = 0; r < ART_ROWS; r++) {
+            textRows += lt_ext_is_text_row(drawnRow[r]);
+        }
+        /* the game rows' textures are still transferred (display_texture),
+           the port rows' are not */
+        CHECK(textRows == ART_ROWS && s_texTransfers == 2,
+              "%s %s: %d text rows (%d), %d texture transfers (2)", slug, name, textRows, ART_ROWS,
+              s_texTransfers);
+        int found[ART_ROWS] = {0};
+        artBatches = 0;
+        for (int i = 0; i < snap.n; i++) {
+            if (!isArtTex(snap.tex[i])) {
+                continue;
+            }
+            artBatches++;
+            const RdScreenVtx *v = snap.v[i];
+            const RdStateBlock *st = &snap.st[i];
+            const RdTexRec *tr = rd__tex_rec(snap.tex[i]);
+            CHECK(snap.nv[i] == 2 && st->ds.texFn == RD_TEXFN_MODULATE &&
+                      st->ds.tcc == RD_TCC_RGBA && st->ds.abe == 1 &&
+                      st->ds.blend == RD_BLEND_LERP_AS && st->ds.zwrite == RD_ZWRITE_OFF &&
+                      v[1].z == UI_LAYOUT_Z,
+                  "%s %s: batch %d one sprite, MODULATE, the packet's blend and Z", slug, name, i);
+            CHECK(v[0].rgba[0] == 0x7F && v[0].rgba[1] == 0x7F && v[0].rgba[2] == 0x7F &&
+                      v[0].rgba[3] > 0 && memcmp(v[0].rgba, v[1].rgba, 4) == 0,
+                  "%s %s: batch %d the sprite's colour (%u %u %u %u)", slug, name, i, v[0].rgba[0],
+                  v[0].rgba[1], v[0].rgba[2], v[0].rgba[3]);
+            const float gx0 = gridX(v[0].x), gx1 = gridX(v[1].x);
+            const float gy0 = gridY(v[0].y), gy1 = gridY(v[1].y);
+            /* the row whose disc box (display_texture's: dispX + 1/4, w
+               dispW - 1; 2 dispY + 1/2, h dispH - 2) holds the centre */
+            int r = -1;
+            for (int k = 0; k < ART_ROWS; k++) {
+                const LtProperty *e = drawnRow[k];
+                const float bx = (float)e->dispX + 0.25f, by = 2.0f * (float)e->dispY + 0.5f;
+                const float cx = (gx0 + gx1) * 0.5f, cy = (gy0 + gy1) * 0.5f;
+                if (cx > bx && cx < bx + (float)(e->dispW - 1) && cy > by &&
+                    cy < by + (float)(e->dispH - 2)) {
+                    r = k;
+                }
+            }
+            if (r < 0) {
+                CHECK(0, "%s %s: batch %d at %.1f,%.1f is in no row's box", slug, name, i,
+                      (double)gx0, (double)gy0);
+                continue;
+            }
+            found[r]++;
+            const LtProperty *e = drawnRow[r];
+            const int g = drawnGlyph[r];
+            const float a = pad_glyphs_aspect(style, g);
+            const float bx = (float)e->dispX + 0.25f, by = 2.0f * (float)e->dispY + 0.5f;
+            const float bw = (float)(e->dispW - 1), bh = (float)(e->dispH - 2);
+            const float shown = (gx1 - gx0) / ((gy1 - gy0) * UI_X_PER_Y);
+            /* the size: the group's fit for this box (in y units both
+               ways), the piece's height and aspect; the tightest piece of
+               the group touches the box, so this one cannot pass it */
+            const float L = pad_glyphs_fit_box(style, g, bw / UI_X_PER_Y, bh);
+            const float wantH = L * pad_glyphs_height(style, g);
+            const float wantW = wantH * UI_X_PER_Y * a;
+            /* in 1/16 units the corners are rounded: a tenth of a unit */
+            CHECK(L > 0.0f && gx0 >= bx - 0.1f && gx1 <= bx + bw + 0.1f && gy0 >= by - 0.1f &&
+                      gy1 <= by + bh + 0.1f,
+                  "%s %s: row %d's art %.2f,%.2f-%.2f,%.2f inside the disc box %.2f,%.2f %.2fx%.2f",
+                  slug, name, r, (double)gx0, (double)gy0, (double)gx1, (double)gy1, (double)bx,
+                  (double)by, (double)bw, (double)bh);
+            CHECK(fabsf((gx0 + gx1) * 0.5f - (bx + bw * 0.5f)) < 0.1f &&
+                      fabsf((gy0 + gy1) * 0.5f - (by + bh * 0.5f)) < 0.1f,
+                  "%s %s: row %d's art centred in its box", slug, name, r);
+            CHECK(fabsf(gx1 - gx0 - wantW) < 0.15f && fabsf(gy1 - gy0 - wantH) < 0.15f,
+                  "%s %s: row %d's art %.2f x %.2f (%.2f x %.2f: the group's fit %.2f)", slug, name,
+                  r, (double)(gx1 - gx0), (double)(gy1 - gy0), (double)wantW, (double)wantH,
+                  (double)L);
+            CHECK(fabsf(shown / a - 1.0f) < 0.02f, "%s %s: row %d's art at aspect %.3f (%.3f)",
+                  slug, name, r, (double)shown, (double)a);
+            /* the cell: inside the texture, the art's shape (its width
+               rounded to a texel), the art in it */
+            const float u0 = v[0].s / 16.0f, t0 = v[0].t / 16.0f;
+            const float u1 = v[1].s / 16.0f, t1 = v[1].t / 16.0f;
+            CHECK(tr && u0 >= 0.0f && t0 >= 0.0f && u1 <= (float)tr->w && t1 <= (float)tr->h &&
+                      u1 > u0 && t1 > t0 && fabsf((u1 - u0) - (t1 - t0) * a) <= 0.51f,
+                  "%s %s: row %d's cell %.1f,%.1f-%.1f,%.1f in the %ux%u atlas, aspect %.3f", slug,
+                  name, r, (double)u0, (double)t0, (double)u1, (double)t1, tr ? tr->w : 0u,
+                  tr ? tr->h : 0u, (double)a);
+            int ink = 0;
+            if (tr && tr->pixels && tr->format == RD_TEXEL_RGBA8) {
+                for (int y = (int)t0; y < (int)t1 && y < (int)tr->h; y++) {
+                    for (int x = (int)u0; x < (int)u1 && x < (int)tr->w; x++) {
+                        ink += tr->pixels[((size_t)y * tr->w + (size_t)x) * 4 + 3] == 0x80;
+                    }
+                }
+            }
+            CHECK(ink > (int)((u1 - u0) * (t1 - t0) / 16.0f),
+                  "%s %s: row %d's cell holds the art (%d opaque texels)", slug, name, r, ink);
+        }
+        int once = 1;
+        for (int r = 0; r < ART_ROWS; r++) {
+            once &= found[r] == 1;
+        }
+        CHECK(artBatches == ART_ROWS && once,
+              "%s %s: each of the %d rows one sprite from the atlas (%d sprites)", slug, name,
+              ART_ROWS, artBatches);
+    }
+
+    /* PlayStation again: the frame is the one before any set was in force */
+    pad_glyphs_set_style(ICO_PAD_GLYPHS_PLAYSTATION);
+    for (int i = 0; i < 2; i++) {
+        artFrame(&snap);
+    }
+    int same = snap.n == before.n;
+    for (int i = 0; same && i < snap.n; i++) {
+        same = snap.tex[i] == before.tex[i] && snap.texOn[i] == before.texOn[i] &&
+               snap.nv[i] == before.nv[i] && memcmp(snap.v[i], before.v[i], sizeof(snap.v[i])) == 0;
+    }
+    CHECK(same, "%s: PlayStation after the sets: the same %d batches as before (%d)", slug,
+          before.n, snap.n);
+    ui__set_record_hook(NULL);
+    rd_shutdown();
+    ui_font_forget_textures();
+    lt_ext_reset();
+    memset(texProperty, 0, sizeof(texProperty));
+    memset(texLayout, 0, sizeof(texLayout));
+    CHECK(ico_region_select("pal") == 0, "the European disc again");
+}
+
 /* ui_test SLUG (ctests ui_jpn, ui_kor): the layout extension's glyphs and pad
    convention on the Japanese or Korean disc (port/core/region_<slug>.c): each glyph row
    and rectangle the region's (Tex_menu01/option.tm2), its height the row's
@@ -1673,10 +2115,27 @@ static void testOtherDisc(const char *slug)
           "the European disc again");
 }
 
+/* the menus' outline: the user's pick of 2026-11-08 (rc3, grey from rc5).
+   kSheetInk's five European rows carry rim grey 100 and full white fill
+   with the rim on and the dither on (the falloff, levels, solid rule and
+   Bayer matrix are pinned by sheet_ref.c's static asserts) */
+static void testPickedOutline(void)
+{
+    static const int kEuropean[] = {UI_LANG_EN, UI_LANG_FR, UI_LANG_DE, UI_LANG_IT, UI_LANG_ES};
+    for (size_t i = 0; i < sizeof(kEuropean) / sizeof(kEuropean[0]); i++) {
+        const UiSheetInk *ink = ui_menu_sheet_ink(kEuropean[i]);
+        CHECK(ink != NULL && ink->rimOn == 1 && ink->rimLevel == 100 && ink->fillLevel == 255 &&
+                  ink->dither == 1 && ink->rimWeight == 0,
+              "kSheetInk row %d: the picked rim grey 100 (%d)", kEuropean[i],
+              ink != NULL ? ink->rimLevel : -1);
+    }
+}
+
 int main(int argc, char **argv)
 {
     if (argc > 1) {
         testOtherDisc(argv[1]);
+        testGlyphArt(argv[1]);
         printf("ui_test %s: %s\n", argv[1], failures ? "failed" : "ok");
         return failures ? 1 : 0;
     }
@@ -1689,6 +2148,8 @@ int main(int argc, char **argv)
     testOverlay();
     testAtlasUploads();
     testSizeSets();
+    testGlyphArt("pal");
+    testPickedOutline();
     if (failures) {
         printf("ui_test: %d failures\n", failures);
         return 1;

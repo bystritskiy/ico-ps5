@@ -161,6 +161,28 @@ VkResult vkr_sync_wait(uint64_t value)
     return r;
 }
 
+VkResult vkr_sync_wait_for(uint64_t value, uint64_t timeoutNs)
+{
+    if (g_vkr.syncKind == VKR_SYNC_TIMELINE) {
+        VkSemaphoreWaitInfo wi = {
+            .sType = VK_STRUCTURE_TYPE_SEMAPHORE_WAIT_INFO,
+            .semaphoreCount = 1,
+            .pSemaphores = &g_vkr.timeline,
+            .pValues = &value,
+        };
+        return g_vkr.waitSemaphores(g_vkr.device, &wi, timeoutNs);
+    }
+    const uint32_t s = (uint32_t)(value % VKR_SYNC_FENCE_RING);
+    if (value <= g_vkr.fenceFinished || g_vkr.fenceValue[s] != value) {
+        return vkr_sync_wait(value); /* finished, taken again or never submitted: no wait */
+    }
+    const VkResult r = vkWaitForFences(g_vkr.device, 1, &g_vkr.fences[s], VK_TRUE, timeoutNs);
+    if (r == VK_SUCCESS && value > g_vkr.fenceFinished) {
+        g_vkr.fenceFinished = value; /* in submission order, as vkr_sync_wait */
+    }
+    return r;
+}
+
 /* the fence path: the slot of number `value` free (its earlier number
  * finished) and its fence unsignalled; false when the earlier number did
  * not finish (a lost device) or the reset failed */
@@ -192,11 +214,101 @@ static bool vkr_fence_slot_take(uint64_t value)
     return true;
 }
 
+/* rhi_vk.h vkr_test_submit_waits: the submits' binary waits, in order,
+ * while the test records them (the test's own thread submits) */
+#define VKR_TEST_SUBMITS 32u
+static bool s_testRecord;
+static RhiVkTestSubmit s_testSubmits[VKR_TEST_SUBMITS];
+static uint32_t s_testSubmitN;
+
+/* a semaphore as the test sees it (a pointer or a 64-bit handle) */
+static uint64_t vkr_test_handle(VkSemaphore h)
+{
+    uint64_t v = 0;
+    memcpy(&v, &h, sizeof(h) < sizeof(v) ? sizeof(h) : sizeof(v));
+    return v;
+}
+
+static void vkr_test_note_submit(const VkrSubmitDesc *d)
+{
+    if (s_testSubmitN < VKR_TEST_SUBMITS) {
+        RhiVkTestSubmit *t = &s_testSubmits[s_testSubmitN++];
+        t->waitSem = vkr_test_handle(d->wait);
+        t->waitStage = d->wait != VK_NULL_HANDLE ? (uint32_t)d->waitStage : 0u;
+        t->lists = d->cbCount;
+    }
+}
+
+void vkr_test_submit_record(bool on)
+{
+    s_testRecord = on;
+    s_testSubmitN = 0;
+}
+
+uint32_t vkr_test_submit_waits(RhiVkTestSubmit *out, uint32_t max)
+{
+    const uint32_t n = s_testSubmitN < max ? s_testSubmitN : max;
+    if (n) {
+        memcpy(out, s_testSubmits, (size_t)n * sizeof(out[0]));
+    }
+    s_testSubmitN = 0;
+    return n;
+}
+
+uint64_t vkr_test_acquire_sem(void)
+{
+    return vkr_test_handle(vkr_cur_frame()->acquireSem);
+}
+
+/* rhi_vk.h vkr_test_hold_next_submit: a timeline semaphore the next
+ * submission waits on (value 1), signalled from the host by
+ * vkr_test_release_hold (rhi_vk_test's clock cell: a wait that blocks while
+ * nothing runs, on a driver that runs submissions at once) */
+static VkSemaphore s_testHold;
+static bool s_testHoldNext;
+
+bool vkr_test_hold_next_submit(void)
+{
+    if (g_vkr.syncKind != VKR_SYNC_TIMELINE || s_testHold != VK_NULL_HANDLE) {
+        return false;
+    }
+    VkSemaphoreTypeCreateInfo ti = {.sType = VK_STRUCTURE_TYPE_SEMAPHORE_TYPE_CREATE_INFO,
+                                    .semaphoreType = VK_SEMAPHORE_TYPE_TIMELINE};
+    VkSemaphoreCreateInfo ci = {.sType = VK_STRUCTURE_TYPE_SEMAPHORE_CREATE_INFO, .pNext = &ti};
+    if (vkCreateSemaphore(g_vkr.device, &ci, NULL, &s_testHold) != VK_SUCCESS) {
+        s_testHold = VK_NULL_HANDLE;
+        return false;
+    }
+    s_testHoldNext = true;
+    return true;
+}
+
+bool vkr_test_release_hold(void)
+{
+    PFN_vkSignalSemaphore sig =
+        (PFN_vkSignalSemaphore)vkGetDeviceProcAddr(g_vkr.device, "vkSignalSemaphore");
+    if (!sig) {
+        sig = (PFN_vkSignalSemaphore)vkGetDeviceProcAddr(g_vkr.device, "vkSignalSemaphoreKHR");
+    }
+    const VkSemaphoreSignalInfo si = {
+        .sType = VK_STRUCTURE_TYPE_SEMAPHORE_SIGNAL_INFO, .semaphore = s_testHold, .value = 1};
+    return s_testHold != VK_NULL_HANDLE && sig != NULL && sig(g_vkr.device, &si) == VK_SUCCESS;
+}
+
+void vkr_test_hold_destroy(void)
+{
+    if (s_testHold != VK_NULL_HANDLE) {
+        vkDestroySemaphore(g_vkr.device, s_testHold, NULL);
+    }
+    s_testHold = VK_NULL_HANDLE;
+    s_testHoldNext = false;
+}
+
 bool vkr_sync_submit(const VkrSubmitDesc *d, uint64_t *outValue)
 {
-    VkSemaphore waitSems[2];
-    uint64_t waitValues[2];
-    VkPipelineStageFlags waitStages[2];
+    VkSemaphore waitSems[3];
+    uint64_t waitValues[3];
+    VkPipelineStageFlags waitStages[3];
     uint32_t waitCount = 0;
     VkSemaphore sigSems[2];
     uint64_t sigValues[2];
@@ -215,6 +327,13 @@ bool vkr_sync_submit(const VkrSubmitDesc *d, uint64_t *outValue)
         waitValues[waitCount] = g_vkr.timelineValue;
         waitStages[waitCount] = VK_PIPELINE_STAGE_ALL_COMMANDS_BIT;
         waitCount++;
+    }
+    if (s_testHoldNext && timeline) {
+        waitSems[waitCount] = s_testHold;
+        waitValues[waitCount] = 1;
+        waitStages[waitCount] = VK_PIPELINE_STAGE_ALL_COMMANDS_BIT;
+        waitCount++;
+        s_testHoldNext = false;
     }
     if (d->signal != VK_NULL_HANDLE) {
         sigSems[sigCount] = d->signal;
@@ -250,6 +369,9 @@ bool vkr_sync_submit(const VkrSubmitDesc *d, uint64_t *outValue)
             return false;
         }
         fence = g_vkr.fences[value % VKR_SYNC_FENCE_RING];
+    }
+    if (s_testRecord) {
+        vkr_test_note_submit(d);
     }
     if (!VKR_CHECK(vkQueueSubmit(g_vkr.queue, 1, &si, fence))) {
         /* nothing will signal the number: the counter stays, and a later

@@ -12,7 +12,9 @@
 //                  (rd_mesh.h).  Read as uint4 (Integer lanes, below)
 //   b2  VuCB       the VU1 data memory 0..35 the program reads (see below)
 //   b3  VuBoneCB   cluster: VU memory 16..255, the bones; every mesh
-//                  program: the card bits after them (vu_strip_card)
+//                  program: the card bits after them (vu_strip_card); the
+//                  ring builds of the cluster entries (ICO_VU_BONES_RING)
+//                  read the same bytes through t5 instead
 //   t4  vu_rec_buf the record: the vertex pre-pass's vertices
 //                  (vu_rec_vertex) and the triangle pre-pass's triangles and
 //                  sprites (the record stages below), read by the main
@@ -89,6 +91,15 @@
 #ifndef ICO_VU_COMMON_HLSLI
 #define ICO_VU_COMMON_HLSLI
 
+// The compute builds (ICO_VU_REC_COMPUTE: vu_X_compute_pre_cs and
+// vu_X_batch_compute_pre_cs, below at vu_rec_store) are the store builds
+// run as compute dispatches: everything the store builds write they write
+#ifdef ICO_VU_REC_COMPUTE
+#ifndef ICO_VU_REC_STORES
+#define ICO_VU_REC_STORES 1
+#endif
+#endif
+
 #include "common.hlsli"
 
 // VuCB.vu_mem: VU1 data memory 0..35 as the program reads it.
@@ -152,6 +163,22 @@ cbuffer VuCB : ICO_REG(b2, 1)
     uint4 vu_tri;
 };
 
+#ifdef ICO_VU_BONES_RING
+// The bones through the ring (ICO_VU_BONES_RING: the cluster entries'
+// vu_skin_ring_plain_vs, vu_skin_spec_ring_plain_vs and
+// vu_skin_debug_ring_plain_vs; issue 123, docs/port/VU_SKIN_CHECK.md "The
+// ladder"): the same 3,840 bytes VuBoneCB would hold at b3, read as a
+// storage buffer, vu_ring (t5, the ring from rd_replay_vu.c s_ringBase), from
+// qword vu_mark.w (IcoVuCB.mark[3], the lane nothing else reads in these
+// builds; rd_replay_vu.c vuSource puts the block's index there).  A uniform
+// read of the block at the draw's offset gave other bytes than the CPU
+// wrote on Mesa's Turnip (Yorda's shin): the skin check's ladder switches
+// to this read by itself.  uint4 and asfloat as VuBoneCB's (Integer lanes,
+// above); every word computed is the same.
+StructuredBuffer<uint4> vu_ring : ICO_REG(t5, 1);
+#define VU_BONE(i) asfloat(vu_ring[vu_mark.w + (i)])
+#define VU_BONE_BITS(i) vu_ring[vu_mark.w + (i)]
+#else
 // VU memory 16..255: the cluster program's bones (vu_skin.hlsl), and for
 // every mesh program the card bits from qword vu_strip.w (vu_strip_card;
 // rd_replay_vu.c doVuDraw puts them after the bones a skinned mesh reads).
@@ -161,14 +188,15 @@ cbuffer VuBoneCB : ICO_REG(b3, 1)
 {
     uint4 vu_bone[240];
 };
-
-// The arrays' elements, read one at a time (the batch build below reads
-// them from vu_ring); VU_BONE_BITS a qword of VuBoneCB as integers (the
-// card bits)
-#define VU_MEM(i) vu_mem[i]
-#define VU_TICK(i) vu_ticks[i]
+// VU_BONE_BITS a qword of VuBoneCB as integers (the card bits)
 #define VU_BONE(i) asfloat(vu_bone[i])
 #define VU_BONE_BITS(i) vu_bone[i]
+#endif
+
+// The arrays' elements, read one at a time (the batch build below reads
+// them from vu_ring)
+#define VU_MEM(i) vu_mem[i]
+#define VU_TICK(i) vu_ticks[i]
 // a pre-pass entry's vertex: SV_VertexID itself (the batch build's
 // vu_pre_batch_entry finds its entry first)
 #define VU_PRE_ENTRY(vid) (vid)
@@ -384,6 +412,30 @@ uint4 vu_stream_u(uint qw)
 // each of those.  No shader reads it yet.
 #define VU_F_JUN26 1024u
 #define g_vuVariant (((vu_draw.z & VU_F_JUN26) != 0u) ? 1u : 0u)
+// The matrix h is made with turns the eye's side over (shader_consts.h
+// ICO_VU_MIRROR: a reflection camera, a mirrored model): a triangle's
+// facing on screen reads the other way (vu_front_facing)
+#define VU_F_MIRROR 4096u
+// No side bands (shader_consts.h ICO_VU_NO_BESIDE): a triangle the region
+// rule drops stays dropped (VU_RULE_CLIP_BESIDE off): a frame not wider
+// than 4:3, a draw without winding marks, a _dstrov pass
+#define VU_F_NO_BESIDE 8192u
+// The camera rule ([dev] region_rule = camera, the default; shader_consts.h
+// ICO_VU_CAMERA, rd_replay_vu.c vuSource): the camera decides what is drawn,
+// in every preset and state.  A triangle the PS2's region rule drops (out
+// of range, a corner behind the eye, a card) is drawn, clipped by the GPU
+// at the native frustum, over the whole frame when it faces the eye
+// (vu_rule_beside); one facing away keeps the drop (the one exception: the
+// inside of a cliff the camera clips into).  No card test under it
+// (vu_region_rule_cut), and a sprite the VU skips for its x/y window is
+// drawn whole (vu_particle_vs).  Clear: the PS2's drops ([dev] region_rule
+// = ps2), with the side bands where VU_F_NO_BESIDE is clear
+#define VU_F_CAMERA 16384u
+// Under VU_F_CAMERA: the draw has no facing data to read and its surfaces
+// are open (a grid, Mesh3D: its strips wind both ways, and its back is
+// what the camera sees of it): a triangle the PS2 drops is drawn whatever
+// way it faces (vu_rule_beside)
+#define VU_F_TWO_SIDED 32768u
 // The marks of a triangle k-2, k-1, k (shader_consts.h ICO_VU_MARK_*,
 // rd_mesh.c RdMeshRec.kickMark): a byte a kick after the mesh's vertices
 // in the stream, where vu_mark says.
@@ -397,9 +449,14 @@ uint4 vu_stream_u(uint qw)
 //   VU_MARK_LATER   a triangle that overlaps an earlier triangle of its
 //                   mesh in the same plane (static prelit and lit meshes,
 //                   rd_mesh.c markLaterOverlaps; vu_later_out)
+//   VU_MARK_FLIP    the corners k-2, k-1, k wind against the triangle's
+//                   front, the side its normals point to (the EE's table,
+//                   Packet.c; rd_mesh.c markWinding; static prelit, lit
+//                   and skinned meshes): vu_front_facing
 #define VU_MARK_JOINED 1u
 #define VU_MARK_HIDE 2u
 #define VU_MARK_LATER 4u
+#define VU_MARK_FLIP 8u
 
 // vu_rec.w, the triangle stage's program rule (shader_consts.h
 // ICO_VU_TRI_*), above its clip mode in bits 0..1: VU_TRI_CHAIN the chain
@@ -471,7 +528,7 @@ float4 vu_matm(uint at, float4 v, float w)
 int vu_ftoi(float x)
 {
     int r = (int)x;
-    r = x >= 2147483648.0 ? 0x7FFFFFFF : r;
+    r = x >= 2147483648.0 ? 2147483647 : r;
     r = x >= -2147483648.0 ? r : (int)0x80000000u;
     return r;
 }
@@ -569,8 +626,8 @@ VuVtx vu_vtx_init()
 // writes); 1 or 0 (VuVtx.gsOk, vu_has_gs_position).
 uint vu_gs_ok(float w, int gx, int gy, int gz)
 {
-    return w > 0.0 && gz >= 0 && gz != 0x7FFFFFFF && gx != 0x7FFFFFFF &&
-                   gx != (int)0x80000000u && gy != 0x7FFFFFFF && gy != (int)0x80000000u
+    return w > 0.0 && gz >= 0 && gz != 2147483647 && gx != 2147483647 &&
+                   gx != (int)0x80000000u && gy != 2147483647 && gy != (int)0x80000000u
                ? 1u
                : 0u;
 }
@@ -641,10 +698,15 @@ struct VuVSOut {
     VK_LOC(0) noperspective float4 col : COLOR0; // RGBA 0..255, the GS interpolates in screen space
     VK_LOC(1)
     noperspective float3 stq : TEXCOORD0; // S, T, Q linear in screen space, divided per pixel
-    // vu_plane_distance, drawn where >= 0 under a clip plane (DF_PLANE);
+    // x: vu_plane_distance, drawn where >= 0 under a clip plane (DF_PLANE);
     // without one 1, or -1 on the kick triangles of a fused scissor pair
-    // (vu_fused_out: the mark the no-planes twins read, which have no r)
-    VK_LOC(2) noperspective float plane : TEXCOORD1;
+    // (vu_fused_out: the mark the no-planes twins read, which have no r).
+    // y: 1 on a triangle drawn beside the picture (VU_RULE_CLIP_BESIDE),
+    // whose pixels in the picture's columns vu_pixel_tests discards, else 0
+    // (a constant over the triangle: the interpolation is 1 or 0 to an ulp;
+    // NaN on a part of a triangle Mesa's software clipper cut behind the
+    // eye, which vu_pixel_tests reads as beside)
+    VK_LOC(2) noperspective float2 plane : TEXCOORD1;
     // The triangle's attribute planes (vu_attr_planes): col, stq and plane
     // at its first corner (a0: col, a1: stq, plane) and per texel across
     // (x0, x1) and down (y0, y1); r.xy the corner in texels from the
@@ -674,8 +736,8 @@ float4 vu_gs_position(int gx, int gy, int gz, bool wrap)
 {
     int x = gx, y = gy;
     if (wrap) {
-        x = gx & 0xFFFF;
-        y = gy & 0xFFFF;
+        x = gx & 65535;
+        y = gy & 65535;
     }
     return float4(vu_ndc(float2(x, y) * (1.0 / 16.0)), gs_depth(asuint(gz)), 1.0);
 }
@@ -697,7 +759,9 @@ float4 vu_homogeneous_position(float4 h)
     if (g_vp.x != 0.0) {
         // the exact viewport's form (common.hlsli gs_px_to_ndc) times w:
         // about the target's centre, so the same at every frame width up to
-        // the viewport's power-of-two factor
+        // the viewport's power-of-two factor; g_vpo.xy holds a jittered
+        // frame's jitter in its scene-class passes (common.hlsli g_jitter),
+        // after the divide and ftoi4 (0 elsewhere)
         precise float2 c = g_origin.xy + g_target.xy * 0.5;
         precise float x = ((h.x - c.x * h.w) * g_vp.z + (g_frame.w + g_vpo.x) * h.w) * g_vp.x;
         precise float y = -(((h.y - c.y * h.w) * g_vp.w + (g_frame.w + g_vpo.y) * h.w) * g_vp.y);
@@ -762,9 +826,10 @@ float4 vu_cut_position(VuVtx v)
 // vu_cut_position): vu_cut_position_of, except that in a state other than
 // out of the box (VU_F_EXTENDED) a corner in front of the eye (w > 0)
 // whose ftoi4 X and Y are not saturated, whose ftoi4 Z saturated
-// (0x7FFFFFFF), and which has no z clip flag (clipf bits 4 and 5: a
-// scissor program's corner beyond its z planes, which the PS2's
-// SCISSOR_COMMON clips away; 0 in the other programs) takes its GS
+// (0x7FFFFFFF), and which has no clip flag (clipf bits 0 to 5: a scissor
+// program's corner beyond one of its six planes, which the PS2's
+// SCISSOR_COMMON clips away, so no picture of the PS2 has its saturated
+// Z; 0 in the other programs) takes its GS
 // position vtx: the 12.4 X and Y and gs_depth(0x7FFFFFFF), 2^31 * g_z.x
 // (0.5 on D24S8, 0.25 on a float depth buffer), what a triangle drawn
 // exactly gives the same vertex (the region test does not test Z, so a
@@ -786,12 +851,12 @@ float4 vu_cut_position(VuVtx v)
 // every state.
 float4 vu_corner_cut_position(VuVtx v, float4 vtx)
 {
-    uint xyOk = v.gx != 0x7FFFFFFF && v.gx != (int)0x80000000u && v.gy != 0x7FFFFFFF &&
+    uint xyOk = v.gx != 2147483647 && v.gx != (int)0x80000000u && v.gy != 2147483647 &&
                         v.gy != (int)0x80000000u
                     ? 1u
                     : 0u;
-    uint snap = (vu_draw.z & VU_F_EXTENDED) != 0u && v.h.w > 0.0 && v.gz == 0x7FFFFFFF &&
-                        (v.clipf & 0x30u) == 0u
+    uint snap = (vu_draw.z & VU_F_EXTENDED) != 0u && v.h.w > 0.0 && v.gz == 2147483647 &&
+                        v.clipf == 0u
                     ? xyOk
                     : 0u;
     if ((vu_has_gs_position(v) | snap) != 0u) {
@@ -1116,7 +1181,7 @@ VuVSOut vu_out_init()
     o.pos = VU_CULLED;
     o.col = float4(0.0, 0.0, 0.0, 0.0);
     o.stq = float3(0.0, 0.0, 1.0);
-    o.plane = 1.0;
+    o.plane = float2(1.0, 0.0);
     o.a0 = o.a1 = o.x0 = o.x1 = o.y0 = o.y1 = o.r = float4(0.0, 0.0, 0.0, 0.0);
     return o;
 }
@@ -1319,7 +1384,7 @@ VuVSOut vu_pixel_attrs(VuVSOut i)
     precise float4 sp = i.a1 + i.x1 * d.x + i.y1 * d.y;
     i.col = col;
     i.stq = sp.xyz;
-    i.plane = sp.w;
+    i.plane.x = sp.w;
     return i;
 }
 
@@ -1358,7 +1423,7 @@ VuVSOut vu_plane_out(VuVSOut o, VuPlaneTri t, uint kick, uint me)
     o.pos.y = past ? VU_CULLED.y : o.pos.y;
     o.pos.z = past ? VU_CULLED.z : o.pos.z;
     o.pos.w = past ? VU_CULLED.w : o.pos.w;
-    o.plane = me == 0u ? da : (me == 1u ? db : dc);
+    o.plane.x = me == 0u ? da : (me == 1u ? db : dc);
     if (o.r.z == 0.0) {
         return o;
     }
@@ -1381,6 +1446,11 @@ VuVSOut vu_plane_out(VuVSOut o, VuPlaneTri t, uint kick, uint me)
 // card, a free-standing strip (no VU_MARK_JOINED) none of whose
 // triangles passes the region test (vu_strip_card), else VU_RULE_CLIP
 #define VU_RULE_STRIP 3u
+// The side bands (vu_rule_beside): a triangle the rule drops at the draw's
+// own camera (not a card), on a frame wider than the picture, facing the
+// eye: GPU-clipped as VU_RULE_CLIP and drawn only beside the picture
+// (VuVSOut.plane.y 1, vu_pixel_tests)
+#define VU_RULE_CLIP_BESIDE 4u
 
 // The region rule (docs/port/VU1_PROGRAMS.md, "The region rule").
 // On the PS2 any vertex outside the region sets ADC on itself and the next
@@ -1427,7 +1497,31 @@ VuVSOut vu_plane_out(VuVSOut o, VuPlaneTri t, uint kick, uint me)
 // - one with a vertex behind the eye that reaches into the picture: not
 //   drawn in any state (the opening's cliff st26a_p1, filmed from inside):
 //   a game made for a wide picture would not draw geometry behind the eye
-//   either. None is cut at the picture's edge (the waterfall's mist).
+//   either. None is cut at the picture's edge (the waterfall's mist);
+// - last, every triangle the steps above drop (after the card test and,
+//   between two ticks, the ticks' rescue): on a frame wider than the
+//   picture, one facing the eye (vu_front_facing: its winding on the
+//   screen, the matrix's sign, the EE's FLIP mark from its normals) is
+//   drawn clipped as the clipped ones, but only beside the picture
+//   (VU_RULE_CLIP_BESIDE, vu_rule_beside; its pixels in the picture's
+//   columns discarded, vu_pixel_tests): inside the picture the PS2's drop,
+//   beside it no hole (issue 29: the sea at the far left of the old
+//   bridge, walls beside the camera at 48:9).  One facing away keeps the
+//   drop (the opening's cliff, filmed from inside the rock, shows the eye
+//   its back faces).  Not at 4:3 (the frame is the picture), not for a
+//   draw without winding marks (VU_F_NO_BESIDE).
+// The steps above are the PS2's rule with the port's side bands: the
+// escape, [dev] region_rule = ps2.  By default the camera decides
+// (VU_F_CAMERA, in every preset and state, out of the box included): the
+// drops of steps 4 to 6 (a vertex out of range, a card, a corner behind
+// the eye) are the VU's limits, not the camera's, so a triangle they drop
+// is drawn, clipped by the GPU at the native frustum, over the whole frame,
+// when it faces the eye (vu_rule_beside, vu_camera_draws; a grid, with no
+// facing data and open surfaces, whatever way it faces: VU_F_TWO_SIDED).
+// No card test (vu_region_rule_cut), so the verdict is the same in every
+// preset at a given frame.  The one exception: a triangle facing away
+// keeps the drop (ICO never culls back faces, and without the drop the
+// inside of a cliff the camera clips into would cover the view).
 // A drawn triangle with a vertex outside takes code 36's corner rule
 // (vu_corner_cut_position: the GS position where the vertex has one, the
 // homogeneous form of h where it is behind the eye, its X or Y saturated
@@ -1457,7 +1551,9 @@ uint vu_region_rule_cut(VuVtx a, VuVtx b, VuVtx c, VuCutZ z, float4 pic)
         return VU_RULE_CLIP;
     }
 #ifndef ICO_VU_PLAIN
-    if ((vu_draw.z & VU_F_EXTENDED) != 0u && vu_strip.y != 0u &&
+    // the card test: the PS2's rule outside out of the box (not under the
+    // camera rule, where a dropped card that faces the eye is drawn)
+    if ((vu_draw.z & (VU_F_EXTENDED | VU_F_CAMERA)) == VU_F_EXTENDED && vu_strip.y != 0u &&
         min(a.h.w, min(b.h.w, c.h.w)) > 0.0) {
         return VU_RULE_STRIP;
     }
@@ -1538,18 +1634,23 @@ uint vu_tick_shown(VuVtx a, VuVtx b, VuVtx c, uint k, float4 lo, float4 hi, floa
 // a still camera) and under the free camera.  The two ticks are written
 // out (k = 0, then 1, only on this path), each tick's z cut shared by its
 // picture and frame tests (vu_tick_shown).  vu1_ref.h
-// vu1ref_region_between is the CPU mirror.
-uint vu_region_rule(VuVtx a, VuVtx b, VuVtx c, float4 lo, float4 hi)
+// vu1ref_region_between is the CPU mirror.  own: the verdict at the
+// draw's own camera, before the ticks' tail (the side bands read it:
+// vu_rule_beside).
+uint vu_region_rule(VuVtx a, VuVtx b, VuVtx c, float4 lo, float4 hi, out uint own)
 {
+    own = VU_RULE_EXACT;
     if ((a.inside & b.inside & c.inside) != 0u) {
         return VU_RULE_EXACT;
     }
+    own = VU_RULE_CLIP;
     if ((vu_draw.z & VU_F_BEHIND_EYE) != 0u) {
         return VU_RULE_CLIP;
     }
     float4 pic = vu_picture_ndc();
     VuCutZ z = vu_cut_z(vu_cut_position(a), vu_cut_position(b), vu_cut_position(c));
     uint r = vu_region_rule_cut(a, b, c, z, pic);
+    own = r;
     if (r != VU_RULE_DROP || (vu_draw.z & VU_F_TICKS) == 0u) {
         return r;
     }
@@ -1608,6 +1709,112 @@ uint vu_rule_card(uint rule, uint marks, uint kick)
     return VU_RULE_DROP;
 }
 
+// ------------------------------------------------------- the side bands
+// The region rule's last step (docs/port/VU1_PROGRAMS.md "The region
+// rule", step 7; vu1_ref.h vu1ref_region_draw's wide and facing): a
+// triangle the rule drops at the draw's own camera (behind the eye, out of
+// the box) is drawn, GPU-clipped as VU_RULE_CLIP, but only beside the camera's
+// picture (VU_RULE_CLIP_BESIDE: VuVSOut.plane.y 1, its pixels in the
+// picture's columns discarded by vu_pixel_tests) when the frame is wider
+// than the picture and the triangle faces the eye.  Inside the picture
+// the PS2's drop stands, pixel for pixel; beside it the PS2 showed
+// nothing, and a dropped wall or sea there left a hole on a wide frame
+// (issue 29).  A triangle facing away keeps the drop everywhere: the
+// opening's cliff, filmed from inside the rock (st26a_p1), shows its back
+// faces to the eye.  At 4:3 the frame is the picture: never.  A card (the
+// card test's drop at that camera) keeps the drop beside the picture too:
+// the cards the rule drops are the game's screen-sized overlays, mist
+// quads held in front of the camera (stage 32's exit, wf_smoke1, issue
+// 189), which the PS2 never drew in its picture, so drawn only beside it
+// they lit the sides as bars with an edge at the picture's.  A triangle
+// the draw's camera drops and a tick sends to the card test is no card
+// at that camera: beside as before (vu1_ref.h vu1ref_region_between).
+
+// Whether the frame the bound target shows is wider than the camera's
+// picture, 1 or 0: vu_frame_ndc beyond vu_picture_ndc on a side, compared
+// in GS pixels (both map GS X to clip space by the same increasing map,
+// vu_ndc), the frame's edges its centre -+ its half-width (a Full pixel
+// target's less the texels it leaves out, g_vpo.z), the picture's 2048 -+
+// vu_picture_half
+uint vu_frame_wider()
+{
+    precise float c = g_origin.x + g_target.x * 0.5;
+    precise float hf = g_target.x * 0.5;
+    if (g_vp.x != 0.0 && g_vp.z > 0.0) {
+        hf = hf - g_vpo.z / g_vp.z;
+    }
+    const float hp = vu_picture_half().x;
+    precise float fl = c - hf;
+    precise float fr = c + hf;
+    return fl < 2048.0 - hp || fr > 2048.0 + hp ? 1u : 0u;
+}
+
+// 1 when the triangle a, b, c (the corners k-2, k-1, k, in that order)
+// shows its front to the eye (vu1_ref.h vu1ref_region_facing, the same
+// operations in the same order): the homogeneous determinant of the
+// corners' h centred on GS 2048 (rows x - 2048 w, y - 2048 w, w), whose
+// sign is the eye's side of the triangle's plane times the sign of the
+// matrix h is made with, exact across w = 0 (a corner behind the eye),
+// read the other way under VU_F_MIRROR (that sign negative) and under
+// VU_MARK_FLIP (the corners wind against the normals).  Front: det < 0
+// with neither.  An edge-on triangle (det 0) or a NaN is not front.  The
+// forms: scalars, flags as uints.
+uint vu_front_facing(VuVtx a, VuVtx b, VuVtx c, uint marks)
+{
+    precise float ax = a.h.x - 2048.0 * a.h.w;
+    precise float ay = a.h.y - 2048.0 * a.h.w;
+    precise float bx = b.h.x - 2048.0 * b.h.w;
+    precise float by = b.h.y - 2048.0 * b.h.w;
+    precise float cx = c.h.x - 2048.0 * c.h.w;
+    precise float cy = c.h.y - 2048.0 * c.h.w;
+    const float aw = a.h.w, bw = b.h.w, cw = c.h.w;
+    precise float m0 = by * cw - bw * cy;
+    precise float m1 = bx * cw - bw * cx;
+    precise float m2 = bx * cy - by * cx;
+    precise float det = ax * m0 - ay * m1 + aw * m2;
+    const uint neg = det < 0.0 ? 1u : 0u;
+    const uint nz = det < 0.0 || det > 0.0 ? 1u : 0u;
+    const uint mirror = (vu_draw.z & VU_F_MIRROR) != 0u ? 1u : 0u;
+    const uint flip = (marks & VU_MARK_FLIP) != 0u ? 1u : 0u;
+    return (neg + mirror + flip) & nz; // odd: front (no exclusive or in the envelope)
+}
+
+// What becomes of a triangle the PS2's rule drops, given whether it faces
+// the eye at the draw's own camera (front, vu_front_facing, computed once
+// for both): 2 drawn clipped over the whole frame by the camera rule
+// (VU_F_CAMERA: front, or a two-sided draw, VU_F_TWO_SIDED: a grid), 1
+// drawn beside the picture by the side bands (no VU_F_CAMERA: the draw
+// has side bands, no VU_F_NO_BESIDE, and the frame is wider than the
+// picture, vu_frame_wider), 0 dropped
+uint vu_drop_fate(uint front)
+{
+    if ((vu_draw.z & VU_F_CAMERA) != 0u) {
+        const uint two = (vu_draw.z & VU_F_TWO_SIDED) != 0u ? 1u : 0u;
+        return (front | two) != 0u ? 2u : 0u;
+    }
+    if ((vu_draw.z & VU_F_NO_BESIDE) != 0u) {
+        return 0u;
+    }
+    return vu_frame_wider() & front;
+}
+
+// The rule's last step on its final verdict (after vu_rule_card and,
+// between two ticks, the ticks' rescue).  Under the camera rule
+// (VU_F_CAMERA) a final drop is drawn clipped over the whole frame when
+// vu_camera_draws says so, else it stays dropped (the inside of a cliff the
+// camera clips into: the one exception).  Else the side bands (the PS2's
+// drops, [dev] region_rule = ps2); own: the verdict at the draw's own
+// camera (vu_region_rule), the card test's (VU_RULE_STRIP) keeping the
+// drop
+uint vu_rule_beside(uint rule, uint own, VuVtx a, VuVtx b, VuVtx c, uint marks)
+{
+    if (rule != VU_RULE_DROP || ((vu_draw.z & VU_F_CAMERA) == 0u && own == VU_RULE_STRIP)) {
+        return rule;
+    }
+    const uint fate = vu_drop_fate(vu_front_facing(a, b, c, marks));
+    return fate == 2u ? VU_RULE_CLIP : (fate == 1u ? VU_RULE_CLIP_BESIDE : VU_RULE_DROP);
+}
+
 // The triangle k-2, k-1, k: what the GS draws of it (vu_triangle_out),
 // without the planes; exact 1: every corner drawn at its GS position.
 // Each position the corner can take is computed once (pme its
@@ -1640,10 +1847,10 @@ VuVSOut vu_triangle_out_pos(VuVtx a, VuVtx b, VuVtx c, VuVtx me, uint mode, uint
         // reflection pass, 38) would fail or pass GEQUAL wholesale as the
         // camera moves.  A vertex whose X or Y the 16-bit wrap would change
         // keeps the wrapped GS value.
-        at = (me.gx & 0xFFFF) != me.gx || (me.gy & 0xFFFF) != me.gy ? 3u : 1u;
-        exact = (a.gx & 0xFFFF) == a.gx && (a.gy & 0xFFFF) == a.gy && (b.gx & 0xFFFF) == b.gx &&
-                        (b.gy & 0xFFFF) == b.gy && (c.gx & 0xFFFF) == c.gx &&
-                        (c.gy & 0xFFFF) == c.gy
+        at = (me.gx & 65535) != me.gx || (me.gy & 65535) != me.gy ? 3u : 1u;
+        exact = (a.gx & 65535) == a.gx && (a.gy & 65535) == a.gy && (b.gx & 65535) == b.gx &&
+                        (b.gy & 65535) == b.gy && (c.gx & 65535) == c.gx &&
+                        (c.gy & 65535) == c.gy
                     ? 1u
                     : 0u;
     } else if (mode == VU_CLIP_REGION) {
@@ -1651,7 +1858,7 @@ VuVSOut vu_triangle_out_pos(VuVtx a, VuVtx b, VuVtx c, VuVtx me, uint mode, uint
         if (rule == VU_RULE_EXACT) {
             at = 1u;
             exact = 1u;
-        } else if (rule == VU_RULE_CLIP) {
+        } else if (rule == VU_RULE_CLIP || rule == VU_RULE_CLIP_BESIDE) {
             at = 2u;
             exact = gsPos;
         }
@@ -1673,6 +1880,17 @@ VuVSOut vu_triangle_out_pos(VuVtx a, VuVtx b, VuVtx c, VuVtx me, uint mode, uint
             // z = -w: that would need SV_ClipDistance)
             at = 2u;
             exact = gsPos;
+        } else if (gsPos == 0u) {
+            // only x/y flags, a corner without its GS position (its ftoi4 Z
+            // saturated, within about 8 units of the eye): the VU cuts the
+            // triangle at its guard band, so the PS2's fans have that
+            // corner's true depth, not 0x7FFFFFFF, which drawn as it is
+            // pulled the triangle's depth far behind the true one (the
+            // main gate's bottom rail beside the 48:9 picture lost to the
+            // stone sill behind it); the GPU clips it, the corner in the
+            // homogeneous form (vu_corner_cut_position: a flagged corner
+            // is never snapped)
+            at = 2u;
         } else {
             // only x/y flags: the VU clips to its guard band (the 1500 unit
             // clip window, wider than any target), the GS scissor does the
@@ -1813,7 +2031,7 @@ VuVSOut vu_fused_out(VuVSOut o, uint mode)
         o.r.w = fused != 0u ? 1.0 : 0.0;
         // (1 or 0 each: flags combined after they are computed are uints)
         const uint mark = fused & (vu_batch.z == 0u ? 1u : 0u);
-        o.plane = mark != 0u ? -1.0 : o.plane;
+        o.plane.x = mark != 0u ? -1.0 : o.plane.x;
     }
 #endif
     return o;
@@ -1830,10 +2048,13 @@ VuVSOut vu_mesh_out(VuVtx a, VuVtx b, VuVtx c, uint kick, uint corner, uint mark
     VuVtx me = vu_pick(a, b, c, corner);
     uint rule = VU_RULE_EXACT;
     if (mode == VU_CLIP_REGION) {
-        rule = vu_rule_card(vu_region_rule(a, b, c, lo, hi), marks, kick);
+        uint own;
+        rule = vu_region_rule(a, b, c, lo, hi, own);
+        rule = vu_rule_beside(vu_rule_card(rule, marks, kick), own, a, b, c, marks);
     }
     uint exact;
     VuVSOut o = vu_triangle_out_pos(a, b, c, me, mode, rule, exact);
+    o.plane.y = rule == VU_RULE_CLIP_BESIDE ? 1.0 : 0.0; // the side bands' pixels
     VuPlaneTri t = vu_plane_tri(a, b, c);
     o = vu_attr_planes(o, t, a, b, c, exact);
     if (chain) {
@@ -1851,7 +2072,25 @@ VuVSOut vu_mesh_out(VuVtx a, VuVtx b, VuVtx c, uint kick, uint corner, uint mark
 // floats as their bits: plane 0 h; plane 1 p.x, p.y, GS Z, RGBA (a byte a
 // channel, R lowest); plane 2 S, T, Q and the flags (bit 0 inside, bit 1
 // gsOk, bits 2..7 clipf).  GS X and Y are vu_divide's vu_ftoi4 of p.
+#ifdef ICO_VU_REC_STORES
+// The store builds (ICO_VU_REC_STORES: vu_X_store_pre_vs and
+// vu_X_batch_store_pre_vs, docs/port/PIPELINES.md "The record stages"):
+// the pre-pass's points write their record words straight into the frame
+// slot's record buffer, bound writable at u6 (rd_vu_record.c layoutVuPre:
+// the six slots of group 1 but t4, and u6), plane k of slot t at k *
+// vu_rec.y + t, the layout the targets' copies give (rd_replay_vu.c
+// vuRecPassEnd), so the readers below and the main shaders are the same.
+// The record stages of pass T read the vertex records through the same
+// binding (Direct3D 12 cannot bind a resource's SRV and UAV in one pass;
+// in Vulkan both are storage buffer descriptors).  Under robust buffer
+// access off a store past the buffer is undefined, so each store is held
+// to the record's planes (t < vu_rec.y), as the targets' viewport held a
+// point to the texture.
+RWStructuredBuffer<uint4> vu_rec_out : ICO_REG(u6, 1);
+#define vu_rec_buf vu_rec_out
+#else
 StructuredBuffer<uint4> vu_rec_buf : ICO_REG(t4, 1);
+#endif
 
 // Vertex v of the draw as the pre-pass recorded it (vu_rec.x + v, a
 // texel of each plane, vu_rec.y texels apart)
@@ -1877,7 +2116,100 @@ VuVtx vu_rec_vertex(uint v)
 
 // The pre-pass's point: vertex vu_rec.z + id at its record texel
 // (vu_rec.x + vu_rec.z + id), a pixel of the VU_REC_W x vu_rec.y / VU_REC_W
-// targets (the viewport the replay sets), the record as flat varyings
+// targets (the viewport the replay sets), the record as flat varyings.
+// The store builds write the record (vu_rec_store) and return a position
+// outside the clip volume: the pipeline has no rasterization
+// (RhiPipelineDesc.noRaster), and a backend that rasterised anyway would
+// draw nothing
+#ifdef ICO_VU_REC_STORES
+#ifdef ICO_VU_REC_COMPUTE
+// The compute builds (ICO_VU_REC_COMPUTE: vu_X_compute_pre_cs and
+// vu_X_batch_compute_pre_cs; rd_vu_record.c, the record written by compute
+// dispatches where the vertex shaders cannot store, issue 179): each entry
+// below is called as a function by its compute entry (VU_PRE_CS), one
+// invocation a point, so VuPreOut is a plain value nothing reads; the
+// stores (vu_rec_store, vu_rec_lane_store) are the store builds' own, the
+// same words at the same places
+struct VuPreOut {
+    float4 pos;
+    float size;
+};
+#else
+struct VuPreOut {
+    float4 pos : SV_Position;
+#ifdef __spirv__
+    [[vk::builtin("PointSize")]] float size : PSIZE;
+#endif
+};
+#endif
+
+// slot t's three planes (k * vu_rec.y + t), inside the record
+VuPreOut vu_rec_store(uint t, uint4 r0, uint4 r1, uint4 r2)
+{
+    if (t < vu_rec.y) {
+        vu_rec_out[t] = r0;
+        vu_rec_out[vu_rec.y + t] = r1;
+        vu_rec_out[vu_rec.y * 2u + t] = r2;
+    }
+    VuPreOut o;
+    o.pos = float4(2.0, 2.0, 0.0, 1.0);
+#ifdef __spirv__
+    o.size = 1.0;
+#endif
+    return o;
+}
+
+// The tick stage's word (slot C, plane 0): lane x for tick 0, y for tick 1
+// (vu_tri.w), one 32-bit store, as the colour mask R or G wrote one channel
+// of the target (the other tick's draw writes the other lane, in the same
+// pass and without a barrier between them, so the store is of the lane
+// alone, never of the whole texel)
+VuPreOut vu_rec_lane_store(uint t, uint lane, uint s)
+{
+    if (t < vu_rec.y) {
+        if (lane == 0u) {
+            vu_rec_out[t].x = s;
+        } else {
+            vu_rec_out[t].y = s;
+        }
+    }
+    VuPreOut o;
+    o.pos = float4(2.0, 2.0, 0.0, 1.0);
+#ifdef __spirv__
+    o.size = 1.0;
+#endif
+    return o;
+}
+
+VuPreOut vu_pre_out(uint id, VuVtx v)
+{
+    uint t = vu_rec.x + vu_rec.z + id;
+    uint4 r0 = asuint(v.h);
+    uint4 r1 = uint4(asuint(v.p.x), asuint(v.p.y), asuint(v.gz),
+                     v.rgba.x | (v.rgba.y << 8) | (v.rgba.z << 16) | (v.rgba.w << 24));
+    uint4 r2 = uint4(asuint(v.stq.x), asuint(v.stq.y), asuint(v.stq.z),
+                     v.inside | (v.gsOk << 1) | (v.clipf << 2));
+    return vu_rec_store(t, r0, r1, r2);
+}
+
+#ifdef ICO_VU_REC_COMPUTE
+// A pre-pass entry vs (vu_X_pre_vs) as the compute entry cs: invocation
+// t.x of the dispatch is the point SV_VertexID t.x of the store build's
+// draw, 64 to a group.  The dispatch's point count is g_aux0.z of its
+// DrawCB (rd_replay_vu.c vuStageDraw, preBatchDraw: the groups cover it
+// rounded up to 64); the spare invocations of the last group return
+// before the entry runs, ahead of VU_PRE_ENTRY's search (a batch build
+// clamps a vertex past its table to the last entry, whose slots a spare
+// invocation would then write again) and of any store
+#define VU_PRE_CS(cs, vs)                                                                          \
+    [numthreads(64, 1, 1)] void cs(uint3 t : SV_DispatchThreadID)                                  \
+    {                                                                                              \
+        if (t.x < g_aux0.z) {                                                                      \
+            vs(t.x);                                                                               \
+        }                                                                                          \
+    }
+#endif
+#else
 struct VuPreOut {
     float4 pos : SV_Position;
     VK_LOC(0) nointerpolation uint4 r0 : TEXCOORD0;
@@ -1908,6 +2240,7 @@ VuPreOut vu_pre_out(uint id, VuVtx v)
 #endif
     return o;
 }
+#endif
 
 // ------------------------------------------------- the record stages
 // The triangle pre-pass (docs/port/RENDER.md, "The vertex and triangle
@@ -1950,8 +2283,18 @@ VuPreOut vu_pre_out(uint id, VuVtx v)
 #define VU_TF_GSPOS 4096u   // every corner at its GS position (vu_has_gs_position)
 #define VU_TF_WRAP 8192u    // clip mode none: no corner's X or Y changed by the 16-bit wrap
 #define VU_TF_KEPT 16384u   // a sprite the port draws (vu_particle_vs's drop verdict)
+#define VU_TF_BESIDE 32768u // a drop would be drawn beside the picture (vu_drop_fate 1; region mode)
+#define VU_TF_CAMERA 65536u // a drop the camera rule draws (vu_drop_fate 2; region mode)
+#define VU_TF_ZERO 131072u  // the zero-area builds: no sample point covered (vu_tri_zero; with HIDDEN)
 
-// A record stage's point: texel t of the three planes (vu_pre_out's mapping)
+// A record stage's point: texel t of the three planes (vu_pre_out's mapping;
+// the store builds: vu_rec_store)
+#ifdef ICO_VU_REC_STORES
+VuPreOut vu_rec_point_out(uint t, uint4 r0, uint4 r1, uint4 r2)
+{
+    return vu_rec_store(t, r0, r1, r2);
+}
+#else
 VuPreOut vu_rec_point_out(uint t, uint4 r0, uint4 r1, uint4 r2)
 {
     VuPreOut o;
@@ -1967,6 +2310,7 @@ VuPreOut vu_rec_point_out(uint t, uint4 r0, uint4 r1, uint4 r2)
 #endif
     return o;
 }
+#endif
 
 // The anchor's RGBA (VuVSOut.a0: integers 0..255) as bytes, R lowest
 uint vu_rec_pack_rgba(float4 c)
@@ -2193,11 +2537,13 @@ DualOut vu_dual_out_f(float4 col, uint flags, uint fix VU_FUSED_ARG)
 // clip plane's draw, and under one a negative plane's pixel is discarded
 // before this)
 #if defined(ICO_NO_DUAL) && defined(ICO_VU_NO_PLANES)
-#define VU_RETURN(col, i) return vu_dual_out_f(col, g_mode.x, g_blend.y, i.plane < 0.0 ? 1.0 : 0.0)
+#define VU_RETURN(col, i)                                                                          \
+    return vu_dual_out_f(col, g_mode.x, g_blend.y, i.plane.x < 0.0 ? 1.0 : 0.0)
 #elif defined(ICO_NO_DUAL)
 #define VU_RETURN(col, i) return vu_dual_out_f(col, g_mode.x, g_blend.y, i.r.w)
 #elif defined(ICO_VU_NO_PLANES)
-#define VU_RETURN(col, i) return vu_dual_out_f(col, g_mode.x, g_blend.y, i.plane < 0.0 ? 1.0 : 0.0)
+#define VU_RETURN(col, i)                                                                          \
+    return vu_dual_out_f(col, g_mode.x, g_blend.y, i.plane.x < 0.0 ? 1.0 : 0.0)
 #else
 // A pixel of a fused pair's kick (fused not 0: VU_F_FUSED, VuVSOut.r.w or
 // the twins' negative plane),
@@ -2236,7 +2582,7 @@ DualOut vu_dual_out_fused(float4 col, uint flags, uint fix, float fused)
 // is what the kick's own pass (no GS blending: RdDrawPass.csOnly, the
 // register 0x00) stores, byte for byte
 #ifdef ICO_VU_NO_PLANES
-#define VU_RETURN(col, i) return gs_dst_out_reg(uint4(col), i.plane < 0.0 ? 0u : g_blend.x)
+#define VU_RETURN(col, i) return gs_dst_out_reg(uint4(col), i.plane.x < 0.0 ? 0u : g_blend.x)
 #else
 #define VU_RETURN(col, i) return gs_dst_out_reg(uint4(col), i.r.w != 0.0 ? 0u : g_blend.x)
 #endif
@@ -2263,7 +2609,7 @@ struct VuPSIn {
     float4 pos : SV_Position;
     VK_LOC(0) noperspective float4 col : COLOR0;
     VK_LOC(1) noperspective float3 stq : TEXCOORD0;
-    VK_LOC(2) noperspective float plane : TEXCOORD1;
+    VK_LOC(2) noperspective float2 plane : TEXCOORD1;
 };
 
 VuPSIn vu_pixel_in(VuPSIn i)
@@ -2279,10 +2625,63 @@ VuPSIn vu_pixel_in(VuPSIn i)
 }
 #endif
 
-// The clip plane's and DATE's discards
+// Whether the pixel at pos (SV_Position) lies in the camera's picture's
+// columns (vu_picture_half: GS 2048 -+ g_frame.y), which a triangle drawn
+// beside the picture (VuVSOut.plane.y, VU_RULE_CLIP_BESIDE) leaves to the
+// PS2's rule.  Under the exact viewport the pixel's offset from the
+// target's centre in texels (gs_plane_offset's: pixel centres k + 0.5, the
+// centre a whole or half texel) against the band's edges in the same
+// texels (gs_texel_offset, the planes' corners' mapping).  That mapping
+// puts a GS integer coordinate on a texel's centre (g_frame.w, the GS's
+// pixel-centre convention), so the band's left edge, GS 2048 - h, is the
+// centre of its first column: the band is lo <= q < hi, the columns the
+// 4:3 frame's own texels are (with the half texel off, g_frame.w 0, the
+// edges fall between centres and the same test holds).  The plain mapping
+// (the shader tests): the pixel's GS X from the texel, g_z.y texels a GS
+// pixel (0: 1), the same half-open range.  A jittered frame's scene-class
+// pass (common.hlsli g_jitter, in the exact viewport's offset) moved the
+// triangle's corners by the jitter: the pixel is tested at its jittered GS
+// position, its offset less the jitter (0 elsewhere: the same test).
+bool vu_pixel_in_picture(float4 pos)
+{
+    const float h = vu_picture_half().x;
+    if (g_vp.x != 0.0) {
+        precise float c = g_target.x * g_vp.z * 0.5 - g_vpo.z;
+        precise float q = pos.x - c - g_jitter.x;
+        const float lo = gs_texel_offset(float2(2048.0 - h, 2048.0)).x;
+        const float hi = gs_texel_offset(float2(2048.0 + h, 2048.0)).x;
+        return q >= lo && q < hi;
+    }
+    const float k = g_z.y > 0.0 ? g_z.y : 1.0;
+    precise float x = pos.x / k + g_origin.x - g_origin.z;
+    return x >= 2048.0 - h && x < 2048.0 + h;
+}
+
+// The clip plane's, the side bands' and DATE's discards.  The discard-free
+// twins (ICO_VU_NODISCARD: vu_ps_nodual_nd, vu_texa_ps_nodual_nd, the
+// *_nodual builds with no discard at all; port/render/rd_nodiscard.h) have
+// none of these nor the alpha test's below: the renderer gives them only a
+// pass it proved none of them can fire for (no clip plane, no DATE, no side
+// band, the alpha test off in the pass), so a draw through a twin writes
+// what the *_nodual build writes, pixel for pixel
 void vu_pixel_tests(VuPSIn i)
 {
-    if ((g_mode.x & DF_PLANE) != 0u && i.plane < 0.0) {
+#ifndef ICO_VU_NODISCARD
+    if ((g_mode.x & DF_PLANE) != 0u && i.plane.x < 0.0) {
+        GS_DISCARD;
+    }
+    // a triangle drawn beside the picture: none of its pixels inside it,
+    // where the PS2 dropped it (written nowhere: no colour, depth or
+    // stencil, as the drop).  A flag that is not a number counts as
+    // beside: Mesa's software clipper (llvmpipe, lavapipe:
+    // draw_pipe_clip.c interp) takes a noperspective varying's factor at a
+    // new corner as (dst - out) / (in - out) of the corners' divided x or
+    // y, which is not finite where those coincide, and then every varying
+    // of that part of the triangle is NaN: on fx-drops-4657 a floor
+    // triangle with corners behind the eye drew colour 0 in the band, its
+    // flag failing the test above.  A GPU whose interpolation keeps the
+    // constant gives 1 or 0, and nothing changes there
+    if (!(i.plane.y < 0.5) && vu_pixel_in_picture(i.pos)) {
         GS_DISCARD;
     }
     if ((g_mode.x & DF_DATE) != 0u) {
@@ -2290,6 +2689,7 @@ void vu_pixel_tests(VuPSIn i)
             GS_DISCARD;
         }
     }
+#endif
 }
 
 // sprite_ps with STQ: the texel at S/Q, T/Q (the texture is padded to
@@ -2308,9 +2708,11 @@ float4 vu_pixel(VuPSIn i)
         t = vu_texa_expand_f(t, g_mode.y & 0xFFu, g_mode.y >> 8);
         col = vu_texture_function_f(t, col, g_mode.x);
     }
+#ifndef ICO_VU_NODISCARD
     if (gs_alpha_discard(g_mode.z, g_mode.w, uint(col.a))) {
         GS_DISCARD;
     }
+#endif
     return col;
 }
 
@@ -2329,9 +2731,11 @@ float4 vu_pixel_texa(VuPSIn i)
                       : gs_texa_texture(g_texture, g_sampler, uv, g_mode.x);
         col = vu_texture_function_f(float4(t), col, g_mode.x);
     }
+#ifndef ICO_VU_NODISCARD
     if (gs_alpha_discard(g_mode.z, g_mode.w, uint(col.a))) {
         GS_DISCARD;
     }
+#endif
     return col;
 }
 

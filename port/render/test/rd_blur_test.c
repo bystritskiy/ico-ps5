@@ -142,6 +142,18 @@
  *      rd_blur_aura_box_test.inc says what): x's frames at Enhanced 2x, the
  *      phone's 2364 x 1080 and 1.5x, with the two-pass form off and on:
  *      FEED128 the same bytes every frame, SCENE and DISPLAY too.
+ *   k  the glow's mask folded into its reduction (rd_glow_fold.c;
+ *      rd_blur_glow_fold_test.inc says what): post modes 1..7 without the
+ *      shine at 1x, 2x, the phone's 2364 x 1080 and its 848-pixel frame with
+ *      Full pixel, drawn with the fold and replayed without it: every target
+ *      but WORK2 the same bytes, at 1x and 2x the CPU model's both ways;
+ *      the scan on a recorded frame in (r); post mode 7 not forced: folded
+ *      exactly where the device profile's glow fold is on (off on the
+ *      tile-based classes; rd_blur_glow_fold_tile and _tile_on run the case
+ *      alone, --only glow_fold, under ICO_VK_FAKE_LIMITS=moltenvk with
+ *      --glow-fold-default off and, with ICO_RD_GLOW_FOLD=1, on).  Where a
+ *      replay folds, WORK2 is not compared (the fold leaves it undrawn) in
+ *      any case.
  * Tolerance 0 everywhere (but q's scaled runs and s).  Every pipeline created is enumerated; no
  * validation errors; no stubbed command replayed. */
 #include <math.h>
@@ -151,6 +163,7 @@
 #include <string.h>
 
 #include "rd_internal.h"
+#include "rd_lamps.h"
 #include "shader_consts.h"
 #include "vk/rhi_vk.h"
 /* the game's side */
@@ -353,10 +366,15 @@ void CopyVector(float *d, float *s)
     memcpy(d, s, 16);
 }
 
-/* the sun fans: Primitive.c is not linked; they draw nothing here */
+/* the sun fans: Primitive.c is not linked; they draw nothing here, but
+   with s_fanWork2 (case (k), the glow fold) each draws an untextured
+   sprite of its colour and radius over the frame's centre into WORK2, the
+   target dispSun draws them into, between the glow's fill and its mask */
 static Fan2D s_fan;
 
-static int s_fanDraws;
+static int s_fanDraws, s_fanWork2;
+static float s_fanR;
+static unsigned int s_fanCol;
 
 Fan2D *prim_InitFan2D(int n, float r, float *pos, unsigned int cc, unsigned int rc)
 {
@@ -366,13 +384,44 @@ Fan2D *prim_InitFan2D(int n, float r, float *pos, unsigned int cc, unsigned int 
 
 void prim_SetFan2D(Fan2D *f, float r, float *pos, unsigned int cc, unsigned int rc)
 {
-    (void)f, (void)r, (void)pos, (void)cc, (void)rc;
+    (void)f, (void)pos, (void)rc;
+    s_fanR = r;
+    s_fanCol = cc;
 }
 
 void prim_DispFan2D(Fan2D *f, int mode)
 {
     (void)f, (void)mode;
     s_fanDraws++;
+    if (!s_fanWork2) {
+        return;
+    }
+    rd_set_target(rd_target(RD_TARGET_WORK2), rd_target(RD_TARGET_SCENE), (uint32_t)gsFrame.w,
+                  (uint32_t)ScreenHeight, 0);
+    rd_test_gs(0x30000);
+    rd_z_write(0);
+    rd_abe(0);
+    rd_fba(0);
+    rd_pabe(0);
+    rd_texture_off();
+    rd_gouraud(0);
+    RdPostParams p;
+    memset(&p, 0, sizeof(p));
+    const float r16 = s_fanR * 16.0f;
+    /* s_fanWork2 2 (case glow_light): the fan beside the frame, off the
+       picture, as dispSun draws it for a sun just outside the view */
+    const float dx = s_fanWork2 == 2 ? (float)(gsFrame.w + 64) * 16.0f : 0.0f;
+    p.rect[0] = 32768.0f - r16 + dx;
+    p.rect[1] = 32768.0f - r16;
+    p.rect[2] = 32768.0f + r16 + dx;
+    p.rect[3] = 32768.0f + r16;
+    p.rgba[0] = (uint8_t)(s_fanCol >> 24);
+    p.rgba[1] = (uint8_t)(s_fanCol >> 16);
+    p.rgba[2] = (uint8_t)(s_fanCol >> 8);
+    p.rgba[3] = (uint8_t)s_fanCol;
+    p.scalar[0] = p.scalar[1] = 1024.0f;
+    p.scalar[2] = 1.0f;
+    rd_post(RD_POST_FLARE, &p);
 }
 
 /* the EE word arena (eeword.h) */
@@ -1692,6 +1741,9 @@ static int compareAll(const char *what, int verbose)
             free(s_gpu);
             s_gpuSize = cpuMaxBytes();
             s_gpu = malloc(s_gpuSize);
+        }
+        if (kCompared[k] == RD_TARGET_WORK2 && g_rdPerf.glowFolded) {
+            continue; /* the glow fold leaves WORK2 undrawn: the reduction's WORK0 is compared */
         }
         if (!rd__read_target(rd_target((RdTargetId)kCompared[k]), s_gpu, s_gpuSize, &w, &h) ||
             (int)w != c->w || (int)h != c->h) {
@@ -3785,6 +3837,38 @@ static void checkBlurFoldWide(void)
         const int dOff = compareAll(again, failures < 10);
         CHECK(off == 0, "%s: %u pairs folded", again, off);
 
+        /* the same frame, two pairs a pass where they fold (rd_lamps.c
+         * RD_LAMPS_FOLD4, fx_blur4_ps behind its self-test; on to the end of
+         * the width, the strip-off run below with it): the model's
+         * bytes, the same pairs folded, nine folded pairs four passes of two
+         * (pairs 1-8; the ninth's next is the chain's last), eight three or
+         * four (the pair the next-pair rule refuses splits a run) */
+        g_rd.profile.blurFold = true;
+        rd__lamps_force((int)RD_LAMPS_FOLD4);
+        (void)rd__blur_fold4_selftest();
+        const char *f4words = NULL;
+        const int f4state = rd__blur_fold4_test_state(&f4words);
+        CHECK(f4state == 1 || !g_rd.fs[RD_FS_FX_BLUR4].id,
+              "%s: the fold of two pairs' self-test: %s", what, f4words);
+        uint32_t f4 = 0, f4pairs = 0;
+        int d4 = 0;
+        if (f4state == 1) {
+            snprintf(again, sizeof(again), "%s, two pairs a pass", what);
+            rhi_wait_idle();
+            CHECK(rd__replay_frame(f, 0, false), "%s: replay", again);
+            rhi_wait_idle();
+            f4 = g_rdPerf.lampsFold4;
+            f4pairs = g_rdPerf.blurFolds;
+            d4 = compareAll(again, failures < 10);
+            CHECK(f4pairs == kF[r].folds, "%s: %u pairs folded, %u expected", again, f4pairs,
+                  kF[r].folds);
+            CHECK(kF[r].folds == 9u ? f4 == 4u : (f4 >= 3u && f4 <= 4u),
+                  "%s: %u passes of two pairs (want %s)", again, f4,
+                  kF[r].folds == 9u ? "4" : "3 or 4");
+        }
+        printf("  %s: %u passes of two pairs, %u pairs folded (max difference %d)\n", what, f4,
+               f4pairs, d4);
+
         /* the strip off: the true pairs are refused on a wide frame */
         g_rd.profile.blurFold = true;
         rd__set_glow_edge_fill(false);
@@ -3806,7 +3890,8 @@ static void checkBlurFoldWide(void)
         printf("  %s: %u pairs folded (max difference %d), %u with the fold off (%d), %u without "
                "the glow's edge strip (%d)\n",
                what, on, dOn, off, dOff, bare, dBare);
-        checkPipelines(); /* the fold's key enumerated while the profile folds */
+        checkPipelines(); /* the fold's keys enumerated while the profile folds (and two pairs) */
+        rd__lamps_force(-1);
         CHECK(rhi_vk_validation_error_count() == 0, "%s: %u validation errors", what,
               rhi_vk_validation_error_count());
         g_rd.profile.blurFold = was;
@@ -4009,6 +4094,8 @@ static void checkPipelines(void)
 }
 
 #include "rd_blur_aura_box_test.inc"
+#include "rd_blur_glow_fold_test.inc"
+#include "rd_blur_glow_light_test.inc"
 
 /* the weights are each case's seconds in a whole run (255 s at -j2 on 4 cores); the
    aura case (600 frames, each fed by the one before) is the shortest a shard can be */
@@ -4038,6 +4125,8 @@ static const IcoShardCase k_cases[] = {
     {"effects_scaled", 4},
     {"motion_blur_smooth_scaled", 2},
     {"aura_box", 30},
+    {"glow_fold", 40},
+    {"glow_light", 20},
 };
 
 int main(int argc, char **argv)
@@ -4045,7 +4134,22 @@ int main(int argc, char **argv)
     if (ico_shard_start(argc, argv, k_cases, ICO_SHARD_COUNT(k_cases))) {
         return ico_shard_exit();
     }
+    for (int i = 1; i + 1 < argc; i++) {
+        /* the glow fold's default the run expects (the tile twins;
+           rd_blur_glow_fold_test.inc) */
+        if (strcmp(argv[i], "--glow-fold-default") == 0) {
+            s_gfExpect = strcmp(argv[i + 1], "on") == 0 ? 1 : 0;
+        }
+    }
     rd__set_not_implemented_fatal(true); /* a stub command replayed stops the test */
+    /* the glow's light plan off but in its own case (glow_light): every other
+       case compares the glow's buffers with the CPU model in every channel,
+       and the plan may change their alpha (rd_blur_glow_light_test.inc) */
+    rd__glow_light_force(0);
+    /* the glow's chain as the game draws it in every case (the CPU GS model
+       is its reference): the glow blur in two passes pinned off whatever the
+       build's RD_GLOW_BLUR_DEFAULT (rd_glow_blur.c, DIVERGENCES.md VD-33) */
+    rd__lamps_glowblur_pin(true);
     printf("rd_blur_test\n");
     setMatrices();
     systemStatus[0] = 1; /* PAL: 512 lines */
@@ -4095,6 +4199,7 @@ int main(int argc, char **argv)
               eye);
         CHECK(date == 1, "the backlight subtract into SCENE with DATE (DATM 0): %d", date);
     }
+    checkGlowFoldPlan(rd__last_frame()); /* the glow fold's scan (rd_blur_glow_fold_test.inc) */
     InitializeStaticBlur();
     checkRecordingMotionBlur(448);
     checkRecordingMotionBlur(512);
@@ -4206,6 +4311,12 @@ int main(int argc, char **argv)
     }
     if (ico_shard_take("aura_box")) {
         checkAuraBox(); /* re-initialises rd (Enhanced 2x, 2364x1080, 1.5x; rd_blur_aura_box_test.inc) */
+    }
+    if (ico_shard_take("glow_fold")) {
+        checkGlowFold(); /* re-initialises rd (1x, 2x, 2364x1080, the 848 frame; rd_blur_glow_fold_test.inc) */
+    }
+    if (ico_shard_take("glow_light")) {
+        checkGlowLight(); /* re-initialises rd (1x, 2x, 2364x1080; rd_blur_glow_light_test.inc) */
     }
     if (ico_shard_finish() != 0) {
         return 1;

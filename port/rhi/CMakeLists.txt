@@ -99,7 +99,11 @@ target_include_directories(rhi_d3d11_shader_plan_test PRIVATE "${CMAKE_CURRENT_S
                            "${CMAKE_CURRENT_SOURCE_DIR}/test/shaders")
 target_compile_definitions(rhi_d3d11_shader_plan_test PRIVATE
     ICO_RHI_TEST_SHADER_DIR="${CMAKE_CURRENT_SOURCE_DIR}/test/shaders"
-    ICO_GAME_SHADER_DIR="${CMAKE_SOURCE_DIR}/port/shaders")
+    ICO_GAME_SHADER_DIR="${CMAKE_SOURCE_DIR}/port/shaders"
+    # the vendored shader headers the sources include by base name
+    # (cmake/IcoShaders.cmake ICO_SHADER_THIRD_PARTY_DIRS; the Direct3D 11
+    # sources embed them too)
+    ICO_GAME_SHADER_THIRD_PARTY_DIR="${CMAKE_SOURCE_DIR}/port/third_party/fsr1")
 target_compile_options(rhi_d3d11_shader_plan_test PRIVATE ${ICO_SEMANTIC_OPTIONS}
                        ${ICO_PORT_WARNINGS})
 # the table's entries (hlslFile and defines are in every table; the sources
@@ -128,6 +132,17 @@ if(ICO_RUN_TESTS)
     add_test(NAME rhi_gl_glsl COMMAND rhi_gl_glsl_test)
 endif()
 
+# --- The OpenGL backend's fence wait with a limit (CPU only, every target) -----
+# gl/gl_sync_wait.c: gl_device.c's gl_wait_sync held to the GPU hang limit
+# in slices with the window's pump between them, on a stub fence and a fake
+# clock (rhi_gl_sync_wait_test.c).
+add_executable(rhi_gl_sync_wait_test test/rhi_gl_sync_wait_test.c gl/gl_sync_wait.c)
+target_include_directories(rhi_gl_sync_wait_test PRIVATE "${CMAKE_CURRENT_SOURCE_DIR}")
+target_compile_options(rhi_gl_sync_wait_test PRIVATE ${ICO_SEMANTIC_OPTIONS} ${ICO_PORT_WARNINGS})
+if(ICO_RUN_TESTS)
+    add_test(NAME rhi_gl_sync_wait COMMAND rhi_gl_sync_wait_test)
+endif()
+
 # --- The driver version text (CPU only, every target) -----------------------
 # rhi_driver_version.c: a Vulkan driverVersion as the vendor writes it (the
 # adapter line of vk_device.c).
@@ -138,6 +153,106 @@ target_compile_options(rhi_driver_version_test PRIVATE ${ICO_SEMANTIC_OPTIONS}
 if(ICO_RUN_TESTS)
     add_test(NAME rhi_driver_version COMMAND rhi_driver_version_test)
 endif()
+
+# --- The render pass driver row (CPU only, every target) ---------------------
+# rhi_pass_row.c: the drivers whose render passes are VkRenderPass objects
+# although they offer dynamic rendering (Intel's Windows driver at Vulkan
+# 1.3.215 or older), and the [dev] legacy_passes override's words
+# (vk_device.c vkr_pass_row_apply).
+add_executable(rhi_vk_pass_row_test test/rhi_vk_pass_row_test.c rhi_pass_row.c)
+target_include_directories(rhi_vk_pass_row_test PRIVATE "${CMAKE_CURRENT_SOURCE_DIR}")
+target_compile_options(rhi_vk_pass_row_test PRIVATE ${ICO_SEMANTIC_OPTIONS} ${ICO_PORT_WARNINGS})
+if(ICO_RUN_TESTS)
+    add_test(NAME rhi_vk_pass_row COMMAND rhi_vk_pass_row_test)
+endif()
+
+# --- No global queue priority asked (a source scan, every target) ------------
+# rhi_vk_qprio_source (test/rhi_qprio_source.cmake): no source or header
+# under port/ names the structure that asks a global priority for a queue
+# (VkDeviceQueueGlobalPriorityCreateInfo, KHR and EXT): v0.11.7 asked high on
+# Qualcomm's own driver under Android, v0.11.8 took it off (issues 215 and
+# 123).  The lavapipe twin, rhi_vk_qprio_none, is with the Vulkan tests.
+if(ICO_RUN_TESTS)
+    add_test(NAME rhi_vk_qprio_source
+             COMMAND "${CMAKE_COMMAND}" "-DSRC=${CMAKE_SOURCE_DIR}"
+                     -P "${CMAKE_CURRENT_SOURCE_DIR}/test/rhi_qprio_source.cmake")
+endif()
+
+# --- The subpass read's decision and verdict (CPU only, every target) --------
+# rhi_subpass_verdict.h: what a Vulkan start on VkRenderPass objects decides
+# for the subpass read (the [dev] key, the route, the file, the timestamps,
+# the verdict an earlier start's probe kept), the verdict file's line, its
+# path beside the pipeline cache file, and a write, read and remove in the
+# test's folder (vk_device.c vkr_subpass_read_decide,
+# port/render/rd_subpass_probe.c).
+add_executable(rhi_subpass_verdict_test test/rhi_subpass_verdict_test.c)
+target_include_directories(rhi_subpass_verdict_test PRIVATE "${CMAKE_CURRENT_SOURCE_DIR}")
+target_compile_options(rhi_subpass_verdict_test PRIVATE ${ICO_SEMANTIC_OPTIONS}
+                       ${ICO_PORT_WARNINGS})
+if(ICO_RUN_TESTS)
+    add_test(NAME rhi_subpass_verdict COMMAND rhi_subpass_verdict_test)
+    set_tests_properties(rhi_subpass_verdict PROPERTIES WORKING_DIRECTORY
+                         "${CMAKE_CURRENT_BINARY_DIR}")
+endif()
+
+# --- The tile-based phones' rule (CPU only, every target) --------------------
+# rhi_tile_rule.c: the barrier scopes and the submission wait a Vulkan start
+# runs (a tile-based phone GPU, the lost starts in a row before it, the tests'
+# ICO_VK_FAKE_SCOPES; issues 179 and 211), and their lines' words.
+add_executable(rhi_vk_tile_rule_test test/rhi_vk_tile_rule_test.c rhi_tile_rule.c)
+target_include_directories(rhi_vk_tile_rule_test PRIVATE "${CMAKE_CURRENT_SOURCE_DIR}")
+target_compile_options(rhi_vk_tile_rule_test PRIVATE ${ICO_SEMANTIC_OPTIONS} ${ICO_PORT_WARNINGS})
+if(ICO_RUN_TESTS)
+    add_test(NAME rhi_vk_tile_rule COMMAND rhi_vk_tile_rule_test)
+endif()
+
+# --- The passes' attachment bytes (CPU only, every target) -------------------
+# rhi_traffic.c: what each render pass asks a tile-based GPU to load, store
+# and clear, from its description and its attachments' formats, and the
+# texture copies' bytes (rhi_traffic.h, issue 179's performance lines): the
+# bytes a texel by format and aspect, the render area clamped, MSAA, a
+# read-only depth, an unknown attachment, the handle table (made, gone, the
+# backward shift keeping a run reachable, forget) and the sums in RhiStats.
+add_executable(rhi_traffic_test test/rhi_traffic_test.c rhi_traffic.c)
+target_include_directories(rhi_traffic_test PRIVATE "${CMAKE_CURRENT_SOURCE_DIR}")
+target_compile_options(rhi_traffic_test PRIVATE ${ICO_SEMANTIC_OPTIONS} ${ICO_PORT_WARNINGS})
+if(ICO_RUN_TESTS)
+    add_test(NAME rhi_traffic COMMAND rhi_traffic_test)
+endif()
+
+# --- The SPIR-V scan (CPU only, every target) --------------------------------
+# vk/vk_spirv_scan.c: whether a module is a fragment shader that declares a
+# storage buffer (the buffer barriers' first scopes, vk_cmd.c), over the RHI
+# tests' modules and hand-built ones.
+add_executable(rhi_vk_spirv_scan_test test/rhi_vk_spirv_scan_test.c vk/vk_spirv_scan.c)
+target_include_directories(rhi_vk_spirv_scan_test PRIVATE "${CMAKE_CURRENT_SOURCE_DIR}"
+                           "${CMAKE_CURRENT_SOURCE_DIR}/test/shaders")
+target_compile_options(rhi_vk_spirv_scan_test PRIVATE ${ICO_SEMANTIC_OPTIONS} ${ICO_PORT_WARNINGS})
+if(ICO_RUN_TESTS)
+    add_test(NAME rhi_vk_spirv_scan COMMAND rhi_vk_spirv_scan_test)
+endif()
+
+# --- The render pass breadcrumb (CPU only, every target) ---------------------
+# rhi_pass_crumb.c: the pass a backend last began, stored before the driver's
+# begin call (vk_renderpass.c vkr_pass_begin) and printed by the crash report
+# (port/platform/diag_host.c report_crash_block).  A library of its own: the
+# Vulkan backend writes it, the platform layer, which links no backend, reads
+# it.
+add_library(ico_pass_crumb STATIC rhi_pass_crumb.c)
+target_include_directories(ico_pass_crumb PUBLIC "${CMAKE_CURRENT_SOURCE_DIR}")
+target_compile_options(ico_pass_crumb PRIVATE ${ICO_SEMANTIC_OPTIONS} ${ICO_PORT_WARNINGS})
+target_link_libraries(ico_platform PUBLIC ico_pass_crumb)
+add_executable(rhi_vk_pass_crumb_test test/rhi_vk_pass_crumb_test.c)
+target_compile_options(rhi_vk_pass_crumb_test PRIVATE ${ICO_SEMANTIC_OPTIONS} ${ICO_PORT_WARNINGS})
+target_link_libraries(rhi_vk_pass_crumb_test PRIVATE ico_pass_crumb)
+if(ICO_RUN_TESTS)
+    add_test(NAME rhi_vk_pass_crumb COMMAND rhi_vk_pass_crumb_test)
+endif()
+
+# --- The device table (CPU only, every target) --------------------------------
+# rhi_device_table.c: the hardware rows that set renderer-internal choices
+# (docs/port/DEVICE_TABLE.md), its library and its three tests.
+include(rhi_device_table.cmake)
 
 # --- The [video] adapter rules (CPU only, every target) ---------------------
 # rhi_adapter.c: the exact-name match the Vulkan and Direct3D backends force
@@ -274,9 +389,10 @@ endif()
 
 # --- ico_rhi_vulkan -------------------------------------------------------------
 if(_ico_have_vk)
-    set(_ico_vk_sources rhi_adapter.c rhi_bind_cache.c rhi_driver_version.c vk/vk_cmd.c vk/vk_device.c vk/vk_memory.c
+    set(_ico_vk_sources rhi_adapter.c rhi_bind_cache.c rhi_driver_version.c rhi_pass_row.c rhi_tile_rule.c vk/vk_cmd.c vk/vk_device.c vk/vk_memory.c vk/vk_native.c
                         vk/vk_pipeline.c vk/vk_present_mode.c vk/vk_renderpass.c vk/vk_resource.c
-                        vk/vk_swapchain.c vk/vk_sync.c)
+                        vk/vk_spirv_scan.c vk/vk_swapchain.c vk/vk_sync.c vk/vk_tsclock.c vk/vk_range.c
+                        vk/vk_glass.c vk/vk_device_table.c)
     if(ANDROID)
         # the window's surface through the loader in use (a
         # driver the program loaded, or the system's)
@@ -301,6 +417,9 @@ if(_ico_have_vk)
     set_source_files_properties(${_ico_vk_sources} PROPERTIES COMPILE_OPTIONS
                                 "${ICO_PORT_WARNINGS}")
     target_link_libraries(ico_rhi_vulkan PRIVATE ${CMAKE_DL_LIBS})
+    # the crash report's breadcrumb (vk_renderpass.c writes it)
+    target_link_libraries(ico_rhi_vulkan PUBLIC ico_pass_crumb)
+    target_link_libraries(ico_rhi_vulkan PUBLIC ico_device_table) # the rows and start-up lines
     if(SDL3_FOUND)
         target_compile_definitions(ico_rhi_vulkan PRIVATE ICO_RHI_HAVE_SDL=1)
         target_link_libraries(ico_rhi_vulkan PUBLIC SDL3::SDL3)
@@ -314,6 +433,7 @@ if(_ico_have_d3d12)
         rhi_bind_cache.c
         d3d12/d3d12_cmd.c
         d3d12/d3d12_device.c
+        d3d12/d3d12_native.c
         d3d12/d3d12_pipeline.c
         d3d12/d3d12_plan.c
         d3d12/d3d12_resource.c
@@ -325,6 +445,7 @@ if(_ico_have_d3d12)
     # the IIDs (IID_ID3D12Device, ...); d3d12.dll and dxgi.dll are loaded at
     # run time (d3d12_device.c)
     target_link_libraries(ico_rhi_d3d12 PRIVATE dxguid)
+    target_link_libraries(ico_rhi_d3d12 PUBLIC ico_device_table) # the start-up lines
     if(SDL3_FOUND)
         target_compile_definitions(ico_rhi_d3d12 PRIVATE ICO_RHI_HAVE_SDL=1)
         target_link_libraries(ico_rhi_d3d12 PUBLIC SDL3::SDL3)
@@ -355,6 +476,7 @@ if(_ico_have_d3d11)
     # d3dcompiler_47.dll are loaded at run time (d3d11_device.c,
     # d3d11_shader.c)
     target_link_libraries(ico_rhi_d3d11 PRIVATE dxguid)
+    target_link_libraries(ico_rhi_d3d11 PUBLIC ico_device_table) # the start-up lines
     if(SDL3_FOUND)
         target_compile_definitions(ico_rhi_d3d11 PRIVATE ICO_RHI_HAVE_SDL=1)
         target_link_libraries(ico_rhi_d3d11 PUBLIC SDL3::SDL3)
@@ -369,12 +491,15 @@ if(_ico_have_gl)
     set(_ico_gl_sources
         rhi_bind_cache.c
         gl/gl_cmd.c
+        gl/gl_compile.c
         gl/gl_device.c
         gl/gl_glsl.c
         gl/gl_loader.c
         gl/gl_pipeline.c
         gl/gl_resource.c
+        gl/gl_start_screen.c
         gl/gl_swapchain.c
+        gl/gl_sync_wait.c
         d3d12/d3d12_plan.c)
     add_library(ico_rhi_opengl STATIC ${_ico_gl_sources})
     target_include_directories(ico_rhi_opengl PUBLIC "${CMAKE_CURRENT_SOURCE_DIR}")
@@ -382,6 +507,7 @@ if(_ico_have_gl)
                                ${_ico_rhi_debug_default})
     target_compile_options(ico_rhi_opengl PRIVATE ${ICO_SEMANTIC_OPTIONS} ${ICO_PORT_WARNINGS})
     target_link_libraries(ico_rhi_opengl PUBLIC SDL3::SDL3 PRIVATE ico_miniz)
+    target_link_libraries(ico_rhi_opengl PUBLIC ico_device_table) # the start-up lines
     if(NOT WIN32)
         # d3d12_plan.c's floorf: lld does not take libm from SDL3's link line
         target_link_libraries(ico_rhi_opengl PUBLIC m)
@@ -390,8 +516,9 @@ if(_ico_have_gl)
 endif()
 
 # --- ico_rhi: the dispatcher ----------------------------------------------------
-add_library(ico_rhi STATIC rhi_backend.c)
+add_library(ico_rhi STATIC rhi_backend.c rhi_traffic.c)
 target_include_directories(ico_rhi PUBLIC "${CMAKE_CURRENT_SOURCE_DIR}")
+target_link_libraries(ico_rhi PUBLIC ico_device_table) # the renderer's reads
 target_compile_options(ico_rhi PRIVATE ${ICO_SEMANTIC_OPTIONS} ${ICO_PORT_WARNINGS})
 if(_ico_have_vk)
     target_compile_definitions(ico_rhi PRIVATE ICO_RHI_HAVE_VK=1)
@@ -419,14 +546,15 @@ endif()
 
 # --- Tests ----------------------------------------------------------------------
 # rhi_test_common.c: the exact-texel cells every backend must pass.
-set(_ico_rhi_test_common test/rhi_test_common.c)
+set(_ico_rhi_test_common test/rhi_test_common.c test/rhi_test_native.c test/rhi_test_stores.c
+    test/rhi_test_compute.c)
 
 if(_ico_have_vk)
     set(_ico_vk_test_env "")
     # Every rhi.h enumeration maps to a Vulkan value (static asserts plus a
     # run over the tables). Needs only the headers.
     # With rhi_backend.c's layer classifiers (no backend linked).
-    add_executable(rhi_vk_enum_test test/rhi_vk_enum_test.c rhi_backend.c)
+    add_executable(rhi_vk_enum_test test/rhi_vk_enum_test.c rhi_backend.c rhi_traffic.c)
     target_include_directories(rhi_vk_enum_test PRIVATE "${ICO_VULKAN_INCLUDE_DIR}")
     target_compile_options(rhi_vk_enum_test PRIVATE ${ICO_SEMANTIC_OPTIONS} ${ICO_PORT_WARNINGS})
 
@@ -459,12 +587,23 @@ if(_ico_have_vk)
 
     # Headless rendering on whatever device is present (lavapipe in the
     # container); exits 77 (skipped) when there is no Vulkan device.
-    add_executable(rhi_vk_test test/rhi_vk_test.c ${_ico_rhi_test_common})
+    add_executable(rhi_vk_test test/rhi_vk_test.c test/rhi_vk_scope.c test/rhi_vk_subpass.c
+                               ${_ico_rhi_test_common})
     # the thread submit cell's second thread (rhi_test_common.c threadSubmitCell)
     target_link_libraries(rhi_vk_test PRIVATE ico_thread)
     target_include_directories(rhi_vk_test PRIVATE "${CMAKE_CURRENT_SOURCE_DIR}/test/shaders")
     target_compile_options(rhi_vk_test PRIVATE ${ICO_SEMANTIC_OPTIONS} ${ICO_PORT_WARNINGS})
     target_link_libraries(rhi_vk_test PRIVATE ico_rhi)
+
+    # rhi_native.h (the handles external compute needs): textures granted
+    # storage, the external begin/end bracket and the picture around it,
+    # through the Vulkan backend on lavapipe; exits 77 without a device.
+    add_executable(rhi_native_test test/rhi_native_test.c)
+    target_include_directories(rhi_native_test PRIVATE "${CMAKE_CURRENT_SOURCE_DIR}/test/shaders"
+                               "${ICO_VOLK_DIR}" "${ICO_VULKAN_INCLUDE_DIR}")
+    target_compile_definitions(rhi_native_test PRIVATE VK_NO_PROTOTYPES)
+    target_compile_options(rhi_native_test PRIVATE ${ICO_SEMANTIC_OPTIONS} ${ICO_PORT_WARNINGS})
+    target_link_libraries(rhi_native_test PRIVATE ico_rhi)
 
     # The window path (surface, swapchain, present, resize) through SDL's
     # offscreen video driver; needs SDL3.
@@ -477,7 +616,7 @@ if(_ico_have_vk)
 
     # Windows: SDL3.dll beside the test programs
     if(SDL3_FOUND)
-        ico_copy_sdl3_dll(rhi_vk_test rhi_vk_swapchain_test)
+        ico_copy_sdl3_dll(rhi_vk_test rhi_native_test rhi_vk_swapchain_test)
     endif()
 
     if(ICO_RUN_TESTS)
@@ -487,12 +626,15 @@ if(_ico_have_vk)
         add_test(NAME rhi_vk COMMAND rhi_vk_test)
         set_tests_properties(rhi_vk PROPERTIES SKIP_RETURN_CODE 77)
         # The validation layer tools/fetch_deps.sh unpacks, with
-        # synchronisation validation on; the test fails on any validation
-        # error.
+        # synchronisation validation on and its shader access analysis
+        # (SYNCVAL_SHADER_ACCESSES_HEURISTIC: without it the checks take no
+        # shader's buffer read into account, rhi_vk_scopes* below); the test
+        # fails on any validation error.
         set(_ico_vvl "${ICO_DEPS_DIR}/vulkan-validation")
         if(NOT WIN32 AND EXISTS "${_ico_vvl}/VkLayer_khronos_validation.json")
             set(_ico_vk_test_env
-                "VK_ADD_LAYER_PATH=${_ico_vvl};VK_KHRONOS_VALIDATION_VALIDATE_SYNC=true")
+                "VK_ADD_LAYER_PATH=${_ico_vvl};VK_KHRONOS_VALIDATION_VALIDATE_SYNC=true"
+                "VK_KHRONOS_VALIDATION_SYNCVAL_SHADER_ACCESSES_HEURISTIC=true")
         endif()
         if(ICO_SANITIZE MATCHES "address")
             # LeakSanitizer reports 112 bytes the Vulkan driver
@@ -505,6 +647,224 @@ if(_ico_have_vk)
         if(_ico_vk_test_env)
             set_tests_properties(rhi_vk PROPERTIES ENVIRONMENT "${_ico_vk_test_env}")
         endif()
+        # the vertex shaders' stores alone (rhi_test_stores.c; the VU record's
+        # write, port/render/rd_vu_record.h), under synchronisation validation:
+        # a point draw stores through a pipeline without rasterization in a
+        # pass without attachments, after and before copies of the buffer,
+        # read back word for word; _vk11 through VkRenderPass objects (an
+        # attachment-less legacy pass, ICO_VK_FAKE_API=1.1), _global with a
+        # global barrier before every pass and copy (ICO_VK_GLOBAL_BARRIERS=1:
+        # the bracket's barriers recorded at once); rhi_vk_nostores: a device
+        # made without vertexPipelineStoresAndAtomics
+        # (ICO_VK_FAKE_NO_VERTEX_STORES=1) reports none and the bracket refuses
+        add_test(NAME rhi_vk_stores COMMAND rhi_vk_test stores)
+        add_test(NAME rhi_vk_stores_vk11 COMMAND rhi_vk_test stores)
+        add_test(NAME rhi_vk_stores_global COMMAND rhi_vk_test stores)
+        add_test(NAME rhi_vk_nostores COMMAND rhi_vk_test nostores)
+        set_tests_properties(rhi_vk_stores PROPERTIES SKIP_RETURN_CODE 77 ENVIRONMENT
+                             "${_ico_vk_test_env}")
+        set(_ico_vk_stores11_env ${_ico_vk_test_env} "ICO_VK_FAKE_API=1.1")
+        set_tests_properties(rhi_vk_stores_vk11 PROPERTIES SKIP_RETURN_CODE 77 ENVIRONMENT
+                             "${_ico_vk_stores11_env}")
+        set(_ico_vk_storesg_env ${_ico_vk_test_env} "ICO_VK_GLOBAL_BARRIERS=1")
+        set_tests_properties(rhi_vk_stores_global PROPERTIES SKIP_RETURN_CODE 77 ENVIRONMENT
+                             "${_ico_vk_storesg_env}")
+        set(_ico_vk_nostores_env ${_ico_vk_test_env} "ICO_VK_FAKE_NO_VERTEX_STORES=1")
+        set_tests_properties(rhi_vk_nostores PROPERTIES SKIP_RETURN_CODE 77 ENVIRONMENT
+                             "${_ico_vk_nostores_env}")
+        # the compute shaders' stores (rhi_test_compute.c; the VU record's
+        # write where the vertex shaders cannot store), under synchronisation
+        # validation: one group stores after and before copies of the
+        # buffer, read back word for word, and (with vertex stores too) the
+        # bind-point rule: a store draw after a dispatch binds its own group
+        # again; _vk11 on a Vulkan 1.1 device (ICO_VK_FAKE_API=1.1: legacy
+        # passes around the store draws), _global with every barrier
+        # recorded at once (ICO_VK_GLOBAL_BARRIERS=1), _novs on a device
+        # without vertexPipelineStoresAndAtomics (the Mali-G52 of issue 179:
+        # the dispatches alone); rhi_vk_nocompute: a device under
+        # ICO_VK_FAKE_NO_COMPUTE_STORES=1 reports none, the bracket refuses
+        # and a dispatch records nothing
+        add_test(NAME rhi_vk_compute COMMAND rhi_vk_test compute)
+        add_test(NAME rhi_vk_compute_vk11 COMMAND rhi_vk_test compute)
+        add_test(NAME rhi_vk_compute_global COMMAND rhi_vk_test compute)
+        add_test(NAME rhi_vk_compute_novs COMMAND rhi_vk_test compute)
+        add_test(NAME rhi_vk_nocompute COMMAND rhi_vk_test nocompute)
+        set_tests_properties(rhi_vk_compute PROPERTIES SKIP_RETURN_CODE 77 ENVIRONMENT
+                             "${_ico_vk_test_env}")
+        set_tests_properties(rhi_vk_compute_vk11 PROPERTIES SKIP_RETURN_CODE 77 ENVIRONMENT
+                             "${_ico_vk_stores11_env}")
+        set_tests_properties(rhi_vk_compute_global PROPERTIES SKIP_RETURN_CODE 77 ENVIRONMENT
+                             "${_ico_vk_storesg_env}")
+        set_tests_properties(rhi_vk_compute_novs PROPERTIES SKIP_RETURN_CODE 77 ENVIRONMENT
+                             "${_ico_vk_nostores_env}")
+        set(_ico_vk_nocompute_env ${_ico_vk_test_env} "ICO_VK_FAKE_NO_COMPUTE_STORES=1")
+        set_tests_properties(rhi_vk_nocompute PROPERTIES SKIP_RETURN_CODE 77 ENVIRONMENT
+                             "${_ico_vk_nocompute_env}")
+        # the buffer barriers' first scopes (rhi_vk_scope.c; issue 179), under
+        # synchronisation validation: a picture's uploads, VU record and pass
+        # after the picture before's hold no fragment work
+        # (RhiStats.fragmentHolds 0), a texture upload over a sampled texture
+        # one, and after a fragment shader that declares a storage buffer the
+        # copy and the bracket wait for fragment work; _vk11 on VkRenderPass
+        # objects and the fence ring (ICO_VK_FAKE_API=1.1), _global with every
+        # barrier recorded at once, _novs without vertex stores (the Mali-G52
+        # of issue 179: the compute dispatches alone).  The layer's shader
+        # access analysis on (SYNCVAL_SHADER_ACCESSES_HEURISTIC): without it
+        # the synchronisation checks take no shader's buffer read into
+        # account (layer 1.4.309: a copy over a buffer a fragment shader
+        # read, with no barrier at all, passes), so they could not see the
+        # write after read a fragment stage left out of a copy's first scope
+        # would be; with it they report one (checked with the fragment
+        # stage taken out)
+        set(_ico_vk_scopes_sv "VK_KHRONOS_VALIDATION_SYNCVAL_SHADER_ACCESSES_HEURISTIC=true")
+        set(_ico_vk_scopes_env ${_ico_vk_test_env} ${_ico_vk_scopes_sv})
+        set(_ico_vk_scopes11_env ${_ico_vk_stores11_env} ${_ico_vk_scopes_sv})
+        set(_ico_vk_scopesg_env ${_ico_vk_storesg_env} ${_ico_vk_scopes_sv})
+        set(_ico_vk_scopesn_env ${_ico_vk_nostores_env} ${_ico_vk_scopes_sv})
+        add_test(NAME rhi_vk_scopes COMMAND rhi_vk_test scopes)
+        add_test(NAME rhi_vk_scopes_vk11 COMMAND rhi_vk_test scopes)
+        add_test(NAME rhi_vk_scopes_global COMMAND rhi_vk_test scopes)
+        add_test(NAME rhi_vk_scopes_novs COMMAND rhi_vk_test scopes)
+        set_tests_properties(rhi_vk_scopes PROPERTIES SKIP_RETURN_CODE 77 ENVIRONMENT
+                             "${_ico_vk_scopes_env};ICO_TEST_SCOPE_WANT=narrow")
+        set_tests_properties(rhi_vk_scopes_vk11 PROPERTIES SKIP_RETURN_CODE 77 ENVIRONMENT
+                             "${_ico_vk_scopes11_env}")
+        get_test_property(rhi_vk_scopes_vk11 LABELS _ico_scopes11_labels)
+        set_tests_properties(rhi_vk_scopes_vk11 PROPERTIES LABELS "${_ico_scopes11_labels};vk11")
+        set_tests_properties(rhi_vk_scopes_global PROPERTIES SKIP_RETURN_CODE 77 ENVIRONMENT
+                             "${_ico_vk_scopesg_env}")
+        set_tests_properties(rhi_vk_scopes_novs PROPERTIES SKIP_RETURN_CODE 77 ENVIRONMENT
+                             "${_ico_vk_scopesn_env}")
+        # the wide scopes (port/rhi/rhi_tile_rule.h; issues 179 and 211:
+        # v0.11.2's, on every tile-based phone GPU by default since v0.11.4):
+        # _arm on Arm's phone GPU faked (ICO_VK_FAKE_VENDOR=0x13B5, the rule's
+        # alone), _wide the wide scopes faked on lavapipe
+        # (ICO_VK_FAKE_SCOPES=wide), _arm_narrow Arm faked with the narrow
+        # scopes faked (ICO_VK_FAKE_SCOPES=narrow: the override rules); each
+        # under the same synchronisation checks, ICO_TEST_SCOPE_WANT naming
+        # the scopes the device must run (rhi_vk_scopes: narrow, lavapipe is
+        # not tile-based).  rhi_vk_clock_arm: the recycled slot's clock alone
+        # on Arm faked: the single wait, no trace, no calibrated pair
+        # (ICO_TEST_POLLED_WANT=0).  rhi_vk_scopes_mac: MoltenVK faked
+        # (ICO_VK_FAKE_LIMITS=moltenvk) off iOS is a Mac, not a phone: the
+        # narrow scopes (desktops keep v0.11.3's)
+        set(_ico_vk_arm "ICO_VK_FAKE_VENDOR=0x13B5")
+        set(_ico_vk_scopesmac_env ${_ico_vk_scopes_env} "ICO_VK_FAKE_LIMITS=moltenvk"
+                                  "ICO_TEST_SCOPE_WANT=narrow")
+        add_test(NAME rhi_vk_scopes_mac COMMAND rhi_vk_test scopes)
+        set_tests_properties(rhi_vk_scopes_mac PROPERTIES SKIP_RETURN_CODE 77 ENVIRONMENT
+                             "${_ico_vk_scopesmac_env}")
+        set(_ico_vk_scopesarm_env ${_ico_vk_scopes_env} ${_ico_vk_arm} "ICO_TEST_SCOPE_WANT=wide")
+        set(_ico_vk_scopesw_env ${_ico_vk_scopes_env} "ICO_VK_FAKE_SCOPES=wide"
+                                "ICO_TEST_SCOPE_WANT=wide")
+        set(_ico_vk_scopesan_env ${_ico_vk_scopes_env} ${_ico_vk_arm} "ICO_VK_FAKE_SCOPES=narrow"
+                                 "ICO_TEST_SCOPE_WANT=narrow")
+        set(_ico_vk_clockarm_env ${_ico_vk_test_env} ${_ico_vk_arm} "ICO_TEST_POLLED_WANT=0")
+        add_test(NAME rhi_vk_scopes_arm COMMAND rhi_vk_test scopes)
+        add_test(NAME rhi_vk_scopes_wide COMMAND rhi_vk_test scopes)
+        add_test(NAME rhi_vk_scopes_arm_narrow COMMAND rhi_vk_test scopes)
+        add_test(NAME rhi_vk_clock_arm COMMAND rhi_vk_test clock)
+        set_tests_properties(rhi_vk_scopes_arm PROPERTIES SKIP_RETURN_CODE 77 ENVIRONMENT
+                             "${_ico_vk_scopesarm_env}")
+        set_tests_properties(rhi_vk_scopes_wide PROPERTIES SKIP_RETURN_CODE 77 ENVIRONMENT
+                             "${_ico_vk_scopesw_env}")
+        set_tests_properties(rhi_vk_scopes_arm_narrow PROPERTIES SKIP_RETURN_CODE 77 ENVIRONMENT
+                             "${_ico_vk_scopesan_env}")
+        set_tests_properties(rhi_vk_clock_arm PROPERTIES SKIP_RETURN_CODE 77 ENVIRONMENT
+                             "${_ico_vk_clockarm_env}")
+        # rhi_vk_offer: the device start's read-only line of what it offers
+        # for the stall diagnostics (vk_device.c vkr_offer_line, issue 123):
+        # the calibrated time domains and the global queue priority
+        add_test(NAME rhi_vk_offer COMMAND rhi_vk_test clock)
+        set_tests_properties(rhi_vk_offer PROPERTIES SKIP_RETURN_CODE 77 PASS_REGULAR_EXPRESSION
+                             "rhi_vk: offered \\(read only, nothing enabled for it\\): calibrated time domains [^;]+; global queue priority (KHR and EXT|KHR|EXT|not) offered")
+        # rhi_vk_offer_timing: the same line's display timing clause (the
+        # evenness line's next design, rd_even.h): whether the device offers
+        # the four extensions, nothing enabled for them
+        add_test(NAME rhi_vk_offer_timing COMMAND rhi_vk_test clock)
+        set_tests_properties(rhi_vk_offer_timing PROPERTIES SKIP_RETURN_CODE 77 PASS_REGULAR_EXPRESSION
+                             "rhi_vk: offered \\(read only, nothing enabled for it\\): calibrated time domains [^;]+; global queue priority [^;]+; the game's one queue made at priority [^;]+; display timing: VK_GOOGLE_display_timing (yes|no), VK_EXT_present_timing (yes|no), VK_KHR_present_id (yes|no), VK_KHR_present_wait (yes|no)")
+        # rhi_vk_pipeline_stats: the device start's read-only line whether
+        # the device offers pipeline statistics queries (vk_device.c, issue
+        # 179: list 0's vertex against fragment work; nothing enabled)
+        add_test(NAME rhi_vk_pipeline_stats COMMAND rhi_vk_test clock)
+        set_tests_properties(rhi_vk_pipeline_stats PROPERTIES SKIP_RETURN_CODE 77 PASS_REGULAR_EXPRESSION
+                             "rhi_vk: pipeline statistics: (offered|not offered) \\(read only, nothing enabled")
+        # VK_EXT_memory_budget's numbers in rhi_get_stats (videoMem*):
+        # rhi_vk_budget on lavapipe (consistent; a budget where offered),
+        # rhi_vk_budget_phone with Arm's phone GPU faked: none (not asked)
+        add_test(NAME rhi_vk_budget COMMAND rhi_vk_test budget)
+        add_test(NAME rhi_vk_budget_phone COMMAND rhi_vk_test budget)
+        set(_ico_vk_budget_env ${_ico_vk_test_env} "ICO_TEST_BUDGET_WANT=")
+        set(_ico_vk_budgetph_env ${_ico_vk_test_env} ${_ico_vk_arm} "ICO_TEST_BUDGET_WANT=0")
+        set_tests_properties(rhi_vk_budget PROPERTIES SKIP_RETURN_CODE 77 ENVIRONMENT
+                             "${_ico_vk_budget_env}")
+        set_tests_properties(rhi_vk_budget_phone PROPERTIES SKIP_RETURN_CODE 77 ENVIRONMENT
+                             "${_ico_vk_budgetph_env}")
+        # a pass's own colour read in it with a depth target bound
+        # (rhi_vk_subpass.c, DATE's stencil setup's shape) under
+        # synchronisation validation with the shader access analysis on:
+        # rhi_vk_subpass through dynamic rendering's local read; _vk11, _vk10
+        # (with all-static pipelines) and _mali_vk11 (the Mali-G52's 1.1
+        # limits) through the VkRenderPass path's subpass read, an
+        # experiment off by default, turned on by ICO_VK_SUBPASS_READ=1 ([dev]
+        # subpass_read = on: the colour also input attachment 0, a by-region
+        # self-dependency, GENERAL); _vk11_off the 1.1 profile as shipped (the
+        # read off, no local read: the cell not run); _legacy on VkRenderPass
+        # objects of a 1.4 device as the Intel row gives them (off, the cell
+        # not run), and with ICO_VK_SUBPASS_READ=1 (_legacy_on) the read on
+        # them.  ICO_TEST_SUBPASS_WANT: the cell fails unless the read is on
+        # (1) or off (0) as named
+        set(_ico_vk_subpass_on "ICO_VK_SUBPASS_READ=1" "ICO_TEST_SUBPASS_WANT=1")
+        set(_ico_vk_subpass11_env ${_ico_vk_scopes11_env} ${_ico_vk_subpass_on})
+        set(_ico_vk_subpass11o_env ${_ico_vk_scopes11_env} "ICO_TEST_SUBPASS_WANT=0")
+        set(_ico_vk_subpass10_env ${_ico_vk_scopes_env} "ICO_VK_FAKE_API=1.0"
+                                  "ICO_VK_FAKE_NO_DYNAMIC=1" ${_ico_vk_subpass_on})
+        set(_ico_vk_subpassm_env ${_ico_vk_scopes11_env} "ICO_VK_FAKE_LIMITS=mali"
+                                 ${_ico_vk_subpass_on})
+        set(_ico_vk_subpassl_env ${_ico_vk_scopes_env} "ICO_VK_LEGACY_PASSES=1"
+                                 "ICO_TEST_SUBPASS_WANT=0")
+        set(_ico_vk_subpasslo_env ${_ico_vk_scopes_env} "ICO_VK_LEGACY_PASSES=1"
+                                  ${_ico_vk_subpass_on})
+        foreach(_sp IN ITEMS "|${_ico_vk_scopes_env}" "_vk11|${_ico_vk_subpass11_env}"
+                             "_vk11_off|${_ico_vk_subpass11o_env}"
+                             "_vk10|${_ico_vk_subpass10_env}" "_mali_vk11|${_ico_vk_subpassm_env}"
+                             "_legacy|${_ico_vk_subpassl_env}"
+                             "_legacy_on|${_ico_vk_subpasslo_env}")
+            string(FIND "${_sp}" "|" _spi)
+            string(SUBSTRING "${_sp}" 0 ${_spi} _spn)
+            math(EXPR _spi "${_spi} + 1")
+            string(SUBSTRING "${_sp}" ${_spi} -1 _spe)
+            add_test(NAME rhi_vk_subpass${_spn} COMMAND rhi_vk_test subpass)
+            set_tests_properties(rhi_vk_subpass${_spn} PROPERTIES SKIP_RETURN_CODE 77
+                                 ENVIRONMENT "${_spe}")
+        endforeach()
+        # rhi_vk_subpass_verdict (test/rhi_vk_subpass_verdict.cmake): the
+        # read decided by its verdict file on the 1.1 profile with no [dev]
+        # key (ICO_VK_SUBPASS_VERDICT names the file the game keeps beside
+        # its pipeline cache): none, on for the probe with the mark written
+        # and taken away again at a clean shutdown that never probed; kept,
+        # on without a probe; the mark of a start that ended inside its
+        # probe, off and refused for good in the file; refused, off; another
+        # driver's verdict, the probe again
+        add_test(NAME rhi_vk_subpass_verdict
+                 COMMAND "${CMAKE_COMMAND}" -DTOOL=$<TARGET_FILE:rhi_vk_test>
+                         "-DFILE=${CMAKE_CURRENT_BINARY_DIR}/rhi_vk_subpass_verdict.txt"
+                         -P "${CMAKE_CURRENT_SOURCE_DIR}/test/rhi_vk_subpass_verdict.cmake")
+        set_tests_properties(rhi_vk_subpass_verdict PROPERTIES SKIP_REGULAR_EXPRESSION "SKIP:"
+                             ENVIRONMENT "${_ico_vk_scopes11_env}")
+        foreach(_spn _vk11 _vk11_off _mali_vk11 _verdict)
+            get_test_property(rhi_vk_subpass${_spn} LABELS _ico_sp_labels)
+            set_tests_properties(rhi_vk_subpass${_spn} PROPERTIES LABELS "${_ico_sp_labels};vk11")
+        endforeach()
+        get_test_property(rhi_vk_subpass_vk10 LABELS _ico_sp_labels)
+        set_tests_properties(rhi_vk_subpass_vk10 PROPERTIES LABELS "${_ico_sp_labels};vk10")
+        # rhi_native.h on the same layer setup (a validation message fails it)
+        add_test(NAME rhi_native COMMAND rhi_native_test)
+        set_tests_properties(rhi_native PROPERTIES SKIP_RETURN_CODE 77)
+        if(_ico_vk_test_env)
+            set_tests_properties(rhi_native PROPERTIES ENVIRONMENT "${_ico_vk_test_env}")
+        endif()
         # the same cells on a device made without dualSrcBlend
         # (the hook clears the feature at device creation); its own directory
         # for the pipeline cache file, which rhi_vk writes beside itself
@@ -514,6 +874,16 @@ if(_ico_have_vk)
         set(_ico_vk_nodual_env ${_ico_vk_test_env} "ICO_VK_FAKE_NO_DUAL=1")
         set_tests_properties(rhi_vk_nodual PROPERTIES SKIP_RETURN_CODE 77 ENVIRONMENT
                              "${_ico_vk_nodual_env}")
+        # the cells under the rule of one compile at a time
+        # (ICO_VK_FAKE_SERIAL=1, vk_pipeline.c, issue 188): one compile
+        # thread, the lock around module and pipeline creation, a creation on
+        # the test's thread beside the background set
+        file(MAKE_DIRECTORY "${CMAKE_CURRENT_BINARY_DIR}/serial")
+        add_test(NAME rhi_vk_serial COMMAND rhi_vk_test
+                 WORKING_DIRECTORY "${CMAKE_CURRENT_BINARY_DIR}/serial")
+        set(_ico_vk_serial_env ${_ico_vk_test_env} "ICO_VK_FAKE_SERIAL=1")
+        set_tests_properties(rhi_vk_serial PROPERTIES SKIP_RETURN_CODE 77 ENVIRONMENT
+                             "${_ico_vk_serial_env}")
         # the cells with the bind cache off (ICO_RHI_BIND_CACHE=0,
         # rhi_bind_cache.c): every bind recorded as given, the same pictures,
         # no skip counted (rhi_test_common.c bindCacheCell, dynamicCell)
@@ -551,6 +921,39 @@ if(_ico_have_vk)
                              "${_ico_vk_vk11_env}")
         get_test_property(rhi_vk_vk11 LABELS _ico_vk11_labels)
         set_tests_properties(rhi_vk_vk11 PROPERTIES LABELS "${_ico_vk11_labels};vk11")
+        # Qualcomm's driver row (rhi_pass_row.h rhi_vk_pass_row_qualcomm, issue
+        # 123): rhi_vk_qcom_passes every cell with lavapipe put on the row alone
+        # (ICO_VK_FAKE_PASS_ROW=qualcomm: VkRenderPass objects on a 1.4 device,
+        # the store passes still without an attachment), failing if the device
+        # line says dynamic rendering; rhi_vk_qcom_passes_off the clock cell with
+        # [dev] legacy_passes = false over the row (ICO_VK_LEGACY_PASSES=0),
+        # failing if it says VkRenderPass objects
+        file(MAKE_DIRECTORY "${CMAKE_CURRENT_BINARY_DIR}/qcom_passes")
+        add_test(NAME rhi_vk_qcom_passes COMMAND rhi_vk_test
+                 WORKING_DIRECTORY "${CMAKE_CURRENT_BINARY_DIR}/qcom_passes")
+        set(_ico_vk_qcom_env ${_ico_vk_test_env} "ICO_VK_FAKE_PASS_ROW=qualcomm")
+        set_tests_properties(rhi_vk_qcom_passes PROPERTIES SKIP_RETURN_CODE 77 ENVIRONMENT
+                             "${_ico_vk_qcom_env}" FAIL_REGULAR_EXPRESSION
+                             "render passes dynamic;")
+        add_test(NAME rhi_vk_qcom_passes_off COMMAND rhi_vk_test clock)
+        set(_ico_vk_qcomoff_env ${_ico_vk_qcom_env} "ICO_VK_LEGACY_PASSES=0")
+        set_tests_properties(rhi_vk_qcom_passes_off PROPERTIES SKIP_RETURN_CODE 77 ENVIRONMENT
+                             "${_ico_vk_qcomoff_env}" FAIL_REGULAR_EXPRESSION
+                             "render passes legacy")
+        # no global queue priority asked on any device (v0.11.7 asked high
+        # on Qualcomm's own driver under Android; taken off in v0.11.8,
+        # issues 215 and 123): rhi_vk_qprio_none the clock cell with lavapipe
+        # put on Qualcomm's row (ICO_VK_FAKE_PASS_ROW=qualcomm, the devices
+        # the priority was asked on), passing on the read-only start line
+        # (vk_device.c vkr_offer_line) and failing on any asked priority's
+        # words; rhi_vk_qprio_source no source under port/ that chains a
+        # global priority onto a queue's creation (rhi_qprio_source.cmake)
+        add_test(NAME rhi_vk_qprio_none COMMAND rhi_vk_test clock)
+        set_tests_properties(rhi_vk_qprio_none PROPERTIES SKIP_RETURN_CODE 77 ENVIRONMENT
+                             "${_ico_vk_qcom_env}" PASS_REGULAR_EXPRESSION
+                             "rhi_vk: queue priority: the driver's default \\(medium\\), not asked: global queue priority (KHR and EXT|KHR|EXT|not) offered \\(the game's queue family [0-9]+'s priorities: .+ the game asks no device for a global priority"
+                             FAIL_REGULAR_EXPRESSION
+                             "asked and granted|asked and refused|with global priority high")
         # the cells on a Vulkan 1.0 driver (ICO_VK_FAKE_API=1.0, issue 158):
         # a 1.0 instance with VK_KHR_get_physical_device_properties2, the
         # device at 1.0 with VK_KHR_maintenance1/2, the core 1.1 entry points
@@ -616,6 +1019,11 @@ if(_ico_have_vk)
     endif()
 endif()
 
+# The FidelityFX FSR 3.1 upscaler (option ICO_FFX): the SDK built from the
+# fetched source, its shader compiler for the build host and ffx_link_test.
+# After the Vulkan tests: the test takes their validation environment.
+add_subdirectory(ffx)
+
 # rhi_gl_test: the same cells on OpenGL with the driver's debug output on
 # (headless: a hidden window of the backend's own), the copies the cells do
 # not make, then the swapchain on an SDL offscreen window; exits 77 (skipped)
@@ -651,6 +1059,18 @@ if(_ico_have_gl)
         set(_ico_gl_nobindcache_env ${_ico_gl_test_env} "ICO_RHI_BIND_CACHE=0")
         set_tests_properties(rhi_gl_nobindcache PROPERTIES SKIP_RETURN_CODE 77 ENVIRONMENT
                              "${_ico_gl_nobindcache_env}")
+        # rhi_vk_stores' twin (rhi_test_stores.c): SKIP (77) while the OpenGL
+        # backend reports no vertex stores, which also checks that its store
+        # bracket refuses
+        add_test(NAME rhi_gl_stores COMMAND rhi_gl_test stores)
+        set_tests_properties(rhi_gl_stores PROPERTIES SKIP_RETURN_CODE 77 ENVIRONMENT
+                             "${_ico_gl_test_env}")
+        # and rhi_vk_compute's (rhi_test_compute.c): SKIP (77) while the
+        # OpenGL backend reports no compute stores, after checking that its
+        # compute bracket refuses and a dispatch counts nothing (1 if not)
+        add_test(NAME rhi_gl_compute COMMAND rhi_gl_test compute)
+        set_tests_properties(rhi_gl_compute PROPERTIES SKIP_RETURN_CODE 77 ENVIRONMENT
+                             "${_ico_gl_test_env}")
     endif()
 endif()
 

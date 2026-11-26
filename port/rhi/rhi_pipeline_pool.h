@@ -12,17 +12,20 @@
  *     a batch of the start-up set or of a replay's gathered keys holds an
  *     id for each of its RD_PIPE_BATCH (32) descriptions until it ends,
  *     its duplicates destroyed then (rd_pipeline.c createKeys), the
- *     COLCLAMP 0 pipelines (RD_WRAP_PIPES, 16; rd_replay.c s_wrapPipes)
- *     and the movie's two output pipelines and its field pipeline (3;
- *     rd_video.c s_v.pipe, fieldPipe): 51, rounded up to 64
- *     (rd_pipeline.c checks the sum against it).
+ *     COLCLAMP 0 pipelines (RD_WRAP_PIPES, 16; rd_replay.c s_wrapPipes),
+ *     Motion blur: Smooth's two (rd_blur_smooth.c), the movie's two output
+ *     pipelines and its field pipeline (3; rd_video.c s_v.pipe, fieldPipe)
+ *     and the skin check's 33 (RD_VU_SKIN_PIPES: the probe's three, c2's
+ *     three, column 3's three, 16 box checks and twin C's 8;
+ *     rd_vu_skin_check.c): 86, under 96 (rd_pipeline.c checks the sum
+ *     against it).
  * A handle indexes 2^20 - 1 slots (vk_internal.h VKR_INDEX_BITS,
  * d3d12_plan.h D3DP_INDEX_BITS), far above the pool. */
 #ifndef PORT_RHI_RHI_PIPELINE_POOL_H
 #define PORT_RHI_RHI_PIPELINE_POOL_H
 
 #define RHI_PIPELINE_POOL_CACHE 4096
-#define RHI_PIPELINE_POOL_HEADROOM 64
+#define RHI_PIPELINE_POOL_HEADROOM 96
 #define RHI_PIPELINE_POOL_MAX (RHI_PIPELINE_POOL_CACHE + RHI_PIPELINE_POOL_HEADROOM)
 
 #endif /* PORT_RHI_RHI_PIPELINE_POOL_H */

@@ -100,7 +100,7 @@ void la_host_leave(void)
     s_leaves++;
 }
 
-/* layout_action.c: the pause menu's Back before la_game_loop (Game variants >
+/* layout_action.c: the pause menu's Back before la_game_loop (Developer >
    Debug menu closes Options into the game) */
 int s_resumes;
 
@@ -240,6 +240,14 @@ int soundSeDefPlay(int no, unsigned int a, float *b, int c)
 }
 
 void gflagInit(void) {}
+
+/* debug.c's Debug menu closed (settings.c after a state load) */
+int s_menuOffs;
+
+void debug_Menu_off(void)
+{
+    s_menuOffs++;
+}
 
 void debug_StdPrintfDummy(const char *fmt, ...)
 {
@@ -580,11 +588,13 @@ int s_reduce;
 
 #endif
 
+static int s_heldNow; /* buttons held beyond this frame's trigger word (hold) */
+
 void frame(int flags)
 {
     frame_count++;
     pad[0].flags = flags;
-    pad[0].now = flags;
+    pad[0].now = flags | s_heldNow;
 #ifdef SETTINGS_RENDER
     dl_SetDLPriority(0);
     rd_set_target(rd_target(RD_TARGET_SCENE), rd_target(RD_TARGET_SCENE), 512, 512, 1);
@@ -613,6 +623,17 @@ int settle(int layout, int max)
         frame(0);
     }
     return current_layout_id == layout && lt_fade_status() == 2;
+}
+
+/* flags pressed at the first of `ticks` frames and held through all of them
+   (the trigger word only on the first, as keyInput.c fills it) */
+void hold(int flags, int ticks)
+{
+    for (int i = 0; i < ticks; i++) {
+        s_heldNow = flags;
+        frame(i == 0 ? flags : 0);
+    }
+    s_heldNow = 0;
 }
 
 void press(int flags)
@@ -740,6 +761,39 @@ int openPage(int mainL, int mainRow, UiSettingsPage page)
     const int l = ui_settings_page_layout(page);
     CHECK(settle(l, 60), "page %d opens (%d)", page, current_layout_id);
     return l;
+}
+
+/* from the page `parent` on screen (its layout parentL), Cross on the row
+   that links to page (Gameplay's Chains, Shadows and Cutscenes): its layout */
+int openLink(int parentL, UiSettingsPage parent, UiSettingsPage page)
+{
+    int labels[24];
+    const int n = ui_settings_page_rows(parent, labels, NULL, NULL, 24);
+    const int want = ui_settings_page_layout(page);
+    int row = -1;
+    for (int i = 0; i < n && row < 0; i++) {
+        row = lt_ext_prop(labels[i])->right == want ? labels[i] : -1;
+    }
+    CHECK(row >= 0, "page %d has the link to page %d", parent, page);
+    if (row < 0) {
+        return want;
+    }
+    lt_ext_layout(parentL)->curItem = row;
+    frame(0);
+    press(lt_ext_confirm_button());
+    CHECK(settle(want, 60), "page %d opens from page %d (%d)", page, parent, current_layout_id);
+    return want;
+}
+
+/* Gameplay from the main page, then its link to page: page's layout
+   (*gameL, when not NULL, Gameplay's) */
+int openGameplayPage(int mainL, UiSettingsPage page, int *gameL)
+{
+    const int g = openPage(mainL, -1, UI_PAGE_GAMEPLAY);
+    if (gameL) {
+        *gameL = g;
+    }
+    return openLink(g, UI_PAGE_GAMEPLAY, page);
 }
 
 /* the main page's row that opens page (its label row), -1: the walks

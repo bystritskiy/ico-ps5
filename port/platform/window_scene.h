@@ -1,0 +1,320 @@
+/*
+ * port/platform/window_scene.h
+ *
+ * Text writers of the window's 10 s block that say which part of the game
+ * the time was in (issue 179: a cutscene read from one phone log), kept out
+ * of window_host.c (at its file size gate).  Pure: no window, no renderer;
+ * port/platform/test/window_scene_test.c runs them.
+ *
+ *   - the layout share: the block's steps' time by the game's layout (play,
+ *     a scene or a movie, the title, the pause menu, the options pages,
+ *     the rest), "layout: play 6.2 s, scene 3.1 s, pause 0.7 s";
+ *   - the slow step's game threads part, with the longest single fiber
+ *     switch and the core the game thread was on: "game threads 199.3 in 39
+ *     switches (longest Main 171.2 ms; on core 2)";
+ *   - the VU work of a replay: "VU: 1182 draws, 61k triangles, 550k vertex
+ *     invocations (pre-pass off: 9 a triangle)", the skin check's twins'
+     share ("; twins 42 draws, 76k vertex invocations a picture", issue
+     123), and (issue 179) what the
+ *     GPU's work (the span less the display wait and the present) cost in
+ *     the block's timed replays against their vertex invocations: "; GPU
+ *     work 51.8 ms a replay, 16.0 ms + 0.17 ms a thousand vertex
+ *     invocations (R^2 0.81, 70 replays)";
+ *   - the swapchain's images and those the game holds: " (images: 10, in
+ *     use 1)" after the present mode.
+ */
+#ifndef ICO_PLATFORM_WINDOW_SCENE_H
+#define ICO_PLATFORM_WINDOW_SCENE_H
+
+#include <stdbool.h>
+#include <stddef.h>
+#include <stdint.h>
+
+typedef enum SceneKind {
+    SCENE_PLAY = 0,
+    SCENE_SCENE, /* a scene's empty layout, or a movie playing */
+    SCENE_TITLE,
+    SCENE_PAUSE,
+    SCENE_SETTINGS,   /* the game's options and button configuration */
+    SCENE_VIBE,       /* the vibration choice (la_vibe_select) */
+    SCENE_MC_FILES,   /* the memory card's file list (la_mc_file_select) */
+    SCENE_LOAD_FILES, /* the Continue screen's file list (la_mc_load_file_select) */
+    SCENE_LOAD,       /* the load in progress (la_load_processing) */
+    SCENE_SAVE_DONE,  /* the save's confirmation (la_save_confirm_complete) */
+    SCENE_OTHER,      /* every other layout (the logo, the port's pages, none) */
+    SCENE_KIND_COUNT
+} SceneKind;
+
+/* The running disc's layout ids (region.h layout_*); the last five only
+   when above 0 (a table without them leaves them 0) */
+typedef struct SceneIds {
+    int play, scene, titleContinue, titleNew, pause, options, keyConfig;
+    int vibe, mcFiles, loadFiles, load, saveComplete;
+} SceneIds;
+
+/* The kind of the game's state: a movie counts as a scene, whatever the
+   layout */
+SceneKind window_scene_kind(const SceneIds *ids, int layout, int movie);
+
+/* The kind's word in the layout line ("play", "scene", "title", "pause",
+   "settings", "vibration setting", "memory card files", "Continue files",
+   "loading", "save done", "other"; "other" past the kinds): the
+   performance lines' scene names (window_perf_rank.c) */
+const char *window_scene_kind_word(SceneKind kind);
+
+/* The performance lines' scene key (window_perf_rank.c, the report's
+   table): the stage and the game's name of it on every kind once a stage
+   is loaded (stage above 0, or play and a scene whatever the stage), so
+   the logo, the attract and a cutscene's other layouts are told apart:
+   "stage 4 play (st04a (...))", "stage 1 other (...)", "title" before any
+   stage; " (keep frames)" after it when keep; stageName "" or NULL: none;
+   a ':' in the name is written '-' (the report reads the key up to ": ").
+   The length written */
+size_t window_scene_key(char *out, size_t cap, SceneKind kind, int stage, const char *stageName,
+                        bool keep);
+
+/* The block's time by kind, in ns */
+typedef struct SceneShare {
+    uint64_t ns[SCENE_KIND_COUNT];
+} SceneShare;
+
+/* ns of a step added to the kind of the state it ran in */
+void window_scene_note(SceneShare *s, SceneKind kind, uint64_t ns);
+/* "layout: play 6.2 s, scene 3.1 s" in the kinds' order, those with any
+   time, to a tenth of a second; "layout: no steps" with none; the length
+   written */
+size_t window_scene_text(const SceneShare *s, char *out, size_t cap);
+/* the block over: the sums empty */
+void window_scene_reset(SceneShare *s);
+
+/* The kind that held most of the block's step time (the first of equals);
+   SCENE_OTHER for a block with no steps */
+SceneKind window_scene_dominant(const SceneShare *s);
+
+/* The slow-scene dump's trigger (issue 179, window_host.c slow_scene_check):
+   the figures of a 10 s block, and whether this block is one of the run's
+   cutscene dumps (up to SLOW_SCENE_DUMPS, each from a block at least
+   SLOW_SCENE_STEP times as heavy as the one before).  boundMs is [dev]
+   slow_scene_dump_ms (0 or less: off); the sums are the block's GPU
+   figures, from which the mean work less the display wait is compared with
+   the bound. */
+#define SLOW_SCENE_UPTIME_MIN_S 30.0
+#define SLOW_SCENE_GPU_MIN 8
+#define SLOW_SCENE_DUMPS 3
+#define SLOW_SCENE_STEP 1.5
+
+typedef struct SlowSceneBlock {
+    SceneKind dominant; /* window_scene_dominant of the block */
+    int window;         /* a window is up */
+    int movie;          /* a movie is playing */
+    int count;          /* the dumps this run has written so far */
+    double lastWorkMs;  /* the work (window_slow_scene_work_ms) of the block of the last one */
+    double uptimeS;
+    unsigned gpuN;       /* the block's timed replays */
+    double spanSumMs;    /* their GPU spans summed */
+    double waitSumMs;    /* and their display waits */
+    double presentSumMs; /* and their present passes: on a driver whose stamps do
+                            not wait (a Mali) the display wait lands here */
+    double boundMs;
+    int stage;     /* the game's stage_no at the block's end */
+    int lastStage; /* the stage of the last dump's block (unused with count 0) */
+    int playDone;  /* a play block's dump has been made this run */
+} SlowSceneBlock;
+
+/* The mean GPU work a replay: (span less the display wait less the present
+   pass) over gpuN, 0 with no timed replay and never below 0.  The present
+   pass is counted out because on a driver whose timestamps run ahead of the
+   acquire wait (the Mali of issue 179) the wait lands in the present figure,
+   not in the display wait: a display-bound block must not write the file */
+double window_slow_scene_work_ms(const SlowSceneBlock *b);
+/* true when the block is a dump's: a window up, no movie, the dominant
+   kind a scene, the bound on, 30 s of uptime, at least 8 timed replays, the
+   work over the bound (not at it) and either no dump yet this run or fewer
+   than SLOW_SCENE_DUMPS with the work at least SLOW_SCENE_STEP times the
+   last dump's block (so a run of climbing blocks ends with the worst one's
+   file, the zips being pruned to the newest three); or a later dump (fewer
+   than SLOW_SCENE_DUMPS) whose block is in another stage than the last
+   dump's (window_slow_scene_new_stage), at any work over the bound: the
+   first slow block of each stage gets a file (issue 179: the cage, 90.9 ms,
+   after the boat's 99.7 ms, which the 1.5 times rule alone refused).
+   The last of the SLOW_SCENE_DUMPS is kept for play (issue 179's v0.11.7
+   log: all three were spent in the opening's cutscenes before the player
+   had control): scene blocks take at most SLOW_SCENE_DUMPS - 1 while no
+   play block's dump has been made (window_slow_scene_scene_cap), and the
+   first block whose dominant kind is play (SCENE_PLAY: the play layout,
+   the player in control; window_scene_kind) with its work over the bound,
+   under the same window, movie, uptime and timed-replay rules, takes the
+   one kept.  The total and each dump's size are unchanged */
+bool window_slow_scene_due(const SlowSceneBlock *b);
+/* the dumps scene blocks may take: SLOW_SCENE_DUMPS - 1 until a play block's
+   dump is made (playDone), then SLOW_SCENE_DUMPS */
+int window_slow_scene_scene_cap(const SlowSceneBlock *b);
+/* true when a dump has been made this run and the block's stage differs from
+   the last dump's block's: the block is the first slow one of its stage */
+bool window_slow_scene_new_stage(const SlowSceneBlock *b);
+/* Whether a replay is the block's heavy part: its CPU-side vertex work
+   (window_scene_vu_invocations of its own counts) at or above the block's
+   mean of that a replay (the frame the dump is to hold is the first such
+   replay after the block's end, window_host.c slow_scene_poll).  False for
+   a work or a mean that is not above 0 */
+bool window_slow_scene_pick(double work, double meanWork);
+/* "slow scene: the block's GPU work 52.3 ms a replay (bound 40; display
+   wait 3.1, present 2.0, span 55.4) in a scene layout: frame 4812 (its
+   vertex work 682.1 thousand against the block's mean 598.0 thousand)
+   written to logs/slow-20261106-120000.zip (dump 2 of 3 this run); attach
+   it with the log" (a new-stage block reads "in a scene layout (the first
+   slow block of stage 40): frame ..."; a play block's "in play (the dump
+   kept for play): frame ..."; the works in vertex invocations, printed in
+   thousands; the name is the file name alone; dump is count + 1).  The
+   length written */
+size_t window_slow_scene_text(char *out, size_t cap, const SlowSceneBlock *b, unsigned frame,
+                              double frameWork, double meanWork, const char *zipName);
+
+/* The slow step's game threads part: "game threads 199.3 in 39 switches
+   (longest Main 171.2 ms; on core 2)".  longestMs 0 (no switch timed) leaves
+   the bracket out; core below 0 (not known) leaves "; on core N" out; name
+   NULL or empty is "?" */
+size_t window_scene_threads_text(char *out, size_t cap, double threadsMs, unsigned long switches,
+                                 double longestMs, const char *name, int core);
+
+/* A replay's VU work, averaged over replays (n): draws, triangles drawn
+   (index lists in threes), the vertices the pre-passes recorded (a
+   pre-pass's: each vertex once), and prepass whether the pre-pass is on.
+   Off, every triangle shades 3 corners three times (a tiler's vertex shader
+   runs for position then for varyings per index: 9 invocations a triangle).
+     "VU: 1182 draws, 61k triangles, 550k vertex invocations (pre-pass off: 9 a triangle)"
+     "VU: 250 draws, 9.2k triangles, 4.1k vertex invocations (pre-pass: each vertex once);
+     the draws' vu_main_vs 28k more (3 a triangle; never summed with the pre-pass's)"
+   (with the pre-pass the draws run vu_main_vs three times a triangle, index
+   kick * 4 + corner, no vertex reuse: named beside the pre-pass's figure,
+   never added to it); leftOut of the triangles the index compaction left
+   out (RdPerfRecord.vuTrisLeftOut, port/render/rd_vu_compact.h), one
+   invocation each where the GPU reuses an index within a triangle:
+     "... the draws' vu_main_vs 23k more (3 a triangle, after the index
+     compaction 1 a triangle it left out: 2.5k of 9.2k; never summed with
+     the pre-pass's)" */
+size_t window_scene_vu_text(char *out, size_t cap, uint64_t draws, uint64_t tris,
+                            uint64_t preVertices, unsigned n, int prepass, uint64_t leftOut);
+
+/* The skin check's twins in a replay, averaged over replays (n): the draws
+   they added and their vertex invocations (issue 123: what the check costs
+   a picture), appended to the VU line; "" with no twin drawn:
+     "; twins 42 draws, 76k vertex invocations a picture" */
+size_t window_scene_twins_text(char *out, size_t cap, uint64_t draws, uint64_t invocations,
+                               unsigned n);
+
+/* The vertex invocations of a replay's VU draws: the pre-pass's vertices
+   with it on, 9 a triangle with it off (the VU line's own quantity) */
+uint64_t window_scene_vu_invocations(uint64_t tris, uint64_t preVertices, int prepass);
+
+/* A replay's GPU work: its span less the display wait and the present (the
+   slow-scene rule's quantity), never negative.  The stamps inside the span
+   are not used: on a tile-based GPU the "before list 0" and list 0 figures
+   trade at a constant sum (issue 179) */
+double window_scene_gpu_work_ms(double spanMs, double waitMs, double presentMs);
+
+/* The block's timed replays as (vertex invocations, GPU work ms) pairs, for
+   a least-squares line: work = a + b x (x in thousands of invocations).
+   Sums, no ring: a block's few hundred replays in doubles */
+typedef struct SceneVuFit {
+    unsigned n;
+    double sx, sy, sxx, sxy, syy;
+    double xMin, xMax; /* the smallest and largest x (thousands of invocations) */
+} SceneVuFit;
+
+void window_scene_vu_fit_add(SceneVuFit *f, uint64_t invocations, double workMs);
+/* The line's a (ms), b (ms a thousand invocations) and r2 (the share of the
+   work's variance the invocations explain; -1 when the work did not vary):
+   false with fewer than 3 replays or the invocations' count not varying
+   (no slope to be had), or the invocations' largest not at least twice the
+   smallest (a cutscene's replays: the line would be noise read as a cost) */
+bool window_scene_vu_fit(const SceneVuFit *f, double *a, double *b, double *r2);
+/* "; GPU work 51.8 ms a replay, 16.0 ms + 0.17 ms a thousand vertex
+   invocations (R^2 0.81, 70 replays)": the mean, then the line where it is
+   had; "" with no replay timed.  A high b with a high R^2 says the vertex
+   work sets the GPU's time, a low R^2 that something else does (the
+   pixels, the passes).  The length written */
+size_t window_scene_vu_fit_text(char *out, size_t cap, const SceneVuFit *f);
+
+/* The hint's floor on the fit's R^2 (rd_perf_rank.h RD_PERF_RANK_VU_R2,
+   the ranked lines' vertex estimate's own): a line explaining less of the
+   work's variance names no step (issue 179's v0.11.13 log: R^2 0.79) */
+#define WINDOW_SCENE_HINT_R2 0.8
+/* The hint's printed figures kept to known widths, so the text has a
+   known longest (window_host.c hint[512]; window_scene_test.c sweeps it):
+   the GPU's time a picture at most WINDOW_SCENE_HINT_GPU_MAX_MS (a block's
+   mean over a 10 s block: the GPU hang limit ends any picture far below
+   it) and the game's rate at most WINDOW_SCENE_HINT_FPS_MAX (the game runs
+   at 25 to 60) or no hint; every other figure is one of these or less */
+#define WINDOW_SCENE_HINT_GPU_MAX_MS 9999.9
+#define WINDOW_SCENE_HINT_FPS_MAX 999.9
+#define WINDOW_SCENE_HINT_TEXT 512
+
+/* The GPU-bound hint at the end of the 10 s presents line (issue 123: the
+   Adreno 740 at Custom 3x made 25.7 presented fps against the game's 30,
+   its GPU 36-38 ms a picture).  Only when the block presented fewer
+   pictures than the game made (presentedFps under gameFps), skipped
+   presents for lateness (skippedLate above 0) and the GPU's time a picture
+   is over the game's step (1000 / gameFps ms); "" else.  That time is the
+   block's mean GPU work (fit's, the VU line's "GPU work ... a replay")
+   where the block timed a replay, else gpuMs (the present allowance's
+   median span less the display wait, the line's "GPU span").
+   The arithmetic: the fit's vertex part V = b x the block's mean
+   invocations (window_scene_vu_fit; 0 with b not above 0, at most gpuMs)
+   does not change with the resolution; the rest P =
+   gpuMs - V scales with the pixels, (K / scale)^2 at a scale K for the
+   scene's scale now (scale, the scene's texels a GS pixel down); the hint
+   names the largest offered resolution step (1, 2, 3, 4, 6, 8, 12, 16)
+   below scale whose V + P (K / scale)^2 is at most 0.9 of the step:
+   "; the GPU takes 37.7 ms a picture at this resolution (3x): 2x would fit
+   the game's rate (37.7 ms = 3.8 ms of vertex work by the fit (R^2 1.00)
+   + 33.9 ms
+   that scales with the pixels: 3.8 + 33.9 x (2/3)^2 = 18.8 ms, under 30.0
+   ms, 0.9 of the 33.3 ms step at 30.0 game fps; a hint: nothing changes by
+   itself)"; with none "...: no lower resolution step would fit the game's
+   rate (3.8 ms of vertex work by the fit + 33.9 ms that scales with the
+   pixels: 3.8 + 33.9 x (1/3)^2 = 7.5 ms at 1x against 30.0 ms ...)" (or
+   "at 1x already" for a scale of 1 or less).  Without a line (fit NULL,
+   under 3 replays, or window_scene_vu_fit refusing: the invocations not
+   spread enough, or its R^2 under WINDOW_SCENE_HINT_R2) no step is named,
+   since a vertex-bound block would read as pixels: "; GPU-bound at 3x (the
+   GPU takes 37.7 ms a picture, the step 33.3 ms at 30.0 game fps): no
+   resolution hint (fit: not enough spread)" ("fit: under 3 timed
+   replays", "fit: R^2 0.79, under 0.80"); a line whose work did not vary
+   reads "by the fit (the work flat)".  A hint only: the resolution
+   never changes by itself (the v0.7.9 decision).  skippedLate: the block's
+   frames not presented, the late skips and, at frame rate Original, those
+   the render thread's busy picture left out (issue 179: a Mali-G52 phone
+   showed "the render thread busy 157" and no late skip, so no hint
+   printed); 0 prints none.  The length written */
+unsigned window_scene_hint_skips(unsigned late, unsigned busy);
+size_t window_scene_gpu_hint_text(char *out, size_t cap, double presentedFps, double gameFps,
+                                  unsigned skippedLate, double gpuMs, double scale,
+                                  const SceneVuFit *fit);
+
+/* "acquire: the display's image was free at the present's submit in 41 of 60
+   pictures": the pictures whose present list's submit found the acquire's
+   fence signalled (RhiStats acquireReadyAtSubmit) of those it asked
+   (that and acquireNotReady); "" with none asked (every backend but Vulkan).
+   The length written */
+size_t window_scene_acquire_text(char *out, size_t cap, uint64_t ready, uint64_t notReady);
+/* window_tiler_words' text (window_lines.c, the end of the 10 s GPU lines):
+   on a tile-based GPU (tiler nonzero) where a pass's time and the display
+   wait land, ending ": the stretch before list 0 is the uploads and the
+   GPU's work still in flight"; "" elsewhere */
+const char *window_scene_tiler_words(int tiler);
+/* The VU pre-pass's part of the "GPU ms per replay" line: its GPU ms a
+   replay ("%.2f") with it on, the word "off" with it off (a 0.00 read as a
+   cost).  The length written */
+size_t window_scene_prepass_gpu_text(char *out, size_t cap, int on, double msPerReplay);
+/* A block's share of a counter that only grows, from its value now and its
+   value at the block before: now less that, or now itself when now is below
+   it (the backend was made again and its counters started from 0) */
+uint64_t window_scene_counter_delta(uint64_t now, uint64_t snapshot);
+
+/* " (images: 10, in use 1)": the swapchain's images and those acquired and
+   not yet handed back to the presentation engine; "" with no image count
+   (a backend without one); the length written */
+size_t window_scene_images_text(char *out, size_t cap, uint64_t images, uint64_t inUse);
+
+#endif /* ICO_PLATFORM_WINDOW_SCENE_H */

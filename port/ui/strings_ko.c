@@ -38,11 +38,7 @@ const char *const ui_strings_ko[UI_STR_COUNT] = {
         "부담 없이 즐기고 싶은 분께. 일부 이벤트 장면에서는 요르다가 잡혀가는 모습이 나옵니다.",
     [UI_STR_OPT_PIT_TIME] = "요르다를 구할 시간",
     [UI_STR_OPT_PIT_TIME_NOTE] =
-        "그림자가 요르다를 데려가기까지의 시간입니다. 위의 요르다 항목을 켜면 잡혀가지 않습니다.",
-    [UI_STR_VAL_PIT_HALF] = "절반",
-    [UI_STR_VAL_PIT_LONGER] = "더 오래",
-    [UI_STR_VAL_PIT_DOUBLE] = "2배",
-    [UI_STR_VAL_PIT_TRIPLE] = "3배",
+        "그림자가 요르다와 가라앉기 시작해 데려가기까지의 시간(초)으로, 일부 장면은 비례해 짧습니다. 잡혀가지 않음을 켜면 쓰이지 않습니다.",
     [UI_STR_OPT_SHADOW_SPEED] = "그림자 속도",
     [UI_STR_OPT_SHADOW_SPEED_NOTE] =
         "그림자가 걷고, 달리고, 나는 속도입니다. 공격하는 빈도는 바뀌지 않습니다.",
@@ -157,6 +153,7 @@ const char *const ui_strings_ko[UI_STR_COUNT] = {
     [UI_STR_OPT_TOUCH_SIZE] = "터치 크기",
     [UI_STR_OPT_TOUCH_OPACITY] = "터치 불투명도",
     [UI_STR_VAL_ALWAYS] = "항상 표시",
+    [UI_STR_VAL_ALWAYS_SCENES] = "항상 표시, 장면 중 시작만",
     [UI_STR_VAL_SMALL] = "작게",
     [UI_STR_VAL_MEDIUM] = "보통",
     [UI_STR_VAL_LARGE] = "크게",
@@ -207,9 +204,17 @@ const char *const ui_strings_ko[UI_STR_COUNT] = {
     [UI_STR_MIRROR_SCREEN] = "좌우를 반전해서 플레이합니다. 이 설정은 저장 데이터에 기록됩니다.",
     [UI_STR_OPT_NEWGAME_PLUS] = "뉴 게임+",
     [UI_STR_NEWGAME_PLUS_SCREEN] =
-        "뉴 게임+에서는 두 번째 여정을 플레이합니다. 요르다의 말이 번역되고, 엔딩과 아이템이 바뀝니다. 끄면 클리어한 뒤에도 첫 번째 여정을 플레이합니다.",
+        "두 번째 여정: 요르다의 말이 번역되고, 엔딩과 아이템이 바뀝니다. 끄면 첫 번째 여정을 플레이합니다.",
+    [UI_STR_NEWGAME_START] = "시작하기",
+    [UI_STR_NEWGAME_START_SCREEN] = "위에서 고른 설정으로 새 게임을 시작합니다.",
     [UI_STR_OPT_CRT] = "CRT 필터",
     [UI_STR_OPT_CRT_STRENGTH] = "CRT 강도",
+    [UI_STR_OPT_TONE_GAMMA] = "감마",
+    [UI_STR_OPT_TONE_BRIGHTNESS] = "화면 밝기",
+    [UI_STR_OPT_TONE_CONTRAST] = "대비",
+    [UI_STR_OPT_TONE_SATURATION] = "채도",
+    [UI_STR_OPT_TONE_NOTE] =
+        "50은 게임이 그리는 그대로의 화면입니다. □를 누르면 50으로 돌아갑니다. CRT 필터도 바뀌지만 선명하게 그린 메뉴 글자는 바뀌지 않습니다.",
     [UI_STR_VAL_CRT_SCANLINES] = "주사선",
     [UI_STR_VAL_CRT_CONSUMER] = "가정용 TV",
     [UI_STR_VAL_CRT_TRINITRON] = "Trinitron",
@@ -407,6 +412,19 @@ const char *const ui_strings_ko[UI_STR_COUNT] = {
     [UI_STR_VAL_HOLD_DISC_B] = "디스크 그대로 (B)",
     [UI_STR_HOLD_TYPE_NOTE] =
         "A: R1을 누르고 있는 동안 요르다의 손을 잡습니다. B: R1을 한 번 누르면 손을 잡고, 다시 누르면 놓습니다.",
+    [UI_STR_OPT_ZOOM_TYPE] = "줌 설정",
+    [UI_STR_VAL_ZOOM_HOLD] = "누르고 있기",
+    [UI_STR_VAL_ZOOM_TOGGLE] = "전환",
+    [UI_STR_ZOOM_TYPE_NOTE] =
+        "누르고 있기: R2를 누르고 있는 동안 줌합니다. 전환: R2를 한 번 누르면 줌하고, 다시 누르면 원래대로 돌아갑니다.",
+    [UI_STR_OPT_CAMERA_RESET] = "카메라 리셋",
+    [UI_STR_CAMERA_RESET_NOTE] = "켬: 오른쪽 스틱을 누르면(R3) 카메라가 바로 이코에게 돌아옵니다.",
+    [UI_STR_OPT_YORDA_LOOK] = "요르다 보기",
+    [UI_STR_YORDA_LOOK_NOTE] =
+        "이코와 카메라가 요르다를 부르지 않고 그쪽을 향합니다. 누르고 있기: L3를 누르고 있는 동안. 전환: L3를 누를 때마다 시작과 끝.",
+    [UI_STR_OPT_BUTTON_PICTURES] = "버튼 그림",
+    [UI_STR_BUTTON_PICTURES_NOTE] =
+        "메뉴와 포토 모드에 표시되는 버튼 그림입니다. 자동은 마지막으로 사용한 컨트롤러에 맞게 바뀝니다.",
     [UI_STR_STICK_FIX_ALSO_NOTE] = "‘게임플레이’에도 있습니다.",
     [UI_STR_ACH_POPUPS_ALSO_NOTE] = "‘업적’에도 있습니다.",
     [UI_STR_PLAYERS_NOTE] = "2: 두 번째 컨트롤러로 요르다를 조작합니다.",
@@ -448,7 +466,6 @@ const char *const ui_strings_ko[UI_STR_COUNT] = {
     [UI_STR_STATS_CAPTURES] = "요르다가 잡혀간 횟수",
     [UI_STR_STATS_SAVES] = "이번 여정의 저장 횟수",
     [UI_STR_STATS_ENEMIES] = "이번 여정에서 쓰러뜨린 적",
-    [UI_STR_STATS_ASSISTS] = "어시스트",
     [UI_STR_STATS_AREA] = "지역",
     [UI_STR_PHOTO_ACT_MOVE] = "이동",
     [UI_STR_PHOTO_ACT_LOOK] = "시점",
@@ -517,10 +534,6 @@ const char *const ui_strings_ko[UI_STR_COUNT] = {
     [UI_STR_OPT_WINDOW_MODE] = "창 모드",
     [UI_STR_VAL_WINDOWED] = "창",
     [UI_STR_VAL_BORDERLESS] = "테두리 없음",
-    [UI_STR_OPT_EFFECT_WATER] = "수면 반사",
-    [UI_STR_VAL_SHARP] = "선명하게",
-    [UI_STR_EFFECT_WATER_NOTE] =
-        "‘선명하게’는 수면의 반사를 선택한 해상도로 그립니다. ‘오리지널’은 PS2의 부드러운 반사 그대로입니다.",
     [UI_STR_VAL_SMOOTH] = "부드럽게",
     [UI_STR_OPT_SHOW_FPS] = "프레임 레이트 표시",
     [UI_STR_EFFECT_MOTION_BLUR_NOTE] =
@@ -557,14 +570,13 @@ const char *const ui_strings_ko[UI_STR_COUNT] = {
         "선택한 드라이버가 지난번에 시작되지 않았습니다. 기기 내장 드라이버를 사용하고 있습니다.",
     [UI_STR_GPU_DRIVER_NOSPACE] = "공간이 부족해서 추가할 수 없습니다",
     [UI_STR_GPU_DRIVER_NO_PICKER] =
-        "파일 선택 화면을 열 수 없습니다. 대신 드라이버 zip 파일을 게임의 drivers 폴더에 복사할 수 있습니다: %s",
+        "파일 선택 화면이 열리지 않았습니다. 드라이버 zip을 drivers 폴더에 복사하세요: %s",
     [UI_STR_GPU_DRIVER_NO_PICKER_APP] =
-        "이 기기에는 파일을 고를 수 있는 앱이 없습니다. 드라이버 zip 파일을 게임의 drivers 폴더에 복사하세요: %s",
-    [UI_STR_GPU_DRIVER_UNREADABLE] =
-        "선택한 파일을 읽을 수 없습니다. 먼저 이 기기로 복사한 뒤 다시 선택하세요",
+        "파일을 고를 수 있는 앱이 없습니다. 드라이버 zip을 drivers 폴더에 복사하세요: %s",
+    [UI_STR_GPU_DRIVER_UNREADABLE] = "읽을 수 없습니다. 먼저 이 기기로 복사하세요",
     [UI_STR_GPU_DRIVER_ADD_FILE] = "drivers 폴더에서 추가",
     [UI_STR_GPU_DRIVER_CANCELLED] =
-        "선택한 파일이 없습니다. 이 기기에서 파일 선택 화면이 열리지 않으면 드라이버 zip 파일을 게임의 drivers 폴더에 복사한 뒤 drivers 폴더에서 추가를 사용하세요: %s",
+        "선택한 파일이 없습니다. 파일 선택 화면이 열리지 않으면 드라이버 zip을 drivers 폴더에 복사한 뒤 drivers 폴더에서 추가를 사용하세요: %s",
     [UI_STR_GPU_DRIVER_NOTE_LOST] =
         "이 기기의 Qualcomm 드라이버에서 그래픽이 제대로 작동하지 않았습니다. Turnip 드라이버를 추가하거나 그 zip 파일을 게임의 drivers 폴더에 복사하세요 (%s). 다음 실행부터 적용됩니다.",
     [UI_STR_QUIT_GAME] = "게임 종료",
@@ -591,6 +603,9 @@ const char *const ui_strings_ko[UI_STR_COUNT] = {
     [UI_STR_OPT_SECOND_CARD] = "두 번째 메모리 카드",
     [UI_STR_OPT_SECOND_CARD_NOTE] =
         "끔: 원작 그대로 메모리 카드 1장. 켬: 두 번째 카드에 10개 더 저장할 수 있고, 저장과 불러오기에서 둘 다 고릅니다.",
+    [UI_STR_OPT_SHADOWS_TOGETHER] = "그림자가 함께 공격",
+    [UI_STR_OPT_SHADOWS_TOGETHER_NOTE] =
+        "끔: 원작 그대로 그림자가 번갈아 공격합니다. 켬: 여러 그림자가 동시에 공격할 수 있습니다.",
     [UI_STR_OPT_AA] = "안티에일리어싱",
     [UI_STR_OPT_AA_NOTE] =
         "윤곽을 매끄럽게 합니다. 슈퍼샘플링은 점이 4배(2x), 16배(4x). 카운터가 30이 되면 줄이세요.",
@@ -598,6 +613,17 @@ const char *const ui_strings_ko[UI_STR_COUNT] = {
     [UI_STR_VAL_DOWNSAMPLE_BOX] = "원래 크기로",
     [UI_STR_OPT_DOWNSAMPLE_NOTE] =
         "위의 해상도로 그려 원래 크기로 줄입니다. 2x 이상에서 작동, CRT 필터와 창 크기에서는 안 됩니다.",
+    [UI_STR_OPT_UPSCALE] = "업스케일링",
+    [UI_STR_VAL_UPSCALE_FSR1] = "FSR 1.0",
+    [UI_STR_VAL_UPSCALE_FSR3] = "FSR 3.1",
+    [UI_STR_OPT_UPSCALE_QUALITY] = "업스케일링 품질",
+    [UI_STR_VAL_UPSCALE_Q_NATIVE] = "네이티브 AA",
+    [UI_STR_VAL_UPSCALE_Q_QUALITY] = "품질",
+    [UI_STR_VAL_UPSCALE_Q_BALANCED] = "균형",
+    [UI_STR_VAL_UPSCALE_Q_PERFORMANCE] = "성능",
+    [UI_STR_OPT_UPSCALE_SHARPNESS] = "선명도",
+    [UI_STR_OPT_UPSCALE_NOTE] =
+        "화면보다 작게 그릴 때 FSR(AMD)로 선명하게 합니다. CRT 필터와 창 크기에서는 안 됩니다. 3.1은 축소 없이, 안티에일리어싱 끔.",
     [UI_STR_AA_OFF] = "끔",
     [UI_STR_AA_SSAA2] = "2x 슈퍼샘플링",
     [UI_STR_AA_SSAA4] = "4x 슈퍼샘플링",
@@ -605,6 +631,7 @@ const char *const ui_strings_ko[UI_STR_COUNT] = {
     [UI_STR_AA_MSAA4] = "MSAA 4x",
     [UI_STR_AA_MSAA8] = "MSAA 8x",
     [UI_STR_AA_UNAVAILABLE] = " (끔: 사용할 수 없음)",
+    [UI_STR_AA_FSR3] = " (끔: FSR 3.1)",
     [UI_STR_EXTRAS_STEAM] = "Steam에 추가",
     [UI_STR_STEAM_ADDED] = "Steam에 추가했습니다",
     [UI_STR_STEAM_ADDED_BODY] = "Steam을 실행하고 라이브러리에서\nICO를 찾아 주십시오.",
@@ -617,8 +644,12 @@ const char *const ui_strings_ko[UI_STR_COUNT] = {
     [UI_STR_STEAM_NO_USER] = "Steam 계정을 찾을 수 없습니다",
     [UI_STR_STEAM_NO_USER_BODY] = "Steam에 한 번 로그인한 뒤\n다시 시도해 주십시오.",
     [UI_STR_STEAM_FAILED] = "Steam에 추가하지 못했습니다",
-    [UI_STR_STEAM_FAILED_BODY] =
-        "바로 가기 목록을 바꾸지 못했습니다.\n직접 추가하는 방법은 README에 있습니다.",
+    [UI_STR_STEAM_FAILED_BODY] = "직접 추가하는 방법은 README에 있습니다.",
+    [UI_STR_EXTRAS_DESKTOP] = "애플리케이션 메뉴에 추가",
+    [UI_STR_DESKTOP_ADDED] = "메뉴에 추가했습니다",
+    [UI_STR_DESKTOP_ADDED_BODY] = "게임이 애플리케이션 메뉴에\n들어갔습니다.",
+    [UI_STR_DESKTOP_FAILED] = "메뉴에 추가하지 못했습니다",
+    [UI_STR_DESKTOP_FAILED_BODY] = "메뉴 항목을 사용자 폴더에\n쓰지 못했습니다.",
     [UI_STR_EXTRAS_EXPORT_TEXTURES] = "텍스처 내보내기",
     [UI_STR_EXPORT_TEXTURES_STOP] = "내보내기 중지",
     [UI_STR_EXPORT_TEXTURES_NOTE] =
@@ -641,7 +672,7 @@ const char *const ui_strings_ko[UI_STR_COUNT] = {
     [UI_STR_RESTORE_AGAIN] = "한 번 더 눌러 고르기",
     [UI_STR_RESTORE_CONFIRM_TITLE] = "백업에서 복원할까요?",
     [UI_STR_RESTORE_CONFIRM_BODY] =
-        "지금의 메모리 카드, 저장 상태, 설정, 업적이 백업의 것으로 바뀌고 게임이 다시 시작됩니다.\n백업을 고르려면 한 번 더 누르세요.",
+        "지금의 메모리 카드, 저장 상태, 설정, 업적을 백업으로 바꾸고 다시 시작합니다.\n백업을 고르려면 한 번 더 누르세요.",
     [UI_STR_RESTORE_CHOOSING] = "복원할 백업을 고르세요.",
     [UI_STR_RESTORE_READING] = "백업을 읽는 중…",
     [UI_STR_RESTORE_PROGRESS] = "복원 중: %d / %d개 파일",
@@ -657,19 +688,17 @@ const char *const ui_strings_ko[UI_STR_COUNT] = {
     [UI_STR_BACKUP_DONE_BODY] = "파일 %d개를\n%s에 저장했습니다",
     [UI_STR_BACKUP_FAILED] = "데이터를 백업하지 못했습니다",
     [UI_STR_RESTORE_DONE] = "데이터를 복원하는 중",
-    [UI_STR_RESTORE_DONE_RESTART] = "게임이 지금 다시 시작되며 백업을 제자리에 둡니다.",
-    [UI_STR_RESTORE_DONE_CLOSE] =
-        "게임이 지금 종료됩니다. 다시 실행하면 시작할 때 백업을 제자리에 둡니다.",
+    [UI_STR_RESTORE_DONE_RESTART] = "다시 시작해 백업을 제자리에 둡니다.",
+    [UI_STR_RESTORE_DONE_CLOSE] = "게임이 종료됩니다. 다시 실행하면 백업을 제자리에 둡니다.",
     [UI_STR_RESTORE_FAILED] = "백업을 복원하지 못했습니다",
-    [UI_STR_BACKUP_WHY_BUSY] = "지금은 안 됩니다: 게임이 저장 중입니다. 잠시 후 다시 해 보세요.",
+    [UI_STR_BACKUP_WHY_BUSY] = "게임이 저장 중입니다. 잠시 후 다시 해 보세요.",
     [UI_STR_BACKUP_WHY_NOTHING] = "아직 백업할 것이 없습니다.",
-    [UI_STR_BACKUP_WHY_WRITE] = "데이터를 쓰지 못했습니다. 남은 공간을 확인하고 다시 해 보세요.",
+    [UI_STR_BACKUP_WHY_WRITE] = "쓰지 못했습니다. 남은 공간을 확인하고 다시 해 보세요.",
     [UI_STR_BACKUP_WHY_READ] = "파일을 읽지 못했습니다.",
     [UI_STR_BACKUP_WHY_NOT_BACKUP] = "이 파일은 이 게임이 만든 백업이 아닙니다.",
-    [UI_STR_BACKUP_WHY_NEWER] =
-        "이 백업은 더 새로운 버전에서 만들었습니다. 게임을 업데이트한 뒤 복원하세요.",
+    [UI_STR_BACKUP_WHY_NEWER] = "더 새로운 버전에서 만들었습니다. 게임을 업데이트한 뒤 복원하세요.",
     [UI_STR_BACKUP_WHY_DAMAGED] = "이 백업은 손상되었습니다.",
-    [UI_STR_BACKUP_WHY_UNSAFE] = "이 백업에는 게임 폴더 밖의 파일이 들어 있어 쓰지 않습니다.",
+    [UI_STR_BACKUP_WHY_UNSAFE] = "게임 폴더 밖의 파일이 있어 쓰지 않습니다.",
     [UI_STR_BACKUP_WHY_TOO_BIG] = "이 백업은 게임이 받아들이는 크기보다 큽니다.",
     [UI_STR_BACKUP_WHY_NO_DIALOG] = "파일 선택 화면을 열지 못했습니다.",
     [UI_STR_BACKUP_WHY_NO_SPACE] = "기기의 남은 공간이 부족합니다.",
@@ -712,17 +741,18 @@ const char *const ui_strings_ko[UI_STR_COUNT] = {
     [UI_STR_ISO_COPYING] = "디스크 이미지를 앱으로 복사하는 중",
     [UI_STR_ISO_COPYING_LONG] =
         "디스크 이미지를 앱으로 복사하는 중. 이미지가 커서 수 분이 소요됩니다",
-    [UI_STR_SECTION_VARIANTS] = "게임 변형",
+    [UI_STR_SECTION_CHAINS] = "사슬",
+    [UI_STR_SECTION_SHADOWS] = "그림자",
+    [UI_STR_SECTION_CUTSCENES] = "컷신",
     [UI_STR_OPT_VAR_TOUGHNESS] = "그림자 강도",
     [UI_STR_OPT_VAR_TOUGHNESS_NOTE] =
-        "북미판: 그림자가 북미판 디스크와 같은 강도가 되고, 이후 플레이에서도 강해지지 않습니다. 업적은 그대로 유지됩니다.",
+        "북미판: 그림자가 북미판 디스크와 같은 강도가 되고, 이후 플레이에서도 강해지지 않습니다.",
     [UI_STR_VAL_VAR_AMERICAN] = "북미판",
     [UI_STR_VAL_VAR_NOT_TOUGHER] = "강해지지 않음",
     [UI_STR_OPT_VAR_ONE_HIT] = "휘두르기당 한 번 적중",
-    [UI_STR_OPT_VAR_ONE_HIT_NOTE] =
-        "이코가 한 번 휘두르면 그림자에게 한 번만 맞습니다. 업적이 꺼집니다.",
+    [UI_STR_OPT_VAR_ONE_HIT_NOTE] = "이코가 한 번 휘두르면 그림자에게 한 번만 맞습니다.",
     [UI_STR_OPT_VAR_NEVER_DODGE] = "그림자가 피하지 않음",
-    [UI_STR_OPT_VAR_NEVER_DODGE_NOTE] = "그림자가 이코의 공격을 피하지 않습니다. 업적이 꺼집니다.",
+    [UI_STR_OPT_VAR_NEVER_DODGE_NOTE] = "그림자가 이코의 공격을 피하지 않습니다.",
     [UI_STR_OPT_VAR_AGGRESSION] = "그림자의 공격성",
     [UI_STR_VAL_VAR_AGG_OWN] = "기본",
     [UI_STR_VAL_VAR_AGG_BOLD_PATIENT] = "대담, 느긋하게",
@@ -730,15 +760,13 @@ const char *const ui_strings_ko[UI_STR_COUNT] = {
     [UI_STR_VAL_VAR_AGG_WARY_PATIENT] = "신중, 느긋하게",
     [UI_STR_VAL_VAR_AGG_WARY_QUICK] = "신중, 빠르게",
     [UI_STR_OPT_VAR_AGGRESSION_NOTE] =
-        "그림자의 싸움 방식을 대담하거나 신중하게, 느긋하거나 빠르게 바꿉니다. 업적은 그대로 유지됩니다.",
+        "그림자의 싸움 방식을 대담하거나 신중하게, 느긋하거나 빠르게 바꿉니다.",
     [UI_STR_OPT_VAR_NO_HINTS] = "힌트 없음",
-    [UI_STR_OPT_VAR_NO_HINTS_NOTE] =
-        "북미판처럼 요르다가 갈 곳을 알려 주지 않습니다. 업적은 그대로 유지됩니다.",
+    [UI_STR_OPT_VAR_NO_HINTS_NOTE] = "북미판처럼 요르다가 갈 곳을 알려 주지 않습니다.",
     [UI_STR_OPT_VAR_BARRIER] = "여왕의 방벽",
     [UI_STR_VAL_VAR_HITS_5] = "5회",
     [UI_STR_VAL_VAR_HITS_7] = "7회",
-    [UI_STR_OPT_VAR_BARRIER_NOTE] =
-        "여왕의 방벽을 부수는 데 필요한 공격 횟수입니다. 업적은 그대로 유지됩니다.",
+    [UI_STR_OPT_VAR_BARRIER_NOTE] = "여왕의 방벽을 부수는 데 필요한 공격 횟수입니다.",
     [UI_STR_OPT_VAR_NO_LOOK] = "컷신 중 둘러보기 끄기",
     [UI_STR_OPT_VAR_NO_LOOK_NOTE] =
         "컷신 중에 오른쪽 스틱으로 둘러볼 수 없습니다. 업적은 그대로 유지됩니다.",
@@ -748,9 +776,8 @@ const char *const ui_strings_ko[UI_STR_COUNT] = {
     [UI_STR_OPT_VAR_DEBUG_MENU] = "디버그 메뉴",
     [UI_STR_OPT_VAR_DEBUG_MENU_NOTE] = "게임 자체의 디버그 메뉴입니다(개발자용). 업적이 꺼집니다.",
     [UI_STR_OPT_VAR_TOUGHNESS_NOTE_DEMO] =
-        "이 데모에서는 북미판을 고를 수 없습니다. 그림자가 북미판 디스크와 같지 않습니다. 강해지지 않음: 이후 플레이에서도 강해지지 않습니다. 업적은 그대로 유지됩니다.",
-    [UI_STR_OPT_VAR_NO_HINTS_NOTE_2001] =
-        "이 버전에는 힌트가 없어서 효과가 없습니다. 업적은 그대로 유지됩니다.",
+        "이 데모에서는 북미판을 고를 수 없습니다. 그림자가 북미판 디스크와 같지 않습니다. 강해지지 않음: 이후 플레이에서도 강해지지 않습니다.",
+    [UI_STR_OPT_VAR_NO_HINTS_NOTE_2001] = "이 버전에는 힌트가 없어서 효과가 없습니다.",
     [UI_STR_OPT_VAR_NO_LOOK_NOTE_2001] =
         "이 버전은 컷신 중에 둘러볼 수 없어서 효과가 없습니다. 업적은 그대로 유지됩니다.",
     [UI_STR_GPU_HANG_TURNIP] =
@@ -768,22 +795,25 @@ const char *const ui_strings_ko[UI_STR_COUNT] = {
     [UI_STR_STATES_NOTE] =
         "상태는 이 디스크에 속합니다. 이후 버전에서도 불러올 수도 있습니다. 왼쪽과 오른쪽으로 동작을 고릅니다.",
     [UI_STR_STATES_PAUSE_FIRST] = "상태를 저장하려면 게임을 일시정지하세요",
+    [UI_STR_STATES_PAUSE_FIRST_LOAD] = "이 상태를 불러오려면 게임을 일시정지하세요",
     [UI_STR_STATES_REFUSED_BUILD] = "다른 버전의 게임에서 저장됨",
     [UI_STR_STATES_REFUSED_DISC] = "다른 디스크에서 저장됨",
-    [UI_STR_STATES_REFUSED_SETTINGS] = "게임 설정이 다릅니다: %s",
     [UI_STR_STATES_REFUSED_BUSY] = "지금은 할 수 없습니다: 게임이 불러오거나 저장하는 중입니다",
-    [UI_STR_STATES_REFUSED_CHECK] = "상태를 복원하지 못했습니다. 게임은 계속됩니다",
+    [UI_STR_STATES_REFUSED_CHECK] = "불러오지 못했습니다. 게임은 계속됩니다",
     [UI_STR_STATES_OFF] = "이 빌드에서는 저장 상태가 꺼져 있습니다",
     [UI_STR_STATES_TITLE_HINT] = "저장은 일시정지 메뉴에서 합니다",
     [UI_STR_STATES_SAVE_FAILED] = "상태를 저장하지 못했습니다",
     [UI_STR_STATES_XB_OLD] =
-        "이 저장 상태는 버전 %s에서 만들어졌습니다. 저장 상태를 새 버전으로 옮길 수 있게 되기 전의 것입니다. 메모리 카드의 저장 데이터는 그대로 쓸 수 있습니다.",
+        "버전 %s에서 만든 오래된 상태라 불러올 수 없습니다. 메모리 카드 저장 데이터는 쓸 수 있습니다.",
     [UI_STR_STATES_XB_CODE] =
-        "이 저장 상태는 버전 %s에서 만들어졌습니다. 버전 %s에서 저장한 부분의 게임이 바뀌어 이어서 할 수 없습니다. 메모리 카드의 저장 데이터는 그대로 쓸 수 있습니다.",
+        "버전 %s에서 만들어졌습니다. 버전 %s에서는 저장한 부분이 바뀌어 불러올 수 없습니다. 메모리 카드 저장 데이터는 쓸 수 있습니다.",
     [UI_STR_STATES_XB_DATA] =
-        "이 저장 상태는 버전 %s에서 만들어졌습니다. 버전 %s에서 게임이 진행 상황을 메모리에 담는 방식이 바뀌어 이어서 할 수 없습니다. 메모리 카드의 저장 데이터는 그대로 쓸 수 있습니다.",
+        "버전 %s에서 만들어졌습니다. 버전 %s에서는 진행 상황을 담는 방식이 바뀌어 불러올 수 없습니다. 메모리 카드 저장 데이터는 쓸 수 있습니다.",
     [UI_STR_STATES_XB_PINNED] =
-        "이 저장 상태는 버전 %s에서 만들어졌으며 그 버전에서만 이어서 할 수 있습니다. 메모리 카드의 저장 데이터는 그대로 쓸 수 있습니다.",
+        "버전 %s에서만 불러올 수 있습니다. 메모리 카드 저장 데이터는 쓸 수 있습니다.",
+    [UI_STR_STATES_CKPT_ROW] = "마지막 체크포인트부터 불러옵니다",
+    [UI_STR_STATES_CKPT_LOADED] = "마지막 체크포인트부터 이어서 시작했습니다 (버전 %s).",
+    [UI_STR_STATES_CKPT_NONE] = "버전 %s에서 만들어져 이어서 할 수 없고, 체크포인트도 없습니다.",
     [UI_STR_OPT_EFFECT_GLOW_SMOOTH] = "프레임 사이의 빛 번짐",
     [UI_STR_EFFECT_GLOW_SMOOTH_NOTE] =
         "‘오리지널’은 게임 본래 프레임의 빛 번짐을 그 사이에도 그대로 씁니다. ‘부드럽게’는 표시되는 프레임마다 다시 만들어 부담이 늘어납니다.",
@@ -792,7 +822,97 @@ const char *const ui_strings_ko[UI_STR_COUNT] = {
     [UI_STR_OPT_EFFECT_MOTION_BLUR_STRENGTH] = "모션 블러 강도",
     [UI_STR_EFFECT_MOTION_BLUR_STRENGTH_NOTE] =
         "값을 줄이면 블러가 더 빠르게 사라집니다. 100은 PS2 그대로입니다.",
+    [UI_STR_SECTION_UNUSED] = "미사용 콘텐츠",
+    [UI_STR_UNUSED_ARENA] = "테스트 방: 아레나",
+    [UI_STR_UNUSED_ARENA_NOTE] =
+        "제작진이 그림자와의 전투를 시험하던 방입니다. 출구가 없으니 START를 누르고 '게임을 종료함'으로 나가십시오.",
+    [UI_STR_UNUSED_CLIMB] = "테스트 방: 오르기",
+    [UI_STR_UNUSED_CLIMB_NOTE] =
+        "제작진이 오르기와 상자를 시험하던 방입니다. 출구가 없으니 START를 누르고 '게임을 종료함'으로 나가십시오.",
+    [UI_STR_UNUSED_MOVIE] = "데모 영상 (576라인)",
+    [UI_STR_UNUSED_MOVIE_NOTE] =
+        "타이틀 화면을 그대로 두면 나오는 영상의 또 다른 판입니다. 유럽 TV용으로 만들어졌지만 쓰이지 않았습니다.",
+    [UI_STR_UNUSED_ART] = "초기 전시판 타이틀 그림",
+    [UI_STR_UNUSED_ART_NOTE] =
+        "초기 전시판의 타이틀 화면 그림입니다. 디스크에 남아 있지만 표시되지 않습니다.",
+    [UI_STR_UNUSED_ART_VER] = "전시판: 버전 표기",
+    [UI_STR_UNUSED_ART_START] = "전시판: PRESS START",
+    [UI_STR_UNUSED_ART_COPYRIGHT] = "전시판: 저작권 표기",
+    [UI_STR_STATES_REFUSED_UNUSED] = "테스트 방에서는 할 수 없습니다",
+    [UI_STR_SECTION_COMBAT] = "전투",
+    [UI_STR_OPT_VAR_AUTO_GUARD] = "자동 방어",
+    [UI_STR_OPT_VAR_AUTO_GUARD_NOTE] =
+        "끔: 이코가 앞쪽에서 오는 그림자의 공격을 막지 않으며, 뒤에서 맞을 때처럼 맞습니다.",
+    [UI_STR_OPT_VAR_ATTACK_TURN] = "그림자 쪽으로 돌아봄",
+    [UI_STR_OPT_VAR_ATTACK_TURN_NOTE] =
+        "끔: 이코가 휘두를 때 가장 가까운 그림자 쪽으로 돌지 않고 정면으로 휘두릅니다. 옆에 있는 그림자는 여전히 맞을 수 있습니다.",
+    [UI_STR_OPT_VAR_SHADOWS_WAIT_DOWN] = "이코가 쓰러지면 그림자 대기",
+    [UI_STR_OPT_VAR_SHADOWS_WAIT_DOWN_NOTE] =
+        "끔: 이코가 쓰러져 있는 동안에도 그림자가 기다리지 않으며, 바닥에 쓰러져 있을 때와 일어나는 중에도 공격이 적중합니다.",
+    [UI_STR_OPT_VAR_SWORD_COLOUR] = "빛의 검 색",
+    [UI_STR_OPT_VAR_SWORD_COLOUR_NOTE] =
+        "빨강: 빛의 검이 쓰이지 않은 쌍둥이 검처럼 붉은 궤적을 남깁니다. 색만 바뀝니다. 다음 방부터 적용됩니다.",
+    [UI_STR_OPT_VAR_WEAPON] = "막대기",
+    [UI_STR_VAL_VAR_INSECT_NET] = "잠자리채",
+    [UI_STR_OPT_VAR_WEAPON_NOTE] =
+        "잠자리채: 모든 막대기가 쓰이지 않은 잠자리채가 됩니다. 휘두르거나 불을 붙일 수 없고 그림자를 해치지 못합니다. 다음 방부터 적용됩니다.",
+    [UI_STR_VAL_VAR_THIRD_JOURNEY] = "3회차",
+    [UI_STR_OPT_VAR_TOUGHNESS_NOTE_THIRD] =
+        "그림자가 3회차와 같은 강도(첫 플레이의 2배)가 됩니다. 게임에서는 3회차에 도달할 수 없습니다.",
+    [UI_STR_OPT_VAR_PEACEFUL] = "얌전한 그림자",
+    [UI_STR_OPT_VAR_PEACEFUL_NOTE] =
+        "켬: 그림자가 나타난 자리에 머물며 이코나 요르다를 쫓지 않습니다.",
+    [UI_STR_OPT_VAR_CHAIN_SPEED] = "사슬 흔들림 속도",
+    [UI_STR_OPT_VAR_CHAIN_SPEED_NOTE] =
+        "이코가 매달려 흔들 때 사슬이 흔들리는 속도입니다. 1이 가장 느리고 10이 가장 빠르며 4가 게임 원래 값입니다. 업적은 그대로 유지됩니다.",
+    [UI_STR_OPT_VAR_CHAIN_DAMPING] = "사슬 흔들림 멈춤",
+    [UI_STR_OPT_VAR_CHAIN_DAMPING_NOTE] =
+        "이코가 사슬을 흔들지 않을 때 흔들림이 잦아드는 속도입니다. 1이 가장 느리고 10이 가장 빠르며 4가 게임 원래 값입니다. 업적은 그대로 유지됩니다.",
+    [UI_STR_VAL_VAR_CHAIN_ORIGINAL] = "4 (오리지널)",
     [UI_STR_LANG_RU_BOBTTZ] = "Русский (bob-ttz)",
     [UI_STR_LANG_RU_COBRA838] = "Русский (cobra838)",
     [UI_STR_LANG_PT_BR] = "Português (Brasil) (ichagas7)",
+    [UI_STR_OPT_FREE_MOVEMENT] = "자유 이동",
+    [UI_STR_OPT_FREE_MOVEMENT_NOTE] =
+        "L2를 누르면 스틱으로 이코를 자유롭게 움직입니다. 왼쪽 스틱은 이동, 오른쪽 스틱은 위아래, L3는 바닥에 내려놓습니다. 업적이 꺼집니다.",
+    [UI_STR_REMAP_ASK_HINT] = "요르다에게 힌트 묻기",
+    [UI_STR_DIFF] = "난이도",
+    [UI_STR_DIFF_NOTE] =
+        "이번 새 여정의 그림자, 구출 시간, 규칙을 정합니다. 저장 데이터에 선택이 남습니다.",
+    [UI_STR_DIFF_EASY] = "쉬움",
+    [UI_STR_DIFF_NORMAL] = "보통",
+    [UI_STR_DIFF_HARD] = "어려움",
+    [UI_STR_DIFF_CUSTOM] = "사용자 설정",
+    [UI_STR_DIFF_EASY_NOTE] =
+        "더 느리고 순한 그림자가 요르다를 데려가지 않고 피하지도 않으며, 구출할 시간이 더 많습니다.",
+    [UI_STR_DIFF_NORMAL_NOTE] = "발매 당시 그대로의 게임입니다.",
+    [UI_STR_DIFF_HARD_NOTE] =
+        "빠르고 단단한 그림자가 함께 공격, 자동 방어 없음, 짧은 구출 시간, 한 방에서 3번 쓰러지면 게임 오버.",
+    [UI_STR_DIFF_CUSTOM_NOTE] =
+        "직접 정하는 규칙입니다. 세부 조정에서 모든 항목을 바꿀 수 있습니다.",
+    [UI_STR_DIFF_CUSTOMIZE] = "세부 조정",
+    [UI_STR_DIFF_CUSTOMIZE_NOTE] =
+        "규칙을 하나씩 바꿉니다. 어떤 난이도와도 맞지 않는 조합은 사용자 설정으로 표시됩니다.",
+    [UI_STR_DIFF_RULES] = "규칙",
+    [UI_STR_DIFF_NO_SHADOWS] = "그림자 없음",
+    [UI_STR_DIFF_NO_SHADOWS_NOTE] =
+        "켬: 그림자가 나타나지 않습니다. 일부 이야기 장면은 사라지거나 다르게 진행됩니다.",
+    [UI_STR_DIFF_KNOCK_LIMIT] = "쓰러짐 제한",
+    [UI_STR_DIFF_KNOCK_LIMIT_NOTE] =
+        "이코가 이 횟수만큼 쓰러지면 게임 오버입니다. 끔이면 제한이 없습니다.",
+    [UI_STR_DIFF_KNOCK_SCOPE] = "쓰러짐 집계",
+    [UI_STR_DIFF_KNOCK_SCOPE_NOTE] =
+        "방마다(방에 들어갈 때마다 다시 셈) 또는 여정 전체로 셉니다. 제한이 꺼져 있으면 효과가 없습니다.",
+    [UI_STR_DIFF_SCOPE_ROOM] = "방마다",
+    [UI_STR_DIFF_SCOPE_JOURNEY] = "여정 전체",
+    [UI_STR_DIFF_PERMADEATH] = "영구 사망",
+    [UI_STR_DIFF_PERMADEATH_NOTE] =
+        "켬: 게임 오버가 되면 이 여정이 끝납니다. 불러오기를 할 수 없고, 이 저장 데이터는 다시 불러올 수 없습니다.",
+    [UI_STR_DIFF_LOCKED_NOTE] = "여정을 시작할 때 정한 설정입니다",
+    [UI_STR_DIFF_LINE] = "난이도",
+    [UI_STR_DIFF_LINK] = "난이도",
+    [UI_STR_DIFF_TOAST_ENDED] = "이 여정은 끝났습니다.",
+    [UI_STR_DIFF_STATES_LOCKED] = "영구 사망 여정에서는 저장 상태를 불러올 수 없습니다.",
+    [UI_STR_DIFF_WORD_PERMADEATH] = "영구 사망",
+    [UI_STR_DIFF_STATES_SAVE_LOCKED] = "영구 사망 여정에서는 저장 상태를 만들 수 없습니다.",
 };

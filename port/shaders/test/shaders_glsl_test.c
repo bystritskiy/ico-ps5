@@ -38,7 +38,7 @@ int main(int argc, char **argv)
         printf("SKIP shaders_glsl: the OpenGL backend is not linked into this build\n");
         return 77;
     }
-    RhiDeviceDesc dd = {NULL, false, true, "shaders_glsl_test"};
+    RhiDeviceDesc dd = {NULL, false, true, "shaders_glsl_test", NULL};
     if (!rhi_init(&dd)) {
         printf("SKIP shaders_glsl: no OpenGL context (see messages above)\n");
         return 77;
@@ -66,7 +66,7 @@ int main(int argc, char **argv)
         }
         RhiShaderDesc d;
         memset(&d, 0, sizeof(d));
-        d.stage = b->stage == ICO_SHADER_STAGE_VERTEX ? RHI_STAGE_VERTEX : RHI_STAGE_FRAGMENT;
+        d.stage = (RhiShaderStage)b->stage; /* ICO_SHADER_STAGE_* equal RhiShaderStage */
         d.bytecode = b->glsl;
         d.bytecodeSize = b->glsl_len;
         d.textSize = b->glsl_text_len;

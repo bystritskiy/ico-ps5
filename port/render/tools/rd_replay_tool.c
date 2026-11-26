@@ -39,12 +39,19 @@
  * goes as the window's presents go, its submit and present on the submit
  * thread, rd_submit_thread.h).  Not with
  * OpenGL (its context stays on the main thread; the line says so and the
- * replays stay on it).  --repeat N (1..8) makes that picture N times in a
- * row, the PNG read after the last: with --render-thread on the N are
- * handed over back to back, so with the frame slots apart each one's end,
- * submit and present on the submit thread go on while the next one
- * records (rd_submit_thread.h "the slots"); off and sync make the same N
- * one after the other, so the last picture's bytes compare as one.
+ * replays stay on it).  --repeat N (1..1000) makes that picture N times in
+ * a row, the PNG read after the last: with --render-thread on (N up to 8)
+ * the N are handed over back to back, so with the frame slots apart each
+ * one's end, submit and present on the submit thread go on while the next
+ * one records (rd_submit_thread.h "the slots"); off and sync (and on, past
+ * 8) make the same N one after the other, so the last picture's bytes
+ * compare as one.  On a keep frame (fbKeep: lists 11-12 over the picture
+ * before, a stage switch's fade) --repeat N is N ticks of the keep loop:
+ * each replay reads the DISPLAY (or, under a temporal upscaler, the
+ * composite) the one before left, as the game's ticks do (give the
+ * picture before with --prev: under a temporal upscaler a keep frame with
+ * no picture held is refused); --presents re-shows one tick's picture, as
+ * the window's later presents of a tick do, and does not iterate it.
  *
  * The display options: a dump does not carry them, so the replay takes them
  * here, the PS2 picture by default:
@@ -70,15 +77,75 @@
  *                         with a --resolution above 1x, DISPLAY box-averaged
  *                         to its GS size before the present, which then
  *                         draws it as at 1x; --stats names the reduce
+ *   --fsr1 [S]            Upscaling: FSR 1.0 (RdSettings.upscale, rd_fsr1.c):
+ *                         where the picture has fewer texels than the
+ *                         --present box on both axes, EASU and RCAS draw it
+ *                         at the box's size; S the Sharpness row, 0..100
+ *                         (default 80); --stats names the pass ("present:
+ *                         fsr1 WxH -> wxh", or "present: fsr1 off")
+ *   --fsr3 Q              Upscaling: FSR 3.1 (RdSettings.upscale, rd_fsr3.c) at
+ *                         the Upscaling quality Q (native, quality, balanced
+ *                         or performance; Native AA at 1x and under the
+ *                         Original preset), Sharpness 80: the FidelityFX
+ *                         upscaler at the upscale point (Vulkan; exit 77
+ *                         where it cannot run, with the reason).  A dump
+ *                         holds no history: each replay starts FSR from
+ *                         empty, as a camera cut does, so this proves the
+ *                         dispatch runs, not FSR's picture.  --stats names
+ *                         it ("upscale: fsr3 ran N presents (...),
+ *                         validation errors E", or "upscale: fsr3 off")
+ *   --fsr3-dump DIR       (with --fsr3 or --upscale-test) the pictures F12
+ *                         saves under an upscaler (rd_upscale_capture.h), of
+ *                         the last replay's dispatch (the last of --repeat,
+ *                         the last of --presents): DIR/<dump>-scene.png
+ *                         (SCENE before the upscale, render size),
+ *                         -velocity.png, -depth.png (the 24-bit step in R,
+ *                         G, B) and -composite.png (the upscaler's output
+ *                         before the display layer, display size), full
+ *                         size; prints "fsr3-dump: <stem>-scene.png WxH,
+ *                         ..."; exit 1 when the replay held no dispatch or a
+ *                         picture was not written.  The same pictures as a
+ *                         reporter's zip, for a side-by-side (under the
+ *                         display layer --target SCENE reads the composite:
+ *                         this is the way to the pre-upscale SCENE)
+ *   --jitter X,Y          the scene's sub-pixel jitter (rd_jitter.h), X right
+ *                         and Y down in texels of the bound target, each
+ *                         -0.5..0.5, added after the GS's snap in the
+ *                         frame groups of SCENE, WORK2 and AURA_WORK (what a
+ *                         temporal upscaler's jitter does; [dev]
+ *                         jitter_test = X,Y in the game); 0,0 adds 0.0 and
+ *                         draws the picture without it byte for byte;
+ *                         --stats names it ("jitter X, Y: N frame groups")
+ *   --upscale-test [R]    the upscale point (rd_upscale.h, [dev]
+ *                         upscale_test): the scene-class targets at the
+ *                         display scale (the --resolution row's) over R
+ *                         (1..3, default 1.5), and at the reduction SCENE
+ *                         upscaled into UPSCALED by the test's bilinear
+ *                         hook, which the reduction then reads; no
+ *                         supersampling or MSAA; the motion vectors on (as
+ *                         --velocity).  A dump from before version 17 has
+ *                         no marker: nothing is upscaled.  --stats names
+ *                         it ("upscale point: SCENE WxH -> UPSCALED wxh,
+ *                         ...", or "upscale point off")
+ *   --upscale-phases N    (with --upscale-test) the jitter's phase count:
+ *                         the replay's present takes Halton (2, 3) at index
+ *                         0 (0, -1/6) as a temporal upscaler's first frame
  *   --full-pixel          the reduction draws the whole frame: no black border
  *   --border-mask         the game's Full pixel off: the same picture, the
  *                         border masked over it at present (rd__border_mask)
- *   --water-sharp         Water reflections: Sharp: the dump's render-to-texture
- *                         blocks that are not scene-sized (the reflections in
- *                         water, the queen barrier's copy) at the scene's scale
- *                         (rd_core.c rd__target_scale_of); without it they are
- *                         drawn at their GS size, the PS2's.  A dump from before
- *                         the option marks no block and replays as without it
+ *   --water-ps2           the dump's render-to-texture blocks that are not
+ *                         scene-sized (the reflections in water, the queen
+ *                         barrier's copy) at their GS size, the PS2's, as
+ *                         v0.11.6's Water reflections: Original drew them
+ *                         (sets ICO_RD_WATER_SCALE=0 before rd_init); without
+ *                         it they take the scene's scale as the game draws
+ *                         them (rd_core.c rd__target_scale_of).  No dump
+ *                         records the option it was made with: one made under
+ *                         Original replays as made with this.  A dump from
+ *                         before the block mark marks no block and replays at
+ *                         the GS size either way.  --water-sharp, the old
+ *                         switch for the scene's scale, is the default now
+ *                         and is accepted for older command lines
  *   --motion-blur M       original (the default) or smooth: Options > Effects
  *                         > Motion blur's way (RdSettings.motionBlurSmooth,
  *                         rd_blur_smooth.c).  Smooth's trail is an
@@ -125,11 +192,24 @@
  *                         overlay
  *
  * Inspection:
+ *   --fine-check          after the replay, the shadow's levels at the
+ *                         scene's scale read back and compared with the CPU
+ *                         reference on the same count (tools/rd_replay_fine.c
+ *                         says the rule and the lines); exit 1 outside the
+ *                         rule or with no chain to check.  A step from the
+ *                         stencil (rd_shadow_count.h) also has the full-size
+ *                         count drawn after it, so the count it stood for is
+ *                         read back (the stencil-to-table equality)
  *   --list                prints every command of the replayed lists: the
  *                         list, index, type and key; for a draw its texture
  *                         (id and size), and for screen prims the prim,
  *                         space, vertex count, the bounding box in GS pixels
- *                         and the texel rectangle (UV, or STQ times the size)
+ *                         and the texel rectangle (UV, or STQ times the size);
+ *                         "[display layer begins]" before the command where
+ *                         a temporal upscaler's display layer would begin
+ *                         (rd_layer.h: after the last scene-class command
+ *                         of lists 11-12) and "[keep copy]" after a keep
+ *                         frame's keep sprite the layer holds 1:1
  *   --no-device           no device: the dump is loaded into a record-only
  *                         renderer (rd__init_record_only) for
  *                         --list, --mesh and --dump-textures and nothing is
@@ -154,6 +234,40 @@
  *                         and is drawn in front of it; then 'j'
  *                         where its strip is joined to another strip of
  *                         the mesh, ICO_VU_MARK_JOINED: not a card)
+ *   --region-stats        the region rule's verdict on every triangle of the
+ *                         VU draws of lists 0-6 under it (prelit, lit,
+ *                         skinned, grid), through the CPU oracle at the
+ *                         replayed frame's camera (with --interp the blended
+ *                         one and the ticks' cameras): a line a draw
+ *                         ("<dump>: region: L:I mesh NAME tris T: exact E
+ *                         clip C strip S drop D (behind-eye B, out-of-box X,
+ *                         card K; rescued at a tick R) det -|+"), a line a
+ *                         list and the frame's, which ends in the draws
+ *                         that draw nothing as a --nop spec
+ *                         (rd_replay_region.c); with --mesh NAME only that
+ *                         mesh's draws get a line.  With --no-device too,
+ *                         in the record-only renderer's state (the
+ *                         display options not applied: the Original
+ *                         preset at 1x, so extended only on a frame wider
+ *                         than 4:3)
+ *   --region-png FILE     (implies --region-stats) the dropped triangles of
+ *                         the frame camera's draws as the GPU would draw
+ *                         them, on black at the native frame's size (red a
+ *                         vertex behind the eye, yellow out of the box, cyan
+ *                         a card), the 4:3 band outlined in green
+ *   --region-out FILE     (implies --region-stats) writes the draws that draw
+ *                         nothing as a --nop spec ("none" for none): replayed
+ *                         with --nop @FILE the pass dumps are the same
+ *   --region-mask FILE    (implies --region-stats) where the PS2's rule
+ *                         ([dev] region_rule = ps2) and the camera rule draw
+ *                         differently, whichever is in force, on black at
+ *                         the native frame's GS size: red a triangle the
+ *                         PS2's drops (or draws beside the picture only)
+ *                         and the camera's draws, green one the PS2's card
+ *                         test draws and the camera's drops (a back face),
+ *                         blue a sprite the PS2 drops out of the box;
+ *                         tools/region_camera_report.py holds every pixel
+ *                         the two rules' pictures differ in to it
  *   --dump-textures DIR   writes every image texture of the dump to
  *                         DIR/tex-<id>-<w>x<h>.png as decoded (RGBA8, the
  *                         alpha byte as stored: GS 0x80 = 1.0; an R8
@@ -193,7 +307,30 @@
  *                         more times and the last replay's GPU times are
  *                         printed: the uploads, each list, each picture
  *                         effect (rd.h RD_PERF_POST_*, inside the lists'
- *                         times), the present and the VU pre-pass
+ *                         times), the present and the VU pre-pass.  Among
+ *                         the lines, "stats: two-pass blend: N draws drawn
+ *                         twice (T VU triangles), C through the colour pass
+ *                         alone" (RdPerfRecord noDualPairs, noDualTris,
+ *                         noDualColour: 0 with dual-source blending) and
+ *                         "stats: pipelines: P made this run"
+ *                         (rd_pipeline_count: the self-tests' and the
+ *                         replays' own; the tool makes no start-up set),
+ *                         which the draw pattern gate reads
+ *                         (test/rd_draw_pattern.cmake)
+ *   --game-selftests      the start-up self-tests in the game window's order
+ *                         (port/platform/window_host.c): rd_blend_selftest,
+ *                         rd_vuprepass_selftest, then rd_fog_selftest (DATE's,
+ *                         the local reads', the shadow count's, the volumes'
+ *                         and composites' entries, the crack fill's swap,
+ *                         the turn fold, the desktop's local-read probe) in
+ *                         place of the tool's own few (the crack fill's swap,
+ *                         the turn fold, and those ICO_RD_VOLUME_FS and
+ *                         ICO_RD_COMP_SPEC ask for), so the replay draws as
+ *                         the game would on the device the fakes stand for;
+ *                         one line "game self-tests: blend <passed|failed>,
+ *                         VU pre-pass <on|off>, fog <passed|failed>".  A rule
+ *                         that a start-up self-test turns on is in force in
+ *                         a replay only with it (or its own variable)
  *   --keys                the pipelines the replay asks for against the start-up
  *                         set (rd__enumerate_reachable): the replay is walked
  *                         with nothing drawn (rd__pipeline_gather) and the keys
@@ -229,6 +366,28 @@
  *                         pixel), and under --stats --gpu-repeat K says what
  *                         leaving the hidden draws out takes off list 0's
  *                         GPU time (tools/occlusion_corpus.py)
+ *                         The measurement replays with the visibility test
+ *                         off (ICO_RD_CULL=0): it counts what every draw
+ *                         puts on the screen
+ *   --cull MODE           the scene draws' visibility test (rd_vis.c, [dev]
+ *                         cull): off, frustum (the default) or full (the
+ *                         frustum test and list 0's occlusion test,
+ *                         rd_vis_hiz.c); sets ICO_RD_CULL.  --stats prints
+ *                         "stats: cull MODE: N of M scene draws skipped (F
+ *                         frustum, O occluded), T ms" (M the VU draw
+ *                         commands walked, N those replayed as NOPs), what
+ *                         it did not test and the occlusion test's
+ *                         occluder triangles, cells, draws tested, resets
+ *                         and time, then "stats: cull why: <reason> <count>; ..."
+ *                         (one reason a command, rd_vis.h RD_VIS_WHY_*) and
+ *                         "stats: cull occlusion: <reason> <count>; ..."
+ *                         (list 0's occluder candidates by the rule that
+ *                         refused them, its occludee candidates by why they
+ *                         were kept, RD_VIS_HZ_*), then "stats: cull
+ *                         occlusion cost: collect C ms (...)" (its time by
+ *                         part, the vertex pass's counts, the collect
+ *                         cache's hits; ICO_RD_CULL_HIZ_FAST on or off and
+ *                         ICO_RD_CULL_HIZ_CHECK's checked and wrong)
  *   --occlusion-out FILE  (with --occlusion) writes SPEC to FILE, for
  *                         --nop @FILE
  *   --occlusion-csv FILE  (with --occlusion) writes a line a command of the
@@ -239,6 +398,23 @@
  *                         the view or the scissor, every fragment
  *                         discarded); the corpus script takes them from the
  *                         hidden set to leave what the depth hid
+ *   --skin-check          the skinned draws' bone-block check (issue 163;
+ *                         rd_vu_skin_check.h, docs/port/VU_SKIN_CHECK.md)
+ *                         on every skinned command of the frame, after the
+ *                         picture: replays of the frame with every command
+ *                         probed (80 a replay), each read back at once; the
+ *                         check's own lines on stderr, then "<dump>: skin
+ *                         check: N skinned commands, C checks, W wrong
+ *                         (address A), B blocks whose bytes differed (R
+ *                         changed after the draw), X of Y box checks with
+ *                         samples outside; on the wrong ones c1 right K, c2
+ *                         right L (c2 drawn in M); reads as: WORDS; ...; P
+ *                         checks past the probe's rows (Q boxed over every
+ *                         batch)" (a command past the probe's rows: its box
+ *                         made over every batch it draws).  Vulkan
+ *                         only (another backend: exit 77);
+ *                         ICO_RD_VU_SKIN_SABOTAGE=A[,ring] the tests' wrong
+ *                         reads
  *   --pass-times          (implies --stats) every replay timed pass by pass
  *                         ([dev] perf_passes, rd_perf.c): after the gpu line
  *                         the warm replay's passes, one line each ("pass N:
@@ -248,6 +424,14 @@
  *                         after its size, rd_pass_area.c), then
  *                         the window's top-passes text over that replay and
  *                         its passes by kind
+ *   --bench K             after the picture is written, the rc bench over
+ *                         the frame (rd_bench_run.h rd_bench_tool: every
+ *                         variant, W 1 and K timed replays a block, one
+ *                         round; its "bench: " lines and CSV rows on
+ *                         stdout; a baseline's presented picture after it
+ *                         against the one before it); needs --present,
+ *                         not --interp; exit 1 when a variant did not run
+ *                         or the pictures differ
  *   --time N              after the picture is written, the frame replayed
  *                         N more times (with --interp the presenter's frame
  *                         built again before each, rd__interp_frame: the
@@ -289,6 +473,13 @@
  *                         and prints what it found; <out.png> is unused (give
  *                         -).  Exit 0 when it ran (lost or not), 1 when it
  *                         could not
+ *   --loss-overlap BEFORE the bisect's last step too (rd.h rd_loss_overlap):
+ *                         after a clean bisect the frame of BEFORE (a dump;
+ *                         "-" for none) and the frame are replayed back to back,
+ *                         4 times each, with no wait for the GPU between them,
+ *                         then one wait; prints "loss overlap: clean|lost|not
+ *                         run; frames B and L, N replays".  Implies
+ *                         --loss-bisect
  *   --passes A[-B]        replays passes A..B only (rd_internal.h
  *                         rd__replay_set_window: the draws and copies of the
  *                         other passes left out, the walk stopped where pass
@@ -330,6 +521,21 @@
  *                         frame hashes as the last rendered one's is shown
  *                         again (rd_reshow.c; ICO_RD_STILL_REPRESENT=0
  *                         renders every one, the pictures the same)
+ *   --velocity            the temporal upscaler's switch on (rd_velocity.h,
+ *                         [dev] velocity_test): the replay draws the scene's
+ *                         motion vectors into VELOCITY from the VuPrevCBs the
+ *                         dump carries (version 16; an older dump has none:
+ *                         every vector 0), with --interp T PREV from the
+ *                         blend at 0 (PREV's tick) to the one at T; prints
+ *                         "velocity: N of M mesh and grid draws carry their
+ *                         previous transform; the replay drew D into
+ *                         VELOCITY, Z of list 0 left at 0".  The pictures are
+ *                         the same bytes as without it
+ *   --velocity-dump PNG   (implies --velocity) VELOCITY as a picture: x and y
+ *                         in R and G about 128 (8 levels a pixel), the length
+ *                         in B (16 a pixel), black where no draw wrote it;
+ *                         prints "velocity-dump: WxH -> PNG: moving N texels,
+ *                         the largest L pixels"; exit 1 when it cannot
  *   --save-blended DUMP   (with --interp T PREV, not --presents) writes the
  *                         frame built between the two, after its replay, as
  *                         the dump F12 saves of a present drawn between the
@@ -366,14 +572,59 @@
 #include <stdio.h>
 #include <stdlib.h>
 #include <string.h>
+#ifdef _WIN32
+#include <process.h> /* _getpid: the zip's temporary dump */
+#else
+#include <unistd.h> /* getpid: the zip's temporary dump */
+#endif
 #include "../../include/ico_endian.h"
 #include "dump_zip.h" /* port/platform: the F12 zip */
+#include "rd_fsr1.h"
+#include "rd_fsr3.h"
+#include "rd_upscale_temporal.h"
+#include "vk/rhi_vk.h" /* the validation layer's count (--fsr3's stats) */
 #include "rd_internal.h"
+#include "rd_jitter.h"
+#include "rd_layer.h"
+#include "rd_aura_paste.h"       /* --stats: the aura's paste split */
+#include "rd_late_pass.h"        /* --stats: the late passes on SCENE */
+#include "rd_lamps.h"            /* --stats: the lamps' glow for less */
+#include "rd_glow_blur.h"        /* --stats: the glow blur in two passes */
+#include "rd_paste_spec.h"       /* --stats: the glow's paste by its own entry */
+#include "rd_volume_fs.h"        /* --stats: the shadow volumes' stencil-only entry */
+#include "rd_comp_spec.h"        /* --stats: the shadow composites' own entry */
+#include "rd_turn_fold.h"        /* the turn in the present's blit's self-test */
+#include "rd_fill11.h"           /* --stats: the crack fill in list 11's pass */
+#include "rd_present_scene.h"    /* --stats: the present from SCENE */
+#include "rd_stencil_selftest.h" /* --stats: the stencil outside the shadow window */
+#include "rd_vu_compact.h"       /* --stats: the index compaction's counts */
+#include "rd_vu_share.h"         /* --stats: the shared vertices */
+#include "rd_vu_zero.h"          /* --stats: the zero-area cull */
+#include "rd_ab_run.h"           /* --stats: the in-play judge's arms */
+#include "rd_fastps.h"           /* --stats: the fast pixel build */
+#include "rd_onepass.h"          /* --stats: the one-pass blend */
+#include "rd_nodiscard.h"        /* --stats: the discard-free twins */
+#include "rd_ratecard.h"         /* --game-selftests: the rate card */
+#include "rd_shadow_box.h"       /* --stats: the shadows over the volumes' box */
+#include "rd_shadow_tile.h"      /* --stats: the shadow composites over the tile mask */
+#include "rd_replay_fine.h"      /* --fine-check */
+#include "rd_shadowres.h"        /* --stats: the shadow's levels above 1x */
+#include "rd_shadow_count.h"     /* --stats, --fine-check: the full-size count's form */
+#include "rd_no_volume.h"        /* --stats: a shadow window with no volume */
+#include "rd_upscale.h"
+#include "rd_upscale_capture.h" /* --fsr3-dump */
+#include "rd_velocity.h"
+#include "rd_bench_run.h" /* --bench: the rc bench over the frame */
 #include "rd_mesh.h"
+#include "rd_vis.h"
+#include "rd_vu_rec_early.h" /* ICO_RD_EARLY_PREPARE=1 */
+#include "rd_vu_record.h"
+#include "rd_vu_skin_check.h"
 #include "../core/region.h"              /* the dump's disc (version 12) */
 #include "../vu1_ref/vu1_ref.h"          /* --vu-ref: the CPU mirror of the VU programs */
 #include "../../shaders/shader_consts.h" /* ICO_VU_MARK_*: the marks --mesh shows */
 #include "font.h"                        /* port/ui: the overlay test's text */
+#include "rd_replay_region.h"            /* --region-stats */
 
 static const char *const kNames[] = {
     "SCENE",    "DISPLAY",   "SHADOW0",   "SHADOW1",      "SHADOW2",   "WORK0", "WORK1",
@@ -381,12 +632,12 @@ static const char *const kNames[] = {
     "AURA_TAP", "WORK2_PAD", "FEED_HELD", "DISPLAY_HELD", "WORK3_HELD"};
 
 static const char *const kCmdNames[RDC_COUNT] = {
-    "NOP",          "TEST",           "BLEND",     "ABE",         "ZWRITE",       "FBA",
-    "PABE",         "COLCLAMP",       "TEXA",      "FILTER",      "WRAP",         "TEXTURE",
-    "TEXTURE_OFF",  "UVOFFSET",       "COLORMASK", "TARGET",      "SCISSOR",      "ALPHA",
-    "SHADE",        "CLEAR",          "SCREEN",    "EXACT_BLEND", "COPY",         "MESH",
-    "SKINNED",      "GRID",           "PARTICLES", "WORLD_PRIMS", "SHADOW_STRIP", "POST_STUB",
-    "SHADOW_RESET", "SHADOW_RESOLVE", "AA1",       "OVERLAY_TEXT"};
+    "NOP",          "TEST",           "BLEND",     "ABE",          "ZWRITE",       "FBA",
+    "PABE",         "COLCLAMP",       "TEXA",      "FILTER",       "WRAP",         "TEXTURE",
+    "TEXTURE_OFF",  "UVOFFSET",       "COLORMASK", "TARGET",       "SCISSOR",      "ALPHA",
+    "SHADE",        "CLEAR",          "SCREEN",    "EXACT_BLEND",  "COPY",         "MESH",
+    "SKINNED",      "GRID",           "PARTICLES", "WORLD_PRIMS",  "SHADOW_STRIP", "POST_STUB",
+    "SHADOW_RESET", "SHADOW_RESOLVE", "AA1",       "OVERLAY_TEXT", "UPSCALE_POINT"};
 
 static const char *const kPrimNames[] = {"points",   "lines",  "linestrip", "tris",
                                          "tristrip", "trifan", "sprites"};
@@ -473,8 +724,11 @@ static void texSummary(uint32_t id)
  * and Y do not (vu1_ref.h vu1ref_region_z_saturated, the shaders' own
  * transform): the corners vu_common.hlsli vu_corner_cut_position keeps at
  * their GS position when a GPU-clipped triangle has them, in a state other
- * than out of the box.  *drawsOut: the draws with one or more */
-static uint64_t satZVertices(const RdFrame *f, uint32_t *drawsOut)
+ * than out of the box.  clip RD_VU_CLIP_SCISSOR counts code 36's draws
+ * instead: a triangle with such a corner past the guard band is GPU-clipped
+ * with it at its true depth (vu_triangle_out_pos), as the PS2's cut has it.
+ * *drawsOut: the draws with one or more */
+static uint64_t satZVertices(const RdFrame *f, int clip, uint32_t *drawsOut)
 {
     static float bones[240][4];
     uint64_t n = 0;
@@ -508,7 +762,7 @@ static uint64_t satZVertices(const RdFrame *f, uint32_t *drawsOut)
                 kind = -1;
                 break;
             }
-            if (kind < 0 || p.clip != RD_VU_CLIP_REGION ||
+            if (kind < 0 || p.clip != clip ||
                 (kind == VU1REF_CARD_CLUSTER) != (c->type == RDC_SKINNED)) {
                 continue;
             }
@@ -611,10 +865,15 @@ static void skinnedPlace(const RdFrame *f, const RdCmd *c, const RdStateBlock *s
 }
 
 static uint32_t s_listed;
+/* --list: the display layer's plan of the frame (rd_layer.h) */
+static RdLayerPlan s_layerPlan;
 
 static void listCmd(void *user, int list, uint32_t index, const RdCmd *c, const RdStateBlock *st)
 {
     const RdFrame *f = user;
+    if (s_listed == s_layerPlan.boundaryOrd) {
+        printf("   [display layer begins]\n");
+    }
     s_listed++;
     char nb[2][16];
     printf("%2d:%-5u %-14s key %08x%08x", list, index,
@@ -640,6 +899,15 @@ static void listCmd(void *user, int list, uint32_t index, const RdCmd *c, const 
     } else if (c->type == RDC_SCISSOR) {
         printf(" (%d,%d)-(%d,%d)", (int32_t)c->u[0], (int32_t)c->u[1], (int32_t)c->u[2],
                (int32_t)c->u[3]);
+    } else if (c->type == RDC_UPSCALE_POINT) {
+        printf(" src %u dst %u", c->u[0], c->u[1]);
+        if (c->u[2] & RD_UPSCALE_NO_HISTORY) {
+            /* the attach's mark and its reason (rd_velocity.h; 0 = first in a
+             * dump made before the reasons) */
+            static const char *const kWhy[8] = {"first",  "size",      "cut", "keep run",
+                                                "camera", "forgotten", "?",   "?"};
+            printf(" new history (%s)", kWhy[RD_UPSCALE_WHY(c->u[2])]);
+        }
     } else if (c->type <= RDC_STATE_LAST || c->type == RDC_AA1) {
         if (c->type != RDC_TEXTURE_OFF && c->type != RDC_NOP && c->type != RDC_UVOFFSET) {
             printf(" %u", c->b[0]);
@@ -767,6 +1035,9 @@ static void listCmd(void *user, int list, uint32_t index, const RdCmd *c, const 
         }
     }
     printf("\n");
+    if (s_listed - 1u == s_layerPlan.keepOrd) {
+        printf("   [keep copy]\n");
+    }
 }
 
 /* --mesh NAME: every vertex of the VU meshes of that name, per batch: the
@@ -891,8 +1162,19 @@ static bool unzipDump(const char **dump, int nth)
     if (dir == NULL) {
         dir = "/tmp";
     }
-    snprintf(tmp, sizeof(s_zipTemps[0]), "%s/rd_replay_%u_%d.rddump", dir,
-             (unsigned)(uintptr_t)data & 0xFFFFFFu, nth);
+    /* named by the process: no two live tools share a name.  The name was the
+       low 24 bits of the extracted copy's address, which ASLR leaves 12 random
+       bits of (a page-aligned mmap chunk), so two replays run side by side
+       (ctest -j: rd_fades_fold_ab and rd_crack_late_ab both replay the phone's
+       v4657.zip) could pick one name: the first to exit removed the other's
+       dump before it was read ("rd: load: cannot open", exit 1), or one
+       overwrote the other's with a different frame */
+#ifdef _WIN32
+    const unsigned pid = (unsigned)_getpid();
+#else
+    const unsigned pid = (unsigned)getpid();
+#endif
+    snprintf(tmp, sizeof(s_zipTemps[0]), "%s/rd_replay_%u_%d.rddump", dir, pid, nth);
     FILE *fp = fopen(tmp, "wb");
     const bool ok = fp != NULL && fwrite(data, 1, size, fp) == size;
 
@@ -1072,12 +1354,69 @@ static float interpT = 1.0f;
 static const char *prevDumps[16];
 static int prevCount;
 static bool noHalf;
+/* --velocity, --velocity-dump PNG: the motion vectors (rd_velocity.h) */
+static bool velocityOn;
+static const char *velocityPng;
+/* --fsr3 Q: Upscaling: FSR 3.1 (rd_fsr3.c) */
+static bool fsr3Asked;
 /* --motion-blur smooth (every replay armed as a present, rd__blur_smooth_arm)
  * and --presents N */
 static bool motionSmooth;
 static int presentsN;
 /* --repeat N: the presented picture made N times in a row (1: once) */
 static int repeatN = 1;
+/* --fsr3-dump DIR: the upscaler's four pictures of the last replay (the
+ * game's F12 capture, rd_upscale_capture.h) as DIR/<dump>-scene.png etc. */
+static const char *fsr3Dump;
+static char fsr3Stem[1100];
+static uint32_t fsr3Written0, fsr3Taken0;
+
+static void fsr3DumpArm(const char *dump)
+{
+    if (!fsr3Dump) {
+        return;
+    }
+    const char *b = strrchr(dump, '/');
+    b = b ? b + 1 : dump;
+    char base[512];
+    snprintf(base, sizeof(base), "%s", b);
+    char *dot = strrchr(base, '.');
+    if (dot && (strcmp(dot, ".rddump") == 0 || strcmp(dot, ".zip") == 0)) {
+        *dot = '\0';
+    }
+    snprintf(fsr3Stem, sizeof(fsr3Stem), "%s/%s", fsr3Dump, base);
+    fsr3Written0 = rd__upscale_capture_stats()->written;
+    fsr3Taken0 = rd__upscale_capture_stats()->taken;
+    if (!rd_capture_upscale(fsr3Stem, 0)) {
+        fprintf(stderr, "%s: --fsr3-dump: not armed (no device)\n", dump);
+    }
+}
+
+/* after the last replay: the pictures written (by the present's finish or
+ * here), each named with its size; false when they were not */
+static bool fsr3DumpFinish(const char *dump)
+{
+    if (!fsr3Dump) {
+        return true;
+    }
+    rhi_wait_frame();
+    (void)rd__upscale_capture_finish();
+    const RdUpscaleCaptureStats *cs = rd__upscale_capture_stats();
+    if (cs->taken == fsr3Taken0) {
+        fprintf(stderr,
+                "%s: --fsr3-dump: no dispatch of the upscale point in the replay (no "
+                "upscaler in force, or a dump without the marker)\n",
+                dump);
+        return false;
+    }
+    const bool ok = cs->written > fsr3Written0;
+    printf("%s: fsr3-dump: %s%s %ux%u, %s %ux%u, %s %ux%u, %s %ux%u%s\n", dump, fsr3Stem,
+           rd__upscale_capture_suffix(0), cs->w[0], cs->h[0], rd__upscale_capture_suffix(1),
+           cs->w[1], cs->h[1], rd__upscale_capture_suffix(2), cs->w[2], cs->h[2],
+           rd__upscale_capture_suffix(3), cs->w[3], cs->h[3],
+           ok ? "" : " (not all written: the log line says which)");
+    return ok;
+}
 
 /* --no-half: every TARGET command without the field's half pixel
    (RD_TARGET_HALF_Y), as a flip in the other field sends the frame */
@@ -1329,6 +1668,72 @@ static bool printOcclusion(const char *dump, const RdFrame *f, const RdOccResult
     return ok;
 }
 
+/* --velocity: the frame's draws carrying their previous transform and the
+ * replay's velocity pass, and with --velocity-dump PNG VELOCITY as a
+ * picture: x and y in R and G about 128 (8 levels a pixel, clamped), the
+ * length in B (16 levels a pixel), alpha 255 where a draw wrote it, black
+ * where none did; then the moving texels' count.  False when PNG was asked
+ * and VELOCITY could not be read or written. */
+static bool velocityReport(const char *dump, const RdFrame *rf, const char *pngPath)
+{
+    uint32_t carried = 0, vu = 0;
+    for (int l = 0; l < RD_LIST_COUNT; l++) {
+        for (uint32_t i = 0; i < rf->lists[l].count; i++) {
+            const RdCmd *c = &rf->lists[l].cmds[i];
+            if (c->type == RDC_MESH || c->type == RDC_SKINNED || c->type == RDC_GRID) {
+                vu++;
+                carried += rd__velocity_prev(rf, c) != NULL;
+            }
+        }
+    }
+    const RdVelocityStats *vs = rd__velocity_stats();
+    printf("%s: velocity: %u of %u mesh and grid draws carry their previous transform; the replay "
+           "drew %u into VELOCITY, %u of list 0 left at 0\n",
+           dump, carried, vu, vs->drawn, vs->noRecord);
+    if (!pngPath) {
+        return true;
+    }
+    RhiTexture t;
+    RhiState *st;
+    uint32_t w = 0, h = 0;
+    if (!rd__velocity_target(&t, &st, &w, &h)) {
+        fprintf(stderr, "%s: --velocity-dump: no VELOCITY\n", dump);
+        return false;
+    }
+    float *v = malloc((size_t)w * h * 4 * sizeof(float));
+    uint8_t *px = malloc((size_t)w * h * 4);
+    bool ok = v && px && rd__velocity_read(v, (size_t)w * h * 4, &w, &h);
+    uint64_t moving = 0;
+    double most = 0.0;
+    for (size_t k = 0; ok && k < (size_t)w * h; k++) {
+        const float *q = &v[k * 4];
+        const double len = sqrt((double)q[0] * q[0] + (double)q[1] * q[1]);
+        uint8_t *o = &px[k * 4];
+        if (!(q[3] > 0.5f)) {
+            o[0] = o[1] = o[2] = o[3] = 0;
+            continue;
+        }
+        const double x = 128.0 + q[0] * 8.0, y = 128.0 + q[1] * 8.0, b = len * 16.0;
+        o[0] = (uint8_t)(x < 0.0 ? 0.0 : (x > 255.0 ? 255.0 : x));
+        o[1] = (uint8_t)(y < 0.0 ? 0.0 : (y > 255.0 ? 255.0 : y));
+        o[2] = (uint8_t)(b > 255.0 ? 255.0 : b);
+        o[3] = 255;
+        moving += len > 0.01;
+        most = len > most ? len : most;
+    }
+    ok = ok && rd_write_png(pngPath, px, w, h, w * 4, 0);
+    if (ok) {
+        printf("%s: velocity-dump: %ux%u -> %s: moving %llu texels, the largest %.3f pixels\n",
+               dump, w, h, pngPath, (unsigned long long)moving, most);
+    } else {
+        fprintf(stderr, "%s: --velocity-dump: VELOCITY not read or %s not written\n", dump,
+                pngPath);
+    }
+    free(v);
+    free(px);
+    return ok;
+}
+
 /* replays the --prev dumps in order; false on a load failure */
 static bool replayPrev(void)
 {
@@ -1341,7 +1746,7 @@ static bool replayPrev(void)
         }
         dropHalf(&q);
         if (motionSmooth) {
-            rd__blur_smooth_arm(1, 1); /* Smooth's trail fed by the frames before */
+            rd__blur_smooth_arm(1, 1, 0.0, 0.0); /* Smooth's trail fed by the frames before */
         }
         const bool ok = rd__replay_frame(&q, (int)q.keep, false);
         rhi_wait_frame();
@@ -1399,6 +1804,12 @@ static const RdFrame *prepareFrame(const char *dump, RdFrame *pf, RdFrame *f)
         RdInterpStats ist;
         if (interpAny) {
             pf->number = f->number - 1; /* the tick before, whatever was saved between */
+        }
+        if (rd__velocity_on() && interpT > 0.0f) {
+            /* the picture before for the motion vectors: the present at
+             * alpha 0, PREV's tick (rd_velocity.h) */
+            (void)interpAt(pf, f, 0.0f, 1, &ist);
+            printf("velocity: the picture before is the blend at 0 (PREV's tick)\n");
         }
         rf = interpAt(pf, f, interpT, 1, &ist);
         if (!rf) {
@@ -1571,19 +1982,19 @@ static bool timeReplays(const char *dump, const RdFrame *pf, const RdFrame *f, c
                         int n, bool present)
 {
     enum {
-        P_TOTAL,
-        P_INTERP,
-        P_WAIT,
-        P_ACQUIRE,
-        P_UPLOAD,
-        P_WALK,
-        P_BIND,
-        P_SUBMIT,
-        P_PRESENT,
-        P_COUNT
+        TP_TOTAL,
+        TP_INTERP,
+        TP_WAIT,
+        TP_ACQUIRE,
+        TP_UPLOAD,
+        TP_WALK,
+        TP_BIND,
+        TP_SUBMIT,
+        TP_PRESENT,
+        TP_COUNT
     };
 
-    double sum[P_COUNT] = {0}, low[P_COUNT] = {0};
+    double sum[TP_COUNT] = {0}, low[TP_COUNT] = {0};
     double ring = 0.0, uniform = 0.0, interp = 0.0, draws = 0.0, pipes = 0.0, groups = 0.0;
     double skipPipes = 0.0, skipGroups = 0.0, skipStates = 0.0; /* the bind cache's */
     double d3d11 = 0.0;    /* RdPerfRecord.backendWriteBytes (Direct3D 11 only) */
@@ -1613,9 +2024,9 @@ static bool timeReplays(const char *dump, const RdFrame *pf, const RdFrame *f, c
         }
         const RdPerfRecord r = g_rdPerf; /* the record the replay just closed */
         while (rd_perf_pop(NULL)) {}
-        const double v[P_COUNT] = {r.totalMs, r.interpMs, r.waitMs,   r.acquireMs, r.uploadMs,
-                                   r.walkMs,  r.bindMs,   r.submitMs, r.presentMs};
-        for (int p = 0; p < P_COUNT; p++) {
+        const double v[TP_COUNT] = {r.totalMs, r.interpMs, r.waitMs,   r.acquireMs, r.uploadMs,
+                                    r.walkMs,  r.bindMs,   r.submitMs, r.presentMs};
+        for (int p = 0; p < TP_COUNT; p++) {
             sum[p] += v[p];
             low[p] = k == 0 || v[p] < low[p] ? v[p] : low[p];
         }
@@ -1648,12 +2059,12 @@ static bool timeReplays(const char *dump, const RdFrame *pf, const RdFrame *f, c
                "(%.3f), walk %.3f (%.3f), bind %.3f (%.3f), submit %.3f (%.3f), present %.3f "
                "(%.3f); per replay: ring %.1f KB, uniform %.1f KB, interp %.1f KB, %.1f draws, "
                "%.1f pipeline binds, %.1f bind group binds\n",
-               dump, n, sum[P_TOTAL] / m, low[P_TOTAL], sum[P_INTERP] / m, low[P_INTERP],
-               sum[P_WAIT] / m, low[P_WAIT], sum[P_ACQUIRE] / m, low[P_ACQUIRE], sum[P_UPLOAD] / m,
-               low[P_UPLOAD], sum[P_WALK] / m, low[P_WALK], sum[P_BIND] / m, low[P_BIND],
-               sum[P_SUBMIT] / m, low[P_SUBMIT], sum[P_PRESENT] / m, low[P_PRESENT],
-               ring / m / 1024.0, uniform / m / 1024.0, interp / m / 1024.0, draws / m, pipes / m,
-               groups / m);
+               dump, n, sum[TP_TOTAL] / m, low[TP_TOTAL], sum[TP_INTERP] / m, low[TP_INTERP],
+               sum[TP_WAIT] / m, low[TP_WAIT], sum[TP_ACQUIRE] / m, low[TP_ACQUIRE],
+               sum[TP_UPLOAD] / m, low[TP_UPLOAD], sum[TP_WALK] / m, low[TP_WALK], sum[TP_BIND] / m,
+               low[TP_BIND], sum[TP_SUBMIT] / m, low[TP_SUBMIT], sum[TP_PRESENT] / m,
+               low[TP_PRESENT], ring / m / 1024.0, uniform / m / 1024.0, interp / m / 1024.0,
+               draws / m, pipes / m, groups / m);
         printf("%s: time: bind cache: %.1f pipeline, %.1f bind group and %.1f state repeats "
                "skipped a replay\n",
                dump, skipPipes / m, skipGroups / m, skipStates / m);
@@ -1759,7 +2170,7 @@ static int presentsRun(const char *dump, const char *png, RdFrame *pf, RdFrame *
     if (n > 4 && strcmp(stem + n - 4, ".png") == 0) {
         stem[n - 4] = '\0';
     }
-    rd__blur_smooth_arm(1, (uint32_t)presentsN);
+    rd__blur_smooth_arm(1, (uint32_t)presentsN, 0.0, 0.0);
     if (!rd__replay_frame(pf, (int)pf->keep, false)) {
         fprintf(stderr, "%s: --presents: PREV's replay failed\n", dump);
         return 1;
@@ -1779,7 +2190,10 @@ static int presentsRun(const char *dump, const char *png, RdFrame *pf, RdFrame *
             rc = 1;
             break;
         }
-        rd__blur_smooth_arm(k == 0, (uint32_t)presentsN);
+        rd__blur_smooth_arm(k == 0, (uint32_t)presentsN, 0.0, 0.0);
+        if (k == presentsN - 1) {
+            fsr3DumpArm(dump); /* --fsr3-dump: the last present's dispatch */
+        }
         char name[1100];
         snprintf(name, sizeof(name), "%s-p%d.png", stem, k);
         uint32_t w = 0, h = 0;
@@ -1806,8 +2220,23 @@ static int presentsRun(const char *dump, const char *png, RdFrame *pf, RdFrame *
         rc = ok ? 0 : 1;
     }
     free(px);
+    if (rc == 0 && !fsr3DumpFinish(dump)) {
+        rc = 1;
+    }
     return rc;
 }
+
+/* rd_msaa_shadow.c (rd_replay.h needs the shaders' include path, which this
+   tool does not have): the counts drawn in the MSAA epoch in the last replay (--stats) */
+uint32_t rd__msaa_shadow_counts(void);
+/* rd_crack_fill.c's FILLSWAP and CRACKTAP (declared in rd_replay.h, for the
+   same reason): the swap's self-test, its result (0 not run, 1 passed, 2
+   failed), its switch and a copy's reason, the early leave's switch */
+bool rd__crack_swap_selftest(void);
+int rd__crack_swap_test(void);
+bool rd__crack_swap_on(void);
+const char *rd__crack_swap_why_text(uint32_t why);
+bool rd__crack_tap2_on(void);
 
 int main(int argc, char **argv)
 {
@@ -1815,25 +2244,32 @@ int main(int argc, char **argv)
         fprintf(stderr,
                 "usage: %s <dump> <out.png> [--target NAME] [--present WxH] [--enhanced] "
                 "[--aspect A] [--resolution WxH|Nx] [--full-height] [--full-pixel] "
-                "[--border-mask] [--water-sharp] [--motion-blur original|smooth] [--no-crack-fill] "
+                "[--border-mask] [--water-ps2] [--motion-blur original|smooth] [--no-crack-fill] "
                 "[--motion-blur-strength N] "
                 "[--work-clear RRGGBB] [--no-glow-edge] "
                 "[--filter F] "
                 "[--mirror] [--overlay-test] [--backend vulkan|d3d12|opengl|d3d11] "
                 "[--render-thread off|sync|on] [--repeat N] [--list] "
                 "[--nop L:A[-B][,...]|@FILE] [--occlusion [--occlusion-out FILE] "
-                "[--occlusion-csv FILE]] "
+                "[--occlusion-csv FILE]] [--skin-check] [--cull off|frustum|full] "
                 "[--gpu-repeat K] "
+                "[--region-stats] [--region-png FILE] [--region-out FILE] [--region-mask FILE] "
                 "[--mesh NAME] [--dump-textures DIR] [--no-aa1] [--stats] [--pass-times] "
-                "[--time N] [--keys] "
+                "[--time N] [--bench K] [--keys] [--game-selftests] "
                 "[--pass-dump DIR] "
+                "[--velocity] [--velocity-dump PNG] "
                 "[--prev DUMP]... [--no-half] [--interp T PREV [--interp-any] [--no-reproject] "
                 "[--interp-nop-prev L:A[-B]] [--presents N] [--save-blended DUMP]]\n"
-                "       [--loss-bisect] [--passes A[-B]] [--draws A[-B]] [--mask-marks]\n"
+                "       [--loss-bisect [--loss-overlap BEFORE|-]] [--passes A[-B]] [--draws A[-B]] "
+                "[--mask-marks]\n"
                 "       [--no-device (with --list, --mesh or --dump-textures; <out.png> unused)]\n"
                 "       [--crt scanlines|consumer|trinitron|pvm|shadow [--crt-strength K]]\n"
                 "       [--aa off|ssaa2|ssaa4|msaa2|msaa4|msaa8 (with --enhanced)]\n"
-                "       [--downsample (with --resolution above 1x)]\n",
+                "       [--downsample (with --resolution above 1x)] [--fsr1 [0..100]]\n"
+                "       [--fsr3 native|quality|balanced|performance [0..100 sharpness]]\n"
+                "       [--fsr3-dump DIR (with --fsr3 or --upscale-test)]\n"
+                "       [--jitter X,Y (texels, each -0.5..0.5)]\n"
+                "       [--upscale-test [1..3] [--upscale-phases N]]\n",
                 argv[0]);
         return 1;
     }
@@ -1844,19 +2280,31 @@ int main(int argc, char **argv)
     RdSettings s;
     bool list = false, overlay = false, stats = false, passTimes = false;
     int timeN = 0;                   /* --time N */
+    int benchK = 0;                  /* --bench K */
     int gpuRepeat = 1;               /* --gpu-repeat K */
     bool occlusion = false;          /* --occlusion */
     const char *occlusionOut = NULL; /* --occlusion-out FILE */
     const char *occlusionCsv = NULL; /* --occlusion-csv FILE */
     bool occFailed = false;          /* the spec could not be written */
+    bool skinCheck = false;          /* --skin-check */
+    bool skinFailed = false;         /* a replay of its check failed */
+    bool velFailed = false;          /* --velocity-dump: no VELOCITY or no PNG */
+    bool fsr3Failed = false;         /* --fsr3-dump: no dispatch or a picture not written */
+    bool regionStats = false;        /* --region-stats (rd_replay_region.c) */
+    RdRegionOpts regionOpts = {NULL, NULL, NULL, NULL};
+    bool regionFailed = false; /* its picture or spec could not be written */
     bool noDevice = false, aspectGiven = false;
     bool keysCheck = false;
+    bool gameSelftests = false; /* --game-selftests */
     int vuRefL[8], vuRefCount = 0;
     uint32_t vuRefI[8];
     const char *passDir = NULL;
     const char *tempsDir = NULL; /* --dump-temps: every per-frame temp target after the replay */
+    bool fineCheck = false;      /* --fine-check: the fine shadow levels against the reference */
+    bool fineFailed = false;
     const char *texDir = NULL, *meshName = NULL;
     bool lossBisect = false, maskMarks = false;
+    const char *overlapBefore = NULL;
     uint32_t drawA = 0, drawB = 0;
     unsigned passA = 0, passB = 0;
     memset(&s, 0, sizeof(s));
@@ -1895,6 +2343,79 @@ int main(int argc, char **argv)
             s.fullHeightScene = 1;
         } else if (strcmp(argv[i], "--downsample") == 0) {
             s.downsample = 1;
+        } else if (strcmp(argv[i], "--fsr1") == 0) {
+            s.upscale = RD_UPSCALE_FSR1;
+            s.upscaleSharpness = 80; /* the row's default */
+            char *end = NULL;
+            const long v = i + 1 < argc ? strtol(argv[i + 1], &end, 10) : -1;
+            if (i + 1 < argc && end && end != argv[i + 1] && *end == '\0') {
+                if (v < 0 || v > 100) {
+                    fprintf(stderr, "--fsr1: the sharpness is 0..100\n");
+                    return 1;
+                }
+                s.upscaleSharpness = (uint8_t)v;
+                i++;
+            }
+        } else if (strcmp(argv[i], "--jitter") == 0 && i + 1 < argc) {
+            float j[2];
+            if (!rd__frame_jitter_parse(argv[++i], j)) {
+                fprintf(stderr, "--jitter: X,Y with each -0.5..0.5 (\"%s\")\n", argv[i]);
+                return 1;
+            }
+            rd__frame_jitter_set(j[0], j[1]);
+        } else if (strcmp(argv[i], "--fsr3") == 0 && i + 1 < argc) {
+            /* Upscaling: FSR 3.1 at the quality named (rd_fsr3.c) */
+            static const char *const qn[RD_UPSCALE_Q_COUNT] = {"native", "quality", "balanced",
+                                                               "performance"};
+            int q = -1;
+            for (int k = 0; k < RD_UPSCALE_Q_COUNT; k++) {
+                q = strcmp(argv[i + 1], qn[k]) == 0 ? k : q;
+            }
+            if (q < 0) {
+                fprintf(stderr, "--fsr3: native, quality, balanced or performance (\"%s\")\n",
+                        argv[i + 1]);
+                return 1;
+            }
+            s.upscale = RD_UPSCALE_FSR3;
+            s.upscaleQuality = (uint8_t)q;
+            s.upscaleSharpness = 80; /* the row's default */
+            fsr3Asked = true;
+            i++;
+            /* an optional sharpness 0..100 after the quality (the row's) */
+            char *end = NULL;
+            const long v = i + 1 < argc ? strtol(argv[i + 1], &end, 10) : -1;
+            if (i + 1 < argc && end && end != argv[i + 1] && *end == '\0') {
+                if (v < 0 || v > 100) {
+                    fprintf(stderr, "--fsr3: the sharpness is 0..100\n");
+                    return 1;
+                }
+                s.upscaleSharpness = (uint8_t)v;
+                i++;
+            }
+        } else if (strcmp(argv[i], "--fsr3-dump") == 0 && i + 1 < argc) {
+            fsr3Dump = argv[++i];
+        } else if (strcmp(argv[i], "--upscale-test") == 0) {
+            /* the upscale point's test (rd_upscale.h), at the ratio given */
+            float ratio = 1.5f;
+            char *end = NULL;
+            const float v = i + 1 < argc ? strtof(argv[i + 1], &end) : 0.0f;
+            if (i + 1 < argc && end && end != argv[i + 1] && *end == '\0') {
+                if (!(v >= 1.0f && v <= 3.0f)) {
+                    fprintf(stderr, "--upscale-test: the ratio is 1..3 (\"%s\")\n", argv[i + 1]);
+                    return 1;
+                }
+                ratio = v;
+                i++;
+            }
+            rd__upscale_set(true, ratio);
+        } else if (strcmp(argv[i], "--upscale-phases") == 0 && i + 1 < argc) {
+            char *end = NULL;
+            const long n = strtol(argv[++i], &end, 10);
+            if (!end || *end != '\0' || n < 1 || n > 1024) {
+                fprintf(stderr, "--upscale-phases: 1..1024 (\"%s\")\n", argv[i]);
+                return 1;
+            }
+            rd__upscale_set_phases((uint32_t)n);
         } else if (strcmp(argv[i], "--full-pixel") == 0) {
             s.fullPixel = 1;
         } else if (strcmp(argv[i], "--border-mask") == 0) {
@@ -1923,8 +2444,10 @@ int main(int argc, char **argv)
                 return 1;
             }
             presentsN = (int)n;
+        } else if (strcmp(argv[i], "--water-ps2") == 0) {
+            setEnv("ICO_RD_WATER_SCALE", "0"); /* read at rd_init (rd_core.c) */
         } else if (strcmp(argv[i], "--water-sharp") == 0) {
-            s.waterSharp = 1;
+            /* the default since v0.11.7: the blocks at the scene's scale */
         } else if (strcmp(argv[i], "--mirror") == 0) {
             s.mirror = 1;
         } else if (strcmp(argv[i], "--pass-dump") == 0 && i + 1 < argc) {
@@ -1938,13 +2461,16 @@ int main(int argc, char **argv)
             rd_thread_local_want(m); /* every rd_init from here (rd_thread.h) */
         } else if (strcmp(argv[i], "--repeat") == 0 && i + 1 < argc) {
             const int n = atoi(argv[++i]);
-            if (n < 1 || n > 8) {
-                fprintf(stderr, "bad --repeat (1..8)\n");
+            if (n < 1 || n > 1000) {
+                fprintf(stderr, "bad --repeat (1..1000)\n");
                 return 1;
             }
             repeatN = n;
         } else if (strcmp(argv[i], "--dump-temps") == 0 && i + 1 < argc) {
             tempsDir = argv[++i];
+        } else if (strcmp(argv[i], "--fine-check") == 0) {
+            fineCheck = true;
+            rd__shadow_count_set_keep(true); /* the count the step stood for, read back */
         } else if (strcmp(argv[i], "--aspect") == 0 && i + 1 < argc) {
             unsigned a = 0, b = 0;
             aspectGiven = true;
@@ -1996,6 +2522,8 @@ int main(int argc, char **argv)
             rd__set_glow_edge_fill(false);
         } else if (strcmp(argv[i], "--keys") == 0) {
             keysCheck = true;
+        } else if (strcmp(argv[i], "--game-selftests") == 0) {
+            gameSelftests = true;
         } else if (strcmp(argv[i], "--pass-times") == 0) {
             stats = passTimes = true;
         } else if (strcmp(argv[i], "--time") == 0 && i + 1 < argc) {
@@ -2006,8 +2534,19 @@ int main(int argc, char **argv)
                 return 1;
             }
             timeN = (int)n;
+        } else if (strcmp(argv[i], "--bench") == 0 && i + 1 < argc) {
+            benchK = atoi(argv[++i]);
+            if (benchK < 1 || benchK > ICO_BENCH_K_MAX) {
+                fprintf(stderr, "bad --bench (timed replays a block, 1..%d)\n", ICO_BENCH_K_MAX);
+                return 1;
+            }
         } else if (strcmp(argv[i], "--no-aa1") == 0) {
             noAa1 = true;
+        } else if (strcmp(argv[i], "--velocity") == 0) {
+            velocityOn = true;
+        } else if (strcmp(argv[i], "--velocity-dump") == 0 && i + 1 < argc) {
+            velocityOn = true;
+            velocityPng = argv[++i];
         } else if (strcmp(argv[i], "--interp-any") == 0) {
             interpAny = true;
         } else if (strcmp(argv[i], "--no-reproject") == 0) {
@@ -2073,6 +2612,9 @@ int main(int argc, char **argv)
             noDevice = true;
         } else if (strcmp(argv[i], "--loss-bisect") == 0) {
             lossBisect = true;
+        } else if (strcmp(argv[i], "--loss-overlap") == 0 && i + 1 < argc) {
+            lossBisect = true;
+            overlapBefore = argv[++i];
         } else if (strcmp(argv[i], "--draws") == 0 && i + 1 < argc) {
             const int n = sscanf(argv[++i], "%u-%u", &drawA, &drawB);
             if (n < 1 || drawA == 0 || (n == 2 && drawB < drawA)) {
@@ -2104,12 +2646,32 @@ int main(int argc, char **argv)
                 fprintf(stderr, "bad %s\n", argv[i - 1]);
                 return 1;
             }
+        } else if (strcmp(argv[i], "--cull") == 0 && i + 1 < argc) {
+            const char *v = argv[++i];
+            if (strcmp(v, "off") != 0 && strcmp(v, "frustum") != 0 && strcmp(v, "full") != 0) {
+                fprintf(stderr, "bad --cull (off, frustum or full)\n");
+                return 1;
+            }
+            setEnv("ICO_RD_CULL", v); /* read at rd_init (rd_vis.c rd__vis_init) */
         } else if (strcmp(argv[i], "--occlusion") == 0) {
             occlusion = true;
+        } else if (strcmp(argv[i], "--skin-check") == 0) {
+            skinCheck = true;
         } else if (strcmp(argv[i], "--occlusion-out") == 0 && i + 1 < argc) {
             occlusionOut = argv[++i];
         } else if (strcmp(argv[i], "--occlusion-csv") == 0 && i + 1 < argc) {
             occlusionCsv = argv[++i];
+        } else if (strcmp(argv[i], "--region-stats") == 0) {
+            regionStats = true;
+        } else if (strcmp(argv[i], "--region-png") == 0 && i + 1 < argc) {
+            regionStats = true;
+            regionOpts.png = argv[++i];
+        } else if (strcmp(argv[i], "--region-out") == 0 && i + 1 < argc) {
+            regionStats = true;
+            regionOpts.out = argv[++i];
+        } else if (strcmp(argv[i], "--region-mask") == 0 && i + 1 < argc) {
+            regionStats = true;
+            regionOpts.mask = argv[++i];
         } else if (strcmp(argv[i], "--gpu-repeat") == 0 && i + 1 < argc) {
             char *end = NULL;
             const long n = strtol(argv[++i], &end, 10);
@@ -2148,6 +2710,11 @@ int main(int argc, char **argv)
         fprintf(stderr, "--save-blended needs --interp T PREV (and not --presents)\n");
         return 1;
     }
+    if (skinCheck && (presentsN || lossBisect || keysCheck || noDevice || occlusion)) {
+        fprintf(stderr, "--skin-check replays the frame itself: not with --presents, "
+                        "--loss-bisect, --keys, --no-device or --occlusion\n");
+        return 1;
+    }
     if ((occlusionOut || occlusionCsv) && !occlusion) {
         fprintf(stderr, "--occlusion-out and --occlusion-csv need --occlusion\n");
         return 1;
@@ -2163,8 +2730,11 @@ int main(int argc, char **argv)
            settings whatever the environment says */
         setEnv("ICO_RD_VU_MERGE", "0");
         setEnv("ICO_RD_BLEND", "fixed");
-        printf("note: --occlusion: the replays run under ICO_RD_VU_MERGE=0, ICO_RD_BLEND=fixed and "
-               "the screen-prim runs off (one GPU draw a command)\n");
+        /* every draw replayed: the visibility test's NOPs would hide the
+           draws it measures (rd_vis.c) */
+        setEnv("ICO_RD_CULL", "0");
+        printf("note: --occlusion: the replays run under ICO_RD_VU_MERGE=0, ICO_RD_BLEND=fixed, "
+               "ICO_RD_CULL=0 and the screen-prim runs off (one GPU draw a command)\n");
     }
     uint32_t gw = 0, gh = 0;
     if (!unzipDump(&dump, 0) || (interpPrev && !unzipDump(&interpPrev, 1))) {
@@ -2239,8 +2809,9 @@ int main(int argc, char **argv)
         fprintf(stderr, "--keys needs a device\n");
         return 77;
     }
-    if (noDevice && !list && !texDir && !meshName && !vuRefCount) {
-        fprintf(stderr, "--no-device renders nothing: give --list, --mesh or --dump-textures\n");
+    if (noDevice && !list && !texDir && !meshName && !vuRefCount && !regionStats) {
+        fprintf(stderr, "--no-device renders nothing: give --list, --mesh, --dump-textures or "
+                        "--region-stats\n");
         return 1;
     }
     if (noDevice || !rd_init(gw, gh, &s, NULL)) {
@@ -2255,8 +2826,68 @@ int main(int argc, char **argv)
         }
     }
     rd__set_not_implemented_fatal(false);
+    if (!noDevice && gameSelftests) {
+        /* the game window's start-up self-tests, in its order
+         * (window_host.c: the blend's and the VU pre-pass's before the
+         * start-up set, the fog's after it; rd_fog_selftest runs the
+         * crack fill's swap, the turn fold and the shadows' entries) */
+        const bool blendOk = rd_blend_selftest();
+        (void)rd_vuprepass_selftest();
+        const bool prepassOn = rd_vu_prepass_on(); /* off by the settings or the device too */
+        const bool fogOk = rd_fog_selftest();
+        printf("game self-tests: blend %s, VU pre-pass %s, fog %s\n", blendOk ? "passed" : "failed",
+               prepassOn ? "on" : "off", fogOk ? "passed" : "failed");
+    } else if (!noDevice) {
+        /* the crack fill's swap is on only where its self-test passed
+         * (rd_crack_fill.c; the game runs it with the other self-tests,
+         * rd_fog_selftest, which the tool does not run) */
+        (void)rd__crack_swap_selftest();
+        (void)rd__turn_fold_selftest(); /* where ICO_RD_TURN_FOLD asks (rd_turn_fold.c) */
+        /* the volumes' stencil-only entry where ICO_RD_VOLUME_FS asks
+         * (rd_volume_fs.c: the game runs it with rd_fog_selftest; its replays
+         * of the shadow count's frame are left out of every other test's run) */
+        if (getenv("ICO_RD_VOLUME_FS") != NULL) {
+            (void)rd__volume_fs_selftest();
+        }
+        /* the shadow composites' own entry where ICO_RD_COMP_SPEC asks
+         * (rd_comp_spec.c: the game runs it with rd_fog_selftest; its two
+         * replays on SCENE are left out of every other test's run) */
+        if (getenv("ICO_RD_COMP_SPEC") != NULL) {
+            (void)rd__comp_spec_selftest();
+        }
+        /* the rate card, as the window runs it after the fog's self-test
+           (rd_ratecard.h: only under ICO_RD_RATECARD=1 or a results file) */
+        rd_rate_card();
+    }
+    if (!noDevice && getenv("ICO_RD_EARLY_PREPARE") != NULL &&
+        strcmp(getenv("ICO_RD_EARLY_PREPARE"), "1") == 0) {
+        /* the game window's start-up preparation (rd_vu_rec_early.h), with
+           no memory function: the record's own limit (rd_vu_rec_early_ab) */
+        rd_vu_record_prepare(NULL);
+        printf("early: record %u rows, arena %s\n", rd_vu_record_early_rows(),
+               rd_vu_record_early_arena() ? "made" : "not made");
+    }
+    if (fsr3Asked && !noDevice && !rd_upscale_temporal_supported()) {
+        /* a skip only where FSR 3.1 cannot be expected; a build with it on a
+           Vulkan 1.2 device that refuses it is a failure */
+        const char *notExpected = rd__fsr3_not_expected();
+        if (notExpected) {
+            printf("skip: --fsr3: %s (FSR 3.1: %s)\n", notExpected, rd_upscale_temporal_why());
+            rd_shutdown();
+            return 77;
+        }
+        fprintf(stderr,
+                "--fsr3: this build has FSR 3.1 and the device is Vulkan 1.2 or later, but FSR "
+                "3.1 is not available (%s)\n",
+                rd_upscale_temporal_why());
+        rd_shutdown();
+        return 1;
+    }
     if (overlay) {
         rd_set_present_overlay(overlayTest, NULL);
+    }
+    if (velocityOn) {
+        rd__velocity_set(true); /* the temporal upscaler's switch (rd_velocity.h) */
     }
     if (!noDevice && prevCount && !replayPrev()) {
         rd_shutdown();
@@ -2293,6 +2924,18 @@ int main(int argc, char **argv)
         if (b.next[0]) {
             printf("%s: loss bisect: the replay stopped as %s began\n", dump, b.next);
         }
+        if (overlapBefore && b.result == RD_BISECT_CLEAN) {
+            RdLossOverlap ov;
+
+            rd_loss_overlap(dump, strcmp(overlapBefore, "-") == 0 ? NULL : overlapBefore, 4u, &ov);
+            printf("%s: loss overlap: %s; frames %u and %u, %u replays in %.1f s%s%s\n", dump,
+                   kResult[ov.result], ov.beforeFrame, ov.lostFrame, ov.replays, ov.ms / 1000.0,
+                   ov.line[0] ? ": " : "", ov.line);
+            if (ov.result == RD_BISECT_NOT_RUN) {
+                rd_shutdown();
+                return 1;
+            }
+        }
         rd_shutdown();
         return b.result == RD_BISECT_NOT_RUN ? 1 : 0;
     }
@@ -2301,9 +2944,19 @@ int main(int argc, char **argv)
     if (!rf) {
         return 1;
     }
+    {
+        /* ICO_RD_SCENE_HOLD=paused: the frame taken as the game's paused one
+           (rd_hold.c; the tests' A/B), not the start-up self-tests' frames */
+        const char *hold = getenv("ICO_RD_SCENE_HOLD");
+        if (hold && strcmp(hold, "paused") == 0) {
+            ((RdFrame *)rf)->paused = 1u;
+        }
+    }
     if (list) {
         RdStateBlock st = rf->startState;
         s_listed = 0;
+        bool carried = false;
+        rd__layer_plan(rf, (int)rf->keep, false, &carried, &s_layerPlan);
         rd__walk(rf, (int)rf->keep, &st, listCmd, (void *)rf);
         printf("dump: version %u, GS %ux%u, aspect %.4f (%s), visible width %g, cull width %u, "
                "region %s\n",
@@ -2327,12 +2980,16 @@ int main(int argc, char **argv)
     if (meshName) {
         listMesh(meshName);
     }
+    if (regionStats) {
+        regionOpts.mesh = meshName;
+        regionFailed = !rd_replay_region(dump, rf, &regionOpts);
+    }
     int rc = 1;
     if (noDevice) {
         rd__frame_free(&f);
         rd__frame_free(&pf);
         rd_shutdown();
-        return 0;
+        return regionFailed ? 1 : 0;
     }
     if (keysCheck) {
         const int krc = checkKeys(dump, rf);
@@ -2346,6 +3003,11 @@ int main(int argc, char **argv)
     } else if (maskMarks) {
         rd__replay_set_window_draws(1, UINT32_MAX, 0, 0, 1, 0);
     }
+    if (presentsN && rf->keep) {
+        printf("%s: keep frame: --presents re-shows as the window does; --repeat iterates the keep "
+               "loop\n",
+               dump);
+    }
     if (presentsN && !list) {
         rc = presentsRun(dump, png, &pf, &f, target, ow, oh, want, pw, ph);
         rd__frame_free(&f);
@@ -2356,7 +3018,7 @@ int main(int argc, char **argv)
     if (motionSmooth) {
         /* a replay of its own is a tick's first present; its trail is the
            --prev frames' (none without them: the trail starts here) */
-        rd__blur_smooth_arm(1, 1);
+        rd__blur_smooth_arm(1, 1, 0.0, 0.0);
         if (!prevCount) {
             printf("note: --motion-blur smooth on one replay holds no trail (give --prev DUMP or "
                    "--interp T PREV --presents N)\n");
@@ -2375,12 +3037,16 @@ int main(int argc, char **argv)
         rd__occlusion_arm(0);
     }
     bool replayed;
-    if (rd_thread_host_on() && pw != 0 && !passDir && !occlusion && !saveBlended && !tempsDir) {
+    if (rd_thread_host_on() && pw != 0 && !passDir && !occlusion && !saveBlended && !tempsDir &&
+        !fineCheck && repeatN <= 8) {
         /* --render-thread: the presented picture handed over as the
            window's are (sync: waited), its submit and present on the
            submit thread (rd_submit_thread.h), read back after the drain;
            --repeat's pictures back to back, nothing drained between them */
         for (int k = 0; k < repeatN; k++) {
+            if (k == repeatN - 1) {
+                fsr3DumpArm(dump); /* --fsr3-dump: the last picture's dispatch */
+            }
             (void)rd__replay_frame_async(rf, (int)rf->keep, true);
         }
         (void)rd_thread_drain();
@@ -2388,9 +3054,13 @@ int main(int argc, char **argv)
     } else {
         replayed = true;
         for (int k = 0; k < repeatN && replayed; k++) {
+            if (k == repeatN - 1) {
+                fsr3DumpArm(dump); /* --fsr3-dump: the last picture's dispatch */
+            }
             replayed = rd__replay_frame(rf, (int)rf->keep, pw != 0 && !passDir);
         }
     }
+    rd_hold_line(); /* the paused scene's hold, when a picture was taken as paused (rd_hold.c) */
     if (occlusion) {
         /* the counts before anything else recycles a frame slot */
         RdOccResult occ;
@@ -2403,6 +3073,35 @@ int main(int argc, char **argv)
             printf("%s: occlusion: no list-0 draw was measured\n", dump);
         }
         free(occ.cmds);
+    }
+    if (replayed && skinCheck) {
+        if (rhi_backend() != RHI_BACKEND_VULKAN) {
+            fprintf(stderr, "%s: skin check: not run: Vulkan only (%s)\n", dump,
+                    rhi_backend_kind_name(rhi_backend()));
+            rd__frame_free(&f);
+            rd__frame_free(&pf);
+            rd_shutdown();
+            return 77;
+        }
+        RdSkinSummary sk;
+        const int wrong = rd__vu_skin_check_frame(rf, (int)rf->keep, &sk);
+        if (wrong < 0) {
+            fprintf(stderr, "%s: skin check: a replay failed\n", dump);
+            skinFailed = true;
+        }
+        printf("%s: skin check: %u skinned commands, %u checks, %u wrong (address %u), %u blocks "
+               "whose bytes differed (%u changed after the draw), %u of %u box checks with "
+               "samples outside; on the wrong ones c1 right %u, c2 right %u (c2 drawn in %u); "
+               "reads as: %s; twins: %u read (%u through the draw's own pipeline), %u differ (%u "
+               "of them through it); "
+               "%u wrong vertices dropped (non-finite); the ring read: c3 right %u (c3 drawn in "
+               "%u), ring twins %u read, %u differ from B; %u checks past the probe's rows (%u "
+               "boxed over every batch)\n",
+               dump, sk.commands, sk.checks, sk.wrong, sk.lastAddr, sk.blocksDiffer,
+               sk.rereadDiffer, sk.boxOutside, sk.boxChecks, sk.c1Right, sk.c2Right, sk.c2Run,
+               sk.decision[0] ? sk.decision : "every check right", sk.twins, sk.twinsOwn,
+               sk.twinsDiffer, sk.twinsDifferOwn, sk.dropped, sk.c3Right, sk.c3Run, sk.ringTwins,
+               sk.ringDiffer, sk.past, sk.pastBoxed);
     }
     if (replayed && saveBlended) {
         /* after the replay, as rd_present writes F12's (rd_interp.c
@@ -2440,6 +3139,15 @@ int main(int argc, char **argv)
             free(tp);
         }
     }
+    if (fineCheck && (!replayed || rd_replay_fine_check() != 0)) {
+        fineFailed = true; /* the pictures still written; the exit says the levels are not */
+    }
+    if (replayed && velocityOn && !velocityReport(dump, rf, velocityPng)) {
+        velFailed = true;
+    }
+    if (replayed && fsr3Dump && !fsr3DumpFinish(dump)) {
+        fsr3Failed = true;
+    }
     if (passA) {
         RdReplayWindowStats ws;
         rd__replay_window_stats(&ws);
@@ -2463,14 +3171,35 @@ int main(int argc, char **argv)
          * once its timestamps are in, RHI_FRAMES_IN_FLIGHT replays later) */
         const RdPerfRecord *pr = &g_rdPerf;
         printf("%s: stats: %u draws, %u passes, %u bind groups (%u uniform, %u texture), %u bind "
-               "group binds, %u pipeline binds, %llu ring bytes, %u barriers, %u copies; screen "
-               "prims %u draws merged into %u\n",
+               "group binds, %u pipeline binds, %llu ring bytes, %u barriers, %u copies, %u "
+               "dispatches; screen prims %u draws merged into %u\n",
                dump, pr->draws, pr->renderPasses, pr->bindGroups, pr->uniformGroups,
                pr->textureGroups, pr->bindGroupBinds, pr->pipelineBinds,
-               (unsigned long long)pr->uploadBytes, pr->barriers, pr->copies, pr->screenCmds,
-               pr->screenDraws);
+               (unsigned long long)pr->uploadBytes, pr->barriers, pr->copies, pr->dispatches,
+               pr->screenCmds, pr->screenDraws);
+        /* the passes begun as VkRenderPass objects (Vulkan under a driver row
+         * of rhi_pass_row.h: every pass the row begins; 0 elsewhere) */
+        printf("%s: stats: render passes: %u begun, %u as VkRenderPass objects\n", dump,
+               pr->renderPasses, pr->passObjects);
+        /* the two-pass blend's draws (no dual-source blending,
+         * rd__expand_no_dual; rd_perf_hooks.c) and the pipelines made so
+         * far: what the draw pattern gate pins a device profile by */
+        printf("%s: stats: two-pass blend: %u draws drawn twice (%u VU triangles), %u through "
+               "the colour pass alone\n",
+               dump, pr->noDualPairs, pr->noDualTris, pr->noDualColour);
+        printf("%s: stats: pipelines: %u made this run\n", dump, rd_pipeline_count());
         printf("%s: stats: bind cache: %u pipeline, %u bind group and %u state repeats skipped\n",
                dump, pr->pipelineBindsSkipped, pr->bindGroupBindsSkipped, pr->stateSetsSkipped);
+        /* the attachment bytes the passes asked for (rhi_traffic.c, the
+         * 10 s perf scene line's figures for one picture): a dump A/B's MB */
+        printf("%s: stats: traffic: colour %.2f MB loaded %.2f MB stored, depth and stencil "
+               "%.2f/%.2f MB loaded/stored, %.2f MB cleared, %.2f MB copied (each copy counted "
+               "once: as many MB read as written), %u passes (%u with an attachment of no known "
+               "format, at 4 bytes a texel)\n",
+               dump, (double)pr->colorLoadBytes / 1048576.0,
+               (double)pr->colorStoreBytes / 1048576.0, (double)pr->depthLoadBytes / 1048576.0,
+               (double)pr->depthStoreBytes / 1048576.0, (double)pr->clearBytes / 1048576.0,
+               (double)pr->copyBytes / 1048576.0, pr->renderPasses, pr->passUntracked);
         if (pr->backendWriteBytes) {
             printf("%s: stats: Direct3D 11 submits wrote %llu bytes to the GPU\n", dump,
                    (unsigned long long)pr->backendWriteBytes);
@@ -2507,17 +3236,96 @@ int main(int argc, char **argv)
             }
             printf("%s: stats: present: downsample %s, window reduce %s\n", dump, dn, wn);
         }
+        /* Upscaling: FSR 1.0 (--fsr1; rd_fsr1.c): the source EASU read and the box */
+        uint32_t fsr[4];
+        if (pw && s.upscale) {
+            if (rd__last_present_fsr1(fsr)) {
+                printf("%s: stats: present: fsr1 %ux%u -> %ux%u\n", dump, fsr[0], fsr[1], fsr[2],
+                       fsr[3]);
+            } else {
+                printf("%s: stats: present: fsr1 off\n", dump);
+            }
+        }
+        /* the scene's jitter (--jitter, [dev] jitter_test; rd_jitter.h): the
+         * frame groups of the scene-class passes it moved */
+        float jit[2];
+        if (rd__frame_jitter_get(jit)) {
+            printf("%s: stats: jitter %.4g, %.4g: %u frame groups\n", dump, (double)jit[0],
+                   (double)jit[1], rd__frame_jitter_groups());
+        } else {
+            printf("%s: stats: jitter off\n", dump);
+        }
+        /* the upscale point (--upscale-test; rd_upscale.h) */
+        if (rd__upscale_point_on()) {
+            const RdUpscaleStats *us = rd__upscale_stats();
+            float dx, dy;
+            rd__display_scale(&dx, &dy);
+            printf("%s: stats: upscale point: SCENE %ux%u -> UPSCALED %ux%u (render scale %gx%g, "
+                   "display scale %gx%g), markers %u, dispatched %u, refused %u, reductions "
+                   "remapped %u, edge guard %u columns %u rows, jittered presents %u; resets %u "
+                   "(first %u, size %u, cut %u, keep run %u, camera %u, forgotten %u); display "
+                   "layer %s: frames %u (draws %u, textured %u), keep frames held %u (keep copies "
+                   "%u, no keep sprite %u), begun after a scene-class command %u, pre-upscale "
+                   "reductions %u (read as DISPLAY by %u), refused %u\n",
+                   dump, us->colorW, us->colorH, us->outW, us->outH, (double)g_rd.sceneSx,
+                   (double)g_rd.sceneSy, (double)dx, (double)dy, us->points, us->dispatched,
+                   us->refused, us->remapped, us->guardCols, us->guardRows, us->jittered,
+                   us->resets, us->resetsBy[RD_UPSCALE_RESET_FIRST],
+                   us->resetsBy[RD_UPSCALE_RESET_SIZE], us->resetsBy[RD_UPSCALE_RESET_CUT],
+                   us->resetsBy[RD_UPSCALE_RESET_KEEP], us->resetsBy[RD_UPSCALE_RESET_CAMERA],
+                   us->resetsBy[RD_UPSCALE_RESET_FORGOTTEN], rd__layer_on() ? "on" : "off",
+                   us->layerFrames, us->layerDraws, us->layerTextured, us->keepHeld, us->keepCopies,
+                   us->keepNoSprite, us->layerLate, us->preReductions, us->preLent,
+                   us->layerRefused);
+        } else {
+            printf("%s: stats: upscale point off\n", dump);
+        }
+        /* FSR 3.1 (--fsr3; rd_fsr3.c): the dispatches that ran, the
+         * contexts, the validation layer's errors so far (Vulkan) */
+        if (s.upscale == RD_UPSCALE_FSR3) {
+            const RdFsr3Stats *fs = rd__fsr3_stats();
+            const uint32_t verr =
+                rhi_backend() == RHI_BACKEND_VULKAN ? rhi_vk_validation_error_count() : 0u;
+            if (rd__upscale_by_fsr3() || fs->dispatched) {
+                printf("%s: stats: upscale: fsr3 ran %u presents (context render %ux%u -> "
+                       "display %ux%u, phase count %d, made %u, refused %u, failed %u, resets "
+                       "%u, FidelityFX %s, GPU memory %.1f MB, %u FidelityFX messages), "
+                       "validation errors %u\n",
+                       dump, fs->dispatched, fs->renderW, fs->renderH, fs->displayW, fs->displayH,
+                       (int)fs->phases, fs->made, fs->refused, fs->failed, fs->resets,
+                       fs->version[0] ? fs->version : "-", fs->memoryMb, fs->messages, verr);
+            } else {
+                printf("%s: stats: upscale: fsr3 off (%s)\n", dump,
+                       rd_upscale_temporal_why()[0] ? rd_upscale_temporal_why() : "not in force");
+            }
+        }
         /* the tiler passes (rd_replay.c: DATE through the stencil bit, the
          * fog's local read, the blur pairs folded) */
         printf("%s: stats: DATE snapshots %u, DATE stencil draws %u (%u setups); fog local draws "
                "%u (fog path %s); blur pairs folded %u\n",
                dump, pr->dateSnapshots, pr->dateStencilDraws, pr->dateStencilTakes,
                pr->fogLocalDraws, rd__fog_path_name(g_rd.fogPath), pr->blurFolds);
+        /* DATE's passes without the depth and the snapshots by why
+         * (rd_date_cut.c; rd_date_cut_ab reads this line) */
+        printf("%s: stats: DATE cut %s: %u passes begun without the depth (%u draws, %u runs, "
+               "%.2f MB of depth and stencil each way at most), %u begun again with it, %u draws "
+               "kept it; snapshots taken: %s %u, %s %u, %s %u, %s %u, %s %u; reused %u\n",
+               dump, rd__date_cut_on() ? "on" : "off", pr->dateCutPasses, pr->dateCutDraws,
+               pr->dateCutRuns, (double)pr->dateCutTexels * 5.0 / 1048576.0, pr->dateCutAgain,
+               pr->dateCutKept, rd__date_retake_word(RD_DATE_RETAKE_FIRST),
+               pr->dateRetakeWhy[RD_DATE_RETAKE_FIRST], rd__date_retake_word(RD_DATE_RETAKE_TARGET),
+               pr->dateRetakeWhy[RD_DATE_RETAKE_TARGET],
+               rd__date_retake_word(RD_DATE_RETAKE_WRITTEN),
+               pr->dateRetakeWhy[RD_DATE_RETAKE_WRITTEN], rd__date_retake_word(RD_DATE_RETAKE_AREA),
+               pr->dateRetakeWhy[RD_DATE_RETAKE_AREA], rd__date_retake_word(RD_DATE_RETAKE_TOUCHED),
+               pr->dateRetakeWhy[RD_DATE_RETAKE_TOUCHED], pr->dateSnapReused);
         /* the shadow count's resolves (rd_replay.c doShadowResolve), the
          * one draw's pass and the count target's colour passes the store
          * plan left neither loaded nor stored (rd_store_plan.c) */
-        printf("%s: stats: shadow count: %u in one draw, %u in seven draws (profile %s)", dump,
-               pr->shadowOne, pr->shadowSeven, g_rd.profile.shadowOne ? "one draw" : "seven draws");
+        printf("%s: stats: shadow count: %u in one draw, %u in seven draws (profile %s), %u in "
+               "the MSAA epoch",
+               dump, pr->shadowOne, pr->shadowSeven,
+               g_rd.profile.shadowOne ? "one draw" : "seven draws", rd__msaa_shadow_counts());
         if (pr->shadowOne) {
             const double mb = 1.0 / 1048576.0;
             printf("; the one draw's pass: colour %ux%u not loaded, stored (%.1f MB), no depth "
@@ -2543,6 +3351,23 @@ int main(int argc, char **argv)
                pr->storePlanMode == 2   ? "all"
                : pr->storePlanMode == 1 ? "on"
                                         : "off");
+        {
+            char sc[512]; /* the stencil outside the shadow window (rd_stencil_selftest.c) */
+            rd__stencil_cut_stats(pr, sc, sizeof sc);
+            printf("%s: stats: %s\n", dump, sc);
+            rd__shadow_box_stats(pr, sc, sizeof sc); /* rd_shadow_box.c */
+            printf("%s: stats: %s\n", dump, sc);
+            rd__shadow_tile_stats(pr, sc, sizeof sc); /* rd_shadow_tile.c */
+            printf("%s: stats: %s\n", dump, sc);
+            rd__no_volume_stats(pr, sc, sizeof sc); /* rd_no_volume.c */
+            printf("%s: stats: %s\n", dump, sc);
+            rd__shadow_fine_stats(pr, sc, sizeof sc); /* rd_shadowres.c */
+            printf("%s: stats: %s\n", dump, sc);
+            rd__shadow_fine_drawn(pr, sc, sizeof sc);
+            printf("%s: stats: %s\n", dump, sc);
+            rd__shadow_count_stats(pr, sc, sizeof sc); /* rd_shadow_count.c */
+            printf("%s: stats: %s\n", dump, sc);
+        }
         /* a cleared source read as its colour (rd_const_read.c) */
         printf("%s: stats: constant reads %s: %u sprites drawn in a cleared source's colour, %u "
                "target reads kept (the source drawn since its clear, or not cleared this "
@@ -2551,6 +3376,189 @@ int main(int argc, char **argv)
         /* the fades fold (rd_fades_fold.c) */
         printf("%s: stats: fades fold %s: %u sprites folded into the reduction\n", dump,
                rd__fades_fold_on() ? "on" : "off", pr->fadesFolded);
+        /* the present from SCENE (rd_present_scene.c): the reduction not
+           drawn, the present reading SCENE, DISPLAY drawn on demand */
+        printf("%s: stats: present from SCENE %s: %u reductions not drawn, %u presents from "
+               "SCENE, %u kept%s%s%s, %u drawn on demand%s%s%s\n",
+               dump, rd__present_scene_on() ? "on" : "off", pr->presentSceneSkipped,
+               pr->presentSceneShown, pr->presentSceneKept, pr->presentSceneKept ? " (" : "",
+               pr->presentSceneKept ? rd__present_scene_why_text((int)pr->presentSceneWhy) : "",
+               pr->presentSceneKept ? ")" : "", pr->presentSceneDrawn,
+               pr->presentSceneDrawn ? " (" : "",
+               pr->presentSceneDrawn ? rd__present_scene_why_text((int)pr->presentSceneDrawWhy)
+                                     : "",
+               pr->presentSceneDrawn ? ")" : "");
+        /* the glow's mask computed in its reduction (rd_glow_fold.c) */
+        printf("%s: stats: glow: WORK2 fold %s: %u folded (%u reading the sun's fans' WORK2), %u "
+               "kept%s%s%s\n",
+               dump, rd__glow_fold_on() ? "on" : "off", pr->glowFolded, pr->glowFoldRead,
+               pr->glowKept, pr->glowKept ? " (" : "",
+               pr->glowKept ? rd_glow_fold_why_text(pr->glowWhy) : "", pr->glowKept ? ")" : "");
+        /* the glow drawn only where it can add light (rd_glow_light.c) */
+        {
+            const uint64_t lzn[4] = {
+                (pr->glowLightLazyWhich >> 0) & 1u, (pr->glowLightLazyWhich >> 1) & 1u,
+                (pr->glowLightLazyWhich >> 2) & 1u, (pr->glowLightLazyWhich >> 3) & 1u};
+            char lz[160];
+            rd__glow_light_lazy_text(lz, sizeof(lz), lzn);
+            printf("%s: stats: glow: light plan %s: %s%s%s%s; %u passes in the chain, lazy "
+                   "clears drawn: %s\n",
+                   dump, rd__glow_light_on() ? "on" : "off", rd_glow_light_text(pr->glowLight),
+                   pr->glowLight == RD_GLOW_LIGHT_WHOLE ? " (" : "",
+                   pr->glowLight == RD_GLOW_LIGHT_WHOLE ? rd_glow_light_why_text(pr->glowLightWhy)
+                                                        : "",
+                   pr->glowLight == RD_GLOW_LIGHT_WHOLE ? ")" : "", pr->glowLightPasses, lz);
+        }
+        /* the late passes on SCENE (rd_late_pass.c) */
+        printf("%s: stats: late pass %s: %u crack fills held into a paste pass (%u the glow's; "
+               "%.2f MB of colour not loaded and as many not stored), %u drawn early in a pass "
+               "of their own%s%s%s; %u glow pastes in the aura's paste pass (%.2f MB of colour "
+               "not loaded and as many not stored), %u drawn early; %u list 11 draws joined the "
+               "open pass without SCENE's depth (%u passes not begun, %.2f MB of colour at most "
+               "each way); %u draws more for the border's blocks; %u fills not held (no paste "
+               "in the frame takes them)\n",
+               dump, rd__late_pass_bits_text(rd__late_pass_bits()), pr->latePassHeld,
+               pr->latePassGlowHeld, (double)pr->latePassTexels * 4.0 / 1048576.0,
+               pr->latePassFlushed, pr->latePassFlushed ? " (" : "",
+               pr->latePassFlushed ? rd__late_pass_why_text((int)pr->latePassWhy) : "",
+               pr->latePassFlushed ? ")" : "", pr->latePassDeferred,
+               (double)pr->latePassDeferTexels * 4.0 / 1048576.0, pr->latePassDeferEarly,
+               pr->latePassJoined, pr->latePassJoinPasses,
+               (double)pr->latePassJoinTexels * 4.0 / 1048576.0, pr->latePassBlockDraws,
+               pr->latePassNoLand);
+        /* the lamps' glow for less (rd_lamps.c): the lamps' pass on WORK2
+         * with an area and the bytes it saved against the whole pass, or
+         * why it was whole; WORK2_PAD's bands left lazy (and its size) */
+        {
+            const char *tw = NULL;
+            (void)rd__lamps_test_state(&tw);
+            const RdTargetRec *w2 = rd__target_rec(rd_target(RD_TARGET_WORK2).id);
+            const RdTargetRec *pad = rd__target_rec(rd_target(RD_TARGET_WORK2_PAD).id);
+            const RdTargetRec *w0 = rd__target_rec(rd_target(RD_TARGET_WORK0).id);
+            const char *f4w = NULL;
+            (void)rd__blur_fold4_test_state(&f4w);
+            printf("%s: stats: lamps %s (self-test %s): %u passes with the lamps' area (%ux%u at "
+                   "%d,%d of %ux%u: %u of %u texels; %u bytes not cleared, %u colour bytes not "
+                   "stored, %u depth bytes not loaded, %u not stored), %u whole%s%s%s; %u bands "
+                   "left lazy (WORK2_PAD %ux%u); %u WORK0 alpha sprites owed (WORK0 %ux%u); %u "
+                   "passes of two blur pairs (fold of two pairs %s, self-test %s)%s%s%s%s\n",
+                   dump, rd__lamps_bits_text(rd__lamps_bits()), tw, pr->lampsAreas, pr->lampsAreaW,
+                   pr->lampsAreaH, pr->lampsAreaX, pr->lampsAreaY, w2 ? w2->tw : 0u,
+                   w2 ? w2->th : 0u, pr->lampsAreaTexels, pr->lampsTexels, pr->lampsSavedClear,
+                   pr->lampsSavedColorStore, pr->lampsSavedDepthLoad, pr->lampsSavedDepthStore,
+                   pr->lampsWhole, pr->lampsWhole ? " (" : "",
+                   pr->lampsWhole ? rd__lamps_why_text((int)pr->lampsWhy) : "",
+                   pr->lampsWhole ? ")" : "", pr->lampsPads, pad ? pad->tw : 0u, pad ? pad->th : 0u,
+                   pr->lampsOwed, w0 ? w0->tw : 0u, w0 ? w0->th : 0u, pr->lampsFold4,
+                   (rd__lamps_bits() & RD_LAMPS_FOLD4) ? "on" : "off", f4w,
+                   pr->lampsFold4Why ? "; a pair alone: " : "",
+                   pr->lampsFold4Why ? rd__lamps_f4_why_text((int)pr->lampsFold4Why) : "",
+                   pr->lampsBoxWhy ? "; a lamp's box not known: " : "",
+                   pr->lampsBoxWhy ? rd__lamps_box_why_text((int)pr->lampsBoxWhy) : "");
+        }
+        /* the lamps' glow at the GS frame's size above 1x (rd_lamps.h
+         * RD_LAMPS_LOWRES): the run's draws into WORK2 on its own depth, the
+         * fills of that depth from SCENE's, the draws that went without one */
+        {
+            uint64_t ld = 0, lf = 0, lx = 0;
+            rd__lamps_lowres_counts(&ld, &lf, &lx);
+            const RdTargetRec *w2 = rd__target_rec(rd_target(RD_TARGET_WORK2).id);
+            const RdTargetRec *sc = rd__target_rec(rd_target(RD_TARGET_SCENE).id);
+            uint64_t mp = 0, ms1 = 0;
+            rd__lamps_ms_counts(&mp, &ms1);
+            printf("%s: stats: lamps lowres %s: WORK2 %ux%u under SCENE %ux%u, %llu draws into "
+                   "WORK2 on its own depth, %llu depth fills, %llu draws without a depth; "
+                   "lowresms %s: %llu passes with 4 samples resolved in the pass, %llu "
+                   "single-sampled\n",
+                   dump, rd__lamps_lowres_on() ? "on" : "off", w2 ? w2->tw : 0u, w2 ? w2->th : 0u,
+                   sc ? sc->tw : 0u, sc ? sc->th : 0u, (unsigned long long)ld,
+                   (unsigned long long)lf, (unsigned long long)lx,
+                   rd__lamps_lowres_ms() ? "on" : "off", (unsigned long long)mp,
+                   (unsigned long long)ms1);
+        }
+        /* the crack fill in the paste's pass (rd_lamps.h RD_LAMPS_FILLPASTE) */
+        {
+            uint64_t fl = 0, ff = 0;
+            rd__lamps_fillpaste_counts(&fl, &ff);
+            printf("%s: stats: lamps fillpaste %s: %llu crack fills drawn in the paste's pass by "
+                   "the swap, %llu flushed before a paste\n",
+                   dump, rd__lamps_fillpaste_on() ? "on" : "off", (unsigned long long)fl,
+                   (unsigned long long)ff);
+        }
+        /* the glow's blur pairs in two passes (rd_glow_blur.c): this
+         * replay's chain drawn so (1) or not (0) and its pairs, why not;
+         * the run's chains, pairs and chains drawn as recorded */
+        {
+            uint64_t gc = 0, gp = 0, gr = 0;
+            int gw = 0, rw = 0;
+            uint32_t rc1 = 0, rp = 0;
+            rd__glow_blur_counts(&gc, &gp, &gr, &gw);
+            rd__glow_blur_replay(&rc1, &rp, &rw);
+            printf("%s: stats: glow blur %s: %u chains in two passes (%u pairs)%s%s; the run: "
+                   "%llu chains in two passes (%llu pairs), %llu drawn as recorded\n",
+                   dump, rd__glow_blur_on() ? "on" : "off", rc1, rp,
+                   rw ? ", drawn as recorded: " : "", rw ? rd__glow_blur_why_text(rw) : "",
+                   (unsigned long long)gc, (unsigned long long)gp, (unsigned long long)gr);
+        }
+        /* the glow's paste by its own entry (rd_paste_spec.c): this replay's
+         * premultiplied adds drawn by fx_paste_ps of those seen; the run's,
+         * and the last reason one kept fx_frame_ps */
+        {
+            uint64_t pt = 0, ps = 0;
+            int pw = 0;
+            uint32_t rt = 0, rs = 0;
+            const char *ptw = NULL;
+            rd__paste_spec_counts(&pt, &ps, &pw);
+            rd__paste_spec_replay(&rt, &rs);
+            (void)rd__paste_spec_test_state(&ptw);
+            printf("%s: stats: paste spec %s (self-test %s): %u pastes by fx_paste_ps of %u; the "
+                   "run: %llu of %llu%s%s\n",
+                   dump, rd__paste_spec_on() ? "on" : "off", ptw, rt, rs, (unsigned long long)pt,
+                   (unsigned long long)ps, pt < ps ? ", last kept on fx_frame_ps: " : "",
+                   pt < ps ? rd__paste_spec_why_text(pw) : "");
+        }
+        /* the shadow volumes' stencil-only entry (rd_volume_fs.c): this
+         * replay's volume draws by date_clear_ps of those seen; the run's,
+         * and the last reason one kept sprite_ps */
+        {
+            uint64_t vt = 0, vs = 0;
+            int vw = 0;
+            uint32_t rt = 0, rs = 0;
+            const char *vtw = NULL;
+            rd__volume_fs_counts(&vt, &vs, &vw);
+            rd__volume_fs_replay(&rt, &rs);
+            (void)rd__volume_fs_test_state(&vtw);
+            printf("%s: stats: volume fs %s (self-test %s): %u volume draws by date_clear_ps of "
+                   "%u; the run: %llu of %llu%s%s\n",
+                   dump, rd__volume_fs_on() ? "on" : "off", vtw, rt, rs, (unsigned long long)vt,
+                   (unsigned long long)vs, vt < vs ? ", last kept on sprite_ps: " : "",
+                   vt < vs ? rd__volume_fs_why_text(vw) : "");
+        }
+        /* the shadow composites and levels by their own entry
+         * (rd_comp_spec.c): this replay's draws of the two forms by
+         * sprite_comp_ps of those seen; the run's, and the last reason one
+         * kept sprite_ps */
+        {
+            uint64_t ct = 0, cs = 0;
+            int cw = 0;
+            uint32_t rt = 0, rs = 0;
+            const char *ctw = NULL;
+            rd__comp_spec_counts(&ct, &cs, &cw);
+            rd__comp_spec_replay(&rt, &rs);
+            (void)rd__comp_spec_test_state(&ctw);
+            printf("%s: stats: comp spec %s (self-test %s): %u composites and levels by "
+                   "sprite_comp_ps of %u; the run: %llu of %llu%s%s\n",
+                   dump, rd__comp_spec_on() ? "on" : "off", ctw, rt, rs, (unsigned long long)ct,
+                   (unsigned long long)cs, ct < cs ? ", last kept on sprite_ps: " : "",
+                   ct < cs ? rd__comp_spec_why_text(cw) : "");
+        }
+        /* the aura's paste as the alpha alone (rd_aura_paste.c) */
+        printf("%s: stats: aura paste %s: %u split (%u rows as the alpha alone, %u band rows), %u "
+               "drawn whole%s%s%s\n",
+               dump, rd__aura_paste_on() ? "on" : "off", pr->auraPasteSplit, pr->auraPasteRows,
+               pr->auraPasteBand, pr->auraPasteKept, pr->auraPasteKept ? " (" : "",
+               pr->auraPasteKept ? rd__aura_paste_why_text((int)pr->auraPasteWhy) : "",
+               pr->auraPasteKept ? ")" : "");
         /* the aura's read in two passes (rd_aura_box.c) */
         printf("%s: stats: aura box %s: %u feedback reads in two passes\n", dump,
                rd__aura_box_on() ? "on" : "off", pr->auraBoxDraws);
@@ -2599,6 +3607,65 @@ int main(int argc, char **argv)
                dump, g_rd.vuPrepass ? "on" : "off", pr->vuPrePasses, pr->vuPreVertices,
                pr->vuPreDraws, pr->vuPreFallbacks, pr->vuPreSprites, pr->vuTriSlots,
                pr->vuTickDraws);
+        /* how the record was written (rd_vu_record.h) and the frames [dev]
+         * vu_prepass_min skipped */
+        {
+            uint32_t minSlots = 0, maxSlots = 0;
+            const uint32_t skipped = rd_vu_prepass_skips(&minSlots, &maxSlots);
+            printf("%s: stats: VU record %s: %s; pre-pass skipped %u frames under %u slots "
+                   "(the largest %u)\n",
+                   dump, rd_vu_record_mode(), g_rdRec.why, skipped, minSlots, maxSlots);
+        }
+        /* the index compaction (rd_vu_compact.h): every copy's counts after a
+         * full wait, the replays so far (the A/B's counts, rd_vu_compact_ab) */
+        {
+            RdVuCmpCounts cc;
+            if (rd_vu_compact_counts_now(&cc)) {
+                printf("%s: stats: VU index compaction %s: %llu of %llu list 0 triangles left "
+                       "out (drop %llu, outside %llu); the other lists %llu of %llu; %u "
+                       "pictures\n",
+                       dump, rd_vu_compact_state(),
+                       (unsigned long long)(cc.drop[0] + cc.outside[0]),
+                       (unsigned long long)(cc.drop[0] + cc.outside[0] + cc.kept[0]),
+                       (unsigned long long)cc.drop[0], (unsigned long long)cc.outside[0],
+                       (unsigned long long)(cc.drop[1] + cc.outside[1]),
+                       (unsigned long long)(cc.drop[1] + cc.outside[1] + cc.kept[1]), cc.pictures);
+            } else {
+                printf("%s: stats: VU index compaction %s: not run\n", dump, rd_vu_compact_state());
+            }
+        }
+        /* the region rule's mode: under region_rule = ps2 the side bands
+         * (rd_replay_vu.c vuDropMode, vuSource): the draws that had them and
+         * carried card verdicts, whose cards stay off the sides (issue
+         * 189); under the camera rule its draws; and those without either
+         * for want of facing data */
+        {
+            uint32_t nf = 0;
+            for (int k = 0; k < RD_VU_NOFACE_COUNT; k++) {
+                nf += pr->vuBesideNoFacing[k];
+            }
+            if (rd__region_camera()) {
+                /* the camera rule ([dev] region_rule = camera): the draws
+                 * that drew the PS2's drops facing the eye
+                 * (RdPerfRecord.vuCameraDraws); the triangles are
+                 * --region-stats' "drawn by the camera rule" */
+                printf("%s: stats: region rule: the camera's: %u VU draws drawn by the camera "
+                       "rule, %u draws without facing data (the PS2's drops kept)\n",
+                       dump, pr->vuCameraDraws, nf);
+            } else {
+                printf("%s: stats: side bands: %u draws with cards (kept off the sides), %u "
+                       "draws without facing data\n",
+                       dump, pr->vuBesideCards, nf);
+            }
+            if (g_rd.vuNoBeside) {
+                /* the device's plain set (rd_plain_camera.h, issue 123):
+                 * the meshes and grids the camera rule held, the skinned
+                 * draws that kept the PS2's drops (issue 163) */
+                printf("%s: stats: plain set: %u static and grid draws by the camera rule, %u "
+                       "skinned draws kept the PS2's drops\n",
+                       dump, pr->vuPlainCamera, pr->vuPlainKept);
+            }
+        }
         /* the draw-merge count (rd_replay_vu.c vuMergeNote): how many VU
          * draws could join the draw before them (same pipeline, textures,
          * DrawCB bytes, scissor and FrameCB, one pass, no DATE stencil,
@@ -2631,6 +3698,34 @@ int main(int argc, char **argv)
                    "merge %s)\n",
                    dump, pr->vuMergeIn + pr->vuMergeAlone, pr->vuMergeGpu + pr->vuMergeAlone,
                    pr->vuMergeIn, pr->vuMergeGpu, pr->vuMergeAlone, g_rd.vuMerge ? "on" : "off");
+            /* the shared vertices (rd_vu_share.h): the run's draws so far */
+            char share[384];
+            (void)rd__vu_share_stats_text(share, sizeof(share));
+            printf("%s: stats: %s\n", dump, share);
+            /* the zero-area cull (rd_vu_zero.h): the run's draws and checks
+               so far, every check read first */
+            char zero[640];
+            (void)rd__vu_zero_stats_text(zero, sizeof(zero));
+            printf("%s: stats: %s\n", dump, zero);
+            /* the discard-free twins (rd_nodiscard.h): the run's passes
+               through them and refused */
+            char nd[640];
+            (void)rd__nd_stats_text(nd, sizeof(nd));
+            printf("%s: stats: %s\n", dump, nd);
+            /* the fast pixel build (rd_fastps.h) */
+            char fps[640];
+            (void)rd__fps_stats_text(fps, sizeof(fps));
+            printf("%s: stats: %s\n", dump, fps);
+            /* the one-pass blend (rd_onepass.h): the run's pairs in one pass
+               and kept, the code 36 commands unfused */
+            char op[768];
+            (void)rd__op_stats_text(op, sizeof(op));
+            printf("%s: stats: %s\n", dump, op);
+            /* the in-play judge (rd_ab_run.h): the replays at each arm (five
+               subjects) */
+            char ab[768];
+            (void)rd__ab_stats_text(ab, sizeof(ab));
+            printf("%s: stats: %s\n", dump, ab);
             /* code 36's cut and kick pairs (rd_replay_vu.c vuFuseVerdict;
              * g_rd.vuFuse): fused, kept apart by reason, under one pipeline
              * already */
@@ -2660,12 +3755,87 @@ int main(int argc, char **argv)
                (unsigned long long)cc.skipped, (unsigned long long)cc.late,
                (unsigned long long)cc.afterMsaa, (unsigned long long)cc.pasted,
                (unsigned long long)cc.afterAlpha);
+        /* FILLSWAP and CRACKTAP (rd_crack_fill.c) */
+        {
+            const int t = rd__crack_swap_test();
+            printf(
+                "%s: stats: crack fill swap %s (self-test %s): %u snapshots by the swap (%.2f MB "
+                "of colour not copied and as many not loaded), %u copied%s%s%s; early leave "
+                "%s: %u draws\n",
+                dump, rd__crack_swap_on() && t == 1 ? "on" : "off",
+                t == 1   ? "passed"
+                : t == 2 ? "failed"
+                         : "not run",
+                pr->crackSwaps, (double)pr->crackSwapTexels * 4.0 / 1048576.0, pr->crackSwapCopied,
+                pr->crackSwapCopied ? " (last: " : "",
+                pr->crackSwapCopied ? rd__crack_swap_why_text(pr->crackSwapWhy) : "",
+                pr->crackSwapCopied ? ")" : "", rd__crack_tap2_on() ? "on" : "off", pr->crackTap2);
+        }
+        /* FILL11: the fill drawn in list 11's pass (rd_fill11.c) */
+        {
+            char f11[1024];
+            rd__fill11_stats(f11, sizeof(f11));
+            printf("%s: stats: %s\n", dump, f11);
+        }
+        /* the scene draws' visibility test (rd_vis.c rd__vis_frame): the VU
+         * draw commands walked, those replayed as NOPs, and those it did not
+         * test (particles, clip mode none, lists 11 and 12, no target: exempt;
+         * no bound or a layout it does not read: unbounded) */
+        {
+            RdVisCounts vc;
+            rd__vis_counts(&vc);
+            printf("%s: stats: cull %s: %u of %u scene draws skipped (%u frustum, %u occluded), "
+                   "%.3f ms; not tested: %u exempt, %u unbounded; skipped beyond the left %u, "
+                   "right %u, top %u, bottom %u, behind the eye %u; occlusion: %u occluder "
+                   "triangles (%u past the budget), %llu cells, %u draws tested, %u resets, "
+                   "%.3f ms\n",
+                   dump, rd__vis_mode_name(rd__vis_mode()), pr->cullSkipped, pr->cullDraws,
+                   pr->cullFrustum, pr->cullOccluded, pr->cullMs, vc.exempt, vc.unbounded,
+                   vc.byVerdict[RD_VIS_LEFT], vc.byVerdict[RD_VIS_RIGHT], vc.byVerdict[RD_VIS_TOP],
+                   vc.byVerdict[RD_VIS_BOTTOM], vc.byVerdict[RD_VIS_NEAR], vc.hizTris,
+                   vc.hizOverBudget, (unsigned long long)vc.hizCells, vc.hizTested, vc.hizResets,
+                   vc.hizMs);
+            /* one reason a command, every reason named (the sum is M) */
+            uint32_t why[RD_VIS_WHY_COUNT];
+            rd__vis_why(why);
+            printf("%s: stats: cull why:", dump);
+            for (int k = 0; k < RD_VIS_WHY_COUNT; k++) {
+                printf("%s %s %u", k ? ";" : "", rd__vis_why_name(k), why[k]);
+            }
+            printf("\n");
+            /* the occlusion test (full): the occluder candidates of list 0
+             * by the rule that refused them, the occludee candidates by
+             * why they were kept */
+            uint32_t hz[RD_VIS_HZ_COUNT];
+            rd__vis_hiz_why(hz);
+            printf("%s: stats: cull occlusion:", dump);
+            for (int k = 0; k < RD_VIS_HZ_COUNT; k++) {
+                printf("%s %s %u", k ? ";" : "", rd__vis_hiz_why_name(k), hz[k]);
+            }
+            printf("\n");
+            /* the occlusion test's time by part and its vertex pass
+             * (rd_vis.h RdVisCounts' hiz fields; docs/port/RENDER.md,
+             * "Culling", the occlusion test's cost) */
+            printf("%s: stats: cull occlusion cost: collect %.3f ms (settle %.3f, alpha %.3f, "
+                   "vertices %.3f ms: %u in full, %u for the screen box alone; %u triangles "
+                   "read, %u kept, %u left by their batch's box, %u by their own; cache %u of "
+                   "%u draws), raster %.3f ms, test %.3f ms; fast %s, check: %u checked, %u "
+                   "wrong\n",
+                   dump, vc.hizCollectMs, vc.hizSettleMs, vc.hizAlphaMs, vc.hizVertMs, vc.hizVerts,
+                   vc.hizCheapVerts, vc.hizTrisRead, vc.hizTrisKept, vc.hizTrisBatch,
+                   vc.hizTrisArea, vc.hizCacheHits, vc.hizCacheDraws, vc.hizRasterMs, vc.hizTestMs,
+                   rd__vis_hiz_fast() ? "on" : "off", vc.hizChecked, vc.hizWrong);
+        }
         uint32_t satDraws = 0;
-        const uint64_t sat = satZVertices(rf, &satDraws);
+        const uint64_t sat = satZVertices(rf, RD_VU_CLIP_REGION, &satDraws);
         printf("%s: stats: VU corners with a saturated GS Z: %llu vertices of region-mode meshes "
                "in %u draws (in a GPU-clipped triangle at their GS position: %s)\n",
                dump, (unsigned long long)sat, satDraws,
                rd__vu_extended() ? "yes, not out of the box" : "no, out of the box");
+        const uint64_t sat36 = satZVertices(rf, RD_VU_CLIP_SCISSOR, &satDraws);
+        printf("%s: stats: VU corners with a saturated GS Z: %llu vertices of code 36's meshes in "
+               "%u draws (one with a scissor flag: GPU-clipped at its true depth)\n",
+               dump, (unsigned long long)sat36, satDraws);
     }
     if (replayed && passDir) {
         /* One frame, every target: the renderer keeps each target's contents
@@ -2706,6 +3876,14 @@ int main(int argc, char **argv)
                 return 1;
             }
             rd__set_not_implemented_fatal(false);
+            (void)rd__crack_swap_selftest(); /* the new renderer's (rd_crack_fill.c) */
+            (void)rd__turn_fold_selftest();  /* the new renderer's (rd_turn_fold.c) */
+            if (getenv("ICO_RD_VOLUME_FS") != NULL) {
+                (void)rd__volume_fs_selftest(); /* the new renderer's (rd_volume_fs.c) */
+            }
+            if (getenv("ICO_RD_COMP_SPEC") != NULL) {
+                (void)rd__comp_spec_selftest(); /* the new renderer's (rd_comp_spec.c) */
+            }
             if (overlay) {
                 rd_set_present_overlay(overlayTest, NULL);
             }
@@ -2790,9 +3968,9 @@ int main(int argc, char **argv)
             for (int p = 0; p < RD_PERF_POST_COUNT; p++) {
                 printf("%s %s %.3f", p ? "," : "", rd_perf_post_name(p), last.gpuPostMs[p]);
             }
-            printf("%s; present %.3f; VU pre-pass %.3f\n",
-                   last.gpuPostPartial ? " (not all timed apart)" : "", last.gpuPresentMs,
-                   last.gpuPrepassMs);
+            printf("%s; display wait %.3f; present %.3f; VU pre-pass %.3f\n",
+                   last.gpuPostPartial ? " (not all timed apart)" : "", last.gpuDisplayWaitMs,
+                   last.gpuPresentMs, last.gpuPrepassMs);
             if (gpuRepeat > 1) {
                 printf("%s: gpu median of %d replays: total %.3f ms, list 0 %.3f ms, VU pre-pass "
                        "%.3f ms\n",
@@ -2843,7 +4021,10 @@ int main(int argc, char **argv)
     if (rc == 0 && timeN > 0 && !timeReplays(dump, &pf, &f, rf, timeN, pw != 0)) {
         rc = 1;
     }
-    if (occFailed) {
+    if (rc == 0 && benchK > 0 && (interpPrev || rd_bench_tool(&f, benchK, pw != 0) != 0)) {
+        rc = 1; /* the rc bench (rd_bench_run.h); not over an --interp frame */
+    }
+    if (occFailed || regionFailed || skinFailed || velFailed || fsr3Failed || fineFailed) {
         rc = 1;
     }
     rd__frame_free(&f);

@@ -26,6 +26,8 @@ extern char gameSysMainSaveBuff[]; /* common/src/gamesys.c:79 */
 int gflagChk(int bit_idx);         /* script/src/gflag.c:58 */
 /* port/game/options.h: developer mode */
 int ico_opt_developer_mode(void);
+/* port/game/yorda_look.h: Look at Yorda's tick (yorda_look_live.c) */
+void ico_yorda_look_tick(void);
 /* read by the heartbeat (ico_host_status) */
 extern int fadeStatus;                   /* seki/src/Basic.c:124 */
 extern int mpegPlay;                     /* common/src/StageManager.c:73 */
@@ -52,6 +54,13 @@ static int logged_stage = -1;
 
 static int logged_layout = -1;
 
+static void (*main_tick_hook)(void);
+
+void ico_host_set_main_tick_hook(void (*fn)(void))
+{
+    main_tick_hook = fn;
+}
+
 /* The save state's block (state_port.h): a load rewinds the Main tick
    count with the game, so the pad script and the recording go on from the
    saved tick.  The trace file's own position (traced_ticks) is not part of
@@ -63,6 +72,10 @@ int ico_trace_state_register(void)
 
 void ico_host_main_tick(void)
 {
+    /* Look at Yorda (yorda_look_live.c): after the pass's objects, before
+       the count moves, as the boy's collision thread looked in the tick;
+       the camera's next step takes its request */
+    ico_yorda_look_tick();
     if (main_ticks == 0) {
         ico_diag_milestone("first Main tick done (stage_no %d)", stage_no);
     }
@@ -83,6 +96,9 @@ void ico_host_main_tick(void)
     if (current_layout_id != logged_layout) {
         ico_diag_milestone("menu screen %d -> %d", logged_layout, current_layout_id);
         logged_layout = current_layout_id;
+    }
+    if (main_tick_hook != NULL) {
+        main_tick_hook();
     }
 }
 

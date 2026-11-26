@@ -47,6 +47,7 @@ PROGRAMS=(
     port/render/rd_msaa_test.exe
     port/render/rd_crt_test.exe
     port/render/rd_mirror_test.exe
+    port/fmv/rd_video_test.exe
 )
 
 stage() {
@@ -211,8 +212,8 @@ run() {
         # batches (vu_X_batch_pre_vs, FXC's first compile of them) and one
         # an entry (vu_X_pre_vs), and off when its first command's records
         # are drawn a texel off (the failure path a player's driver takes)
-        local vst_on='on \(self-test: prelit, lit, skin(, the tick cameras)? and particles byte for byte, [0-9]+ vertices and 4 sprites in [0-9]+ pre-pass draws \(2 passes, [0-9]+ triangle slots\), [0-9]+ of [0-9]+ pixels drawn\) on SCENE [0-9]+x[0-9]+ at [0-9]+x[0-9]+ texels in [0-9.]+ ms'
-        local vst_off='off \(self-test: the pictures differ: [0-9]+ of [0-9]+ bytes, the first at texel [0-9]+,[0-9]+: [0-9,]+ want [0-9,]+\) on SCENE'
+        local vst_on='on \(self-test: prelit, lit, skin(, the tick cameras)? and particles byte for byte over 4 replays in both frame slots, [0-9]+ vertices and 4 sprites in [0-9]+ pre-pass draws \(2 passes, [0-9]+ triangle slots\), [0-9]+ of [0-9]+ pixels drawn\) on SCENE [0-9]+x[0-9]+ at [0-9]+x[0-9]+ texels in [0-9.]+ ms'
+        local vst_off='off \(self-test: the pictures differ: in replay [1-4] of 4 \(frame slot [01]\), [0-9]+ of [0-9]+ bytes, the first at texel [0-9]+,[0-9]+: [0-9,]+ want [0-9,]+\) on SCENE'
         local vst_script
         vst_script="$(winpath "$SRC/port/render/test/rd_vuprepass_selftest.cmake")"
         run_test rd_vuprepass_selftest "$CMAKE_BIN" "-DTOOL=$W/rd_vuprepass_selftest_test.exe" \
@@ -294,11 +295,23 @@ run() {
                 -P "$(winpath "$SRC/port/render/test/rd_vustage_ab.cmake")"
             log_has rd_vustage_ab_compared "$LOGS/rd_vustage_ab.log" \
                 "rd_vustage_ab: [1-9][0-9]* targets equal over 3 dumps at 2 settings" ""
+            # the main shader's flat outputs at the provoking corner against
+            # every corner computing them (ICO_RD_VU_FLAT0=0, the twins), byte
+            # for byte, merged and one draw a command (port/render/
+            # rd_vu_flat0.cmake rd_vu_flat0_ab_pixel runs the same on Vulkan)
+            printf 'corpus %s\n' rd_pixel_vu.rddump rd_pixel_vu36.rddump rd_pixel_frame.rddump \
+                > "$WORK/vu_flat0_dumps.txt"
+            run_test rd_vu_flat0_ab "$CMAKE_BIN" "-DTOOL=$W/rd_replay_tool.exe" \
+                "-DLIST=$(winpath "$WORK/vu_flat0_dumps.txt")" "-DOUT=$(winpath "$WORK/vu_flat0_ab")" \
+                -DBACKEND=d3d11 -P "$(winpath "$SRC/port/render/test/rd_vu_flat0_ab.cmake")"
+            log_has rd_vu_flat0_ab_compared "$LOGS/rd_vu_flat0_ab.log" \
+                "rd_vu_flat0_ab \(d3d11\): [1-9][0-9]* targets compared" ""
         else
             echo "ci_d3d11_warp: no cmake on PATH: the merge, fuse and pre-pass A/Bs cannot run"
-            NAMES+=("rd_vumerge_ab" "rd_vumerge_fallback" "rd_vufuse_ab" "rd_vustage_ab")
+            NAMES+=("rd_vumerge_ab" "rd_vumerge_fallback" "rd_vufuse_ab" "rd_vustage_ab"
+                "rd_vu_flat0_ab")
             RESULTS+=("FAILED (no cmake)" "FAILED (no cmake)" "FAILED (no cmake)"
-                "FAILED (no cmake)")
+                "FAILED (no cmake)" "FAILED (no cmake)")
             FAILED=1
         fi
     else
@@ -311,6 +324,37 @@ run() {
     run_test rd_msaa "$DIR/rd_msaa_test.exe"
     run_test rd_crt "$DIR/rd_crt_test.exe" "$(winpath "$WORK")"
     run_test rd_mirror "$DIR/rd_mirror_test.exe"
+    # the movie's colour conversion (yuv.hlsl) against the CPU's, flat and
+    # ramp among the cases: FXC read the conversion's hex constants as
+    # unsigned and the movies were purple on Direct3D 11
+    run_test rd_video "$DIR/rd_video_test.exe"
+
+    # the whole D3D11 shader set: FXC compiles every shader at run time and
+    # warns in its own words; the backend logs each distinct warning text
+    # once ("rhi_d3d11: shader compiler warnings"). Any FXC warning fails the
+    # job but two FXC-only hints the WARP picture tests prove harmless: X3556
+    # (an integer divide or modulus "may be much slower": the GS arithmetic
+    # is signed by design) and X4000 ("potentially uninitialized" on a
+    # function that returns from every branch; DXC's -WX covers real cases).
+    # X3092/X3203 (an unsigned hex literal in signed arithmetic: the purple
+    # movie) stay fatal.
+    local warned hints
+    warned=$(grep -a -h -E 'warning X[0-9]{4}' "$LOGS"/*.log 2> /dev/null |
+        grep -a -v -E 'warning X(3556|4000):' |
+        sed -e 's/^.*rhi_d3d11: shader compiler warnings ([^)]*): //' -e 's/^[A-Za-z]:[^ ]*[\\/]//' |
+        sort -u | head -n 20 || true)
+    hints=$(grep -a -h -E 'warning X(3556|4000):' "$LOGS"/*.log 2> /dev/null | sort -u | wc -l || true)
+    echo "d3d11_shader_warnings: $hints distinct X3556/X4000 hint lines (not failures)"
+    NAMES+=("d3d11_shader_warnings")
+    if [ -n "$warned" ]; then
+        echo "== d3d11_shader_warnings: FAILED"
+        echo "$warned"
+        RESULTS+=("FAILED (the shader compiler warned: see the logs' rhi_d3d11 lines)")
+        FAILED=1
+    else
+        echo "== d3d11_shader_warnings: passed"
+        RESULTS+=("passed")
+    fi
 
     # the summary: the device line once (the first log that has one) and
     # whether the debug layer was there, then the verdicts

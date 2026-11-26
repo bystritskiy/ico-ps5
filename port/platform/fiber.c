@@ -11,6 +11,7 @@
 #include <stdint.h>
 #include <stdio.h>
 #include <stdlib.h>
+#include <stddef.h>
 #include <string.h>
 #include "diag_host.h"
 #include "fiber.h"
@@ -50,6 +51,12 @@ struct IcoFiber {
     int slot;
 };
 
+typedef struct HostFiber {
+    IcoFiber fiber;
+    void *reservation;
+    size_t reservation_bytes;
+} HostFiber;
+
 /* --- The pool -------------------------------------------------------------
  *
  * minicoro lays a coroutine out in one block (minicoro.h,
@@ -87,6 +94,8 @@ static Pool pool;
 static void fiber_main(mco_coro *co);
 static void *slot_alloc(size_t size, void *allocator_data);
 static void slot_dealloc(void *ptr, size_t size, void *allocator_data);
+static void *host_alloc(size_t size, void *allocator_data);
+static void host_dealloc(void *ptr, size_t size, void *allocator_data);
 
 static size_t align_up(size_t v, size_t a)
 {
@@ -212,6 +221,51 @@ static void slot_dealloc(void *ptr, size_t size, void *allocator_data)
     slot_release((int)((s - pool.base) / pool.slot_bytes));
 }
 
+/* A host fiber has its own header, one-page guard, and committed stack. */
+static void *host_alloc(size_t size, void *allocator_data)
+{
+    HostFiber *host = allocator_data;
+    size_t page = ico_vm_page_size();
+    size_t head;
+    size_t bytes;
+    void *base;
+
+    if (size < ICO_FIBER_HOST_STACK_SIZE + page + 16) {
+        return NULL;
+    }
+    head = size - ICO_FIBER_HOST_STACK_SIZE - page - 16;
+    if (head > page) {
+        return NULL;
+    }
+    bytes = align_up(size + page, page);
+    base = ico_vm_reserve(0, bytes, 0);
+    if (base == NULL) {
+        return NULL;
+    }
+    if (ico_vm_commit(base, page) != 0 ||
+        ico_vm_commit((char *)base + 2 * page, align_up(ICO_FIBER_HOST_STACK_SIZE + 16, page)) !=
+            0) {
+        ico_vm_release(base, bytes);
+        return NULL;
+    }
+    host->reservation = base;
+    host->reservation_bytes = bytes;
+    return (char *)base + page - head;
+}
+
+static void host_dealloc(void *ptr, size_t size, void *allocator_data)
+{
+    HostFiber *host = allocator_data;
+    (void)ptr;
+    (void)size;
+#ifdef ICO_FIBER_ASAN
+    __asan_unpoison_memory_region(host->reservation, host->reservation_bytes);
+#endif
+    ico_vm_release(host->reservation, host->reservation_bytes);
+    host->reservation = NULL;
+    host->reservation_bytes = 0;
+}
+
 static int slot_ok(int slot)
 {
     return slot >= 0 && slot < ICO_FIBER_POOL_SLOTS;
@@ -284,6 +338,35 @@ IcoFiber *ico_fiber_create(void (*fn)(void *arg), void *arg, size_t stack_size)
     return NULL;
 }
 
+IcoFiber *ico_fiber_create_host(void (*fn)(void *arg), void *arg)
+{
+    HostFiber *host = calloc(1, sizeof *host);
+    mco_desc desc;
+    mco_result res;
+    size_t page = ico_vm_page_size();
+
+    if (host == NULL) {
+        return NULL;
+    }
+    desc = mco_desc_init(fiber_main, ICO_FIBER_HOST_STACK_SIZE);
+    desc.coro_size += page - MCO_DEFAULT_STORAGE_SIZE;
+    desc.storage_size = page;
+    desc.alloc_cb = host_alloc;
+    desc.dealloc_cb = host_dealloc;
+    desc.user_data = &host->fiber;
+    desc.allocator_data = host;
+    host->fiber.fn = fn;
+    host->fiber.arg = arg;
+    host->fiber.slot = -1;
+    res = mco_create(&host->fiber.co, &desc);
+    if (res != MCO_SUCCESS) {
+        fprintf(stderr, "fiber: host mco_create: %s\n", mco_result_description(res));
+        free(host);
+        return NULL;
+    }
+    return &host->fiber;
+}
+
 int ico_fiber_resume(IcoFiber *f)
 {
     mco_result res = mco_resume(f->co);
@@ -314,13 +397,18 @@ void ico_fiber_yield(void)
 
 void ico_fiber_destroy(IcoFiber *f)
 {
+    int host;
     if (f == NULL) {
         return;
     }
+    host = f->slot == -1;
     /* the slot (and f with it) is decommitted by slot_dealloc */
     if (mco_destroy(f->co) != MCO_SUCCESS) {
         fprintf(stderr, "fiber: destroying a running fiber\n");
         abort();
+    }
+    if (host) {
+        free((HostFiber *)f);
     }
 }
 
@@ -419,7 +507,7 @@ static uintptr_t ctx_sp(const _mco_ctxbuf *c)
 static void scan_word(void **p, const IcoStateReloc *r)
 {
     uint64_t w = (uint64_t)(uintptr_t)*p;
-    if (ico_state_reloc_word(r, &w)) {
+    if (ico_state_reloc_word_at(r, &w, (uint64_t)(uintptr_t)p)) {
         *p = (void *)(uintptr_t)w;
     }
 }
@@ -557,7 +645,7 @@ int ico_fiber_slot_save(int slot, IcoFiberImage *out)
     }
     /* from the stack pointer less the System V red zone, and below it down
        to the deepest word the stack ever held (lowest_used) */
-    from = sp - lo >= 128 ? sp - 128 : lo;
+    from = sp - lo >= ICO_STATE_RED_ZONE ? sp - ICO_STATE_RED_ZONE : lo;
     from = lowest_used(lo, from);
     from &= ~(uintptr_t)15;
     out->slot_base = (uint64_t)s;
@@ -582,9 +670,27 @@ uint64_t ico_fiber_image_sp(const IcoFiberImage *img)
     return (uint64_t)ctx_sp(&cx->ctx);
 }
 
-int ico_fiber_slot_restore(int slot, const IcoFiberImage *in, const IcoStateReloc *r)
+int ico_fiber_image_rewritten(const IcoFiberImage *img, size_t *off, size_t *n)
 {
-    const IcoStateRange *pr = &r->range[ICO_RELOC_POOL];
+    *off = 0;
+    *n = 0;
+    if (pool.base == 0 || img->ctrl == NULL || img->ctrl_bytes != pool.page ||
+        pool.ctx_off + sizeof(_mco_context) > img->ctrl_bytes) {
+        return -1;
+    }
+    *off = pool.ctx_off + offsetof(_mco_context, back_ctx);
+    *n = sizeof(((_mco_context *)0)->back_ctx);
+    return 0;
+}
+
+int ico_fiber_slot_restore(int slot, const IcoFiberImage *in, const IcoStateReloc *r0)
+{
+    /* another build's translation with per-fiber points: this slot's
+       (state_reloc.h IcoStateXlate.fiber) */
+    IcoStateReloc rs = *r0;
+    IcoStateXlate xs;
+    const IcoStateReloc *r = &rs;
+    const IcoStateRange *pr = &r0->range[ICO_RELOC_POOL];
     uintptr_t s;
     uintptr_t lo;
     uintptr_t hi;
@@ -596,9 +702,16 @@ int ico_fiber_slot_restore(int slot, const IcoFiberImage *in, const IcoStateRelo
     uint64_t *end;
     void *p;
     int bad = 0;
+    /* a cross-build load's misses by place (state_reloc.h IcoStateMiss) */
+    IcoStateMiss *miss = r0->xlate != NULL ? r0->xlate->miss : NULL;
 
     if (pool_ensure() != 0 || !slot_ok(slot) || pool.used[slot] || in->slot != (uint32_t)slot) {
         return -1;
+    }
+    if (r0->xlate != NULL && r0->xlate->n_fiber > 0) {
+        xs = *r0->xlate;
+        xs.fiber = slot + 1;
+        rs.xlate = &xs;
     }
     s = slot_addr(slot);
     lo = s + pool.stack_off;
@@ -632,6 +745,7 @@ int ico_fiber_slot_restore(int slot, const IcoFiberImage *in, const IcoStateRelo
     p = (void *)(uintptr_t)f->fn;
     typed_word(&p, r, ICO_RELOC_MODULE, &bad);
     f->fn = (void (*)(void *))(uintptr_t)p;
+    ico_state_miss_at(miss, "control page", (uint64_t)s, slot + 1, 0);
     scan_word(&f->arg, r);
     if (f->slot != slot) {
         bad = 1;
@@ -662,17 +776,27 @@ int ico_fiber_slot_restore(int slot, const IcoFiberImage *in, const IcoStateRelo
     co->tsan_fiber = NULL;
 #endif
     /* the switch context; back_ctx is written by the next resume */
+    ico_state_miss_at(miss, "saved registers", (uint64_t)(uintptr_t)&cx->ctx, slot + 1, 0);
     fix_ctxbuf(&cx->ctx, lo, hi, r, &bad);
     memset(&cx->back_ctx, 0, sizeof cx->back_ctx);
     if (ctx_sp(&cx->ctx) < s + in->stack_off) {
         bad = 1; /* the stack pointer below the saved bytes */
     }
-    /* the stack */
+    /* the stack: below the stack pointer less the red zone dead frames,
+       split where the save's soft scan splits them (state_host.c
+       xb_scan_stack, the same function) */
+    ico_state_miss_at(miss, "stack", (uint64_t)ctx_sp(&cx->ctx), slot + 1, 1);
+    if (miss != NULL) {
+        miss->dead_lo = (uint64_t)(s + in->stack_off);
+        miss->dead_hi = miss->dead_lo + ico_state_stack_dead_bytes(miss->dead_lo, in->stack_bytes,
+                                                                   (uint64_t)ctx_sp(&cx->ctx));
+    }
     w = (uint64_t *)(s + in->stack_off);
     end = (uint64_t *)hi;
     for (; w < end; w++) {
         ico_state_reloc_word(r, w);
     }
+    ico_state_miss_at(miss, NULL, 0, 0, 0);
     if (bad) {
         fprintf(stderr, "fiber: slot %d: the saved control block failed its checks\n", slot);
         slot_release(slot);
@@ -687,6 +811,14 @@ uint64_t ico_fiber_image_sp(const IcoFiberImage *img)
 {
     (void)img;
     return 0;
+}
+
+int ico_fiber_image_rewritten(const IcoFiberImage *img, size_t *off, size_t *n)
+{
+    (void)img;
+    *off = 0;
+    *n = 0;
+    return -1;
 }
 
 int ico_fiber_slot_save(int slot, IcoFiberImage *out)

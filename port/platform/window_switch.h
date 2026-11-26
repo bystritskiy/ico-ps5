@@ -30,13 +30,25 @@
  *                               build with one renderer, a name the build
  *                               does not link); -3 neither started (no
  *                               renderer: the game ends)
+ *   ico_window_switch_restart(why)
+ *                               the renderer made again in place (the same
+ *                               backend, the card asked for) at the next
+ *                               ico_window_switch_pump, as Apply's switch
+ *                               makes it (rd_suspend, the window again,
+ *                               rd_resume), so what rd_init reads at the
+ *                               start (the environment) takes effect in the
+ *                               run: issue 123's ladder (window_bones.c).
+ *                               0 asked; -2 refused (refusal's reasons, a
+ *                               switch asked already), said in a line
  *   ico_window_switch_running() the backend running, as the config key
  *                               [video] backend names it ("vulkan",
  *                               "opengl", "d3d12", "d3d11")
  *   ico_window_switch_install() the Graphics page's host and its card names
  *                               (installed again after every switch)
  *   ico_window_switch_pump()    a switch the page asked for, from
- *                               ico_window_pump, the watchdog paused; 0, or
+ *                               ico_window_pump, under the switch's own
+ *                               watchdog limit (diag_host.h
+ *                               ico_diag_watchdog_switch); 0, or
  *                               -1 when no renderer is left (the pump ends
  *                               the run)
  *   ico_window_switch_end_text() after that -1: the box's text naming both
@@ -46,6 +58,17 @@
  *                               ico_window_open's choice once the renderer
  *                               is up (the player's, or Automatic's with
  *                               its fallback or restart backend)
+ *   ico_window_switch_wait_hooks()
+ *                               the renderer's wait hooks (rhi.h
+ *                               RhiWaitHooks), set once before the first
+ *                               rd_init: a long driver call (an OpenGL
+ *                               shader compile on its own thread, a fence
+ *                               wait) takes the window's events on this
+ *                               thread meanwhile, is held to the GPU hang
+ *                               limit, and each shader and pipeline made
+ *                               is progress for the switch's limit; a
+ *                               compile given up on makes the switch go
+ *                               back with a box naming the shader
  *   ico_window_reopen(backend, backendExplicit)
  *                               window_host.c's part: 1 up, 0 not (no
  *                               window then; the next call makes one);
@@ -61,8 +84,10 @@ int ico_window_switch_backend(const char *name, const char *adapter, int trial);
 const char *ico_window_switch_running(void);
 void ico_window_switch_install(void);
 int ico_window_switch_pump(void);
+int ico_window_switch_restart(const char *why);
 const char *ico_window_switch_end_text(void);
 void ico_window_switch_started(bool backendExplicit, const char *backend);
 int ico_window_reopen(const char *backend, bool backendExplicit);
+void ico_window_switch_wait_hooks(void);
 
 #endif /* ICO_PLATFORM_WINDOW_SWITCH_H */

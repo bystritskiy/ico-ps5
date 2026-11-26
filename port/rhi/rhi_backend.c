@@ -6,6 +6,7 @@
  * (port/rhi/CMakeLists.txt), Vulkan first, so it is the default; [video]
  * backend or ICO_RHI_BACKEND picks another. */
 #include "rhi_backend.h"
+#include "rhi_traffic.h"
 #include <stdio.h>
 #include <stdlib.h>
 #include <string.h>
@@ -38,6 +39,14 @@ static bool s_up; /* rhi_init succeeded and rhi_shutdown has not run */
 /* [video] adapter (rhi_set_adapter_wanted): handed to the backend at each
    rhi_init, whichever backend is selected then */
 static char s_adapterWanted[256];
+/* rhi_set_wait_hooks (rhi.h): copied, handed to every rhi_init */
+static RhiWaitHooks s_waits;
+static bool s_waitsOn;
+/* rhi_plan_shaders (rhi.h): the start-up set's size and the shaders of it
+   made so far, from the first rhi_plan_shaders until rhi_plan_end or the
+   first rhi_begin_commands */
+static uint32_t s_planTotal, s_planMade;
+static bool s_planOpen;
 
 static bool nameEq(const char *a, const char *b)
 {
@@ -189,6 +198,24 @@ bool rhi_slot_guard_worker(void)
     return s_slotOn && s_slotGuard.worker(s_slotGuard.user);
 }
 
+/* rhi_set_thread_begin (rhi.h): set once before the first rhi_init, read
+   by the threads the backend makes */
+static void (*s_threadBegin)(void);
+
+void rhi_set_thread_begin(void (*fn)(void))
+{
+    __atomic_store_n(&s_threadBegin, fn, __ATOMIC_RELEASE);
+}
+
+void rhi_thread_begin(void)
+{
+    void (*fn)(void) = __atomic_load_n(&s_threadBegin, __ATOMIC_ACQUIRE);
+
+    if (fn != NULL) {
+        fn();
+    }
+}
+
 void rhi_set_call_guard(const RhiCallGuard *guard)
 {
     if (guard != NULL && guard->busy != NULL && guard->wait != NULL) {
@@ -220,14 +247,82 @@ bool rhi_init(const RhiDeviceDesc *desc)
         return true;
     }
     be()->set_adapter_wanted(s_adapterWanted);
-    s_up = be()->init(desc);
+    /* the renderer plans the new device's set */
+    s_planTotal = s_planMade = 0;
+    s_planOpen = false;
+    if (desc && !desc->waits && s_waitsOn) {
+        RhiDeviceDesc d = *desc;
+        d.waits = &s_waits;
+        s_up = be()->init(&d);
+    } else {
+        s_up = be()->init(desc);
+    }
     return s_up;
+}
+
+/* rhi_set_create_hook's (rhi.h) */
+static RhiCreateHook s_createHook;
+
+void rhi_set_create_hook(RhiCreateHook fn)
+{
+    s_createHook = fn;
+}
+
+void rhi_set_wait_hooks(const RhiWaitHooks *hooks)
+{
+    s_waitsOn = hooks != NULL;
+    if (hooks) {
+        s_waits = *hooks;
+    } else {
+        memset(&s_waits, 0, sizeof(s_waits));
+    }
+}
+
+void rhi_plan_shaders(uint32_t count)
+{
+    s_planTotal += count;
+    s_planOpen = s_planOpen || count > 0;
+}
+
+void rhi_plan_progress(uint32_t *made, uint32_t *total)
+{
+    *made = s_planOpen ? s_planMade : 0u;
+    *total = s_planOpen ? (s_planMade > s_planTotal ? s_planMade : s_planTotal) : 0u;
+}
+
+/* the device's start moves (RhiWaitHooks.made) */
+static void noteMade(void)
+{
+    if (s_waitsOn && s_waits.made) {
+        s_waits.made(s_waits.ctx);
+    }
+}
+
+void rhi_plan_end(void)
+{
+    if (!s_planOpen) {
+        return;
+    }
+    if (s_planMade != s_planTotal) {
+        /* the count and rd__gpu_init's loops apart (rd_shader_plan.c):
+           the screens counted wrong, nothing else */
+        fprintf(stderr, "rhi: the start-up shader set ended with %u made of the %u planned (%s)\n",
+                s_planMade, s_planTotal,
+                s_planMade < s_planTotal
+                    ? "the renderer's start stopped early, or the plan counted modules it did "
+                      "not make"
+                    : "the plan counted fewer than the renderer made");
+    }
+    s_planOpen = false;
+    s_planTotal = s_planMade = 0;
+    noteMade(); /* the window's line for the set's end (rhi_plan_progress 0 and 0) */
 }
 
 void rhi_shutdown(void)
 {
     RHI_GUARD();
     be()->shutdown();
+    rhi_traffic_forget(); /* the handles were the device's */
     s_up = false;
 }
 
@@ -282,6 +377,11 @@ bool rhi_swapchain_size(uint32_t *w, uint32_t *h)
     return be()->swapchain_size(w, h);
 }
 
+uint32_t rhi_swapchain_rotation(void)
+{
+    return be()->swapchain_rotation();
+}
+
 void rhi_surface_poll_restart(void)
 {
     RHI_GUARD();
@@ -315,7 +415,12 @@ bool rhi_recreate_surface(void *window)
 RhiBuffer rhi_create_buffer(const RhiBufferDesc *desc)
 {
     RHI_GUARD();
-    return be()->create_buffer(desc);
+    const RhiBuffer b = be()->create_buffer(desc);
+    const RhiCreateHook hook = s_createHook;
+    if (hook != NULL && b.id && desc != NULL) {
+        hook(RHI_CREATE_BUFFER, desc->debugName, desc->size);
+    }
+    return b;
 }
 
 void rhi_destroy_buffer(RhiBuffer b)
@@ -344,12 +449,15 @@ void rhi_buffer_note_written(RhiBuffer b, uint64_t hi)
 RhiTexture rhi_create_texture(const RhiTextureDesc *desc)
 {
     RHI_GUARD();
-    return be()->create_texture(desc);
+    const RhiTexture t = be()->create_texture(desc);
+    rhi_traffic_texture_made(t, desc); /* its format for the passes' bytes */
+    return t;
 }
 
 void rhi_destroy_texture(RhiTexture t)
 {
     RHI_GUARD();
+    rhi_traffic_texture_gone(t);
     be()->destroy_texture(t);
 }
 
@@ -368,7 +476,19 @@ void rhi_destroy_sampler(RhiSampler s)
 RhiShader rhi_create_shader(const RhiShaderDesc *desc)
 {
     RHI_GUARD();
-    return be()->create_shader(desc);
+    RhiShader s;
+    if (desc && s_planOpen) {
+        /* one of the start-up set: its number for the backend's progress
+           screen (OpenGL's, gl_start_screen.c) */
+        RhiShaderDesc d = *desc;
+        d.planIndex = ++s_planMade;
+        d.planTotal = s_planMade > s_planTotal ? s_planMade : s_planTotal;
+        s = be()->create_shader(&d);
+    } else {
+        s = be()->create_shader(desc);
+    }
+    noteMade(); /* the window's lines read rhi_plan_progress there */
+    return s;
 }
 
 void rhi_destroy_shader(RhiShader s)
@@ -398,7 +518,13 @@ RhiBindGroup rhi_create_bind_group(const RhiBindGroupDesc *desc)
 RhiPipeline rhi_create_pipeline(const RhiPipelineDesc *desc)
 {
     RHI_GUARD();
-    return be()->create_pipeline(desc);
+    const RhiPipeline p = be()->create_pipeline(desc);
+    noteMade();
+    const RhiCreateHook hook = s_createHook;
+    if (hook != NULL && p.id && desc != NULL) {
+        hook(RHI_CREATE_PIPELINE, desc->debugName, 0);
+    }
+    return p;
 }
 
 uint32_t rhi_create_pipelines(const RhiPipelineDesc *descs, uint32_t n, RhiPipeline *out,
@@ -431,12 +557,19 @@ void rhi_destroy_pipeline(RhiPipeline p)
 RhiCommandList rhi_begin_commands(void)
 {
     RHI_GUARD_SLOT(RHI_SLOT_NOW());
+    if (s_planOpen) {
+        rhi_plan_end(); /* a frame: the start-up set is over */
+    }
     return be()->begin_commands();
 }
 
 void rhi_end_commands(RhiCommandList cl)
 {
-    RHI_GUARD();
+    /* a slot call: the renderer ends a picture's scene list on the render
+     * thread before it begins the present's (port/render/rd_submit.c),
+     * beside the submit thread's work of the other slot; an end touches
+     * only its own list (vk_cmd.c "Frame slots") */
+    RHI_GUARD_SLOT(RHI_SLOT_NOW());
     be()->end_commands(cl);
 }
 
@@ -450,6 +583,12 @@ void rhi_wait_frame(void)
 {
     RHI_GUARD_SLOT(RHI_SLOT_NEXT());
     be()->wait_frame();
+}
+
+bool rhi_commands_left(void)
+{
+    RHI_GUARD_SLOT(RHI_SLOT_NOW());
+    return be()->commands_left();
 }
 
 uint32_t rhi_frame_slot(void)
@@ -476,6 +615,7 @@ void rhi_cmd_barrier(RhiCommandList cl, const RhiTextureBarrier *barriers, uint3
 
 void rhi_cmd_begin_render_pass(RhiCommandList cl, const RhiRenderPassDesc *pass)
 {
+    rhi_traffic_pass(pass); /* the bytes it asks to load and store (CPU only) */
     be()->cmd_begin_render_pass(cl, pass);
 }
 
@@ -572,6 +712,7 @@ void rhi_cmd_copy_buffer_to_texture(RhiCommandList cl, RhiBuffer src, uint64_t s
 void rhi_cmd_copy_texture(RhiCommandList cl, RhiTexture src, RhiRect srcRegion, RhiTexture dst,
                           int32_t dstX, int32_t dstY)
 {
+    rhi_traffic_copy(src, RHI_ASPECT_COLOR, srcRegion);
     be()->cmd_copy_texture(cl, src, srcRegion, dst, dstX, dstY);
 }
 
@@ -579,7 +720,33 @@ void rhi_cmd_copy_texture_to_buffer(RhiCommandList cl, RhiTexture src, RhiViewAs
                                     RhiRect region, RhiBuffer dst, uint64_t dstOffset,
                                     uint32_t rowPitch)
 {
+    rhi_traffic_copy(src, aspect, region);
     be()->cmd_copy_texture_to_buffer(cl, src, aspect, region, dst, dstOffset, rowPitch);
+}
+
+bool rhi_cmd_buffer_store_begin(RhiCommandList cl, RhiBuffer buf)
+{
+    return be()->cmd_buffer_store_begin(cl, buf);
+}
+
+bool rhi_cmd_buffer_store_end(RhiCommandList cl, RhiBuffer buf)
+{
+    return be()->cmd_buffer_store_end(cl, buf);
+}
+
+bool rhi_cmd_buffer_compute_begin(RhiCommandList cl, RhiBuffer buf)
+{
+    return be()->cmd_buffer_compute_begin(cl, buf);
+}
+
+bool rhi_cmd_buffer_compute_end(RhiCommandList cl, RhiBuffer buf)
+{
+    return be()->cmd_buffer_compute_end(cl, buf);
+}
+
+void rhi_cmd_dispatch(RhiCommandList cl, uint32_t gx, uint32_t gy, uint32_t gz)
+{
+    be()->cmd_dispatch(cl, gx, gy, gz);
 }
 
 void rhi_cmd_resolve_color(RhiCommandList cl, RhiTexture src, RhiTexture dst)
@@ -632,9 +799,11 @@ void rhi_get_stats(RhiStats *out)
     if (s_guardOn &&
         (s_guard.stale != NULL ? s_guard.stale(s_guard.user) : s_guard.busy(s_guard.user))) {
         *out = s_guardStats; /* the hand-over's counters (rhi.h rhi_set_call_guard) */
+        rhi_traffic_stats(out);
         return;
     }
     be()->get_stats(out);
+    rhi_traffic_stats(out); /* the passes' bytes (rhi_traffic.h): every backend */
 }
 
 bool rhi_timestamps_supported(void)
@@ -659,9 +828,20 @@ uint32_t rhi_read_timestamps_busy(uint64_t *ns, uint32_t max)
     return be()->read_timestamps_busy(ns, max);
 }
 
+bool rhi_read_timestamp_clock(RhiTimestampClock *out)
+{
+    RHI_GUARD_SLOT(RHI_SLOT_NOW());
+    return be()->read_timestamp_clock(out);
+}
+
 bool rhi_occlusion_supported(void)
 {
     return be()->occlusion_supported();
+}
+
+bool rhi_occlusion_prepare(uint32_t count)
+{
+    return be()->occlusion_prepare(count);
 }
 
 void rhi_cmd_begin_occlusion(RhiCommandList cl, uint32_t index)
@@ -691,6 +871,41 @@ bool rhi_present_shown(void)
     return be()->present_shown();
 }
 
+bool rhi_present_split(RhiPresentSplit *out)
+{
+    return be()->present_split(out);
+}
+
+bool rhi_wait_present_room(void)
+{
+    RHI_GUARD();
+    return be()->wait_present_room();
+}
+
+bool rhi_wait_submitted(void)
+{
+    RHI_GUARD();
+    return be()->wait_submitted();
+}
+
+int rhi_submitted_finished(uint64_t *value)
+{
+    RHI_GUARD();
+    return be()->submitted_finished(value);
+}
+
+uint64_t rhi_last_submitted(void)
+{
+    RHI_GUARD();
+    return be()->last_submitted();
+}
+
+int32_t rhi_wait_value_ns(uint64_t value, uint64_t *ns)
+{
+    RHI_GUARD();
+    return be()->wait_value_ns(value, ns);
+}
+
 bool rhi_present_mailbox(void)
 {
     return be()->present_mailbox();
@@ -705,6 +920,12 @@ void rhi_present_fifo_fallback(bool on)
 bool rhi_present_fifo_fallback_on(void)
 {
     return be()->present_fifo_fallback_on();
+}
+
+void rhi_present_fifo_start(RhiFifoStartFn eligible)
+{
+    RHI_GUARD();
+    be()->present_fifo_start(eligible);
 }
 
 void rhi_set_exclusive_fullscreen(bool allowed)
@@ -739,6 +960,34 @@ uint64_t rhi_present_last_id(void)
 int rhi_present_timing_next(uint64_t *id, uint64_t *ns)
 {
     return s_up ? be()->present_timing_next(id, ns) : -1;
+}
+
+uint32_t rhi_present_glass(uint64_t *lastId, uint64_t *refreshNs, RhiGlassTime *out, uint32_t max)
+{
+    if (!s_up) {
+        if (lastId != NULL) {
+            *lastId = 0;
+        }
+        if (refreshNs != NULL) {
+            *refreshNs = 0;
+        }
+        return 0;
+    }
+    return be()->present_glass(lastId, refreshNs, out, max);
+}
+
+void rhi_present_desire(uint64_t desiredNs)
+{
+    if (s_up) {
+        be()->present_desire(desiredNs);
+    }
+}
+
+void rhi_present_glass_use(bool on)
+{
+    if (s_up) {
+        be()->present_glass_use(on);
+    }
 }
 
 bool rhi_present_statistics(uint64_t *presentCount, uint64_t *presentRefresh, uint64_t *syncRefresh,
@@ -785,6 +1034,54 @@ const char *rhi_injector_name(void)
 const char *rhi_overlay_name(void)
 {
     return s_up ? be()->overlay_name() : NULL;
+}
+
+/* The native handles of rhi_native.h: forwarded; nothing is offered before
+ * rhi_init succeeded (the handles belong to the device), and the command
+ * list calls are command recording like the rest (no guard) */
+bool rhi_native_device(RhiNativeDevice *out)
+{
+    if (out) {
+        memset(out, 0, sizeof(*out));
+    }
+    return out && s_up && be()->native_device(out);
+}
+
+bool rhi_native_texture(RhiTexture t, RhiNativeTexture *out)
+{
+    if (out) {
+        memset(out, 0, sizeof(*out));
+    }
+    return out && s_up && be()->native_texture(t, out);
+}
+
+bool rhi_native_command_list(RhiCommandList cl, void **out)
+{
+    if (out) {
+        *out = NULL;
+    }
+    return out && s_up && be()->native_command_list(cl, out);
+}
+
+bool rhi_cmd_external_begin(RhiCommandList cl)
+{
+    return s_up && be()->cmd_external_begin(cl);
+}
+
+void rhi_cmd_external_end(RhiCommandList cl)
+{
+    if (s_up) {
+        be()->cmd_external_end(cl);
+    }
+}
+
+bool rhi_device_compute_caps(RhiComputeCaps *out)
+{
+    if (out) {
+        memset(out, 0, sizeof(*out));
+        out->why = "no device";
+    }
+    return out && s_up && be()->device_compute_caps(out);
 }
 
 /* ------------------------------------------------ the layer classifiers

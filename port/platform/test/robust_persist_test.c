@@ -1,0 +1,448 @@
+/*
+ * port/platform/test/robust_persist_test.c
+ *
+ * The port's own [dev] gpu_robust turning itself off (robust_persist.h):
+ *   - the mark's text written and read back, and a hand-written or
+ *     foreign value never taken for the game's;
+ *   - the rule over sequences of starts: three clean starts in a row turn
+ *     it off, a loss or an end while preparing resets the count, a start
+ *     that never reached the game leaves it, another version turns it off
+ *     at once, no mark does nothing;
+ *   - the mark through the config text (ico_toml set, render, parse) and
+ *     the keys' removal leaving every other line byte for byte;
+ *   - a gpu_robust = true without the mark (issue 179's, written by
+ *     v0.7.10 to v0.10.1 or by hand) through config fixtures as the window
+ *     reads them: removed at the first start of a new version by the same
+ *     removal, after a lost start too, the loss ladder's marked key after
+ *     it counted and dropped as any; a marked key unchanged; false and
+ *     ico-pc.ini's line never touched; a desktop's file the same;
+ *   - the log lines word for word.
+ */
+#include <stdio.h>
+#include <stdlib.h>
+#include <string.h>
+#include "host_config.h"
+#include "robust_persist.h"
+
+static int g_fail;
+#define CHECK(cond)                                                                                \
+    do {                                                                                           \
+        if (!(cond)) {                                                                             \
+            fprintf(stderr, "%s:%d: CHECK failed: %s\n", __FILE__, __LINE__, #cond);               \
+            g_fail = 1;                                                                            \
+        }                                                                                          \
+    } while (0)
+
+static void testMark(void)
+{
+    RobustMark m, n;
+    char text[96];
+
+    memset(&m, 0, sizeof(m));
+    snprintf(m.version, sizeof(m.version), "0.10.2");
+    m.clean = 1;
+    CHECK(robust_mark_format(text, sizeof(text), &m) == 0);
+    CHECK(strcmp(text, "losses; 0.10.2; 1; -") == 0);
+    CHECK(robust_mark_parse(text, &n) == 0 && strcmp(n.version, "0.10.2") == 0 && n.clean == 1 &&
+          !n.running);
+    m.running = 1;
+    CHECK(robust_mark_format(text, sizeof(text), &m) == 0 &&
+          strcmp(text, "losses; 0.10.2; 1; run") == 0);
+    CHECK(robust_mark_parse(text, &n) == 0 && n.running);
+    CHECK(robust_mark_parse("losses;0.10.2;2;run", &n) == 0 && n.clean == 2);
+    CHECK(robust_mark_format(text, 8, &m) == -1);
+    /* not the game's */
+    CHECK(robust_mark_parse(NULL, &n) == -1);
+    CHECK(robust_mark_parse("", &n) == -1);
+    CHECK(robust_mark_parse("by hand", &n) == -1);
+    CHECK(robust_mark_parse("crash; 0.10.2; 1; -", &n) == -1);
+    CHECK(robust_mark_parse("losses; ; 1; -", &n) == -1);
+    CHECK(robust_mark_parse("losses; 0.10.2; x; -", &n) == -1);
+    CHECK(robust_mark_parse("losses; 0.10.2; 9; -", &n) == -1);
+    CHECK(robust_mark_parse("losses; 0.10.2; -1; -", &n) == -1);
+    CHECK(robust_mark_parse("losses; 0.10.2", &n) == -1);
+}
+
+/* one start of the rule; the mark carried to the next start with "run"
+   set when the start reached the game */
+static RobustStep start(RobustMark *mark, const char *version, int lost, int ended, int reached)
+{
+    const RobustStep s = robust_persist_step(mark, version, lost, ended);
+    if (s.action == ROBUST_STAYS) {
+        *mark = s.mark;
+        mark->running = reached;
+    }
+    return s;
+}
+
+static void testRule(void)
+{
+    RobustMark m;
+    RobustStep s;
+
+    /* no mark: nothing */
+    CHECK(robust_persist_step(NULL, "0.10.2", 0, 0).action == ROBUST_NONE);
+    CHECK(robust_persist_step(NULL, "0.10.2", 1, 1).action == ROBUST_NONE);
+
+    /* written by the start that lost twice: 0 clean, and it reaches the game */
+    memset(&m, 0, sizeof(m));
+    snprintf(m.version, sizeof(m.version), "0.10.2");
+    m.running = 1;
+    s = start(&m, "0.10.2", 0, 0, 1);
+    CHECK(s.action == ROBUST_STAYS && s.mark.clean == 1);
+    s = start(&m, "0.10.2", 0, 0, 1);
+    CHECK(s.action == ROBUST_STAYS && s.mark.clean == 2);
+    s = start(&m, "0.10.2", 0, 0, 1);
+    CHECK(s.action == ROBUST_OFF_CLEAN);
+
+    /* a loss resets the count */
+    memset(&m, 0, sizeof(m));
+    snprintf(m.version, sizeof(m.version), "0.10.2");
+    m.running = 1;
+    s = start(&m, "0.10.2", 0, 0, 1);
+    s = start(&m, "0.10.2", 0, 0, 1);
+    CHECK(s.mark.clean == 2);
+    s = start(&m, "0.10.2", 1, 0, 1);
+    CHECK(s.action == ROBUST_STAYS && s.mark.clean == 0);
+    s = start(&m, "0.10.2", 0, 0, 1);
+    CHECK(s.mark.clean == 1);
+    /* an end while preparing the graphics resets it too */
+    s = start(&m, "0.10.2", 0, 1, 1);
+    CHECK(s.action == ROBUST_STAYS && s.mark.clean == 0);
+
+    /* a start that never reached the game and ended without a word: the
+       count stays (it is not clean, and not a loss) */
+    s = start(&m, "0.10.2", 0, 0, 1);
+    CHECK(s.mark.clean == 1);
+    s = start(&m, "0.10.2", 0, 0, 0); /* judges the previous; this one does not reach */
+    CHECK(s.mark.clean == 2);
+    s = start(&m, "0.10.2", 0, 0, 1);
+    CHECK(s.action == ROBUST_STAYS && s.mark.clean == 2);
+    s = start(&m, "0.10.2", 0, 0, 1);
+    CHECK(s.action == ROBUST_OFF_CLEAN);
+
+    /* three clean starts needed even after two resets */
+    memset(&m, 0, sizeof(m));
+    snprintf(m.version, sizeof(m.version), "0.10.2");
+    m.running = 1;
+    CHECK(start(&m, "0.10.2", 1, 0, 1).mark.clean == 0);
+    CHECK(start(&m, "0.10.2", 1, 0, 1).mark.clean == 0);
+    CHECK(start(&m, "0.10.2", 0, 0, 1).mark.clean == 1);
+    CHECK(start(&m, "0.10.2", 0, 0, 1).mark.clean == 2);
+    CHECK(start(&m, "0.10.2", 0, 0, 1).action == ROBUST_OFF_CLEAN);
+
+    /* another version: off at once, whatever the count and the last end */
+    memset(&m, 0, sizeof(m));
+    snprintf(m.version, sizeof(m.version), "0.10.1");
+    CHECK(robust_persist_step(&m, "0.10.2", 0, 0).action == ROBUST_OFF_VERSION);
+    CHECK(robust_persist_step(&m, "0.10.2", 1, 1).action == ROBUST_OFF_VERSION);
+    CHECK(robust_persist_step(&m, "dev", 0, 0).action == ROBUST_OFF_VERSION);
+    CHECK(robust_persist_step(&m, NULL, 0, 0).action == ROBUST_OFF_VERSION);
+}
+
+static const char k_file[] = "version = 1\n"
+                             "[video]\n"
+                             "vsync = true # keep\n"
+                             "[dev]\n"
+                             "# a note\n"
+                             "gpu_robust = true\n"
+                             "slow_step_ms = 8.0\n"
+                             "  gpu_robust_by = \"losses; 0.10.1; 2; run\"\n"
+                             "[audio]\n"
+                             "gpu_robust = 3\n"
+                             "volume = 1.0\n";
+
+static void testFile(void)
+{
+    IcoToml *t = ico_toml_parse(k_file);
+    RobustMark m, n;
+    char *text, *out, *again;
+    char value[96];
+
+    CHECK(t != NULL);
+    CHECK(robust_mark_parse(ico_toml_get(t, "dev.gpu_robust_by"), &m) == 0 && m.clean == 2 &&
+          m.running);
+    /* the mark written back through the config text */
+    m.running = 0;
+    m.clean = 0;
+    CHECK(robust_mark_format(value, sizeof(value), &m) == 0);
+    CHECK(ico_toml_set_string(t, "dev.gpu_robust_by", value) == 0);
+    text = ico_toml_render(t, k_file);
+    CHECK(text != NULL && strstr(text, "gpu_robust_by = \"losses; 0.10.1; 0; -\"") != NULL);
+    ico_toml_free(t);
+    t = ico_toml_parse(text);
+    CHECK(robust_mark_parse(ico_toml_get(t, "dev.gpu_robust_by"), &n) == 0 && n.clean == 0 &&
+          !n.running && strcmp(n.version, "0.10.1") == 0);
+    ico_toml_free(t);
+    free(text);
+
+    /* a new mark on a file that has the key and no mark */
+    t = ico_toml_parse("[dev]\ngpu_robust = true\n");
+    CHECK(robust_mark_parse(ico_toml_get(t, "dev.gpu_robust_by"), &n) == -1);
+    CHECK(ico_toml_set_string(t, "dev.gpu_robust_by", "losses; 0.10.2; 0; -") == 0);
+    text = ico_toml_render(t, "[dev]\ngpu_robust = true\n");
+    CHECK(text != NULL &&
+          strcmp(text, "[dev]\ngpu_robust = true\ngpu_robust_by = \"losses; 0.10.2; 0; -\"\n") ==
+              0);
+    free(text);
+    ico_toml_free(t);
+
+    /* the removal: both [dev] keys, nothing else (a gpu_robust in another
+       section stays) */
+    out = robust_persist_strip(k_file);
+    CHECK(out != NULL);
+    CHECK(strcmp(out, "version = 1\n[video]\nvsync = true # keep\n[dev]\n# a note\n"
+                      "slow_step_ms = 8.0\n[audio]\ngpu_robust = 3\nvolume = 1.0\n") == 0);
+    again = robust_persist_strip(out);
+    CHECK(again != NULL && strcmp(again, out) == 0);
+    free(again);
+    free(out);
+    /* no trailing newline, no dev section, empty text */
+    out = robust_persist_strip("[dev]\nx = 1\ngpu_robust = true");
+    CHECK(out != NULL && strcmp(out, "[dev]\nx = 1\n") == 0);
+    free(out);
+    out = robust_persist_strip("gpu_robust = true\n[video]\nvsync = true\n");
+    CHECK(out != NULL && strcmp(out, "gpu_robust = true\n[video]\nvsync = true\n") == 0);
+    free(out);
+    out = robust_persist_strip("");
+    CHECK(out != NULL && out[0] == '\0');
+    free(out);
+    out = robust_persist_strip("[dev]\r\ngpu_robust = true\r\nx = 1\r\n");
+    CHECK(out != NULL && strcmp(out, "[dev]\r\nx = 1\r\n") == 0);
+    free(out);
+    /* the root's dotted form (read as [dev]'s): both lines out, blanks
+       around the dot too; the dotted key under another header stays */
+    out = robust_persist_strip("dev.gpu_robust = true\ndev . gpu_robust_by = \"x\"\nversion = 1\n"
+                               "[audio]\ndev.gpu_robust = true\n");
+    CHECK(out != NULL && strcmp(out, "version = 1\n[audio]\ndev.gpu_robust = true\n") == 0);
+    t = ico_toml_parse(out != NULL ? out : "");
+    CHECK(t != NULL && ico_toml_get_bool(t, "dev.gpu_robust", 0) == 0);
+    ico_toml_free(t);
+    free(out);
+    t = ico_toml_parse("dev.gpu_robust = true\n");
+    CHECK(t != NULL && ico_toml_get_bool(t, "dev.gpu_robust", 0) == 1);
+    ico_toml_free(t);
+    /* forms the strip leaves (a quoted key, an inline table): what the
+       parser reads before it, it reads after it, so window_robust.c's
+       check after the strip (dev.gpu_robust still true: nothing written,
+       robust_unremovable_line) sees every form file_on sees */
+    {
+        static const char *const kForms[] = {
+            "[dev]\n\"gpu_robust\" = true\n",
+            "dev = { gpu_robust = true }\n",
+            "\"dev\".gpu_robust = true\n",
+            "[\"dev\"]\ngpu_robust = true\n",
+        };
+        for (size_t i = 0; i < sizeof kForms / sizeof kForms[0]; i++) {
+            IcoToml *before = ico_toml_parse(kForms[i]);
+            out = robust_persist_strip(kForms[i]);
+            IcoToml *after = ico_toml_parse(out != NULL ? out : "");
+            const int on = ico_toml_get_bool(before, "dev.gpu_robust", 0);
+            const int still = ico_toml_get_bool(after, "dev.gpu_robust", 0);
+            CHECK(out != NULL && still <= on);
+            printf("strip: form %zu read %s, %s\n", i, on ? "on" : "off",
+                   !on     ? "nothing to do"
+                   : still ? "still on after the strip: refused"
+                           : "taken out");
+            ico_toml_free(before);
+            ico_toml_free(after);
+            free(out);
+        }
+    }
+    {
+        char line[512];
+        CHECK(robust_unremovable_line(line, sizeof line, "config.toml") == 0 &&
+              strstr(line, "stays on") != NULL && strstr(line, "delete that line by hand") != NULL);
+        CHECK(robust_unremovable_line(line, 16, "config.toml") == -1);
+    }
+}
+
+static void testLines(void)
+{
+    RobustMark old;
+    RobustStep s;
+    char line[1024];
+
+    memset(&old, 0, sizeof(old));
+    snprintf(old.version, sizeof(old.version), "0.10.1");
+    old.running = 1;
+    old.clean = 1;
+    s = robust_persist_step(&old, "0.10.1", 0, 0);
+    CHECK(s.action == ROBUST_STAYS);
+    CHECK(robust_persist_line(line, sizeof(line), &s, &old, "0.10.1", "config.toml") == 0);
+    CHECK(strcmp(line, "ico_pc: robust access on (set by the game after 2 lost starts on 0.10.1): "
+                       "2 clean starts of 3 before it turns off") == 0);
+    old.clean = 2;
+    s = robust_persist_step(&old, "0.10.1", 0, 0);
+    CHECK(s.action == ROBUST_OFF_CLEAN);
+    CHECK(robust_persist_line(line, sizeof(line), &s, &old, "0.10.1", "/x/config.toml") == 0);
+    CHECK(strcmp(line, "ico_pc: robust access turned off (set by the game after 2 lost starts on "
+                       "0.10.1): 3 clean starts in a row; [dev] gpu_robust and gpu_robust_by are "
+                       "removed from /x/config.toml, and two lost starts in a row turn it on "
+                       "again") == 0);
+    s = robust_persist_step(&old, "0.10.2", 0, 0);
+    CHECK(s.action == ROBUST_OFF_VERSION);
+    CHECK(robust_persist_line(line, sizeof(line), &s, &old, "0.10.2", NULL) == 0);
+    CHECK(strcmp(line, "ico_pc: robust access turned off (set by the game after 2 lost starts on "
+                       "0.10.1): this is version 0.10.2, so those losses were another build's; "
+                       "[dev] gpu_robust and gpu_robust_by are removed from config.toml, and two "
+                       "lost starts in a row turn it on again") == 0);
+    s = robust_persist_step(NULL, "0.10.2", 0, 0);
+    CHECK(robust_persist_line(line, sizeof(line), &s, &old, "0.10.2", NULL) == -1);
+    s = robust_persist_step(&old, "0.10.1", 0, 0);
+    CHECK(robust_persist_line(line, 20, &s, &old, "0.10.1", NULL) == -1);
+    CHECK(robust_mark_parse("by hand", &old) == -1);
+    CHECK(robust_mark_parse("", &old) == -1);
+    /* a key without the mark: removed at once, said once (the next start
+       has no key) */
+    s = robust_start_step(1, NULL, "0.11.6", 0, 0);
+    CHECK(s.action == ROBUST_OFF_UNMARKED);
+    CHECK(robust_persist_line(line, sizeof(line), &s, NULL, "0.11.6",
+                              "/storage/emulated/0/Android/data/com.defnf.icopc/files/"
+                              "config.toml") == 0);
+    CHECK(strcmp(line, "ico_pc: robust access turned off ([dev] gpu_robust = true in "
+                       "/storage/emulated/0/Android/data/com.defnf.icopc/files/config.toml had "
+                       "no gpu_robust_by mark: written after 2 lost starts by a game that wrote "
+                       "no mark, or by hand): taken as the game's own from another version, so "
+                       "it is removed now as a marked one is after an update, with no clean "
+                       "starts left to count; a lost start turns robust access on for the next "
+                       "start, and two lost starts in a row write it again with the mark") == 0);
+    CHECK(robust_persist_line(line, 40, &s, NULL, "0.11.6", NULL) == -1);
+    /* ico-pc.ini's line: said every start, never removed */
+    CHECK(robust_ini_line(line, sizeof(line), "C:\\ico\\x64\\ico-pc.ini") == 0);
+    CHECK(strcmp(line, "ico_pc: robust access on by gpu_robust in C:\\ico\\x64\\ico-pc.ini (a line "
+                       "for a bug report: the game never writes or removes it); it costs bounds "
+                       "checks on every 3D load (delete the line to turn it off)") == 0);
+    CHECK(robust_ini_line(line, sizeof(line), NULL) == 0 &&
+          strstr(line, " in ico-pc.ini (") != NULL);
+    CHECK(robust_ini_line(line, 20, NULL) == -1);
+}
+
+/* the window's reading of a config.toml (window_robust.c file_on: the
+   file's own [dev] gpu_robust as a bool and its gpu_robust_by), then
+   robust_start_step */
+static RobustStep fileStart(const char *text, const char *version, int lost, int ended)
+{
+    IcoToml *t = ico_toml_parse(text);
+    RobustStep s;
+
+    CHECK(t != NULL);
+    s = robust_start_step(t != NULL && ico_toml_get_bool(t, "dev.gpu_robust", 0),
+                          t != NULL ? ico_toml_get(t, "dev.gpu_robust_by") : NULL, version, lost,
+                          ended);
+    ico_toml_free(t);
+    return s;
+}
+
+/* the reporter's file (issue 179, v0.11.5 log lines 9 and 15: the key kept
+   from an earlier start, no mark) */
+static const char k_moto[] = "version = 1\n"
+                             "[video]\n"
+                             "aspect = \"21:9\"\n"
+                             "[dev]\n"
+                             "gpu_robust = true\n"
+                             "[audio]\n"
+                             "volume = 1.0\n";
+
+static void testUnmarked(void)
+{
+    char *out;
+    RobustStep s;
+    IcoToml *t;
+    RobustMark m;
+    char value[96], *text;
+    int lost, ended, i;
+
+    /* unmarked true on a new version: off at once, whatever the previous
+       start's end, as a mark of another version is (the version rule) */
+    for (lost = 0; lost <= 1; lost++) {
+        for (ended = 0; ended <= 1; ended++) {
+            memset(&m, 0, sizeof(m));
+            snprintf(m.version, sizeof(m.version), "0.10.1");
+            CHECK(robust_persist_step(&m, "0.11.6", lost, ended).action == ROBUST_OFF_VERSION);
+            CHECK(fileStart(k_moto, "0.11.6", lost, ended).action == ROBUST_OFF_UNMARKED);
+            CHECK(fileStart(k_moto, "dev", lost, ended).action == ROBUST_OFF_UNMARKED);
+        }
+    }
+    /* a gpu_robust_by that is not the game's (by hand) is no mark */
+    CHECK(fileStart("[dev]\ngpu_robust = true\ngpu_robust_by = \"by hand\"\n", "0.11.6", 0, 0)
+              .action == ROBUST_OFF_UNMARKED);
+    /* the removal is the marked key's (robust_persist_strip): both [dev]
+       lines, the rest byte for byte; the next start finds nothing */
+    out = robust_persist_strip(k_moto);
+    CHECK(out != NULL && strcmp(out, "version = 1\n[video]\naspect = \"21:9\"\n[dev]\n[audio]\n"
+                                     "volume = 1.0\n") == 0);
+    CHECK(out != NULL && fileStart(out, "0.11.6", 0, 0).action == ROBUST_NONE);
+    free(out);
+    out = robust_persist_strip("[dev]\ngpu_robust = true\ngpu_robust_by = \"by hand\"\nx = 1\n");
+    CHECK(out != NULL && strcmp(out, "[dev]\nx = 1\n") == 0);
+    free(out);
+
+    /* unmarked true, then a loss: the line removed at the first start; two
+       lost starts in a row then write the key with this version's mark
+       (window_robust_persist: clean 0, "-"), which counts as any marked
+       key: a loss keeps it, three clean starts take it off */
+    out = robust_persist_strip(k_moto);
+    CHECK(out != NULL);
+    t = ico_toml_parse(out != NULL ? out : "");
+    memset(&m, 0, sizeof(m));
+    snprintf(m.version, sizeof(m.version), "0.11.6");
+    CHECK(robust_mark_format(value, sizeof(value), &m) == 0);
+    CHECK(ico_toml_set_bool(t, "dev.gpu_robust", 1) == 0);
+    CHECK(ico_toml_set_string(t, "dev.gpu_robust_by", value) == 0);
+    text = ico_toml_render(t, out != NULL ? out : "");
+    ico_toml_free(t);
+    free(out);
+    CHECK(text != NULL);
+    s = fileStart(text, "0.11.6", 1, 0); /* the start after the write: a loss again */
+    CHECK(s.action == ROBUST_STAYS && s.mark.clean == 0);
+    m = s.mark;
+    for (i = 1; i <= 3; i++) {
+        m.running = 1; /* each start reached the game */
+        s = robust_persist_step(&m, "0.11.6", 0, 0);
+        CHECK(s.action == (i < 3 ? ROBUST_STAYS : ROBUST_OFF_CLEAN));
+        m = s.mark;
+    }
+    free(text);
+
+    /* a marked key: unchanged (robust_persist_step's) */
+    s = fileStart("[dev]\ngpu_robust = true\ngpu_robust_by = \"losses; 0.11.6; 1; run\"\n",
+                  "0.11.6", 0, 0);
+    CHECK(s.action == ROBUST_STAYS && s.mark.clean == 2);
+    s = fileStart("[dev]\ngpu_robust = true\ngpu_robust_by = \"losses; 0.11.5; 1; run\"\n",
+                  "0.11.6", 0, 0);
+    CHECK(s.action == ROBUST_OFF_VERSION);
+
+    /* false: never removed (robust access stays off; the loss ladder
+       writes nothing over it), with or without a mark beside it */
+    CHECK(fileStart("[dev]\ngpu_robust = false\n", "0.11.6", 1, 0).action == ROBUST_NONE);
+    CHECK(fileStart("[dev]\ngpu_robust = false\ngpu_robust_by = \"losses; 0.11.6; 0; -\"\n",
+                    "0.11.6", 0, 0)
+              .action == ROBUST_NONE);
+    CHECK(fileStart("[dev]\nslow_step_ms = 8.0\n", "0.11.6", 1, 1).action == ROBUST_NONE);
+    /* outside [dev]: not the key */
+    CHECK(fileStart("gpu_robust = true\n[dev]\nx = 1\n", "0.11.6", 0, 0).action == ROBUST_NONE);
+
+    /* a desktop's file (the key set by hand after a crash: the game writes
+       it on Android alone): the same rule on every platform; ico-pc.ini's
+       gpu_robust is not in this file, so it is never what is removed */
+    CHECK(fileStart("version = 1\n[video]\nbackend = \"vulkan\"\n[dev]\ngpu_robust = true\n",
+                    "0.11.6", 0, 0)
+              .action == ROBUST_OFF_UNMARKED);
+    CHECK(fileStart("version = 1\n[video]\nbackend = \"vulkan\"\n", "0.11.6", 0, 0).action ==
+          ROBUST_NONE);
+}
+
+int main(void)
+{
+    testMark();
+    testRule();
+    testFile();
+    testLines();
+    testUnmarked();
+    if (g_fail) {
+        return 1;
+    }
+    printf("robust_persist_test: ok\n");
+    return 0;
+}

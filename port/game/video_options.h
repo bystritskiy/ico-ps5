@@ -46,6 +46,9 @@
  *   [video] crt_strength    1.0         0..1
  *   [video] crt_scanlines, crt_mask, crt_halation, crt_bloom, crt_curvature
  *                           -1          config only: the mode's value when < 0
+ *   [video] gamma, brightness, contrast, saturation
+ *                           50          1..100; 50 is the game's own picture (any preset, with
+ *                                       or without the CRT filter)
  *   [video] texture_pack    true        load a PCSX2 texture pack when one is installed
  *   [video] dump_textures   false       write each texture under its PCSX2 name (pack authors)
  *   [video] model_pack      true        load a model pack (replacement models) when one is installed
@@ -83,10 +86,12 @@
  *                                       faster; a value off the tens is rounded to one,
  *                                       outside 10..100 clamped
  *   [video] effect_water_sharp
- *                           false       the reflections in water (and the picture through
- *                                       the queen's barrier) at the scene's resolution;
- *                                       false keeps the PS2's size (Water reflections:
- *                                       Original)
+ *                           (retired)   v0.11.6's Water reflections; not read since
+ *                                       v0.11.7, which draws the reflections in water
+ *                                       (and the picture through the queen's barrier)
+ *                                       at the scene's resolution always; a file's line
+ *                                       is kept and logged as not used (config.c
+ *                                       retired_keys)
  *   [video] effects_depth   true        config only: the scene's depth beside
  *                                       the picture for an effects program (ReShade's depth
  *                                       effects), drawn only when one is loaded; not with
@@ -167,18 +172,42 @@ enum {
 /* IcoVideoOptions.downsample: [video] downsample "off" | "box" */
 enum { ICO_DOWNSAMPLE_OFF = 0, ICO_DOWNSAMPLE_BOX = 1, ICO_DOWNSAMPLE_COUNT = 2 };
 
+/* IcoVideoOptions.upscale: [video] upscaling "off" | "fsr1" | "fsr3" (issue
+   99; rd.h RdUpscale's values).  "fsr3" is FSR 3.1, the temporal upscaler: a
+   saved one that the device cannot run shows "FSR 3.1 (off: not available)"
+   and is drawn as Off, and stays in the file */
+enum { ICO_UPSCALE_OFF = 0, ICO_UPSCALE_FSR1 = 1, ICO_UPSCALE_FSR3 = 2, ICO_UPSCALE_COUNT = 3 };
+
+/* IcoVideoOptions.upscaleQuality: [video] upscaling_quality "native" |
+   "quality" | "balanced" | "performance", the FSR 3.1 ratios 1.0 / 1.5 / 1.7
+   / 2.0 (rd.h RdUpscaleQuality's values); default Native AA */
+enum {
+    ICO_UPSCALE_Q_NATIVE = 0,
+    ICO_UPSCALE_Q_QUALITY = 1,
+    ICO_UPSCALE_Q_BALANCED = 2,
+    ICO_UPSCALE_Q_PERFORMANCE = 3,
+    ICO_UPSCALE_Q_COUNT = 4
+};
+
+/* [video] upscaling_sharpness: the Sharpness row, 0..100 in tens */
+#define ICO_UPSCALE_SHARPNESS_DEFAULT 80
+#define ICO_UPSCALE_SHARPNESS_STEP 10
+
 typedef struct IcoVideoOptions {
-    int resW, resH; /* resolution "WxH"; 0 x 0 with resScale 0: "window" */
-    int resScale;   /* resolution "Nx": N (1..16); ICO_RES_AUTO: "auto"; 0 otherwise */
-    int aspect;     /* ICO_ASPECT_* */
-    int windowMode; /* ICO_WINDOW_* */
-    int vsync;      /* the swapchain waits for the vertical blank */
-    int filter;     /* ICO_FILTER_* */
-    int fullHeight; /* skip the reduction's vertical halving */
-    int fullPixel;  /* the window's own pixels, no black border (full_pixel above) */
-    int antiAlias;  /* ICO_AA_*, as written (ico_video_anti_alias: the one in force) */
-    int downsample; /* ICO_DOWNSAMPLE_*; outside the preset, as showFps */
-    int framerate;  /* ICO_FRAMERATE_ORIGINAL, _UNCAPPED, or presents a second */
+    int resW, resH;       /* resolution "WxH"; 0 x 0 with resScale 0: "window" */
+    int resScale;         /* resolution "Nx": N (1..16); ICO_RES_AUTO: "auto"; 0 otherwise */
+    int aspect;           /* ICO_ASPECT_* */
+    int windowMode;       /* ICO_WINDOW_* */
+    int vsync;            /* the swapchain waits for the vertical blank */
+    int filter;           /* ICO_FILTER_* */
+    int fullHeight;       /* skip the reduction's vertical halving */
+    int fullPixel;        /* the window's own pixels, no black border (full_pixel above) */
+    int antiAlias;        /* ICO_AA_*, as written (ico_video_anti_alias: the one in force) */
+    int downsample;       /* ICO_DOWNSAMPLE_*; outside the preset, as showFps */
+    int upscale;          /* ICO_UPSCALE_*; outside the preset, as downsample */
+    int upscaleSharpness; /* 0..100, ICO_UPSCALE_SHARPNESS_DEFAULT; outside the preset */
+    int upscaleQuality;   /* ICO_UPSCALE_Q_*, FSR 3.1 only; outside the preset */
+    int framerate;        /* ICO_FRAMERATE_ORIGINAL, _UNCAPPED, or presents a second */
     /* the CRT filter: applied whatever the preset */
     int crt;           /* the filter on */
     int crtMode;       /* ICO_CRT_* */
@@ -186,6 +215,9 @@ typedef struct IcoVideoOptions {
     /* the config-only overrides, -1 = the mode's own: scanline strength,
        mask strength, halation, bloom (0..1), curvature (0..0.25) */
     float crtScanlines, crtMask, crtHalation, crtBloom, crtCurvature;
+    /* the colour adjustment (Picture page), 1..100, ICO_TONE_DEFAULT the
+       game's own picture: applied whatever the preset, to the CRT's too */
+    int toneGamma, toneBrightness, toneContrast, toneSaturation;
     /* texture packs: applied whatever the preset */
     int texturePack;         /* replacements from an installed pack drawn */
     int dumpTextures;        /* each texture written under its PCSX2 name */
@@ -218,10 +250,6 @@ typedef struct IcoVideoOptions {
     int effectGlowSmooth;
     int effectFog;           /* the depth fog (ZFog.c fog_DrawFog) */
     int effectCinematicBars; /* the cutscene bars (GsBase.c); 1 = on */
-    /* the water's reflections (puddle.c, pool.c) and the queen barrier's
-       picture at the scene's resolution (rd.h RdSettings.waterSharp);
-       0 = Original, the PS2's size: the one effect row whose default is 0 */
-    int effectWaterSharp;
     /* an output-size depth buffer in the presentation for an
        effects program (rd.h RdSettings.effectsDepth); 1 = on */
     int effectsDepth;
@@ -242,6 +270,16 @@ typedef struct IcoVideoOptions {
 #define ICO_MOTION_BLUR_STRENGTH_STEP 10
 /* v clamped to MIN..MAX and rounded to the nearest step (half up) */
 int ico_video_motion_blur_strength_clamp(int v);
+/* IcoVideoOptions.toneGamma, toneBrightness, toneContrast, toneSaturation:
+   the range, the default (the game's own picture, as PCSX2's 50) and the
+   step of the Picture page's four rows */
+#define ICO_TONE_MIN 1
+#define ICO_TONE_MAX 100
+#define ICO_TONE_DEFAULT 50
+#define ICO_TONE_STEP 1         /* issue 194: 1 a press (was 5 in v0.10.3) */
+#define ICO_TONE_STEP_COARSE 10 /* L1/R1 on a colour row (issue 202) */
+/* v clamped to MIN..MAX (no rounding: a hand-set 47 is kept) */
+int ico_video_tone_clamp(int v);
 
 /* IcoVideoOptions.crtMode (rd.h RdCrtMode is this + 1) */
 enum {
@@ -329,9 +367,6 @@ int ico_video_effect_softening(void);
 int ico_video_effect_motion_blur(void);
 int ico_video_effect_fog(void);
 int ico_video_effect_cinematic_bars(void);
-/* [video] effect_water_sharp, 1 (Sharp) or 0 (Original): the host hands it
-   to the renderer (window_host.c video_settings, RdSettings.waterSharp) */
-int ico_video_effect_water_sharp(void);
 /* 1 when the motion blur is on and Smooth ([video] effect_motion_blur =
    true, effect_motion_blur_mode = "smooth"): the host hands it to the
    renderer (window_host.c video_settings, RdSettings.motionBlurSmooth);
@@ -381,6 +416,18 @@ int ico_video_show_fps(void);
 int ico_video_downsample(void);
 int ico_video_parse_downsample(const char *s, int *ds);
 const char *ico_video_downsample_name(int ds);
+/* [video] upscaling, ICO_UPSCALE_OFF (the default), _FSR1 or _FSR3, and
+   upscaling_sharpness (0..100) and upscaling_quality (FSR 3.1's ratio),
+   whatever the preset (the renderer decides where each is in force).  The
+   parse gives 0, or -1 for a word it does not know */
+int ico_video_upscale(void);
+int ico_video_upscale_sharpness(void);
+int ico_video_upscale_quality(void);
+int ico_video_parse_upscale(const char *s, int *up);
+const char *ico_video_upscale_name(int up);
+int ico_video_upscale_sharpness_clamp(int v);
+int ico_video_parse_upscale_quality(const char *s, int *q);
+const char *ico_video_upscale_quality_name(int q);
 /* The presentation rate in force: the framerate option, whatever
    the preset. */
 int ico_video_framerate(void);

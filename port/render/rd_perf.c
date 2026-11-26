@@ -25,8 +25,30 @@
 #include <stdlib.h>
 #include <string.h>
 #include "ico_thread.h"
+#include "rd_ab_run.h"
+#include "rd_even.h"
+#include "rd_glass.h"
+#include "rd_pace_gpu.h"
+#include "rd_pace_even.h"
+#include "rd_pace_rules.h"
 #include "rd_internal.h"
+#include "rd_hold.h"
 #include "rd_passring.h"
+#include "rd_perf_clock.h"
+#include "rd_health.h"
+#include "rd_perf_gap.h"
+#include "rd_perf_hooks.h"
+#include "rd_list_draws.h"
+#include "rd_perf_rare.h"
+#include "rd_plain_camera.h"
+#include "rd_shadow_box.h"
+#include "rd_shadow_count.h" /* the count's trial (rd__shadow_count_trial) */
+#include "rd_shadow_tile.h"
+#include "rd_no_volume.h"
+#include "rd_shot_late.h"
+#include "rd_stencil_selftest.h"
+#include "rd_vis.h"
+#include "rd_vu_skin_check.h"
 
 RdPerfRecord g_rdPerf;
 
@@ -40,6 +62,10 @@ static uint32_t s_head, s_count;
 static RdPerfRecord s_pending[RHI_FRAMES_IN_FLIGHT];
 
 static bool s_pendingValid[RHI_FRAMES_IN_FLIGHT];
+/* g_rd.replayCounter at the pending record's end: the skin check's replay
+   number for the same replay (rd__vu_skin_reset_seen), which also counts
+   the renderer's own frames (the start-up self-tests) the records do not */
+static uint32_t s_pendingCounter[RHI_FRAMES_IN_FLIGHT];
 
 static RhiStats s_last;
 
@@ -85,6 +111,22 @@ static PerfStamps s_stamps; /* the replay being recorded */
 
 static PerfStamps s_pendingStamps[RHI_FRAMES_IN_FLIGHT];
 
+/* every timestamp index of the replay being recorded (the list and effect
+   stamps and the pieces'), in the order recorded, and the same of the
+   records waiting for their slot: the slot's clock names the stamps by it
+   (rd_perf_clock.h) */
+static uint8_t s_ord[RHI_MAX_TIMESTAMPS];
+static uint32_t s_ordN;
+static uint8_t s_pendingOrd[RHI_FRAMES_IN_FLIGHT][RHI_MAX_TIMESTAMPS];
+static uint32_t s_pendingOrdN[RHI_FRAMES_IN_FLIGHT];
+
+static void ordAdd(uint32_t index)
+{
+    if (s_ordN < RHI_MAX_TIMESTAMPS && index < RHI_MAX_TIMESTAMPS) {
+        s_ord[s_ordN++] = (uint8_t)index;
+    }
+}
+
 static int s_post = -1;    /* the effect the work being recorded belongs to */
 static uint32_t s_nextTs;  /* the next free index above RD_PERF_TS_COUNT */
 static bool s_postPartial; /* an effect change found no free index */
@@ -101,12 +143,38 @@ const char *rd_perf_post_name(int post)
 
 static const char *const s_passKindNames[RD_PERF_PASS_KIND_COUNT] = {
     "uploads",        "VU pre-pass", "render pass",  "copy",          "snapshot", "DATE snapshot",
-    "fog depth read", "exact blend", "MSAA resolve", "stencil clear", "present",
+    "fog depth read", "exact blend", "MSAA resolve", "stencil clear", "present",  "display wait",
 };
 
 const char *rd_perf_pass_kind_name(int kind)
 {
     return kind >= 0 && kind < RD_PERF_PASS_KIND_COUNT ? s_passKindNames[kind] : "none";
+}
+
+double rd_perf_pace_gpu_ms(const RdPerfRecord *r)
+{
+    if (!r->gpuValid) {
+        return 0.0;
+    }
+    const double ms = r->gpuMs - r->gpuDisplayWaitMs; /* rd.h: the wait is not GPU work */
+    return ms > 0.0 ? ms : 0.0;
+}
+
+const char *rd_perf_pass_kind_display(int kind, bool tiler)
+{
+    /* on a tile-based GPU the stamp that ends the uploads lands at an
+       arbitrary point inside a fixed amount of work (the figures before
+       list 0 and list 0's trade at a constant sum, issue 179), so the stretch
+       is named for where it ends */
+    if (tiler && kind == RD_PERF_PASS_UPLOAD) {
+        return "before list 0";
+    }
+    return rd_perf_pass_kind_name(kind);
+}
+
+static bool tiler_names(void)
+{
+    return g_rd.hasDevice && rhi_limits()->tiler;
 }
 
 int rd_perf_pass_label(const RdPerfPass *p, char *buf, size_t n)
@@ -120,7 +188,7 @@ int rd_perf_pass_label(const RdPerfPass *p, char *buf, size_t n)
         }
         return snprintf(buf, n, "list %d", (int)p->list);
     }
-    return snprintf(buf, n, "%s", rd_perf_pass_kind_name(p->kind));
+    return snprintf(buf, n, "%s", rd_perf_pass_kind_display(p->kind, tiler_names()));
 }
 
 int rd__perf_post_of_kind(uint32_t kind)
@@ -193,6 +261,17 @@ static uint64_t s_backendBytes;
 static uint32_t s_backendReplays, s_reshownReplays, s_glowHeldReplays;
 static uint64_t s_mergeIn, s_mergeGpu, s_mergeAlone, s_mergeBlocked[5];
 static uint64_t s_fusePairs, s_fuseSame, s_fuseKept[RD_VU_FUSE_WHY_COUNT];
+/* the visibility test (rd_vis.c; RdPerfRecord cull*) */
+static RdPerfCullSum s_cull;
+/* the VU draws without side bands for want of facing data, by why
+ * (RdPerfRecord.vuBesideNoFacing, RD_VU_NOFACE_*) */
+static uint64_t s_besideNoFacing[RD_VU_NOFACE_COUNT];
+/* the VU draws with side bands and card verdicts (RdPerfRecord.vuBesideCards) */
+static uint64_t s_besideCards;
+/* the VU draws under the camera rule (RdPerfRecord.vuCameraDraws) */
+static uint64_t s_cameraDraws;
+/* on the device's plain set (RdPerfRecord.vuPlainCamera, vuPlainKept) */
+static uint64_t s_plainCamera, s_plainKept;
 /* the store plan's (RdPerfRecord storePasses, storeDepthDropped,
  * storeColorDropped) and the replays it planned */
 static uint64_t s_storePasses, s_storeDepth, s_storeColor;
@@ -215,6 +294,12 @@ static uint32_t s_storeWhy[RD_STORE_WHY_COUNT];
  * (RdPerfRecord.pipeFamily, uber) */
 static uint16_t s_pipeFamily[RD_PERF_PIPE_FAMILIES];
 static uint8_t s_pipeUber;
+/* the barriers that held fragment work (RhiStats.holdSites: Vulkan's
+ * vk_cmd.c vkr_hold_note) by kind and site, summed over the replays since
+ * the last summary; written at each replay's end (rd__perf_end, the render
+ * thread), read and cleared by rd_perf_backend_text, both under qLock */
+static uint64_t s_holdAcc[2][RHI_HOLD_SITES];
+static uint32_t s_holdReplays;
 
 bool rd_perf_pop(RdPerfRecord *out)
 {
@@ -234,6 +319,14 @@ bool rd_perf_pop(RdPerfRecord *out)
         s_mergeBlocked[k] += s_queue[s_head].vuMergeBlocked[k];
     }
     s_fusePairs += s_queue[s_head].vuFusePairs;
+    rd_perf_cull_add(&s_cull, &s_queue[s_head]);
+    for (int k = 0; k < RD_VU_NOFACE_COUNT; k++) {
+        s_besideNoFacing[k] += s_queue[s_head].vuBesideNoFacing[k];
+    }
+    s_besideCards += s_queue[s_head].vuBesideCards;
+    s_cameraDraws += s_queue[s_head].vuCameraDraws;
+    s_plainCamera += s_queue[s_head].vuPlainCamera;
+    s_plainKept += s_queue[s_head].vuPlainKept;
     s_fuseSame += s_queue[s_head].vuFuseSame;
     for (int k = 0; k < RD_VU_FUSE_WHY_COUNT; k++) {
         s_fuseKept[k] += s_queue[s_head].vuFuseKept[k];
@@ -251,6 +344,11 @@ bool rd_perf_pop(RdPerfRecord *out)
     s_storePasses += s_queue[s_head].storePasses;
     s_storeDepth += s_queue[s_head].storeDepthDropped;
     s_storeColor += s_queue[s_head].storeColorDropped;
+    rd__date_cut_pop(&s_queue[s_head]);    /* DATE's passes and snapshots (rd_date_cut.c) */
+    rd__stencil_cut_pop(&s_queue[s_head]); /* the stencil outside the window */
+    rd__shadow_box_pop(&s_queue[s_head]);  /* the shadows over the volumes' box */
+    rd__shadow_tile_pop(&s_queue[s_head]); /* the shadow composites over the tile mask */
+    rd__no_volume_pop(&s_queue[s_head]);   /* a shadow window with no volume */
     s_storePlanned += s_queue[s_head].storePlanMode != 0;
     if (s_queue[s_head].storeWhy < RD_STORE_WHY_COUNT) {
         s_storeWhy[s_queue[s_head].storeWhy]++;
@@ -359,9 +457,124 @@ void rd_perf_why_text(char *buf, size_t size, int which, const uint64_t *counts,
     }
 }
 
+void rd_perf_cull_add(RdPerfCullSum *s, const RdPerfRecord *r)
+{
+    s->draws += r->cullDraws;
+    s->skipped += r->cullSkipped;
+    s->frustum += r->cullFrustum;
+    s->occluded += r->cullOccluded;
+    s->ms += r->cullMs;
+    s->hizMs += r->cullHizMs;
+    s->settleMs += r->cullHizSettleMs;
+    s->collectMs += r->cullHizCollectMs;
+    s->alphaMs += r->cullHizAlphaMs;
+    s->vertMs += r->cullHizVertMs;
+    s->rasterMs += r->cullHizRasterMs;
+    s->testMs += r->cullHizTestMs;
+    s->verts += r->cullHizVerts;
+    s->trisRead += r->cullHizTrisRead;
+    s->trisKept += r->cullHizTrisKept;
+    s->cells += r->cullHizCells;
+    s->tested += r->cullHizTested;
+    s->overBudget += r->cullHizOverBudget;
+    s->cacheHits += r->cullHizCacheHits;
+    s->cacheDraws += r->cullHizCacheDraws;
+    for (int k = 0; k < RD_PERF_HIZ_OCC; k++) {
+        s->occ[k] += r->cullHizOcc[k];
+    }
+}
+
+void rd_perf_cull_text(char *buf, size_t size, const RdPerfCullSum *s, double replays)
+{
+    if (!buf || size == 0) {
+        return;
+    }
+    buf[0] = '\0';
+    if (!s->draws || !(replays > 0.0)) {
+        return;
+    }
+    const double n = replays;
+    int k = snprintf(buf, size,
+                     "; cull: %.0f of %.0f scene draws skipped a replay (%.0f frustum, "
+                     "%.0f occluded), %.2f ms (occlusion %.2f) (%s)",
+                     (double)s->skipped / n, (double)s->draws / n, (double)s->frustum / n,
+                     (double)s->occluded / n, s->ms / n, s->hizMs / n,
+                     rd__vis_profile_default() ? "profile default" : "[dev] cull");
+    size_t at = k > 0 && (size_t)k < size ? (size_t)k : size - 1;
+    uint64_t cands = 0;
+    for (int j = 0; j < RD_PERF_HIZ_OCC; j++) {
+        cands += s->occ[j];
+    }
+    if (!cands && !(s->collectMs > 0.0) && !s->tested) {
+        return; /* the occlusion test did not run (frustum, a list other than 0 first) */
+    }
+    /* after "(occlusion H)", so tools/cull_log_compare.py's CULL_RE still
+       reads the part before: the collect (the decodes' settle before it
+       apart: in neither figure), its alpha proofs and vertex pass, the
+       raster, the occludees' test, the candidates by reason */
+    k = snprintf(buf + at, size - at,
+                 "; occlusion: collect %.2f ms (settle %.2f, alpha %.2f, vertices %.2f ms for %.0f "
+                 "vertices, %.0f triangles kept of %.0f; cache %.0f of %.0f draws), raster %.2f "
+                 "ms (%.0f cells), test %.2f ms (%.0f draws tested); occluders used %.0f, refused: "
+                 "state/chain/target/bound/program/alpha/small/no-tri "
+                 "%.0f/%.0f/%.0f/%.0f/%.0f/%.0f/%.0f/%.0f; past the budget %.0f",
+                 s->collectMs / n, s->settleMs / n, s->alphaMs / n, s->vertMs / n,
+                 (double)s->verts / n, (double)s->trisKept / n, (double)s->trisRead / n,
+                 (double)s->cacheHits / n, (double)s->cacheDraws / n, s->rasterMs / n,
+                 (double)s->cells / n, s->testMs / n, (double)s->tested / n, (double)s->occ[0] / n,
+                 (double)s->occ[1] / n, (double)s->occ[2] / n, (double)s->occ[3] / n,
+                 (double)s->occ[4] / n, (double)s->occ[5] / n, (double)s->occ[6] / n,
+                 (double)s->occ[7] / n, (double)s->occ[8] / n, (double)s->overBudget / n);
+    (void)k;
+}
+
+/* "; barriers holding fragment work per replay: ..." (the replays since the
+ * last summary; nothing when none held any) at *at of out, then cleared */
+static void holdText(char *out, size_t n, size_t *at)
+{
+    static const char *const site[RHI_HOLD_SITES] = {
+        "the lists' opening",       "the held-back barriers", "the passes' and copies' own",
+        "the buffer copies' waits", "the global barriers",    "the external compute's",
+    };
+    uint64_t acc[2][RHI_HOLD_SITES];
+    qLock();
+    memcpy(acc, s_holdAcc, sizeof(acc));
+    const uint32_t replays = s_holdReplays;
+    memset(s_holdAcc, 0, sizeof(s_holdAcc));
+    s_holdReplays = 0;
+    qUnlock();
+    uint64_t sum[2] = {0, 0};
+    for (int i = 0; i < RHI_HOLD_SITES; i++) {
+        sum[0] += acc[RHI_HOLD_KIND_VERTEX][i];
+        sum[1] += acc[RHI_HOLD_KIND_COPY][i];
+    }
+    if (!replays || (!sum[0] && !sum[1]) || *at >= n) {
+        return;
+    }
+    const double r = (double)replays;
+    int k = snprintf(out + *at, n - *at,
+                     "; barriers holding fragment work per replay: %.2f before vertex or compute "
+                     "work, %.2f before copies only (vertex/copy by site:",
+                     (double)sum[0] / r, (double)sum[1] / r);
+    *at += k > 0 && (size_t)k < n - *at ? (size_t)k : 0;
+    bool first = true;
+    for (int i = 0; i < RHI_HOLD_SITES && *at < n; i++) {
+        if (!acc[RHI_HOLD_KIND_VERTEX][i] && !acc[RHI_HOLD_KIND_COPY][i]) {
+            continue;
+        }
+        k = snprintf(out + *at, n - *at, "%s %s %.2f/%.2f", first ? "" : ",", site[i],
+                     (double)acc[RHI_HOLD_KIND_VERTEX][i] / r,
+                     (double)acc[RHI_HOLD_KIND_COPY][i] / r);
+        *at += k > 0 && (size_t)k < n - *at ? (size_t)k : 0;
+        first = false;
+    }
+    k = snprintf(out + *at, n - *at, ")");
+    *at += k > 0 && (size_t)k < n - *at ? (size_t)k : 0;
+}
+
 const char *rd_perf_backend_text(void)
 {
-    static char s_text[2048];
+    static char s_text[3072];
     size_t at = 0;
     s_text[0] = '\0';
     if (s_backendBytes && s_backendReplays) {
@@ -399,6 +612,67 @@ const char *rd_perf_backend_text(void)
                      (double)s_mergeBlocked[0] / n, (double)s_mergeBlocked[1] / n,
                      (double)s_mergeBlocked[2] / n, (double)s_mergeBlocked[3] / n,
                      (double)s_mergeBlocked[4] / n);
+        at += k > 0 && (size_t)k < sizeof(s_text) - at ? (size_t)k : 0;
+    }
+    if (s_cull.draws && s_backendReplays) {
+        /* the visibility test (rd_vis.c): per replay, the scene draws it
+           turned into NOPs of the VU draw commands, by which test, and its
+           CPU time, the occlusion test's (rd_vis_hiz.c) share of it, and
+           that share by part */
+        char cull[640];
+        rd_perf_cull_text(cull, sizeof(cull), &s_cull, (double)s_backendReplays);
+        const int k = snprintf(s_text + at, sizeof(s_text) - at, "%s", cull);
+        at += k > 0 && (size_t)k < sizeof(s_text) - at ? (size_t)k : 0;
+    }
+    uint64_t noFacing = 0;
+    for (int k = 0; k < RD_VU_NOFACE_COUNT; k++) {
+        noFacing += s_besideNoFacing[k];
+    }
+    if (s_cameraDraws && s_backendReplays) {
+        /* the camera rule (rd_replay_vu.c vuSource; [dev] region_rule =
+           camera): the draws whose triangles the PS2 drops are drawn
+           clipped when they face the eye (a report shows the rule was in
+           force where something near the camera shows or not) */
+        const int k = snprintf(s_text + at, sizeof(s_text) - at,
+                               "; region rule: the camera's: %.0f VU draws a replay drawn by "
+                               "the camera rule (the PS2's drops that face the eye drawn)",
+                               (double)s_cameraDraws / (double)s_backendReplays);
+        at += k > 0 && (size_t)k < sizeof(s_text) - at ? (size_t)k : 0;
+    }
+    {
+        /* the device's plain set (rd_plain_camera.h, issue 123): the
+           meshes and grids the camera rule held, the skinned draws that
+           kept the PS2's drops (issue 163); nothing on other devices */
+        const size_t k = rd__plain_camera_text(s_text + at, sizeof(s_text) - at, s_plainCamera,
+                                               s_plainKept, s_backendReplays);
+        at += k < sizeof(s_text) - at ? k : 0;
+    }
+    if (noFacing) {
+        /* the side bands or the camera rule (rd_replay_vu.c vuDropMode):
+           the draws that kept the PS2's drops because their mesh has no
+           facing data, by why (RD_VU_NOFACE_*): a report shows why a wall
+           near the camera still opens, or the sides of the picture are
+           empty, where they should not be */
+        const int k = snprintf(
+            s_text + at, sizeof(s_text) - at,
+            "; %s: %llu draws without facing data (%llu prelit rebuilt without the "
+            "EE's table: a save state or a morph, %llu model pack replacements, %llu copies, "
+            "%llu other)",
+            s_cameraDraws ? "camera rule" : "side bands", (unsigned long long)noFacing,
+            (unsigned long long)s_besideNoFacing[RD_VU_NOFACE_NO_TABLE],
+            (unsigned long long)s_besideNoFacing[RD_VU_NOFACE_REPLACED],
+            (unsigned long long)s_besideNoFacing[RD_VU_NOFACE_COPY],
+            (unsigned long long)s_besideNoFacing[RD_VU_NOFACE_OTHER]);
+        at += k > 0 && (size_t)k < sizeof(s_text) - at ? (size_t)k : 0;
+    }
+    if (s_besideCards) {
+        /* the side bands' draws with card verdicts (rd_replay_vu.c
+           vuSource): their cards stay off the sides of the picture as off
+           its middle (issue 189: a mist quad the PS2 dropped, drawn only
+           beside the picture, showed as bars) */
+        const int k = snprintf(s_text + at, sizeof(s_text) - at,
+                               "; side bands: %llu draws with cards (kept off the sides)",
+                               (unsigned long long)s_besideCards);
         at += k > 0 && (size_t)k < sizeof(s_text) - at ? (size_t)k : 0;
     }
     uint64_t kept = 0;
@@ -459,6 +733,11 @@ const char *rd_perf_backend_text(void)
                      s_storePlanned ? "planned" : "every store kept", kept, none);
         at += k > 0 && (size_t)k < sizeof(s_text) - at ? (size_t)k : 0;
     }
+    rd__stencil_cut_text(s_text, sizeof(s_text), &at); /* "; stencil: ..." */
+    rd__shadow_box_text(s_text, sizeof(s_text), &at);  /* "; shadow box: ..." */
+    rd__shadow_tile_text(s_text, sizeof(s_text), &at); /* "; shadow tiles: ..." */
+    rd__no_volume_text(s_text, sizeof(s_text), &at);   /* "; no volume: ..." */
+    rd__date_cut_text(s_text, sizeof(s_text), &at);    /* "; DATE: ..." (rd_date_cut.c) */
     if (s_backendReplays &&
         (s_cutCarried || s_cutSkipped || s_cutLast || rd__pass_cut_on(RD_CUT_CARRY) ||
          rd__pass_cut_on(RD_CUT_SKIP) || rd__pass_cut_on(RD_CUT_LAST))) {
@@ -496,6 +775,7 @@ const char *rd_perf_backend_text(void)
                                (double)s_smArmed / n, (double)s_smClears / n);
         at += k > 0 && (size_t)k < sizeof(s_text) - at ? (size_t)k : 0;
     }
+    holdText(s_text, sizeof(s_text), &at); /* before the families' tail, which ends the text */
     if (s_backendReplays) {
         /* the pipelines made so far by family (rd_uber.c rd__uber_perf_note:
            where GS state as shader data shrinks the set, which part) */
@@ -522,6 +802,11 @@ const char *rd_perf_backend_text(void)
     memset(s_mergeBlocked, 0, sizeof(s_mergeBlocked));
     s_fusePairs = s_fuseSame = 0;
     memset(s_fuseKept, 0, sizeof(s_fuseKept));
+    memset(&s_cull, 0, sizeof(s_cull));
+    memset(s_besideNoFacing, 0, sizeof(s_besideNoFacing));
+    s_besideCards = 0;
+    s_cameraDraws = 0;
+    s_plainCamera = s_plainKept = 0;
     s_cutCarried = s_cutSkipped = s_cutLast = 0;
     memset(s_cutLastWhy, 0, sizeof(s_cutLastWhy));
     s_smMerged = s_smArmed = s_smResets = s_smClears = 0;
@@ -570,9 +855,19 @@ static PassTable s_passQueue[RD_PERF_PASS_QUEUE];
 static uint32_t s_passHead, s_passCount;
 static RhiStats s_passStats; /* the RHI's counters at the open piece's start */
 static double s_passCpu0;    /* the CPU clock at the open piece's start */
+/* a stalled replay's list 0 (rd_perf_rare.h; below rd__perf_rare_pipeline) */
+static RdPerfRareReplay s_rareRec, s_rarePending[RHI_FRAMES_IN_FLIGHT];
+static RdPerfRareBlock s_rareBlock;
+static int s_rareBlockNew; /* __atomic: the window's block ended */
 
 void rd__perf_passes_init(void)
 {
+    /* at the device's start (rd__gpu_init): the picture's two lists
+       (rd_submit.c rd__submit_frame; issue 179) */
+    rd__log("present: the present's pass is a list of its own, submitted after the scene's; only "
+            "its submit waits for the display's image (Vulkan: the acquire semaphore at "
+            "COLOR_ATTACHMENT_OUTPUT)");
+    rd__passring_pipeline_hook(rd__perf_rare_pipeline); /* list 0's pipelines (rd_perf_rare.h) */
     const char *env = getenv("ICO_RD_PERF_PASSES");
     s_passesMode = env && env[0] == '1';
     const char *lists = getenv("ICO_RD_PERF_LIST_STAMPS");
@@ -598,6 +893,11 @@ void rd__perf_passes_init(void)
     }
 }
 
+bool rd__perf_pass_on(void)
+{
+    return s_passOn;
+}
+
 void rd__set_perf_passes(bool on)
 {
     s_passesMode = on;
@@ -618,6 +918,26 @@ bool rd_perf_passes_mode(void)
     return s_passesMode;
 }
 
+#ifndef ICO_IOS
+/* rd_perf_passes_arm's: every replay timed (no CSV); set on the window's
+   thread, read at each replay's start on the render thread */
+static bool s_passesArmed;
+#endif
+
+bool rd_perf_passes_arm(bool on)
+{
+#ifdef ICO_IOS
+    (void)on;
+    return false;
+#else
+    if (!g_rd.hasDevice || !rhi_timestamps_supported() || s_passesMode ||
+        (on && !rd_perf_passes_arm_backend(rhi_backend(), true))) {
+        return false;
+    }
+    return __atomic_exchange_n(&s_passesArmed, on, __ATOMIC_RELAXED) != on;
+#endif
+}
+
 static uint16_t clamp16(uint32_t v)
 {
     return v > 65535u ? (uint16_t)65535u : (uint16_t)v;
@@ -634,6 +954,17 @@ static void passClose(const RhiStats *st, double nowMs)
     p->pipelineBinds = (uint32_t)(st->pipelineBinds - s_passStats.pipelineBinds);
     p->entryBinds = (uint32_t)(st->entryBinds - s_passStats.entryBinds);
     p->entrySkipped = (uint32_t)(st->entryBindsSkipped - s_passStats.entryBindsSkipped);
+    /* the attachment bytes its passes asked for (rhi_traffic.h: counted on
+       the CPU as the passes began) */
+#define KB(field) (uint32_t)((st->field - s_passStats.field + 512u) / 1024u)
+    p->colorLoadKB = KB(passColorLoadBytes);
+    p->colorStoreKB = KB(passColorStoreBytes);
+    p->depthLoadKB = KB(passDepthLoadBytes);
+    p->depthStoreKB = KB(passDepthStoreBytes);
+    p->clearKB = KB(passClearBytes);
+    p->copyKB = KB(copyTextureBytes);
+#undef KB
+    p->kTexels = (uint32_t)((st->passPixels - s_passStats.passPixels + 500u) / 1000u);
     p->cpuUs = (float)((nowMs - s_passCpu0) * 1000.0);
 }
 
@@ -669,6 +1000,7 @@ void rd__perf_pass(RhiCommandList cl, int kind, uint32_t target, uint32_t w, uin
         g_rdPerf.passEffects[post] < UINT16_MAX) {
         g_rdPerf.passEffects[post]++;
     }
+    rd__perf_hooks_pass(kind, passTarget(target), post); /* SCENE's breaks (rd_perf_hooks.h) */
     if (!s_passOn) {
         return;
     }
@@ -682,6 +1014,7 @@ void rd__perf_pass(RhiCommandList cl, int kind, uint32_t target, uint32_t w, uin
     passClose(&st, now);
     rhi_cmd_write_timestamp(cl, (RD_PERF_TS_PASS0 + s_passRec.count) | RHI_TIMESTAMP_KEEP_BARRIERS |
                                     RHI_TIMESTAMP_ISSUE_TIME);
+    ordAdd(RD_PERF_TS_PASS0 + s_passRec.count);
     RdPerfPass *p = &s_passRec.pass[s_passRec.count++];
     memset(p, 0, sizeof(*p));
     p->kind = (uint8_t)kind;
@@ -717,6 +1050,7 @@ void rd__perf_pass_end(RhiCommandList cl)
     passClose(&st, rd__now_ms());
     rhi_cmd_write_timestamp(cl, (RD_PERF_TS_PASS0 + s_passRec.count) | RHI_TIMESTAMP_KEEP_BARRIERS |
                                     RHI_TIMESTAMP_ISSUE_TIME);
+    ordAdd(RD_PERF_TS_PASS0 + s_passRec.count);
     s_passRec.closed = true;
 }
 
@@ -781,9 +1115,14 @@ uint32_t rd_perf_passes_of(uint32_t replay, const RdPerfPass **out)
     return n;
 }
 
+/* the last timed record's last timestamp and its replay, for the next
+   one's gpuGapNs (rd_perf_gap.h; a new device's clock starts again) */
+static RdPerfGap s_gap;
+
 void rd__perf_reset(void)
 {
     s_head = s_count = 0;
+    memset(&s_gap, 0, sizeof(s_gap));
     memset(s_pendingValid, 0, sizeof(s_pendingValid));
     memset(s_pendingStamps, 0, sizeof(s_pendingStamps));
     s_haveLast = false;
@@ -837,15 +1176,40 @@ static bool s_recOpen;
 void rd__perf_begin(const RdFrame *f, int keep, bool present)
 {
     memset(&g_rdPerf, 0, sizeof(g_rdPerf));
+    rd__perf_hooks_begin(); /* the cost counters' state (rd_perf_hooks.h) */
     s_recOpen = true;
     g_rdPerf.replay = ++s_replay;
     g_rdPerf.frame = f ? f->number : 0;
     g_rdPerf.keep = (uint8_t)(keep != 0);
     g_rdPerf.presented = (uint8_t)present;
+    /* the in-play judge's arms for this replay, kept in its record so its
+       GPU span is judged as the arm it was recorded with (rd_ab_run.h) */
+    rd__ab_begin(&g_rdPerf);
+    /* the submit thread's times set it again when they come */
+    g_rdPerf.presentThread = rd__thread_in_step_now() ? RD_PRESENT_IN_STEP : RD_PRESENT_ELSEWHERE;
     g_rdPerf.interpolated = (uint8_t)(s_interpMs > 0.0);
     g_rdPerf.interpMs = s_interpMs;
     g_rdPerf.readbackMs = s_readbackMs; /* since the previous replay */
     g_rdPerf.alpha = s_alpha;
+    if (s_alpha >= 0.0f) {
+        /* a present handed over: its drain's stamps (rd_even.h) */
+        rd_even_hand_take(&g_rdPerf.evenAskMs, &g_rdPerf.evenHandMs);
+    }
+    {
+        /* its rules' alphas for the on-glass line (rd_pace_rules.h) */
+        RdRuleNote rn;
+        rd_pace_rules_take(&rn);
+        _Static_assert(sizeof g_rdPerf.ruleAlpha / sizeof g_rdPerf.ruleAlpha[0] == RD_RULE_COUNT,
+                       "a record's alpha for every rule");
+        for (int i = 0; i < RD_RULE_COUNT; i++) {
+            g_rdPerf.ruleAlpha[i] = rn.alpha[i];
+        }
+        g_rdPerf.rule = rn.rule;
+        g_rdPerf.ruleTickMs = rn.tickMs;
+        g_rdPerf.screenEndMs = rn.screenEndMs;
+        g_rdPerf.screenAtMs = rn.screenAtMs;
+        g_rdPerf.desiredMs = rn.desiredMs;
+    }
     g_rdPerf.firstOfTick = s_first;
     g_rdPerf.reshown = s_reshownNext;
     g_rdPerf.glowHeld = s_glowHeldNext;
@@ -861,6 +1225,7 @@ void rd__perf_begin(const RdFrame *f, int keep, bool present)
     s_pipelineCreates = rd__stats_here()->pipelineCreates;
     s_a1xDraws = g_rd.above1xDraws;
     memset(&s_stamps, 0, sizeof(s_stamps));
+    s_ordN = 0;
     s_post = -1;
     s_nextTs = RD_PERF_TS_COUNT;
     s_postPartial = false;
@@ -870,24 +1235,41 @@ void rd__perf_begin(const RdFrame *f, int keep, bool present)
     s_passRec.count = 0;
     s_passRec.closed = false;
     s_passRec.replay = g_rdPerf.replay;
+    rd_perf_rare_replay_reset(&s_rareRec, g_rdPerf.replay);
     s_passOn = false;
 #ifndef ICO_IOS
     if (g_rd.hasDevice && rhi_timestamps_supported() &&
-        (s_passesMode || s_t0 - s_passLastMs >= RD_PERF_PASS_EVERY_MS)) {
+        (s_passesMode || __atomic_load_n(&s_passesArmed, __ATOMIC_RELAXED) ||
+         s_t0 - s_passLastMs >= RD_PERF_PASS_EVERY_MS)) {
         s_passOn = true;
         s_passLastMs = s_t0;
     }
 #endif
 }
 
-void rd__perf_submit_times(uint32_t replay, double submitMs, double presentMs)
+/* a submit job's present split into a record (rd.h RdPerfRecord.presentSplit ...) */
+static void presentSplitInto(RdPerfRecord *r, const RdSubmitJob *j)
 {
+    r->presentSplit = (uint8_t)j->presentSplit;
+    r->presentLockMs = j->presentLockMs;
+    r->presentCallMs = j->presentCallMs;
+    r->presentPollMs = j->presentPollMs;
+    r->presentEndMs = j->presentEndMs;
+    r->glassId = j->glassId;
+    r->presentThread = RD_PRESENT_ON_SUBMIT;
+}
+
+void rd__perf_submit_times(const RdSubmitJob *j)
+{
+    const uint32_t replay = j->replay;
+    const double submitMs = j->submitMs, presentMs = j->presentMs;
     if (replay == 0) {
         return;
     }
     if (g_rdPerf.replay == replay) {
         g_rdPerf.submitMs = submitMs;
         g_rdPerf.presentMs = presentMs;
+        presentSplitInto(&g_rdPerf, j);
         if (!s_recOpen) {
             g_rdPerf.totalMs += submitMs + presentMs; /* rd_last_replay_ms */
         }
@@ -897,31 +1279,249 @@ void rd__perf_submit_times(uint32_t replay, double submitMs, double presentMs)
             /* rd__perf_end left it here: the submit's times were not in it */
             s_pending[i].submitMs = submitMs;
             s_pending[i].presentMs = presentMs;
+            presentSplitInto(&s_pending[i], j);
             s_pending[i].totalMs += submitMs + presentMs;
         }
     }
 }
 
-/* the last record's last timestamp and its replay, for the next one's
-   gpuGapNs (0: none, or the last record had no timestamps) */
-static uint64_t s_gapLastNs;
-static uint32_t s_gapLastReplay;
+void rd__present_split_take(RdSubmitJob *j, bool presented)
+{
+    RhiPresentSplit sp;
+    j->presentSplit = 0;
+    j->presentLockMs = j->presentCallMs = j->presentPollMs = j->presentEndMs = 0.0;
+    j->glassId = 0;
+    if (!presented) {
+        return;
+    }
+    j->presentEndMs = rd__now_ms();
+    if (g_rd.hasDevice) {
+        uint64_t id = 0;
+        (void)rhi_present_glass(&id, NULL, NULL, 0); /* this thread's last present's id */
+        j->glassId = (uint32_t)id;
+    }
+    if (g_rd.hasDevice && rhi_present_split(&sp)) {
+        j->presentSplit = sp.called ? 1u : 2u; /* 2: the lock only, no present call made */
+        j->presentLockMs = (double)sp.lockNs / 1e6;
+        j->presentCallMs = (double)sp.callNs / 1e6;
+        j->presentPollMs = (double)sp.pollNs / 1e6;
+    }
+}
 
-/* the GPU's time between this replay and the one before (rd.h
-   RdPerfRecord.gpuGapNs): only for the replay right after it, both timed,
-   within a second (a clock that jumped is no gap) */
+/* the GPU's time between this replay and the timed one before (rd.h
+   RdPerfRecord.gpuGapNs): across the untimed replays between (counted in
+   gpuGapSkipped: a stall's neighbours are the ones that come without
+   stamps), within 60 s (a clock that jumped is no gap) */
 static void gpuGap(RdPerfRecord *r, uint64_t t0, uint64_t last)
 {
-    if (s_gapLastReplay != 0 && r->replay == s_gapLastReplay + 1u) {
-        const int64_t gap = (int64_t)(t0 - s_gapLastNs);
+    int64_t gap;
+    uint32_t skipped;
 
-        if (gap > -1000000000ll && gap < 1000000000ll) {
-            r->gpuGapNs = gap;
-            r->gpuGapValid = 1;
+    uint64_t back;
+    static uint32_t s_backLogged;
+
+    if (rd_perf_gap_step_ex(&s_gap, r->replay, t0, last, &gap, &skipped, &back)) {
+        r->gpuGapNs = gap;
+        r->gpuGapSkipped = skipped;
+        r->gpuGapValid = 1;
+    } else if (back != 0) {
+        r->gpuGapBackNs = back;
+        const uint32_t n = ++s_backLogged;
+        if (n <= 8u || n % 100u == 0u) {
+            rd__log("GPU timestamps: the clock went back %.1f ms at replay %u (restart %u of the "
+                    "run; the time a restarted counter had run, not an overlap of replays)",
+                    (double)back / 1e6, r->replay, n);
         }
     }
-    s_gapLastNs = last;
-    s_gapLastReplay = r->replay;
+}
+
+/* a stamp index's name for the slot's clock line (rd_perf_clock.h); user:
+   the replay's pieces when it was timed pass by pass, else NULL */
+static void clockName(uint32_t index, void *user, char *buf, size_t n)
+{
+    const PassTable *t = user;
+    if (index >= RD_PERF_TS_PASS0) {
+        const uint32_t k = index - RD_PERF_TS_PASS0;
+        if (t != NULL && k < t->count) {
+            /* its target and size, and the draws of the pieces before it
+               (a stop inside a list: how far the replay had come) */
+            char label[96];
+            const RdPerfPass *q = &t->pass[k];
+            uint32_t before = 0;
+            rd_perf_pass_label(q, label, sizeof label);
+            for (uint32_t j = 0; j < k; j++) {
+                before += t->pass[j].draws;
+            }
+            snprintf(buf, n,
+                     "the start of piece %u of %u, %s %s %ux%u (%u draws before it, %u in it)", k,
+                     t->count, label, rd_perf_target_name(q->target), (unsigned)q->w,
+                     (unsigned)q->h, before, q->draws);
+        } else if (t != NULL && k == t->count) {
+            snprintf(buf, n, "the end of its last piece (%u)", t->count);
+        } else {
+            snprintf(buf, n, "piece %u", k);
+        }
+    } else if (index == RD_PERF_TS_BEGIN) {
+        snprintf(buf, n, "its start");
+    } else if (index == RD_PERF_TS_LISTS) {
+        snprintf(buf, n, "list 0's start");
+    } else if (index >= RD_PERF_TS_LIST0 && index < RD_PERF_TS_LIST0 + RD_LIST_COUNT) {
+        snprintf(buf, n, "list %u's end", index - RD_PERF_TS_LIST0);
+    } else if (index == RD_PERF_TS_PRESENT) {
+        snprintf(buf, n, "the present's end");
+    } else if (index == RD_PERF_TS_PREPASS) {
+        snprintf(buf, n, "the VU pre-pass's start");
+    } else if (index == RD_PERF_TS_PRESENT_BEGIN) {
+        snprintf(buf, n, "the present's list's start");
+    } else if (index == RD_PERF_TS_LATE) {
+        snprintf(buf, n, "the texture uploads' start, after the VU pre-pass");
+    } else {
+        snprintf(buf, n, "effect stamp %u", index);
+    }
+}
+
+/* ------------------------------------------ a stalled replay's list 0
+ * (rd_perf_rare.h): the replay being recorded keeps list 0's pipelines,
+ * its slot keeps them until its clock is read, and the window's block
+ * counts the replays each was seen in (reset at the block's end) */
+
+void rd__perf_rare_pipeline(uint32_t id, uint8_t vs, uint8_t fs, uint8_t dst)
+{
+    if (s_recOpen && s_inLists && rd__passring_list_now() == 0) {
+        rd_perf_rare_replay_add(&s_rareRec, id, vs, fs, dst);
+    }
+}
+
+void rd_perf_rare_block_end(void)
+{
+    __atomic_store_n(&s_rareBlockNew, 1, __ATOMIC_RELAXED);
+}
+
+/* rd__perf_end's: the replay's list 0 into the block and its slot */
+static void rareEnd(uint32_t slot)
+{
+    if (__atomic_exchange_n(&s_rareBlockNew, 0, __ATOMIC_RELAXED)) {
+        rd_perf_rare_block_reset(&s_rareBlock);
+    }
+    rd_perf_rare_block_add(&s_rareBlock, &s_rareRec);
+    s_rarePending[slot] = s_rareRec;
+}
+
+void rd__perf_rare_stall(uint32_t slot, uint32_t replay, uint32_t k)
+{
+    if (k == 0 || slot >= RHI_FRAMES_IN_FLIGHT || s_rarePending[slot].replay != replay) {
+        return;
+    }
+    char line[1536];
+    rd_perf_rare_text(&s_rareBlock, &s_rarePending[slot], RD_PERF_RARE_PCT, rd__vs_name,
+                      rd__fs_name, line, sizeof line);
+    rd__log("%s (stall line %u of the run)", line, k);
+}
+
+/* the slot's clock against the CPU's into the record, and its line on a
+   long wait, a second run, a stamp the GPU never wrote (a stalled replay:
+   the first 32, then every 10th) or a counter restart alone (the first 8,
+   then every 100th, on its own count: rd_perf_clock.h rd_perf_clock_due) */
+/* The spans the game was not presenting (rd.h rd_perf_idle_note: any
+   thread), the count at the last record's end, and at each pending
+   record's end the count at the end of the replay before it: a note since
+   then is a span with no GPU work before that replay (rd_perf_idle) */
+static uint32_t s_idleNotes; /* __atomic */
+static uint32_t s_endNotes;
+static uint32_t s_pendingNotes[RHI_FRAMES_IN_FLIGHT];
+
+void rd_perf_idle_note(void)
+{
+    __atomic_fetch_add(&s_idleNotes, 1u, __ATOMIC_RELEASE);
+}
+
+/* the replay collected last: its number and its end as its slot's wait saw
+   it (rd_perf_clock.h RdPerfIdleIn) */
+static struct {
+    uint32_t replay;
+    double endMs;
+    bool exact;
+} s_prevEnd;
+
+/* clockNote's: the replay's submissions, its first unwritten stamp's
+   name, whether the GPU was idle before it and its sign of a reset (the
+   record's gpu* fields: rd.h).  A few stores a replay; the submissions'
+   contents and the name only for a stalled replay's verdict */
+static void clockSubs(RdPerfRecord *r, uint32_t slot, const RdPerfClockIn *in,
+                      const RdPerfClockVerdict *v)
+{
+    const RhiTimestampClock *c = in->clk;
+    static const RdPerfSubMap k_map = {RD_PERF_TS_LIST0, RD_LIST_COUNT, RD_PERF_TS_PASS0,
+                                       RD_PERF_TS_PRESENT, RD_PERF_TS_PRESENT_BEGIN};
+    r->gpuFirstSubmitMs = (double)c->firstSubmitNs / 1e6;
+    r->gpuSignalMs = v->doneValid == 1   ? (double)c->waitEndNs / 1e6
+                     : v->doneValid == 2 ? (double)c->waitBeginNs / 1e6
+                                         : 0.0;
+    r->gpuSubAll = (uint8_t)(c->submits > 255u ? 255u : c->submits);
+    r->gpuSubN = (uint8_t)(c->subN < RD_PERF_SUBS ? c->subN : RD_PERF_SUBS);
+    r->gpuSubHung = (uint8_t)rd_perf_subs_judge(in, v, &k_map, v->stall, r->gpuSub, RD_PERF_SUBS);
+    if (v->missing > 0 && v->firstMissing >= 0) {
+        clockName((uint32_t)v->firstMissing, in->user, r->gpuFirstMissing,
+                  sizeof r->gpuFirstMissing);
+    }
+    const RdPerfIdleIn idleIn = {r->gpuFirstSubmitMs, s_prevEnd.endMs, s_prevEnd.exact,
+                                 s_prevEnd.replay != 0 && s_prevEnd.replay + 1u == r->replay,
+                                 __atomic_load_n(&s_idleNotes, __ATOMIC_ACQUIRE) !=
+                                     s_pendingNotes[slot]};
+    double idleMs = 0.0;
+    const int idle = r->gpuGapBackNs != 0 ? rd_perf_idle(&idleIn, &idleMs) : 0;
+    r->gpuResetSign = (uint8_t)rd_perf_reset_sign(v->missing, v->ranTwice, r->gpuGapBackNs, idle);
+    r->gpuIdleMs = idle == 1 ? idleMs : 0.0;
+    s_prevEnd.replay = r->replay;
+    s_prevEnd.endMs = r->gpuSignalMs;
+    s_prevEnd.exact = v->doneValid == 1;
+}
+
+static void clockNote(RdPerfRecord *r, uint32_t slot, const RhiTimestampClock *clk,
+                      const uint64_t *ts, uint32_t n)
+{
+    static RdPerfClockLines s_lines;
+    const RdPerfClockIn in = {clk,
+                              ts,
+                              n,
+                              s_pendingOrd[slot],
+                              s_pendingOrdN[slot],
+                              r->replay,
+                              r->gpuGapBackNs,
+                              clockName,
+                              r->passTimed ? (void *)&s_passPending[slot] : NULL};
+    RdPerfClockVerdict v;
+    rd_perf_clock_judge(&in, &v);
+    r->gpuLateValid = (uint8_t)v.lateValid;
+    r->gpuLateMs = v.lateMs;
+    r->gpuRanTwice = (uint8_t)v.ranTwice;
+    r->gpuStampsMissing = (uint16_t)(v.missing > 65535u ? 65535u : v.missing);
+    r->gpuSlotWaitMs = v.waitMs;
+    r->gpuDoneMs = v.doneMs;
+    r->gpuDoneValid = (uint8_t)v.doneValid;
+    clockSubs(r, slot, &in, &v);
+    if (!v.report) {
+        return;
+    }
+    const uint32_t k = rd_perf_clock_due(&s_lines, &v);
+    if (k != 0) {
+        char line[2048];
+        rd_perf_clock_text(&in, &v, line, sizeof line);
+        if (r->gpuResetSign == RD_RESET_IDLE && r->gpuIdleMs >= 0.0) {
+            rd__log("%s; submitted %.1f ms after the replay before had ended: the GPU idle, not a "
+                    "sign of a reset (%s line %u of the run)",
+                    line, r->gpuIdleMs, v.stall ? "stall" : "restart", k);
+        } else if (r->gpuResetSign == RD_RESET_IDLE) {
+            rd__log("%s; after a span the game was not presenting (a pause, a capture, the app "
+                    "away): the GPU idle, not a sign of a reset (%s line %u of the run)",
+                    line, v.stall ? "stall" : "restart", k);
+        } else {
+            rd__log("%s (%s line %u of the run)", line, v.stall ? "stall" : "restart", k);
+        }
+    }
+    if (v.stall) {
+        rd__perf_rare_stall(slot, r->replay, k); /* the hung list's pipelines (rd_perf_rare.h) */
+    }
 }
 
 /* timestamps of the slot just recycled: the replay RHI_FRAMES_IN_FLIGHT ago */
@@ -932,6 +1532,11 @@ void rd__perf_collect_gpu(void)
        the one rd__perf_end left there the last time the slot was used,
        RHI_FRAMES_IN_FLIGHT frames ago */
     const uint32_t slot = rhi_frame_slot();
+    if (g_rd.hasDevice) {
+        rd__shot_late_collect(slot);    /* the state picture this slot copied (rd_shot_late.h) */
+        rd__hold_collect(slot);         /* the paused scene's feedback readback (rd_hold.h) */
+        rd__shadow_count_collect(slot); /* the shadow count's check (rd_shadow_count.h) */
+    }
     if (!s_pendingValid[slot]) {
         return;
     }
@@ -950,6 +1555,7 @@ void rd__perf_collect_gpu(void)
         uint32_t lastIndex = RD_PERF_TS_BEGIN;
         double stretch = 0.0; /* since the last RD_PERF_TS_* stamp */
         bool prepass = false; /* RD_PERF_TS_PREPASS came: LISTS ends the pre-pass */
+        bool late = false;    /* RD_PERF_TS_LATE came: LISTS ends the late uploads */
         for (uint32_t k = 0; k < ps->count; k++) {
             const uint32_t i = ps->order[k];
             if (i == RD_PERF_TS_BEGIN || i >= n || ts[i] == 0 || ts[i] < prev) {
@@ -963,14 +1569,27 @@ void rd__perf_collect_gpu(void)
             if (i == RD_PERF_TS_PREPASS) {
                 r->gpuUploadMs = stretch;
                 prepass = true;
-            } else if (i == RD_PERF_TS_LISTS) {
+            } else if (i == RD_PERF_TS_LATE) {
+                /* the texture uploads after the pre-pass (rd_upload_late.h)
+                   count as uploads, as when they came before it */
                 if (prepass) {
+                    r->gpuPrepassMs = stretch;
+                } else {
+                    r->gpuUploadMs = stretch;
+                }
+                late = true;
+            } else if (i == RD_PERF_TS_LISTS) {
+                if (late) {
+                    r->gpuUploadMs += stretch;
+                } else if (prepass) {
                     r->gpuPrepassMs = stretch;
                 } else {
                     r->gpuUploadMs = stretch;
                 }
             } else if (i == RD_PERF_TS_PRESENT) {
                 r->gpuPresentMs = stretch;
+            } else if (i == RD_PERF_TS_PRESENT_BEGIN) {
+                r->gpuDisplayWaitMs = stretch; /* the last list's end to the present's list */
             } else if (i >= RD_PERF_TS_LIST0 && i < RD_PERF_TS_LIST0 + RD_LIST_COUNT) {
                 r->gpuListMs[i - RD_PERF_TS_LIST0] = stretch;
             }
@@ -988,12 +1607,74 @@ void rd__perf_collect_gpu(void)
             r->gpuBusyMs = (double)(busy[lastIndex] - busy[RD_PERF_TS_BEGIN]) / 1e6;
             r->gpuBusyValid = 1;
         }
-    } else {
-        s_gapLastReplay = 0; /* no stamps: the next record has no gap */
     }
+    /* the slot's clock (Vulkan) */
+    RhiTimestampClock clk;
+    double endMs = 0.0, submitMs = 0.0;
+    if (g_rd.hasDevice && rhi_read_timestamp_clock(&clk)) {
+        clockNote(r, slot, &clk, ts, n);
+        if (rd_perf_reset_counted(r->gpuResetSign)) {
+            /* the GPU's own sign of a reset, the stall lines' test
+               (rd_perf_clock.h rd_perf_reset_sign: a counter restart after
+               a span with no GPU work is not one): the skin check skips a
+               readback in its span (rd_vu_skin_check.h rd__skin_skip) */
+            rd__vu_skin_reset_seen(s_pendingCounter[slot]);
+        }
+        submitMs = (double)clk.firstSubmitNs / 1e6;
+        if (r->gpuDoneValid != 0) {
+            /* the GPU's end on the CPU's clock (rd__now_ms's): the slot
+               wait's end when it blocked, its start (a bound) when it
+               blocked under 0.05 ms (rd_perf_clock.c); none when not */
+            endMs = (double)(r->gpuDoneValid == 1 ? clk.waitEndNs : clk.waitBeginNs) / 1e6;
+        }
+    } else if (r->gpuGapBackNs != 0) {
+        /* no slot clock (OpenGL, Direct3D): a counter restart judged by the
+           notes alone */
+        const int idle = __atomic_load_n(&s_idleNotes, __ATOMIC_ACQUIRE) != s_pendingNotes[slot];
+        r->gpuResetSign = (uint8_t)rd_perf_reset_sign(0, false, r->gpuGapBackNs, idle);
+        r->gpuIdleMs = idle ? -1.0 : 0.0;
+    }
+    /* the picture-health report (rd_health.h, issue 179): counts and a
+       compare a record, nothing switched */
+    rd__health_note(r);
+    if (r->alpha >= 0.0f) {
+        /* a present into the evenness line (rd_even.h): no clock read */
+        const RdEvenPic ep = {r->frame,      r->alpha, r->evenAskMs,
+                              r->evenHandMs, endMs,    r->gpuDoneValid == 1};
+        rd_even_picture(&ep);
+        /* and into the GPU queue's model (rd_pace_gpu.h): handed over only */
+        const RdPaceGpuSample ps = {r->evenHandMs, submitMs, r->gpuValid ? r->gpuMs : 0.0, endMs,
+                                    r->gpuDoneValid == 1};
+        rd_pace_gpu_measure(&ps);
+    }
+    /* the even cadence's self-check: the presents' acquire and present
+       call with a desired time against those without (rd_pace_even.h) */
+    rd_pace_even_note_present(r->acquireMs + r->presentCallMs, r->desiredMs > 0.0);
+    if (r->glassId != 0) {
+        /* the content's speed on the glass (rd_glass.h): the display's
+           times read back since, then this picture */
+        const RdGlassPic gp = {r->glassId,
+                               r->frame,
+                               r->alpha,
+                               {r->ruleAlpha[0], r->ruleAlpha[1], r->ruleAlpha[2], r->ruleAlpha[3]},
+                               r->rule,
+                               r->ruleTickMs,
+                               r->evenHandMs,
+                               endMs,
+                               r->gpuDoneValid == 1,
+                               r->screenEndMs,
+                               r->screenAtMs};
+        rd_glass_picture(&gp);
+    }
+    /* no stamps: the next timed record's gap is measured across this one
+       (gpuGapSkipped) */
     if (r->passTimed) {
         passFinish(&s_passPending[slot], ts, n, busy, nb);
+        /* the shadow count's trial (rd_shadow_count.c): its list 3 time */
+        rd__shadow_count_trial(s_passPending[slot].replay, s_passPending[slot].pass,
+                               s_passPending[slot].count);
     }
+    rd__ab_collect(r); /* the in-play judge: its span under the arm it was recorded with */
     push(r);
 }
 
@@ -1038,10 +1719,48 @@ static void walkBreakdown(const RdPerfRecord *r)
             s_slow == 8u ? "; from here every 100th is written" : "");
 }
 
+/* rd_perf_last_replay_work's note: written by the thread that replays
+   (rd__perf_end), read by any; seq is odd while a write is in progress.
+   Every field is read and written with the atomic builtins */
+static struct {
+    uint32_t seq, replay, frame, vuTris, vuPreVertices;
+} s_work;
+
+static void workNote(const RdPerfRecord *r)
+{
+    const uint32_t seq = __atomic_load_n(&s_work.seq, __ATOMIC_RELAXED);
+
+    __atomic_store_n(&s_work.seq, seq + 1u, __ATOMIC_RELAXED);
+    __atomic_thread_fence(__ATOMIC_RELEASE);
+    __atomic_store_n(&s_work.replay, r->replay, __ATOMIC_RELAXED);
+    __atomic_store_n(&s_work.frame, r->frame, __ATOMIC_RELAXED);
+    __atomic_store_n(&s_work.vuTris, r->vuTris, __ATOMIC_RELAXED);
+    __atomic_store_n(&s_work.vuPreVertices, r->vuPreVertices, __ATOMIC_RELAXED);
+    __atomic_store_n(&s_work.seq, seq + 2u, __ATOMIC_RELEASE);
+}
+
+bool rd_perf_last_replay_work(RdReplayWork *out)
+{
+    const uint32_t s1 = __atomic_load_n(&s_work.seq, __ATOMIC_ACQUIRE);
+
+    if (s1 & 1u) {
+        return false;
+    }
+    out->replay = __atomic_load_n(&s_work.replay, __ATOMIC_RELAXED);
+    out->frame = __atomic_load_n(&s_work.frame, __ATOMIC_RELAXED);
+    out->vuTris = __atomic_load_n(&s_work.vuTris, __ATOMIC_RELAXED);
+    out->vuPreVertices = __atomic_load_n(&s_work.vuPreVertices, __ATOMIC_RELAXED);
+    __atomic_thread_fence(__ATOMIC_ACQUIRE);
+    return __atomic_load_n(&s_work.seq, __ATOMIC_RELAXED) == s1 && out->replay != 0;
+}
+
 void rd__perf_end(void)
 {
     RdPerfRecord *r = &g_rdPerf;
     s_recOpen = false;
+    rd__ab_end();         /* no arm read after it (rd_ab_run.h) */
+    rd__perf_hooks_end(); /* the last break's loads */
+    workNote(r);          /* its CPU-side counts are final here, its GPU times come later */
     r->totalMs = rd__now_ms() - s_t0 + r->interpMs;
     r->pipelineCreates = rd__stats_here()->pipelineCreates - s_pipelineCreates;
     r->a1xDraws = g_rd.above1xDraws - s_a1xDraws;
@@ -1069,12 +1788,31 @@ void rd__perf_end(void)
         r->renderPasses = D(renderPasses);
         r->barriers = D(barriers);
         r->copies = D(copies);
+        r->dispatches = D(dispatches);
+        r->passObjects = D(passObjects);
         r->fenceWaits = D(fenceWaits);
         r->waitIdles = D(waitIdles);
         r->readbacks = D(readbacks);
+        r->submits = D(submits);
 #undef D
+        qLock();
+        for (int k = 0; k < 2; k++) {
+            for (int i = 0; i < RHI_HOLD_SITES; i++) {
+                s_holdAcc[k][i] += s.holdSites[k][i] - s_last.holdSites[k][i];
+            }
+        }
+        s_holdReplays++;
+        qUnlock();
         r->fenceWaitMs = (double)(s.fenceWaitNs - s_last.fenceWaitNs) / 1e6;
         r->backendWriteBytes = s.uploadWriteBytes - s_last.uploadWriteBytes;
+        r->colorLoadBytes = s.passColorLoadBytes - s_last.passColorLoadBytes;
+        r->colorStoreBytes = s.passColorStoreBytes - s_last.passColorStoreBytes;
+        r->depthLoadBytes = s.passDepthLoadBytes - s_last.passDepthLoadBytes;
+        r->depthStoreBytes = s.passDepthStoreBytes - s_last.passDepthStoreBytes;
+        r->clearBytes = s.passClearBytes - s_last.passClearBytes;
+        r->passTexels = s.passPixels - s_last.passPixels;
+        r->copyBytes = s.copyTextureBytes - s_last.copyTextureBytes;
+        r->passUntracked = (uint32_t)(s.passUntracked - s_last.passUntracked);
         if (r->walkMs > WALK_SLOW_MS) {
             walkBreakdown(r);
         }
@@ -1097,8 +1835,16 @@ void rd__perf_end(void)
         memcpy(t->pass, s_passRec.pass, (size_t)s_passRec.count * sizeof(s_passRec.pass[0]));
     }
     s_passOn = false;
+    rareEnd(slot);
+    rd__list_draws_replay_end(); /* its lists' draws by entry (rd_list_draws.h) */
     s_pending[slot] = *r;
     s_pendingStamps[slot] = s_stamps;
+    memcpy(s_pendingOrd[slot], s_ord, s_ordN);
+    s_pendingOrdN[slot] = s_ordN;
+    s_pendingCounter[slot] = g_rd.replayCounter;
+    /* the notes up to the replay before's end (rd_perf_idle) */
+    s_pendingNotes[slot] = s_endNotes;
+    s_endNotes = __atomic_load_n(&s_idleNotes, __ATOMIC_ACQUIRE);
     s_pendingValid[slot] = true;
 }
 
@@ -1113,10 +1859,11 @@ static void stamp(RhiCommandList cl, uint32_t index)
     }
     /* [dev] perf_list_stamps = false: only the stamps written outside every
        render pass (the replay's start, the pre-pass's, the lists' start, the
-       present's end), for the A/B of what a stamp inside an open pass costs
+       present's end; not the present's list's start, whose stretch would
+       then hold the lists: the display wait reads 0), for the A/B of what a stamp inside an open pass costs
        a tile-based GPU (one that ends the pass there and begins it again) */
     if (s_noListStamps && index != RD_PERF_TS_BEGIN && index != RD_PERF_TS_LISTS &&
-        index != RD_PERF_TS_PREPASS && index != RD_PERF_TS_PRESENT) {
+        index != RD_PERF_TS_PREPASS && index != RD_PERF_TS_LATE && index != RD_PERF_TS_PRESENT) {
         return;
     }
     /* a replay timed pass by pass: each stamp's issue time too, for the busy
@@ -1127,6 +1874,7 @@ static void stamp(RhiCommandList cl, uint32_t index)
         cl, (index >= RD_PERF_TS_COUNT ? index | RHI_TIMESTAMP_KEEP_BARRIERS : index) | issue);
     s_stamps.written |= 1u << index;
     s_stamps.order[s_stamps.count++] = (uint8_t)index;
+    ordAdd(index);
     s_stamps.post[index] = (int8_t)s_post;
 }
 
@@ -1213,14 +1961,21 @@ void rd_perf_pass_agg_reset(RdPerfPassAgg *a)
 void rd_perf_pass_agg_add(RdPerfPassAgg *a, const RdPerfPass *p, uint32_t n)
 {
     a->replays++;
+    uint32_t full = 0; /* the replay's largest render pass */
+    for (uint32_t k = 0; k < n; k++) {
+        const uint32_t ar = (uint32_t)p[k].w * p[k].h;
+        full = p[k].kind == RD_PERF_PASS_RENDER && ar > full ? ar : full;
+    }
+    RdPerfPassAggEntry *last = NULL; /* the entry of the piece before */
     for (uint32_t k = 0; k < n; k++) {
         const RdPerfPass *q = &p[k];
         const double ms = q->gpuUs >= 0.0f ? (double)q->gpuUs / 1e3 : 0.0;
-        a->passes++;
+        const bool wait = q->kind == RD_PERF_PASS_WAIT; /* no pass: its time only */
+        a->passes += wait ? 0u : 1u;
         a->gpuMs += ms;
         a->entryBinds += q->entryBinds;
         a->entrySkipped += q->entrySkipped;
-        if (q->gpuUs >= 0.0f && q->gpuUs < RD_PERF_PASS_SMALL_US) {
+        if (!wait && q->gpuUs >= 0.0f && q->gpuUs < RD_PERF_PASS_SMALL_US) {
             a->small++;
             a->smallMs += ms;
         }
@@ -1236,6 +1991,7 @@ void rd_perf_pass_agg_add(RdPerfPassAgg *a, const RdPerfPass *p, uint32_t n)
         if (!e) {
             if (a->count == RD_PERF_PASS_AGG_MAX) {
                 a->dropped++;
+                last = NULL;
                 continue;
             }
             e = &a->e[a->count++];
@@ -1251,6 +2007,19 @@ void rd_perf_pass_agg_add(RdPerfPassAgg *a, const RdPerfPass *p, uint32_t n)
         e->draws += q->draws;
         e->gpuMs += ms;
         e->cpuMs += (double)q->cpuUs / 1e3;
+        if (k > 0 && last != e) {
+            const RdPerfPass *b = &p[k - 1];
+            e->prevKind = b->kind;
+            e->prevTarget = b->target;
+            e->prevList = b->list;
+            e->prevPost = b->post;
+            e->prevW = b->w;
+            e->prevH = b->h;
+            e->prevN++;
+            e->prevFull +=
+                b->kind == RD_PERF_PASS_RENDER && full != 0 && (uint32_t)b->w * b->h == full;
+        }
+        last = e;
         if (q->busyValid) {
             e->busyMs += (double)q->gpuBusyUs / 1e3;
             e->busyN++;
@@ -1262,6 +2031,12 @@ void rd_perf_pass_agg_add(RdPerfPassAgg *a, const RdPerfPass *p, uint32_t n)
 
 int rd_perf_pass_agg_text(const RdPerfPassAgg *a, unsigned top, char *buf, size_t n)
 {
+    return rd_perf_pass_agg_text_ex(a, top, false, false, buf, n);
+}
+
+int rd_perf_pass_agg_text_ex(const RdPerfPassAgg *a, unsigned top, bool tiler, bool before,
+                             char *buf, size_t n)
+{
     if (n == 0) {
         return 0;
     }
@@ -1270,34 +2045,94 @@ int rd_perf_pass_agg_text(const RdPerfPassAgg *a, unsigned top, char *buf, size_
         return snprintf(buf, n, "no replay timed");
     }
     const double r = (double)a->replays;
+    /* a tile-based GPU: the uploads' entry joins list 0's largest (a copy;
+       the entries' own sums stay for rd_perf_pass_agg_mean) */
+    static RdPerfPassAggEntry ent[RD_PERF_PASS_AGG_MAX];
+    const uint32_t count = a->count;
+    memcpy(ent, a->e, (size_t)count * sizeof(ent[0]));
     bool used[RD_PERF_PASS_AGG_MAX];
     memset(used, 0, sizeof(used));
+    int joined = -1;
+    if (tiler) {
+        int up = -1;
+        for (uint32_t i = 0; i < count; i++) {
+            if (ent[i].kind == RD_PERF_PASS_UPLOAD) {
+                up = (int)i;
+            } else if (ent[i].kind == RD_PERF_PASS_RENDER && ent[i].list == 0 && ent[i].post < 0 &&
+                       ent[i].target != RD_PERF_TARGET_SHADOW_COUNT &&
+                       (joined < 0 || ent[i].gpuMs > ent[joined].gpuMs)) {
+                joined = (int)i;
+            }
+        }
+        if (up >= 0 && joined >= 0) {
+            ent[joined].gpuMs += ent[up].gpuMs;
+            ent[joined].passes += ent[up].passes;
+            ent[joined].busyMs += ent[up].busyMs;
+            ent[joined].prevKind = ent[up].prevKind; /* what came before the stretch */
+            ent[joined].prevTarget = ent[up].prevTarget;
+            ent[joined].prevList = ent[up].prevList;
+            ent[joined].prevPost = ent[up].prevPost;
+            ent[joined].prevW = ent[up].prevW;
+            ent[joined].prevH = ent[up].prevH;
+            ent[joined].prevN = ent[up].prevN;
+            ent[joined].prevFull = ent[up].prevFull;
+            used[up] = true; /* not listed on its own */
+        } else {
+            joined = -1;
+        }
+    }
     size_t at = 0;
     unsigned shown = 0;
-    for (; shown < top && shown < a->count; shown++) {
+    for (; shown < top && shown < count; shown++) {
         int best = -1;
-        for (uint32_t i = 0; i < a->count; i++) {
-            if (!used[i] && (best < 0 || a->e[i].gpuMs > a->e[best].gpuMs)) {
+        for (uint32_t i = 0; i < count; i++) {
+            if (!used[i] && (best < 0 || ent[i].gpuMs > ent[best].gpuMs)) {
                 best = (int)i;
             }
         }
+        if (best < 0) {
+            break;
+        }
         used[best] = true;
-        const RdPerfPassAggEntry *e = &a->e[best];
-        const RdPerfPass lp = {.kind = e->kind, .list = e->list, .post = e->post};
-        char label[32], passes[32] = "";
-        rd_perf_pass_label(&lp, label, sizeof(label));
+        const RdPerfPassAggEntry *e = &ent[best];
+        /* with its target: the shadow count's label is "shadow" (rd_perf_pass_label) */
+        const RdPerfPass lp = {
+            .kind = e->kind, .target = e->target, .list = e->list, .post = e->post};
+        char label[40], passes[32] = "";
+        if (best == joined) {
+            snprintf(label, sizeof(label), "before list 0 + list 0");
+        } else {
+            rd_perf_pass_label(&lp, label, sizeof(label));
+        }
         const double pr = (double)e->passes / r;
         if (pr < 0.95 || pr > 1.05) {
             snprintf(passes, sizeof(passes), " %.1f passes", pr);
         }
-        char busy[32] = "";
+        char busy[32] = "", draws[32] = "";
         if (e->busyN) {
             snprintf(busy, sizeof(busy), " (busy %.2f)", e->busyMs / r);
         }
-        const int w =
-            snprintf(buf + at, n - at, "%s%s %s %ux%u%s %.0f draws %.2f ms%s", shown ? ", " : "",
-                     label, rd_perf_target_name(e->target), (unsigned)e->w, (unsigned)e->h, passes,
-                     (double)e->draws / r, e->gpuMs / r, busy);
+        if (e->kind != RD_PERF_PASS_WAIT) {
+            /* the display wait: "display wait window 1280x720 38.40 ms" */
+            snprintf(draws, sizeof(draws), " %.0f draws", (double)e->draws / r);
+        }
+        char after[160] = "";
+        if (before && e->prevN) {
+            const RdPerfPass bp = {.kind = e->prevKind,
+                                   .target = e->prevTarget,
+                                   .list = e->prevList,
+                                   .post = e->prevPost};
+            char bl[32];
+            rd_perf_pass_label(&bp, bl, sizeof(bl));
+            snprintf(
+                after, sizeof(after),
+                " after %s %s %ux%u (the last seen; the piece before was full size in %llu of %llu)",
+                bl, rd_perf_target_name(e->prevTarget), (unsigned)e->prevW, (unsigned)e->prevH,
+                (unsigned long long)e->prevFull, (unsigned long long)e->prevN);
+        }
+        const int w = snprintf(buf + at, n - at, "%s%s %s %ux%u%s%s %.2f ms%s%s", shown ? ", " : "",
+                               label, rd_perf_target_name(e->target), (unsigned)e->w,
+                               (unsigned)e->h, passes, draws, e->gpuMs / r, busy, after);
         if (w < 0 || (size_t)w >= n - at) {
             at = n - 1;
             break;
@@ -1330,6 +2165,198 @@ int rd_perf_pass_agg_text(const RdPerfPassAgg *a, unsigned top, char *buf, size_
     return (int)strlen(buf);
 }
 
+bool rd_perf_pass_agg_mean(const RdPerfPassAgg *a, const RdPerfPass *p, double *ms)
+{
+    for (uint32_t i = 0; i < a->count; i++) {
+        const RdPerfPassAggEntry *c = &a->e[i];
+        if (c->kind == p->kind && c->target == p->target && c->list == p->list &&
+            c->post == p->post && c->w == p->w && c->h == p->h && c->passes != 0) {
+            *ms = c->gpuMs / (double)c->passes;
+            return true;
+        }
+    }
+    return false;
+}
+
+int rd_perf_pass_grow_text(const RdPerfPassAgg *a, const RdPerfPass *p, uint32_t count,
+                           uint32_t replay, double presentMs, int gpuValid, double gpuMs,
+                           double blockGpuMs, unsigned top, char *buf, size_t n)
+{
+    if (n == 0) {
+        return 0;
+    }
+    buf[0] = '\0';
+    if (count > RD_PERF_PASS_MAX) {
+        count = RD_PERF_PASS_MAX;
+    }
+    char gpu[96];
+    if (!gpuValid) {
+        snprintf(gpu, sizeof(gpu), "GPU not timed");
+    } else if (blockGpuMs < 0.0) {
+        snprintf(gpu, sizeof(gpu), "GPU %.1f ms, the block's first", gpuMs);
+    } else {
+        snprintf(gpu, sizeof(gpu), "GPU %.1f ms against the block's %.1f", gpuMs, blockGpuMs);
+    }
+    size_t at = 0;
+    int w = snprintf(buf, n, "stalled replay %u (present %.0f ms, %s): ", replay, presentMs, gpu);
+#define ADD(...)                                                                                   \
+    do {                                                                                           \
+        if (w < 0 || (size_t)w >= n - at) {                                                        \
+            return (int)strlen(buf);                                                               \
+        }                                                                                          \
+        at += (size_t)w;                                                                           \
+        w = snprintf(buf + at, n - at, __VA_ARGS__);                                               \
+    } while (0)
+    /* The display wait apart (RD_PERF_PASS_WAIT: the present's own list
+       alone waits for the window's image, rd_submit.c): a stall there is
+       the display holding the image, not a slow GPU.  A record without
+       one (a replay that did not present, or one from before the present
+       had a list of its own) keeps the first render pass apart instead:
+       the acquire's wait (COLOR_ATTACHMENT_OUTPUT) landed inside its
+       stamps.  The other timed pieces summed against their block means */
+    int first = -1;
+    bool waitPiece = false;
+    for (uint32_t i = 0; i < count; i++) {
+        if (p[i].kind == RD_PERF_PASS_WAIT && p[i].gpuUs >= 0.0f) {
+            first = (int)i;
+            waitPiece = true;
+            break;
+        }
+    }
+    for (uint32_t i = 0; first < 0 && i < count; i++) {
+        if (p[i].kind == RD_PERF_PASS_RENDER && p[i].gpuUs >= 0.0f) {
+            first = (int)i;
+        }
+    }
+    if (first >= 0) {
+        double m, otherMs = 0.0, otherMean = 0.0;
+        unsigned others = 0;
+        char fm[48] = "", om[40] = "";
+        for (uint32_t i = 0; i < count; i++) {
+            if ((int)i == first || p[i].gpuUs < 0.0f) {
+                continue;
+            }
+            others++;
+            otherMs += (double)p[i].gpuUs / 1e3;
+            if (rd_perf_pass_agg_mean(a, &p[i], &m)) {
+                otherMean += m;
+            }
+        }
+        const bool mean = a->replays != 0 && rd_perf_pass_agg_mean(a, &p[first], &m);
+        if (waitPiece) {
+            if (mean) {
+                snprintf(fm, sizeof(fm), " (the block's %.1f)", m);
+            }
+            ADD("the display wait %.1f ms%s", (double)p[first].gpuUs / 1e3, fm);
+        } else {
+            if (mean) {
+                snprintf(fm, sizeof(fm), "the block's %.1f: ", m);
+            }
+            ADD("the first pass %.1f ms (%sit waits for the display's image)",
+                (double)p[first].gpuUs / 1e3, fm);
+        }
+        if (a->replays != 0) {
+            snprintf(om, sizeof(om), " (the block's %.1f)", otherMean);
+        }
+        if (others) {
+            ADD(", the other %u timed passes %.1f ms%s", others, otherMs, om);
+        }
+        ADD("; ");
+    }
+    /* the most expensive pieces, each with the block's mean of one like it */
+    bool used[RD_PERF_PASS_MAX];
+    memset(used, 0, sizeof(used));
+    for (unsigned k = 0; k < top; k++) {
+        int best = -1;
+        for (uint32_t i = 0; i < count; i++) {
+            if (!used[i] && p[i].gpuUs >= 0.0f && (best < 0 || p[i].gpuUs > p[best].gpuUs)) {
+                best = (int)i;
+            }
+        }
+        if (best < 0) {
+            break;
+        }
+        used[best] = true;
+        const RdPerfPass *q = &p[best];
+        char label[32], mean[40] = "";
+        double m;
+        rd_perf_pass_label(q, label, sizeof(label));
+        if (a->replays != 0) {
+            if (rd_perf_pass_agg_mean(a, q, &m)) {
+                snprintf(mean, sizeof(mean), " (the block's %.1f)", m);
+            } else {
+                snprintf(mean, sizeof(mean), " (new to the block)");
+            }
+        }
+        ADD("%s%s %s %ux%u %.1f ms%s", k ? ", " : "", label, rd_perf_target_name(q->target),
+            (unsigned)q->w, (unsigned)q->h, (double)q->gpuUs / 1e3, mean);
+    }
+    if (a->replays == 0) {
+        ADD("; no timed replay in the block before it to compare");
+        ADD("%s", "");
+        return (int)strlen(buf);
+    }
+    /* the pieces against their block means */
+    unsigned compared = 0, over = 0, small = 0, fresh = 0, untimed = 0;
+    double restMax = 0.0;
+    for (uint32_t i = 0; i < count; i++) {
+        double m;
+        if (p[i].gpuUs < 0.0f) {
+            untimed++;
+        } else if (!rd_perf_pass_agg_mean(a, &p[i], &m)) {
+            fresh++;
+        } else if (m * 1e3 < (double)RD_PERF_PASS_SMALL_US) {
+            small++;
+        } else {
+            const double ratio = (double)p[i].gpuUs / 1e3 / m;
+            compared++;
+            if (ratio > 2.0) {
+                over++;
+            } else if (ratio > restMax) {
+                restMax = ratio;
+            }
+        }
+    }
+    ADD("; %u of %u passes over 2x their block mean", over, compared);
+    if (over < compared) {
+        ADD(", the rest within %.1fx", restMax);
+    }
+    if (small) {
+        ADD("; %u under 0.05 ms left out", small);
+    }
+    if (fresh) {
+        ADD("; %u new to the block", fresh);
+    }
+    if (untimed) {
+        ADD("; %u not timed", untimed);
+    }
+    ADD(" (%u timed replays in the block so far)", a->replays);
+    ADD("%s", "");
+#undef ADD
+    return (int)strlen(buf);
+}
+
+bool rd_perf_passes_arm_backend(int kind, bool presentSplit)
+{
+    /* Vulkan (MoltenVK's too): its stamps are written by the GPU and the
+       record carries the present split the stall lines are for.  OpenGL
+       reads each armed stamp's issue time with glGetInteger64v, which may
+       hold the CPU (rhi.h RHI_TIMESTAMP_ISSUE_TIME): never there, nor on
+       Direct3D, which has no split either */
+    return presentSplit && (kind == RHI_BACKEND_VULKAN || kind == RHI_BACKEND_METAL);
+}
+
+int rd_perf_passes_arm_text(uint32_t replay, double presentMs, const char *backend, char *buf,
+                            size_t n)
+{
+    return snprintf(buf, n,
+                    "every replay timed pass by pass from here on %s (a present blocked %.0f ms "
+                    "at replay %u): the next stalled replay's passes are compared with the block's "
+                    "(then one replay every 250 ms again, or after 3 blocks with no present "
+                    "blocking)",
+                    backend ? backend : "?", presentMs, replay);
+}
+
 int rd_perf_pass_kinds_text(const double kinds[RD_PERF_PASS_KIND_COUNT],
                             const double effects[RD_PERF_POST_COUNT], double replays, char *buf,
                             size_t n)
@@ -1337,7 +2364,7 @@ int rd_perf_pass_kinds_text(const double kinds[RD_PERF_PASS_KIND_COUNT],
     const double r = replays > 0.0 ? replays : 1.0;
     double all = 0.0, fx = 0.0;
     for (int k = 0; k < RD_PERF_PASS_KIND_COUNT; k++) {
-        all += kinds[k];
+        all += k != RD_PERF_PASS_WAIT ? kinds[k] : 0.0; /* the display wait is no pass */
     }
     for (int p = 0; p < RD_PERF_POST_COUNT; p++) {
         fx += effects[p];
@@ -1363,8 +2390,8 @@ int rd_perf_pass_kinds_text(const double kinds[RD_PERF_PASS_KIND_COUNT],
     }
     ADD(")");
     for (int k = 0; k < RD_PERF_PASS_KIND_COUNT; k++) {
-        if (k != RD_PERF_PASS_RENDER && kinds[k] > 0.0) {
-            ADD(", %s %.1f", rd_perf_pass_kind_name(k), kinds[k] / r);
+        if (k != RD_PERF_PASS_RENDER && k != RD_PERF_PASS_WAIT && kinds[k] > 0.0) {
+            ADD(", %s %.1f", rd_perf_pass_kind_display(k, tiler_names()), kinds[k] / r);
         }
     }
 #undef ADD

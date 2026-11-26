@@ -66,6 +66,7 @@ static struct {
     bool rasterValid; /* raster is what OpenGL holds */
     GlRaster raster;
     GLuint ppo, vao;   /* bound now; GL_UNKNOWN_NAME when not known */
+    bool discard;      /* GL_RASTERIZER_DISCARD enabled (GlPipeline.noRaster) */
     GlCmdList *active; /* the list the last command was on */
     /* what gl_bind_groups last gave each binding point, so a bind of the
      * same is skipped (gl_forget_units: every name GL_UNKNOWN_NAME) */
@@ -177,6 +178,13 @@ static void gl_default_raster(GlRaster *w)
 
 /* the write masks a clear honours, opened (colour draw buffers in
  * colourBits, the depth, the stencil) */
+static void gl_open_masks(uint32_t colourBits, bool depth, bool stencil);
+
+void gl_cmd_open_colour_mask(void)
+{
+    gl_open_masks(1u, false, false);
+}
+
 static void gl_open_masks(uint32_t colourBits, bool depth, bool stencil)
 {
     GlRaster w;
@@ -593,6 +601,7 @@ RhiCommandList rhi_begin_commands(void)
     if (!g_gl.initialised) {
         return out;
     }
+    gl_start_screen_end(); /* the renderer draws from here on */
     GlFrame *f = gl_cur_frame();
     if (f->listCount == GL_MAX_CMD_LISTS) {
         GL_LOG("more than %d command lists in one frame", GL_MAX_CMD_LISTS);
@@ -851,6 +860,14 @@ void rhi_cmd_end_render_pass(RhiCommandList cl)
          * resolve, the present's) depends on whether a driver applies the
          * last draw's colour mask to it; nothing is called when they are */
         gl_open_masks((1u << RHI_MAX_COLOR_TARGETS) - 1u, false, false);
+        if (s.discard) {
+            /* a noRaster pipeline's GL_RASTERIZER_DISCARD (gl_flush)
+             * ends with its pass: under it glClear and glClearBuffer* are
+             * ignored (the glEnable reference page), so the next pass's
+             * load-op clear would not happen */
+            glf.Disable(GL_RASTERIZER_DISCARD);
+            s.discard = false;
+        }
     }
 }
 
@@ -1242,6 +1259,15 @@ static const GlPipeline *gl_flush(GlCmdList *c, bool indexed)
         glf.BindVertexArray(p->vao);
         s.vao = p->vao;
     }
+    if (!cache || s.discard != p->noRaster) {
+        /* rhi.h RhiPipelineDesc.noRaster: on while such a pipeline draws */
+        if (p->noRaster) {
+            glf.Enable(GL_RASTERIZER_DISCARD);
+        } else {
+            glf.Disable(GL_RASTERIZER_DISCARD);
+        }
+        s.discard = p->noRaster;
+    }
     if (!cache || c->vbVao != p->vao) {
         /* the buffer bindings are the VAO's state */
         c->vbVao = p->vao;
@@ -1561,4 +1587,51 @@ void rhi_cmd_resolve_color(RhiCommandList cl, RhiTexture src, RhiTexture dst)
         gl_copy_refused(what, "a texture cannot be used through a framebuffer");
     }
     glf.BindFramebuffer(GL_FRAMEBUFFER, 0);
+}
+
+/* rhi.h rhi_cmd_buffer_store_begin / _end: no vertex stores on OpenGL this release (RhiLimits.vertexStores false;
+ * a later one would put glMemoryBarrier(GL_SHADER_STORAGE_BARRIER_BIT | ...)
+ * here): the renderer draws the VU record into render targets */
+bool rhi_cmd_buffer_store_begin(RhiCommandList cl, RhiBuffer buf)
+{
+    (void)cl;
+    (void)buf;
+    return false;
+}
+
+bool rhi_cmd_buffer_store_end(RhiCommandList cl, RhiBuffer buf)
+{
+    (void)cl;
+    (void)buf;
+    return false;
+}
+
+/* rhi.h rhi_cmd_buffer_compute_begin / _end, rhi_cmd_dispatch: no compute
+ * stores on OpenGL this release (RhiLimits.computeStores false; GL 4.3 compute and glMemoryBarrier are later work), so
+ * the renderer never dispatches here: the bracket refuses and a dispatch
+ * is a no-op, said once */
+bool rhi_cmd_buffer_compute_begin(RhiCommandList cl, RhiBuffer buf)
+{
+    (void)cl;
+    (void)buf;
+    return false;
+}
+
+bool rhi_cmd_buffer_compute_end(RhiCommandList cl, RhiBuffer buf)
+{
+    (void)cl;
+    (void)buf;
+    return false;
+}
+
+void rhi_cmd_dispatch(RhiCommandList cl, uint32_t gx, uint32_t gy, uint32_t gz)
+{
+    static bool s_said;
+    (void)cl;
+    if (!s_said) {
+        s_said = true;
+        GL_LOG("rhi_cmd_dispatch: no compute dispatches on OpenGL in this release (%u x %u x %u "
+               "groups not recorded)",
+               gx, gy, gz);
+    }
 }

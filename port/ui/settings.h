@@ -74,24 +74,44 @@ int ui_settings_title_return_pending(void);
 int ui_settings_title_decided(void);
 /* A Settings page opened from the title is the current layout (Extras and
    its Music page, Achievements and the remap list among them); not from
-   the pause menu (port/game/title_logo.c hides the title's logo under it). */
+   the pause menu (port/game/title_logo.c hides the title's logo under it).
+   Not the New Game screen (below): it is not a page, and the game's own
+   title animation has taken the lettering away by then. */
 int ui_settings_covers_title(void);
 
 /* The New Game screen: la_vibe_select (common/src/layout_action.c)
-   switches to it after the vibration choice.  Two rows, Mirror mode (row
-   0) and New Game+ (row 1), each "Off" or "On"; Cross or START anywhere
-   confirms both: it sets the run's mirror mode (ico_opt_set_mirror) and
-   New Game+ (gFlagGameClear), then calls la_host_new_game_go
-   (gflagOn(382), what the vibration screen did).  Triangle goes back to
-   the vibration screen (layout 9).  Enter returns the screen's layout with
-   the cursor on Mirror mode's "Off" and the run's value reset
-   (ico_opt_mirror_reset), -1 when the menu is not built (the caller then
-   starts the game as the original did). */
+   switches to it after the vibration choice (settings_newgame.c).  Its rows,
+   one under the other: Difficulty (a stepped value: Easy, Normal, Hard, and
+   Custom while a customized draft exists), Customize (opens the Customize
+   pages, UI_PAGE_CUSTOMIZE, on the draft; their Back returns here with the
+   cursor on Customize), a Start row, and a note for the cursor's row; up
+   and down loop the three.  Mirror mode and New Game+ are Customize's rows
+   (UI_OPT_NEWGAME_MIRROR, UI_OPT_NEWGAME_PLUS), for every difficulty.  Left
+   and Right on Difficulty step the mode: a preset replaces the draft's rows,
+   the customized draft is kept aside and comes back with Custom.  Cross on
+   Difficulty moves the cursor down; Cross on Start, or START anywhere,
+   confirms: the draft becomes the journey's difficulty
+   (port/game/difficulty.h ico_difficulty_begin), then the run's mirror mode
+   (ico_opt_set_mirror) and New Game+ (gFlagGameClear) are set from
+   Customize's two choices and la_host_new_game_go called (gflagOn(382),
+   what the vibration screen did).  Triangle goes back to the vibration
+   screen (layout 9).  Enter returns the screen's layout with the cursor on
+   Difficulty, the draft at Normal (a cleared save's own rows when
+   gFlagGameClear is set and that save's record is in force), Mirror mode
+   Off, New Game+ On from a finished save and Off otherwise, and the run's
+   mirror value reset (ico_opt_mirror_reset), -1 when the menu is not built
+   (the caller then starts the game as the original did). */
 int ui_new_game_screen_enter(void);
 int ui_new_game_screen_layout(void);
-/* row 0 (Mirror mode) or 1 (New Game+): the "Off" (on = 0) and "On"
-   (on = 1) items; -1 for a row the screen does not have (tests) */
-int ui_new_game_screen_row(int row, int on);
+/* the Start row's item (tests) */
+int ui_new_game_screen_start(void);
+/* the Difficulty row's item (its value row and two arrows follow it) and
+   the Customize row's (tests) */
+int ui_new_game_screen_difficulty(void);
+int ui_new_game_screen_customize(void);
+/* the draft the screen and the Customize pages show and edit (tests) */
+struct IcoDifficulty;
+const struct IcoDifficulty *ui_new_game_screen_draft(void);
 
 /* "Quit to desktop": a port row under the title's Options row (layouts 12 and 13, in the same
    chained entry layout) whose Cross opens a confirmation screen, "Quit to
@@ -120,6 +140,11 @@ void ui_settings_set_aa_mask_query(unsigned (*fn)(void));
    the stored value with " (off: not available)".  Without a query the
    renderer's own answer (no renderer: never). */
 void ui_settings_set_aa_blocked_query(int (*fn)(void));
+/* Whether FSR 3.1 can run (rd_upscale_temporal_supported): the Upscaling row
+   steps to FSR 3.1 only when fn says so (nonzero), and a saved FSR 3.1 the
+   device cannot run reads "FSR 3.1 (off: not available)" and is drawn as Off.
+   Without a query the renderer's own answer (no renderer: never). */
+void ui_settings_set_temporal_query(int (*fn)(void));
 /* Display > Texture pack reads fn (texpack_count, the replacements
    found at start) to tell an installed pack from none ("None installed",
    the row then does not step); NULL, or none installed, is none. */
@@ -192,6 +217,9 @@ void ui_settings_set_quit_is_game(int (*fn)(void));
 #define UI_GPU_INSTALL_NO_PICKER 5     /* the file picker could not be opened */
 #define UI_GPU_INSTALL_NO_PICKER_APP 6 /* no app on the device can choose a file */
 #define UI_GPU_INSTALL_UNREADABLE 7    /* the chosen file could not be opened or copied */
+#define UI_GPU_INSTALL_PAGES                                                                       \
+    8 /* the package is not built for this phone's memory pages
+                                          (installWhy has the sentence) */
 
 typedef struct UiGpuDriverHost {
     int (*count)(void);         /* drivers installed */
@@ -221,6 +249,15 @@ typedef struct UiGpuDriverHost {
        own Qualcomm driver (the Graphics driver row's note then names the
        driver package route). May be NULL (0). */
     int (*lostOnStock)(void);
+    /* the words for driver i (-1 the phone's own) as its last start saw it:
+       "Qualcomm's driver 512.676.1, Vulkan 1.3", "Turnip, Mesa 25.3.0,
+       Vulkan 1.4", or that it has not been started yet.  The page puts the
+       chosen driver's line at the head of its note.  May be NULL, and may
+       return NULL or "" (nothing to say). English: the driver's names are. */
+    const char *(*info)(int i);
+    /* the sentence for the last UI_GPU_INSTALL_PAGES, shown in the popup.
+       May be NULL. */
+    const char *(*installWhy)(void);
 } UiGpuDriverHost;
 
 /* NULL (or never called) hides the link and the page. The struct is copied. */
@@ -302,6 +339,14 @@ void ui_settings_vsync(void);
 #define UI_STEAM_NO_USER 4   /* no Steam account to add it to */
 #define UI_STEAM_FAILED 5    /* the shortcut list could not be changed */
 void ui_settings_set_steam_handler(int (*fn)(void));
+/* Settings > Extras > Add to the applications menu (Linux only): fn writes
+   the game's desktop entry and icon into the player's data folder
+   (port/platform/desktop_entry.h) and returns UI_DESKTOP_DONE or
+   UI_DESKTOP_FAILED; the menu answers with a popup. NULL (or never called)
+   hides the row; no other platform sets it. */
+#define UI_DESKTOP_DONE 0   /* the entry and the icon are written */
+#define UI_DESKTOP_FAILED 1 /* they could not be written */
+void ui_settings_set_desktop_handler(int (*fn)(void));
 /* Settings > Extras > Export textures (the title only): every picture on the
    disc saved under its PCSX2 name into the dumps folder, a job the host runs
    in the background (window_host.c over port/render/texpack_export.h; the
@@ -412,7 +457,8 @@ void ui_settings_set_backup_host(const UiBackupHost *host);
 typedef struct UiStateSlotInfo {
     int present;              /* a state exists */
     int loadable;             /* it would load now */
-    int refusal_str;          /* UI_STR_* naming why not (when !loadable); 0 none */
+    int refusal_str;          /* UI_STR_* naming why not (when !loadable), or what a load
+                                 will do (loadable: it continues from its checkpoint); 0 none */
     unsigned int play_frames; /* for playTimeText */
     int stage_no;             /* for areaName */
     long long saved_at;       /* time(NULL) */
@@ -461,6 +507,25 @@ int ui_settings_states_prompt_layout(void);
 /* After a load: the menu closes its page and puts the cursor on the pause
    menu's Save states row (the restored game is on the pause layout). */
 void ui_settings_sync_after_state_load(void);
+/* After a load, before ui_settings_sync_after_state_load (state_host.c
+   perform_load, never on the checkpoint's way): the state loads under this
+   run's settings, so what the restore put back of the game's own settings
+   is set to this run's again, each change logged ("settings: after the
+   load ..."): the hold type (optionControlType, as the Hold type row sets
+   it), the game's language on a disc that has one (as the Language row
+   sets it), and the Debug menu closed (debug.c debug_Menu_off) when
+   developer mode is off now and saved_keys (the state header's keys text,
+   sim_keys.h) say it was on; then also the run marked as one that used the
+   Debug menu and the bound debug switches put back
+   (ico_variants_developer_state_loaded).  What changed: UI_REAPPLY_* bits. */
+#define UI_REAPPLY_HOLD_TYPE 1
+#define UI_REAPPLY_LANGUAGE 2
+#define UI_REAPPLY_DEBUG_MENU 4
+int ui_settings_reapply_after_state_load(const char *saved_keys);
+/* A state continued from its checkpoint instead (the stage is changing): in
+   play as after a load, from the title the page closes on the game's empty
+   layout. */
+void ui_settings_sync_after_state_checkpoint(void);
 /* F6 (port/platform/hotkeys.h ICO_HOTKEY_STATES_PAGE, the window's key
    down): startOpensPause is mouse_look.h ico_start_opens_pause's answer.
    In play the press is latched and 1 returned: the window then taps Start
@@ -521,6 +586,22 @@ typedef struct UiCharactersHost {
 } UiCharactersHost;
 
 void ui_settings_set_characters_host(const UiCharactersHost *host);
+
+/* Extras > Unused content (port/include/ico_unused.h; the program's host is
+   port/game/unused_live.c's, the tests' a fake).  row is the page's row,
+   0 .. 3 (ICO_UNUSED_ARENA, _CLIMB, _MOVIE, _ART):
+     available  whether the running disc has the row: 1 shows it (from the
+                title only); the Extras link shows while any row does
+     open       Cross on the row: the row is started; the layout to switch
+                to (the menu closes on it, the title's cursor kept on
+                Settings), or -1 (the page stays; the host logged why)
+   NULL (or never called) hides the page's link. */
+typedef struct UiUnusedHost {
+    int (*available)(int row);
+    int (*open)(int row);
+} UiUnusedHost;
+
+void ui_settings_set_unused_host(const UiUnusedHost *host);
 /* whether the Characters page is the viewer's panel now (host->shown() is
    not -2) */
 int ui_settings_characters_in_viewer(void);
@@ -573,15 +654,21 @@ typedef enum UiSettingsPage {
        shows only while the build has more than one renderer
        (ui_settings_set_backend_names) */
     UI_PAGE_GRAPHICS,
-    /* Extras > Game variants (port/game/variants.h): the eight [variants]
-       rows, the Debug menu (Developer mode only), Back */
-    UI_PAGE_VARIANTS,
+    /* Gameplay's two pages, their links before Gameplay's Back: Chains
+       (Natural chains and the two chain rows of [variants],
+       port/game/variants.h) and Cutscenes (Skip the opening and the two
+       cutscene [variants] rows), each with Back.  Shadows and Combat are
+       Customize's (below): rows of the New Game draft, not of the config */
+    UI_PAGE_CHAINS,
+    UI_PAGE_SHADOWS,
+    UI_PAGE_COMBAT,
+    UI_PAGE_CUTSCENES,
     /* Picture (main page, after Display): the picture's own rows
        (Anti-aliasing, Full-height picture, Texture filtering, Full pixel,
        Brightness, CRT, the texture and model packs), Back */
     UI_PAGE_PICTURE,
     /* Developer (main page, before Back): Developer mode, Dump textures,
-       Dump models, Back */
+       Dump models, the Debug menu, Back */
     UI_PAGE_DEVELOPER,
     /* Save states: the pause menu's Save states row and the Continue
        screen's Square prompt open it (both only built while a UiStatesHost
@@ -589,6 +676,21 @@ typedef enum UiSettingsPage {
        cards, each a picture, "Slot N" with its action, the area and play
        time, and the date */
     UI_PAGE_STATES,
+    /* Extras > Unused content (title only, the link hidden when the disc
+       has none of its rows): the two test rooms, the attract movie, the
+       early show title art, Back (ui_settings_set_unused_host) */
+    UI_PAGE_UNUSED,
+    /* Customize (the New Game screen's Customize row; its Back returns
+       there): the Shadows, Combat and Rules pages' links, Back.  The four
+       pages edit the New Game's draft (settings_difficulty.c): Shadows
+       (Shadow speed, toughness, aggression, Peaceful shadows, Shadows never
+       take Yorda, Shadows attack together, No Shadows), Combat (Automatic
+       guard, Turn to face shadows, Shadows wait while Ico is down, One hit
+       per swing, Shadows never dodge, Queen barrier), Rules (Time to rescue
+       Yorda, Yorda trips, No hints, Knock-down limit, Knock-downs count,
+       Permadeath) */
+    UI_PAGE_CUSTOMIZE,
+    UI_PAGE_RULES,
     UI_PAGE_COUNT
 } UiSettingsPage;
 
@@ -603,6 +705,12 @@ typedef enum UiSettingsOpt {
     UI_OPT_ASPECT,
     UI_OPT_ANTI_ALIAS, /* [video] anti_aliasing, stepped through rd_aa_supported_mask */
     UI_OPT_DOWNSAMPLE, /* [video] downsample: Off / To original size, default Off */
+    UI_OPT_UPSCALE, /* [video] upscaling: Off / FSR 1.0 / FSR 3.1 (when supported), default Off */
+    /* [video] upscaling_quality: Native AA / Quality / Balanced / Performance;
+       shown while Upscaling is FSR 3.1 and the device runs it */
+    UI_OPT_UPSCALE_QUALITY,
+    /* [video] upscaling_sharpness: 0..100 in tens, default 80; shown while Upscaling is on */
+    UI_OPT_UPSCALE_SHARPNESS,
     UI_OPT_WINDOW_MODE,
     UI_OPT_VSYNC,
     UI_OPT_FILTER,
@@ -611,6 +719,12 @@ typedef enum UiSettingsOpt {
     UI_OPT_SHOW_FPS,     /* [video] show_fps: Off/On, default Off (the Frame rate counter) */
     UI_OPT_CRT,          /* [video] crt and crt_mode in one row */
     UI_OPT_CRT_STRENGTH, /* [video] crt_strength, 0..100 % in tens */
+    /* [video] gamma, brightness, contrast, saturation: 1..100, 50 the game's own
+       picture, 1 a press, Square puts 50 back; outside the preset */
+    UI_OPT_TONE_GAMMA,
+    UI_OPT_TONE_BRIGHTNESS,
+    UI_OPT_TONE_CONTRAST,
+    UI_OPT_TONE_SATURATION,
     UI_OPT_TEXTURE_PACK, /* [video] texture_pack: On/Off, "None installed" without a pack */
     UI_OPT_MODEL_PACK, /* [video] model_pack: On/Off, "None installed" without a pack; title only */
     UI_OPT_BRIGHTNESS, /* the game's brightness step, systemStatus[11] 0..14 */
@@ -629,7 +743,6 @@ typedef enum UiSettingsOpt {
        PS2's); shown only while Motion blur is not Off */
     UI_OPT_EFFECT_MOTION_BLUR_STRENGTH,
     UI_OPT_EFFECT_FOG,
-    UI_OPT_EFFECT_WATER, /* [video] effect_water_sharp: Original/Sharp, default Original */
     UI_OPT_EFFECT_CINEMATIC_BARS,
     UI_OPT_FULL_PIXEL, /* [video] full_pixel; On/Off, last Effects row, outside the preset */
     /* Audio */
@@ -648,6 +761,12 @@ typedef enum UiSettingsOpt {
     UI_OPT_CIRCLE_BACK,  /* [game] circle_back */
     UI_OPT_VIBRATION,    /* the game's iosPadActRequestEnable */
     UI_OPT_HOLD_TYPE,    /* [gameplay] hold_type: A (hold) or B (toggle) */
+    UI_OPT_ZOOM_TYPE,    /* [gameplay] zoom_type: Hold or Toggle (port/game/zoom_toggle.h) */
+    UI_OPT_CAMERA_RESET, /* [gameplay] camera_reset: Off/On (port/game/camera_reset.h) */
+    UI_OPT_YORDA_LOOK,   /* [gameplay] yorda_look: Off/Hold/Toggle (port/game/yorda_look.h) */
+    /* [input] button_pictures: Auto, PlayStation, Xbox, Nintendo, Wii Classic
+       Controller (settings_pads.h), after Vibration */
+    UI_OPT_BUTTON_PICTURES,
     /* Controls > Touch screen: the touch overlay ([input] touch_*) and
        its layout edits ([touch]), shown with a touch screen */
     UI_OPT_TOUCH_MODE,    /* Off, Auto, Always */
@@ -657,17 +776,18 @@ typedef enum UiSettingsOpt {
     UI_OPT_TOUCH_GRID,    /* [touch] grid: 2, 4 or 8 mm */
     /* Gameplay */
     UI_OPT_STICK_FIX,
-    UI_OPT_YORDA,
-    UI_OPT_PIT_TIME,       /* [gameplay] pit_time: Half, Original, Longer, Double, Triple */
-    UI_OPT_SHADOW_SPEED,   /* [gameplay] shadow_speed: Slower, Original, Faster, Fastest */
-    UI_OPT_DOOR_FIX,       /* [gameplay] door_fix, the doorway fix */
-    UI_OPT_YORDA_TRIPS,    /* [gameplay] yorda_trips (port/game/yorda_trip.h) */
-    UI_OPT_NATURAL_CHAINS, /* [gameplay] natural_chains (port/render/rd_chain.h) */
-    UI_OPT_SKIP_OPENING,   /* [gameplay] skip_opening: the boot starts at the title */
-    UI_OPT_SECOND_CARD,    /* [gameplay] second_memory_card: a card in port 1 */
-    UI_OPT_FILM_EFFECT,    /* the game's optionScreenMode 0..4, once cleared */
-    UI_OPT_PLAYERS,        /* the game's girlControlMode, 1 or 2, once cleared */
-    UI_OPT_ACH_POPUPS,     /* [game] achievements, On/Off: the achievement pop-ups, on the
+    UI_OPT_YORDA,            /* the draft's Shadows never take Yorda (Customize > Shadows) */
+    UI_OPT_PIT_TIME,         /* the draft's rescue time: 4 to 30 s, or Original (the disc's 15 s) */
+    UI_OPT_SHADOW_SPEED,     /* the draft's Shadow speed: Slower, Original, Faster, Fastest */
+    UI_OPT_SHADOWS_TOGETHER, /* the draft's Shadows attack together: no turns between them */
+    UI_OPT_DOOR_FIX,         /* [gameplay] door_fix, the doorway fix */
+    UI_OPT_YORDA_TRIPS,      /* the draft's Yorda trips (port/game/yorda_trip.h) */
+    UI_OPT_NATURAL_CHAINS,   /* [gameplay] natural_chains (port/render/rd_chain.h) */
+    UI_OPT_SKIP_OPENING,     /* [gameplay] skip_opening: the boot starts at the title */
+    UI_OPT_SECOND_CARD,      /* [gameplay] second_memory_card: a card in port 1 */
+    UI_OPT_FILM_EFFECT,      /* the game's optionScreenMode 0..4, once cleared */
+    UI_OPT_PLAYERS,          /* the game's girlControlMode, 1 or 2, once cleared */
+    UI_OPT_ACH_POPUPS,       /* [game] achievements, On/Off: the achievement pop-ups, on the
                               Achievements page before Back */
     /* Main */
     UI_OPT_LANGUAGE,      /* the game's own language (the European disc only) */
@@ -688,8 +808,14 @@ typedef enum UiSettingsOpt {
     UI_OPT_CHAR_ICO_SHORTS,
     UI_OPT_CHAR_YORDA_SKIN,
     UI_OPT_CHAR_YORDA_DRESS,
-    /* Extras > Game variants, one row per IcoVariantId in its order
-       (UI_OPT_VAR_TOUGHNESS + id): [variants] keys, port/game/variants.h */
+    /* the game variants, one row per IcoVariantId in its order
+       (UI_OPT_VAR_TOUGHNESS + id), port/game/variants.h: the ten the
+       journey's difficulty holds are rows of the New Game draft on Customize's
+       pages (Shadow toughness, aggression, Peaceful shadows on Shadows; the
+       three combat rows, One hit, Never dodge, Queen barrier on Combat; No
+       hints on Rules), the others [variants] keys: the two cutscene rows on
+       Gameplay > Cutscenes, the two weapon rows on Gameplay, the two chain
+       rows on Gameplay > Chains */
     UI_OPT_VAR_TOUGHNESS,
     UI_OPT_VAR_ONE_HIT,
     UI_OPT_VAR_NEVER_DODGE,
@@ -698,6 +824,14 @@ typedef enum UiSettingsOpt {
     UI_OPT_VAR_BARRIER,
     UI_OPT_VAR_NO_LOOK,
     UI_OPT_VAR_IGNORE_CAMS,
+    UI_OPT_VAR_AUTO_GUARD,
+    UI_OPT_VAR_ATTACK_TURN,
+    UI_OPT_VAR_SHADOWS_WAIT_DOWN,
+    UI_OPT_VAR_SWORD_COLOUR,
+    UI_OPT_VAR_WEAPON,
+    UI_OPT_VAR_PEACEFUL,
+    UI_OPT_VAR_CHAIN_SPEED,   /* Gameplay > Chains */
+    UI_OPT_VAR_CHAIN_DAMPING, /* Gameplay > Chains */
     UI_OPT_DEVELOPER,
     /* actions */
     UI_OPT_BACK,
@@ -740,6 +874,9 @@ typedef enum UiSettingsOpt {
     /* Extras > Add to Steam (desktop; shown from the title while a host
        handler is set) */
     UI_OPT_EXTRAS_STEAM,
+    /* Extras > Add to the applications menu (Linux; shown from the title
+       while a host handler is set, ui_settings_set_desktop_handler) */
+    UI_OPT_EXTRAS_DESKTOP,
     /* Extras > Export textures (shown from the title while a host is set,
        ui_settings_set_texture_export_host); Stop exporting while it runs */
     UI_OPT_EXTRAS_EXPORT_TEXTURES,
@@ -757,17 +894,42 @@ typedef enum UiSettingsOpt {
     /* Main's row "Save a picture for a bug report", above Developer mode:
        the host's frame dump, 3 s later (ui_settings_set_frame_dump_handler) */
     UI_OPT_REPORT_PICTURE,
-    /* Game variants' Debug menu: a press row, shown while Developer mode
+    /* Developer's Debug menu: a press row, shown while Developer mode
        is on (ico_variants_debug_menu_pressed) */
     UI_OPT_VAR_DEBUG_MENU,
     /* Save states page: a slot's card (its label row; the action word is
        the value row) */
     UI_OPT_STATE_SLOT,
+    /* Extras > Unused content's rows, in ico_unused.h's order (ICO_UNUSED_*):
+       press rows, each shown from the title while the host has it */
+    UI_OPT_UNUSED_ARENA,
+    UI_OPT_UNUSED_CLIMB,
+    UI_OPT_UNUSED_MOVIE,
+    UI_OPT_UNUSED_ART,
 #if ICO_RC_TOOLS
     /* Main's row "Share a bug report" below it, rc builds on Android alone
        (ui_settings_set_share_report_handler) */
     UI_OPT_SHARE_REPORT,
 #endif
+    /* Developer's Free movement: [developer] free_movement, shown while
+       Developer mode is on (port/game/ico_rows.h) */
+    UI_OPT_FREE_MOVEMENT,
+    /* Customize's new rows of the New Game draft (port/game/difficulty.h):
+       No Shadows (Shadows), Knock-down limit (Off, 1..9), Knock-downs count
+       (Each room, Whole journey) and Permadeath (Rules).  The draft's other
+       rows are the options above that were config rows before v0.11.3
+       (UI_OPT_SHADOW_SPEED, UI_OPT_YORDA, UI_OPT_PIT_TIME, UI_OPT_VAR_TOUGHNESS
+       ...: settings_difficulty.c ui__diff_opt) */
+    UI_OPT_DIFF_NO_SHADOWS,
+    UI_OPT_DIFF_KNOCK_LIMIT,
+    UI_OPT_DIFF_KNOCK_SCOPE,
+    UI_OPT_DIFF_PERMADEATH,
+    /* Customize's Mirror mode and New Game+ (Off, On), for every difficulty:
+       the New Game screen's choices (settings_newgame.c ui__newgame_*), not
+       rows of the draft, so never in its mode, difficulty.toml or a save
+       state; the pause menu's view shows the journey's own, greyed */
+    UI_OPT_NEWGAME_MIRROR,
+    UI_OPT_NEWGAME_PLUS,
 } UiSettingsOpt;
 
 /* The entry rows and the menu's layouts (-1 before ui_settings_install):

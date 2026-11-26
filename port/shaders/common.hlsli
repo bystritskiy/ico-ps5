@@ -191,8 +191,28 @@ GS_FN uint gs_fog_channel(uint lo, uint hi, uint f, uint mul, uint b)
 #define VK_DUAL(n, i)
 #endif
 
+// A choice between two values both computed, and a logical and of two
+// booleans both computed, without a branch.  HLSL 2021 (DXC's default)
+// short-circuits && and || and evaluates only the chosen side of ?:, so DXC
+// emits each as a conditional branch, a merge block and an OpPhi; select()
+// and and() are its forms that evaluate both sides, one OpSelect or
+// OpLogicalAnd.  A chain of them in a shader called many times over is the
+// difference between a few thousand basic blocks and a few dozen
+// (font_sheet_ps: 5,337 blocks, 70,549 words before, docs/port/SHADERS.md,
+// "Branches from && and ?:").  FXC (Direct3D 11, shader model 5.0) has
+// neither intrinsic and evaluates both sides of ?: and && anyway (a movc),
+// so it keeps the operators.  Both sides must be safe to evaluate: no
+// division by a value that may be 0 (divide by max(d, 1) and select).
+#if defined(__HLSL_VERSION) && __HLSL_VERSION >= 2021
+#define ICO_SELECT(c, a, b) select((c), (a), (b))
+#define ICO_AND(a, b) and((a), (b))
+#else
+#define ICO_SELECT(c, a, b) ((c) ? (a) : (b))
+#define ICO_AND(a, b) ((a) && (b))
+#endif
+
 // ---------------------------------------------------------------- FrameCB
-// Group 0, slot 0. 336 bytes (shader_consts.h IcoFrameCB, asserted there).
+// Group 0, slot 0. 352 bytes (shader_consts.h IcoFrameCB, asserted there).
 // Matrices are column-major float[16] (element
 // [column * 4 + row]) used as mul(M, v) with column vectors; rd's RdCamera
 // carries them in that order.
@@ -237,6 +257,17 @@ cbuffer FrameCB : ICO_REG(b0, 0)
                    // a Full pixel target leaves out at its left (its texture
                    // the frame's exact width alone, centred: rd_replay.c
                    // rd__frame_group_ex), else 0; w reserved
+    float4 g_jitter; // xy the sub-pixel jitter in texels of a jittered
+                     // frame's scene-class passes (rd_jitter.c), already in
+                     // g_vpo.xy, so every position the exact viewport maps
+                     // (gs_px_to_ndc, vu_homogeneous_position) takes it after
+                     // the GS's snap; the helpers that map a pixel back to
+                     // the GS's place subtract it (gs_plane_offset,
+                     // vu_pixel_in_picture: a pixel is evaluated at its
+                     // jittered GS position) and fullscreen_triangle does (a
+                     // pass's reads by pixel stay on their texels); 0 in
+                     // every other frame group (x - 0 is x: the same
+                     // pixels); zw reserved
 };
 
 // ---------------------------------------------------------------- DrawCB
@@ -270,10 +301,35 @@ cbuffer DrawCB : ICO_REG(b1, 1)
     float4 g_param;
     float4 g_scale;
     // (shader_consts.h IcoDrawCB.aux0, aux1): spare blocks of the
-    // folded blur pair and of the pixel cuts' per-draw constants
+    // folded blur pair and of the pixel cuts' per-draw constants; aux1.w
+    // in blit_vs the present's quarter turns (blit.hlsl), else 0
     uint4 g_aux0;
     uint4 g_aux1;
 };
+
+#ifdef ICO_VU_FAST
+// The fast-set build of vu_ps (vu_ps_nodual_fast; port/render/rd_fastps.h):
+// the DrawCB words the boat's VU passes hold (textured, MODULATE with TCC,
+// an RGBA32 texel, no GS levels, no nearest, no DATE, no clip plane, no
+// alpha test, no Full pixel crop) read as constants, every other bit and
+// word as the DrawCB has it.  The CPU binds it only for a pass whose DrawCB
+// holds exactly those values (rd_fps_eligible): there every word below is
+// the DrawCB's own, so the build computes what vu_ps_nodual computes, the
+// branches it never takes folded away.  The side band's discard stays (its
+// flag is an interpolated input, not a DrawCB word).  mode.y, z and w are
+// read as 0: with the texel RGBA32 (mode.y >> 8 == 0) TEXA's mode (mode.y's
+// low byte) is never read (vu_texa_expand_f), and with the alpha test's
+// enable bit clear (mode.z bit 8) gs_alpha_discard returns false whatever
+// the rest of mode.z and AREF (mode.w) hold, their only reader in vu_ps.
+uint4 vu_fast_mode() { return g_mode; }
+float4 vu_fast_scale() { return g_scale; }
+// TEXTURED DECAL TCC DATE DATM PLANE GS_LOD NEAREST GS_BILINEAR_GRID DATE_DST
+#define VU_FAST_FIXED_MASK                                                                         \
+    (1u | 2u | 4u | 128u | 256u | 8388608u | 262144u | 16777216u | 67108864u | 1073741824u)
+#define VU_FAST_FIXED (1u | 4u) // DF_TEXTURED | DF_TCC_RGBA
+#define g_mode uint4((vu_fast_mode().x & ~VU_FAST_FIXED_MASK) | VU_FAST_FIXED, 0u, 0u, 0u)
+#define g_scale float4(vu_fast_scale().x, vu_fast_scale().y, 0.0, vu_fast_scale().w)
+#endif
 
 #define DF_TEXTURED 1u    // PRIM.TME
 #define DF_DECAL 2u       // TFX DECAL (else MODULATE)
@@ -1046,7 +1102,10 @@ float gs_dst_date_snap()
 // target's centre is GS 2048 and the viewport's size is one for every
 // target), so is what the GPU clips of a triangle.  The plain mapping
 // (1 / the target's size, then the GPU's multiply by it) rounds at any
-// size that is not a power of two.
+// size that is not a power of two.  g_vpo.xy carries a jittered frame's
+// jitter in its scene-class passes (g_jitter): added after the GS position
+// is made, so the snap to the 1/16 grid is the GS's and the jitter moves the
+// whole picture by the same sub-pixel; 0 in every other frame group.
 float2 gs_px_to_ndc(float2 px)
 {
     if (g_vp.x != 0.0) {
@@ -1096,9 +1155,10 @@ float2 gs_texel_offset(float2 px)
 float2 gs_plane_offset(float4 pos, float2 corner)
 {
     // the texture's centre: the frame's, less the Full pixel crop's
-    // left-out texels (g_vpo.z, 0 on every other target)
+    // left-out texels (g_vpo.z, 0 on every other target); the pixel's
+    // place less the jitter its triangle's corners took (g_jitter)
     precise float2 c = g_target.xy * g_vp.zw * 0.5 - float2(g_vpo.z, 0.0);
-    precise float2 d = (pos.xy - c) - corner;
+    precise float2 d = (pos.xy - c - g_jitter.xy) - corner;
     return d;
 }
 
@@ -1116,9 +1176,10 @@ void fullscreen_triangle(uint id, out float4 pos, out float2 t)
 {
     float2 c = float2((id << 1) & 2u, id & 2u);
     float2 k = g_misc.z != 0.0 ? g_misc.zw : float2(1.0, 1.0);
-    // the viewport's centre g_vpo before the target's (0 in the plain mapping)
-    pos = float4((c.x * 2.0 - 1.0) * k.x + g_vpo.x * g_vp.x,
-                 (1.0 - c.y * 2.0) * k.y - g_vpo.y * g_vp.y, 0.0, 1.0);
+    // the viewport's centre g_vpo before the target's (0 in the plain
+    // mapping), less the jitter g_vpo carries (the target's texels exactly)
+    pos = float4((c.x * 2.0 - 1.0) * k.x + (g_vpo.x - g_jitter.x) * g_vp.x,
+                 (1.0 - c.y * 2.0) * k.y - (g_vpo.y - g_jitter.y) * g_vp.y, 0.0, 1.0);
     t = c;
 }
 

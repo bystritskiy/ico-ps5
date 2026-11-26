@@ -14,10 +14,14 @@
 #                       settings tests
 #   ico_ui_rd           the sources with ICO_RD for ui_test and
 #                       menu_text_test (needs ico_render)
-#   ico_ui_settings_rd  ico_ui_rd with the Settings sources, for
+#   ico_ui_settings_rd  ico_ui_rd with the Settings sources and
+#                       touch_ui.c (the touch overlay's button pictures), for
 #                       settings_render
 #   ico_ui_font_rd      font.c alone with ICO_RD, for the render tests and
 #                       rd_replay_tool
+#
+# pad_glyphs.cmake embeds the button pictures' SVG files the same way
+# (_ui_pad_glyph_data, in _ui_sources).
 #
 # The font files (Arimo, Noto Sans JP's subset for the characters Arimo
 # has no glyph for: the Japanese text, the language names, the button
@@ -81,20 +85,26 @@ set(_ui_string_srcs strings.c strings_en.c strings_fr.c strings_de.c strings_it.
                     strings_ja.c strings_ko.c strings_zh.c strings_ru_bobttz.c
                     strings_ru_cobra838.c strings_pt_br.c)
 
+# the button pictures of other controllers (pad_glyphs.c over the 24 SVG files
+# pad_glyphs.cmake embeds: _ui_pad_glyph_data)
+include("${CMAKE_CURRENT_SOURCE_DIR}/pad_glyphs.cmake")
+
 set(_ui_sources
     font.c
     layout_ext.c
     menu_font.c
     menu_text.c
+    pad_glyphs.c
     popup.c
     ${_ui_string_srcs}
-    ${_ui_font_srcs})
+    ${_ui_font_srcs}
+    ${_ui_pad_glyph_data})
 
 # layout_ext.h includes the game's layout_texture.h (LtProp, LtProperty),
 # whose typedef.h has unprototyped declarations the port warnings reject
 ico_include_dirs(common _ico_ui_game_incs)
 set_source_files_properties(layout_ext.c menu_font.c menu_text.c popup.c settings.c
-                            settings_states.c ui_list.c
+                            settings_newgame.c settings_states.c settings_step.c ui_list.c
                             ui_hint.c gallery.c photo_ui.c ui_mouse.c touch_ui.c ui_fps.c
                             touch_edit_ui.c subtitle_text.c PROPERTIES
                             COMPILE_OPTIONS "-Wno-strict-prototypes")
@@ -130,13 +140,21 @@ function(ico_ui_settings name)
     # the Edit layout page's side of the touch layout editor (touch_edit_ui.c)
     # the Graphics page's rows and Apply (settings_graphics.c)
     # Extras' Back up your data and Restore from a backup (settings_backup.c)
+    # Extras' Add to the applications menu (settings_desktop.c)
     # the Save states page's cards, actions and F6 latch (settings_states.c)
+    # Extras > Unused content's host (settings_unused.c)
+    # the game variants rows' values, notes and per-disc rule (settings_variants.c)
+    # the Upscaling rows: FSR 3.1 and its quality (settings_upscale.c)
+    # held Left/Right on the value rows, L1/R1 on the colour rows (settings_step.c)
+    # the New Game screen (settings_newgame.c) and the Customize pages' draft
+    # of the journey's difficulty (settings_difficulty.c)
+    # Controls > Button pictures and the set in force once a frame (settings_pads.c)
     # a community translation's subtitles as text (subtitle_text.c, jimaku.c's
     # hook, over port/game's tables: subtitles_ru_bobttz.c, subtitles_ru_cobra838.c,
     # subtitles_pt_br.c)
-    target_sources(${name} PRIVATE settings.c settings_graphics.c settings_backup.c
-                                   settings_states.c ui_list.c
-                                   ui_hint.c gallery.c photo_ui.c ui_mouse.c ui_mouse_geom.c
+    target_sources(${name} PRIVATE settings.c settings_graphics.c settings_backup.c settings_desktop.c
+                                   settings_states.c settings_unused.c settings_variants.c settings_upscale.c settings_step.c ui_list.c
+                                   settings_newgame.c settings_difficulty.c settings_pads.c ui_hint.c gallery.c photo_ui.c ui_mouse.c ui_mouse_geom.c
                                    ui_lang.c touch_edit_ui.c subtitle_text.c
                                    "${CMAKE_SOURCE_DIR}/port/game/subtitles_ru_bobttz.c"
                                    "${CMAKE_SOURCE_DIR}/port/game/subtitles_ru_cobra838.c"
@@ -228,8 +246,8 @@ ico_settings_test(settings_test test/settings_test.c)
 # hide the title's logo
 ico_settings_test(settings_extras_test test/settings_extras_test.c)
 # settings_states_test: the Save states page, the pause menu's row at pitch 16
-# and the Continue screen's Square prompt over a fake host and a fake Continue
-# screen; Extras has no Save states row (the other discs' runs: the pause
+# (Square there does nothing) and the Continue screen's Square prompt over a fake
+# host and a fake Continue screen; Extras has no Save states row (the other discs' runs: the pause
 # rows, Extras and the prompt on their numbers)
 ico_settings_test(settings_states_test test/settings_states_test.c)
 # settings_extra_test: more Settings menu tests; each settings test file
@@ -240,14 +258,26 @@ ico_settings_test(settings_extra_test test/settings_extra_test.c)
 # settings_adapter_test: Options > Graphics > Graphics card (the row, its
 # names, Apply on another card with Keep and Revert, a fake host)
 ico_settings_test(settings_adapter_test test/settings_adapter_test.c)
+# settings_step_test: holding Left or Right on the Picture colour rows and
+# L1/R1 by 10 (settings_step.c); Mirror mode's stick on the menus (the
+# game's lt_analog2Pad through port/input's ico_pad_menu_stick_x)
+ico_settings_test(settings_step_test test/settings_step_test.c)
 # settings_backup_test: Extras > Back up your data and Restore from a backup
 # (settings_backup.c) over a fake host: the rows, the confirmations, the
 # backup read and the end popups
 ico_settings_test(settings_backup_test test/settings_backup_test.c)
+# settings_desktop_test: Extras > Add to the applications menu
+# (settings_desktop.c) over a fake handler: the row, its press and popups
+ico_settings_test(settings_desktop_test test/settings_desktop_test.c)
 # settings_discs_test: the rows each disc's Options has, from the title and
 # the pause menu (docs/port/GAME_FEATURES.md, Options on each disc): the
 # European run and the six others (the three above and the 2001 discs below)
 ico_settings_test(settings_discs_test test/settings_discs_test.c)
+# settings_difficulty_test: the New Game screen's Difficulty row and the
+# Customize pages (settings_difficulty.c): each preset's draft, an edit turning
+# the mode Custom and back, the greyed Knock-downs count, the confirm handing
+# the draft to the journey, a cleared save's draft; every disc's run
+ico_settings_test(settings_difficulty_test test/settings_difficulty_test.c)
 # subtitles_ru_test: the Russian (bob-ttz) community translation: its
 # subtitle table, the words jimaku.c's hook gets (subtitle_text.c) and their
 # layout in the band, the Language row's entry and [game] text_language, the
@@ -262,13 +292,16 @@ ico_settings_test(subtitles_ru_cobra838_test test/subtitles_ru_cobra838_test.c)
 ico_settings_test(subtitles_pt_br_test test/subtitles_pt_br_test.c)
 if(ICO_RUN_TESTS)
     # the three 2001 discs (the North American disc, the August 2001 preview,
-    # the June 2001 demo): Extras > Game variants on each (settings_extra_test
-    # main; the other runs' checks are the Japanese program's)
+    # the June 2001 demo): the game variants on Gameplay's pages on each
+    # (settings_extra_test main; the other runs' checks are the Japanese
+    # program's)
     foreach(_slug ntsc aug6 jun26)
         add_test(NAME settings_extra_${_slug}
                  COMMAND settings_extra_test "${CMAKE_CURRENT_BINARY_DIR}" ${_slug})
         add_test(NAME settings_discs_${_slug}
                  COMMAND settings_discs_test "${CMAKE_CURRENT_BINARY_DIR}" ${_slug})
+        add_test(NAME settings_difficulty_${_slug}
+                 COMMAND settings_difficulty_test "${CMAKE_CURRENT_BINARY_DIR}" ${_slug})
         # settings_test's and settings_extras_test's other-disc runs (the
         # disc's own confirm face, its title and pause rows, its Extras)
         add_test(NAME settings_${_slug} COMMAND settings_test "${CMAKE_CURRENT_BINARY_DIR}" ${_slug})
@@ -289,11 +322,16 @@ if(ICO_RUN_TESTS)
                          settings_states settings_states_jpn settings_states_kor settings_states_cn
                          settings_states_ntsc settings_states_aug6 settings_states_jun26
                          settings_adapter settings_adapter_jpn settings_adapter_kor settings_adapter_cn
+                         settings_step settings_step_jpn settings_step_kor settings_step_cn
                          settings_backup settings_backup_jpn settings_backup_kor settings_backup_cn
+                         settings_desktop settings_desktop_jpn settings_desktop_kor settings_desktop_cn
                          subtitles_ru subtitles_ru_jpn subtitles_ru_kor subtitles_ru_cn
                          subtitles_ru_cobra838 subtitles_ru_cobra838_jpn subtitles_ru_cobra838_kor
                          subtitles_ru_cobra838_cn subtitles_pt_br subtitles_pt_br_jpn
                          subtitles_pt_br_kor subtitles_pt_br_cn
+                         settings_difficulty settings_difficulty_jpn settings_difficulty_kor
+                         settings_difficulty_cn settings_difficulty_ntsc settings_difficulty_aug6
+                         settings_difficulty_jun26
                          PROPERTIES RESOURCE_LOCK settings_toml)
 endif()
 
@@ -364,12 +402,16 @@ endif()
 # model_viewer_test (port/game/test): the model viewer's table
 # (port/game/model_viewer_table.c) against its motion-kind blocks and the
 # game's table sizes, and its names and words in the six languages with a
-# glyph for every character in the port font. CPU only.
+# glyph for every character in the port font; its member rows (the early
+# show title art) over a fake of each disc's logo pack directory: their
+# ids, the rows offered, the per-disc id cache (model_viewer and
+# model_viewer_rows_<slug>). CPU only.
 add_executable(model_viewer_test "${CMAKE_SOURCE_DIR}/port/game/test/model_viewer_test.c"
     "${CMAKE_SOURCE_DIR}/port/game/model_viewer_table.c" font.c ${_ui_string_srcs}
     ${_ui_font_srcs})
 target_include_directories(model_viewer_test PRIVATE "${CMAKE_SOURCE_DIR}/port/game"
-                           "${CMAKE_SOURCE_DIR}/port/third_party/stb")
+                           "${CMAKE_SOURCE_DIR}/port/third_party/stb"
+                           $<TARGET_PROPERTY:ico_port_data,INTERFACE_INCLUDE_DIRECTORIES>)
 # port/ui's "strings.h" by -iquote, so <strings.h> stays the C library's
 target_compile_options(model_viewer_test PRIVATE ${ICO_SEMANTIC_OPTIONS} ${ICO_PORT_WARNINGS}
                        -iquote "${CMAKE_CURRENT_SOURCE_DIR}")
@@ -379,6 +421,9 @@ if(NOT WIN32)
 endif()
 if(ICO_RUN_TESTS)
     add_test(NAME model_viewer COMMAND model_viewer_test)
+    foreach(_slug jpn kor cn ntsc aug6 jun26)
+        add_test(NAME model_viewer_rows_${_slug} COMMAND model_viewer_test ${_slug})
+    endforeach()
     # the table's Japanese model column against the PAL ELF's and each other
     # disc's modelData (tools/gen_mv_region.py --check; the Korean disc reads
     # the Japanese column; tools/gen_data_c.py reads the ELFs, so pyelftools:
@@ -490,6 +535,27 @@ if(ICO_RUN_TESTS)
     add_test(NAME ui_mouse COMMAND ui_mouse_test)
 endif()
 
+# pad_glyphs_test: the button pictures' core (pad_glyphs.c over the embedded
+# files, font.c's rasteriser): every shipped set has eight valid pieces,
+# broken files given through the test entry are refused and make their set
+# incomplete (it can then not be the style in force), the absolute and
+# relative path forms draw alike, and the rasters at 24 and 96 rows: the
+# fill inside a letter, the stroke just outside it, the corners clear, the
+# evenodd holes of the Xbox A and B without fill, the 40 x 24 and 24 x 32
+# sizes. CPU only (no ICO_RD: no texture is made).
+add_executable(pad_glyphs_test test/pad_glyphs_test.c pad_glyphs.c font.c ${_ui_pad_glyph_data}
+    ${_ui_font_srcs})
+target_include_directories(pad_glyphs_test PRIVATE "${CMAKE_SOURCE_DIR}/port/third_party/stb")
+# port/ui by -iquote, so <strings.h> stays the C library's
+target_compile_options(pad_glyphs_test PRIVATE ${ICO_SEMANTIC_OPTIONS} ${ICO_PORT_WARNINGS}
+                       -iquote "${CMAKE_CURRENT_SOURCE_DIR}")
+if(NOT WIN32)
+    target_link_libraries(pad_glyphs_test PRIVATE m)
+endif()
+if(ICO_RUN_TESTS)
+    add_test(NAME pad_glyphs COMMAND pad_glyphs_test)
+endif()
+
 if(NOT TARGET ico_render)
     message(STATUS "ico: ui_test not built (needs port/render)")
     return()
@@ -543,6 +609,9 @@ target_link_libraries(ui_test PRIVATE ico_render ico_math ico_sheet_ref ico_regi
 # device)
 ico_ui_library(ico_ui_settings_rd ON)
 ico_ui_settings(ico_ui_settings_rd)
+# the touch overlay's drawing: its button pictures with a set of another
+# controller's in force (settings_photo_test.c testTouchArt)
+target_sources(ico_ui_settings_rd PRIVATE touch_ui.c)
 add_executable(settings_render test/settings_photo_test.c test/settings_fixture.c
     $<TARGET_OBJECTS:ico_ui_settings_rd>
     "${CMAKE_SOURCE_DIR}/ico2/common/src/layout_texture.c"
@@ -628,7 +697,10 @@ endif()
 # compared per item in the five languages, with the survey that pinned the
 # sheet constants.  Needs the base ELF to configure, and the disc image to
 # run (exit 77 without it, so a worktree skips it); writes its pictures to
-# <build>/menu_look/<lang>/.  ICO_MENU_LOOK_FIT=1 runs the constants' search.
+# <build>/menu_look/<lang>/.  ICO_MENU_LOOK_FIT=1 runs the constants' search;
+# ICO_MENU_LOOK_REF46=1 measures the title's publisher plate and
+# ICO_MENU_LOOK_OUTLINE=1 draws candidate outline looks beside it (ico_miniz:
+# their pictures compressed).
 if(_ico_cov_elf AND TARGET ico_sheet_ref)
     add_executable(menu_look_test test/menu_look_test.c test/menu_sheets.c menu_font.c menu_text.c
         ${_ui_string_srcs} $<TARGET_OBJECTS:ico_ui_font_rd>
@@ -648,7 +720,7 @@ if(_ico_cov_elf AND TARGET ico_sheet_ref)
     target_compile_options(menu_look_test PRIVATE ${ICO_SEMANTIC_OPTIONS} ${ICO_GAME_LAYOUT_OPTIONS}
                            ${ICO_GAME_WARNINGS})
     target_link_libraries(menu_look_test PRIVATE ico_render ico_sheet_ref ico_port_data ico_platform
-                          ico_region)
+                          ico_region ico_miniz)
     if(NOT WIN32)
         target_link_libraries(menu_look_test PRIVATE m)
     endif()
@@ -754,7 +826,12 @@ if(ICO_RUN_TESTS)
     set(_asan_env "")
     if(ICO_SANITIZE MATCHES "address")
         set(_asan_env "ASAN_OPTIONS=detect_leaks=0")
-        set_tests_properties(settings_render PROPERTIES ENVIRONMENT "${_asan_env}")
+        # and its disc variants: the same program, the same driver leak
+        # (settings_render_aug6 showed the same 2 x 56 bytes on CI's Mesa
+        # 25.2.8 in the v0.10.2 run, all in the driver)
+        set_tests_properties(settings_render settings_render_jpn settings_render_kor
+                             settings_render_cn settings_render_ntsc settings_render_aug6
+                             settings_render_jun26 PROPERTIES ENVIRONMENT "${_asan_env}")
     endif()
     list(APPEND _env ${_asan_env})
     if(_env)

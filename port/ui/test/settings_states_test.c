@@ -1,21 +1,28 @@
-/* settings_states_test.c: the Save states page, the pause menu's row and the
- * Continue screen's prompt (settings.c, "the Save states page"), over the
- * shared fixture (settings_fixture.h) with a fake UiStatesHost, fake picture
- * textures and a fake Continue screen; the slot picture's box at its own
- * shape (lt_ext_image_fit: 16:9, 4:3 and a tall picture in the 72 x 54
- * tile, centred, none stretched); F6 (ui_settings_states_key): in play it
- * asks for Start and the page opens once the pause menu is up (Back then
- * returns to the menu's row), on the pause menu it opens the page, a second
+/* settings_states_test.c: the Save states page, the pause menu's row (no
+ * Square prompt there) and the Continue screen's Square prompt (settings.c, "the
+ * Save states page"), over the shared fixture (settings_fixture.h) with a
+ * fake UiStatesHost, fake picture textures and a fake Continue screen; the
+ * slot picture's box at its own shape (lt_ext_image_fit: 16:9, 4:3 and a
+ * tall picture in the 72 x 54 tile, centred, none stretched); F6
+ * (ui_settings_states_key): in play it asks for Start and the page opens
+ * once the pause menu is up (Back then returns to the menu's row), on the
+ * pause menu it opens the page, a second
  * press on the page closes it into the game, a press the pause menu does not
  * take within 60 frames is dropped, and each ignore (no host, the title,
  * photo mode, no pause allowed, another screen) with its line.  CPU only;
  * the host's own work (files, memory, the pause picture) is
- * state_host_test's. */
+ * state_host_test's.  After a load (ui_settings_reapply_after_state_load,
+ * every disc's run): the hold type and, on the disc with a language of its
+ * own, the game's language the restore put back are this run's again, the
+ * Debug menu closed when the state had developer mode on and this run has
+ * it off; nothing when they already are this run's. */
 #include "settings_fixture.h"
 #include "photo_mode.h"
 #include "pointer.h"
 #include "popup.h"
+#include "ico_unused.h"
 #include "ui_mouse.h"
+#include "variants.h"
 
 #include <time.h>
 
@@ -366,7 +373,7 @@ static void testExtrasRows(void)
             CHECK(settle(ml, 60), "title %d: the menu", title);
             openPage(ml, -1, UI_PAGE_EXTRAS);
             const int n = ui_settings_page_rows(UI_PAGE_EXTRAS, labels, NULL, NULL, 24);
-            CHECK(n == 11, "title %d, host %d: %d Extras rows", title, host, n);
+            CHECK(n == 12, "title %d, host %d: %d Extras rows", title, host, n);
             for (int i = 0; i < n; i++) {
                 CHECK(strcmp(txt(labels[i]), ui_str(UI_STR_STATES)) != 0 &&
                           lt_ext_prop(labels[i])->right != ui_settings_page_layout(UI_PAGE_STATES),
@@ -803,6 +810,60 @@ static void testConfirm(void)
     CHECK(ui_popup_active() && s_sounds[2] > neg, "a refusal: a popup and the refusal sound");
 }
 
+/* in a test room of Extras > Unused content (ico_unused_active): Save and
+   Load are refused before the host with the plain popup and one line each */
+static void testTestRoom(void)
+{
+    char log[2048];
+    const int conf = lt_ext_confirm_button();
+    startMenus(1, 11);
+    const int sl = pauseToStates();
+    ico_unused_set_running(ICO_UNUSED_ARENA);
+    /* Save on the empty slot 2 */
+    moveTo(sl, 1);
+    s_requests = 0;
+    ui_popup_reset();
+    const int neg = s_sounds[2];
+    errCapture();
+    press(conf);
+    errRelease(log, sizeof(log));
+    CHECK(s_requests == 0 && ui_popup_active() && s_sounds[2] > neg,
+          "a test room: Save refused before the host (%d asked), a popup, the refusal sound",
+          s_requests);
+    CHECK(strstr(log, "unused: save state refused in a test room") != NULL,
+          "a test room: the line (\"%s\")", log);
+    /* Load on slot 1: refused the same way */
+    moveTo(sl, 0);
+    press(0x2000); /* Save -> Load */
+    s_requests = 0;
+    ui_popup_reset();
+    const int negLoad = s_sounds[2];
+    errCapture();
+    press(conf);
+    errRelease(log, sizeof(log));
+    CHECK(s_requests == 0 && ui_popup_active() && s_sounds[2] > negLoad,
+          "a test room: Load refused before the host (%d asked), a popup, the refusal sound",
+          s_requests);
+    CHECK(strstr(log, "unused: save state load refused in a test room (slot 1)") != NULL,
+          "a test room: the load's line (\"%s\")", log);
+    ico_unused_set_running(-1);
+    /* out of the room: Load on slot 1 is asked again (the popup gone
+       first, so the press reaches the card) */
+    ui_popup_reset();
+    s_requests = 0;
+    press(conf);
+    CHECK(s_requests == 1 && s_reqAct == UI_STATES_ACT_LOAD && s_reqSlot == 1,
+          "out of the room: Load asked (%d: %d, slot %d)", s_requests, s_reqAct, s_reqSlot);
+    /* out of the room: Save on slot 2 is asked again */
+    moveTo(sl, 1);
+    s_requests = 0;
+    press(conf);
+    CHECK(s_requests == 1 && s_reqAct == UI_STATES_ACT_SAVE, "out of the room: Save asked (%d)",
+          s_requests);
+    CHECK(strcmp(ui_str(UI_STR_STATES_REFUSED_UNUSED), "Not in a test room") == 0,
+          "the refusal's words");
+}
+
 /* the title: no Save, the hint under the cards; Back to Extras */
 static void testTitle(void)
 {
@@ -1031,6 +1092,246 @@ static void testNoHost(void)
     CHECK(s_requests == 0, "Back leaves");
 }
 
+/* a Permadeath journey in force (ico_difficulty_states_locked): no state
+   saves or loads, so the pause menu's row is greyed (it still opens the
+   page, for Delete), the page's line says so in place of "pick the
+   action", and the Continue screen's prompt is not shown and Square there
+   opens nothing; Normal again: all as before */
+static void testPermadeath(void)
+{
+    char log[2048];
+    startMenus(1, 11);
+    ico_difficulty_reset();
+    toPause();
+    const int st = ui_settings_states_row();
+    CHECK(st >= 0 && !lt_ext_row_dim(st), "Normal: the Save states row not greyed");
+    ico_difficulty_set_row(ICO_DIFF_PERMADEATH, 1);
+    CHECK(ico_difficulty_states_locked(), "Permadeath in force");
+    frame(0);
+    CHECK(lt_ext_row_dim(st) && !lt_ext_prop(st)->masked && !lt_ext_prop(st)->defaultMask,
+          "Permadeath: the row greyed, still shown");
+    const int sl = pauseToStates();
+    moveTo(sl, 1); /* the empty slot */
+    int c[8];
+    if (cardRows(1, c)) {
+        const char *want = ui_str(UI_STR_DIFF_STATES_SAVE_LOCKED), *line = txt(c[7]);
+        const size_t n = strcspn(line, "\n");
+        CHECK(n > 0 && strncmp(line, want, n) == 0, "Permadeath: the page's line \"%s\"", line);
+    }
+    press(LT_PAD_TRIANGLE);
+    CHECK(settle(fxLayout(57), 60), "Back: the pause menu");
+    ico_difficulty_reset();
+    frame(0);
+    CHECK(!lt_ext_row_dim(st), "Normal again: the row not greyed");
+
+    /* the Continue screen: the prompt held back while locked */
+    startMenus(1, 1);
+    s_canSave = 0;
+    const int pl = ui_settings_states_prompt_layout();
+    CHECK(pl >= 0, "the prompt's layout (%d)", pl);
+    if (pl < 0) {
+        return;
+    }
+    const int lf = fxLayout(19), words = lt_ext_layout(pl)->first + 1;
+    ico_difficulty_set_row(ICO_DIFF_PERMADEATH, 1);
+    lt_switch_layout(lf);
+    CHECK(settle(lf, 60), "the Continue screen (%d)", current_layout_id);
+    errCapture();
+    s_mcFilesShown = 1;
+    frame(0);
+    frame(0);
+    errRelease(log, sizeof(log));
+    CHECK(lt_ext_prop(words)->masked && lt_ext_prop(words - 1)->masked,
+          "Permadeath: the files shown, the prompt not");
+    CHECK(strstr(log, "Save states prompt not shown") != NULL, "its line (\"%s\")", log);
+    frame(LT_PAD_SQUARE);
+    frame(0);
+    frame(0);
+    CHECK(current_layout_id == lf, "Permadeath: Square opens nothing (%d)", current_layout_id);
+    ico_difficulty_reset();
+    frame(0);
+    CHECK(!lt_ext_prop(words)->masked, "Normal: the prompt shown again");
+    s_mcFilesShown = 0;
+}
+
+/* the Square rows (LT_POINTER_SQUARE) of the layouts chained after the pause
+   menu, as exec_layout_texture draws them with it */
+static int pausePromptRows(int out[4])
+{
+    int n = 0, hops = 0;
+    for (int l = texLayout[fxLayout(57)].link; l >= 0 && hops < 16; l = lt_ext_layout(l)->link) {
+        const LtProp *p = lt_ext_layout(l);
+        for (int j = p->first; j < p->last && n < 4; j++) {
+            if (lt_ext_pointer_role(j) == LT_POINTER_SQUARE) {
+                out[n++] = j;
+            }
+        }
+        hops++;
+    }
+    return n;
+}
+
+/* The pause menu has no Square prompt and reads no Square (v0.9.6 to
+   v0.11.8 the Continue screen's prompt was drawn there; v0.11.9 to v0.11.12
+   it had its own): with the host no Square rows in the layouts chained after
+   it, Square (the pad or the touch button) leaves it current with no line,
+   in Normal and in photo mode, a Permadeath journey and a test room; the
+   Save states row and F6 still open the page; the Continue screen's prompt
+   is unchanged (shown with the files, Square opens the page); no host: no
+   rows, Square nothing */
+static void testPauseSquare(void)
+{
+    char log[2048];
+    int r[4];
+    const int pause = fxLayout(57);
+    startMenus(1, 11);
+    ico_difficulty_reset();
+    toPause();
+    const int st = ui_settings_states_row(), pl = ui_settings_states_prompt_layout();
+    const int sl = ui_settings_page_layout(UI_PAGE_STATES);
+    CHECK(st >= 0 && pl >= 0 && sl >= 0, "the row %d, the Continue screen's layout %d, the page %d",
+          st, pl, sl);
+    if (st < 0 || pl < 0 || sl < 0) {
+        return;
+    }
+    CHECK(pausePromptRows(r) == 0, "no Square rows on the pause menu");
+
+    /* Square: nothing, no line; in Normal and where v0.11.12 refused it */
+    static const char *const kWhen[4] = {"Normal", "photo mode", "Permadeath", "a test room"};
+    for (int k = 0; k < 4; k++) {
+        if (k == 1) {
+            ico_photo_enter();
+        } else if (k == 2) {
+            ico_difficulty_set_row(ICO_DIFF_PERMADEATH, 1);
+        } else if (k == 3) {
+            ico_unused_set_running(ICO_UNUSED_ARENA);
+        }
+        frame(0);
+        errCapture();
+        frame(LT_PAD_SQUARE);
+        frame(0);
+        frame(0);
+        errRelease(log, sizeof(log));
+        CHECK(current_layout_id == pause &&
+                  strstr(log, "opened from the pause menu (Square)") == NULL &&
+                  strstr(log, "Square on the pause menu") == NULL,
+              "%s: Square does nothing (%d; \"%s\")", kWhen[k], current_layout_id, log);
+        CHECK(pausePromptRows(r) == 0, "%s: no Square rows", kWhen[k]);
+        if (k == 1) {
+            ico_photo_exit();
+        }
+        ico_difficulty_reset();
+        ico_unused_set_running(-1);
+        frame(0);
+    }
+
+    /* the row opens the page; Back returns to it */
+    texLayout[pause].curItem = st;
+    press(lt_ext_confirm_button());
+    CHECK(settle(sl, 60), "the row opens the page (%d)", current_layout_id);
+    press(LT_PAD_TRIANGLE);
+    CHECK(settle(pause, 60) && texLayout[pause].curItem == st,
+          "Back: the pause menu on the Save states row (%d, %d)", current_layout_id,
+          texLayout[pause].curItem);
+
+    /* F6 on the pause menu opens the page */
+    errCapture();
+    (void)ui_settings_states_key(0);
+    const int opened = settle(sl, 60);
+    errRelease(log, sizeof(log));
+    CHECK(opened && strstr(log, "hotkeys: F6 opened the Save states page") != NULL,
+          "F6 opens the page (%d; \"%s\")", current_layout_id, log);
+    press(LT_PAD_TRIANGLE);
+    CHECK(settle(pause, 60), "Back again (%d)", current_layout_id);
+
+    /* the Continue screen's prompt: shown with the files, Square opens the page */
+    const LtProp *pp = lt_ext_layout(pl);
+    toContinue();
+    CHECK(pp->last - pp->first == 2 && !lt_ext_prop(pp->first)->masked &&
+              !lt_ext_prop(pp->first + 1)->masked &&
+              lt_ext_pointer_role(pp->first) == LT_POINTER_SQUARE &&
+              strcmp(txt(pp->first + 1), ui_str(UI_STR_STATES)) == 0,
+          "the Continue screen's prompt: %d rows, shown, \"%s\"", pp->last - pp->first,
+          txt(pp->first + 1));
+    press(LT_PAD_SQUARE);
+    CHECK(settle(sl, 60), "Square on the Continue screen opens the page (%d)", current_layout_id);
+    s_mcFilesShown = 0;
+
+    /* no host: no rows, Square nothing */
+    startMenus(0, 11);
+    toPause();
+    CHECK(pausePromptRows(r) == 0, "no host: no Square rows on the pause menu");
+    frame(LT_PAD_SQUARE);
+    frame(0);
+    CHECK(current_layout_id == pause, "no host: Square does nothing (%d)", current_layout_id);
+}
+
+/* a state loaded under this run's settings: what the restore put back of
+   the saving run's game settings is set to this run's again */
+static void testReapplyAfterLoad(void)
+{
+    const int lang = ico_region_cur()->has_game_language;
+    /* the game's Debug-menu switches the variants bind (debug.c
+       debug_VariableInit), here plain ints at their retail values */
+    int oneHit = 0, dodge = 0, battle = 3, demoCam = 0, handCam = 1;
+    int got;
+
+    useConfig("version = 1\n[game]\nlanguage = \"fr\"\n[gameplay]\nhold_type = \"toggle\"\n");
+    CHECK(ico_opt_hold_type() == ICO_HOLD_TOGGLE, "this run: toggle");
+    CHECK(!lang || ico_boot_language() == 3, "this run: French (%d)", ico_boot_language());
+    CHECK(!ico_opt_developer_mode(), "this run: no developer mode");
+    ico_variants_bind_debug(&oneHit, &dodge, &battle, &demoCam, &handCam, NULL);
+    ico_variants_debug_menu_clear();
+    CHECK(!ico_variants_suspend_achievements(), "this run: achievements on");
+    /* a state saved without developer mode: the Debug menu not counted */
+    s_menuOffs = 0;
+    CHECK((ui_settings_reapply_after_state_load("gameplay.developer_mode=false\n") &
+           UI_REAPPLY_DEBUG_MENU) == 0 &&
+              s_menuOffs == 0 && !ico_variants_suspend_achievements(),
+          "no developer mode in the state: achievements on");
+    /* the restore: the saving run's hold type A and German, a state saved in
+       developer mode with Debug-menu switches changed (BrainOnOff and the
+       others are not bound: they keep the state's) */
+    optionControlType = ICO_HOLD_HOLD;
+    NonLinearCameraMove = 4;
+    oneHit = 1;
+    battle = 0;
+    demoCam = 1;
+    got = ui_settings_reapply_after_state_load("gameplay.mirror=\ngameplay.developer_mode=true\n");
+    CHECK(got == (UI_REAPPLY_HOLD_TYPE | (lang ? UI_REAPPLY_LANGUAGE : 0) | UI_REAPPLY_DEBUG_MENU),
+          "what changed: %d", got);
+    CHECK(optionControlType == ICO_HOLD_TOGGLE, "the hold type: %d", optionControlType);
+    CHECK(NonLinearCameraMove == (lang ? 3 : 4), "the game's language: %d", NonLinearCameraMove);
+    CHECK(s_menuOffs == 1, "the Debug menu closed: %d", s_menuOffs);
+    /* the run counts as one that used the Debug menu: achievements off, as
+       after the row's press; the bound switches are this run's */
+    CHECK(ico_variants_suspend_achievements(), "developer-mode state: achievements off");
+    CHECK(oneHit == 0 && dodge == 0 && battle == 3 && demoCam == 0 && handCam == 1,
+          "the bound switches put back: %d %d %d %d %d", oneHit, dodge, battle, demoCam, handCam);
+    /* already this run's, a state saved without developer mode: nothing */
+    got = ui_settings_reapply_after_state_load("gameplay.developer_mode=false\n");
+    CHECK(got == 0 && s_menuOffs == 1, "nothing to do: %d", got);
+    CHECK(ui_settings_reapply_after_state_load(NULL) == 0 && s_menuOffs == 1, "no keys text");
+    /* developer mode on in this run: the menu is left as the state has it */
+    useConfig("version = 1\n[game]\nlanguage = \"fr\"\n[gameplay]\nhold_type = \"toggle\"\n"
+              "developer_mode = true\n");
+    CHECK(ui_settings_reapply_after_state_load("gameplay.developer_mode=true\n") == 0 &&
+              s_menuOffs == 1,
+          "developer mode on now: the menu left");
+    /* the hold type alone: A now, B in the state */
+    useConfig("version = 1\n[gameplay]\nhold_type = \"hold\"\nhold_type_chosen = true\n");
+    optionControlType = ICO_HOLD_TOGGLE;
+    NonLinearCameraMove = lang ? ico_boot_language() : 4;
+    CHECK(ui_settings_reapply_after_state_load("") == UI_REAPPLY_HOLD_TYPE &&
+              optionControlType == ICO_HOLD_HOLD,
+          "A again: %d", optionControlType);
+    useConfig("version = 1\n");
+    NonLinearCameraMove = 2;
+    ui_set_language(UI_LANG_EN);
+    ico_variants_debug_menu_clear();
+    ico_variants_bind_debug(NULL, NULL, NULL, NULL, NULL, NULL);
+}
+
 int main(int argc, char **argv)
 {
     snprintf(s_dir, sizeof(s_dir), "%s", argc > 1 ? argv[1] : ".");
@@ -1043,7 +1344,10 @@ int main(int argc, char **argv)
         testPauseRows();
         testExtrasRows();
         testContinue();
+        testPermadeath();
+        testPauseSquare();
         testStatesKey();
+        testReapplyAfterLoad();
         CHECK(ico_region_select("pal") == 0, "the European region again");
         printf("settings_states_test %s: %s\n", argv[2], failures ? "failed" : "ok");
         return failures ? 1 : 0;
@@ -1051,14 +1355,18 @@ int main(int argc, char **argv)
     testPauseRows();
     testExtrasRows();
     testContinue();
+    testPermadeath();
+    testPauseSquare();
     testCards();
     testActions();
     testConfirm();
+    testTestRoom();
     testTitle();
     testBackAndLoad();
     testNoHost();
     testPictureBox();
     testStatesKey();
+    testReapplyAfterLoad();
     if (failures) {
         printf("settings_states_test: %d failure(s)\n", failures);
         return 1;

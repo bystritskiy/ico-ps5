@@ -40,9 +40,13 @@
 #define PAC_HOST_BATCHES 512
 
 /* The UNPACK payloads of a packet into qw (at most cap quadwords) and their
-   batches; returns the quadword count, 0 when the packet has none. */
+   batches; returns the quadword count, 0 when the packet has none.  *cut
+   (NULL: not asked) is 1 when the stream stopped before the packet's end
+   (an UNPACK past the data, the scratch's room or the batch cap: the rest
+   of the packet is not drawn; the scene ledger names it, rd.h
+   rd_note_packet_out). */
 static unsigned int pac_hostStream(const PacHeader *pk, float (*qw)[4], unsigned int cap,
-                                   RdVuBatchDesc *b, unsigned int *nb, unsigned int *qpv)
+                                   RdVuBatchDesc *b, unsigned int *nb, unsigned int *qpv, int *cut)
 {
     const unsigned char *p = (const unsigned char *)pk->data;
     unsigned int nw = pk->size / 4, i = 0, n = 0;
@@ -64,6 +68,9 @@ static unsigned int pac_hostStream(const PacHeader *pk, float (*qw)[4], unsigned
                 num = 256;
             }
             if (i + num * 4 > nw || n + num > cap || *nb == PAC_HOST_BATCHES) {
+                if (cut != 0) {
+                    *cut = 1;
+                }
                 break;
             }
             memcpy(qw[n], p + (size_t)i * 4, (size_t)num * 16);
@@ -89,7 +96,8 @@ static unsigned int pacHostQwCap;
 
 static RdVuBatchDesc pacHostBatch[PAC_HOST_BATCHES];
 
-static unsigned int pac_hostCollect(const PacHeader *pk, unsigned int *nb, unsigned int *qpv)
+static unsigned int pac_hostCollect(const PacHeader *pk, unsigned int *nb, unsigned int *qpv,
+                                    int *cut)
 {
     unsigned int need = pk->size / 16 + 1;
 
@@ -101,7 +109,7 @@ static unsigned int pac_hostCollect(const PacHeader *pk, unsigned int *nb, unsig
     if (pacHostQw == 0) {
         return 0;
     }
-    return pac_hostStream(pk, pacHostQw, pacHostQwCap, pacHostBatch, nb, qpv);
+    return pac_hostStream(pk, pacHostQw, pacHostQwCap, pacHostBatch, nb, qpv, cut);
 }
 
 /* PC port: a save state's load (port/game/state_host.c).  The scratch
@@ -133,15 +141,15 @@ void pac_HostStateWords(void (*fn)(const void *p, size_t n, int ptr, void *user)
 }
 
 /* The packet's mesh desc (its stream in pacHostQw); 0 when the packet has
-   no batches. */
-static int pac_hostDesc(const PacHeader *pk, RdVuMeshDesc *d, const char *name)
+   no batches.  *cut as pac_hostStream's (NULL: not asked). */
+static int pac_hostDesc(const PacHeader *pk, RdVuMeshDesc *d, const char *name, int *cut)
 {
     unsigned int nb, qpv, n;
 
     if (pk->data == 0 || pk->size == 0) {
         return 0;
     }
-    n = pac_hostCollect(pk, &nb, &qpv);
+    n = pac_hostCollect(pk, &nb, &qpv, cut);
     if (n == 0 || nb == 0 || qpv == 0) {
         return 0;
     }
@@ -185,13 +193,28 @@ static void pac_hostBuild(PacHeader *pk, const char *name, const PacHostIdent *i
     uint64_t h;
     void *field;
     int e;
+    int cut = 0;
 
     memset(pk->pad9C, 0, sizeof(pk->pad9C));
-    if (!pac_hostDesc(pk, &d, name)) {
+    if (!pac_hostDesc(pk, &d, name, &cut)) {
+        /* PC port: no geometry the port can read (no data, no UNPACK, no
+           vertex size): no mesh, the packet's draws none (the scene ledger) */
+        rd_note_packet_out(name, RD_PACKET_OUT_EMPTY);
         return;
     }
-    /* no hash without a pack, dumping or a shot; a morph part is never replaced */
-    h = modelpack_hash_wanted() && (id == 0 || !id->morph) ? rd_vu_mesh_desc_hash(&d, 0, 0) : 0;
+    if (cut) {
+        rd_note_packet_out(name, RD_PACKET_OUT_CUT); /* PC port: the rest not drawn */
+    }
+    /* the triangles' facing from the p2o normals (pac_hostFacing): the
+       table pac_makeStrip just made, kept under the stream's hash, or the
+       one kept for this stream before; the hash it returns (d.hash too) is
+       the model pack's key and the mesh's record, so the stream is hashed
+       once */
+    h = rd_vu_facing_attach(&d);
+    /* no lookup without a pack, dumping or a shot; a morph part is never replaced */
+    if (!modelpack_hash_wanted() || (id != 0 && id->morph)) {
+        h = 0;
+    }
     e = h != 0 ? modelpack_lookup(h) : -1;
     if (e >= 0) {
         if (d.qwPerVertex != RD_VU_QW_SKIN || (id != 0 && id->bones > 0)) {
@@ -242,7 +265,7 @@ void pac_HostRefreshFor(PacHeader *pk, const PacHostIdent *id)
     unsigned int nb, qpv;
     uint64_t h;
 
-    if (m.id == 0 || pac_hostCollect(pk, &nb, &qpv) == 0) {
+    if (m.id == 0 || pac_hostCollect(pk, &nb, &qpv, 0) == 0) {
         return;
     }
     if (rd_update_vu_mesh(m, (const float (*)[4])pacHostQw) || !rd_vu_mesh_replaced(m)) {
@@ -280,7 +303,7 @@ int pac_HostDump(PacHeader *pk, const PacHostIdent *id)
     RdVuMeshDesc d;
     ModelpackIdent mi;
 
-    if (!pac_hostDesc(pk, &d, id != 0 && id->model != 0 ? id->model : "pac")) {
+    if (!pac_hostDesc(pk, &d, id != 0 && id->model != 0 ? id->model : "pac", 0)) {
         return 0;
     }
     mi.model = id != 0 ? id->model : 0;
@@ -616,6 +639,33 @@ static short *pac_hostStripEntry(short *strip, int num, int i)
     return strip + pac_HostStripOrder(pacWork.name, strip + 2, 8, num, i) * 8;
 }
 
+#ifdef ICO_RD
+
+/* PC port: the facing of the triangles a strip kicks (rd_mesh.h
+   rd_vu_facing_vertex), from its records as the strip writes them
+   (ordered: pac_makeNormalStrip's order, pac_hostStripEntry; else the
+   cluster strip's, as stored): each record's position (+4) and normal
+   (+6) index.  The packet's stream drops the normals of a prelit part;
+   the records keep them, so every program's triangles get their front
+   from the same normals the lit ones are shaded by.  A record whose normal
+   index is outside the part's normals voids the packet's table. */
+static void pac_hostFacing(PObjPart *obj, short *strip, int num, int ordered)
+{
+    int i;
+
+    for (i = 0; i < num; i++) {
+        short *v = ordered ? pac_hostStripEntry(strip, num, i) : strip + i * 8;
+        const float *nrm = 0;
+
+        if (obj->nrm != 0 && v[3] >= 0 && (unsigned int)v[3] < obj->nrmCount) {
+            nrm = (const float *)(obj->nrm + v[3] * 16);
+        }
+        rd_vu_facing_vertex(i == 0, (const float *)(obj->vtx + v[2] * 16), nrm);
+    }
+}
+
+#endif
+
 static int pac_makeNormalStrip(PObjPart *obj, short *strip, int num)
 {
     char buf[256];
@@ -673,6 +723,9 @@ static int pac_makeNormalStrip(PObjPart *obj, short *strip, int num)
             *pacWork.cursor.f++ = 127.0f;
         }
     }
+#ifdef ICO_RD
+    pac_hostFacing(obj, strip, num, 1);
+#endif
     return num - 2;
 }
 
@@ -810,6 +863,9 @@ static int pac_makeClusterStrip(PObjPart *obj, short *strip, int num)
             *pacWork.cursor.f++ = 127.0f;
         }
     }
+#ifdef ICO_RD
+    pac_hostFacing(obj, strip, num, 0);
+#endif
     return num - 2;
 }
 
@@ -1125,6 +1181,9 @@ static int pac_makeStrip(char **out, PObjPart *obj, PObjGroup *tbl, int matno, i
     if (pkt == 0)
         debug_Assert("pac_makeStrip:No Memory To Convert.\n");
     pac_openDmaTag(pkt);
+#ifdef ICO_RD
+    rd_vu_facing_begin(); /* the packet's facing table (pac_hostFacing) */
+#endif
     t0 = debug_GetTimerSec();
     for (i = 0; i < num; i++) {
         p = ((short **)obj->strips)[i];

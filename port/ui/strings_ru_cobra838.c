@@ -41,10 +41,6 @@ const char *const ui_strings_ru_cobra838[UI_STR_COUNT] = {
         "Для более спокойного прохождения. Йорду все еще могут похитить в некоторых постановочных сценах.",
     [UI_STR_OPT_PIT_TIME] = "Время на спасение Йорды",
     [UI_STR_OPT_PIT_TIME_NOTE] = NULL, /* says something else than the English: English */
-    [UI_STR_VAL_PIT_HALF] = "50%",
-    [UI_STR_VAL_PIT_LONGER] = "x1,5",
-    [UI_STR_VAL_PIT_DOUBLE] = "x2",
-    [UI_STR_VAL_PIT_TRIPLE] = "x3",
     [UI_STR_OPT_SHADOW_SPEED] = "Скорость теней",
     [UI_STR_OPT_SHADOW_SPEED_NOTE] =
         "Меняет скорость ходьбы, бега и полета теней. Частота их атак не меняется.",
@@ -210,8 +206,15 @@ const char *const ui_strings_ru_cobra838[UI_STR_COUNT] = {
     [UI_STR_OPT_NEWGAME_PLUS] = "Новая игра+",
     [UI_STR_NEWGAME_PLUS_SCREEN] =
         "Диалоги Йорды будут отображаться с переводом, а концовка и предметы отличаться от оригинала. Работает и при первом прохождении.",
+    [UI_STR_NEWGAME_START] = "Начать",
+    [UI_STR_NEWGAME_START_SCREEN] = "Начинает новую игру с выбранными выше настройками.",
     [UI_STR_OPT_CRT] = "ЭЛТ-фильтр",
     [UI_STR_OPT_CRT_STRENGTH] = "Сила ЭЛТ-фильтра",
+    [UI_STR_OPT_TONE_GAMMA] = NULL,      /* newer than the translation: English */
+    [UI_STR_OPT_TONE_BRIGHTNESS] = NULL, /* newer than the translation: English */
+    [UI_STR_OPT_TONE_CONTRAST] = NULL,   /* newer than the translation: English */
+    [UI_STR_OPT_TONE_SATURATION] = NULL, /* newer than the translation: English */
+    [UI_STR_OPT_TONE_NOTE] = NULL,       /* newer than the translation: English */
     [UI_STR_VAL_CRT_SCANLINES] = "Линии развертки",
     [UI_STR_VAL_CRT_CONSUMER] = "Бытовой телевизор",
     [UI_STR_VAL_CRT_TRINITRON] = NULL, /* English in his table: English */
@@ -447,7 +450,6 @@ const char *const ui_strings_ru_cobra838[UI_STR_COUNT] = {
     [UI_STR_STATS_CAPTURES] = "Кол-во похизений Йорды",
     [UI_STR_STATS_SAVES] = "Сохранения за это прохождение",
     [UI_STR_STATS_ENEMIES] = "Побежденные враги за это прохождение",
-    [UI_STR_STATS_ASSISTS] = "Помощь",
     [UI_STR_STATS_AREA] = "Область",
     [UI_STR_PHOTO_ACT_MOVE] = "движение",
     [UI_STR_PHOTO_ACT_LOOK] = "осмотр",
@@ -577,8 +579,10 @@ const char *const ui_strings_ru_cobra838[UI_STR_COUNT] = {
     [UI_STR_OPT_SKIP_OPENING] = "Пропустить вступление",
     [UI_STR_OPT_SKIP_OPENING_NOTE] =
         "Игра запускается с главного меню, без логотипа Sony и вступительной сцены. Изменение вступит в силу при следующем запуске.",
-    [UI_STR_OPT_SECOND_CARD] = NULL,      /* newer than his table: English */
-    [UI_STR_OPT_SECOND_CARD_NOTE] = NULL, /* newer than his table: English */
+    [UI_STR_OPT_SECOND_CARD] = NULL,           /* newer than his table: English */
+    [UI_STR_OPT_SECOND_CARD_NOTE] = NULL,      /* newer than his table: English */
+    [UI_STR_OPT_SHADOWS_TOGETHER] = NULL,      /* newer than his table: English */
+    [UI_STR_OPT_SHADOWS_TOGETHER_NOTE] = NULL, /* newer than his table: English */
     [UI_STR_OPT_AA] = "Сглаживание",
     [UI_STR_OPT_AA_NOTE] =
         "Сглаживает зубчатые края. Суперсэмплинг увеличивает число пикселей в 4 (2x) или 16 (4x) раз. При падении FPS до 30 снизьте значение.",
@@ -656,10 +660,6 @@ const char *const ui_strings_ru_cobra838[UI_STR_COUNT] = {
     [UI_STR_BACKUP_WHY_TOO_BIG] = NULL,    /* newer than his table: English */
     [UI_STR_BACKUP_WHY_NO_DIALOG] = NULL,  /* newer than his table: English */
     [UI_STR_BACKUP_WHY_NO_SPACE] = NULL,   /* newer than his table: English */
-    [UI_STR_OPT_EFFECT_WATER] = "Отражения в воде",
-    [UI_STR_VAL_SHARP] = "Четкие",
-    [UI_STR_EFFECT_WATER_NOTE] =
-        "В режиме «Четкие» отражения в воде отображаются в выбранном вами разрешении; «Оригинал» сохраняет более мягкие отражения PS2.",
     [UI_STR_VAL_SMOOTH] = "Плавно",
     [UI_STR_OPT_SHOW_FPS] = "Счетчик кадров",
     [UI_STR_EFFECT_MOTION_BLUR_NOTE] =
@@ -703,18 +703,18 @@ const char *const ui_strings_ru_cobra838[UI_STR_COUNT] = {
     [UI_STR_ISO_COPYING] = "Копирование образа диска в приложение",
     [UI_STR_ISO_COPYING_LONG] =
         "Копирование образа диска в приложение. Из-за большого объема файла это может занять несколько минут.",
-    [UI_STR_SECTION_VARIANTS] = "Версии игры",
+    [UI_STR_SECTION_CHAINS] = NULL,    /* newer than his table: English */
+    [UI_STR_SECTION_SHADOWS] = NULL,   /* newer than his table: English */
+    [UI_STR_SECTION_CUTSCENES] = NULL, /* newer than his table: English */
     [UI_STR_OPT_VAR_TOUGHNESS] = "Прочность теней",
     [UI_STR_OPT_VAR_TOUGHNESS_NOTE] =
-        "Стойкость теней как в версии NTSC. В следующих прохождениях сложность не растет. Достижения не отключаются.",
+        "Стойкость теней как в версии NTSC. В следующих прохождениях сложность не растет.",
     [UI_STR_VAL_VAR_AMERICAN] = "Американская",
     [UI_STR_VAL_VAR_NOT_TOUGHER] = "Без усиления в следующих прохождениях",
     [UI_STR_OPT_VAR_ONE_HIT] = "Одно попадание за взмах",
-    [UI_STR_OPT_VAR_ONE_HIT_NOTE] =
-        "Каждый взмах оружия Ико наносит тени урон только один раз. Отключает достижения.",
+    [UI_STR_OPT_VAR_ONE_HIT_NOTE] = "Каждый взмах оружия Ико наносит тени урон только один раз.",
     [UI_STR_OPT_VAR_NEVER_DODGE] = "Тени не уклоняются",
-    [UI_STR_OPT_VAR_NEVER_DODGE_NOTE] =
-        "Тени не будут уклоняться от ударов Ико. Отключает достижения.",
+    [UI_STR_OPT_VAR_NEVER_DODGE_NOTE] = "Тени не будут уклоняться от ударов Ико.",
     [UI_STR_OPT_VAR_AGGRESSION] = "Агрессивность теней",
     [UI_STR_VAL_VAR_AGG_OWN] = "Оригинал",
     [UI_STR_VAL_VAR_AGG_BOLD_PATIENT] = "Смелые, неторопливые",
@@ -722,15 +722,14 @@ const char *const ui_strings_ru_cobra838[UI_STR_COUNT] = {
     [UI_STR_VAL_VAR_AGG_WARY_PATIENT] = "Осторожные, неторопливые",
     [UI_STR_VAL_VAR_AGG_WARY_QUICK] = "Осторожные, быстрые",
     [UI_STR_OPT_VAR_AGGRESSION_NOTE] =
-        "Стиль боя теней. Вариант «Как задумано» сохраняет исходное поведение. Достижения не отключаются.",
+        "Стиль боя теней. Вариант «Как задумано» сохраняет исходное поведение.",
     [UI_STR_OPT_VAR_NO_HINTS] = "Без подсказок",
     [UI_STR_OPT_VAR_NO_HINTS_NOTE] =
-        "Йорда не подсказывает, куда идти, как на североамериканском диске. Достижения не отключаются.",
+        "Йорда не подсказывает, куда идти, как на североамериканском диске.",
     [UI_STR_OPT_VAR_BARRIER] = "Барьер Королевы",
     [UI_STR_VAL_VAR_HITS_5] = "5 ударов",
     [UI_STR_VAL_VAR_HITS_7] = "7 ударов",
-    [UI_STR_OPT_VAR_BARRIER_NOTE] =
-        "Сколько ударов требуется, чтобы разрушить барьер Королевы. Достижения не отключаются.",
+    [UI_STR_OPT_VAR_BARRIER_NOTE] = "Сколько ударов требуется, чтобы разрушить барьер Королевы.",
     [UI_STR_OPT_VAR_NO_LOOK] = "Отключить обзор во время кат-сцен",
     [UI_STR_OPT_VAR_NO_LOOK_NOTE] =
         "Правый стик больше не управляет обзором во время кат-сцен. Достижения не отключаются.",
@@ -742,7 +741,7 @@ const char *const ui_strings_ru_cobra838[UI_STR_COUNT] = {
     [UI_STR_OPT_VAR_TOUGHNESS_NOTE_DEMO] =
         NULL, /* longer than its space (422 bytes): English until shortened */
     [UI_STR_OPT_VAR_NO_HINTS_NOTE_2001] =
-        "В этой версии игры подсказок нет, эта настройка ничего не меняет. Достижения не отключаются.",
+        "В этой версии игры подсказок нет, эта настройка ничего не меняет.",
     [UI_STR_OPT_VAR_NO_LOOK_NOTE_2001] =
         "В этой версии игры нельзя осматриваться во время роликов, поэтому эта настройка ничего не меняет. Достижения не отключаются.",
     [UI_STR_GPU_HANG_TURNIP] =
@@ -761,7 +760,6 @@ const char *const ui_strings_ru_cobra838[UI_STR_COUNT] = {
     [UI_STR_STATES_PAUSE_FIRST] = "Приостановите игру, чтобы сохранить состояние",
     [UI_STR_STATES_REFUSED_BUILD] = "Сохранено в другой версии игры",
     [UI_STR_STATES_REFUSED_DISC] = "Сохранено с другого диска",
-    [UI_STR_STATES_REFUSED_SETTINGS] = "Отличается настройка игрового процесса: %s",
     [UI_STR_STATES_REFUSED_BUSY] = "Подождите, идет процесс загрузки или сохранения",
     [UI_STR_STATES_REFUSED_CHECK] = "Не удалось восстановить состояние",
     [UI_STR_STATES_OFF] = "В этой сборке сохранение состояний отключено",
@@ -778,7 +776,140 @@ const char *const ui_strings_ru_cobra838[UI_STR_COUNT] = {
         "Работает только при частоте кадров выше «Оригинальной» и включенном свечении.",
     [UI_STR_OPT_EFFECT_MOTION_BLUR_STRENGTH] = NULL,  /* newer than the translation: English */
     [UI_STR_EFFECT_MOTION_BLUR_STRENGTH_NOTE] = NULL, /* newer than the translation: English */
+    [UI_STR_SECTION_UNUSED] = NULL,                   /* newer than his table: English */
+    [UI_STR_UNUSED_ARENA] = NULL,                     /* newer than his table: English */
+    [UI_STR_UNUSED_ARENA_NOTE] = NULL,                /* newer than his table: English */
+    [UI_STR_UNUSED_CLIMB] = NULL,                     /* newer than his table: English */
+    [UI_STR_UNUSED_CLIMB_NOTE] = NULL,                /* newer than his table: English */
+    [UI_STR_UNUSED_MOVIE] = NULL,                     /* newer than his table: English */
+    [UI_STR_UNUSED_MOVIE_NOTE] = NULL,                /* newer than his table: English */
+    [UI_STR_UNUSED_ART] = NULL,                       /* newer than his table: English */
+    [UI_STR_UNUSED_ART_NOTE] = NULL,                  /* newer than his table: English */
+    [UI_STR_UNUSED_ART_VER] = NULL,                   /* newer than his table: English */
+    [UI_STR_UNUSED_ART_START] = NULL,                 /* newer than his table: English */
+    [UI_STR_UNUSED_ART_COPYRIGHT] = NULL,             /* newer than his table: English */
+    [UI_STR_STATES_REFUSED_UNUSED] = NULL,            /* newer than his table: English */
     [UI_STR_LANG_RU_BOBTTZ] = "Русский (bob-ttz)",
     [UI_STR_LANG_RU_COBRA838] = "Русский (cobra838)",
     [UI_STR_LANG_PT_BR] = "Português (Brasil) (ichagas7)",
+    /* ---- new since v0.10.2: English until translated ---- */
+    /* Written by the maintainer, please check: UI_STR_NEWGAME_START, UI_STR_NEWGAME_START_SCREEN (above). */
+    [UI_STR_VAL_ALWAYS_SCENES] = NULL,         /* "Always, Start only in scenes" */
+    [UI_STR_OPT_UPSCALE] = NULL,               /* "Upscaling" */
+    [UI_STR_VAL_UPSCALE_FSR1] = NULL,          /* "FSR 1.0" */
+    [UI_STR_VAL_UPSCALE_FSR3] = NULL,          /* "FSR 3.1" */
+    [UI_STR_OPT_UPSCALE_QUALITY] = NULL,       /* "Upscaling quality" */
+    [UI_STR_VAL_UPSCALE_Q_NATIVE] = NULL,      /* "Native AA" */
+    [UI_STR_VAL_UPSCALE_Q_QUALITY] = NULL,     /* "Quality" */
+    [UI_STR_VAL_UPSCALE_Q_BALANCED] = NULL,    /* "Balanced" */
+    [UI_STR_VAL_UPSCALE_Q_PERFORMANCE] = NULL, /* "Performance" */
+    [UI_STR_OPT_UPSCALE_SHARPNESS] = NULL,     /* "Sharpness" */
+    /* "FSR (AMD) sharpens a picture drawn smaller than the screen. Not with the CRT filter or at Window. 3.1: no Downsampling; anti-aliasing off." */
+    [UI_STR_OPT_UPSCALE_NOTE] = NULL,
+    [UI_STR_AA_FSR3] = NULL,            /* " (off: FSR 3.1)" */
+    [UI_STR_EXTRAS_DESKTOP] = NULL,     /* "Add to the applications menu" */
+    [UI_STR_DESKTOP_ADDED] = NULL,      /* "Added to the menu" */
+    [UI_STR_DESKTOP_ADDED_BODY] = NULL, /* "The game is in your\napplications menu." */
+    [UI_STR_DESKTOP_FAILED] = NULL,     /* "Could not add to the menu" */
+    /* "The menu entry could not be\nwritten to your user folder." */
+    [UI_STR_DESKTOP_FAILED_BODY] = NULL,
+    [UI_STR_SECTION_COMBAT] = NULL,     /* "Combat" */
+    [UI_STR_OPT_VAR_AUTO_GUARD] = NULL, /* "Automatic guard" */
+    /* "Off: Ico no longer blocks a Shadow’s attack from the front; it lands as an attack from behind does." */
+    [UI_STR_OPT_VAR_AUTO_GUARD_NOTE] = NULL,
+    [UI_STR_OPT_VAR_ATTACK_TURN] = NULL, /* "Turn to face shadows" */
+    /* "Off: Ico swings straight ahead instead of turning toward the nearest Shadow; the swing’s reach is unchanged." */
+    [UI_STR_OPT_VAR_ATTACK_TURN_NOTE] = NULL,
+    [UI_STR_OPT_VAR_SHADOWS_WAIT_DOWN] = NULL, /* "Shadows wait while Ico is down" */
+    /* "Off: the Shadows no longer hold back while Ico is knocked down, and their swings land while he is on the ground and getting up." */
+    [UI_STR_OPT_VAR_SHADOWS_WAIT_DOWN_NOTE] = NULL,
+    [UI_STR_OPT_VAR_SWORD_COLOUR] = NULL, /* "Light sword colour" */
+    /* "Red: the light sword leaves a red trail, as its unused twin in the game does; nothing else changes. From the next room." */
+    [UI_STR_OPT_VAR_SWORD_COLOUR_NOTE] = NULL,
+    [UI_STR_OPT_VAR_WEAPON] = NULL, /* "Stick" */
+    /* "Insect net: each stick is the game’s unused insect net; it cannot be swung or lit and never hurts a Shadow. From the next room." */
+    [UI_STR_OPT_VAR_WEAPON_NOTE] = NULL,
+    [UI_STR_VAL_VAR_INSECT_NET] = NULL,    /* "Insect net" */
+    [UI_STR_VAL_VAR_THIRD_JOURNEY] = NULL, /* "Third journey" */
+    /* "Shadows as tough as on a third playthrough, which the game never reaches (twice the first journey’s)." */
+    [UI_STR_OPT_VAR_TOUGHNESS_NOTE_THIRD] = NULL,
+    [UI_STR_OPT_VAR_PEACEFUL] = NULL, /* "Peaceful shadows" */
+    /* "On: Shadows stay where they appear and never go after Ico or Yorda." */
+    [UI_STR_OPT_VAR_PEACEFUL_NOTE] = NULL,
+    [UI_STR_OPT_VAR_CHAIN_SPEED] = NULL, /* "Chain swing speed" */
+    /* "How fast a chain swings when Ico hangs on it and swings it. 1 is the slowest, 10 the fastest, 4 the game’s own. Achievements stay on." */
+    [UI_STR_OPT_VAR_CHAIN_SPEED_NOTE] = NULL,
+    [UI_STR_OPT_VAR_CHAIN_DAMPING] = NULL, /* "Chain swing slowdown" */
+    /* "How quickly a swing dies down while Ico is not swinging the chain. 1 is the slowest, 10 the quickest, 4 the game’s own. Achievements stay on." */
+    [UI_STR_OPT_VAR_CHAIN_DAMPING_NOTE] = NULL,
+    [UI_STR_VAL_VAR_CHAIN_ORIGINAL] = NULL, /* "4 (original)" */
+    [UI_STR_OPT_FREE_MOVEMENT] = NULL,      /* "Free movement" */
+    /* "Press L2 to fly Ico with the sticks: the left stick moves him, the right stick goes up and down, L3 sets him on the floor. Switches achievements off." */
+    [UI_STR_OPT_FREE_MOVEMENT_NOTE] = NULL,
+    [UI_STR_REMAP_ASK_HINT] = NULL, /* "Ask Yorda for a hint" */
+    /* ---- new since v0.11.2: English until translated ---- */
+    [UI_STR_DIFF] = NULL, /* "Difficulty" */
+    /* "Sets the Shadows, the rescue time and the rules for this new journey. The save keeps the choice." */
+    [UI_STR_DIFF_NOTE] = NULL,
+    [UI_STR_DIFF_EASY] = NULL,   /* "Easy" */
+    [UI_STR_DIFF_NORMAL] = NULL, /* "Normal" */
+    [UI_STR_DIFF_HARD] = NULL,   /* "Hard" */
+    [UI_STR_DIFF_CUSTOM] = NULL, /* "Custom" */
+    /* "Slower, gentler Shadows that never take Yorda and never dodge, and more time to rescue her." */
+    [UI_STR_DIFF_EASY_NOTE] = NULL,
+    [UI_STR_DIFF_NORMAL_NOTE] = NULL, /* "The game as it shipped." */
+    /* "Faster, tougher Shadows that attack together, no automatic guard, less time to rescue Yorda, game over after 3 knock-downs in a room." */
+    [UI_STR_DIFF_HARD_NOTE] = NULL,
+    [UI_STR_DIFF_CUSTOM_NOTE] = NULL, /* "Your own rules. Change every row under Customize." */
+    [UI_STR_DIFF_CUSTOMIZE] = NULL,   /* "Customize" */
+    /* "Change each rule on its own. A mix that matches no preset shows as Custom." */
+    [UI_STR_DIFF_CUSTOMIZE_NOTE] = NULL,
+    [UI_STR_DIFF_RULES] = NULL,      /* "Rules" */
+    [UI_STR_DIFF_NO_SHADOWS] = NULL, /* "No Shadows" */
+    /* "On: Shadows never appear. Some story moments are lost or play differently without them." */
+    [UI_STR_DIFF_NO_SHADOWS_NOTE] = NULL,
+    [UI_STR_DIFF_KNOCK_LIMIT] = NULL, /* "Knock-down limit" */
+    /* "A game over once Ico has been knocked down this many times. Off sets no limit." */
+    [UI_STR_DIFF_KNOCK_LIMIT_NOTE] = NULL,
+    [UI_STR_DIFF_KNOCK_SCOPE] = NULL, /* "Knock-downs count" */
+    /* "Counts knock-downs in each room (starting again on entering one) or across the whole journey. Does nothing while the limit is Off." */
+    [UI_STR_DIFF_KNOCK_SCOPE_NOTE] = NULL,
+    [UI_STR_DIFF_SCOPE_ROOM] = NULL,    /* "Each room" */
+    [UI_STR_DIFF_SCOPE_JOURNEY] = NULL, /* "Whole journey" */
+    [UI_STR_DIFF_PERMADEATH] = NULL,    /* "Permadeath" */
+    /* "On: any game over ends this journey. There is no Continue, and the save can no longer be loaded." */
+    [UI_STR_DIFF_PERMADEATH_NOTE] = NULL,
+    [UI_STR_DIFF_LOCKED_NOTE] = NULL, /* "Chosen when the journey began" */
+    [UI_STR_DIFF_LINE] = NULL,        /* "Difficulty" */
+    [UI_STR_DIFF_LINK] = NULL,        /* "Difficulty" */
+    [UI_STR_DIFF_TOAST_ENDED] = NULL, /* "This journey has ended." */
+    /* "Save states cannot be loaded on a Permadeath journey." */
+    [UI_STR_DIFF_STATES_LOCKED] = NULL,
+    [UI_STR_DIFF_WORD_PERMADEATH] = NULL, /* "Permadeath" */
+    /* "Save states cannot be made on a Permadeath journey." */
+    [UI_STR_DIFF_STATES_SAVE_LOCKED] = NULL,
+    /* ---- new since v0.11.8: English until translated ---- */
+    [UI_STR_STATES_CKPT_ROW] = NULL, /* "Loads from its last checkpoint" */
+    /* "Resumed at its last checkpoint\n(made by version %s)." */
+    [UI_STR_STATES_CKPT_LOADED] = NULL,
+    /* "Made by version %s: it cannot be\nresumed and has no checkpoint." */
+    [UI_STR_STATES_CKPT_NONE] = NULL,
+    [UI_STR_STATES_PAUSE_FIRST_LOAD] = NULL, /* "Pause the game to load this state" */
+    /* ---- new since v0.11.12: English until translated ---- */
+    [UI_STR_OPT_BUTTON_PICTURES] = NULL, /* "Button pictures" */
+    /* "The buttons shown in menus and photo mode. Auto follows the controller you used last." */
+    [UI_STR_BUTTON_PICTURES_NOTE] = NULL,
+    /* ---- new since v0.11.14: English until translated ---- */
+    [UI_STR_OPT_ZOOM_TYPE] = NULL,   /* "Zoom type" */
+    [UI_STR_VAL_ZOOM_HOLD] = NULL,   /* "Hold" */
+    [UI_STR_VAL_ZOOM_TOGGLE] = NULL, /* "Toggle" */
+    /* "Hold: the camera zooms in while you keep R2 held. Toggle: press R2 once to zoom in, press again to zoom out." */
+    [UI_STR_ZOOM_TYPE_NOTE] = NULL,
+    [UI_STR_OPT_CAMERA_RESET] = NULL, /* "Camera reset" */
+    /* "On: click the right stick (R3) to bring the camera straight back to Ico." */
+    [UI_STR_CAMERA_RESET_NOTE] = NULL,
+    /* ---- new since v0.11.15: English until translated ---- */
+    [UI_STR_OPT_YORDA_LOOK] = NULL, /* "Look at Yorda" */
+    /* "Ico and the camera turn to Yorda without calling her. Hold: while you hold L3. Toggle: L3 starts and stops it." */
+    [UI_STR_YORDA_LOOK_NOTE] = NULL,
 };

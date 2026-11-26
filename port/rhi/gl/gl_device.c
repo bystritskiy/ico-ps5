@@ -6,6 +6,8 @@
 #include "rhi_gl.h"
 #include "../rhi_backend.h"
 #include "../rhi_bind_cache.h"
+#include "../rhi_device_table.h"
+#include "gl_sync_wait.h"
 #include <stdlib.h>
 #include <string.h>
 
@@ -223,13 +225,17 @@ static bool gl_create_context(const RhiDeviceDesc *desc, bool debug)
     }
     SDL_Window *target = w ? w : g_gl.ownWindow;
     gl_context_attributes(debug);
+    if (w) {
+        /* the driver's context start: a hang here leaves the line */
+        GL_LOG_DIRECT("creating the OpenGL 4.3 core context on the window");
+    }
     g_gl.context = SDL_GL_CreateContext(target);
     if (!g_gl.context) {
-        GL_LOG("no OpenGL 4.3 core context (%s)", SDL_GetError());
+        GL_LOG_DIRECT("no OpenGL 4.3 core context (%s)", SDL_GetError());
         return false;
     }
     if (!SDL_GL_MakeCurrent(target, g_gl.context)) {
-        GL_LOG("the OpenGL context is not current (%s)", SDL_GetError());
+        GL_LOG_DIRECT("the OpenGL context is not current (%s)", SDL_GetError());
         return false;
     }
     return true;
@@ -305,6 +311,29 @@ static uint32_t gl_vendor_id(const char *vendor, const char *renderer)
     return 0u;
 }
 
+/* the device table's start-up lines (../rhi_device_table.h,
+   docs/port/DEVICE_TABLE.md): no row is keyed on OpenGL, so the header
+   names the rows a GL identity matches (vendor-unknown on a driver whose
+   vendor the strings do not name), with no fakes (the tests' are Vulkan's);
+   the summary's clause noted */
+static void gl_device_table_line(const char *line, void *user)
+{
+    (void)user;
+    GL_LOG_DIRECT("%s", line);
+}
+
+static void gl_device_table(void)
+{
+    RhiDeviceId id;
+    memset(&id, 0, sizeof id);
+    id.backend = RHI_DT_OPENGL;
+    id.os = RHI_DT_OS_BUILD;
+    id.vendorId = g_gl.limits.vendorId;
+    id.deviceName = g_gl.adapterName[0] ? g_gl.adapterName : NULL;
+    id.driverText = g_gl.limits.driverText;
+    (void)rhi_device_table_start(&id, NULL, gl_device_table_line, NULL);
+}
+
 static void gl_fill_limits(void)
 {
     RhiLimits *o = &g_gl.limits;
@@ -372,6 +401,12 @@ static void gl_fill_limits(void)
     o->rov = false;
     o->rasterOrderAttachment = false;
     o->rasterOrderOff = NULL;
+    /* no vertex stores this release (rhi.h RhiLimits.vertexStores): the
+     * bracket is a no-op here, the record drawn into render targets */
+    o->vertexStores = false;
+    /* no compute dispatches either (rhi.h RhiLimits.computeStores) */
+    o->computeStores = false;
+    o->computeStoresOff = "OpenGL: not in this release";
     o->moltenvk = false;
     o->localRead = false;
     o->vendorId = gl_vendor_id(gl_str(GL_VENDOR), gl_str(GL_RENDERER));
@@ -384,9 +419,11 @@ static void gl_fill_limits(void)
      * in red */
     o->stencilView = true;
     o->stencilViewChannel = 0;
+    o->stencilGather = true; /* textureGather on the usampler2D view */
     o->vuFallbackPlain = NULL;
     o->compilerVersion = NULL;
     o->carefulPipelines = NULL;
+    o->serialPipelines = NULL;
     GLint64 maxIndex = 0;
     glf.GetInteger64v(GL_MAX_ELEMENT_INDEX, &maxIndex);
     o->maxDrawIndexedIndexValue =
@@ -433,10 +470,62 @@ void gl_frame_fence(void)
     glf.Flush(); /* the fence reaches the GPU without a wait's flush */
 }
 
+/* gl_sync_wait.h's slice: one glClientWaitSync on the fence */
+static GlswSlice gl_sync_slice(void *user, uint64_t timeoutNs)
+{
+    const GLenum r = glf.ClientWaitSync((GLsync)user, GL_SYNC_FLUSH_COMMANDS_BIT, timeoutNs);
+    return r == GL_TIMEOUT_EXPIRED ? GLSW_SLICE_TIMEOUT
+           : r == GL_WAIT_FAILED   ? GLSW_SLICE_FAILED
+                                   : GLSW_SLICE_SIGNALED;
+}
+
+static uint64_t gl_sync_now(void *user)
+{
+    (void)user;
+    return gl_now_ns();
+}
+
+static void gl_sync_pump(void *user, uint64_t heldNs)
+{
+    (void)user;
+    if (g_gl.hasWaits && g_gl.waits.pump) {
+        g_gl.waits.pump(g_gl.waits.ctx, "a frame's fence", heldNs);
+    }
+}
+
+static void gl_sync_slow(void *user, uint64_t heldNs)
+{
+    (void)user;
+    GL_LOG_DIRECT("a frame's fence has not signalled after %.1f s; still waiting",
+                  (double)heldNs / 1e9);
+}
+
+/* the time one fence wait may take: the window's (the GPU hang limit), else
+ * ICO_GPU_HANG_LIMIT's seconds where set (port/platform/main_host.c sets it
+ * for the game), else none (the tests and tools) */
+static uint64_t gl_wait_limit_ns(void)
+{
+    if (g_gl.hasWaits && g_gl.waits.limitNs) {
+        return g_gl.waits.limitNs;
+    }
+    const char *v = getenv("ICO_GPU_HANG_LIMIT");
+    const double s = v && v[0] ? atof(v) : 0.0;
+    return s > 0.0 ? (uint64_t)(s * 1e9) : 0u;
+}
+
 /* Waits for a fence; the time blocked counts (RhiStats.fenceWaitNs).  No
- * fence (its creation failed): glFinish. */
+ * fence (its creation failed): glFinish.  The wait is held to the GPU hang
+ * limit (gl_wait_limit_ns; it used to loop on 1 s waits with no end): past
+ * it the device counts as lost (rhi_device_lost: the window's loss path,
+ * or the switch going back), the line says so, and no later wait blocks.
+ * In 50 ms slices with the window's pump between them where the window set
+ * its hooks (the self-tests' readbacks inside a switch run on its thread),
+ * else 1 s slices as before. */
 static void gl_wait_sync(GLsync s)
 {
+    if (!s && g_gl.lost) {
+        return;
+    }
     if (!s) {
         const uint64_t t0 = gl_now_ns();
         glf.Finish();
@@ -444,19 +533,29 @@ static void gl_wait_sync(GLsync s)
         g_gl.fenceWaits++;
         return;
     }
+    if (g_gl.lost) {
+        return;
+    }
     GLenum r = glf.ClientWaitSync(s, GL_SYNC_FLUSH_COMMANDS_BIT, 0);
     if (r == GL_TIMEOUT_EXPIRED) {
-        const uint64_t t0 = gl_now_ns();
-        bool logged = false;
-        do {
-            r = glf.ClientWaitSync(s, GL_SYNC_FLUSH_COMMANDS_BIT, 1000000000ull);
-            if (r == GL_TIMEOUT_EXPIRED && !logged && gl_now_ns() - t0 > 2000000000ull) {
-                logged = true;
-                GL_LOG("a frame's fence has not signalled after 2 s; still waiting");
-            }
-        } while (r == GL_TIMEOUT_EXPIRED);
-        g_gl.fenceWaitNs += gl_now_ns() - t0;
+        const GlswOps ops = {(void *)s, gl_sync_slice, gl_sync_now, gl_sync_pump, gl_sync_slow};
+        const uint64_t limit = gl_wait_limit_ns();
+        uint64_t held = 0;
+        const GlswResult w = gl_sync_wait_limited(
+            &ops, limit, g_gl.hasWaits && g_gl.waits.pump ? 50000000ull : 1000000000ull, &held,
+            NULL);
+        g_gl.fenceWaitNs += held;
         g_gl.fenceWaits++;
+        if (w == GLSW_LIMIT) {
+            g_gl.lost = true;
+            GL_LOG_DIRECT(
+                "a frame's fence has not signalled after %.1f s (the limit %.1f s, the GPU "
+                "hang limit): the GPU or its driver stopped; the device counts as lost "
+                "from now on (replay %u, frame %u)",
+                (double)held / 1e9, (double)limit / 1e9, g_gl.tagReplay, g_gl.tagFrame);
+            return;
+        }
+        r = w == GLSW_FAILED ? GL_WAIT_FAILED : GL_CONDITION_SATISFIED;
     }
     if (r == GL_WAIT_FAILED) {
         static uint32_t s_failed;
@@ -577,6 +676,11 @@ uint32_t rhi_frame_slot(void)
     return (uint32_t)(g_gl.frameIndex % RHI_FRAMES_IN_FLIGHT);
 }
 
+bool rhi_commands_left(void)
+{
+    return true; /* no list limit a slot on this backend */
+}
+
 void rhi_wait_idle(void)
 {
     if (!g_gl.initialised) {
@@ -584,7 +688,9 @@ void rhi_wait_idle(void)
     }
     g_gl.counts.waitIdles++;
     const uint64_t t0 = gl_now_ns();
-    glf.Finish();
+    if (!g_gl.lost) {
+        glf.Finish(); /* not on a device that stopped (gl_wait_sync): it may not return */
+    }
     g_gl.fenceWaitNs += gl_now_ns() - t0;
     /* the other slots' deletes are safe now; the current frame's are not
      * (a bind group made this frame may still be bound) */
@@ -688,11 +794,24 @@ uint32_t rhi_read_timestamps_busy(uint64_t *ns, uint32_t max)
     return n;
 }
 
+/* no slot clock here (rhi.h rhi_read_timestamp_clock: Vulkan's) */
+bool rhi_read_timestamp_clock(RhiTimestampClock *out)
+{
+    memset(out, 0, sizeof(*out));
+    return false;
+}
+
 /* ------------------------------------------------------- occlusion queries
  * Not supported here (rhi.h rhi_cmd_begin_occlusion: the replay tool's
  * measurement is Vulkan's); GL_SAMPLES_PASSED queries (glBeginQuery/glEndQuery per index and slot, read once the slot's fence has passed, as the timestamps) would be the form. */
 bool rhi_occlusion_supported(void)
 {
+    return false;
+}
+
+bool rhi_occlusion_prepare(uint32_t count)
+{
+    (void)count;
     return false;
 }
 
@@ -866,6 +985,10 @@ bool rhi_init(const RhiDeviceDesc *desc)
     memset(&g_gl, 0, sizeof(g_gl));
     s_debugErrors = 0;
     s_debugActive = false;
+    if (desc && desc->waits) {
+        g_gl.waits = *desc->waits;
+        g_gl.hasWaits = true;
+    }
     const bool debug = gl_debug_wanted(desc);
     if (!gl_create_context(desc, debug)) {
         rhi_shutdown();
@@ -908,11 +1031,12 @@ bool rhi_init(const RhiDeviceDesc *desc)
     char msaa[16];
     snprintf(msaa, sizeof(msaa), "1%s%s%s", (l->msaaCounts & 2u) ? "|2" : "",
              (l->msaaCounts & 4u) ? "|4" : "", (l->msaaCounts & 8u) ? "|8" : "");
-    GL_LOG("%s (OpenGL %d.%d %s, %s; GLSL %s)%s; index values up to %u", g_gl.adapterName,
-           g_gl.major, g_gl.minor, g_gl.core ? "core" : "compatibility", g_gl.versionText,
-           gl_str(GL_SHADING_LANGUAGE_VERSION), g_gl.window ? "" : ", headless",
-           l->maxDrawIndexedIndexValue);
-    GL_LOG(
+    GL_LOG_DIRECT("%s (OpenGL %d.%d %s, %s; GLSL %s)%s; index values up to %u", g_gl.adapterName,
+                  g_gl.major, g_gl.minor, g_gl.core ? "core" : "compatibility", g_gl.versionText,
+                  gl_str(GL_SHADING_LANGUAGE_VERSION), g_gl.window ? "" : ", headless",
+                  l->maxDrawIndexedIndexValue);
+    gl_device_table();
+    GL_LOG_DIRECT(
         "limits: uniform align %u, dual-source %s, MSAA %s, interlock %s (image units %d), "
         "texture barrier %s, multi bind %s, BC %s, anisotropy %.0f, max texture %u, entry "
         "points %u (%u optional missing), debug output %s, clip origin lower left (vertex y negated)",
@@ -923,28 +1047,34 @@ bool rhi_init(const RhiDeviceDesc *desc)
         gl_loader_count(), optionalMissing, g_gl.debug ? "on" : "off");
     /* the translated shaders' storage buffers (bindings 16 + t, t up to 5,
      * read by the VU vertex shaders: the stream t0, the record t4, the
-     * ring t5 in the pre-pass's batch builds, three in one vertex shader)
-     * against limits OpenGL 4.3 lets a driver keep small (8 bindings, no
-     * vertex storage blocks) */
+     * ring t5 in the pre-pass's batch builds, three in one vertex shader;
+     * and 16 + 6, the record the store builds write, u6, which tools/
+     * spirv_to_glsl.py moves from the SPIR-V's 48 + 6) against limits
+     * OpenGL 4.3 lets a driver keep small (8 bindings, no vertex storage
+     * blocks) */
     const GLint ssboBindings = gl_int(GL_MAX_SHADER_STORAGE_BUFFER_BINDINGS);
     const GLint vertexSsbos = gl_int(GL_MAX_VERTEX_SHADER_STORAGE_BLOCKS);
     const GLint units = gl_int(GL_MAX_COMBINED_TEXTURE_IMAGE_UNITS);
-    if (ssboBindings <= (GLint)GL_UNIT_STORAGE_BASE + 5 || vertexSsbos < 3 ||
+    if (ssboBindings <= (GLint)GL_UNIT_STORAGE_BASE + 6 || vertexSsbos < 3 ||
         units <= (GLint)GL_UNIT_TEXTURE_BASE + 4) {
         GL_LOG("this driver's limits are below the shaders' bindings: storage buffer bindings %d "
-               "(22 needed), vertex shader storage blocks %d (3 needed), texture units %d (21 "
+               "(23 needed), vertex shader storage blocks %d (3 needed), texture units %d (21 "
                "needed); the draws that use them will fail",
                ssboBindings, vertexSsbos, units);
     }
+    gl_compile_init(); /* the shaders' compile thread (gl_compile.c) */
     gl_check("rhi_init");
     return true;
 }
 
 void rhi_shutdown(void)
 {
+    gl_compile_shutdown(); /* before the contexts go (gl_compile.c) */
     const bool loaded = glf.GetString != NULL;
     if (loaded && g_gl.context) {
-        glf.Finish();
+        if (!g_gl.lost) {
+            glf.Finish();
+        }
         if (g_gl.initialised) {
             gl_cmd_shutdown();
         }
@@ -1030,10 +1160,11 @@ void rhi_set_adapter_wanted(const char *name)
     (void)name;
 }
 
-/* A context reset (ARB_robustness) is not asked for: no loss to report */
+/* A context reset (ARB_robustness) is not asked for; a fence not signalled
+ * within the GPU hang limit counts as a loss (gl_wait_sync) */
 bool rhi_device_lost(void)
 {
-    return false;
+    return g_gl.lost;
 }
 
 /* The counts the Vulkan backend keeps, at the same points (g_gl.counts:
@@ -1090,6 +1221,12 @@ bool rhi_present_fifo_fallback_on(void)
     return false;
 }
 
+/* rhi.h: no mailbox here, so no FIFO start either */
+void rhi_present_fifo_start(RhiFifoStartFn eligible)
+{
+    (void)eligible;
+}
+
 void rhi_set_exclusive_fullscreen(bool allowed)
 {
     g_gl.exclusiveFullscreen = allowed; /* stored: the driver decides */
@@ -1108,6 +1245,32 @@ void rhi_present_timing_use(bool on)
 uint64_t rhi_present_last_id(void)
 {
     return 0;
+}
+
+/* rhi.h: no display times read back on this backend */
+uint32_t rhi_present_glass(uint64_t *lastId, uint64_t *refreshNs, RhiGlassTime *out, uint32_t max)
+{
+    (void)out;
+    (void)max;
+    if (lastId != NULL) {
+        *lastId = 0;
+    }
+    if (refreshNs != NULL) {
+        *refreshNs = 0;
+    }
+    return 0;
+}
+
+/* rhi.h: no desired present time on this backend */
+void rhi_present_desire(uint64_t desiredNs)
+{
+    (void)desiredNs;
+}
+
+/* rhi.h: no display times on this backend */
+void rhi_present_glass_use(bool on)
+{
+    (void)on;
 }
 
 int rhi_present_timing_next(uint64_t *id, uint64_t *ns)
@@ -1156,4 +1319,45 @@ const char *rhi_overlay_name(void)
 }
 
 /* The rhi_create_backend entry (port/rhi/rhi_backend.h). */
+/* The native handles of rhi_native.h: not offered here (the FidelityFX
+ * compute backends exist for Vulkan and D3D12 only). */
+bool rhi_native_device(RhiNativeDevice *out)
+{
+    (void)out;
+    return false;
+}
+
+bool rhi_native_texture(RhiTexture t, RhiNativeTexture *out)
+{
+    (void)t;
+    (void)out;
+    return false;
+}
+
+bool rhi_native_command_list(RhiCommandList cl, void **out)
+{
+    (void)cl;
+    (void)out;
+    return false;
+}
+
+bool rhi_cmd_external_begin(RhiCommandList cl)
+{
+    (void)cl;
+    return false;
+}
+
+void rhi_cmd_external_end(RhiCommandList cl)
+{
+    (void)cl;
+}
+
+bool rhi_device_compute_caps(RhiComputeCaps *out)
+{
+    out->ok = out->apiVersionOk = out->subgroupOk = out->storageFormatsOk = out->float16 = false;
+    out->externalExts = false;
+    out->why = "not offered by the OpenGL backend";
+    return false;
+}
+
 RHI_BACKEND_DEFINE(rhi_backend_gl, "opengl");

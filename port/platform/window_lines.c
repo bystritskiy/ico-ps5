@@ -5,14 +5,29 @@
  * window_host.c.
  */
 #include "window_lines.h"
+#include "window_scene.h"
+#include "window_stall.h" /* window_stall_memory */
 
 #include <stdio.h>
 #include "audio_host.h"
 #include "diag_host.h"
+#include "dump_auto.h" /* ico_dump_auto_held_bytes */
+#include "ico_thread.h"
+#include "log_cost.h"
+#include "mem_watch.h" /* mem_watch_block_clause */
 #include "pace_policy.h"
 #include "host_loop.h"
+#include "rd.h" /* rd_pipelines_first_use_take */
 #include "rd_tex.h"
+#include "rd_vu_compact.h"   /* rd_vu_compact_block, rd_vu_cmp_block_text */
+#include "rd_vu_rec_early.h" /* rd_vu_record_memory, rd_loss_keep_held_bytes */
 #include "rhi.h"
+#ifdef __ANDROID__
+#include "host_android.h"
+#elif !defined(_WIN32)
+#include <sys/stat.h>
+#include <unistd.h>
+#endif
 
 /* The adapter's local video memory (RhiStats videoMem*; Direct3D 11 and
    12): usage and budget in whole MB, false when the adapter does not say */
@@ -89,6 +104,75 @@ void window_slow_replay_line(const RdPerfRecord *r, unsigned vsync, const char *
 /* the graphics allocations against the device's limit (a phone GPU allows
    4096) and the process's memory (a phone ends a process that holds too
    much without a word) */
+/* The block's memory extremes (Android, the log thread's once-a-second
+   reads; issue 179's process swung 538-1067 MB with the
+   graphics steady at 335 MB): what holds the process's memory, so a swing
+   can be put down to its part ("window: memory in the block: ..."; none
+   where the log thread does not read them) */
+/* The VU record's memory every block, every platform (issue 179: 1024 rows
+   held, 96 MB over two frame slots, on a phone under its free-memory floor
+   whose pictures needed at most 256): what it holds, what the block's
+   pictures needed, its growths in play, the upload rings beside it (the
+   words: rd_early_plan.h rd_vu_record_memory_text) */
+static void window_vu_record_line(void)
+{
+    RdVuRecMem m;
+    rd_vu_record_memory(&m);
+    if (m.heldRows == 0 && m.runNeedRows == 0) {
+        return; /* no pre-pass ran yet */
+    }
+    char line[400];
+    (void)rd_vu_record_memory_text(line, sizeof line, &m);
+    fprintf(stderr, "%s\n", line);
+}
+
+void window_vu_compact_line(void)
+{
+    RdVuCmpCounts c;
+    rd_vu_compact_block(&c);
+    if (c.pictures == 0u) {
+        return; /* nothing read back in the block (off, or not the compute record) */
+    }
+    char line[512];
+    (void)rd_vu_cmp_block_text(line, sizeof line, &c);
+    fprintf(stderr, "%s\n", line);
+}
+
+static void memory_block_line(const RhiStats *st)
+{
+    WindowMemBlock b;
+    if (!window_stall_memory_block(&b)) {
+        return;
+    }
+    char floorText[96] = "";
+    if (b.minAvailMb >= 0 && b.floorMb > 0) {
+        snprintf(floorText, sizeof floorText,
+                 " against the floor %ld MB (under it at %u of %u reads)", b.floorMb, b.underFloor,
+                 b.reads);
+    }
+    char swapText[96] = "; swapped out not read";
+    if (b.swapLo >= 0) {
+        snprintf(swapText, sizeof swapText, "; swapped out %ld-%ld MB (VmSwap: still allocated)",
+                 b.swapLo, b.swapHi);
+    }
+    /* what holds the system's memory now (issue 215, mem_watch.h): the
+       file cache, every process's anonymous memory, the kernel, the GPU
+       driver's, the rest */
+    char sysText[400];
+    mem_watch_block_clause(sysText, sizeof sysText);
+    fprintf(stderr,
+            "window: memory in the block: the device's least %ld MB available%s; the process "
+            "%ld-%ld MB resident: anonymous %ld-%ld MB, file-backed %ld-%ld MB, shared %ld-%ld MB "
+            "(/proc/self/status, once a second)%s; the C heap %.0f MB in use and %.0f MB mapped "
+            "(at the last read); beside them the graphics allocations %.0f MB, the dumps' capture "
+            "blocks %.1f MB, the loss dump's frame copies %.1f MB%s%s\n",
+            b.minAvailMb, floorText, b.lo[0], b.hi[0], b.lo[1], b.hi[1], b.lo[2], b.hi[2], b.lo[3],
+            b.hi[3], swapText, b.heapMb, b.mappedMb, (double)st->memoryLiveBytes / 1048576.0,
+            (double)ico_dump_auto_held_bytes() / 1048576.0,
+            (double)rd_loss_keep_held_bytes() / 1048576.0,
+            sysText[0] != '\0' ? "; the system now: " : "", sysText);
+}
+
 void window_memory_line(void)
 {
     /* the graphics allocations against the device's limit (a
@@ -97,14 +181,22 @@ void window_memory_line(void)
     RhiStats st;
     long rss = -1, peak = -1, avail = -1, total = -1;
 
+    window_log_cost_mark("the passes, walk and pixel lines"); /* before it (log_cost.h) */
+
     char gfx[160] = "graphics allocations not counted";
     char dev[96] = "; device memory unknown";
 
     rhi_get_stats(&st);
-    ico_diag_process_memory(&rss, &peak);
+    /* the log thread's last reads where it makes them (window_stall.c:
+       /proc off the game thread), else here */
+    double age = -1.0;
+    const int cell = window_stall_memory(&rss, &peak, &avail, &total, &age);
+    if (cell != 0) {
+        ico_diag_process_memory(&rss, &peak);
+    }
     /* and the device's (issue 128: what the system has left decides
        when it ends the app, not the app's own size) */
-    if (ico_diag_device_memory(&avail, &total) == 0) {
+    if ((cell == 0 && avail >= 0) || (cell != 0 && ico_diag_device_memory(&avail, &total) == 0)) {
         snprintf(dev, sizeof(dev), "; device %ld MB available of %ld MB", avail / 1024,
                  total / 1024);
     }
@@ -127,6 +219,18 @@ void window_memory_line(void)
              (unsigned long long)st.pipelinePoolSize,
              (unsigned long long)(st.pipelineFailures + st.pipelinePoolFull),
              (unsigned long long)st.pipelinePoolFull);
+    /* issue 215: the pipelines made on first use in the block and the
+       longest of them (a start-up set the memory fall stopped leaves its
+       stopped families to them) */
+    char firstUse[128];
+    {
+        uint32_t fuBlock = 0, fuRun = 0;
+        float fuMs = 0.0f;
+        rd_pipelines_first_use_take(&fuBlock, &fuMs, &fuRun);
+        snprintf(firstUse, sizeof(firstUse),
+                 "; %u made on first use in the block (the longest %.2f s), %u in the run",
+                 (unsigned)fuBlock, (double)fuMs / 1000.0, (unsigned)fuRun);
+    }
     /* Direct3D 11 and 12: the card's memory against the budget the system
        gives this process (issue 126: a full card pages, the GPU then waits) */
     char vmem[96] = "";
@@ -138,16 +242,139 @@ void window_memory_line(void)
     }
     window_video_memory_watch();
     s_pagingWarned = false; /* the next block says it again */
+    window_log_cost_part(LOG_COST_MEMORY);
     if (rss >= 0) {
-        fprintf(stderr, "window: memory: %s; the process holds %ld MB (most %ld MB)%s%s%s\n", gfx,
-                rss / 1024, (peak >= 0 ? peak : rss) / 1024, dev, pipes, vmem);
+        fprintf(stderr, "window: memory: %s; the process holds %ld MB (most %ld MB)%s%s%s%s\n", gfx,
+                rss / 1024, (peak >= 0 ? peak : rss) / 1024, dev, pipes, firstUse, vmem);
     } else {
-        fprintf(stderr, "window: memory: %s%s%s\n", gfx, pipes, vmem);
+        fprintf(stderr, "window: memory: %s%s%s%s\n", gfx, pipes, firstUse, vmem);
     }
+    memory_block_line(&st);
+    window_vu_record_line();
 }
 
 /* a step this late past its period with sound held back is named */
 #define HOLD_LATE_MS 100.0
+
+/* ------------------------------------------- the logging's own cost
+ * (log_cost.h): the block's events and the log's writes, one line at the
+ * block's end */
+static LogCost s_logCost;
+static int s_logCostInit;
+static double s_logPrintT0;
+static long long s_logBytesAt = -1;
+
+static LogCost *log_cost(void)
+{
+    if (!s_logCostInit) {
+        log_cost_reset(&s_logCost);
+        s_logCostInit = 1;
+    }
+    return &s_logCost;
+}
+
+/* the log's bytes so far, every thread's (-1 not known): the file's
+   offset where stderr is one; Android's are the log thread's count */
+static long long log_bytes_now(void)
+{
+#if defined(__ANDROID__)
+    return -1;
+#elif defined(_WIN32)
+    return (long long)_ftelli64(stderr);
+#else
+    struct stat st;
+
+    if (fstat(STDERR_FILENO, &st) != 0 || !S_ISREG(st.st_mode)) {
+        return -1;
+    }
+    const off_t at = lseek(STDERR_FILENO, 0, SEEK_CUR);
+    return at >= 0 ? (long long)at : -1;
+#endif
+}
+
+static void window_log_cost_late_span(double t0Ms, double t1Ms)
+{
+    log_cost_late(log_cost(), t0Ms, t1Ms);
+}
+
+void window_log_cost_present(double t0Ms, double t1Ms)
+{
+    log_cost_present(log_cost(), t0Ms, t1Ms);
+}
+
+void window_log_cost_job(double gameMs, double t0Ms, double t1Ms)
+{
+    log_cost_job(log_cost(), gameMs, t0Ms, t1Ms);
+}
+
+static double s_logPartAt; /* the last part's end, 0 outside the print */
+
+void window_log_cost_begin(void)
+{
+    LogCost *c = log_cost();
+    s_logPrintT0 = s_logPartAt = ico_thread_now_ms();
+    c->partValid = 1;
+}
+
+void window_log_cost_mark(const char *what)
+{
+    if (s_logPartAt <= 0.0) {
+        return; /* outside the block's print */
+    }
+    const double now = ico_thread_now_ms();
+    s_logCost.partMs[LOG_COST_OTHER] += now - s_logPartAt;
+    log_cost_other(&s_logCost, what, now - s_logPartAt);
+    s_logPartAt = now;
+}
+
+void window_log_cost_part(int part)
+{
+    if (s_logPartAt <= 0.0 || part < 0 || part >= LOG_COST_PARTS) {
+        return; /* outside the block's print */
+    }
+    const double now = ico_thread_now_ms();
+    s_logCost.partMs[part] += now - s_logPartAt;
+    s_logPartAt = now;
+}
+
+void window_log_cost_end(void)
+{
+    LogCost *c = log_cost();
+    const double t1 = ico_thread_now_ms();
+    char text[1024];
+
+    window_log_cost_mark("the rest"); /* the rest of the print */
+    s_logPartAt = 0.0;
+    c->asks = window_stall_asks_take(&c->askThermalMs, &c->askMemoryMs);
+    if (s_logPrintT0 > 0.0 && t1 >= s_logPrintT0) {
+        c->printValid = 1;
+        c->printMs = t1 - s_logPrintT0;
+        c->print.t0 = s_logPrintT0;
+        c->print.t1 = t1;
+    }
+#ifdef __ANDROID__
+    IcoLogMirrorStats m;
+
+    if (ico_android_log_mirror_take(&m) == 0) {
+        c->bytes = (long long)m.bytes;
+        log_cost_writes(c, m.writes, m.writeMs, m.longestMs, m.longestFamily, m.logcatMs);
+        for (unsigned i = 0; i < m.slowN; i++) {
+            log_cost_slow_write(c, m.slowT0[i], m.slowT1[i]);
+        }
+        c->slow += m.slow > m.slowN ? m.slow - m.slowN : 0u; /* counted past the kept */
+        log_cost_pipe(c, (m.pipeMax + 1023u) / 1024u, m.pipeCap / 1024u);
+    }
+#else
+    const long long at = log_bytes_now();
+
+    c->bytes = at >= 0 && s_logBytesAt >= 0 && at >= s_logBytesAt ? at - s_logBytesAt : -1;
+#endif
+    log_cost_text(c, text, sizeof(text));
+    fprintf(stderr, "window: %s\n", text);
+    log_cost_reset(c);
+    s_logBytesAt = log_bytes_now(); /* the next block's bytes from here */
+    s_logPrintT0 = 0.0;
+}
 
 void window_hold_line(double lateMs, unsigned long long heldMs, unsigned decodes0, unsigned pipes0)
 {
@@ -157,6 +384,12 @@ void window_hold_line(double lateMs, unsigned long long heldMs, unsigned decodes
     IcoStepProfile p;
 
     s_held = heldMs;
+    if (lateMs >= LOG_COST_LATE_MS) {
+        /* the logging's cost line compares its slow writes with it */
+        const double now = ico_thread_now_ms();
+
+        window_log_cost_late_span(now - lateMs, now);
+    }
     if (lateMs > HOLD_LATE_MS) {
         /* the stopped set's background batches wait (rd.h) */
         rd_pipelines_background_hold();
@@ -201,9 +434,9 @@ void window_hold_block_line(unsigned long long heldMs, double stepAvgMs, double 
             stepAvgMs, periodMs, rateWords, pictureMs, heldMs, s_blocks);
 }
 
-/* Frame rate Original's counts for the block (window_orig_*) */
-static unsigned s_origLate, s_origSkipped, s_origReplays;
-static double s_origReplayMs;
+/* Frame rate Original's counts for the block (window_orig_*): the steps
+   late, the frames not presented by reason */
+static unsigned s_origLate, s_origSkipLate, s_origSkipBusy;
 static unsigned long long s_heldAt; /* ico_audio_sdl_held_ms at the last block's end */
 
 /* the simulation's period at hz (host_loop.c's: PAL 20 ms, NTSC 16.683 ms) */
@@ -212,32 +445,46 @@ static uint64_t period_ns(int hz)
     return hz == 50 ? 20000000ull : 16683333ull;
 }
 
-bool window_orig_gate(int keep, uint64_t nowNs, uint64_t dueNs, int hz)
+int window_orig_gate(int keep, bool busy, uint64_t nowNs, uint64_t dueNs, int hz)
 {
-    if (pace_original_present(keep != 0, nowNs, dueNs, period_ns(hz))) {
-        return true;
+    switch (pace_original_gate(keep != 0, busy, nowNs, dueNs, period_ns(hz))) {
+    case PACE_ORIG_LATE:
+        s_origSkipLate++;
+        return RD_GATE_LATE;
+    case PACE_ORIG_BUSY:
+        s_origSkipBusy++;
+        return RD_GATE_BUSY;
+    default:
+        return RD_GATE_PRESENT;
     }
-    s_origSkipped++;
-    return false;
 }
 
-void window_orig_step(bool late, double replayMs)
+void window_orig_step(bool late)
 {
     s_origLate += late ? 1u : 0u;
-    if (replayMs >= 0.0) {
-        s_origReplayMs += replayMs;
-        s_origReplays++;
-    }
+}
+
+unsigned window_orig_skip_busy(void)
+{
+    return s_origSkipBusy;
 }
 
 const char *window_orig_words(bool original)
 {
-    static char words[80];
+    static char words[224];
+    /* the frames handed over while the picture before waited for its GPU
+       end on the submit thread (rd.h rd_thread_gpu_wait_posts_take: the
+       GPU's end first, issue 179), taken every block */
+    const unsigned beside = rd_thread_gpu_wait_posts_take();
 
     words[0] = '\0';
     if (original) {
-        snprintf(words, sizeof(words), "; steps late %u (frames not presented %u)", s_origLate,
-                 s_origSkipped);
+        snprintf(words, sizeof(words),
+                 "; steps late %u (frames not presented %u: the step late %u, the render thread "
+                 "busy %u; frames handed over while the picture before waited for its GPU work "
+                 "%u)",
+                 s_origLate, s_origSkipLate + s_origSkipBusy, s_origSkipLate, s_origSkipBusy,
+                 beside);
     }
     return words;
 }
@@ -247,24 +494,19 @@ void window_hold_block(double stepSumMs, unsigned steps, double stepMaxMs, int h
 {
     const unsigned long long held = ico_audio_sdl_held_ms();
     const double periodMs = (double)period_ns(hz) / 1e6;
-    double picture = replays ? replaySumMs / replays : 0.0;
+    /* the replays' block mean, the submit thread's submit and present
+       included (rd_perf.c rd__perf_submit_times): at Original the picture
+       is handed over, its time no longer the step's own */
+    const double picture = replays ? replaySumMs / replays : 0.0;
 
-    if (original && s_origReplays) {
-        picture = s_origReplayMs / s_origReplays;
-    }
     window_hold_block_line(held > s_heldAt ? held - s_heldAt : 0u, steps ? stepSumMs / steps : 0.0,
                            stepMaxMs - periodMs, periodMs, picture,
                            original ? "Original" : rateName);
     s_heldAt = held;
-    s_origLate = s_origSkipped = s_origReplays = 0;
-    s_origReplayMs = 0.0;
+    s_origLate = s_origSkipLate = s_origSkipBusy = 0;
 }
 
 const char *window_tiler_words(void)
 {
-    return rhi_limits()->tiler
-               ? " (tile-based GPU: the last scene pass carries the earlier passes' tile work; "
-                 "the first pass that writes colour, uploads when new targets are cleared, else "
-                 "list 0's, carries the wait for the display's image)"
-               : "";
+    return window_scene_tiler_words(rhi_limits()->tiler); /* window_scene.c: the text */
 }

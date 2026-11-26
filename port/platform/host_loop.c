@@ -7,9 +7,14 @@
 #include <stdlib.h>
 #include "../audio/audio_host.h"
 #include "../game/options.h"
+#include "../game/camera_reset.h"
+#include "../game/yorda_look.h"
+#include "../game/difficulty.h"
 #include "../data/cdvd_host.h"
 #include "../game/achievements.h"
 #include "../include/ico_credits.h"
+#include "../include/ico_gamestate.h"
+#include "../include/ico_unused.h"
 #include "../save/mc_host.h"
 #include "arena.h"
 #include "diag_host.h"
@@ -85,6 +90,7 @@ void ico_host_init(void)
     ico_audio_host_init();
     gallery_engine_install();
     ico_credits_engine_install();
+    ico_unused_engine_install(); /* Extras > Unused content (unused_live.c) */
     /* the EE timers follow the video mode (50 or 60 Hz vsyncs) */
     ico_clock_set_mode_word(systemStatus);
     ico_sched_reset();
@@ -92,6 +98,10 @@ void ico_host_init(void)
     /* the port's blocks in the save state registry, before the game runs
        (state_port.h; the result is kept for state_host.c) */
     (void)ico_state_register_port();
+    /* Camera reset's press edge: the Main tick count (camera_reset.h) */
+    ico_cam_reset_set_clock(ico_host_main_ticks);
+    /* Look at Yorda's press edge: the same clock (yorda_look.h) */
+    ico_yorda_look_set_clock(ico_host_main_ticks);
     ico_sched_boot(boot_main, NULL, BOOT_PRIORITY);
     ico_sched_run();
 }
@@ -135,17 +145,30 @@ void ico_host_step(void)
     profile.audioMs = ms_since(&t);
     /* the audio push is an SDL call */
     ico_fpenv_sim_enter();
+    ico_sched_switch_max_reset();
     ico_sched_run();
     profile.threadsMs = ms_since(&t);
     /* the port's achievements: once per new Main tick, after the threads
        have run; reads game state, writes none */
     ico_ach_host_poll(ico_host_main_ticks());
+    /* the knock-down limit's in-fall latch, from the snapshot that poll
+       took: the next knock-down counts once Ico is out of the down act and
+       his get-up timer has run out */
+    {
+        const int boy_mode = ico_gs_boy_act_mode();
+
+        ico_difficulty_tick(boy_mode >= 0, boy_mode, ico_gs_boy_down_timer());
+    }
     /* the Extras credits' playback: nothing unless one is running; then it
        watches the stage and puts the game flags back at the title */
     ico_credits_host_poll();
+    /* Extras > Unused content's test rooms: the same, and Options opened
+       again on the page once the title's menu is back */
+    ico_unused_host_poll();
     profile.achMs = ms_since(&t);
     profile.totalMs = (double)(t - start) / 1e6;
     profile.switches = ico_sched_switch_count() - switches;
+    profile.longestMs = (double)ico_sched_switch_max(&profile.longestId) / 1e6;
     ico_cdvd_host_stats(&cd1);
     profile.cdReads = cd1.reads - cd0.reads;
     profile.cdSectors = cd1.sectors - cd0.sectors;

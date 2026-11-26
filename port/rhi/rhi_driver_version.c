@@ -1,6 +1,7 @@
 /* rhi_driver_version.c: the driver version text and the drivers' rules
  * (rhi_driver_version.h). */
 #include "rhi_driver_version.h"
+#include "rhi_device_table.h"
 #include <stdio.h>
 #include <string.h>
 
@@ -37,8 +38,14 @@ char *rhi_driver_version_text(uint32_t vendorId, uint32_t driverId, uint32_t dri
 
 int rhi_driver_is_qualcomm_proprietary(uint32_t vendorId, uint32_t driverId)
 {
-    return vendorId == RHI_VENDOR_QUALCOMM &&
-           (driverId == RHI_DRIVER_ID_QUALCOMM_PROPRIETARY || driverId == 0);
+    /* the device table's test by id (rhi_device_table.h RHI_DT_DRV_QCOM_ID:
+       vendor 0x5143 with driver id 8 or 0), the one its rows key on */
+    RhiDeviceId id;
+    memset(&id, 0, sizeof id);
+    id.backend = RHI_DT_VULKAN;
+    id.vendorId = vendorId;
+    id.driverId = driverId;
+    return rhi_device_driver_test(RHI_DT_DRV_QCOM_ID, &id);
 }
 
 int rhi_driver_is_moltenvk(uint32_t vendorId, uint32_t driverId, int moltenvkBuild)
@@ -64,4 +71,152 @@ uint32_t rhi_metal_color_bytes(const char *deviceName)
         n = n * 10u + (unsigned)(*p - '0');
     }
     return n <= 10u ? 32u : n <= 13u ? 64u : 128u;
+}
+
+/* a case-insensitive strstr for an ASCII needle */
+static const char *findNoCase(const char *s, const char *needle)
+{
+    const size_t n = strlen(needle);
+    for (; *s != '\0'; s++) {
+        size_t i = 0;
+        while (i < n && s[i] != '\0' &&
+               (s[i] | 0x20) == (needle[i] | 0x20) /* needle is lower-case letters */) {
+            i++;
+        }
+        if (i == n) {
+            return s;
+        }
+    }
+    return NULL;
+}
+
+static int isDigit(char c)
+{
+    return c >= '0' && c <= '9';
+}
+
+/* major.minor[.patch][-devel] at s; 1 when at least major.minor is there */
+static int readVersion(const char *s, RhiMesaVersion *out)
+{
+    unsigned part[3] = {0, 0, 0};
+    int got = 0;
+    while (got < 3 && isDigit(*s)) {
+        unsigned v = 0;
+        while (isDigit(*s)) {
+            if (v < 10000u) {
+                v = v * 10u + (unsigned)(*s - '0');
+            }
+            s++;
+        }
+        part[got++] = v;
+        if (*s == '.' && isDigit(s[1])) {
+            s++;
+        } else {
+            break;
+        }
+    }
+    if (got < 2) {
+        return 0;
+    }
+    out->known = 1;
+    out->major = part[0];
+    out->minor = part[1];
+    out->patch = part[2];
+    out->devel = s[0] == '-' && findNoCase(s, "devel") == s + 1;
+    return 1;
+}
+
+int rhi_mesa_version_parse(const char *driverName, const char *driverInfo, RhiMesaVersion *out)
+{
+    memset(out, 0, sizeof(*out));
+    if (driverInfo != NULL) {
+        const char *m = driverInfo;
+        while ((m = findNoCase(m, "mesa")) != NULL) {
+            const char *p = m + 4;
+            while (*p == ' ' || *p == '-' || *p == '_' || *p == 'v' || *p == 'V') {
+                p++;
+            }
+            if (readVersion(p, out)) {
+                return 1;
+            }
+            m += 4;
+        }
+        if (driverName != NULL && findNoCase(driverName, "mesa") != NULL &&
+            readVersion(driverInfo, out)) {
+            return 1;
+        }
+    }
+    return 0;
+}
+
+char *rhi_mesa_version_text(const RhiMesaVersion *v, char *buf, size_t n)
+{
+    if (n == 0) {
+        return buf;
+    }
+    if (v == NULL || !v->known) {
+        buf[0] = '\0';
+    } else {
+        snprintf(buf, n, "Mesa %u.%u.%u%s", v->major, v->minor, v->patch, v->devel ? "-devel" : "");
+    }
+    return buf;
+}
+
+char *rhi_text_one_line(char *s)
+{
+    size_t w = 0;
+    int gap = 0;
+
+    if (s == NULL) {
+        return s;
+    }
+    for (size_t r = 0; s[r] != '\0'; r++) {
+        const unsigned char ch = (unsigned char)s[r];
+
+        if (ch < 0x20 || ch == 0x7f) {
+            gap = 1;
+            continue;
+        }
+        if (gap) {
+            /* one space for the gap, whatever spaces sit beside it ("a\n b",
+               "a \nb", "a \r\n  b": "a b"): the spaces after it skipped,
+               none added after a space */
+            if (ch == ' ') {
+                continue;
+            }
+            gap = 0;
+            if (w > 0 && s[w - 1] != ' ') {
+                s[w++] = ' ';
+            }
+        }
+        if (ch == ' ' && w == 0) {
+            continue;
+        }
+        s[w++] = (char)ch;
+    }
+    while (w > 0 && s[w - 1] == ' ') {
+        w--;
+    }
+    s[w] = '\0';
+    return s;
+}
+
+const char *rhi_driver_compiler_serial(uint32_t vendorId, const char *driverText, uint32_t apiMajor,
+                                       uint32_t apiMinor)
+{
+    /* the B-Series text only: Imagination's statement is about that driver;
+       nothing says an older Rogue driver below Vulkan 1.3 has the fault,
+       and one compile thread for the whole first-start set costs those
+       phones (review 2 N4) */
+    (void)apiMajor;
+    (void)apiMinor;
+    /* the device table's powervr-b-series row (vendor 0x1010, "b-series" in
+       the driver text in any case) */
+    RhiDeviceId id;
+    memset(&id, 0, sizeof id);
+    id.backend = RHI_DT_VULKAN;
+    id.vendorId = vendorId;
+    id.driverText = driverText;
+    const char *why = NULL;
+    return rhi_device_table_choice(&id, RHI_DC_COMPILER_SERIAL, &why) ? why : NULL;
 }

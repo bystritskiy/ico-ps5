@@ -52,11 +52,14 @@
  *            header of another build passes the other-build check.
  *   fresh    a block a later build adds that the state lacks: refused, but
  *            loaded and kept as it is when registered FRESH (not with SCAN).
- *   keys     a simulation key a later build adds that the state lacks: at
- *            its default now (the key-default function) the state loads, the
- *            saved text whole by its own hash; changed from the default,
- *            without the function, or with the saved hash off: refused; a
- *            key only the state lists refused; the absent keys named.
+ *   keys     a state is never refused for a simulation key (both checks
+ *            OK whatever the keys and the settings hash); the load's
+ *            differences (ico_state_keys_diff): a key a later build adds
+ *            that the state lacks is none at its default now (the
+ *            key-default function), named when changed from it or without
+ *            the function; a key only the state lists named, passed over
+ *            when this build retired it (v0.11.3's difficulty rows); a
+ *            listed key that differs named; this run's keys first.
  */
 #include <stdint.h>
 #include <stdio.h>
@@ -291,6 +294,37 @@ static void test_hash_a64(void)
     CHECK(ico_code_a64_writes(0xB90000E0u) == 0u, "a64: a store writes nothing");
     CHECK((ico_code_a64_writes(0x94000040u) & (1u << 30)) != 0, "a64: bl writes x30");
     CHECK(ico_code_a64_writes(0xD53BD048u) == 1u << 8, "a64: mrs writes its target");
+    {
+        /* rules 2: a page kept in x19 used before its ADRP's place, reached by
+           a backward branch (b +12; ldr x0,[x19,#8]; ret; adrp x19; b -12),
+           and one in x20 used in a jump table's case after a BR; the hashes
+           are tools/code_hash_a64.py's (the legacy tables' hashes are made
+           there and compared here) */
+        static const uint32_t f[9] = {0x90000014u, 0x14000003u, 0xF9400660u,
+                                      0xD65F03C0u, 0x90000013u, 0x17FFFFFDu,
+                                      0x1000006Au, 0xD61F0140u, 0xF9400A81u};
+        uint32_t g[9];
+
+        memcpy(g, f, sizeof g);
+        g[2] = 0xF9400A60u;
+        g[8] = 0xF9400E81u;
+        CHECK(ico_code_hash_rules(1, ICO_CODE_A64, f, sizeof f, 0x10000, 0, 0) ==
+                  0xf047d39e2ce0b334ull,
+              "a64 rules 1: tools/code_hash_a64.py's hash");
+        CHECK(ico_code_hash_rules(2, ICO_CODE_A64, f, sizeof f, 0x10000, 0, 0) ==
+                  0xb13c650b0c6751bcull,
+              "a64 rules 2: tools/code_hash_a64.py's hash");
+        CHECK(ico_code_hash_rules(1, ICO_CODE_A64, g, sizeof g, 0x20000, 0, 0) ==
+                  0xe4a31ec5cf5bbcd6ull,
+              "a64 rules 1: a page used across a branch keeps its offset");
+        CHECK(ico_code_hash_rules(2, ICO_CODE_A64, g, sizeof g, 0x20000, 0, 0) ==
+                  0xb13c650b0c6751bcull,
+              "a64 rules 2: pages used across branches and in a jump table's case are masked");
+        CHECK(
+            ico_code_hash(ICO_CODE_A64, g, sizeof g, 0x20000, 0, 0) ==
+                ico_code_hash_rules(ICO_CODE_HASH_RULES, ICO_CODE_A64, g, sizeof g, 0x20000, 0, 0),
+            "a64: ico_code_hash is the current rules");
+    }
 }
 
 /* --- the synthetic builds --------------------------------------------------------------- */
@@ -1420,6 +1454,12 @@ static int fake_default(const char *key, size_t key_n, const char *value, size_t
     return value_n == 0 || (value_n == 5 && memcmp(value, "false", 5) == 0);
 }
 
+/* the retired-key function state_host.c sets (sim_keys.h), for one key */
+static int fake_retired(const char *key, size_t key_n)
+{
+    return key_n == 17 && memcmp(key, "gameplay.pit_time", 17) == 0;
+}
+
 static void keys_header(IcoStateHeader *h, const char *keys)
 {
     ico_state_header_init(h, "build-a");
@@ -1431,61 +1471,89 @@ static void keys_header(IcoStateHeader *h, const char *keys)
 static void test_keys(void)
 {
     IcoStateHeader sv, nw;
-    char detail[160], names[64];
+    char detail[160], names[160];
 
     /* a state saved before gameplay.trips existed */
     keys_header(&sv, "gameplay.mirror=\n");
     keys_header(&nw, "gameplay.mirror=\ngameplay.trips=false\n");
     ico_state_set_key_default(NULL);
-    CHECK(ico_state_header_check(&sv, &nw, detail, sizeof detail) == ICO_STATE_OTHER_SETTINGS &&
-              strcmp(detail, "gameplay.trips=(absent) (now false)") == 0,
-          "without the default function a key the state lacks differs (%s)", detail);
+    CHECK(ico_state_header_check(&sv, &nw, detail, sizeof detail) == ICO_STATE_OK &&
+              detail[0] == '\0',
+          "a key the state lacks never refuses (%s)", detail);
+    CHECK(ico_state_keys_diff(sv.keys, nw.keys, names, sizeof names) == 1 &&
+              strcmp(names, "gameplay.trips=(absent) (now false)") == 0,
+          "without the default function a key the state lacks differs (%s)", names);
     ico_state_set_key_default(fake_default);
     CHECK(ico_state_header_check(&sv, &nw, detail, sizeof detail) == ICO_STATE_OK &&
               detail[0] == '\0',
           "the key at its default now: the state loads (%s)", detail);
     CHECK(ico_state_header_check_other_build(&sv, &nw, detail, sizeof detail) == ICO_STATE_OK,
           "the other-build check too (%s)", detail);
-    CHECK(ico_state_keys_absent(sv.keys, nw.keys, names, sizeof names) == 1 &&
-              strcmp(names, "gameplay.trips") == 0,
-          "the absent key named for the log (%s)", names);
+    CHECK(ico_state_keys_diff(sv.keys, nw.keys, names, sizeof names) == 0 && names[0] == '\0',
+          "at its default: no difference (%s)", names);
     keys_header(&nw, "gameplay.mirror=\ngameplay.trips=\n");
     CHECK(ico_state_header_check(&sv, &nw, NULL, 0) == ICO_STATE_OK, "unset now: loads");
+    CHECK(ico_state_keys_diff(sv.keys, nw.keys, NULL, 0) == 0, "unset now: no difference");
     keys_header(&nw, "gameplay.mirror=\ngameplay.trips=true\n");
-    CHECK(ico_state_header_check(&sv, &nw, detail, sizeof detail) == ICO_STATE_OTHER_SETTINGS &&
-              strcmp(detail, "gameplay.trips=(absent) (now true)") == 0,
-          "changed from its default: refused naming it (%s)", detail);
-    /* the saved text must be whole: its own hash */
+    CHECK(ico_state_header_check(&sv, &nw, detail, sizeof detail) == ICO_STATE_OK,
+          "changed from its default: loads (%s)", detail);
+    CHECK(ico_state_keys_diff(sv.keys, nw.keys, names, sizeof names) == 1 &&
+              strcmp(names, "gameplay.trips=(absent) (now true)") == 0,
+          "changed from its default: named (%s)", names);
+    /* a saved text its hash does not cover: loads (the text is only read) */
     keys_header(&nw, "gameplay.mirror=\ngameplay.trips=false\n");
     sv.settings_hash ^= 1;
-    CHECK(ico_state_header_check(&sv, &nw, detail, sizeof detail) == ICO_STATE_OTHER_SETTINGS &&
-              strcmp(detail, "the settings differ") == 0,
-          "a saved text its hash does not cover: refused (%s)", detail);
-    /* a key present on both sides that differs is still named first */
+    CHECK(ico_state_header_check(&sv, &nw, detail, sizeof detail) == ICO_STATE_OK,
+          "a damaged settings hash: loads (%s)", detail);
+    /* a key present on both sides that differs is named first */
     keys_header(&sv, "gameplay.mirror=true\n");
-    CHECK(ico_state_header_check(&sv, &nw, detail, sizeof detail) == ICO_STATE_OTHER_SETTINGS &&
-              strcmp(detail, "gameplay.mirror=true (now )") == 0,
-          "a differing key named (%s)", detail);
-    /* a key only the state lists (this version dropped it): refused */
+    keys_header(&nw, "gameplay.mirror=\ngameplay.trips=true\n");
+    CHECK(ico_state_header_check(&sv, &nw, detail, sizeof detail) == ICO_STATE_OK,
+          "a differing key: loads (%s)", detail);
+    CHECK(ico_state_keys_diff(sv.keys, nw.keys, names, sizeof names) == 2 &&
+              strcmp(names, "gameplay.mirror=true (now ), gameplay.trips=(absent) (now true)") == 0,
+          "both named, this run's order (%s)", names);
+    /* a key only the state lists (this version dropped it): named */
     keys_header(&sv, "gameplay.mirror=\ngameplay.old=1\n");
     keys_header(&nw, "gameplay.mirror=\n");
-    CHECK(ico_state_header_check(&sv, &nw, detail, sizeof detail) == ICO_STATE_OTHER_SETTINGS &&
-              strcmp(detail, "gameplay.old=1 (now absent)") == 0,
-          "a key this version lacks: refused (%s)", detail);
-    /* the same text: the hash decides, as before */
+    CHECK(ico_state_header_check(&sv, &nw, detail, sizeof detail) == ICO_STATE_OK,
+          "a key this version lacks: loads (%s)", detail);
+    CHECK(ico_state_keys_diff(sv.keys, nw.keys, names, sizeof names) == 1 &&
+              strcmp(names, "gameplay.old=1 (now absent)") == 0,
+          "a key this version lacks: named (%s)", names);
+    /* the same text, another hash: loads, nothing named */
     keys_header(&sv, "gameplay.mirror=\n");
-    CHECK(ico_state_header_check(&sv, &nw, NULL, 0) == ICO_STATE_OK, "the same keys");
     sv.settings_hash ^= 1;
-    CHECK(ico_state_header_check(&sv, &nw, detail, sizeof detail) == ICO_STATE_OTHER_SETTINGS &&
-              strcmp(detail, "the settings differ") == 0,
+    CHECK(ico_state_header_check(&sv, &nw, detail, sizeof detail) == ICO_STATE_OK,
           "the same text, another hash (%s)", detail);
-    /* two absent, listed in order; none */
-    CHECK(ico_state_keys_absent("a=\n", "a=\nb=false\nc=\n", names, sizeof names) == 2 &&
-              strcmp(names, "b, c") == 0,
-          "two absent keys (%s)", names);
-    CHECK(ico_state_keys_absent("a=\nb=\n", "a=\nb=\n", names, sizeof names) == 0 &&
+    CHECK(ico_state_keys_diff(sv.keys, nw.keys, names, sizeof names) == 0, "the same text");
+    /* two absent at their defaults: none; one of them set: that one */
+    CHECK(ico_state_keys_diff("a=\n", "a=\nb=false\nc=\n", names, sizeof names) == 0 &&
               names[0] == '\0',
-          "none absent");
+          "two absent keys at their defaults (%s)", names);
+    CHECK(ico_state_keys_diff("a=\n", "a=\nb=true\nc=\n", names, sizeof names) == 1 &&
+              strcmp(names, "b=(absent) (now true)") == 0,
+          "an absent key set (%s)", names);
+    /* an earlier version's state that lists a key this one retired (a
+       difficulty row, now the state's own block), with a key this one
+       added at its default */
+    keys_header(&sv, "gameplay.mirror=\ngameplay.pit_time=8\n");
+    keys_header(&nw, "gameplay.mirror=\ngameplay.trips=false\n");
+    CHECK(ico_state_header_check_other_build(&sv, &nw, detail, sizeof detail) == ICO_STATE_OK,
+          "the retired row never refuses (%s)", detail);
+    CHECK(ico_state_keys_diff(sv.keys, nw.keys, names, sizeof names) == 1 &&
+              strcmp(names, "gameplay.pit_time=8 (now absent)") == 0,
+          "without the retired function the row is named (%s)", names);
+    ico_state_set_key_retired(fake_retired);
+    CHECK(ico_state_keys_diff(sv.keys, nw.keys, names, sizeof names) == 0,
+          "a retired row and an added key: none (%s)", names);
+    keys_header(&sv, "gameplay.mirror=true\ngameplay.pit_time=8\n");
+    CHECK(ico_state_header_check_other_build(&sv, &nw, detail, sizeof detail) == ICO_STATE_OK,
+          "a listed key that differs: loads (%s)", detail);
+    CHECK(ico_state_keys_diff(sv.keys, nw.keys, names, sizeof names) == 1 &&
+              strcmp(names, "gameplay.mirror=true (now )") == 0,
+          "a listed key that differs: named (%s)", names);
+    ico_state_set_key_retired(NULL);
     ico_state_set_key_default(NULL);
 }
 

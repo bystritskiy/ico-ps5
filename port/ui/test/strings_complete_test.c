@@ -137,11 +137,11 @@ static void testTables(void)
                   strcmp(kTables[l][UI_STR_LANG_PT_BR], "Português (Brasil) (ichagas7)") == 0,
               "%s names Brazilian Portuguese in Portuguese", kNames[l]);
     }
-    /* cobra838's table (PR 180): his rows, not bob-ttz's; the Yorda pit
-       time's 1.5x step (his "x1" was the 1x one) */
-    CHECK(strcmp(ui_strings_ru_cobra838[UI_STR_VAL_PIT_LONGER], "x1,5") == 0 &&
-              strcmp(ui_strings_ru_cobra838[UI_STR_VAL_PIT_DOUBLE], "x2") == 0,
-          "cobra838: Longer is x1,5 (%s)", ui_strings_ru_cobra838[UI_STR_VAL_PIT_LONGER]);
+    /* cobra838's table (PR 180): his rows, not bob-ttz's (the Yorda pit time's
+       steps it checked are seconds since v0.10.2, no words) */
+    CHECK(strcmp(ui_strings_ru_cobra838[UI_STR_OPT_SHADOW_SPEED_NOTE],
+                 ui_strings_ru_bobttz[UI_STR_OPT_SHADOW_SPEED_NOTE]) != 0,
+          "cobra838: his own Shadow speed note");
     /* English: the rows his table left in English, a note over its space,
        an id newer than his table, one whose English changed since */
     CHECK(ui_strings_ru_cobra838[UI_STR_OPT_GRAPHICS_ADAPTER] == NULL &&
@@ -178,6 +178,169 @@ static void testTables(void)
               ui_strings_pt_br[UI_STR_EXTRAS_BACKUP] == NULL &&
               ui_strings_pt_br[UI_STR_STATES_NOTE] == NULL,
           "pt-br: the rows kept in English");
+    /* Shadows attack together (issue 185), newer than the three community
+       tables: English there until a translator sends it; the eight tables
+       have it in their own words */
+    /* a community table has them NULL (English) until its translator
+       sends them, then its own words: bob-ttz's since PR 195 */
+    for (int l = UI_LANG_COMMUNITY_FIRST; l < UI_LANG_TABLES; l++) {
+        const char *row = kTables[l][UI_STR_OPT_SHADOWS_TOGETHER];
+        const char *note = kTables[l][UI_STR_OPT_SHADOWS_TOGETHER_NOTE];
+        CHECK((row == NULL && note == NULL &&
+               strcmp(ui_str_in((UiLang)l, UI_STR_OPT_SHADOWS_TOGETHER),
+                      "Shadows attack together") == 0) ||
+                  (row != NULL && note != NULL && row[0] != 0 && note[0] != 0 &&
+                   strcmp(row, "Shadows attack together") != 0),
+              "%s: Shadows attack together in English or the translator's words", kNames[l]);
+    }
+    CHECK(ui_strings_ru_bobttz[UI_STR_OPT_SHADOWS_TOGETHER] != NULL &&
+              ui_strings_ru_cobra838[UI_STR_OPT_SHADOWS_TOGETHER] == NULL &&
+              ui_strings_pt_br[UI_STR_OPT_SHADOWS_TOGETHER] == NULL,
+          "Shadows attack together: bob-ttz's words (PR 195), the other two in English");
+    for (int l = 0; l < UI_LANG_COMMUNITY_FIRST; l++) {
+        CHECK(kTables[l][UI_STR_OPT_SHADOWS_TOGETHER] != NULL &&
+                  kTables[l][UI_STR_OPT_SHADOWS_TOGETHER_NOTE] != NULL,
+              "%s: Shadows attack together in its own words", kNames[l]);
+    }
+    /* Gameplay's three pages' names (v0.10.3): the eight tables in their
+       own words; newer than the three community tables, English there
+       until a translator sends them */
+    for (int l = 0; l < UI_LANG_COMMUNITY_FIRST; l++) {
+        CHECK(kTables[l][UI_STR_SECTION_CHAINS] != NULL &&
+                  kTables[l][UI_STR_SECTION_SHADOWS] != NULL &&
+                  kTables[l][UI_STR_SECTION_CUTSCENES] != NULL,
+              "%s: Chains, Shadows and Cutscenes in its own words", kNames[l]);
+    }
+    for (int l = UI_LANG_COMMUNITY_FIRST; l < UI_LANG_TABLES; l++) {
+        const char *y = kTables[l][UI_STR_SECTION_CHAINS];
+        const char *sh = kTables[l][UI_STR_SECTION_SHADOWS];
+        const char *c = kTables[l][UI_STR_SECTION_CUTSCENES];
+        CHECK((y == NULL && sh == NULL && c == NULL &&
+               strcmp(ui_str_in((UiLang)l, UI_STR_SECTION_CUTSCENES), "Cutscenes") == 0) ||
+                  (y != NULL && sh != NULL && c != NULL && y[0] != 0 && sh[0] != 0 && c[0] != 0 &&
+                   strcmp(c, "Cutscenes") != 0),
+              "%s: Chains, Shadows and Cutscenes in English or the translator's words", kNames[l]);
+    }
+    CHECK(ui_strings_ru_bobttz[UI_STR_SECTION_CHAINS] != NULL &&
+              ui_strings_ru_cobra838[UI_STR_SECTION_CHAINS] == NULL &&
+              ui_strings_pt_br[UI_STR_SECTION_CHAINS] == NULL,
+          "the Gameplay pages: bob-ttz's words (PR 195), the other two in English");
+    /* Gameplay > Combat (v0.10.5): the page's name and the three rows with
+       their notes, the eight tables in their own words (never the English
+       text outside the English table); the community tables English (NULL)
+       or the translator's words */
+    for (int id = UI_STR_SECTION_COMBAT; id <= UI_STR_OPT_VAR_SHADOWS_WAIT_DOWN_NOTE; id++) {
+        for (int l = 0; l < UI_LANG_TABLES; l++) {
+            const int community = l >= UI_LANG_COMMUNITY_FIRST;
+            const char *row = kTables[l][id];
+            CHECK(community ? (row == NULL || row[0] != 0) : (row != NULL && row[0] != 0),
+                  "%s: Combat string %d %s", kNames[l], id,
+                  community ? "English (NULL) or the translator's words" : "in its own words");
+            if (l != UI_LANG_EN && !community && row != NULL) {
+                CHECK(strcmp(row, kTables[UI_LANG_EN][id]) != 0 || id == UI_STR_SECTION_COMBAT,
+                      "%s: Combat string %d is not the English text", kNames[l], id);
+            }
+        }
+    }
+    /* Gameplay > Shadows (v0.10.5): Third journey, the note it shows, Peaceful
+       shadows and its note: the eight tables in their own words, the
+       community tables English (NULL) or the translator's words */
+    for (int id = UI_STR_VAL_VAR_THIRD_JOURNEY; id <= UI_STR_OPT_VAR_PEACEFUL_NOTE; id++) {
+        for (int l = 0; l < UI_LANG_TABLES; l++) {
+            const int community = l >= UI_LANG_COMMUNITY_FIRST;
+            const char *row = kTables[l][id];
+            CHECK(community ? (row == NULL || row[0] != 0) : (row != NULL && row[0] != 0),
+                  "%s: Shadows string %d %s", kNames[l], id,
+                  community ? "English (NULL) or the translator's words" : "in its own words");
+            if (l != UI_LANG_EN && !community && row != NULL) {
+                CHECK(strcmp(row, kTables[UI_LANG_EN][id]) != 0,
+                      "%s: Shadows string %d is not the English text", kNames[l], id);
+            }
+        }
+    }
+    /* Gameplay > Combat's weapon rows (v0.10.5): Light sword colour, Stick,
+       their notes and the Insect net value, the same rule (the eight tables
+       in their own words, the community tables English (NULL) or the
+       translator's) */
+    {
+        static const int kWeapon[] = {UI_STR_OPT_VAR_SWORD_COLOUR, UI_STR_OPT_VAR_SWORD_COLOUR_NOTE,
+                                      UI_STR_OPT_VAR_WEAPON, UI_STR_OPT_VAR_WEAPON_NOTE,
+                                      UI_STR_VAL_VAR_INSECT_NET};
+        for (unsigned k = 0; k < sizeof(kWeapon) / sizeof(kWeapon[0]); k++) {
+            const int id = kWeapon[k];
+            for (int l = 0; l < UI_LANG_TABLES; l++) {
+                const int community = l >= UI_LANG_COMMUNITY_FIRST;
+                const char *row = kTables[l][id];
+                CHECK(community ? (row == NULL || row[0] != 0) : (row != NULL && row[0] != 0),
+                      "%s: weapon row string %d %s", kNames[l], id,
+                      community ? "English (NULL) or the translator's words" : "in its own words");
+                if (l != UI_LANG_EN && !community && row != NULL) {
+                    CHECK(strcmp(row, kTables[UI_LANG_EN][id]) != 0,
+                          "%s: weapon row string %d is not the English text", kNames[l], id);
+                }
+            }
+        }
+    }
+    /* Ico's two rows (v0.10.5): Developer > Free movement with its note and the
+       Remap controls row Ask Yorda for a hint, the eight tables in their own
+       words; the community tables English (NULL) or the translator's words */
+    for (int id = UI_STR_OPT_FREE_MOVEMENT; id <= UI_STR_REMAP_ASK_HINT; id++) {
+        for (int l = 0; l < UI_LANG_TABLES; l++) {
+            const int community = l >= UI_LANG_COMMUNITY_FIRST;
+            const char *row = kTables[l][id];
+            CHECK(community ? (row == NULL || row[0] != 0) : (row != NULL && row[0] != 0),
+                  "%s: Ico row string %d %s", kNames[l], id,
+                  community ? "English (NULL) or the translator's words" : "in its own words");
+            if (l != UI_LANG_EN && !community && row != NULL) {
+                CHECK(strcmp(row, kTables[UI_LANG_EN][id]) != 0,
+                      "%s: Ico row string %d is not the English text", kNames[l], id);
+            }
+        }
+    }
+    /* Gameplay > Chains (v0.10.5): the two chain rows, their notes and the
+       game's own 4 as a value, the same rule */
+    for (int id = UI_STR_OPT_VAR_CHAIN_SPEED; id <= UI_STR_VAL_VAR_CHAIN_ORIGINAL; id++) {
+        for (int l = 0; l < UI_LANG_TABLES; l++) {
+            const int community = l >= UI_LANG_COMMUNITY_FIRST;
+            const char *row = kTables[l][id];
+            CHECK(community ? (row == NULL || row[0] != 0) : (row != NULL && row[0] != 0),
+                  "%s: chain string %d %s", kNames[l], id,
+                  community ? "English (NULL) or the translator's words" : "in its own words");
+            /* "4 (original)" is the same word in English, French and Spanish */
+            if (l != UI_LANG_EN && !community && row != NULL &&
+                id != UI_STR_VAL_VAR_CHAIN_ORIGINAL) {
+                CHECK(strcmp(row, kTables[UI_LANG_EN][id]) != 0,
+                      "%s: chain string %d is not the English text", kNames[l], id);
+            }
+        }
+    }
+    /* Extras > Unused content (v0.10.3): the page, its rows and notes and
+       the three early show names, the same rule */
+    for (int id = UI_STR_SECTION_UNUSED; id <= UI_STR_UNUSED_ART_COPYRIGHT; id++) {
+        for (int l = 0; l < UI_LANG_TABLES; l++) {
+            const int community = l >= UI_LANG_COMMUNITY_FIRST;
+            const char *row = kTables[l][id];
+            CHECK(community ? (row == NULL || row[0] != 0) : row != NULL,
+                  "%s: Unused content string %d %s", kNames[l], id,
+                  community ? "English (NULL) or the translator's words" : "in its own words");
+        }
+    }
+    /* bob-ttz's PR 195: the page, the four rows and their notes; the three
+       early show names still English */
+    CHECK(ui_strings_ru_bobttz[UI_STR_SECTION_UNUSED] != NULL &&
+              ui_strings_ru_bobttz[UI_STR_UNUSED_ART_NOTE] != NULL &&
+              ui_strings_ru_bobttz[UI_STR_UNUSED_ART_VER] == NULL &&
+              ui_strings_ru_cobra838[UI_STR_SECTION_UNUSED] == NULL &&
+              ui_strings_pt_br[UI_STR_SECTION_UNUSED] == NULL,
+          "Unused content: bob-ttz's nine rows, his three early show names and the other two "
+          "tables in English");
+    CHECK(strcmp(ui_str_in(UI_LANG_EN, UI_STR_SECTION_UNUSED), "Unused content") == 0 &&
+              strcmp(ui_str_in(UI_LANG_EN, UI_STR_UNUSED_ARENA), "Test room: arena") == 0 &&
+              strcmp(ui_str_in(UI_LANG_EN, UI_STR_UNUSED_CLIMB), "Test room: climbing") == 0 &&
+              strcmp(ui_str_in(UI_LANG_EN, UI_STR_UNUSED_MOVIE), "Attract movie (576 lines)") ==
+                  0 &&
+              strcmp(ui_str_in(UI_LANG_EN, UI_STR_UNUSED_ART), "Early show title art") == 0,
+          "the Unused content page's English names");
 }
 
 static void testSerial(void)
@@ -387,8 +550,13 @@ static void testCommunity(void)
               strcmp(ui_str_in(ui_menu_words_language(UI_LANG_EN), UI_STR_MT_NEW_GAME),
                      "Novo Jogo") == 0,
           "Brazilian Portuguese: his words over the English sheets only");
+    /* the Menu language over a translation (settings.c sets it): any table */
     ui_set_menu_words_language(UI_LANG_DE);
-    CHECK(ui_menu_words_language(UI_LANG_EN) == UI_LANG_EN, "a disc language is not one");
+    CHECK(ui_menu_words_language(UI_LANG_EN) == UI_LANG_DE &&
+              ui_menu_words_language(UI_LANG_FR) == UI_LANG_FR,
+          "German words over the English sheets only");
+    ui_set_menu_words_language(UI_LANG_TABLES);
+    CHECK(ui_menu_words_language(UI_LANG_EN) == UI_LANG_EN, "out of range: none");
     ui_set_menu_words_language(-1);
     CHECK(ui_menu_words_language(UI_LANG_EN) == UI_LANG_EN, "none: English");
 }

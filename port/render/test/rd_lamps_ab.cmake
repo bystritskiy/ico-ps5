@@ -1,0 +1,439 @@
+# rd_lamps_ab: the lamps' glow for less (port/render/rd_lamps.c, rd_lamps.h;
+# docs/port/RENDER_POST.md, "The lamps' glow for less") against it off
+# (ICO_RD_LAMPS=0) on the fixtures the list names
+# (port/render/test/fixtures/lists/lamps_ab.txt: fixture names of the
+# repository, docs/port/TESTING_FIXTURES.md; a listed fixture that is absent or
+# does not expand to its pinned SHA-256 FAILS), expanded into OUT, each
+# replayed twice in one run (--repeat 2: the first lamps replay of a renderer
+# is drawn whole, the region it lit then known; the stats are the second's),
+# rd_replay_tool --pass-dump --stats, the visibility test at its default, at
+# the settings:
+#   phone   the PowerVR phone's profile on lavapipe (ICO_VK_FAKE_LIMITS=moltenvk,
+#           ICO_RD_VU_PREPASS=0, ICO_RD_LATE_PASS=1) at 2364x1080, Full height,
+#           Full pixel, presented at 2364x1080; ICO_RD_LAMPS=1 (the MoltenVK
+#           fake is the Apple class, off by default);
+#   phonep  phone with the poison (ICO_RD_LAMPS_POISON=1: a lamps pass drawn
+#           whole first clears WORK2 to magenta) and the store plan's
+#           (ICO_RD_STORE_POISON=1, both runs: a depth load after a dropped
+#           store is garbage);
+#   desk    lavapipe's own desktop profile at Enhanced 2x 4:3, ICO_RD_LAMPS=1
+#           (the desktop class has no pass area by default);
+#   mali    the Mali fakes (ICO_VK_FAKE_LIMITS=mali, ICO_VK_FAKE_VENDOR=0x13B5)
+#           at the phone's setting with the class's default: the area off
+#           (rule: no new kind of work on the Arm class), the band lazy;
+#   gl      (BACKEND opengl) the desk setting on llvmpipe with the default:
+#           the area off (OpenGL ignores a render area), the band lazy.
+# And two sequences (phone, ICO_RD_LAMPS=1) on the title's three frames, named
+# by the list's words seq=whole, seq=lamps and seq=dark:
+#   seqw    --prev the whole frame (the sun's fans, the mask over WORK2) then
+#           the lamps frame twice: the WHOLE frame's WORK2 forgets the region,
+#           so the first lamps replay is whole and the second takes the area;
+#   seqd    --prev the lamps frame --prev the dark frame (nothing drawn into
+#           WORK2) then the lamps frame: the region survives the dark frame,
+#           the area taken.
+# For every run: every PNG (each target and PRESENT) byte for byte; draws
+# fewer by the passes of two pairs (one draw each where two were); passes
+# fewer by the bands left lazy, the owed sprites and the passes of two pairs
+# exactly (under the poison each pass of two pairs leaves a magenta clear
+# pass of its own: that one back); colour loaded fewer by the passes of two
+# pairs' WORK0 texels (the same where there are none);
+# colour stored and cleared fewer by the lamps line's saved bytes plus a
+# band's (WORK2_PAD's texels x 4) each, depth and stencil loaded and stored
+# fewer by its saved bytes (two hundredths of a MB: the stats print two
+# decimals; not under the poison, whose magenta pass counts); the saved
+# colour bytes exactly 4 x the texels the area left; the off run no area and
+# no band; on a lamps plan the on run exactly one planned pass (an area or
+# whole), never whole for the region unknown on the second replay; an area
+# at least once a setting where it is on (phone, phonep, desk, seqw, seqd),
+# none at mali and gl, a band at every setting.  The path ran
+# (rd_fixture_require on the on run of every pair): each fixture's declared
+# glow_plan, lamps_bands_lazy and lamps_owed at every setting, and its
+# lamps_area_passes where the area is on (phone, phonep, desk, the
+# sequences); a fixture no run checked FAILS.  No device: SKIP (77).
+# -DTOOL=<rd_replay_tool> -DFIXTURE_TOOL=<rd_fixture_tool> -DFIXTURES=<the
+# fixtures folder> -DFIXTURE_HELPERS=<rd_fixture_helpers.cmake> -DLIST=<a
+# fixture list> -DOUT=<a folder the test may write> -DBACKEND=vulkan|opengl
+include("${FIXTURE_HELPERS}")
+set(failures 0)
+set(dumps "")
+rd_fixture_list("${LIST}" names)
+foreach(name IN LISTS names)
+  rd_fixture_expand(${name} "${OUT}/fixtures" d)
+  list(APPEND dumps "${d}")
+  set(name_${d} "${name}")
+  set(checked_${name} FALSE)
+  # the sequences' frames: the list's seq= words
+  if(" ${RDFX_FIELDS_${name}} " MATCHES " seq=(whole|lamps|dark) ")
+    if(DEFINED seq_${CMAKE_MATCH_1})
+      message(SEND_ERROR "rd_lamps_ab: the list names two seq=${CMAKE_MATCH_1} frames")
+      math(EXPR failures "${failures} + 1")
+    endif()
+    set(seq_${CMAKE_MATCH_1} "${d}")
+  endif()
+endforeach()
+list(LENGTH dumps ndumps)
+foreach(k whole lamps dark)
+  if(NOT DEFINED seq_${k})
+    message(FATAL_ERROR "rd_lamps_ab: the list names no seq=${k} frame (the sequences' frames)")
+  endif()
+endforeach()
+
+set(args_phone --enhanced --resolution 2364x1080 --full-height --full-pixel --present 2364x1080)
+set(env_phone ICO_VK_FAKE_LIMITS=moltenvk ICO_RD_VU_PREPASS=0 ICO_RD_LATE_PASS=1)
+set(on_phone ICO_RD_LAMPS=1)
+set(args_phonep ${args_phone})
+set(env_phonep ${env_phone} ICO_RD_STORE_POISON=1)
+set(on_phonep ICO_RD_LAMPS=1 ICO_RD_LAMPS_POISON=1)
+set(args_desk --enhanced --resolution 2x --aspect 1.3333 --present 1280x960)
+set(env_desk "")
+set(on_desk ICO_RD_LAMPS=1)
+set(args_mali ${args_phone})
+set(env_mali ICO_VK_FAKE_LIMITS=mali ICO_VK_FAKE_VENDOR=0x13B5 ICO_RD_VU_PREPASS=0)
+# the class's defaults but the glow blur (rd_glow_blur.c, RD_GLOW_BLUR_DEFAULT
+# 1 since v0.11.5: not byte-identical, its own A/B rd_glow_blur_ab), which the
+# off arm (ICO_RD_LAMPS=0) leaves out
+set(on_mali ICO_RD_LAMPS=noglowblur)
+set(args_gl ${args_desk})
+set(env_gl "")
+set(on_gl ICO_RD_LAMPS=noglowblur)
+# the settings that should take the area somewhere, and those that never do
+set(areaSettings phone phonep desk seqw seqd)
+set(noAreaSettings mali gl)
+set(poisonSettings phonep)
+set(fold4Settings phone phonep desk seqw seqd)
+if("${BACKEND}" STREQUAL "opengl")
+  set(settings gl)
+else()
+  set(settings phone phonep desk mali)
+endif()
+
+set(drawsRe "stats: ([0-9]+) draws, ([0-9]+) passes")
+set(trafficRe "stats: traffic: colour ([0-9]+\\.[0-9][0-9]) MB loaded ([0-9]+\\.[0-9][0-9]) MB stored, depth and stencil ([0-9]+\\.[0-9][0-9])/([0-9]+\\.[0-9][0-9]) MB loaded/stored, ([0-9]+\\.[0-9][0-9]) MB cleared")
+set(planRe "stats: glow: light plan (on|off): ([a-z]+)")
+# the stats' ';' are ',' once the output is flattened (CMake's list separator)
+# (CMake keeps nine groups a match: the lamps line in four regexes)
+set(lampsRe "stats: lamps ([a-z0-9+]+) \\(self-test [^)]*\\): ([0-9]+) passes with the lamps' area \\(([0-9]+)x([0-9]+) at [0-9]+,[0-9]+ of [0-9]+x[0-9]+: ([0-9]+) of ([0-9]+) texels")
+set(savedRe "texels, ([0-9]+) bytes not cleared, ([0-9]+) colour bytes not stored, ([0-9]+) depth bytes not loaded, ([0-9]+) not stored\\), ([0-9]+) whole")
+set(whyRe "depth bytes not loaded, [0-9]+ not stored\\), [0-9]+ whole \\(([^)]*)\\)")
+set(padsRe "([0-9]+) bands left lazy \\(WORK2_PAD ([0-9]+)x([0-9]+)\\)")
+set(owedRe "([0-9]+) WORK0 alpha sprites owed \\(WORK0 ([0-9]+)x([0-9]+)\\)")
+set(fold4Re "([0-9]+) passes of two blur pairs \\(fold of two pairs (on|off)")
+set(foldsRe "blur pairs folded ([0-9]+)")
+
+# v in hundredths of a MB (the stats print two decimals)
+function(mb_hundredths out v)
+  string(REGEX REPLACE "^([0-9]+)\\.([0-9][0-9])$" "\\1\\2" h "${v}")
+  math(EXPR h "${h}")
+  set(${out} "${h}" PARENT_SCOPE)
+endfunction()
+
+# bytes in hundredths of a MB, rounded
+function(bytes_hundredths out b)
+  math(EXPR h "(${b} * 100 + 524288) / 1048576")
+  set(${out} "${h}" PARENT_SCOPE)
+endfunction()
+
+# the off run's figure less the on run's, in hundredths of a MB, against
+# want bytes: within two hundredths
+function(check_mb what offv onv wantBytes)
+  mb_hundredths(a "${offv}")
+  mb_hundredths(b "${onv}")
+  bytes_hundredths(w "${wantBytes}")
+  math(EXPR d "${a} - ${b} - ${w}")
+  if(d GREATER 2 OR d LESS -2)
+    message(SEND_ERROR "${what}: ${offv} MB off, ${onv} MB on, want ${wantBytes} bytes fewer")
+    set(failures_add 1 PARENT_SCOPE)
+  else()
+    set(failures_add 0 PARENT_SCOPE)
+  endif()
+endfunction()
+
+set(runs 0)
+foreach(s IN ITEMS ${settings} ${areaSettings} ${noAreaSettings})
+  set(areas_${s} 0)
+  set(pads_${s} 0)
+  set(owed_${s} 0)
+endforeach()
+
+# one A/B: _name a label, _s the setting (its env, args and on switch),
+# _pre the arguments before the dump (--prev ...), _dump, _rep the repeats
+macro(lamps_ab _name _s _pre _dump _rep)
+  set(_ok TRUE)
+  foreach(w 0 1)
+    set(dir_${w} "${OUT}/${_name}-${w}")
+    file(REMOVE_RECURSE "${dir_${w}}")
+    file(MAKE_DIRECTORY "${dir_${w}}")
+    if(w EQUAL 0)
+      set(sw ICO_RD_LAMPS=0)
+    else()
+      set(sw ${on_${_s}})
+    endif()
+    execute_process(COMMAND "${CMAKE_COMMAND}" -E env ${env_${_s}} ${sw} "${TOOL}" "${_dump}"
+                            "${dir_${w}}/out.png" ${_pre} --pass-dump "${dir_${w}}" --stats
+                            --repeat ${_rep} ${args_${_s}}
+                    RESULT_VARIABLE rc OUTPUT_VARIABLE out ERROR_VARIABLE err)
+    if(rc EQUAL 77)
+      message(STATUS "SKIP: no device: ${err}")
+      return()
+    endif()
+    if(NOT rc EQUAL 0)
+      message(SEND_ERROR "${_name} lamps ${w}: exit ${rc}:\n${err}")
+      math(EXPR failures "${failures} + 1")
+      set(_ok FALSE)
+      break()
+    endif()
+    if(w EQUAL 1)
+      set(out_on "${out}")
+    endif()
+    string(REPLACE ";" "," flat "${out}")
+    foreach(re drawsRe trafficRe planRe lampsRe savedRe padsRe owedRe fold4Re foldsRe)
+      if(_ok AND NOT flat MATCHES "${${re}}")
+        message(SEND_ERROR "${_name} lamps ${w}: no ${re} line:\n${out}")
+        math(EXPR failures "${failures} + 1")
+        set(_ok FALSE)
+      endif()
+    endforeach()
+    if(NOT _ok)
+      break()
+    endif()
+    string(REGEX MATCH "${drawsRe}" m "${flat}")
+    set(draws_${w} "${CMAKE_MATCH_1}")
+    set(passes_${w} "${CMAKE_MATCH_2}")
+    string(REGEX MATCH "${trafficRe}" m "${flat}")
+    set(cl_${w} "${CMAKE_MATCH_1}")
+    set(cs_${w} "${CMAKE_MATCH_2}")
+    set(dl_${w} "${CMAKE_MATCH_3}")
+    set(ds_${w} "${CMAKE_MATCH_4}")
+    set(cc_${w} "${CMAKE_MATCH_5}")
+    string(REGEX MATCH "${planRe}" m "${flat}")
+    set(plan_${w} "${CMAKE_MATCH_2}")
+    string(REGEX MATCH "${lampsRe}" m "${flat}")
+    set(bits_${w} "${CMAKE_MATCH_1}")
+    set(areas_${w} "${CMAKE_MATCH_2}")
+    set(aw_${w} "${CMAKE_MATCH_3}")
+    set(ah_${w} "${CMAKE_MATCH_4}")
+    set(at_${w} "${CMAKE_MATCH_5}")
+    set(tt_${w} "${CMAKE_MATCH_6}")
+    string(REGEX MATCH "${savedRe}" m "${flat}")
+    set(svc_${w} "${CMAKE_MATCH_1}")
+    set(svs_${w} "${CMAKE_MATCH_2}")
+    set(svdl_${w} "${CMAKE_MATCH_3}")
+    set(svds_${w} "${CMAKE_MATCH_4}")
+    set(whole_${w} "${CMAKE_MATCH_5}")
+    set(why_${w} "")
+    if(flat MATCHES "${whyRe}")
+      set(why_${w} "${CMAKE_MATCH_1}")
+    endif()
+    string(REGEX MATCH "${padsRe}" m "${flat}")
+    set(pads_${w} "${CMAKE_MATCH_1}")
+    set(pw_${w} "${CMAKE_MATCH_2}")
+    set(ph_${w} "${CMAKE_MATCH_3}")
+    string(REGEX MATCH "${fold4Re}" m "${flat}")
+    set(f4_${w} "${CMAKE_MATCH_1}")
+    string(REGEX MATCH "${foldsRe}" m "${flat}")
+    set(folds_${w} "${CMAKE_MATCH_1}")
+    string(REGEX MATCH "${owedRe}" m "${flat}")
+    set(owed_${w} "${CMAKE_MATCH_1}")
+    set(ow_${w} "${CMAKE_MATCH_2}")
+    set(oh_${w} "${CMAKE_MATCH_3}")
+  endforeach()
+  if(_ok)
+    math(EXPR runs "${runs} + 1")
+    # the path ran: what the fixture declares, on the run with the parts on
+    set(_fx "${name_${_dump}}")
+    list(FIND areaSettings "${_s}" _isArea)
+    if(_isArea EQUAL -1)
+      rd_fixture_require(${_fx} "${out_on}" glow_plan lamps_bands_lazy lamps_owed)
+    else()
+      rd_fixture_require(${_fx} "${out_on}" glow_plan lamps_bands_lazy lamps_owed
+                         lamps_area_passes)
+    endif()
+    set(checked_${_fx} TRUE)
+    # the pictures: every PNG byte for byte
+    file(GLOB pngs RELATIVE "${dir_0}" "${dir_0}/*.png")
+    set(npng 0)
+    foreach(png IN LISTS pngs)
+      math(EXPR npng "${npng} + 1")
+      if(NOT EXISTS "${dir_1}/${png}")
+        message(SEND_ERROR "${_name}: ${png} not written with the lamps' parts on")
+        math(EXPR failures "${failures} + 1")
+        continue()
+      endif()
+      execute_process(COMMAND "${CMAKE_COMMAND}" -E compare_files "${dir_0}/${png}"
+                              "${dir_1}/${png}" RESULT_VARIABLE same)
+      if(NOT same EQUAL 0)
+        message(SEND_ERROR "${_name}: ${png} differs with the lamps' parts on")
+        math(EXPR failures "${failures} + 1")
+      endif()
+    endforeach()
+    if(npng EQUAL 0)
+      message(SEND_ERROR "${_name}: no PNG written")
+      math(EXPR failures "${failures} + 1")
+    endif()
+    # the off run: nothing of the lamps' parts
+    if(NOT areas_0 EQUAL 0 OR NOT pads_0 EQUAL 0 OR NOT owed_0 EQUAL 0 OR NOT f4_0 EQUAL 0)
+      message(SEND_ERROR "${_name}: off, ${areas_0} areas, ${pads_0} bands, ${owed_0} owed")
+      math(EXPR failures "${failures} + 1")
+    endif()
+    # a pass of two pairs is one draw where the two pairs folded one by one
+    # were two (rd__replay_blur_fold, rd_replay_tiler.c: one draw a call,
+    # `draws++` once, the call taking four passes' worth when fold4 applies):
+    # draws fewer by the passes of two pairs
+    math(EXPR wantDraws "${draws_0} - ${f4_1}")
+    if(NOT draws_1 EQUAL wantDraws)
+      message(SEND_ERROR "${_name}: ${draws_1} draws on, ${draws_0} off with ${f4_1} passes of two "
+                         "pairs (want ${wantDraws})")
+      math(EXPR failures "${failures} + 1")
+    endif()
+    # the fold of two pairs: one pass where two fx_blur2_ps passes were, the
+    # same pairs folded; nine folded pairs (the corpus's and issue 163's
+    # frames: pairs 1-9 of the chain's ten) give four passes of two (the
+    # ninth's next pair is the chain's last, drawn as two passes)
+    if(NOT folds_1 EQUAL folds_0)
+      message(SEND_ERROR "${_name}: ${folds_1} pairs folded on, ${folds_0} off")
+      math(EXPR failures "${failures} + 1")
+    endif()
+    list(FIND fold4Settings "${_s}" isF4)
+    if(NOT isF4 EQUAL -1 AND folds_0 EQUAL 9 AND NOT f4_1 EQUAL 4)
+      message(SEND_ERROR "${_name}: ${f4_1} passes of two pairs with nine pairs folded (want 4)")
+      math(EXPR failures "${failures} + 1")
+    elseif(isF4 EQUAL -1 AND NOT f4_1 EQUAL 0)
+      message(SEND_ERROR "${_name}: ${f4_1} passes of two pairs at ${_s} (want none)")
+      math(EXPR failures "${failures} + 1")
+    endif()
+    # each pass of two pairs is one pass where the pairs folded one by one
+    # were two; under the poison (ICO_RD_LAMPS_POISON=1) each of them whose
+    # WORK0 colour came by the swap (the sprite covers the target: every one
+    # of the list's) is preceded by a pass of its own that clears WORK0 to
+    # magenta (fold4Poison, rd_replay_tiler.c): one pass more a fold
+    math(EXPR wantPasses "${passes_0} - ${pads_1} - ${owed_1} - ${f4_1}")
+    list(FIND poisonSettings "${_s}" isPoisonP)
+    if(NOT isPoisonP EQUAL -1)
+      math(EXPR wantPasses "${wantPasses} + ${f4_1}")
+    endif()
+    if(NOT passes_1 EQUAL wantPasses)
+      message(SEND_ERROR "${_name}: ${passes_1} passes on, ${passes_0} off with ${pads_1} bands "
+                         "left lazy, ${owed_1} WORK0 alpha sprites owed and ${f4_1} passes of two "
+                         "pairs (want ${wantPasses})")
+      math(EXPR failures "${failures} + 1")
+    endif()
+    # the planned pass: one a lamps replay, never whole for want of the
+    # region on the second replay (the first knew it)
+    math(EXPR planned "${areas_1} + ${whole_1}")
+    if(plan_1 STREQUAL "lamps")
+      if(NOT planned EQUAL 1)
+        message(SEND_ERROR "${_name}: lamps plan, ${areas_1} areas and ${whole_1} whole (want "
+                           "one planned pass)")
+        math(EXPR failures "${failures} + 1")
+      endif()
+      if(why_1 MATCHES "earlier frame left not known")
+        message(SEND_ERROR "${_name}: the second lamps replay drawn whole: ${why_1}")
+        math(EXPR failures "${failures} + 1")
+      endif()
+      if(pads_1 EQUAL 0)
+        message(SEND_ERROR "${_name}: lamps plan, no band left lazy")
+        math(EXPR failures "${failures} + 1")
+      endif()
+    elseif(NOT planned EQUAL 0)
+      message(SEND_ERROR "${_name}: plan ${plan_1}, ${areas_1} areas, ${whole_1} whole (want "
+                         "no lamps pass)")
+      math(EXPR failures "${failures} + 1")
+    endif()
+    list(FIND noAreaSettings "${_s}" isNo)
+    if(NOT isNo EQUAL -1 AND NOT areas_1 EQUAL 0)
+      message(SEND_ERROR "${_name}: ${areas_1} areas at ${_s} (want none)")
+      math(EXPR failures "${failures} + 1")
+    endif()
+    # the saved bytes: the colour 4 a texel the area left, cleared and stored
+    if(areas_1 GREATER 0)
+      math(EXPR left "(${tt_1} - ${at_1}) * 4")
+      if(NOT svc_1 EQUAL left OR NOT svs_1 EQUAL left OR NOT at_1 LESS tt_1)
+        message(SEND_ERROR "${_name}: the area ${aw_1}x${ah_1} (${at_1} of ${tt_1} texels) "
+                           "saved ${svc_1} cleared and ${svs_1} stored bytes (want ${left})")
+        math(EXPR failures "${failures} + 1")
+      endif()
+    endif()
+    # the traffic: off less on is the saved bytes and the bands'
+    list(FIND poisonSettings "${_s}" isPoison)
+    if(isPoison EQUAL -1)
+      math(EXPR padBytes "${pads_1} * ${pw_1} * ${ph_1} * 4 + ${owed_1} * ${ow_1} * ${oh_1} * 4")
+      # a pass of two pairs: one WORK0 pass fewer, loaded and stored
+      math(EXPR f4Bytes "${f4_1} * ${ow_1} * ${oh_1} * 4")
+      math(EXPR wantClear "${svc_1} + ${padBytes}")
+      math(EXPR wantStore "${svs_1} + ${padBytes} + ${f4Bytes}")
+      set(failures_add 0)
+      check_mb("${_name} colour loaded" "${cl_0}" "${cl_1}" "${f4Bytes}")
+      math(EXPR failures "${failures} + ${failures_add}")
+      check_mb("${_name} colour stored" "${cs_0}" "${cs_1}" "${wantStore}")
+      math(EXPR failures "${failures} + ${failures_add}")
+      check_mb("${_name} cleared" "${cc_0}" "${cc_1}" "${wantClear}")
+      math(EXPR failures "${failures} + ${failures_add}")
+      check_mb("${_name} depth loaded" "${dl_0}" "${dl_1}" "${svdl_1}")
+      math(EXPR failures "${failures} + ${failures_add}")
+      check_mb("${_name} depth stored" "${ds_0}" "${ds_1}" "${svds_1}")
+      math(EXPR failures "${failures} + ${failures_add}")
+    endif()
+    math(EXPR areas_${_s} "${areas_${_s}} + ${areas_1}")
+    math(EXPR pads_${_s} "${pads_${_s}} + ${pads_1}")
+    math(EXPR owed_${_s} "${owed_${_s}} + ${owed_1}")
+    message(STATUS "${_name}: plan ${plan_1}, lamps ${bits_1}: ${areas_1} areas (${aw_1}x${ah_1}, "
+                   "${at_1} of ${tt_1} texels), ${whole_1} whole (${why_1}), ${pads_1} bands; "
+                   "passes ${passes_0} -> ${passes_1}, colour stored ${cs_0} -> ${cs_1} MB, "
+                   "cleared ${cc_0} -> ${cc_1} MB, depth loaded ${dl_0} -> ${dl_1} MB; ${npng} "
+                   "PNGs the same")
+  endif()
+endmacro()
+
+foreach(dump IN LISTS dumps)
+  foreach(s IN LISTS settings)
+    lamps_ab("${name_${dump}}-${s}" ${s} "" "${dump}" 2)
+  endforeach()
+endforeach()
+if(NOT "${BACKEND}" STREQUAL "opengl")
+  set(on_seqw ${on_phone})
+  set(env_seqw ${env_phone})
+  set(args_seqw ${args_phone})
+  set(on_seqd ${on_phone})
+  set(env_seqd ${env_phone})
+  set(args_seqd ${args_phone})
+  lamps_ab("seqw" seqw "--prev;${seq_whole}" "${seq_lamps}" 2)
+  lamps_ab("seqd" seqd "--prev;${seq_lamps};--prev;${seq_dark}" "${seq_lamps}" 1)
+  foreach(s seqw seqd)
+    if(NOT areas_${s} EQUAL 1)
+      message(SEND_ERROR "rd_lamps_ab: ${s}: ${areas_${s}} areas on the last replay (want 1)")
+      math(EXPR failures "${failures} + 1")
+    endif()
+  endforeach()
+endif()
+foreach(name IN LISTS names)
+  if(NOT checked_${name})
+    message(SEND_ERROR "${name}: its declared properties were never checked (no pair replayed it)")
+    math(EXPR failures "${failures} + 1")
+  endif()
+endforeach()
+if(runs GREATER 0)
+  foreach(s IN LISTS settings)
+    list(FIND areaSettings "${s}" isArea)
+    if(NOT isArea EQUAL -1 AND areas_${s} EQUAL 0)
+      message(SEND_ERROR "rd_lamps_ab: no area at ${s}")
+      math(EXPR failures "${failures} + 1")
+    endif()
+    if(pads_${s} EQUAL 0)
+      message(SEND_ERROR "rd_lamps_ab: no band left lazy at ${s}")
+      math(EXPR failures "${failures} + 1")
+    endif()
+    if(owed_${s} EQUAL 0)
+      message(SEND_ERROR "rd_lamps_ab: no WORK0 alpha sprite owed at ${s} (the dark fixtures)")
+      math(EXPR failures "${failures} + 1")
+    endif()
+  endforeach()
+endif()
+math(EXPR failures "${failures} + ${RDFX_FAILURES}")
+if(failures GREATER 0)
+  message(FATAL_ERROR "rd_lamps_ab: ${failures} failures over ${ndumps} fixtures")
+endif()
+if(runs EQUAL 0)
+  message(STATUS "SKIP: nothing ran")
+  return()
+endif()
+message(STATUS "rd_lamps_ab: ${runs} A/Bs over ${ndumps} fixtures, every PNG the same")

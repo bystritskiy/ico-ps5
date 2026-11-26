@@ -94,7 +94,9 @@ first ([where it is](#where-your-files-are)).
    (a bar), then **Preparing the game's data** (a bar) and **Finishing the
    game's data**.
 5. **Starting the game** shows on every start. A few seconds of black can
-   follow it, until the game's own logo appears.
+   follow it, until the game's own logo appears. The first time the title
+   screen is up, the game also makes the recent-apps icon from it; the
+   title holds still for about half a second.
 
 At each step the screen says what the game is doing. Where it shows no
 bar, the step is short and its length cannot be told in advance. Leave the
@@ -176,10 +178,17 @@ In that folder:
   not open ([Using a different graphics
   driver](#using-a-different-graphics-driver)). The game makes the folder
   when it starts.
+- `icon` holds the picture the game makes from your disc's title screen (a
+  `.png` named after the disc). The recent-apps card uses it; the
+  home-screen icon stays the plain one. Some phones' launchers ignore the
+  card's icon.
 - `logs` holds the log file, `ico-pc.log`, which helps with problem
   reports. When the graphics driver stops responding, the game also saves
   a copy of the picture it was drawing there, a file whose name starts
-  with `loss-` and ends in `.zip` (the three newest are kept).
+  with `loss-` and ends in `.zip` (the three newest are kept). The small
+  notes `vu-zero-mark.txt`, `ahead-mark.txt` and `nodiscard-mark.txt`
+  there are the game's own: leave them in place
+  ([what they are](FAQ.md#what-are-vu-zero-marktxt-ahead-marktxt-and-nodiscard-marktxt)).
 - `textures/SCES-50760/replacements` is where a
   [texture pack](TEXTURE_PACKS.md) for the European disc goes, and
   `textures/SCPS-11003/replacements` one for the Japanese disc,
@@ -258,7 +267,10 @@ pause menu's Options.
 
 **Gamepads.** A Bluetooth or USB gamepad works, with rumble if it has it.
 While one is connected, the touch buttons go away. Change that in
-**Options > Controls > Touch screen > Touch controls**.
+**Options > Controls > Touch screen > Touch controls**. The choice
+**Always, Start only in scenes** keeps the buttons like Always, but
+during a scene or a movie only the Start button stays, so it can be
+skipped.
 
 **Keyboards.** A keyboard works too, with the same keys as on a PC
 ([the table](CONTROLS.md#play-with-a-gamepad-a-keyboard-or-a-mouse)).
@@ -282,6 +294,90 @@ screen and steps down (3x, then 2x, then 1x) when the phone cannot draw the
 pictures in time. It never steps back up while the game runs; the row shows
 where it ended up, for example **Auto (2x)**. The Enhanced preset uses the
 size of your screen; Auto is a choice you make in the Resolution row.
+
+The game also keeps its main threads on the phone's fastest
+processor cores and, on Android 13 and later, tells the phone how long each
+picture may take, so the phone can set its speed for the game. There is
+nothing to switch on. A speed gain has been measured only on a Pixel 10 Pro
+Fold; phones with Mali or Adreno graphics are not measured yet.
+
+On some phones the game times its two ways of drawing for a few seconds
+in the first scene of a session (not the title screen) and keeps the
+faster way for the whole session. There is nothing to set.
+
+If it still stutters, play for a minute and send `ico-pc.log` from `logs`
+with a problem report. The normal release is all that is needed, with no
+special build or setting. A line starting `window: device:` near the top of
+the log names the Android version and the phone, so it does not need to be
+typed in. On phones with a Qualcomm graphics chip the log says,
+for each picture that was held back, how fast the graphics chip was running
+and how busy it was just before and just after, and whether the phone's
+graphics driver reset it; that tells a graphics chip that slowed down apart
+from a picture the driver held for another reason. The log also says how
+warm the phone was (a number where 1.0 is the point the phone starts to slow
+the game down, and a level from NONE to SHUTDOWN, on Android 10 and later) and,
+on Android 15 and later, whether the screen was being recorded.
+
+### A fixed refresh rate for a Frame rate you set
+
+Some phones and tablets change the screen's refresh rate while you play (a
+panel that runs anywhere from 1 to 144 times a second). A game that shows
+pictures at a steady 60 a second can then be shown at an uneven pace, or a
+picture can stop for a third of a second while the screen changes over. When
+**Options > Display > Frame rate** is a number (30, 60, 120, 144 and so
+on), the game asks the phone to hold the screen to that rate, as Android's
+own games do (Android 11 and later; older phones are not asked).
+
+On phones whose screen changes its refresh rate by itself, **Uncapped** now
+asks the screen for its highest rate (Android 12 and later), so Uncapped is
+not held at 60 when the screen could show more. The game reads the rates
+from the phone's own list for the screen each time, so a phone with 90, 120
+or 144 Hz gets its own highest. The phone can still say no (for example in
+battery saver), and nothing changes on a phone whose screen has one rate.
+
+The game lets go of the request when you choose **Original**, and when you
+leave the game or it goes to the background. Phones that cannot switch the
+rate without a flash are left as they are.
+
+If you would rather the phone chooses the rate under Uncapped, as before:
+**Original** never asks (but it shows only the game's own frames, as on the
+PS2), and a number such as 60 holds that number instead. To have Uncapped
+exactly as before, put `frame_rate_pin = off` under `[dev]` in
+`config.toml`; that turns every request off, the numbers' too.
+
+The log shows what happened:
+
+- `window: frame rate pin: asked 60 Hz (fixed source; the Frame rate row is
+  60) with ...: returned 0` (the name after "with" is the system call the
+  game used; a return other than 0 says the phone refused it), and `window:
+  frame rate pin: released ...` after Original. Under Uncapped: `window: frame
+  rate pin: asked 120 Hz (fixed source; the display's highest of 60, 120 at
+  1080x2364; the Frame rate row is Uncapped) ...`, or `window: frame rate pin:
+  Uncapped asks for no rate: ...` with the reason (an Android 11 phone, a
+  screen with one rate, a list the phone did not give, or a refused request).
+  The first line of the run says whether the
+  phone offers the call at all. The phone forgets the request when the game
+  goes to the background, so the game asks again when you come back:
+  `window: frame rate pin: asked again for a new surface: 60 Hz ...`.
+- `window: display refresh: 144.00 Hz, 3048x2032 "..." (run time 85.2 s, 2
+  changes this run)` in every 10 second block, and `window: display refresh
+  changed: 144.00 Hz -> 60.00 Hz ...` when the phone reports the screen
+  changed its rate (written with the next 10 second block, its run time the
+  moment of the change). With the pin working, a Frame rate of 60 should show the
+  screen at 60 Hz, and Uncapped the screen's highest rate.
+- On phones with a Qualcomm graphics driver and **Vsync** off, pictures go
+  to the screen one after another from the start (the log says `window:
+  present fifo (Qualcomm's own driver ...`), as the chip maker advises,
+  instead of switching to that only after a few held-back pictures. This is
+  not expected to remove the stutter some of these phones report. With
+  Vsync on nothing changes. `present_fallback = off` under `[dev]` in
+  `config.toml` goes back to the older way, for comparing two logs.
+  Every other graphics chip never switches: phones with a Mali or PowerVR
+  chip keep the usual way, and so do the graphics cards of computers.
+- `window: present calls: 755 timed (over 20 ms 5, over 50 ms 5, over 100 ms 5,
+  over 300 ms 5), longest 365 ms, total ...` in every block: how many times the
+  phone's graphics driver held up a picture, and for how long. A few over 300
+  ms with the screen's rate changing at the same time is what this pin is for.
 
 ## Send a problem report
 
@@ -313,8 +409,8 @@ first shows a message that says so and where its log is. Sometimes the
 phone closes it without a message (for example when the phone runs short
 of memory); the log then just stops. If that happened while the game was
 getting its graphics ready, the next start's log says where it stopped,
-and that start gets its graphics ready as you play. If it stops there
-two starts in a row, the game does that from then on and writes it into
+and that start picks the work up from there, in smaller steps. If a stop
+that cannot be resumed happens at the same place two starts in a row, the game does that from then on and writes it into
 `config.toml` ([how to undo that](TROUBLESHOOTING.md#the-first-start-takes-a-long-time)).
 If the graphics driver stops answering while the game prepares a piece of
 graphics, the game closes itself after about 10 seconds with a message,
@@ -418,7 +514,14 @@ your phone, a newer graphics driver from the community can sometimes fix
 it. If you do not have a problem, you can skip this.
 
 1. On your phone, download a driver package. The community shares them on
-   GitHub as zip files (search for "AdrenoToolsDrivers"). Leave the file
+   GitHub as zip files, for example the releases of
+   [K11MCH1/AdrenoToolsDrivers](https://github.com/K11MCH1/AdrenoToolsDrivers/releases)
+   or [Weab-chan/freedreno_turnip-CI](https://github.com/Weab-chan/freedreno_turnip-CI/releases).
+   Builds differ by graphics chip: some are for the older Adreno 6xx chips
+   only and do not work on newer ones (a release's own text says which), and
+   a newer build is not always a better one for this game. These are other
+   people's builds, not made or tested by this game; try one, and if it does
+   not start the game goes back to the phone's own driver. Leave the file
    as a zip. Do not unpack it.
 2. In the game, open **Options > Graphics driver** and choose **Add a
    driver**. Pick the zip file you downloaded. The game says when the
@@ -434,11 +537,23 @@ it. If you do not have a problem, you can skip this.
    driver** again and choose **Add from the drivers folder**. That row only
    shows while there is a zip in the folder; Left and Right pick between
    zips if there are several. The game deletes the zip once the driver has
-   been added. If it says the chosen file could not be read, copy the zip
-   onto the phone first and choose it again.
-3. In the same page, set the **Driver** row to the driver you added.
+   been added. If it says the file is unreadable, copy the zip onto the
+   phone first and choose it again.
+3. In the same page, set the **Driver** row to the driver you added. The
+   note under the page starts with what the game last saw of that driver:
+   its name, version and Vulkan version ("Qualcomm's driver 512.676.1,
+   Vulkan 1.3" for the phone's own, "Turnip, Mesa 25.3.0, Vulkan 1.4" for a
+   Turnip package). The game learns these when it starts with a driver, so a
+   driver you have not started yet says so, and the phone's own driver shows
+   what it was at the last start without a package.
 4. Close the game completely and start it again. The new driver is used from
    that start.
+
+A driver package built for the older 4 KB memory pages does not run on a
+phone that uses 16 KB memory pages (many phones that came with Android 15
+or later). When you add such a package, the game says "this driver package
+is not built for this phone's 16 KB memory pages" and does not add it; get
+a build made for 16 KB pages (the release's text may say) or use another.
 
 To go back to the phone's own driver, set **Driver** to **Built-in**, or
 choose **Remove this driver** to delete it. Restart the game after either.
@@ -451,7 +566,9 @@ driver on some Snapdragon tablets does): after such a stop, the note under
 **Options > Graphics driver** names this route and the folder.
 
 If a driver does not start, the game falls back to the phone's own driver
-and tells you so. You can still play. The driver is not removed, so you can
+and tells you so. The same happens when the graphics stop responding within
+the first 30 seconds of playing with a driver you added: the next start uses
+the phone's own driver and says so. You can still play. The driver is not removed, so you can
 try another one, or remove it yourself: in **Options > Graphics driver**,
 set **Driver** to it, then choose **Remove this driver**.
 

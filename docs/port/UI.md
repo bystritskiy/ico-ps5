@@ -10,9 +10,16 @@ draws, navigates, fades and sounds it; the port supplies the rows, their words a
 | path | what it holds |
 | --- | --- |
 | `port/ui/layout_ext.h`, `layout_ext.c` | the layout extension: port layouts and rows past the game's tables, text, glyph and rectangle rows, the text hook, the back buttons, pointer roles |
-| `port/ui/settings.h`, `settings.c` | the Settings menu: the pages, the entry rows, the New Game and Quit screens, the values and their setters, the saves |
+| `port/ui/settings.h`, `settings.c` | the Settings menu: the pages, the entry rows, the Quit screen, the values and their setters, the saves |
+| `port/ui/settings_newgame.h`, `settings_newgame.c` | the New Game screen: Difficulty, Customize, Start and its note, and the Mirror mode and New Game+ choices Customize shows (`ui__newgame_*`) ([The New Game and Quit screens](#the-new-game-and-quit-screens)) |
+| `port/ui/settings_difficulty.h`, `settings_difficulty.c` | the New Game's difficulty draft and Customize's pages: the draft's rows, their value text, steps, notes and greying, the pages' tables, the Difficulty row's modes ([Customize: the New Game draft's pages](#customize-the-new-game-drafts-pages)) |
 | `port/ui/settings_graphics.h`, `settings_graphics.c` | Settings > Graphics: the Graphics API and Graphics card rows' values and steps, Apply and its countdown |
+| `port/ui/settings_desktop.h`, `settings_desktop.c` | Settings > Extras > Add to the applications menu (Linux): the host's handler (`ui_settings_set_desktop_handler`), Cross and the done / failed popups |
 | `port/ui/settings_backup.h`, `settings_backup.c` | Settings > Extras > Back up your data and Restore from a backup: the rows' words and notes, Cross, the confirmations, the popups |
+| `port/ui/settings_unused.h`, `settings_unused.c` | Settings > Extras > Unused content's host: whether each row and the link show, Cross's open ([Extras > Unused content](#extras--unused-content)) |
+| `port/ui/settings_pads.h`, `settings_pads.c` | Controls > Button pictures: the row's value and stepping, and the set in force once a frame ([The setting](#the-setting)) |
+| `port/ui/settings_step.h`, `settings_step.c` | holding Left or Right on the value rows (the tracker and the rows that repeat), L1/R1 on the Picture colour rows, the colour rows' field and step |
+| `port/ui/settings_variants.h`, `settings_variants.c` | the game variants rows' helpers: which options they are, their value text, the disc's note and whether a row shows on the disc ([Gameplay > Chains and Cutscenes](#gameplay--chains-and-cutscenes)) |
 | `port/ui/settings_states.h`, `settings_states.c` | the Save states page's host, cards' texts and pictures, actions on a slot with their second press, and F6's latch (`settings.c` builds, opens, leaves and ticks the page) |
 | `port/ui/ui_list.h`, `ui_list.c` | the scrolling list pages (Achievements, Remap, Music) |
 | `port/ui/ui_hint.h`, `ui_hint.c` | a line of button prompts (glyphs and words) |
@@ -25,6 +32,8 @@ draws, navigates, fades and sounds it; the port supplies the rows, their words a
 | `port/ui/menu_text.h`, `menu_text.c` | the table of the game's menu words, measured from the PAL sheets |
 | `port/ui/ui_internal.h` | font.c's and menu_font.c's internals shared with `ui_host.c` and the tests |
 | `port/ui/embed_font.cmake` | a font file as a C array at build time; the subsets' code points |
+| `port/ui/pad_glyphs.h`, `pad_glyphs.c`, `pad_glyphs.cmake` | the button pictures of other controllers: the SVG files embedded, read, rasterised and cached ([Button pictures](#button-pictures)) |
+| `port/assets/buttons/<set>/<button>.svg`, `CREDIT.txt` | the button pictures (Xbox, Nintendo, Wii Classic Controller: eight each) and their credit |
 | `port/assets/fonts/Arimo-Regular.ttf`, `OFL.txt` | the font and its licence |
 | `port/assets/fonts/NotoSansJP-Regular-subset.ttf`, `NotoSansJP-OFL.txt` | the second font (the characters Arimo lacks) and its licence |
 | `tools/subset_font_arimo.py` | makes and checks Arimo's subset |
@@ -56,7 +65,7 @@ rectangle, its box on screen, its item links); on the Japanese disc `texLayout[7
 rows 66..79 sit inside every stage's layout range, whose textures the game initialises at each
 stage load, so a port row there would be looked up as a texture file. The port therefore extends
 both tables past their ends: layouts `80 ..` and properties `436 ..`, up to
-`LT_EXT_MAX_LAYOUTS` (32) and `LT_EXT_MAX_PROPERTIES` (1024) (`port/ui/layout_ext.h`, header
+`LT_EXT_MAX_LAYOUTS` (40) and `LT_EXT_MAX_PROPERTIES` (1024) (`port/ui/layout_ext.h`, header
 comment). `layout_texture.c` reads both tables through `LT_LAYOUT(i)` and `LT_PROP(i)`, which are
 `lt_ext_layout(i)` and `lt_ext_prop(i)`: the game's row below its count, the port's above it, and
 a zeroed scratch row for an index in neither, never memory outside the tables
@@ -191,19 +200,25 @@ tables in step and within the `MAX_ROWS` (17, 18 in an rc build) budget of a pag
 | --- | --- |
 | Main (`UI_PAGE_MAIN`) | Display, Picture (`UI_PAGE_PICTURE`), Effects, Graphics (`UI_PAGE_GRAPHICS`), Graphics driver, Audio, Controls, Gameplay, Language, Menu language, Disc, Achievements, Extras, Save a picture for a bug report, (an rc build on Android: Share a bug report,) Developer (`UI_PAGE_DEVELOPER`), Back |
 | Display | Preset, Resolution, Aspect, Window mode, Vsync, Frame rate, Frame rate counter (`UI_OPT_SHOW_FPS`, `[video] show_fps`, Off or On), Video mode, Back |
-| Picture | Anti-aliasing, Downsampling (`UI_OPT_DOWNSAMPLE`, `[video] downsample`, Off or To original size), Full height, Filtering, Full pixel, Brightness (pause menu only), CRT filter, CRT strength, Texture pack, Model pack (title only), Back |
-| Effects | the six game effects (Glow between frames, `UI_OPT_EFFECT_GLOW_SMOOTH`, Original or Smooth right after Glow, `[video] effect_glow_mode`, greyed by `glowSmoothLocked` at Frame rate Original or with Glow off, its note `UI_STR_EFFECT_GLOW_SMOOTH_NOTE` swapped for `UI_STR_EFFECT_GLOW_SMOOTH_LOCKED` while greyed; Motion blur Off, Original or Smooth, `UI_OPT_EFFECT_MOTION_BLUR`, stepped round with `stepIndex` and its note `UI_STR_EFFECT_MOTION_BLUR_NOTE`; Motion blur strength right after it, `UI_OPT_EFFECT_MOTION_BLUR_STRENGTH`, 10..100 % in tens held at both ends, `[video] effect_motion_blur_strength`, hidden by `optShown` while Motion blur is Off, its note `UI_STR_EFFECT_MOTION_BLUR_STRENGTH_NOTE`) with Water reflections (Original or Sharp, `UI_OPT_EFFECT_WATER`) after Fog, Cinematic bars last, Back |
+| Picture | Anti-aliasing, Downsampling (`UI_OPT_DOWNSAMPLE`, `[video] downsample`, Off or To original size), Upscaling (`UI_OPT_UPSCALE`, `[video] upscaling`, Off, FSR 1.0 or FSR 3.1; the stepper skips FSR 3.1 unless `rd_upscale_temporal_supported()` (`ui_settings_set_temporal_query` in tests), and a saved one the device cannot run reads "FSR 3.1 (off: not available)" and is never rewritten), Upscaling quality (`UI_OPT_UPSCALE_QUALITY`, `[video] upscaling_quality`, Native AA / Quality / Balanced / Performance, shown while FSR 3.1 is offered and chosen) and Sharpness (`UI_OPT_UPSCALE_SHARPNESS`, `[video] upscaling_sharpness`, 0..100 in tens, default 80, held at both ends, shown while Upscaling is FSR 1.0 or a runnable FSR 3.1; one note under the three; the Anti-aliasing value says "(off: FSR 3.1)" while FSR 3.1 runs), Full height, Full height, Filtering, Full pixel, Brightness (pause menu only), CRT filter, CRT strength, Gamma, Picture brightness, Contrast, Saturation (`UI_OPT_TONE_GAMMA`..`UI_OPT_TONE_SATURATION`, `[video] gamma`, `brightness`, `contrast`, `saturation`: 1..100, 50 the game's picture, 1 a press (issue 194), Square puts 50 back, one shared note, 18 rows in all), Texture pack, Model pack (title only), Back |
+| Effects | the six game effects (Glow between frames, `UI_OPT_EFFECT_GLOW_SMOOTH`, Original or Smooth right after Glow, `[video] effect_glow_mode`, greyed by `glowSmoothLocked` at Frame rate Original or with Glow off, its note `UI_STR_EFFECT_GLOW_SMOOTH_NOTE` swapped for `UI_STR_EFFECT_GLOW_SMOOTH_LOCKED` while greyed; Motion blur Off, Original or Smooth, `UI_OPT_EFFECT_MOTION_BLUR`, stepped round with `stepIndex` and its note `UI_STR_EFFECT_MOTION_BLUR_NOTE`; Motion blur strength right after it, `UI_OPT_EFFECT_MOTION_BLUR_STRENGTH`, 10..100 % in tens held at both ends, `[video] effect_motion_blur_strength`, hidden by `optShown` while Motion blur is Off, its note `UI_STR_EFFECT_MOTION_BLUR_STRENGTH_NOTE`) with Fog, Cinematic bars last, Back (no Water reflections row: the reflections take the scene's scale always, `[video] effect_water_sharp` is retired) |
 | Graphics | Graphics API (`UI_OPT_GRAPHICS_API`, shown with two or more renderer names: Automatic, then each name `ui_settings_set_backend_names` was given as Vulkan, OpenGL, Direct3D 12 or Direct3D 11; the shown value and the step base are the config's `video.backend`, an unlinked value shows as written and steps from Automatic; a step writes `video.backend` ("" for Automatic) and sets `s_dirtyConfig`, so the file is written on leaving; the note `UI_STR_GRAPHICS_API_NOTE` says Apply switches now and the choice is otherwise used from the next start), Graphics card (`UI_OPT_GRAPHICS_ADAPTER`, shown with two or more card names: Automatic (`UI_STR_VAL_GRAPHICS_AUTOMATIC`), then each name `ui_settings_set_adapter_names` was given, untranslated and cut to the value box by `gpuFit`; the config's `video.adapter`, a name the list lacks shows as written and steps from Automatic; a step writes it ("" for Automatic) with the line `settings: Graphics card set to <name|automatic> (used from the next start)`; note `UI_STR_GRAPHICS_ADAPTER_NOTE`), Apply (`UI_OPT_GRAPHICS_APPLY`, shown while a `UiGraphicsHost` is set, no switch under way and either the Graphics API value, Automatic counting as the host's `automatic()` (the backend Automatic started this run) or else `vulkan`, is a linked name that is not the host's `running()`, or the Graphics card value, Automatic counting as the card the names marked automatic, is a listed card that is not the host's `runningAdapter()`; note `UI_STR_GRAPHICS_APPLY_NOTE`), Keep and Revert (`UI_OPT_GRAPHICS_KEEP`, `UI_OPT_GRAPHICS_REVERT`, shown only in the countdown, which hides Graphics API, Graphics card and Back), Back (the link and the page with two or more renderer names or two or more card names) |
 | Graphics driver | Driver, Add a driver, Add from the drivers folder (`UI_OPT_GPU_ADD_FILE`, stepped over `fileName(i)`, shown while `fileCount()` is above 0, Cross calls `installFileBegin`), Remove this driver, Back (Android) |
-| Developer | Developer mode, Dump textures, Dump models (the two dump rows only with Developer mode on), Back |
+| Developer | Developer mode, Dump textures, Dump models, Debug menu (`UI_OPT_VAR_DEBUG_MENU`, a press row; the dump rows and Debug menu only with Developer mode on, Debug menu not on the June 2001 demo), Free movement (`UI_OPT_FREE_MOVEMENT`, [developer] free_movement, with Developer mode on, every disc), Back |
 | Audio | Volume, Music, Effects, Output, Device, Back |
-| Controls | Remap (a list), Button configuration, Vibration, Hold type, Stick fix, the mouse camera's six rows, Circle back, Touch screen (a link, with a touch screen only), Back |
+| Controls | Remap (a list, ending with Ask Yorda for a hint on the discs with hints: `REMAP_TARGETS` in `settings.c`), Button configuration, Vibration, Button pictures (`[input] button_pictures`, every disc, title and pause), Hold type, Zoom type (`[gameplay] zoom_type`, every disc, title and pause), Camera reset (`[gameplay] camera_reset`, every disc, title and pause), Look at Yorda (`[gameplay] yorda_look`, Off / Hold / Toggle, every disc, title and pause), Stick fix, the mouse camera's six rows, Circle back, Touch screen (a link, with a touch screen only), Back |
 | Touch screen (`UI_PAGE_TOUCH`) | Touch controls, Touch size, Touch opacity, Edit layout (`UI_OPT_TOUCH_EDIT`), Snap to grid, Grid size, Reset layout, Reset all layouts, Back |
 | Edit layout (`UI_PAGE_TOUCH_LAYOUT`) | no shown rows: the editor's own screen ([The touch layout editor](#the-touch-layout-editor)) |
-| Gameplay | Yorda safe, Time to rescue Yorda, Shadow speed, Stick fix, Door fix, Yorda trips (`UI_OPT_YORDA_TRIPS`, `[gameplay] yorda_trips`, its note `UI_STR_OPT_YORDA_TRIPS_NOTE`), Natural chains, Skip the opening (`UI_OPT_SKIP_OPENING`), Second memory card (`UI_OPT_SECOND_CARD`, `[gameplay] second_memory_card`, its note `UI_STR_OPT_SECOND_CARD_NOTE`; the step calls `ico_opt_set_second_memory_card`, whose listener puts the card in at once), Film effect, Players, Back; twelve rows once the game is cleared, so the page scrolls |
+| Gameplay | Stick fix, Door fix, Second memory card (`UI_OPT_SECOND_CARD`, `[gameplay] second_memory_card`, its note `UI_STR_OPT_SECOND_CARD_NOTE`; the step calls `ico_opt_set_second_memory_card`, whose listener puts the card in at once), Film effect, Players, Light sword colour (`UI_OPT_VAR_SWORD_COLOUR`: Original, Red; hidden on ntsc, aug6 and jun26, `ui__variant_shown`), Stick (`UI_OPT_VAR_WEAPON`: Original, Insect net), Chains (`UI_PAGE_CHAINS`), Cutscenes (`UI_PAGE_CUTSCENES`), Difficulty (a link to `UI_PAGE_CUSTOMIZE`, shown from the pause menu only: `optShown` hides it while `onTitle()`), Back: the three links before Back as Controls' Touch screen; eleven rows once the game is cleared, the window's ten slots scroll. The rows a journey's difficulty holds are Customize's (below) |
+| Chains (`UI_PAGE_CHAINS`) | Natural chains, Chain swing speed (`UI_OPT_VAR_CHAIN_SPEED`) and Chain swing slowdown (`UI_OPT_VAR_CHAIN_DAMPING`) (`[variants] chain_swing_speed` and `chain_swing_damping`, `ICO_VARIANT_CHAIN_SWING_SPEED` / `_DAMPING`: the value is the game's number 1 to 10 as text, the game's own 4 reads `UI_STR_VAL_VAR_CHAIN_ORIGINAL`, "4 (original)"; Left and Right wrap 10 and 1; notes `UI_STR_OPT_VAR_CHAIN_SPEED_NOTE` / `_DAMPING_NOTE`; their text is in `settings_variants.c`), Back |
+| Customize (`UI_PAGE_CUSTOMIZE`) | Shadows (`UI_PAGE_SHADOWS`), Combat (`UI_PAGE_COMBAT`), Rules (`UI_PAGE_RULES`), Mirror mode (`UI_OPT_NEWGAME_MIRROR`), New Game+ (`UI_OPT_NEWGAME_PLUS`), Back; the two Off/On rows for every difficulty, the New Game screen's choices (`settings_newgame.c` `ui__newgame_opt`, `_value`, `_step`), never rows of the draft; reached from the New Game screen's Customize row (its Back returns there) and, read-only, from the pause menu's Gameplay > Difficulty link (its Back returns to Gameplay, the cursor on the link) ([Customize: the New Game draft's pages](#customize-the-new-game-drafts-pages)) |
+| Shadows (`UI_PAGE_SHADOWS`) | Shadow speed, Shadow toughness, Shadow aggression, Peaceful shadows, Shadows never take Yorda (`UI_OPT_YORDA`), Shadows attack together, No Shadows (`UI_OPT_DIFF_NO_SHADOWS`), Back: the New Game draft's rows |
+| Combat (`UI_PAGE_COMBAT`) | Automatic guard, Turn to face shadows, Shadows wait while Ico is down, One hit per swing, Shadows never dodge, Queen barrier, Back: the draft's rows |
+| Rules (`UI_PAGE_RULES`) | Time to rescue Yorda (`UI_OPT_PIT_TIME`: `"15 s (Original)"` for Original with the base from `ico_opt_pit_base_seconds`, else `"8 s"`; a second a step, held at 4 and 30), Yorda trips, No hints (`UI_OPT_VAR_NO_HINTS`), Knock-down limit (`UI_OPT_DIFF_KNOCK_LIMIT`: Off, 1 .. 9 around), Knock-downs count (`UI_OPT_DIFF_KNOCK_SCOPE`: Each room, Whole journey; greyed while the limit is Off), Permadeath (`UI_OPT_DIFF_PERMADEATH`, never greyed), Back: the draft's rows |
+| Cutscenes (`UI_PAGE_CUTSCENES`) | Skip the opening (`UI_OPT_SKIP_OPENING`), No cutscene look-around, Ignore cutscene cameras (`UI_OPT_VAR_*`), Back |
 | Achievements | a list, the popups switch |
-| Extras | Music, Models, Credits, Characters, Game variants (`UI_PAGE_VARIANTS`), Add to Steam, Export textures (`UI_OPT_EXTRAS_EXPORT_TEXTURES`), Back up your data (`UI_OPT_EXTRAS_BACKUP`), Restore from a backup (`UI_OPT_EXTRAS_RESTORE`), Achievement popups, Back |
-| Game variants (`UI_PAGE_VARIANTS`) | Shadow toughness, One hit per swing, Shadows never dodge, Shadow aggression, No hints, Queen barrier, No cutscene look-around, Ignore cutscene cameras (`UI_OPT_VAR_*`, one per `IcoVariantId`), Debug menu (`UI_OPT_VAR_DEBUG_MENU`, a press row, shown with Developer mode on), Back |
+| Extras | Music, Models, Credits, Characters, Unused content (`UI_PAGE_UNUSED`, a link), Add to Steam, Add to the applications menu (`UI_OPT_EXTRAS_DESKTOP`, Linux only), Export textures (`UI_OPT_EXTRAS_EXPORT_TEXTURES`), Back up your data (`UI_OPT_EXTRAS_BACKUP`), Restore from a backup (`UI_OPT_EXTRAS_RESTORE`), Achievement popups, Back |
+| Unused content (`UI_PAGE_UNUSED`) | Test room: arena, Test room: climbing, Attract movie (576 lines), Early show title art (`UI_OPT_UNUSED_ARENA` .. `_ART`, press rows), Back ([Extras > Unused content](#extras--unused-content)) |
 | Music | the music gallery, a list |
 | Characters | nine colour rows, Switch, Randomize, Reset, Back |
 
@@ -237,11 +252,14 @@ value for Credits; Characters a colour swatch per row and the viewer's prompt li
 
 Which rows show depends on where the menu was entered and what the machine has: the game's own
 settings (Brightness, Vibration, Button configuration, Film effect, Players) only from
-the pause menu (Hold type shows from the title too: `[gameplay] hold_type`), Film effect and Players once the game is cleared; Video mode, Model pack and Extras'
+the pause menu (Hold type, Zoom type, Camera reset and Look at Yorda show from the title too: `[gameplay] hold_type`, `zoom_type`, `camera_reset`, `yorda_look`), Film effect and Players once the game is cleared; Video mode, Model pack and Extras'
 Music, Models and Credits only from the title (Add to Steam also only where the window host installs
-its handler, Export textures only while a `UiTextureExportHost` is set, the backup rows only while a
+its handler, Add to the applications menu only where the Linux window host installs its own,
+`ui_settings_set_desktop_handler`, Export textures only while a `UiTextureExportHost` is set, the backup rows only while a
 `UiBackupHost` is set, the window build's but iOS's; none of them is in
-`isExtrasOpt`, which is the three rows that leave the stage); the dump rows only in developer mode; the Touch screen link only with a touch screen; the
+`isExtrasOpt`, which is the three rows that leave the stage); the Unused content link only from
+the title while the host has any row, and each of its rows only from the title while the host has
+that row (`ui__unused_any_shown`, `ui__unused_shown`); the dump rows only in developer mode; the Touch screen link only with a touch screen; the
 window and mouse camera rows not on Android; the Graphics link only with two or more renderer names (`ui_settings_set_backend_names`), the Graphics driver link only with a driver host on an
 Adreno GPU (`port/ui/settings.c` (`optShown`, `isGameOpt`, `isExtrasOpt`)). `layoutPage` masks the
 hidden rows, links the shown ones in a loop and places them in the window.
@@ -276,7 +294,7 @@ tick (`lt_item_select_disable`): the mouse drops its queued wheel notches after 
 (`ui_mouse_tick`), and a notch is an Up or Down press, so three notches move three rows across the
 window's edge. Every other move is the game's alone (both rows in view).
 
-A page whose table is longer than the slots (Main, Display, Controls, Effects, Characters) has two
+A page whose table is longer than the slots (Main, Picture, Controls, Extras, Characters) has two
 marks, port text rows of the font's U+25B2 and U+25BC at `NOTE_SIZE`, greyed (`lt_ext_set_dim`),
 right of the value arrows at x 584, 32 wide (on Characters at x 618, 20 wide, right of the
 swatches): the up mark beside the first slot while rows above are out of view, the down mark
@@ -302,6 +320,21 @@ settings are written by the game's saves, never into `config.toml`, except Hold 
 (the video mode from the pause menu, the resolution under the CRT filter, a pack row with no pack
 installed) shows its value and ignores the press (`canStep`).
 
+Holding Left or Right on a value row keeps stepping it (issue 202; `port/ui/settings_step.c`,
+`settings_step.h`). `settingsProc` hands the tracker `pad[0].now` (not the game's `rep` word,
+which fires every tick once past its delay, is never filled by the test fixture and is not set by
+the stick's d-pad emulation, `lt_analog2Pad`): after `UI_STEP_REPEAT_DELAY` (15) ticks on the same
+row and direction, and then every `UI_STEP_REPEAT_EVERY` (3), `ui__step_repeat` answers a
+synthetic Left or Right bit that goes into a local step word beside `flags`, so the cursor moves,
+Back and the page handlers never repeat. Only `ui__step_repeats` rows repeat (the four colour
+rows, CRT strength, Upscaling sharpness, Motion blur strength, Volume, Music, Effects, the game's
+Brightness, Pit time, Mouse sensitivity and Mouse camera speed: all held at both ends); the
+enumerations that wrap step once a press. A repeat that leaves the value text as it was (held at
+an end) plays no sound; each repeat logs `settings: held step` (the first 8, then every 100th).
+L1 and R1 move the four Picture colour rows by `ICO_TONE_STEP_COARSE` (10), held at 1 and 100
+(`ui__tone_step`); L1/R1 are used elsewhere only by the gallery and Characters' Switch, pages that
+have no colour row.
+
 What changed is written when a page is left (`leaveTo`), before an action that leaves the menu,
 and on quit: `ui_settings_save` writes `[video]` through `ico_video_save`, the bindings through
 `ico_input_write_bindings`, the rest through `ico_config_save`; `ui_settings_save_on_quit` also
@@ -323,11 +356,21 @@ A new option row needs:
    marks;
 3. its value text in `rawValue` and its setter in `ui_settings_step`, plus a case in `optShown`
    when it is not always shown and in `canStep` when it cannot always step;
-4. a `UI_STR_OPT_*` id in `port/ui/strings.h` and its text in each of `strings_en.c`,
-   `strings_fr.c`, `strings_de.c`, `strings_it.c`, `strings_es.c`, `strings_ja.c` and
-   `strings_ko.c` (`strings_complete` fails on a missing entry, which would fall back to
-   English);
+4. a `UI_STR_OPT_*` id in `port/ui/strings.h` and its text in each of the eleven tables,
+   `strings_en.c`, `strings_fr.c`, `strings_de.c`, `strings_it.c`, `strings_es.c`,
+   `strings_ja.c`, `strings_ko.c`, `strings_zh.c` and the three community tables
+   `strings_pt_br.c`, `strings_ru_bobttz.c` and `strings_ru_cobra838.c` (NULL there for a row
+   newer than the translation: English at run time) (`strings_complete` fails on a missing
+   entry, which would fall back to English without a word); a new CJK character needs
+   `tools/subset_font_ja.py`, `_ko.py` and `_zh.py` run (the `font_subset_*` ctests);
 5. for a config key, the key in its owner's module ([CONFIG.md](CONFIG.md#adding-a-key)).
+
+A row of a journey's difficulty is not a config key: it is a row of the record
+(`port/game/difficulty.h` `IcoDiffRow`, CORE's), an entry in `kRowOpt` and in one of Customize's page
+tables in `port/ui/settings_difficulty.c` (its value text in `ui__diff_text`, its note in
+`ui__diff_note`, a greying rule in `ui__diff_dimmed`); `settings.c` routes `rawValue`,
+`ui_settings_step`, `optShown`, `steppable` and the note to those before its own cases, and builds
+the four pages from `ui__diff_page`. Its tests go in `port/ui/test/settings_difficulty_test.c`.
 
 The `settings` test holds each page's rows as fixed lists (`port/ui/test/settings_test.c`
 (`testBuild`)), which gain the row; new cases go in `port/ui/test/settings_extra_test.c` (ctest
@@ -356,11 +399,43 @@ in the strings table. A development build's empty label shows nothing (`port/pla
 
 ### The New Game and Quit screens
 
-After the game's vibration choice, `la_vibe_select` switches to the port's New Game screen: Mirror
-mode and New Game+, each Off or On; Cross or Start confirms both, sets the run's mirror mode and
-`gFlagGameClear`, then calls `la_host_new_game_go`, which starts the game as the vibration screen
-did. Triangle goes back to the vibration screen (`port/ui/settings.h`
-(`ui_new_game_screen_enter`); `ico2/common/src/layout_action.c` (`la_host_new_game_screen`,
+After the game's vibration choice, `la_vibe_select` switches to the port's New Game screen
+(`port/ui/settings_newgame.c`): Difficulty at y 46 (a stepped value between two arrows: Easy, Normal,
+Hard, and Custom while a customized draft is kept aside), Customize (a link) at 70, a centred Start
+row at 100 and the cursor row's note at 182 (30 lines, its bottom at 212). Up and Down go
+Difficulty, Customize, Start and round. Mirror mode and New Game+ are Customize's rows, for every
+difficulty: their choices (`s_mirrorChoice`, `s_ngpChoice`) stay in `settings_newgame.c`, reset on
+entering the screen (Mirror mode Off, New Game+ On from a finished save and Off otherwise) and
+applied at Start, and are no rows of the draft, so stepping them leaves its mode and stepping
+Difficulty (`ui__diff_step_mode` copies the draft's rows only) leaves them. The cursor
+starts on Difficulty at Normal; a cleared save's New Game+ (`gFlagGameClear` set while that save's
+record, with a journey, is in force) starts from that save's rows, copied before
+`ico_opt_mirror_reset` puts Normal in force and kept while the player goes back to the vibration
+screen and here again. Left and Right on Difficulty step the mode: a preset replaces the draft's rows,
+and a Custom draft is kept aside, so stepping back to Custom restores it (`ui__diff_step_mode`). The
+left stick (and the keys and touch stick bound to it) steps it too: the screen's proc runs the game's
+d-pad emulation (`lt_analog2Pad`) before it reads the pad word, as `settingsProc` does (the game's own
+call is in `default_item_select`, after the proc); one step a push, held or not, as the Settings rows
+that wrap (`newgame: Difficulty stepped by the stick (N)`, the first 8 then every 100th). Cross on
+Customize opens [Customize](#customize-the-new-game-drafts-pages) on its first row; its Back returns with
+the cursor on Customize. Cross on Difficulty moves the cursor to Customize; Cross on Start, or the Start button on any row, confirms: `ico_difficulty_begin` makes the
+draft the journey's (a new journey id, its counts 0), then the run's mirror mode and `gFlagGameClear` are
+set from Customize's two choices and `la_host_new_game_go` starts the game as the vibration screen did. The notes: the mode's
+(`UI_STR_DIFF_*_NOTE`) on Difficulty, `UI_STR_DIFF_CUSTOMIZE_NOTE` on Customize,
+`UI_STR_NEWGAME_START_SCREEN` on Start; `UI_STR_MIRROR_SCREEN` and `UI_STR_NEWGAME_PLUS_SCREEN` are
+Customize's two rows' notes.
+The title's lettering is left alone on the screen (the game's own title animation has taken it away by
+the vibration screen; `ui_settings_covers_title` does not count the screen, which is not a page). The
+rows are port props, so the mouse and touch take them with no extra code; there a hover moves nothing
+and a click does (`ui_mouse.c`), a click on Difficulty's arrows is Left or Right and on its value Right.
+Triangle goes back to the vibration screen. Log lines: `newgame: the screen opened: Difficulty <mode>
+(<the preset|the cleared save's rows, journey <id>>), New Game+ <on|off>`, `newgame: Difficulty <Mode>
+(was <Mode>...)`, `newgame: Customize opened on Difficulty <mode>`, `newgame: back from Customize:
+Difficulty <mode>`, `newgame: Customize: <Mirror mode|New Game+> <on|off> (Difficulty stays <mode>)`
+(the first 8 then every 100th), `newgame: start: Difficulty <mode>, Mirror mode <on|off>, New Game+ <on|off>`, then
+the record's own `difficulty: <Mode> in force (a New Game; ...)` (`port/ui/settings.h`
+(`ui_new_game_screen_enter`, `ui_new_game_screen_difficulty`, `ui_new_game_screen_customize`,
+`ui_new_game_screen_draft`); `ico2/common/src/layout_action.c` (`la_host_new_game_screen`,
 `la_host_new_game_go`)).
 
 Cross on the title's Quit row opens "Quit to desktop?" with Yes and No, the cursor on No. Yes writes
@@ -431,7 +506,7 @@ in `ico_window_close`, which then calls `texpack_export_shutdown` before `rd_shu
 `texpack_shutdown`, so the worker joins before the pack closes ([PACKS.md](PACKS.md)). The headless
 build installs no host, so the row stays hidden there and in the UI tests without a fake.
 
-- The row shows from the title only (`optShown`), after Add to Steam; its note is
+- The row shows from the title only (`optShown`), after Add to Steam and Add to the applications menu; its note is
   `UI_STR_EXPORT_TEXTURES_NOTE`. Dump textures does not hide it (the same names, a file already
   there is kept).
 - Cross (`texExportPress`): while the host's state is `UI_TEXEXPORT_RUNNING`, `cancel()` (log
@@ -626,7 +701,7 @@ A community translation ([TRANSLATING.md](../TRANSLATING.md)) is a table past th
 `strings_ru.c` of cobra838's pull request 180: his rows left in English, the ids newer than his
 table, the one whose English changed since, the two notes over 255 bytes, a note that says
 something else than the English and his Korean and Chinese names, which every table gives in their
-own script, are NULL; his "Longer" pit-time value, "x1", is the 1.5x step's "x1,5") and
+own script, are NULL; his pit-time values were dropped when the row became seconds) and
 `UI_LANG_PT_BR` (`port/ui/strings_pt_br.c`, converted once from Igor Chagas's CSV, issue 157: his
 empty rows, the rows the same as the English, the ids newer than his CSV, the one whose English
 changed since, three notes whose second half his spreadsheet lost, three rows without the
@@ -651,11 +726,20 @@ walk every table and its subtitles.
 The Menu language row offers the community translations after the eight (`[ui] language`
 `ru-bobttz`, `ru-cobra838`, `pt-br`), and its Auto resolves to the one in force (`port/ui/ui_lang.h`
 (`ui_settings_text_language`): the Language row's community entry, `[game] text_language`, on the
-European disc with the game in English). `ui_settings_apply_language` also sets the menu words'
-language to it (`ui_set_menu_words_language`), so the game's menu words over the English sheets
-are its `UI_STR_MT_*` strings with the English sheet's geometry, an item's strip hashed with that
-language so the five sheets' own strips stay byte for byte (`port/ui/menu_font.c` (`itemStrip`,
-`itemWords`); ctests `subtitles_ru`, `subtitles_ru_cobra838`, `subtitles_pt_br`). Its subtitles are drawn by `port/ui/subtitle_text.c`
+European disc with the game in English). Two languages are then apart: the Language row's
+translation (the subtitles, the game data stays English) and the Menu language (every menu word).
+While a translation is in force `ui_settings_apply_language` sets the menu words' language to the
+Menu language (`ui_set_menu_words_language(ui_get_language())`; Auto is the translation itself),
+so the game's menu words over the English sheets (New Game, Continue, the save tiles' words) are
+that language's `UI_STR_MT_*` strings, as the port's rows beside them are, with the English
+sheet's geometry: an item's strip carries its string language (`textLang`) apart from its sheet
+language (`lang`, which picks the em, width, anchor and halo), is hashed with `textLang` when the
+two differ so the five sheets' own strips stay byte for byte, and its draw key is made from the
+words it draws (`port/ui/menu_font.c` (`rasterItem`, `itemStrip`, `ui_menu_word_draw`); cobra838's
+fix on PR 180). With no translation in force a disc language keeps the sheets' own words whatever
+the Menu language. The log names each change: `settings: the game's menu words in <lang> (...)`.
+Ctests `subtitles_ru`, `subtitles_ru_cobra838` (`testMenuWordsApart`: Language his Russian, Menu
+language English or German), `subtitles_pt_br`, `strings_complete`. Its subtitles are drawn by `port/ui/subtitle_text.c`
 ([GAME_FEATURES.md](GAME_FEATURES.md#community-translations)).
 
 ## Text: the font and the sheet look
@@ -756,8 +840,8 @@ pre-rendered menu sheets (`port/ui/menu_font.h`, header comment). A sheet texel 
 and one field line tall; the menu rows' em is 13.5 texels, 27 y units. A text is rasterised on
 that grid, its lettering 0.8 as wide as the typeface (`UI_SHEET_WIDTH`, the sheets having been
 lettered for the GS's 512-wide frame) and a little heavier (`UI_MENU_BOLD_X`, `UI_MENU_BOLD_Y`),
-then drawn with rd's sheet [shader](SHADERS.md): a rim around the letters and the antialiasing
-quantised against a fixed dither, as the sheets read (`port/ui/menu_font.h`;
+then drawn with rd's sheet [shader](SHADERS.md): an outline round the letters and the antialiasing
+quantised against a fixed dither (`port/ui/menu_font.h`;
 `port/ui/ui_internal.h` (`UI_SHEET_WIDTH`, `UI_MENU_BOLD_X`)). At 1x rd computes a page's finished
 texels on the CPU when it uploads the strips placed on it, and the shader reads four of them a pixel
 ([SHADERS.md](SHADERS.md#sheet_texthlsli), **The 1x bake**): a 1x page is 1038 x 1034 RGBA8 on the
@@ -767,6 +851,22 @@ again whole. At 2x (the strips of a scene twice the PS2's height or a little mor
 Resolution Auto or 2x) rd bakes the pages the same way ([SHADERS.md](SHADERS.md#sheet_texthlsli),
 **The 2x bake**): a 2x page is 2062 x 1034 RGBA8 (8.5 MB, the 2048 x 1024 texture and its apron)
 where its coverage and rim are 2 MB; at 3x and 4x the shader rebuilds each pixel.
+
+The outline is the one the user picked on the Menu Outline Lab, a page that drew the menus'
+words in candidate looks beside the title screen's lettering (ctest `menu_look`'s
+`ICO_MENU_LOOK_OUTLINE` and `ICO_MENU_LOOK_COVERAGE` modes made its material): a solid dark-grey
+band (grey 100 on every European language) four texels across and two field lines down, then a
+quick fade (`ICO_SHEET_WX` 1000 1000 1000 1000 90 0 0, `ICO_SHEET_WY` 1000 1000 700 350 100 per
+mille), like the lettering at the foot of the title screen. A texel whose alpha is at least
+`ICO_SHEET_SOLID_ABOVE` (32 of 255) is rounded to the eight levels with no dither, so the band is
+solid and only its faint fringe carries the Bayer grain; above 1x the outline is magnified as
+blocks, each strip texel the level of the sheet texel it lies in, so the band and the grain are the
+1x strip's at any resolution (`port/shaders/shader_consts.h`, `port/shaders/sheet_text.hlsli`
+(`sheet_solid_threshold`), `port/shaders/font.hlsl` (`sheet_scaled`)). It is the port's look, not
+the menu sheets': their outline is a soft halo, which `menu_look`'s survey measures (the alpha
+falling off over six texels across and four down, a rim grey per language from 24 to 62); the
+survey's numbers are the record in `port/ui/menu_font.c` (above `kSheetInk`), and `menu_look`'s
+picture limits pin the port's look, not a match to the sheets.
 
 The strips are rasterised at the [scene scale](ARCHITECTURE.md#terms), the scene's texels per GS
 line rounded to whole strip texels per sheet texel, from 1 up to `ICO_SHEET_SCALE_MAX` (on the
@@ -812,8 +912,8 @@ once-a-run `ui: the menu text pages are full` (`ui_menu_font_fallbacks`,
 The inks (`UiMenuTextInk`): light letters with the dark rim (the menu rows; the port's text always
 has the full rim), and dark, plain and grey letters without one (the white panel's prompts, the
 save screens' play time and slot numbers). The light ink's rim level and fill are per sheet
-language (`kSheetInk`, `ui_menu_sheet_ink`: the European disc's five measured on their sheets by
-`menu_look`, and `UI_SHEET_JA`, the Japanese disc's, measured by `menu_look_jpn` on the pause and
+language (`kSheetInk`, `ui_menu_sheet_ink`: the European disc's five the outline's grey 100 and the
+sheets' white 255, `menu_look` pinning both, and `UI_SHEET_JA`, the Japanese disc's, measured by `menu_look_jpn` on the pause and
 title words of `Tex_menu01`'s sheets: fill 251.5, so the level is 252, the letters' palette white
 being fcfcfc on these sheets where the European ones have ffffff; rim 34.3, a black-grey near the
 English sheets' 24; one antialiasing step where the European sheets have three, which the shared
@@ -881,6 +981,201 @@ five sheets; a port label wider than its box shrinks to fit down to 60 %
 whole ([Hints](#hints)); the photo panel shrinks its size until the widest line fits
 (`port/ui/photo_ui.h` (`ui__photo_hud_fit`)).
 
+## Button pictures
+
+The menus draw the disc's own PlayStation button pictures. For other controllers the port carries
+pictures of its own (issue 187): `port/assets/buttons/<set>/<button>.svg`, eight files a set
+(`xbox`, `nintendo`, `wii_classic`), each named by the PlayStation 2 button whose place it takes
+(`cross`, `circle`, `square`, `triangle`, `l1`, `r1`, `l2`, `r2`), so the art follows the button's
+position: `nintendo/cross.svg` is the B letter (the south button), `xbox/cross.svg` the A.
+`port/assets/buttons/CREDIT.txt` credits the artist. `port/ui/pad_glyphs.c` reads, draws and caches
+them; the Button pictures setting chooses the set in force (`pad_glyphs_set_style`, its Auto from
+the controller pressed last, [INPUT.md](INPUT.md#devices) `ico_input_last_pad_kind`), and the glyph
+rows ask for the picture they show (`pad_glyphs_texture`).
+
+**Embedding.** `port/ui/pad_glyphs.cmake` turns the 24 files into C arrays at build time
+(`embed_font.cmake`, `ui_pad_<set>_<button>_svg`), part of every program that compiles
+`pad_glyphs.c` (`_ui_sources`, `pad_glyphs_test`). Configure stops with a message naming the file
+when one of the 24 is missing.
+
+**The reader.** A file may hold exactly what the contributed files use, and anything else refuses
+the piece: an `<?xml?>` line and comments; one root `<svg>` with a `viewBox` (required; `version`,
+`xmlns`, `width`, `height`, `id`); `<g>` with an `id` only (no `transform`); one `<style>` with one
+rule `.<class> { ... }` of `fill` and `stroke` (`#rgb`, `#rrggbb` or `none`), `stroke-width`,
+`stroke-miterlimit` and `paint-order`; and exactly one `<path>` (`id`, `class` naming that rule,
+`d`, `fill-rule` `nonzero` or `evenodd`) whose data uses `M L H V Q C Z` in their absolute and
+relative forms with implicit repeats, every subpath closed. Another element, attribute, property
+or path command, an entity, more than 8192 bytes, more than 512 path commands or nesting deeper
+than 8 refuses it; the reader's buffers are bounded by those limits and by 16384 flattened points
+a picture.
+
+**The ink, not the viewBox.** The contributed files do not place their letters alike: the
+viewBoxes are 24 x 24 (the face letters, the Nintendo and Wii Classic L and R), 40 x 24 (LB, RB,
+LT, RT, ZL, ZR) and 24 x 32 (the Wii Classic b, a, y, x), and inside them the letters have
+different bearings and heights (the capitals' outlines are 19.10, 19.54 or 20.00 units tall; the
+lower case sit at x height or hang a descender). Fitted by its viewBox, a Wii letter came out 3/4
+the size and a two-letter piece in a square box 3/5. So each piece's **ink box** is measured once
+when it is read (`pgInk`): the bounds of every polygon its raster draws (the fill, the stroke's
+bands and miter joins, flattened finely), clipped to the viewBox; the stroke's 4 units belong to
+the ink. Each piece then has a **lettering height** in its file's units (`pgRefs`, per set): a
+capital or ascender letter (its outline's top within a quarter of its own height of the viewBox's
+top) is its own ink height, so every capital of every set fills the same height whatever its
+file's units; a short letter (the Wii Classic a, x and y: their outlines start 7.63 and 7.98 units
+down) takes the lettering of the set's first capital on a viewBox of its size (the b), so it keeps
+its size against it (the a and x about 0.78 and 0.76 of it, the y, ascender to descender, 1.0015).
+`pad_glyphs_aspect` is the ink's width over its height, `pad_glyphs_height` its height in
+lettering heights; a raster, a cell and its texel rectangle are the ink box at the lettering
+height asked for.
+
+**Drawing.** A piece is rasterised at the lettering height it is drawn at (its ink box at that
+size, each side rounded up to whole texels, the box's corner at the first texel's), as a browser
+draws the file: the curves flattened into segments of about
+2 pixels; the fill by the file's rule; the stroke built as outlines, a band of the stroke width
+along every segment and a join piece at every vertex on the outer side of the turn, a miter up to
+`stroke-miterlimit` and a bevel past it (SVG's `stroke-linejoin` default; the files' limit of 100
+gives miters at every corner they have); `paint-order: stroke` puts the fill over the stroke;
+everything clipped to the viewBox (the ink box, which is the same clip). Both layers go through stb_truetype's own scanline rasteriser
+(`font.c` `ui__raster_polys`, around `stbtt__rasterize`, the step of `stbtt_Rasterize` after its
+curve flattening, so the points stay floats). That rasteriser sums each polygon's signed area over
+a pixel and takes its magnitude, clamped (`k = scanline[i] + sum; fabs(k) * 255`): polygons of one
+orientation unite and opposite ones cancel. So every stroke piece is given one orientation, and
+an `evenodd` fill's contours are turned by how deeply each lies inside the others (even depths
+one way, odd ones the other), which empties a hole inside an outline: the even-odd result for
+outlines that do not cross, as the letters' holes (A, B, R, a, b) are. A `nonzero` fill keeps the
+file's own orientations, which is the non-zero rule for windings of one sign.
+
+**The texels.** RGBA8, straight colour (not premultiplied), the alpha at the GS's scale (0x80
+opaque: coverage 255 is 0x80), uploaded with `rd_create_texture(..., RD_TEXA_80_80)` and drawn
+through `ui__draw_tex_quads` (modulate, the texture's alpha, the blend `RD_BLEND_LERP_AS`), so a
+vertex colour of 0x80 draws the art as it is. A transparent texel carries the stroke's colour, so
+bilinear filtering at the outline brings in no other colour.
+
+**The cache.** One atlas per set and lettering height holds the eight pictures, the four face
+buttons on one row and the four shoulders on the next, each cell its ink rounded up to whole texels
+with two transparent texels around it; a request of a `pixelH` lettering is drawn from the first of
+16, 24, 32, 48, 64, 96, 128, 192 and 256 at or above it (`pad_glyphs_bucket`). Each row is as tall
+as its tallest cell, and an atlas whose height would be a power of two gets one more row, so the
+texture filter gives it no mip chain to average cells together (`rd_upload.c` `texLevels`). The
+texel rectangle a caller gets is the ink's own (its right and bottom edges are not whole texels).
+It is made
+inside `pad_glyphs_texture` the first time a set and height are asked for, on the thread that
+draws the menus, as the menu font's pages are. Six atlases live at most: a full cache drops the
+one drawn least recently once no frame of the last four can name it, else the nearest height of
+the set stands in. An atlas of another set than the one in force goes once those four frames have
+passed, at the next `pad_glyphs_texture` or `pad_glyphs_set_style`; `ui_font_forget_textures`
+forgets them (rd started again) and `ui_font_shutdown` destroys them, through
+`ui__set_pad_glyph_hooks`, the pair beside the menu font's. A failed upload is logged once and
+not tried again for that set and height until the textures are forgotten.
+
+**The completeness gate.** A set is complete when all eight of its pieces were read
+(`pad_glyphs_set_complete`; PlayStation always is: the disc's own). A set that is not complete can
+never be in force: `pad_glyphs_set_style` sets PlayStation instead (one line per refused set), and
+`pad_glyphs_active` checks completeness again at every call. The start-up line names each set:
+
+```
+ui: button pictures: Xbox complete, Nintendo complete, Wii Classic Controller complete; PlayStation: the disc's own
+```
+
+and a refused piece has its own line before it, e.g. `ui: button pictures: xbox/cross.svg refused:
+the element <circle>`, the set then `Xbox incomplete, cannot be chosen (7 of 8)`. A refused style:
+`ui: button pictures: Xbox (1) asked for, not a complete set: PlayStation's drawn`.
+
+**The API** (`port/ui/pad_glyphs.h`): `pad_glyphs_init`, `pad_glyphs_set_complete`,
+`pad_glyphs_set_style`, `pad_glyphs_style`, `pad_glyphs_active`, `pad_glyphs_style_name`,
+`pad_glyphs_aspect` (the ink's width over its height), `pad_glyphs_height` (the ink's height in
+lettering heights: 1 for a capital), `pad_glyphs_bucket`, `pad_glyphs_texture` (the atlas, the
+ink's texel rectangle, the aspect, for a lettering height); for tests and tools, CPU only:
+`pad_glyphs_raster_size`, `pad_glyphs_raster` (a piece into the caller's RGBA buffer, the atlas
+cell's texels exactly), `pad_glyphs_ink_box` (the ink box in the file's units),
+`pad_glyphs_piece_valid`, `pad_glyphs_piece_error`,
+`pad_glyphs_test_source` (a piece read from given text instead of its file) and
+`pad_glyphs_atlas_count`. Without `ICO_RD` no texture is made (`pad_glyphs_texture` returns 0).
+
+### The setting
+
+Options > Controls > **Button pictures** (`UI_OPT_BUTTON_PICTURES`, after Vibration and before
+Hold type, on the title and the pause menu, every disc and platform; note
+`UI_STR_BUTTON_PICTURES_NOTE`) holds `[input] button_pictures` (`port/game/options.h`
+`ico_opt_button_pictures`: -1 Auto, else the style's number). Its logic is `port/ui/settings_pads.c`
+(settings.c has its case lines only):
+
+- `ui_settings_pads_frame` resolves the style in force and calls `pad_glyphs_set_style` with it on
+  every call (cheap; it lets another set's atlases go): the chosen set, or under Auto the kind of
+  the controller pressed last (Xbox, Nintendo, else PlayStation; keyboard, mouse and touch give
+  PlayStation; Wii Classic only by hand). `port/ui/ui_host.c` calls it from `ui_host_vsync`, at the
+  frame's quiescent point after the pump read the pads and before the next step draws the menus and
+  prompts and the next present draws the photo and touch overlays, and once from `ui_host_init` for
+  the first frame; so a style chosen by hand or by Auto is in force before the frame's first
+  picture, in play as in Options. A change of the style or of where it came from logs `controls:
+  button pictures: Xbox (Auto, the last pad used), change 2` (the first 8, then every 100th).
+- A set `pad_glyphs_set_complete` refuses reads as Auto (`ui__pads_choice`; `controls: button
+  pictures: Xbox is not a complete set: Auto`, once a set), and the row's stepping skips it
+  (`ui__pads_step`: Auto, PlayStation, Xbox, Nintendo, Wii Classic Controller around).
+- The value text is the set's name (names, not translated) or `Auto (Xbox)` with the set Auto
+  picked (`ui__pads_text`); the key is written in memory at each step and saved with the page.
+
+Not covered: button names in sentences and on the Remap page, and pictures for Start, Select, the
+sticks and the d-pad.
+
+### Where the pictures are drawn
+
+While a set is in force (`pad_glyphs_active`), the art takes the place of the disc's picture of the
+eight buttons wherever the port or the game draws one; the two menu arrows (the Options values')
+stay the disc's, and with PlayStation in force nothing changes at all.
+
+**The menus' rows** (`port/ui/layout_ext.c`). A row shows a button when it is a port glyph row of
+one (`lt_ext_add_glyph`: the prompt lines of `ui_hint.c`, the model viewer's among them, and the
+Settings pages' prompts), or a game row whose texture file (`texFileNo`) and texel rectangle are
+those of the running disc's source row for that button (`port/core/region_<slug>.c`, `.glyph`): so
+the save prompts, Button Configuration's columns and every copy of their rectangles are found on
+each disc from the disc's own tables, with no list of rows per disc. The tables are loaded from the
+disc at run time, so the match is made from them at each call (`lt_ext_glyph_of_row`, eight
+comparisons) and never goes stale. Such a row is a text row (`lt_ext_is_text_row`), and the
+layout's text hook (`lt_ext_draw_text_row`, and `lt_ext_draw_row`'s glyph branch for a port row)
+draws the art in the box `display_texture` gives the disc's sprite (`lt_ext_art_fit`;
+`lt_ext_glyph_box` and every row's place stay the disc's). **The rule, everywhere a picture is
+drawn:** the piece's ink box is fitted inside the button it stands on (as large as fits, its shape
+kept) and centred on it, and nothing of it lies outside that button. The size follows the button,
+never the text beside it. The four face pictures of a set are fitted by one scale, and the four
+shoulder pictures by another (`pad_glyphs_fit_box` / `pad_glyphs_fit_circle`: the largest scale
+at which every one of the four fits a button of this shape and size), so on same-sized buttons
+the A is not bigger than the B. The files allow that for every set; the Wii Classic Controller's
+face letters are lower case, so at one scale its a and x come out x height against its b and y.
+Because the scale is set by the group's tightest piece, the others are a little under their own
+largest fit: the two-letter shoulder pieces (RB is the widest, 1.7 times as wide as tall) set it
+for the shoulders, so a Nintendo L or R is drawn at ZR's lettering.
+
+| Where | The button |
+|---|---|
+| Menu rows: the prompts, Button Configuration's columns (game rows) | the disc picture's sprite box (`display_texture`'s; on the PAL disc 31 x 28 units for a face, 39 x 28 for a shoulder) |
+| The prompt lines (port glyph rows, `ui_hint.c`: Settings, the gallery, the model viewer) | the glyph row's box (`lt_ext_glyph_box`) |
+| Photo mode's panel (`photo_ui.c` `hudArt`) | the disc picture's box at the panel's size |
+| The touch buttons (`touch_ui.c`) | a round button: a circle of `UI_TOUCH_ART_ROUND` (0.8) of its radius, the ink box's corners inside it; a key: a box of `UI_TOUCH_ART_KEY_W` x `UI_TOUCH_ART_KEY_H` (0.8 x 0.7) of its size; each also a pixel inside the ring or frame |
+
+The touch margin: the ring is 0.4 of the layout unit thick; a face's radius is 5.5 units times the
+editor's scale (0.7 to 3.0), so the ring is 10.4 % of the smallest face's radius and 2.4 % of the
+largest's, and the 0.8 circle keeps the stroke 9.6 % to 17.6 % of the radius off the ring (keys:
+7.9 % of the smallest key's height and 5.2 % of its width). As shares of the button, the
+picture scales with the size setting, the editor's per-button scale and the output's resolution:
+half the button, half the picture.
+
+The colour is the sprite's as the game computed it (the fade, the half colour of a row another
+item dims, the reduction), the game's blend for the label pass, and the glow passes additive in
+the stretched box as the glow sprite. The 2001 builds' inset sprite box is fitted the same way. The
+art is rasterised at the size it has in the row's own box at the picture's scale (the GS
+frame's lines per y unit times the scene's scale, as the menu text's strips), for the label and
+glow passes alike, so a glow is the same picture stretched. A game row's texture is
+still transferred, as for the menu text table's rows. When no atlas can be made the row keeps the
+disc's path (`lt_ext_is_text_row` asks for the texture first).
+
+**Photo mode's panel** (`photo_ui.c`) and **the touch overlay** (`touch_ui.c`) draw on the output:
+the art fitted and centred on its button there (the table above), rasterised at the size it is
+shown at in output pixels.
+`lt_ext_glyph_available` (a set in force, or the disc's texture there) decides whether the panel
+shows a picture or the button's name; the touch overlay needs no sheet in its slot for the art.
+Touch input itself counts as PlayStation under Auto, so the touch overlay shows another set only
+when the player picked one.
+
 ## Popups
 
 `ui_popup_push` queues a title and body (eight at most); one shows at a time, sliding in from the
@@ -889,13 +1184,18 @@ right edge of the 4:3 picture for 0.3 s, held for 4 s, sliding out for 0.3 s, co
 call, `ico_host_vsync_hz()` (15, 200 and 15 at 50 Hz; 18, 240 and 18 at 60 Hz, the Japanese disc's
 and the European disc's 60 Hz mode; `port/ui/popup.h` (`UI_POPUP_QUEUE`, `ui_popup_set_vsync_hz`,
 `ui_popup_slide_vsyncs`, `ui_popup_hold_vsyncs`), 50 Hz by default in the tests). Achievements, photo mode, the model viewer, the Graphics driver page and
-Extras > Add to Steam, Export textures and the backup rows push them (`port/ui/settings.c` (`steamAdd`,
-`texExportEnd`); `port/ui/settings_backup.c` (`ui__backup_press`, `ui__backup_vsync`)); `ui_popup_title` and `ui_popup_body` give the one showing (tests). They are drawn on the
+Extras > Add to Steam, Add to the applications menu, Export textures and the backup rows push them (`port/ui/settings.c` (`steamAdd`, `texExportEnd`); `port/ui/settings_desktop.c` (`ui__desktop_press`); `port/ui/settings_backup.c` (`ui__backup_press`, `ui__backup_vsync`)); `ui_popup_title` and `ui_popup_body` give the one showing (tests). They are drawn on the
 presentation overlay (`rd_set_present_overlay`) at every [present](ARCHITECTURE.md#terms), after the
 box blit and at the output's resolution: outside the game's frame, so a frame the GS keeps never
 shows one twice, and never mirrored (`port/ui/popup.h`, header comment; `port/ui/ui_host.c`
-(`hostOverlay`)). The panel's text uses the menus' look with the full rim and room for it
-(`port/ui/popup.c` (`PAD_Y`)). A Japanese body wider than the panel takes line breaks
+(`hostOverlay`)). The panel's text uses the menus' look with the full rim and room for it. The
+sizes are `port/ui/popup.h`'s `UI_POPUP_*` in one place: the title at 22 and the body at 18 grid
+units, 10 units of padding left and right, 13 above and below (the text's dark halo needs it:
+11 let it spill), 2 between the title and the body, a panel at least 160 units wide and 18 in from
+the picture's right edge; a body line holds `UI_POPUP_BODY_WIDTH` (584 units), and the Graphics
+driver page wraps its long answers to it (`port/ui/settings.c` (`gpuFolderPopup`)).
+
+A Japanese body wider than the panel takes line breaks
 ([Strings and languages](#strings-and-languages)); a title is one line. `[dev] popup_test` queues a test popup from Main tick 100 and every
 150 ticks after (`ui_popup_dev_tick`).
 
@@ -926,8 +1226,9 @@ heading moves on in the direction it came from. The rows are port rows made with
 `touch_ui.c` draws the touch controls of `port/input/touch.h` on the output from the copy the
 device layer takes once a vsync: each button a translucent disc or key, the D-pad one cross, the
 game's own button pictures on them while their sheet is loaded (sprites in output pixels from the
-game's textures, fitted to the shape), words on Select, Start and any zone whose sheet is not
-loaded yet, the left stick's ring, run ring and knob, the look pad's ring and dot, a held button
+game's textures, fitted to the shape), or another controller's while a set is in force
+([Where the pictures are drawn](#where-the-pictures-are-drawn)), words on Select, Start and any
+zone whose sheet is not loaded yet, the left stick's ring, run ring and knob, the look pad's ring and dot, a held button
 brighter (`port/ui/touch_ui.h`, header comment). It draws only while the copy's opacity is above
 0. It is on the presenter's top layer (`rd_set_present_overlay_top`), never through the CRT
 filter (`port/ui/ui_host.c` (`hostOverlayTop`)). [INPUT.md](INPUT.md) has the touch input.
@@ -974,6 +1275,26 @@ says "window: frame rate counter at the corner", "at the corner inside the scree
 the touch controls' row, clear of the drawn controls" (x, y, the output's size) once per change of
 place, besides "window: frame rate counter on" or "off" when the option changes (and "on" at the start when it is
 on).
+
+Time the game was not presenting is not a frame rate (issue 123: the reporter's counter read
+about 5 after 13 s in the background, the event pump's 12999.9 ms at the return, and after the 1.1 s a
+bug-report capture held the window). The window notes such a gap with `ui_fps_gap()` (`fps_gap`), and
+the next tick starts the counter's second again from there with the value kept, so no value is made
+from a span that held one. The notes, four calls in `window_host.c`: `lc_pace_reset` (the app back in
+the foreground, Android's lifecycle), `window_pace_paused` (every pause of the host the pacer moves its
+deadline by: a swapchain made again for a rotation or size, a window mode, a present mode or a
+renderer switch, the first present on a new swapchain), the end of `frame_dump` (F12, Settings' bug
+report, an rc's capture) and `photo_pump` when a capture's PNG was written. A guard covers a pause no
+note names: a gap between two ticks of `gapNs` or more counts the same; `gapNs` is the GPU hang limit
+in force (`ico_diag_gpu_hang_limit`, half the watchdog's, 15 s by default) or, with it off,
+`ICO_GPU_HANG_MIN_S` (2 s, its shortest): a single wait for the GPU that long ends the run, so no stall
+the run lives through makes one. A stall shorter than that (the reporter's were 365-486 ms, often in
+clusters) stays inside the second and lowers the number, which is what the counter is for:
+`fps_counter_test` has a 450 ms stall reading 27 and three 440 ms stalls in 1.36 s reading 5, against
+a 1.1 s capture noted (50 kept, then 40 for the next second) and a 2 s gap with no note (50 kept). The
+log says "window: frame rate counter: its second started again after time the game was not presenting
+(the app away, the screen made again, a capture; a gap of G s or more between paces); the number shown
+stays N (K so far)", the first 8 times and then every 100th.
 
 ## The touch layout editor
 
@@ -1045,24 +1366,111 @@ frame (`lt_host_point_item`), and whether a card screen's empty slot is pickable
 (`la_host_mc_slot_pickable`: on the Save screen, not on Load) (`ico2/common/src/layout_texture.c`;
 `ico2/common/src/layout_action.c`).
 
-### Extras > Game variants
+### Gameplay > Chains and Cutscenes
 
-`UI_PAGE_VARIANTS`, a link on Extras after Characters (from the title and the pause menu: it is not
-one of the three rows `isExtrasOpt` hides), its page built like Controls and Gameplay from the tables
-`varOpts` and `varStrs` in `build`. Eight stepped rows, one `UI_OPT_VAR_*` per `IcoVariantId`
-(`port/game/variants.h`; a `_Static_assert` keeps the order), then Debug menu (`UI_OPT_VAR_DEBUG_MENU`,
-a press row after `UI_OPT_DEVELOPER` in the enum, so not stepped) and Back. The value text is
-`variantText`; a step is `ico_variant_step`, which writes `[variants] <key>` in memory and logs
-`variants: <key> = <value>`; the page's leaving saves the file as every page does.
+`UI_PAGE_CHAINS` and `UI_PAGE_CUTSCENES`, two links on Gameplay right before its Back (`gameLinks` in
+`build`, the Controls > Touch screen pattern), each page built like Controls from its tables
+(`chainOpts`, `cutOpts` and their strings) with Gameplay as its parent, so Back and Triangle return
+to Gameplay on the link's row (`leaveTo`). All of them show from the title and the pause menu on every
+disc; the game's pause-only rows (Film effect, Players) stay on Gameplay. The game variants
+(`port/game/variants.h`), sixteen stepped rows, one `UI_OPT_VAR_*` per `IcoVariantId` (a
+`_Static_assert` keeps the order): Light sword colour and Stick on Gameplay, Chain swing speed and
+Chain swing slowdown on Chains, No cutscene look-around and Ignore cutscene cameras on Cutscenes after
+Skip the opening; the other ten are rows of a journey's difficulty, on Customize's pages (below).
+Debug menu (`UI_OPT_VAR_DEBUG_MENU`, a press row after `UI_OPT_DEVELOPER` in the enum, so not
+stepped) is on Developer before Back. The config rows' helpers live in `port/ui/settings_variants.c`
+(moved out of `settings.c`, which sits near the 256 KiB file cap of `tools/check_no_rom.sh`):
+`ui__var_opt`, the value text `ui__variant_text`, the disc's note `ui__variant_note` and the per-disc
+rule `ui__variant_shown`; a step is `ico_variant_step`, which writes `[variants] <key>` in memory and
+logs `variants: <key> = <value>`; the page's leaving saves the file as every page does.
 
-- Values: Shadow toughness Original, American, Not tougher later (`no_plus`); Shadow aggression Their
-  own, Bold patient, Bold quick, Wary patient, Wary quick; Queen barrier 5 hits, 7 hits (shown as the
-  disc ships it until a step, which writes the number); the others Off, On.
-- Each row's note (`UI_STR_OPT_VAR_*_NOTE`) is under the page while the cursor is on the row and ends
-  with the rule: "Switches achievements off." for One hit per swing, Shadows never dodge, Ignore
-  cutscene cameras and Debug menu (`ico_variants_suspend_achievements`, read by `gamestate.c`
-  beside `ico_opt_developer_mode`), "Achievements stay on." for the others.
-- Debug menu is shown only while Developer mode is on (`optShown`). Cross calls
+### Customize: the New Game draft's pages
+
+`UI_PAGE_CUSTOMIZE` (Shadows, Combat, Rules, Mirror mode, New Game+, Back) and its three pages hold
+every row of a journey's difficulty (`port/game/difficulty.h`): ordinary Settings pages (the window, scrolling, held Left and
+Right, the mouse, the languages) whose rows read and step the New Game's draft
+(`port/ui/settings_difficulty.c`), never the config nor the journey in force. `build` makes them from
+`ui__diff_page`; Customize's parent is the New Game screen (`UI__PARENT_NEW_GAME`: `parentLayout`
+asks `ui__newgame_customize_back`, which puts the screen's cursor on Customize), the three pages'
+Customize, and no Settings page links to them. The rows keep the options they had as config rows
+(`UI_OPT_SHADOW_SPEED`, `UI_OPT_YORDA`, `UI_OPT_PIT_TIME`, `UI_OPT_YORDA_TRIPS`,
+`UI_OPT_SHADOWS_TOGETHER` and ten `UI_OPT_VAR_*`) and their strings; No Shadows, Knock-down limit,
+Knock-downs count and Permadeath are `UI_OPT_DIFF_*`, after `UI_OPT_FREE_MOVEMENT`
+(`steppable` takes them through `ui__diff_opt`). A step is `ico_difficulty_row_step` on the draft (the
+values the disc offers: Shadow toughness through `ico_variant_offered`; the Queen barrier between the
+disc's own number and the other, the disc's stored as the record's 0), the mode classified again
+(`ico_difficulty_classify`) and the line `newgame: Customize: <key> <from> -> <to> (the draft is
+<Mode>)` logged; a Custom draft is kept aside for the Difficulty row. Each row's note is
+`ui__diff_note`, chosen at refresh: the June 2001 demo's toughness note, Third journey's while the row
+is on it, the 2001 discs' No hints note; no note ends with an achievements rule (no difficulty row
+switches them off). Knock-downs count is greyed while the limit is Off (`ui__diff_dimmed`); Permadeath
+is never greyed. Every row shows on every disc.
+
+Customize's Mirror mode and New Game+ (`UI_OPT_NEWGAME_MIRROR`, `UI_OPT_NEWGAME_PLUS`, after
+`UI_OPT_DIFF_PERMADEATH`) are the New Game screen's two choices, for every difficulty, not rows of
+the draft: `ui__diff_row` is -1 for them, so they never enter `kRowOpt`, `ico_difficulty_classify`,
+difficulty.toml or a save state, while `ui__diff_opt` answers for them so `settings.c` routes their
+value, step, note and greying with the draft's rows and has no case of its own. `ui__diff_text` gives
+Off or On from `ui__newgame_value` (the screen's choice, or in the read-only view the game's own: the
+run's mirror value and `gFlagGameClear != 0`); `ui__diff_step` hands a step to `ui__newgame_step`
+(either direction toggles; no `classified`, so the draft and its mode stay as they are; the line
+`newgame: Customize: Mirror mode on (Difficulty stays normal)`); their notes are
+`UI_STR_MIRROR_SCREEN` and `UI_STR_NEWGAME_PLUS_SCREEN` (`UI_STR_DIFF_LOCKED_NOTE` read-only), greyed
+and refused in the read-only view as the draft's rows (`mirror_mode not stepped` / `new_game_plus not
+stepped: chosen when the journey began`).
+
+- Places: Customize 6 rows, Shadows 8, Combat 7, Rules 7, inside the window with slots to spare.
+- The pause menu's read-only view: Gameplay > Difficulty opens the same pages on the journey in force
+  (`ico_difficulty_active`), not the draft. `settingsProc` sets `ui__diff_set_readonly(1)` each tick
+  Gameplay is up in the pause menu and the New Game screen's Customize clears it, so the pages know
+  which way they were entered whichever page is on screen. Read-only: every draft row reads the
+  journey's value (`ui__diff_text`), is greyed (`ui__diff_dimmed`), has the note "Chosen when the
+  journey began" (`UI_STR_DIFF_LOCKED_NOTE`, `ui__diff_note`) and ignores Left and Right (No Shadows, when on, keeps its own note, which says some story moments are lost or play differently without the Shadows; `ui__diff_step`
+  logs `<key> not stepped: chosen when the journey began`, the first 8 then every 100th);
+  `parentLayout` sends Customize's Back to Gameplay and `leaveTo` puts the cursor on the link.
+- The pause menu's journey lines (`pauseStats`, 7 lines at most: play time, deaths, captures, saves,
+  enemies, difficulty, area): the line `STAT_DIFFICULTY` (label `UI_STR_DIFF_LINE`) shows the mode,
+  " n / N" while a knock-down limit is on (the room's count, or the journey's with the Whole journey
+  count; `ui__diff_line_text`) and ", Permadeath" (`UI_STR_DIFF_WORD_PERMADEATH`). New Game+, Mirror mode, the
+  achievements count and the assists are not lines here (the Customize view and the Achievements page
+  show them).
+- The journey events (`ui__diff_listen`, called by `ui_settings_install`): the difficulty listener
+  (`ico_difficulty_set_listener`) raises one pop-up, for `ICO_DIFF_EV_REFUSED` ("This journey has
+  ended.", `UI_STR_DIFF_TOAST_ENDED`): difficulty_file.c raises it through `ico_difficulty_notify` at
+  the Continue list's refusal (with the negative sound) and at the load's backstop, both answers to the
+  player's own choice of a save. `ICO_DIFF_EV_ENDED` (the game over) and each counted
+  `ICO_DIFF_EV_KNOCK` short of the limit only write the log: the only pop-up that appears by itself
+  during play is an achievement. Log: `settings: journey event: <what> (<a> of <b>) (<n>)`, the first 8
+  then every 100th. The pause menu's journey
+  line carries the count. The refused-state text is main_host.c's (STATE; a save state action's answer).
+
+ctests `settings` (each page's rows, the links, no page but Customize leading to its pages),
+`settings_difficulty` and its disc runs (each preset's draft, Customize's walk and Back, an edit
+turning the mode Custom and back, the greyed count, the confirm handing the draft over, a cleared
+save's draft, the pause menu's read-only view and Back, the journey line text, the refusal's pop-up and none for a knock-down or the end, the screen's
+notes in every table), `settings_discs*` (every draft row on every disc,
+Hard's toughness, the toughness values offered, the disc's notes).
+
+### Gameplay rows: values, notes, the Debug menu
+
+- Values: Shadow toughness Original, American, Not tougher later (`no_plus`), Third journey
+  (`third_journey`, not offered on `ntsc`, `aug6` and `jun26`: `ico_variant_offered`; its own note
+  `UI_STR_OPT_VAR_TOUGHNESS_NOTE_THIRD` shows while the row is on it); Shadow aggression Their
+  own, Bold patient, Bold quick, Wary patient, Wary quick; Queen barrier 5 hits, 7 hits (the disc's
+  own number is the record's 0); Light sword colour Original, Red (the
+  Characters page's colour word); Stick Original, Insect net (both written as words, `"original"`,
+  `"red"`, `"net"`); the others Off, On.
+- Each config variants row's note (`UI_STR_OPT_VAR_*_NOTE`, added in the page's case of
+  `buildOptionPage`) is under the page while the cursor is on the row; the cutscene rows' and Debug
+  menu's end with the rule: "Switches achievements off." for Ignore cutscene cameras and Debug menu
+  (`ico_variants_suspend_achievements`, read by `gamestate.c` beside `ico_opt_developer_mode`),
+  "Achievements stay on." for No cutscene look-around; Light sword colour's and Stick's say what
+  changes and "From the next room" (neither suspends them). No cutscene look-around's note on the
+  three 2001 discs is their own (`ui__variant_note`: it changes nothing there).
+- Debug menu is shown only while Developer mode is on and not on the June 2001 demo (`optShown`,
+  one log line there). Light sword colour is not shown on the North American disc and the two 2001
+  previews (no light sword: `ui__variant_shown`, `settings: no Light sword colour row on <disc
+  id> (the game has no light sword)` once per disc). Cross calls
   `ico_variants_debug_menu_pressed`, which logs `variants: the Debug menu is opened from Options`,
   marks the menu used (achievements off until `ico_variants_debug_menu_clear` or an options reload)
   and calls `ico_variants_open_debug_menu`, which opens the game's menu through the opener
@@ -1072,18 +1480,67 @@ a press row after `UI_OPT_DEVELOPER` in the enum, so not stepped) and Back. The 
   menu's Back does (`la_host_resume_play`, then the region's `layout_play`), logging `settings:
   Options closed for the Debug menu (to the title|back to the game)`. With nothing bound it logs
   `variants: the Debug menu cannot open: the game has not bound it` and Options stays.
-- Places: the window's ([The window](#the-window)); ten rows with Debug menu fill its slots, Back
-  at 189.
+- Free movement (`UI_OPT_FREE_MOVEMENT`) is shown with Developer mode on, on every disc, and steps with
+  Left or Right (`ico_free_movement_set`, then `developer.free_movement` set and saved); its note says
+  "Switches achievements off." The movement itself needs Developer mode too (`ico_free_movement`).
+- Places: the window's ([The window](#the-window)); Gameplay's ten rows fill its slots (nine shown on
+  ntsc, aug6 and jun26); Yorda (4) and Cutscenes (4) fit with slots to spare; Developer has six rows
+  with Developer mode on (five on the June 2001 demo).
 - Log lines: the values once at the first read (`variants: shade_toughness=... ignore_cutscene_cameras=0`),
   each change, the achievements rule when it changes (`variants: achievements are off (one_hit ...)`,
   `... are back on`), a value that is none (`variants: [variants] <key> = "<word>" is not a value; using
   <default>`).
 
-ctests `settings` (the page's rows), `settings_extra`, `settings_extra_jpn`, `settings_extra_kor`
-(`testVariantsPage`: the link, labels, values, a step and the key and the saved file on every row, the
-notes and the achievements rule, the Debug menu row and its press: unbound it stays on the page,
+ctests `settings` (each page's rows, the two links before Gameplay's Back, the Developer rows
+with Developer mode on), `settings_extra`, `settings_extra_jpn`, `settings_extra_kor`,
+`settings_extra_ntsc`, `_aug6`, `_jun26` (`testVariantsPage`: no Game variants row on Extras,
+Gameplay's labels and the two links, no journey row on Gameplay, the weapon rows' steps, keys and
+notes, the cutscene rows' steps, keys, notes and achievements rule, `checkPageFits` on Gameplay,
+Cutscenes and Developer, the Debug menu row on Developer and its press: unbound it stays on the page,
 bound to a fake opener it opens once and Options closes into the title or the game), `variants`,
 `config`.
+
+### Extras > Unused content
+
+`UI_PAGE_UNUSED`, Extras' fifth row (`extrasOpts[4] = UI_OPT_LINK`, `extrasLinks[4]`), built from
+`unusedOpts` / `unusedStrs` with Extras as its parent: Test room: arena, Test room: climbing,
+Attract movie (576 lines), Early show title art and Back. The four are press rows
+(`UI_OPT_UNUSED_ARENA` .. `UI_OPT_UNUSED_ART`, after `UI_OPT_STATE_SLOT`, outside `steppable`), in
+the order of `ico_unused.h`'s rows (`ui__unused_row` is the option less `UI_OPT_UNUSED_ARENA`). The
+page has no lock; each row has its note (`UI_STR_UNUSED_*_NOTE`, `buildOptionPage`'s case).
+
+- Host: `UiUnusedHost {available, open}` (`ui_settings_set_unused_host`, `settings_unused.c`). The
+  program's is `port/game/unused_live.c`'s (`ico_unused_engine_install` from `host_loop.c`):
+  `available` is `ico_unused_available`, the disc's answer kept per disc, `open` is
+  `ico_unused_start` ([GAME_FEATURES.md](GAME_FEATURES.md#unused-content)). Without a host the link
+  is hidden.
+- Shown: the link from the title only (`onTitle()`) while `available` answers 1 for any row; the
+  first time none does on a disc (the June 2001 demo) one line, `extras: no Unused content page on
+  <disc id> (its disc has none of the rows)`. A row from the title only while `available(row)` is 1
+  (the European disc has all four; the 104-row discs no movie). From the pause menu the link and
+  the rows are masked.
+- Cross: `extrasUnused`, as Credits (`extrasCredits`): from the title only, `ui_settings_save`, the
+  host's `open(row)`; a layout back closes the menu on it (`extrasLeave`: `la_host_leave`, the
+  title's cursor kept on Settings); -1 keeps the page (the host logged why).
+- The art row: its `open` is the model viewer's list on the viewer's first art row on the disc
+  (`port/game/unused_live.c` `beginArt`, `ico_mv_models_enter_at`), on which `extrasLeave` closes
+  the menu as for any start; Back in that list comes to this page's art row
+  (`ui_settings_page_layout(UI_PAGE_UNUSED)`, `ui_settings_row_of(UI_PAGE_UNUSED,
+  UI_OPT_UNUSED_ART)`), where from Extras > Models it comes to Extras' Models row. The list offers
+  the art rows the disc's logo pack holds (the European disc the copyright only)
+  ([GAME_FEATURES.md](GAME_FEATURES.md#the-model-viewer-and-characters)).
+- The way back: after a test room the engine arms `ui_settings_title_return(UI_PAGE_UNUSED)` as the
+  title's stage is entered, and once the title's menu is up and faded in (`lt_fade_status() == 2`,
+  `ui_settings_title_decided`, layout 13 or 12) switches to `ui_settings_reopen_page(UI_PAGE_UNUSED)`:
+  Main on Extras, Extras on the link, the page on its first row; past 250 Main ticks it lets go
+  (`ui_settings_title_return(-1)`, a log line), the model viewer's recipe.
+- Places: five rows inside the window, Back in the slot after the last row shown.
+
+ctests `settings` (the page's labels, Extras' eleven), `settings_extras` (`testUnused`: hidden
+without a host, hidden with the line when no row, the link and rows per `available`, the arena's
+note, `checkPageFits`, Cross with -1 stays, Cross calls `open` once and leaves on its layout with
+the title's cursor on Settings, the reopen, nothing from the pause menu), `settings_discs` and its
+six disc runs (each row per disc through the real CPU side), `strings_complete`.
 
 ## Galleries and photo mode
 
@@ -1170,7 +1627,8 @@ two path strings PAL's do not). On the Japanese disc:
   shown on every disc (`port/ui/settings.c` (`optShown`, `ui_settings_opt_shown`)). On the 2001
   discs Film effect is not shown either (`has_film_effect`; Players and Hold type are, Hold type
   starting on the disc's own B), and on
-  the June 2001 demo Extras > Credits (`credits_staff_packs`); every disc's rows are
+  the June 2001 demo Extras > Credits (`credits_staff_packs`) and Extras > Unused content (no row:
+  the host's answer); every disc's rows are
   [GAME_FEATURES.md](GAME_FEATURES.md#options-on-each-disc)'s matrix.
 - **Disc.** Main's Disc row, after Menu language, shows on every disc when more than one disc's game data
   is there: the window host passes `ico_host_disc_archive_present` (`port/platform/host_config.h`:
@@ -1229,7 +1687,9 @@ The game code calls the menus at named places, each marked "PC port" in a commen
 rd starts, loads the font, installs the sync hook (the game's GS frame, the language, the UI scale
 of the [preset](ARCHITECTURE.md#terms)) and the record hook (`gif_HostFlush`, so the GS register
 decoder flushes before port text is recorded into the list), the two presentation overlays, the
-popup test switch and the quit handler; `ui_host_vsync` runs the popup clock once a vsync
+popup test switch, the first frame's button pictures and the quit handler; `ui_host_vsync` runs
+the popup clock once a vsync and resolves the next frame's button pictures
+(`ui_settings_pads_frame`, [The setting](#the-setting))
 (`port/ui/ui_host.h`; `port/ui/ui_host.c`; `port/ui/ui_internal.h` (`ui__set_record_hook`,
 `ui__set_sync_hook`)).
 
@@ -1252,7 +1712,8 @@ tick's shell (`statesProc`); `port/ui/settings_states.c` holds the host, the car
 
 - **Entry from the pause menu**: under Photo mode a pause menu row `UI_STR_STATES`, in the port
   layout chained after the pause menu (`s_statesRow`, built in `buildEntries` before the journey's
-  lines), whose `right` is the page's layout.
+  lines), whose `right` is the page's layout, and F6. The pause menu has no Square prompt and
+  `entryProc` reads no Square there: Square on the pause menu does nothing and logs nothing.
 - **Entry from the title** (the Continue screen's prompt, `contProc`): the Continue screen's file
   select is `la_mc_load_file_select` (region `layout_load_files`: 19 on the European disc, 16 on the
   six others), a layout with no cursor whose `link` is the files' layout (`layout_mc_files`, 14 or
@@ -1265,7 +1726,10 @@ tick's shell (`statesProc`); `port/ui/settings_states.c` holds the host, the car
   returns the `item` it is given unchanged (the file `la_mc_file_select` picked on a confirm, which
   `la_mc_load_file_select` indexes as `file[item]`). The line is shown while
   `la_host_mc_files_shown()` (`layout_action.c`: `fileMask` and `actionStarted` set, the card check
-  done and the tiles up) and sits at field line 183 (`CONT_HINT_Y`), under the frame of the file
+  done and the tiles up) and the journey in force does not lock states (`ico_difficulty_states_locked`:
+  Permadeath, the condition the load checks first; then Square there opens nothing either, logged
+  `settings: the Save states prompt not shown on the card's files: the journey has Permadeath on (N)`
+  each time the files show, the first 8 then every 100th; the title's Normal shows it) and sits at field line 183 (`CONT_HINT_Y`), under the frame of the file
   picture (lines 60 to 180 on the European disc, to 169 on the others), clear of the memory card
   slot words (112 / 110), the area name (135 / 124) and the play time (160 / 150), above the OK and
   Back bar (200), centred. Square (0x80: no proc of the screen reads it on any disc; not taken with
@@ -1281,7 +1745,10 @@ tick's shell (`statesProc`); `port/ui/settings_states.c` holds the host, the car
 - **Pause rows** (`placePause`): the port rows (Photo mode while a stage runs, Save states) are
   chained one `PAUSE_PITCH` (20) apart under Options, or `PAUSE_PITCH_STATES` (16) when the states
   row shows: Options 50, Photo mode 66, Save states 82, Back 98, End Game 120 where the data has it.
-  A row not shown is masked and skipped by the item links. `pauseRowsOk` accepts Back at 1 or 2 pitches
+  A row not shown is masked and skipped by the item links. On a Permadeath journey
+  (`ico_difficulty_states_locked`) the Save states row is greyed (`lt_ext_set_dim`) and still opens
+  the page (Delete), whose status line then reads `UI_STR_DIFF_STATES_SAVE_LOCKED` in place of the
+  note. `pauseRowsOk` accepts Back at 1 or 2 pitches
   of 20, or (with the row) 1 to 3 of 16, and still wants End Game three pitches of 20 below Options.
   The boxes keep Options' height, so the letters stay where they are in them and overlap
   4 lines at the narrower pitch.
@@ -1325,15 +1792,13 @@ tick's shell (`statesProc`); `port/ui/settings_states.c` holds the host, the car
   can translate it ([PLATFORM.md](PLATFORM.md#across-versions)); when it cannot, the card is greyed
   with `UI_STR_STATES_REFUSED_BUILD` in the status line, and Load's popup says why in the player's
   words, from `ico_state_last_refusal` (`state.h` `IcoStateBlocker`, the two versions from the
-  commit texts without `-dirty`): `UI_STR_STATES_XB_OLD` for a format 1 state ("This save state was
-  made by version X, before save states could carry over to newer versions. Your memory-card saves
-  still work."), `UI_STR_STATES_XB_CODE` for a changed function a thread sits in ("This save state
-  was made by version X. Version Y changed the part of the game it was saved in, so it cannot be
-  resumed. Your memory-card saves still work."), `UI_STR_STATES_XB_DATA` for the game data layout, a
-  variable, a start-up value, a block or a section size ("... Version Y changed how the game keeps
-  its progress in memory, so it cannot be resumed. ..."), and `UI_STR_STATES_XB_PINNED` for a state
-  nothing translates ("This save state was made by version X, and only that version can resume
-  it. ..."). The Latin languages' texts carry their own line breaks (the popup keeps Latin lines as
+  commit texts without `-dirty`): `UI_STR_STATES_XB_OLD` for a format 1 state ("Made by version X, too old to
+  load. Your memory-card saves still work."), `UI_STR_STATES_XB_CODE` for a changed function a
+  thread sits in ("Made by version X; version Y changed that part of the game, so it cannot
+  load. Your memory-card saves still work."), `UI_STR_STATES_XB_DATA` for the game data layout, a
+  variable, a start-up value, a block or a section size ("Made by version X; version Y changed how
+  progress is kept, so it cannot load. ..."), and `UI_STR_STATES_XB_PINNED` for a state nothing translates ("Only
+  version X can load it. ..."). The Latin languages' texts carry their own line breaks (the popup keeps Latin lines as
   written); the log line names the function, the variable or the block.
 - **Listing and pictures**: `statesOpen` lists when the page opens, then every `ST_RELIST_TICKS`
   (30) ticks and at the tick after an accepted request (`list` is cheap and cached by the host; the
@@ -1376,28 +1841,74 @@ Each is a ctest of `port/ui/CMakeLists.txt`; the Settings tests share a fixture:
 - `ui` (`test/ui_test.c`): the embedded fonts, UTF-8 decoding, measuring, the string tables, the
   layout extension through the real `layout_texture.c`, a Japanese popup body's line break.
   `ui_jpn` (`ui_test jpn`): the glyph rows and rectangles, the table sizes and the pad convention
-  on the Japanese disc.
+  on the Japanese disc; `ui_kor`, `ui_cn` the same on theirs. `testGlyphArt` (in `ui` and each of
+  them, on that disc's glyph table, recording only): `lt_ext_glyph_of_row` finds every button's
+  source row and Button Configuration's second block (the L1 and Square rows + 8) and no word,
+  arrow or rectangle of another file; with PlayStation the glyph rows are the texture path and the
+  frame is the same after the sets as before; with Xbox, Nintendo and Wii Classic each glyph row is
+  one sprite from an atlas, centred in its disc box within a tenth of a unit (under half an output
+  pixel) and wholly inside it, at the art's aspect, the size its group's fit for that box gives
+  it (`pad_glyphs_fit_box`), the cell inside the atlas holding the
+  art, the sprite's colour and the packet's blend.
+- `pad_glyphs` (`test/pad_glyphs_test.c`): the button pictures' core, CPU only
+  ([Button pictures](#button-pictures)): every set's eight pieces read, each ink box inside its
+  viewBox, their aspects (the ink's), the capitals one lettering height and the Wii Classic a, x, y
+  against its b, fill and stroke present and the alpha within 0x80; every piece at 24, 48 and 96
+  rows reaching all four sides of its raster within a pixel, every capital of a set the same height
+  within a pixel, the Wii Classic b as tall as the Nintendo B; the group fits (every face, or
+  shoulder, piece inside a box or circle at one scale, one touching, twice the button twice the
+  scale); the Xbox B and A at 24 and 96 rows
+  (the B's ink box, the fill in a stem, the stroke beside it, the stem's stroke corners and the
+  bowls' clear ones, the holes without fill); a ring of two same-way squares, empty with `evenodd`
+  and filled without; the 40 x 24 LB's and 24 x 32 b's ink boxes and sizes; the absolute path forms
+  drawing as the relative ones; broken files refused, their set incomplete and refused as the style
+  in force. Every sample point comes from the file's path data.
 - `strings_complete` (`test/strings_complete_test.c`): every table defines every id with the
   English entry's conversions, the serial notes on every disc, the sheet language, the menu
   language's rule, the Japanese line-break rules.
 - `settings` (`test/settings_test.c`): the menu over fake PAL-shaped tables: pages and labels, the
   entry repoint, the title and pause rows' places, navigation through the real `layout_texture.c`,
-  the game's settings on the pages, what is written.
+  the game's settings on the pages, what is written. `testButtonPictures`: Auto's set from a faked
+  last pad kind (`ico_input_note_pad_kind`) with one change counted a change, Wii Classic only by
+  hand, the row's five values around from the title and the pause menu with the key written and
+  saved on leaving, an incomplete set (`pad_glyphs_test_source`) skipped and the file's word for it
+  read as Auto, an unknown word read as Auto.
 - `settings_states` (`test/settings_states_test.c`): the Save states page, the pause menu's row
   and the Continue screen's prompt over a fake host ([Save states](#save-states)).
 - `settings_extras` (`test/settings_extras_test.c`): the Extras page from the title and the pause
-  menu, Credits, Models, Characters with a faked viewer, the pages that hide the logo.
+  menu, Credits, Models, Unused content over a fake host, Characters with a faked viewer, the pages
+  that hide the logo.
 - `settings_extra` (`test/settings_extra_test.c`): further Settings tests, one function per
   feature, kept in their own file under the source size cap of `tools/check_no_rom.sh`; new
   Settings tests go here (`port/ui/CMakeLists.txt`), or into a program of their own once it is
   near the cap.
+- `settings_step` (`test/settings_step_test.c`, and `_jpn`, `_kor`, `_cn`): holding Left or Right
+  on Gamma (the press alone at 15 ticks, the first repeat at 16, every 3rd tick after, release and
+  hold again, the other direction, the stick's emulation, held at 1 and 100, 1..100 in 98 repeats,
+  presses with gaps), a wrapping row (Filter) held for 75 ticks stepping once, L1/R1 by 10 on the
+  four colour rows (held at 1 and 100, nothing on Filter, written on leaving the page), Square's 50,
+  the repeating rows list, and Mirror mode's stick on the menus (the frame's negated x taken back
+  by `lt_analog2Pad` through `ico_pad_menu_stick_x`, `docs/port/INPUT.md`).
 - `settings_adapter` (`test/settings_adapter_test.c`): the Graphics card row and Apply on another
   card over a fake host ([Graphics > Apply](#graphics--apply)).
+- `settings_desktop` (`test/settings_desktop_test.c`): Extras' Add to the applications menu row over a fake
+  handler (hidden without one and on the pause menu, after Add to Steam, Cross, the popups, the
+  strings; `_jpn`, `_kor`, `_cn`: the disc's confirm button).
 - `settings_backup` (`test/settings_backup_test.c`): Extras' backup rows over a fake host
   ([Extras > Back up your data and Restore from a backup](#extras--back-up-your-data-and-restore-from-a-backup)).
 - `settings_render` (`test/settings_photo_test.c` with `SETTINGS_RENDER`): every screen through rd
   on a Vulkan device, written as PNGs, the words as sheet strips in the scene list, photo mode's
-  panel in every language.
+  panel in every language. The button pictures: the model viewer's prompt lines at 1x with each
+  set (`settings_pad_glyphs_<set>.png`: every glyph row one sprite from an atlas in its box and
+  centred on it, the pixels there not the stand-in sheet's, flat opaque art the texel times the
+  sprite's colour); photo mode's panel with Xbox (seven pictures from the atlas, none from the
+  sheets, each centred on a disc picture's box within half a pixel and inside it, the faces one
+  height and the shoulders one height, one of each filling its box); the touch overlay at 1080p
+  (`settings_touch_<set>_1080.png`: with Xbox every zone with a picture takes the art,
+  `ui__touch_art_zones`; for each set each picture centred on its button within half a pixel and
+  inside its circle or key box, the faces at one scale and the shoulder keys at one, the tightest
+  at its limit, and every button at 0.5 and 2 times its size giving pictures 0.5 and 2 times as
+  large within a pixel, `ui__touch_art_quad`).
 - `settings_jpn`, `settings_extras_jpn`, `settings_extra_jpn`, `settings_render_jpn` (each program
   with `jpn`): the Japanese disc over the fixture's tables at its numbers (`fxLayout`, `fxRow`):
   the rows it has not and the Menu language row, Circle confirming and Cross or Triangle going
@@ -1410,7 +1921,16 @@ Each is a ctest of `port/ui/CMakeLists.txt`; the Settings tests share a fixture:
 - `menu_text` (`test/menu_text_test.c`): the menu text table against the boot ELF's rows, every
   string drawable, the hook through the real `layout_texture.c`.
 - `menu_look` (`test/menu_look_test.c`, `test/menu_sheets.c`): the menus' strips against the
-  player's sheets through the sheet shader's CPU reference; pins the sheet constants.
+  player's sheets through the sheet shader's CPU reference; the sheets' survey is its record, and
+  it pins the port's look (the outline's grey 100, the falloff tables, the eight levels, the solid
+  threshold) and the picture limits that look measures, not a match to the sheets. Its
+  development modes, from the environment: `ICO_MENU_LOOK_FIT=1` (the levels and greys),
+  `ICO_MENU_LOOK_GEOFIT=1` (the table's geometry), `ICO_MENU_LOOK_REF46=1` (the title's publisher
+  plate measured: its outline's falloff, steps and dither), `ICO_MENU_LOOK_OUTLINE=1` (the
+  menus' words in candidate outline looks beside the plate, through `sheet_ref.h`'s `SheetLook`;
+  contact sheets to choose the menu look from) and `ICO_MENU_LOOK_COVERAGE=1` (those words'
+  strip coverage and the plate's rows as PGM files, the outline design page's material)
+  ([TESTING_PROGRAMS.md](TESTING_PROGRAMS.md)).
 - `menu_text_jpn`, `menu_look_jpn`, `menu_text_kor`, `menu_look_kor`, `menu_text_cn`,
   `menu_look_cn` (`test/menu_region_test.c` with a slug, and `test/menu_sheets.c`): over the disc's
   boot ELF's tables (`ICO_BASE_ELF_JPN`, `ICO_BASE_ELF_KOR`, `ICO_BASE_ELF_CN`), the region's layouts by their procedures, the title, pause and memory card

@@ -23,6 +23,13 @@
  *              failing fragment writes what a passing one writes, the pass
  *              and fail pair otherwise; the toggle restores the split
  *   dump       a frame with textures and a temp target survives dump/load;
+ *              the reads-only dump (rd_dump_retained_frame_mem_reads) is
+ *              the drained dump's bytes; the loss keep's copy (issue 179,
+ *              rd_loss_keep.h rd__loss_keep_test_copy) is the file's bytes
+ *              by every way it is made: no host (measured and allocated
+ *              once), a fake host's block once asked for and made (into
+ *              it, sized from the copy before), a block too small (given
+ *              back, measured instead); the end gives the ask back;
  *              an image's GS levels and TEX1's mipmap fields (tex1Lod)
  *              round-trip; version 8 and older dumps (no tex1Lod, no level
  *              words) still load; RDC_AA1 and RdStateBlock.aa1 round-trip, and a
@@ -32,6 +39,9 @@
  *              are recreated
  *   dump v14   a tick's frame loads without the ticks' cameras; a blended
  *              frame's (hasTickCams, tickCams) round-trip
+ *   dump v15   a prelit mesh's EE facing table (its FLIP marks,
+ *              facingFrom RD_MESH_FACING_TABLE) round-trips; the same file
+ *              as version 14 loads the mesh without facing
  *   dump v10   the native frame (aspect, wExact, cullW) after gsH round-trips
  *              and peeks (rd__dump_peek); a version 9 dump loads as the 4:3
  *              frame; a header the renderer cannot size is refused; the
@@ -73,8 +83,12 @@
  *              one snapshot each (rd__date_retake)
  *   pipelines  the reachable screen and post set is under 400 keys (the
  *              sprite_texa_ps twins and the triangle planes included), with the VU program families
- *              under RD_PIPELINE_REACHABLE_MAX; font_sheet_ps and
- *              font_sheet_baked_ps have font_ps's 10 keys each; the VU keys: 242 program-entry keys without the
+ *              under RD_PIPELINE_REACHABLE_MAX; font_sheet_ps (with
+ *              [dev] sheet_shader) and font_sheet_baked_ps have font_ps's
+ *              10 keys each; font_sheet_ps's only where a scale the bake
+ *              does not take is drawn (testSheetSet, issue 188: none on a
+ *              tile-based profile at 1x and 2x, the frame's at 3x, the
+ *              overlay's at a 1080-line output); the VU keys: 242 program-entry keys without the
  *              pre-pass (16 a shader and the 6 of a material TEST's
  *              RGB_ONLY half), 38 + 38 + 10 + 5 with it (printed with the
  *              2D part)
@@ -107,7 +121,9 @@
  *              NVIDIA the extended one; [dev] vu_set = plain (envPlain:
  *              ICO_RD_VU_SET=plain or ICO_RD_VU_PLAIN=1) and the host's
  *              reason the plain one; vu_set = extended the extended one
- *              over each of them
+ *              over each of them; the side bands off (noBeside) only
+ *              with the device's plain set (the table row, Turnip: issue
+ *              163), never with the [dev] or lost-start one or overridden
  *   aura kernel rd__aura_kernel_pick: [dev] aura_kernel = gs drops the box
  *              of the aura's read of SCENE into FEED128 only; unset, empty
  *              or box keeps it
@@ -131,8 +147,11 @@
 #include <stdlib.h>
 #include <string.h>
 #include "../../core/region.h" /* the dump's region (version 12) */
+#include "rd_dump_mem.h"
 #include "rd_internal.h"
+#include "rd_loss_keep.h"
 #include "rd_mesh.h"
+#include "rd_vu_rec_early.h" /* rd_loss_keep_held_bytes */
 #include "shader_consts.h"
 
 static int failures;
@@ -283,6 +302,29 @@ static void testOrderAndLeakage(void)
           "state crosses the frame boundary except the list defaults");
     CHECK(rd__prev_frame() && rd__prev_frame()->number + 1 == rd__last_frame()->number,
           "previous frame retained");
+    /* the slow-scene dump's lookup (rd_dump_retained_frame): the last closed
+       frame and the one before are found by number, anything else is not */
+    CHECK(rd__retained_frame(rd__last_frame()->number) == rd__last_frame(),
+          "retained frame: the last closed by number");
+    CHECK(rd__retained_frame(rd__prev_frame()->number) == rd__prev_frame(),
+          "retained frame: the one before by number");
+    CHECK(rd__retained_frame(rd__last_frame()->number + 1) == NULL &&
+              rd__retained_frame(rd__prev_frame()->number - 1) == NULL,
+          "retained frame: a number outside the ring is none");
+    {
+        uint32_t dumped = 7;
+
+        CHECK(rd_frame_retained(rd__last_frame()->number) &&
+                  rd_frame_retained(rd__prev_frame()->number) &&
+                  !rd_frame_retained(rd__last_frame()->number + 1),
+              "retained frame: rd_frame_retained says the same");
+        /* a frame the ring no longer holds is not written, and no other
+           frame is written in its place */
+        CHECK(!rd_dump_retained_frame(rd__last_frame()->number + 1, "rd_state_test_unused.rddump",
+                                      &dumped) &&
+                  dumped == 0,
+              "retained frame: a number outside the ring writes nothing");
+    }
 }
 
 static void testKeep(void)
@@ -782,6 +824,101 @@ static void testDumpOldTemps(const RdFrame *f, const char *path, const char *dir
     remove(pathOld);
 }
 
+/* the loss keep's fake host (rd_loss_keep_block.h): a block made at once
+   when asked, of the size asked (or of 16 bytes with shrink set) */
+static struct {
+    int asked, shrink, given, withdrawn;
+    size_t bytes;
+} s_kh;
+
+static int khAsk(size_t bytes)
+{
+    if (s_kh.asked) {
+        return -1;
+    }
+    s_kh.asked = 1;
+    s_kh.bytes = bytes;
+    return 0;
+}
+
+static int khTake(void **block, size_t *size)
+{
+    *block = NULL;
+    *size = 0;
+    if (!s_kh.asked) {
+        return -1;
+    }
+    s_kh.asked = 0;
+    *size = s_kh.shrink ? 16u : s_kh.bytes;
+    *block = malloc(*size);
+    return *block != NULL ? 1 : -1;
+}
+
+static void khGiveBack(void *block)
+{
+    if (s_kh.asked) {
+        s_kh.asked = 0;
+        s_kh.withdrawn++;
+    }
+    if (block != NULL) {
+        free(block);
+        s_kh.given++;
+    }
+}
+
+static int khMemory(char *why, size_t size)
+{
+    if (why != NULL && size > 0) {
+        why[0] = '\0';
+    }
+    return 0;
+}
+
+static const RdLossKeepHost s_khHost = {khAsk, khTake, khGiveBack, khMemory};
+
+/* the loss keep's copy of f by each way it is made, against the file's
+   bytes (mem, n) */
+static void testLossKeepCopy(const RdFrame *f, const void *mem, size_t n)
+{
+    RdLossKeepTestCopy c;
+
+    rd__loss_keep_shutdown(); /* a clean start: no copy, no block state */
+    memset(&s_kh, 0, sizeof(s_kh));
+    rd_loss_keep_set_host(NULL);
+    CHECK(rd__loss_keep_test_copy(f, &c) && !c.intoBlock && c.len == n && c.cap == n &&
+              memcmp(c.bytes, mem, n) == 0,
+          "loss keep, no host: measured and allocated once, the file's bytes (%zu, %zu)", c.len, n);
+    rd_loss_keep_set_host(&s_khHost);
+    /* the copy before asks for a block at the next tick: this copy's own
+       tick asks, the copy is measured meanwhile */
+    CHECK(rd__loss_keep_test_copy(f, &c) && !c.intoBlock && c.asks == 1 && c.made == 0 &&
+              s_kh.asked && s_kh.bytes == rd_keep_block_want(n) && memcmp(c.bytes, mem, n) == 0,
+          "loss keep: a block asked for after the run's first copy (asks %llu, %zu bytes)",
+          (unsigned long long)c.asks, s_kh.bytes);
+    /* made: the next copy goes into it, byte for byte the file's */
+    CHECK(rd__loss_keep_test_copy(f, &c) && c.intoBlock && c.made == 1 && c.used == 1 &&
+              c.len == n && c.cap == rd_keep_block_want(n) && memcmp(c.bytes, mem, n) == 0,
+          "loss keep: the copy in the host's block is the file's bytes (%zu of a block of %zu)",
+          c.len, c.cap);
+    CHECK(c.held >= c.cap, "loss keep: the held bytes count the block (%llu)",
+          (unsigned long long)c.held);
+    /* a block too small: given back, the copy measured instead */
+    rd__loss_keep_test_tick(); /* the next block asked for */
+    CHECK(s_kh.asked, "loss keep: the next block asked for after a copy into one");
+    s_kh.shrink = 1;
+    CHECK(rd__loss_keep_test_copy(f, &c) && !c.intoBlock && c.small == 1 && s_kh.given == 1 &&
+              c.len == n && memcmp(c.bytes, mem, n) == 0,
+          "loss keep: a block too small given back, the copy measured (small %llu, given %d)",
+          (unsigned long long)c.small, s_kh.given);
+    s_kh.shrink = 0;
+    rd__loss_keep_test_tick(); /* asked again */
+    CHECK(s_kh.asked, "loss keep: asked again after the measured copy");
+    rd__loss_keep_shutdown();
+    CHECK(!s_kh.asked && s_kh.withdrawn == 1 && rd_loss_keep_held_bytes() == 0,
+          "loss keep: the end withdraws the ask and frees every copy");
+    rd_loss_keep_set_host(NULL);
+}
+
 static void testDump(const char *dir)
 {
     uint8_t px[4 * 4 * 4];
@@ -818,6 +955,90 @@ static void testDump(const char *dir)
     char path[1024];
     snprintf(path, sizeof(path), "%s/rd_state_test.rddump", dir);
     CHECK(rd__dump_frame(f, path), "dump written");
+    {
+        /* the memory dump (rd_dump_frame_mem: the automatic dumps' worker
+           writes the bytes, issues 123 and 179) is the file's bytes */
+        void *mem = NULL, *none = NULL;
+        size_t memLen = 0, noneLen = 0;
+        FILE *df = fopen(path, "rb");
+        long fileLen = 0;
+        uint8_t *fileBytes = NULL;
+
+        if (df) {
+            fseek(df, 0, SEEK_END);
+            fileLen = ftell(df);
+            fseek(df, 0, SEEK_SET);
+            fileBytes = malloc((size_t)fileLen + 1);
+            CHECK(fileBytes && fread(fileBytes, 1, (size_t)fileLen, df) == (size_t)fileLen,
+                  "dump file read");
+            fclose(df);
+        }
+        CHECK(rd_dump_frame_mem(&mem, &memLen), "memory dump made");
+        CHECK(fileBytes && mem && memLen == (size_t)fileLen && memcmp(mem, fileBytes, memLen) == 0,
+              "memory dump equals the file's bytes (%zu, %ld)", memLen, fileLen);
+        CHECK(rd_dump_retained_frame_mem(f->number, &none, &noneLen, NULL) && noneLen == memLen &&
+                  memcmp(none, mem, memLen) == 0,
+              "the retained frame's memory dump is the same");
+        CHECK(!rd_dump_retained_frame_mem(f->number + 7u, &none, &noneLen, NULL),
+              "a frame the ring does not hold is not dumped");
+        {
+            /* the reads-only mode (rd_dump.c dumpFrame: the slow-scene
+               dump's copy made here, the loss keep's) is the drained
+               dump byte for byte.  No host here: the drain and the wait
+               for the reads both return at once, so this shows only that
+               the mode serialises the frame the same way; that it waits
+               for the reads alone, beside a render thread still running a
+               picture, is rd_dump_reads_test.c's */
+            void *reads = NULL;
+            size_t readsLen = 0;
+            uint32_t rn = 0;
+
+            CHECK(rd_dump_retained_frame_mem_reads(f->number, &reads, &readsLen, &rn) &&
+                      rn == f->number && readsLen == memLen && memcmp(reads, mem, memLen) == 0,
+                  "the reads-only dump is the drained one's bytes (%zu, %zu)", readsLen, memLen);
+            CHECK(!rd_dump_retained_frame_mem_reads(f->number + 7u, &reads, &readsLen, NULL),
+                  "reads-only: a frame the ring does not hold is not dumped");
+            free(reads);
+        }
+        {
+            /* the slow-scene dump's two steps (rd_dump_mem.h): the frame
+               measured with nothing copied is the memory dump's size; copied
+               into a block of exactly that size it is the memory dump byte
+               for byte (no growth: one byte short is refused, nothing
+               written past the block, which the sanitizer builds check) */
+            size_t want = 0, got = 9;
+            uint32_t dn = 9;
+
+            CHECK(rd_dump_retained_frame_bytes(f->number, &want) && want == memLen,
+                  "the measured bytes are the memory dump's (%zu, %zu)", want, memLen);
+            uint8_t *blk = want ? malloc(want) : NULL;
+            uint8_t *shortBlk = want > 1 ? malloc(want - 1) : NULL;
+
+            CHECK(blk &&
+                      rd_dump_retained_frame_into(f->number, blk, want, &got, &dn) ==
+                          RD_DUMP_INTO_OK &&
+                      got == memLen && dn == f->number && memcmp(blk, mem, memLen) == 0,
+                  "the frame copied into a block of its size is the memory dump (%zu)", got);
+            CHECK(shortBlk &&
+                      rd_dump_retained_frame_into(f->number, shortBlk, want - 1, &got, &dn) ==
+                          RD_DUMP_INTO_SMALL &&
+                      got == 0 && dn == 0,
+                  "a block one byte short: refused, no dump");
+            CHECK(blk &&
+                      rd_dump_retained_frame_into(f->number + 7u, blk, want, &got, &dn) ==
+                          RD_DUMP_INTO_GONE &&
+                      got == 0 && dn == 0,
+                  "a frame the ring does not hold is not copied");
+            CHECK(!rd_dump_retained_frame_bytes(f->number + 7u, &got) && got == 0,
+                  "a frame the ring does not hold is not measured");
+            free(blk);
+            free(shortBlk);
+        }
+        testLossKeepCopy(f, mem, memLen);
+        free(mem);
+        free(none);
+        free(fileBytes);
+    }
     RdFrame g;
     if (!rd__load_frame(path, &g)) {
         CHECK(0, "dump loaded");
@@ -968,10 +1189,11 @@ static int spit(const char *path, const uint8_t *buf, long size)
     return ok;
 }
 
-/* Water reflections: a block rd_block_target made is marked
+/* The blocks: a block rd_block_target made is marked
  * (RdTargetRec.block), a plain temporary target is not, and the mark goes
  * through a dump in the keep word's bit 1 with keepAcross unchanged, so a
- * replay with --water-sharp scales the same targets the game did */
+ * replay scales the same targets the game did (the scene's scale; their GS
+ * size with --water-ps2) */
 static void testDumpBlock(const char *dir)
 {
     rd_begin_frame();
@@ -1032,6 +1254,99 @@ static void testDumpBlock(const char *dir)
         CHECK(0, "tick cameras: dump loaded");
     }
     remove(path);
+}
+
+/* Dump version 15: a prelit mesh made with the EE's facing table
+ * (RdVuMeshDesc.facing: the region rule's side bands' only facing for a
+ * stream without normals) keeps its FLIP marks through a dump; the same
+ * file with its version word 14 loads the mesh without them (the section
+ * after the ticks' cameras is not read), as an older dump's prelit meshes */
+static void testDumpFacing(const char *dir)
+{
+    static float qw[1 + 5 * 3][4];
+    memset(qw, 0, sizeof(qw));
+    const uint32_t tag = 0x8005u;
+    memcpy(&qw[0][0], &tag, 4);
+    for (int k = 0; k < 5; k++) {
+        qw[1 + k * 3][0] = (float)(k / 2);
+        qw[1 + k * 3][1] = (float)(k & 1);
+        qw[1 + k * 3][3] = 1.0f;
+        qw[1 + k * 3 + 1][2] = 1.0f;
+        qw[1 + k * 3 + 1][3] = k == 0 ? 0.0f : 1.0f; /* strip flag */
+        qw[1 + k * 3 + 2][3] = 127.0f;
+    }
+    const uint8_t bits = 0x18u; /* kicks 3 and 4 wind against their normals */
+    const RdVuBatchDesc bd = {0, 0, 0};
+    RdVuMeshDesc md;
+    memset(&md, 0, sizeof(md));
+    md.qw = (const float (*)[4])qw;
+    md.qwCount = 1 + 5 * 3;
+    md.qwPerVertex = RD_VU_QW_PRELIT;
+    md.batchCount = 1;
+    md.batches = &bd;
+    md.materialCount = 1;
+    md.facing = &bits;
+    md.facingCount = 5;
+    const RdMesh m = rd_create_vu_mesh(&md);
+    const RdMeshRec *mr = rd__mesh_rec(m.id);
+    CHECK(mr && mr->facingFrom == RD_MESH_FACING_TABLE &&
+              (rd__mesh_kick_mark(mr, 3) & ICO_VU_MARK_FLIP) != 0u &&
+              (rd__mesh_kick_mark(mr, 2) & ICO_VU_MARK_FLIP) == 0u,
+          "facing: the mesh takes the EE's table");
+    RdVuDraw d;
+    memset(&d, 0, sizeof(d));
+    d.prog = RD_PROG_PRELIT;
+    d.code = 32;
+    RdXform xf;
+    rd_begin_frame();
+    rd_select_list(0);
+    rd_draw_vu_mesh(m, &d, RD_KEY(&xf, 0, 0));
+    rd_end_frame(0);
+    char path[1100];
+    snprintf(path, sizeof(path), "%s/rd_state_test_facing.rddump", dir);
+    CHECK(rd__dump_frame(rd__last_frame(), path), "facing: dump written");
+    for (int pass = 0; pass < 2; pass++) {
+        if (pass == 1) {
+            /* the same file as version 14 */
+            long size = 0;
+            uint8_t *buf = slurp(path, &size);
+            const uint32_t v14 = 14u;
+            if (!buf || size < 12) {
+                CHECK(0, "facing: dump read back");
+                free(buf);
+                break;
+            }
+            memcpy(buf + 8, &v14, 4);
+            CHECK(spit(path, buf, size), "facing: version 14 written");
+            free(buf);
+        }
+        RdFrame g;
+        if (!rd__load_frame(path, &g)) {
+            CHECK(0, "facing: dump loaded (version %u)", pass ? 14u : RD_DUMP_VERSION);
+            continue;
+        }
+        const RdMeshRec *lr = NULL;
+        for (uint32_t i = 0; i < g.lists[0].count && !lr; i++) {
+            if (g.lists[0].cmds[i].type == RDC_MESH) {
+                lr = rd__mesh_rec(g.lists[0].cmds[i].u[0]);
+            }
+        }
+        if (pass == 0) {
+            CHECK(lr && lr->facingFrom == RD_MESH_FACING_TABLE &&
+                      (rd__mesh_kick_mark(lr, 3) & ICO_VU_MARK_FLIP) != 0u &&
+                      (rd__mesh_kick_mark(lr, 4) & ICO_VU_MARK_FLIP) != 0u &&
+                      (rd__mesh_kick_mark(lr, 2) & ICO_VU_MARK_FLIP) == 0u,
+                  "facing: the table round-trips (from %d)", lr ? (int)lr->facingFrom : -1);
+        } else {
+            CHECK(lr && lr->facingFrom == RD_MESH_FACING_NONE &&
+                      (rd__mesh_kick_mark(lr, 3) & ICO_VU_MARK_FLIP) == 0u,
+                  "facing: a version 14 dump's prelit mesh has no facing (from %d)",
+                  lr ? (int)lr->facingFrom : -1);
+        }
+        rd__frame_free(&g);
+    }
+    remove(path);
+    rd_destroy_vu_mesh(m);
 }
 
 /* Dump version 10: the native frame after gsH (aspect, wExact, cullW) round
@@ -2389,6 +2704,100 @@ static void testUberSet(RdPipeKeyInt *keys)
     g_rd.sceneSy = keepSy;
 }
 
+/* font_sheet_ps's keys in a set only where a scale the bake does not take
+ * is drawn (rd_tex.c rd__sheet_shader_in_scene/_in_overlay, issue 188): the
+ * menus at the scene's scale, the overlay at the output's height / 448,
+ * mfScale's rounding (2.41 is 3, 2.25 is 2).  On a tile-based profile (the
+ * 2x bake) at 1x and 2x and a 1008-line output none; at a 3x scene the
+ * frame's 8, at a 1080-line output (the reporter's phone) the overlay's 4,
+ * every scale with [dev] sheet_shader (10: the overlay's RGBA8 two are the
+ * frame's); on a desktop profile (1x baked only) a 2x scene, or a 720-line
+ * output's overlay, draws through it.  font_sheet_baked_ps's 10 stay in every set,
+ * and the family line's words say which way each went. */
+static uint32_t countSheetKeys(uint32_t *depthKeys)
+{
+    static RdPipeKeyInt k[RD_PIPELINE_REACHABLE_MAX];
+    const uint32_t n = rd__enumerate_reachable(k, RD_PIPELINE_REACHABLE_MAX);
+    uint32_t c = 0, d = 0, baked = 0;
+    for (uint32_t i = 0; i < n && i < RD_PIPELINE_REACHABLE_MAX; i++) {
+        c += k[i].fs == RD_FS_FONT_SHEET;
+        d += k[i].fs == RD_FS_FONT_SHEET && k[i].depthFmt != RHI_FMT_UNKNOWN;
+        baked += k[i].fs == RD_FS_FONT_SHEET_BAKED;
+    }
+    CHECK(baked == 10, "font_sheet_baked_ps keys %u (10 in every set)", baked);
+    if (depthKeys) {
+        *depthKeys = d;
+    }
+    return c;
+}
+
+static void testSheetSet(void)
+{
+    const RdProfile keepProfile = g_rd.profile;
+    const float keepSx = g_rd.sceneSx, keepSy = g_rd.sceneSy;
+    const uint32_t keepOutH = g_rd.settings.outputHeight;
+    const bool keepSheet = g_rd.sheetShader;
+
+    static const struct {
+        bool tiler;
+        float scale;
+        uint32_t outH;
+        bool sheet;
+        bool scene, overlay;
+    } kCase[] = {
+        {true, 1.0f, 448u, false, false, false}, {true, 2.11f, 1008u, false, false, false},
+        {true, 3.0f, 1008u, false, true, false}, {true, 2.11f, 1080u, false, false, true},
+        {true, 1.0f, 448u, true, true, true},    {false, 1.0f, 448u, false, false, false},
+        {false, 2.0f, 448u, false, true, false}, {false, 1.0f, 720u, false, false, true},
+    };
+
+    for (size_t c = 0; c < sizeof(kCase) / sizeof(kCase[0]); c++) {
+        memset(&g_rd.profile, 0, sizeof(g_rd.profile));
+        g_rd.profile.tiler = kCase[c].tiler;
+        g_rd.profile.sheetBake2x = kCase[c].tiler;
+        g_rd.sceneSx = g_rd.sceneSy = kCase[c].scale;
+        g_rd.settings.outputHeight = kCase[c].outH;
+        g_rd.sheetShader = kCase[c].sheet;
+        uint32_t depth = 0;
+        const uint32_t n = countSheetKeys(&depth);
+        /* the overlay's RGBA8 two are the frame's depthless mask F ones */
+        const uint32_t want = kCase[c].scene && kCase[c].overlay ? 10u
+                              : kCase[c].scene                   ? 8u
+                              : kCase[c].overlay                 ? 4u
+                                                                 : 0u;
+        char words[160];
+        rd__sheet_set_words(words, sizeof(words));
+        printf("  sheet set: %s, scene %.2f, output %u lines%s: %u font_sheet_ps keys (%s)\n",
+               kCase[c].tiler ? "tile-based" : "desktop", (double)kCase[c].scale, kCase[c].outH,
+               kCase[c].sheet ? ", [dev] sheet_shader" : "", n, words);
+        CHECK(rd__sheet_shader_in_scene() == kCase[c].scene &&
+                  rd__sheet_shader_in_overlay() == kCase[c].overlay,
+              "case %zu: in the scene %d, in the overlay %d", c, rd__sheet_shader_in_scene(),
+              rd__sheet_shader_in_overlay());
+        /* the overlay's 4 are depthless; the frame's 8 hold its 4 with depth */
+        CHECK(n == want && depth == (kCase[c].scene ? 4u : 0u),
+              "case %zu: %u font_sheet_ps keys (%u with depth), %u expected", c, n, depth, want);
+        char wantScene[64], wantOverlay[64];
+        snprintf(wantScene, sizeof(wantScene), "the menus' text at %ux %s",
+                 rd__sheet_scale_for(kCase[c].scale),
+                 kCase[c].scene ? "in the set" : "baked (not in the set)");
+        snprintf(wantOverlay, sizeof(wantOverlay), "the overlay's at %ux %s",
+                 rd__sheet_scale_for((float)kCase[c].outH / 448.0f),
+                 kCase[c].overlay ? "in the set" : "baked (not in the set)");
+        CHECK(strstr(words, wantScene) != NULL && strstr(words, wantOverlay) != NULL,
+              "case %zu: the line's words: %s (want \"%s\", \"%s\")", c, words, wantScene,
+              wantOverlay);
+    }
+    CHECK(rd__sheet_scale_for(2.41f) == 3u && rd__sheet_scale_for(2.25f) == 2u &&
+              rd__sheet_scale_for(0.5f) == 1u && rd__sheet_scale_for(4.8f) == 4u,
+          "mfScale's rounding");
+    g_rd.profile = keepProfile;
+    g_rd.sceneSx = keepSx;
+    g_rd.sceneSy = keepSy;
+    g_rd.settings.outputHeight = keepOutH;
+    g_rd.sheetShader = keepSheet;
+}
+
 static void testEnumeration(void)
 {
     static RdPipeKeyInt keys[RD_PIPELINE_REACHABLE_MAX];
@@ -2408,21 +2817,30 @@ static void testEnumeration(void)
                   keys[i].gs.afailSplit == 0 && keys[i].gs.date == 0,
               "key %u normalised", i);
     }
-    /* font_sheet_ps has font_ps's keys: the overlay's two
-     * blends on the two outputs and the frame's text, two blends, with and
-     * without depth, colour mask F and 7 (the overlay's RGBA8 keys are the
-     * frame's depthless mask F ones: 10 in all) */
-    uint32_t font = 0, sheet = 0, baked = 0;
-    for (uint32_t i = 0; i < n && i < 512; i++) {
-        font += keys[i].fs == RD_FS_FONT;
-        sheet += keys[i].fs == RD_FS_FONT_SHEET;
-        baked += keys[i].fs == RD_FS_FONT_SHEET_BAKED;
+    /* font_sheet_ps has font_ps's keys where every scale is drawn through
+     * it ([dev] sheet_shader): the overlay's two blends on the two outputs
+     * and the frame's text, two blends, with and without depth, colour mask
+     * F and 7 (the overlay's RGBA8 keys are the frame's depthless mask F
+     * ones: 10 in all) */
+    {
+        static RdPipeKeyInt all[RD_PIPELINE_REACHABLE_MAX];
+        const bool keepSheet = g_rd.sheetShader;
+        g_rd.sheetShader = true;
+        const uint32_t na = rd__enumerate_reachable(all, RD_PIPELINE_REACHABLE_MAX);
+        g_rd.sheetShader = keepSheet;
+        uint32_t font = 0, sheet = 0, baked = 0;
+        for (uint32_t i = 0; i < na && i < RD_PIPELINE_REACHABLE_MAX; i++) {
+            font += all[i].fs == RD_FS_FONT;
+            sheet += all[i].fs == RD_FS_FONT_SHEET;
+            baked += all[i].fs == RD_FS_FONT_SHEET_BAKED;
+        }
+        printf("  font_ps keys %u, font_sheet_ps keys %u, font_sheet_baked_ps keys %u\n", font,
+               sheet, baked);
+        CHECK(font == 10 && sheet == 10 && baked == 10,
+              "font_ps keys %u, font_sheet_ps keys %u, font_sheet_baked_ps keys %u (10 each)", font,
+              sheet, baked);
     }
-    printf("  font_ps keys %u, font_sheet_ps keys %u, font_sheet_baked_ps keys %u\n", font, sheet,
-           baked);
-    CHECK(font == 10 && sheet == 10 && baked == 10,
-          "font_ps keys %u, font_sheet_ps keys %u, font_sheet_baked_ps keys %u (10 each)", font,
-          sheet, baked);
+    testSheetSet();
     testEnumerationVu(keys);
     testDynamicNormalise(keys);
     testTilerSet(keys);
@@ -3063,7 +3481,7 @@ static void testVuSetPolicy(void)
         "(Turnip driver: the extended set's clipped triangles showed a stray vertex there, issue "
         "163; [dev] vu_set = extended asks for the extended one)";
     RdVuSetChoice c;
-    /* the stock Adreno 740: vk_device.c kVuPlainOnly's row */
+    /* the stock Adreno 740: the device table's row adreno-740-qualcomm */
     RhiLimits lim = vuSetLimits(0x5143u,
                                 "device 5143:43050a01; driver Qualcomm Technologies Inc. Adreno "
                                 "Vulkan Driver, version 512.676.53",
@@ -3072,11 +3490,14 @@ static void testVuSetPolicy(void)
     CHECK(c.plain && !c.overridden && strcmp(c.kind, "plain set by the device table") == 0 &&
               strcmp(c.why, "on this device (Adreno 740, issue 107)") == 0,
           "vu set: the stock Adreno 740: plain %d, \"%s\" \"%s\"", c.plain, c.kind, c.why);
+    /* the device's plain set keeps the side bands off (issue 163) */
+    CHECK(c.noBeside, "vu set: the stock Adreno 740: side bands not off");
     rd__vu_set_choose(&lim, false, true, "", &c);
     CHECK(!c.plain && c.overridden && strstr(c.kind, "ICO_RD_VU_EXTENDED=1") != NULL &&
               strcmp(c.why, "on this device (Adreno 740, issue 107)") == 0,
           "vu set: the stock Adreno 740 with ICO_RD_VU_EXTENDED=1: plain %d, overridden %d",
           c.plain, c.overridden);
+    CHECK(!c.noBeside, "vu set: the stock Adreno 740 overridden: side bands still off");
     /* Qualcomm's own driver on a GPU without a row */
     lim = vuSetLimits(0x5143u,
                       "device 5143:43050b00; driver Qualcomm Technologies Inc. Adreno Vulkan "
@@ -3085,6 +3506,7 @@ static void testVuSetPolicy(void)
     rd__vu_set_choose(&lim, false, false, "", &c);
     CHECK(!c.plain && !c.overridden && c.why[0] == '\0',
           "vu set: Qualcomm's driver without a row: plain %d \"%s\"", c.plain, c.why);
+    CHECK(!c.noBeside, "vu set: Qualcomm's driver without a row: side bands off");
     /* Turnip: the driver name as Mesa writes it, and as the issue 163
      * tablet's line has it (the same Adreno 740 chip id, no table row: the
      * row is Qualcomm's own driver only) */
@@ -3100,6 +3522,7 @@ static void testVuSetPolicy(void)
                   strcmp(c.why, kTurnipWhy) == 0 &&
                   strcmp(c.brief, "Turnip driver, issue 163") == 0,
               "vu set: \"%s\": plain %d, \"%s\" \"%s\"", turnip[i], c.plain, c.kind, c.why);
+        CHECK(c.noBeside, "vu set: \"%s\": side bands not off (issue 163)", turnip[i]);
         /* the dev override still wins */
         rd__vu_set_choose(&lim, false, true, "", &c);
         CHECK(!c.plain && c.overridden &&
@@ -3108,7 +3531,29 @@ static void testVuSetPolicy(void)
                   strcmp(c.why, kTurnipWhy) == 0,
               "vu set: \"%s\" with ICO_RD_VU_EXTENDED=1: plain %d, overridden %d, \"%s\"",
               turnip[i], c.plain, c.overridden, c.kind);
+        CHECK(!c.noBeside, "vu set: \"%s\" overridden: side bands still off", turnip[i]);
     }
+
+    /* a Turnip build that renamed itself keeps Mesa's driver id (issue 209:
+     * "PurpleVK public driver", VK_DRIVER_ID_MESA_TURNIP 18): Turnip by the id,
+     * as rhi_driver_is_qualcomm_proprietary reads it; Qualcomm's own driver
+     * (id 8) with the same chip is not */
+    lim = vuSetLimits(0x5143u,
+                      "device 5143:43050a01; driver PurpleVK public driver PurpleVK 26.3.0-devel "
+                      "(git-62ac221a33), version 26.2.99",
+                      NULL);
+    CHECK(!rd__driver_is_turnip(&lim), "vu set: PurpleVK without its driver id taken for Turnip");
+    lim.driverId = 18u;
+    CHECK(rd__driver_is_turnip(&lim), "vu set: PurpleVK (driver id 18) is not Turnip");
+    rd__vu_set_choose(&lim, false, false, "", &c);
+    CHECK(c.plain && strcmp(c.why, kTurnipWhy) == 0 && c.noBeside,
+          "vu set: PurpleVK (driver id 18): plain %d, \"%s\"", c.plain, c.why);
+    lim = vuSetLimits(0x5143u,
+                      "device 5143:43050a01; driver Qualcomm Technologies Inc. Adreno Vulkan "
+                      "Driver, version 512.744.0",
+                      NULL);
+    lim.driverId = 8u;
+    CHECK(!rd__driver_is_turnip(&lim), "vu set: Qualcomm's driver (id 8) taken for Turnip");
 
     /* the desktop drivers */
     static const struct {
@@ -3135,14 +3580,41 @@ static void testVuSetPolicy(void)
                   strcmp(c.brief, "[dev] vu_set = plain") == 0,
               "vu set: \"%s\" with ICO_RD_VU_PLAIN=1: plain %d, \"%s\"", desk[i].text, c.plain,
               c.why);
+        /* the [dev] A/B and a lost start keep the side bands */
+        CHECK(!c.noBeside, "vu set: \"%s\" with ICO_RD_VU_PLAIN=1: side bands off", desk[i].text);
         rd__vu_set_choose(&lim, false, false, "a lost start", &c);
         CHECK(c.plain && strcmp(c.why, "(a lost start)") == 0 &&
                   strcmp(c.kind, "plain set after a lost start") == 0,
               "vu set: \"%s\" after the host's reason: plain %d, \"%s\"", desk[i].text, c.plain,
               c.why);
+        CHECK(!c.noBeside, "vu set: \"%s\" after a lost start: side bands off", desk[i].text);
         rd__vu_set_choose(&lim, true, true, "a lost start", &c);
         CHECK(!c.plain && c.overridden, "vu set: \"%s\" both settings: plain %d", desk[i].text,
               c.plain);
+    }
+    /* the profile line's Turnip note: the Mesa version when the driver names
+     * one (the issue 163 tablet's "Mesa 26.3.0-devel (git-a995eaeda4)"), a
+     * line saying it names none, and nothing off Turnip */
+    {
+        char note[128];
+        RhiMesaVersion mv;
+        rhi_mesa_version_parse("turnip Mesa driver", "Mesa 26.3.0-devel (git-a995eaeda4)", &mv);
+        lim = vuSetLimits(0x5143u, turnip[1], NULL);
+        lim.mesa = mv;
+        rd__turnip_note(&lim, note, sizeof(note));
+        CHECK(strcmp(note, "; turnip: Mesa 26.3.0-devel") == 0, "turnip note: \"%s\"", note);
+        lim.mesa.known = 0;
+        rd__turnip_note(&lim, note, sizeof(note));
+        CHECK(strcmp(note, "; turnip: Mesa version not named by the driver") == 0,
+              "turnip note without a version: \"%s\"", note);
+        lim = vuSetLimits(0x5143u,
+                          "device 5143:43050a01; driver Qualcomm Technologies Inc. Adreno Vulkan "
+                          "Driver, version 512.676.53",
+                          NULL);
+        rd__turnip_note(&lim, note, sizeof(note));
+        CHECK(note[0] == '\0', "turnip note on Qualcomm's driver: \"%s\"", note);
+        rd__turnip_note(NULL, note, sizeof(note));
+        CHECK(note[0] == '\0', "turnip note without limits");
     }
     /* no device's limits: the extended set */
     rd__vu_set_choose(NULL, false, false, NULL, &c);
@@ -3308,6 +3780,14 @@ static void testAuraBox(RdPipeKeyInt *keys)
 
 int main(int argc, char **argv)
 {
+    /* the PS2's region rule ([dev] region_rule = ps2): this test's
+       pictures and counts are its drops' (the camera rule's are vu1's,
+       rd_native's and rd_region_camera_ab's) */
+#ifdef _WIN32
+    _putenv_s("ICO_RD_REGION_RULE", "ps2");
+#else
+    setenv("ICO_RD_REGION_RULE", "ps2", 1);
+#endif
     rd__set_not_implemented_fatal(true); /* a stub command replayed stops the test */
     const char *dir = argc > 1 ? argv[1] : ".";
     if (!rd__init_record_only(512, 512)) {
@@ -3322,6 +3802,7 @@ int main(int argc, char **argv)
     testDump(dir);
     testDumpV10(dir);
     testDumpBlock(dir);
+    testDumpFacing(dir);
     testDumpSheetV11(dir);
     testAa1Plans();
     testAa1DatePairs();

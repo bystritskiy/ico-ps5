@@ -27,6 +27,12 @@
 //                                only for the four forms A, B in {Cs, 0},
 //                                C in {As, FIX}, D Cd, COLCLAMP 1, no PABE
 //                                (the paste's Cs + Cd)
+//                FXF_GLOW_MASK   the glow's reduction WORK2 -> WORK0 with
+//                                SCENE as t1: each WORK2 texel it loads
+//                                computed as the mask's sprite stored it
+//                                over the fill (fx_glow_texel; port/render/
+//                                rd_glow_fold.c), so WORK2 is neither drawn
+//                                nor read
 //   fx_local_ps  (ICO_FX_DST_LOCAL=1) fx_sprite_ps reading the destination
 //                inside the open pass by local read: t1 the bound target
 //                as an input attachment (SubpassLoad: the fragment's own
@@ -106,6 +112,8 @@
 #define FXF_ALPHA_ONLY 16384u
 #define FXF_OUT_PREMUL 32768u
 #define FXF_FOLD 65536u
+#define FXF_GLOW_MASK 131072u
+#define FXF_GLOW_KEPT 262144u
 
 #define AFAIL_KEEP 0u
 #define AFAIL_FB_ONLY 1u
@@ -160,6 +168,41 @@ uint4 fx_load(Texture2D<float4> t, int2 c)
 #error "fx_frame_ps is the UNORM build with its textures in t1, t2"
 #endif
 
+// fx_paste_ps (ICO_FX_FRAME=1 ICO_FX_PASTE=1): fx_frame_ps for the glow's
+// paste alone (WORK3 into SCENE through the premultiplied add,
+// port/render/rd_paste_spec.c), the same functions called in the same order
+// with the words the paste can never change held as constants, so the
+// branches it never takes and their loads are not in the module:
+//   FX_FLAGS        TEXTURED and OUT_PREMUL set; ABOVE1X, ALPHA_ONLY,
+//                   GLOW_MASK, FOLD, ABE, PABE, DATE, DATM, DST clear; the
+//                   paste's own bits (TFX, TCC, LINEAR, CLAMP_S, CLAMP_T,
+//                   FBA) read from g_mode.x as fx_frame_ps reads them
+//   FX_TEXA_WORD    TEXFMT RGBA32 (TEXA leaves the texel as it is,
+//                   gs_texa_expand)
+//   FX_ATEST_WORD   no alpha test
+//   fx_src_scale    1 on both axes, fx_src_crop16 0 (a work buffer: t1 at
+//                   scale 1, no Full pixel crop)
+// The CPU draws through it only a sprite whose DrawCB holds exactly those
+// values (rd_paste_spec.c rd__paste_spec_take), so every value it computes
+// is fx_frame_ps's; a start-up self-test compares the two draws byte for
+// byte on the device (rd__paste_spec_selftest).  The other builds read the
+// words as before.
+#if defined(ICO_FX_PASTE) && !defined(ICO_FX_FRAME)
+#error "fx_paste_ps is fx_frame_ps's build (ICO_FX_FRAME=1) for the glow's paste"
+#endif
+#ifdef ICO_FX_PASTE
+#define FX_PASTE_FIXED (FXF_TEXTURED | FXF_OUT_PREMUL)
+#define FX_PASTE_FREE                                                                              \
+    ((3u << FXF_TFX_SHIFT) | FXF_TCC | FXF_LINEAR | FXF_CLAMP_S | FXF_CLAMP_T | FXF_FBA)
+#define FX_FLAGS ((g_mode.x & FX_PASTE_FREE) | FX_PASTE_FIXED)
+#define FX_TEXA_WORD (TEXFMT_RGBA32 << 8)
+#define FX_ATEST_WORD 0u
+#else
+#define FX_FLAGS g_mode.x
+#define FX_TEXA_WORD g_mode.y
+#define FX_ATEST_WORD g_mode.z
+#endif
+
 // The destination at the fragment's texel px, 0..255: the snapshot's, or
 // the open pass's own by local read (fx_local_ps)
 uint4 fx_dest(int2 px)
@@ -174,14 +217,22 @@ uint4 fx_dest(int2 px)
 // t1 texels per GS texel, 1 when unset.
 float2 fx_src_scale()
 {
+#ifdef ICO_FX_PASTE
+    return float2(1.0, 1.0); // a work buffer (the CPU's condition)
+#else
     return float2(g_scale.x > 0.0 ? g_scale.x : 1.0, g_scale.y > 0.0 ? g_scale.y : 1.0);
+#endif
 }
 
 // t1's Full pixel crop in 1/16 texels: the texels of the GS frame left out
 // at its left (g_scale.z times its width), 0 on every other texture
 int fx_src_crop16()
 {
+#ifdef ICO_FX_PASTE
+    return 0; // no crop on a work buffer (the CPU's condition)
+#else
     return g_scale.z != 0.0 ? int(round(g_scale.z * g_tex.z * 16.0)) : 0;
+#endif
 }
 
 // fx_texel's addressing on one axis, which the other axis does not change:
@@ -213,7 +264,7 @@ int fx_axis_y(int c, uint flags)
 // The texel at addressed coordinates (fx_axis_x, fx_axis_y), after TEXA
 uint4 fx_texel_at(int x, int y)
 {
-    return gs_texa_expand(fx_load(g_texture, int2(x, y)), g_mode.y & 0xFFu, g_mode.y >> 8);
+    return gs_texa_expand(fx_load(g_texture, int2(x, y)), FX_TEXA_WORD & 0xFFu, FX_TEXA_WORD >> 8);
 }
 
 #if !defined(ICO_FX_FRAME) && !defined(ICO_FX_DST_LOCAL)
@@ -414,6 +465,172 @@ uint fx_alpha_only(int su, int sv, uint a, uint flags)
 }
 #endif
 
+#ifdef ICO_FX_FRAME
+// The glow's reduction WORK2 -> WORK0 with its mask folded in
+// (FXF_GLOW_MASK; port/render/rd_glow_fold.c, docs/port/RENDER_POST.md):
+// drawn with SCENE as t1, every WORK2 texel the reduction's kernel loads
+// is computed where it loads it, as makeMaskPatternToWork2's sprite
+// (fx_frame_ps, FXF_ALPHA_ONLY) stored it over fillWork2's fill.  Every
+// value is the one the two draws compute, by the same operations on the
+// same operands: the mask's fragment at the texel (its SV_Position, the
+// texel's centre) through fx_sprite_ps's first lines, U and V, the alpha
+// of fx_alpha_only, fx_sprite_out's alpha test and FBA, then the
+// reduction's own kernel (fx_sprite_texel's: the above-1x box or B-spline,
+// the GS bilinear or nearest; integer sums in the same order), TFX and
+// tail.  Only the RGBA8 store and load between the draws is left out: the
+// mask wrote k / 255, the reduction read floor(x * 255 + 0.5), which is k
+// for every k (fx_load).  The taps are loaded in one loop each (one copy
+// of the mask in the module).
+//
+// WORK2 has SCENE's size, scale and crop and the mask SCENE's TEX0 size
+// (the CPU's conditions), so fx_src_scale (the mask pass's g_z.yz and the
+// mask's g_scale.xy), fx_src_crop16, g_tex.zw and g_aux1.zw are the
+// mask's own.  The rest is in DrawCB words the reduction does not read:
+//   g_aux0   x the fill, R | G << 8 | B << 16 | A << 24 (FBA's MSB in A;
+//            unused with FXF_GLOW_KEPT, where t2 is WORK2 as drawn before
+//            the mask: the fill and the sun's fans, whose texels the mask
+//            keeps are loaded as the reduction would have loaded them);
+//            y the mask's rect x0 | x1 << 16, z y0 | y1 << 16 (12.4);
+//            w WORK2's XYOFFSET in sixteenths, x | y << 16 (the mask
+//            pass's g_origin times 16: whole numbers)
+//   g_blend  x u0 - x0 | (v0 - y0) << 16, signed 16-bit: the mask's UV span
+//            is its rect's, d, and gs_div_trunc_rcp(n d, d, 1 / d) is n, so
+//            U(X) = u0 + (X - x0); y RGBAQ's A | AREF << 8 | ATST << 16 |
+//            ATE << 20 | AFAIL << 24 (KEEP, FB_ONLY or ZB_ONLY); z the
+//            mask's flags (TCC, LINEAR, CLAMP_S, CLAMP_T, FBA)
+//   g_tex    x the mask pass's g_vpo.z (WORK2's Full pixel crop, else 0);
+//            y 0.5, the pixel centre's half, read from the DrawCB so that
+//            no compiler folds it with the 0.5 fx_sprite_ps takes off after
+//            it: the sums are the mask's own, in its order
+
+// fx_alpha_only's value with its taps in one loop: (t.a a) >> 7 with TCC,
+// t.a the GS bilinear (FXF_LINEAR) or nearest texel's alpha
+uint fx_glow_alpha(int su, int sv, uint a, uint flags)
+{
+    if ((flags & FXF_TCC) == 0u) {
+        return a;
+    }
+    const bool lin = (flags & FXF_LINEAR) != 0u;
+    const int uu = lin ? su - 8 : su, vv = lin ? sv - 8 : sv;
+    const int x0 = fx_axis_x(uu >> 4, flags), x1 = fx_axis_x((uu >> 4) + 1, flags);
+    const int y0 = fx_axis_y(vv >> 4, flags), y1 = fx_axis_y((vv >> 4) + 1, flags);
+    int t0 = 0, t1 = 0, t2 = 0, t3 = 0;
+    const uint n = lin ? 4u : 1u;
+    [loop] for (uint k = 0u; k < n; k++) {
+        const int v = int(fx_texel_alpha((k & 1u) != 0u ? x1 : x0, (k & 2u) != 0u ? y1 : y0));
+        t0 = k == 0u ? v : t0;
+        t1 = k == 1u ? v : t1;
+        t2 = k == 2u ? v : t2;
+        t3 = k == 3u ? v : t3;
+    }
+    uint ta = uint(t0);
+    if (lin) {
+        const uint fu = uint(uu & 15), fv = uint(vv & 15);
+        const int top = fx_lerp16(t0, t1, fu);
+        const int bot = fx_lerp16(t2, t3, fu);
+        ta = uint(fx_lerp16(top, bot, fv));
+    }
+    return min((ta * a) >> 7, 255u);
+}
+
+// WORK2's texel c before the mask: the fill's colour, or with
+// FXF_GLOW_KEPT WORK2 itself (t2, bound as the destination's slot: the fill
+// and the sun's fans drawn as ever, read where the mask keeps the texel)
+uint4 fx_glow_kept(int2 c)
+{
+    [branch] if ((g_mode.x & FXF_GLOW_KEPT) != 0u) {
+        return fx_load(g_dest, c);
+    }
+    const uint fill = g_aux0.x;
+    return uint4(fill & 255u, (fill >> 8) & 255u, (fill >> 16) & 255u, fill >> 24);
+}
+
+// WORK2's texel c (in its texels) as the mask left it
+uint4 fx_glow_mask(int2 c)
+{
+    // fx_sprite_ps's first lines at the mask's fragment of the texel, in
+    // WORK2's FrameCB (ts its scale, the vpo.z its crop's)
+    const float2 ts = fx_src_scale();
+    const float2 pos = float2(c) + g_tex.yy;
+    const float2 fp = pos + float2(g_tex.x, 0.0);
+    float2 fb = fp - 0.5, fc = fp;
+    [branch] if (ts.x != 1.0 || ts.y != 1.0) {
+        fb = fb / ts;
+        fc = fc / ts;
+    }
+    const int2 gb = int2(floor(fb)) * 16;
+    const int2 gp = int2(floor((fc - 0.5) * 16.0 + 0.5));
+    const int ox = int(g_aux0.w & 0xFFFFu), oy = int(g_aux0.w >> 16);
+    const int x0 = int(g_aux0.y & 0xFFFFu), x1 = int(g_aux0.y >> 16);
+    const int y0 = int(g_aux0.z & 0xFFFFu), y1 = int(g_aux0.z >> 16);
+    if (ox + gb.x < x0 || ox + gb.x >= x1 || oy + gb.y < y0 || oy + gb.y >= y1) {
+        return fx_glow_kept(c); // outside the sprite: the texel as it was
+    }
+    // U(X) = u0 + (X - x0) with X = ox + gp.x; the UV in t1's texels, 12.4
+    const int du = asint(g_blend.x << 16) >> 16, dv = asint(g_blend.x) >> 16;
+    const float2 ss = fx_src_scale();
+    const int su = int(round(float(ox + gp.x + du) * ss.x)) - fx_src_crop16();
+    const int sv = int(round(float(oy + gp.y + dv) * ss.y));
+    const uint t = g_blend.y, mflags = g_blend.z;
+    const uint a = fx_glow_alpha(su, sv, t & 255u, mflags);
+    // fx_sprite_out's alpha test: AFAIL KEEP and ZB_ONLY write nothing,
+    // FB_ONLY the colour
+    if (((t >> 20) & 1u) != 0u && !gs_alpha_pass((t >> 16) & 15u, (t >> 8) & 255u, a)) {
+        const uint afail = (t >> 24) & 3u;
+        if (afail == AFAIL_KEEP || afail == AFAIL_ZB_ONLY) {
+            return fx_glow_kept(c);
+        }
+    }
+    return uint4(0u, 0u, 0u, a | ((mflags & FXF_FBA) != 0u ? 0x80u : 0u));
+}
+
+// fx_sprite_texel over WORK2's texels from fx_glow_mask (after TEXA, as
+// fx_texel_at): the above-1x kernel (FXF_ABOVE1X), the GS bilinear
+// (FXF_LINEAR) or the nearest texel, each tap addressed by fx_texel's
+// rules; the kernels' integer arithmetic as fx_sprite_texel's, the taps
+// in one loop
+uint4 fx_glow_texel(int su, int sv, uint flags)
+{
+    const bool a1x = (flags & FXF_ABOVE1X) != 0u, lin = (flags & FXF_LINEAR) != 0u;
+    const uint steps = uint(g_scale.w);
+    const GsAxis ax = gs_resample_axis(su, a1x ? int(steps >> 12) : 32, lin);
+    const GsAxis ay = gs_resample_axis(sv, a1x ? int(steps & 4095u) : 32, lin);
+    const uint dx = a1x ? gs_resample_div(ax) : 1u, dy = a1x ? gs_resample_div(ay) : 1u;
+    const int uu = lin ? su - 8 : su, vv = lin ? sv - 8 : sv;
+    const int x0 = fx_axis_x(uu >> 4, flags), x1 = fx_axis_x((uu >> 4) + 1, flags);
+    const int y0 = fx_axis_y(vv >> 4, flags), y1 = fx_axis_y((vv >> 4) + 1, flags);
+    const int nx = a1x ? min(ax.count, GS_RS_TAPS_MAX) : (lin ? 2 : 1);
+    const int ny = a1x ? min(ay.count, GS_RS_TAPS_MAX) : (lin ? 2 : 1);
+    uint4 sum = uint4(0u, 0u, 0u, 0u);
+    uint4 a = sum, b = sum, c = sum, d = sum;
+    [loop] for (int j = 0; j < ny; j++) {
+        uint4 row = uint4(0u, 0u, 0u, 0u);
+        const int ty = a1x ? fx_axis_y(ay.first + j, flags) : (j != 0 ? y1 : y0);
+        [loop] for (int i = 0; i < nx; i++) {
+            const int tx = a1x ? fx_axis_x(ax.first + i, flags) : (i != 0 ? x1 : x0);
+            const uint4 v =
+                gs_texa_expand(fx_glow_mask(int2(tx, ty)), g_mode.y & 0xFFu, g_mode.y >> 8);
+            if (a1x) {
+                row += v * gs_resample_weight(ax, i);
+            } else {
+                const int k = j * 2 + i;
+                a = k == 0 ? v : a;
+                b = k == 1 ? v : b;
+                c = k == 2 ? v : c;
+                d = k == 3 ? v : d;
+            }
+        }
+        if (a1x) {
+            sum += ((row * 16u + dx / 2u) / dx) * gs_resample_weight(ay, j);
+        }
+    }
+    if (a1x) {
+        return (sum + 8u * dy) / (16u * dy);
+    }
+    return lin ? gs_bilerp(a, b, c, d, uint(uu & 15), uint(vv & 15)) : a;
+}
+#endif
+
 // fx_sprite_ps's first lines as functions, for the aura's two passes
 // below (fx_sprite_ps keeps them inline, so its code is as it was): the
 // same operations on the same operands.
@@ -475,7 +692,7 @@ float4 fx_sprite_out(uint4 col, int2 px, uint flags)
 {
     // alpha test
     bool keepDestAlpha = false;
-    const bool ate = ((g_mode.z >> 8) & 1u) != 0u;
+    const bool ate = ((FX_ATEST_WORD >> 8) & 1u) != 0u;
     if (ate && !gs_alpha_pass(g_mode.z & 0xFFu, g_mode.w, col.a)) {
         const uint afail = (g_mode.z >> 16) & 3u;
         if (afail == AFAIL_KEEP || afail == AFAIL_ZB_ONLY) {
@@ -514,7 +731,7 @@ float4 fx_sprite_out(uint4 col, int2 px, uint flags)
 
 float4 fx_sprite_ps(float4 pos : SV_Position) : SV_Target0
 {
-    const uint flags = g_mode.x;
+    const uint flags = FX_FLAGS; // g_mode.x (fx_paste_ps: its constant bits, above)
     const int2 px = int2(pos.xy);
     // the pixel's GS window coordinate, 12.4: px * 16 at scale 1.  On a
     // scaled target the texel's GS pixel (its s x s block) for the coverage,
@@ -557,6 +774,8 @@ float4 fx_sprite_ps(float4 pos : SV_Position) : SV_Target0
 #ifdef ICO_FX_FRAME
         if ((flags & (FXF_ALPHA_ONLY | FXF_ABOVE1X)) == FXF_ALPHA_ONLY) {
             col = uint4(0u, 0u, 0u, fx_alpha_only(su, sv, col.a, flags));
+        } else if ((flags & FXF_GLOW_MASK) != 0u) {
+            col = fx_tfx(fx_glow_texel(su, sv, flags), col, flags); // the glow's mask folded
         } else
 #endif
         {
@@ -775,6 +994,208 @@ float4 fx_blur2_ps(float4 pos : SV_Position) : SV_Target0
     const uint4 d = fx2_pass1(max(fx2_addr(i0 + int2(1, 1), flags, w1), lo), o, flags);
     uint4 res = fx2_tfx(gs_bilerp(a, b, c, d, fu, fv), g_col, flags);
     res.a = res.a | ((flags & FXF_FBA) != 0u ? 0x80u : 0u);
+    return float4(res) * (1.0 / 255.0);
+}
+
+// fx_blur4_ps: two blur pairs (A, then B: four passes) drawn as one pass into
+// WORK0 (rd_replay_tiler.c, the lamps' RD_LAMPS_FOLD4). For a pixel of pair
+// B's pass 2 it computes what fx_blur2_ps computes for pair B, where each of
+// pass 1B's four WORK0 taps is not loaded but computed: pair A's pass 2 at
+// that WORK0 texel, from pair A's pass 1 at its four WORK1 taps, from WORK0
+// as it was before pair A (t1, the snapshot). Every texel is the same
+// integers fx_blur2_ps's functions give, in the passes' order; the windows
+// only choose which texels to evaluate, each once: G1, pass 1A's texels
+// over the WORK1 range pass 2A's taps reach (at most FX4_W1 a side), and
+// G2, pass 2A's texels over the WORK0 range pass 1B's taps reach (at most
+// FX4_W2 a side), both proved by the CPU over every pixel the pass covers
+// (rd_lamps.c rd__lamps_fold4_axis; the pair refused otherwise). A WORK0
+// texel pass 2A does not cover holds the snapshot's texel, as without the
+// fold. The replay folds two pairs only where each pair folds as
+// fx_blur2_ps's (rd_replay_tiler.c) and the pairs differ in no more than
+// pass 1A's x0, x1 and y1 and pass 2A's u0, u1 and v1 (the chain's shrink):
+// pass 1A's y0, UVs and colour are pass 1B's, pass 2A's rect, v0 and colour
+// pass 2B's (so its reciprocals, g_aux1.xy).
+// DrawCB: fx_blur2_ps's for pair B, and pair A's six values and its first
+// drawn WORK1 column in g_blend (no blend in a fold):
+//   x  x0 | x1 << 16 (pass 1A's rect, 12.4)
+//   y  y1 | u0 << 16 (pass 1A's rect, pass 2A's UVs, 12.4)
+//   z  u1 | v1 << 16 (pass 2A's UVs, 12.4)
+//   w  pass 1A's first drawn WORK1 column (its glow edge strip's, as g_mode.w)
+#define FX4_W1 6
+#define FX4_W2 4
+
+uint fx4_pack(uint4 c)
+{
+    return c.r | (c.g << 8) | (c.b << 16) | (c.a << 24);
+}
+
+uint4 fx4_unpack(uint p)
+{
+    return uint4(p & 255u, (p >> 8) & 255u, (p >> 16) & 255u, p >> 24);
+}
+
+// a pass's U (or V) at the 12.4 window coordinate X: t0 + (X - a0) (t1 -
+// t0) / (a1 - a0) truncated, the exact divide (pass 1, as fx2_pass1) or the
+// reciprocal form (pass 2, as fx_blur2_ps with g_aux1's reciprocal)
+int fx4_u1(int X, int a0, int a1, int t0, int t1)
+{
+    return t0 + gs_div_trunc((X - a0) * (t1 - t0), a1 - a0);
+}
+
+int fx4_u2(int X, int a0, int a1, int t0, int t1, float rd)
+{
+    return t0 + gs_div_trunc_rcp((X - a0) * (t1 - t0), a1 - a0, rd);
+}
+
+// pass 1's colour (g_scale.zw: R + 256 G, B + 256 A)
+uint4 fx4_col1()
+{
+    const uint rg = uint(g_scale.z), ba = uint(g_scale.w);
+    return uint4(rg & 255u, rg >> 8, ba & 255u, ba >> 8);
+}
+
+// a pass's texel from its four taps (gs_bilerp, the texture function, FBA)
+uint4 fx4_texel(uint4 a, uint4 b, uint4 c, uint4 d, uint fu, uint fv, uint4 col, uint flags)
+{
+    uint4 res = fx2_tfx(gs_bilerp(a, b, c, d, fu, fv), col, flags);
+    res.a = res.a | ((flags & FXF_FBA) != 0u ? 0x80u : 0u);
+    return res;
+}
+
+uint4 fx4_texa(uint4 t)
+{
+    return gs_texa_expand(t, g_mode.y & 0xFFu, g_mode.y >> 8);
+}
+
+float4 fx_blur4_ps(float4 pos : SV_Position) : SV_Target0
+{
+    const uint flags = g_mode.x;
+    // pass 2B's pixel as fx_blur2_ps has it
+    const float2 ts = float2(g_z.y > 0.0 ? g_z.y : 1.0, g_z.z > 0.0 ? g_z.z : 1.0);
+    const float2 fp = pos.xy + float2(g_vpo.z, 0.0);
+    float2 fb = fp - 0.5, fc = fp;
+    [branch] if (ts.x != 1.0 || ts.y != 1.0) {
+        fb = fb / ts;
+        fc = fc / ts;
+    }
+    const int2 gb = int2(floor(fb)) * 16;
+    const int2 gp = int2(floor((fc - 0.5) * 16.0 + 0.5));
+    const int ox = int(round(g_origin.x * 16.0)), oy = int(round(g_origin.y * 16.0));
+    const int X = ox + gp.x;
+    const int Y = oy + gp.y;
+    // pass 2's rect (both pairs'), its reciprocals
+    const int x0 = int(g_param.x), y0 = int(g_param.y), x1 = int(g_param.z), y1 = int(g_param.w);
+    if (ox + gb.x < x0 || ox + gb.x >= x1 || oy + gb.y < y0 || oy + gb.y >= y1) {
+        discard;
+    }
+    const float rx = asfloat(g_aux1.x), ry = asfloat(g_aux1.y);
+    const int u = fx4_u2(X, x0, x1, int(g_uvRect.x), int(g_uvRect.z), rx);
+    const int v = fx4_u2(Y, y0, y1, int(g_uvRect.y), int(g_uvRect.w), ry);
+    const int2 i0 = int2(u - 8, v - 8) >> 4;
+    const uint fu = uint((u - 8) & 15), fv = uint((v - 8) & 15);
+    const int2 o = int2(ox, oy), w1 = int2(g_tex.zw), w0 = int2(g_scale.xy);
+    const int2 loB = int2(int(g_mode.w), 0), loA = int2(int(g_blend.w), 0);
+    // pass 2B's WORK1 taps (as fx_blur2_ps), each pass 1B's texel
+    const int2 jA = max(fx2_addr(i0, flags, w1), loB);
+    const int2 jB = max(fx2_addr(i0 + int2(1, 1), flags, w1), loB);
+    // pass 1B (g_aux0) and pass 1A (g_blend.xy, the rest pass 1B's)
+    const int bx0 = int(g_aux0.x & 0xFFFFu), by0 = int(g_aux0.x >> 16);
+    const int bx1 = int(g_aux0.y & 0xFFFFu), by1 = int(g_aux0.y >> 16);
+    const int pu0 = int(g_aux0.z & 0xFFFFu), pv0 = int(g_aux0.z >> 16);
+    const int pu1 = int(g_aux0.w & 0xFFFFu), pv1 = int(g_aux0.w >> 16);
+    const int ax0 = int(g_blend.x & 0xFFFFu), ax1 = int(g_blend.x >> 16);
+    const int ay1 = int(g_blend.y & 0xFFFFu);
+    // pass 2A's UVs (g_blend.yz, v0 pass 2B's)
+    const int au0 = int(g_blend.y >> 16), au1 = int(g_blend.z & 0xFFFFu);
+    const int av0 = int(g_uvRect.y), av1 = int(g_blend.z >> 16);
+    const uint4 col1 = fx4_col1();
+    // pass 1B's WORK0 tap rows and columns at pass 2B's two WORK1 columns
+    // and rows
+    const int kx0 = (fx4_u1(o.x + 16 * jA.x, bx0, bx1, pu0, pu1) - 8) >> 4;
+    const int kx1 = (fx4_u1(o.x + 16 * jB.x, bx0, bx1, pu0, pu1) - 8) >> 4;
+    const int ky0 = (fx4_u1(o.y + 16 * jA.y, by0, by1, pv0, pv1) - 8) >> 4;
+    const int ky1 = (fx4_u1(o.y + 16 * jB.y, by0, by1, pv0, pv1) - 8) >> 4;
+    // G2's range: the WORK0 texels those taps read, clamped as pass 1B's
+    // fetch clamps (CLAMP: monotonic)
+    const int2 g2lo = fx2_addr(int2(min(kx0, kx1), min(ky0, ky1)), flags, w0);
+    const int2 g2hi = fx2_addr(int2(max(kx0, kx1) + 1, max(ky0, ky1) + 1), flags, w0);
+    // G1's range: pass 2A's WORK1 taps at G2's texels
+    int2 g1lo = int2(2147483647, 2147483647), g1hi = int2(-2147483647, -2147483647);
+    int mx[FX4_W2], my[FX4_W2];
+    uint fx[FX4_W2], fy[FX4_W2];
+    [unroll] for (int i = 0; i < FX4_W2; i++) {
+        const int tx = min(g2lo.x + i, g2hi.x), ty = min(g2lo.y + i, g2hi.y);
+        const int ua = fx4_u2(o.x + 16 * tx, x0, x1, au0, au1, rx);
+        const int va = fx4_u2(o.y + 16 * ty, y0, y1, av0, av1, ry);
+        mx[i] = (ua - 8) >> 4;
+        my[i] = (va - 8) >> 4;
+        fx[i] = uint((ua - 8) & 15);
+        fy[i] = uint((va - 8) & 15);
+        const int2 m0 = max(fx2_addr(int2(mx[i], my[i]), flags, w1), loA);
+        const int2 m1 = max(fx2_addr(int2(mx[i], my[i]) + int2(1, 1), flags, w1), loA);
+        g1lo = min(g1lo, m0);
+        g1hi = max(g1hi, m1);
+    }
+    // G1: pass 1A's texels from the snapshot, packed
+    uint g1[FX4_W1][FX4_W1];
+    [loop] for (int gy = 0; gy < FX4_W1; gy++) {
+        [loop] for (int gx = 0; gx < FX4_W1; gx++) {
+            g1[gy][gx] = 0u;
+            const int cx = g1lo.x + gx, cy = g1lo.y + gy;
+            [branch] if (cx <= g1hi.x && cy <= g1hi.y) {
+                const int ua = fx4_u1(o.x + 16 * cx, ax0, ax1, pu0, pu1);
+                const int va = fx4_u1(o.y + 16 * cy, by0, ay1, pv0, pv1);
+                const int2 c0 = int2(ua - 8, va - 8) >> 4;
+                const uint gu = uint((ua - 8) & 15), gv = uint((va - 8) & 15);
+                g1[gy][gx] = fx4_pack(fx4_texel(fx2_texel(c0, flags),
+                                                fx2_texel(c0 + int2(1, 0), flags),
+                                                fx2_texel(c0 + int2(0, 1), flags),
+                                                fx2_texel(c0 + int2(1, 1), flags), gu, gv, col1,
+                                                flags));
+            }
+        }
+    }
+    // G2: pass 2A's texels (WORK0 as pair A leaves it, before TEXA), the
+    // snapshot's where pass 2A does not draw
+    uint g2[FX4_W2][FX4_W2];
+    [loop] for (int hy = 0; hy < FX4_W2; hy++) {
+        [loop] for (int hx = 0; hx < FX4_W2; hx++) {
+            g2[hy][hx] = 0u;
+            const int tx = g2lo.x + hx, ty = g2lo.y + hy;
+            [branch] if (tx <= g2hi.x && ty <= g2hi.y) {
+                const int gx = ox + 16 * tx, gy = oy + 16 * ty;
+                [branch] if (gx < x0 || gx >= x1 || gy < y0 || gy >= y1) {
+                    g2[hy][hx] = fx4_pack(fx_load(g_texture, int2(tx, ty)));
+                } else {
+                    const int2 m0 = max(fx2_addr(int2(mx[hx], my[hy]), flags, w1), loA) - g1lo;
+                    const int2 m1 =
+                        max(fx2_addr(int2(mx[hx], my[hy]) + int2(1, 1), flags, w1), loA) - g1lo;
+                    g2[hy][hx] = fx4_pack(fx4_texel(fx4_texa(fx4_unpack(g1[m0.y][m0.x])),
+                                                    fx4_texa(fx4_unpack(g1[m0.y][m1.x])),
+                                                    fx4_texa(fx4_unpack(g1[m1.y][m0.x])),
+                                                    fx4_texa(fx4_unpack(g1[m1.y][m1.x])), fx[hx],
+                                                    fy[hy], g_col, flags));
+                }
+            }
+        }
+    }
+    // pass 1B's texels at pass 2B's four taps, from G2 (TEXA as its fetch
+    // applies it), then TEXA as pass 2B's fetch applies it
+    uint4 p1[4];
+    [loop] for (int k = 0; k < 4; k++) {
+        const int2 j = int2((k & 1) != 0 ? jB.x : jA.x, (k & 2) != 0 ? jB.y : jA.y);
+        const int ub = fx4_u1(o.x + 16 * j.x, bx0, bx1, pu0, pu1);
+        const int vb = fx4_u1(o.y + 16 * j.y, by0, by1, pv0, pv1);
+        const int2 c0 = int2(ub - 8, vb - 8) >> 4;
+        const uint gu = uint((ub - 8) & 15), gv = uint((vb - 8) & 15);
+        const int2 n0 = fx2_addr(c0, flags, w0) - g2lo;
+        const int2 n1 = fx2_addr(c0 + int2(1, 1), flags, w0) - g2lo;
+        p1[k] = fx4_texa(fx4_texel(fx4_texa(fx4_unpack(g2[n0.y][n0.x])),
+                                   fx4_texa(fx4_unpack(g2[n0.y][n1.x])),
+                                   fx4_texa(fx4_unpack(g2[n1.y][n0.x])),
+                                   fx4_texa(fx4_unpack(g2[n1.y][n1.x])), gu, gv, col1, flags));
+    }
+    const uint4 res = fx4_texel(p1[0], p1[1], p1[2], p1[3], fu, fv, g_col, flags);
     return float4(res) * (1.0 / 255.0);
 }
 #endif

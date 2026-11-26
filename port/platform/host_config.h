@@ -142,24 +142,29 @@ const char *ico_config_ini_key(const char *toml_path);
 /* The [dev] A/B switches (blend=, uber=, fog_path=, date_path=, store_plan=,
    blur_fold=, uint_view=, alpha_plan=, fx_plan=, fx_dst_local=,
    vu_planes=, shadow_one=, shadow_bspline=, dynamic_state=, gpu_checkpoints=,
-   gpu_robust=, pass_split=, attachment_read=, storage_pass_merge=,
-   vu_prepass=, crack_fill=, joystick_directinput=, pipeline_set=, bind_cache=,
-   aura_box=, pass_area=, clear_carry=, clear_skip=, last_store=):
+   gpu_robust=, pass_split=, attachment_read=, legacy_passes=, subpass_read=,
+   storage_pass_merge=, vu_prepass=, crack_fill=, joystick_directinput=, pipeline_set=, bind_cache=,
+   aura_box=, pass_area=, clear_carry=, clear_skip=, last_store=, glow_fold=,
+   jitter_test=):
    ico_dev_env_name
    gives the environment variable a key is exported as (ICO_RD_BLEND,
    ICO_RD_UBER, ICO_RD_FOG_PATH, ICO_RD_DATE_PATH, ICO_RD_STORE_PLAN, ICO_RD_BLUR_FOLD,
    ICO_RD_UINT_VIEW, ICO_RD_ALPHA_PLAN, ICO_RD_FX_PLAN, ICO_RD_FX_DST_LOCAL,
    ICO_RD_VU_PLANES, ICO_RD_SHADOW_ONE, ICO_RD_SHADOW_BSPLINE, ICO_VK_FAKE_NO_DYNAMIC, ICO_GPU_CHECKPOINTS, ICO_GPU_ROBUST, ICO_RD_PASS_SPLIT,
-   ICO_VK_ATTACHMENT_READ, ICO_RD_PASS_MERGE, ICO_RD_VU_PREPASS, ICO_RD_CRACK_FILL,
+   ICO_VK_ATTACHMENT_READ, ICO_VK_LEGACY_PASSES, ICO_VK_SUBPASS_READ, ICO_RD_PASS_MERGE, ICO_RD_VU_PREPASS, ICO_RD_CRACK_FILL,
    ICO_JOYSTICK_DIRECTINPUT, ICO_PIPELINE_SET, ICO_DISC_READER,
    ICO_DISC_READ_AHEAD_KB, ICO_RHI_BIND_CACHE, ICO_RD_AURA_BOX, ICO_RD_PASS_AREA,
-   ICO_RD_CLEAR_CARRY, ICO_RD_CLEAR_SKIP, ICO_RD_LAST_STORE), NULL for any other key (the
+   ICO_RD_CLEAR_CARRY, ICO_RD_CLEAR_SKIP, ICO_RD_LAST_STORE, ICO_RD_GLOW_FOLD,
+   ICO_RD_JITTER_TEST), NULL for any
+   other key (the
    retired vu_plain_only= and vu_extended= among them: read, logged by
    ico_ini_export as "ico_pc: [dev] <key> = <value> is not used (every
    device compiles one set of 3D shaders); ignored", not exported);
    ico_dev_env_value the
    value exported for an ini value, NULL when nothing is set: aura_box
-   pass_area, clear_carry, clear_skip and last_store "auto" as it is (else the default branch's 1 / 0); blend
+   pass_area, clear_carry, clear_skip and last_store "auto" as it is (else the default branch's 1 / 0);
+   vu_prepass true/on -> "on" (the key written in the file: over the device
+   table's no-pre-pass row too, issue 123), false/off -> "0"; blend
    "fixed", "attachment", "storage" or "exact" as they are (the
    fixed-function blend is the default: nothing set; exact opts into the
    device's best exact mode); uber "auto" as it is (else the default
@@ -168,11 +173,17 @@ const char *ico_config_ini_key(const char *toml_path);
    it is; dynamic_state true/on -> "0", false/off -> "1", depth -> "blend"
    (the variable names what is static); pipeline_set full, careful or lazy as they are;
    present_fallback auto, off or fifo as they are (0/false/no -> "off");
+   frame_rate_pin auto or off as they are (0/false/no -> "off");
    disc_reader thread or sync as they are (0/false/off/no -> "sync");
-   disc_read_ahead_kb 0 to 4096 as it is (false/off/no -> "0"); pass_split a
-   count; gpu_*, attachment_read, storage_pass_merge, store_plan,
+   disc_read_ahead_kb 0 to 4096 as it is (false/off/no -> "0"); vu_record
+   auto, targets, stores or compute as they are; vu_prepass_min a count as it is
+   (false/off/no -> "0"); jitter_test
+   "x,y" (each -0.5..0.5) as it is; pass_split a
+   count; velocity_sign 1 or -1 as it is; gpu_*, attachment_read, legacy_passes,
+   subpass_read, storage_pass_merge, store_plan,
    blur_fold, uint_view, alpha_plan, fx_plan, fx_dst_local, vu_planes,
-   shadow_one, shadow_bspline, vu_prepass, vu_prepass_batch, still_represent, glow_redraw,
+   shadow_one, shadow_bspline, vu_prepass_batch, velocity_test, upscale_test, upscale_debug_view,
+   upscale_debug_checks, still_represent, glow_redraw, glow_fold,
    crack_fill, joystick_directinput and bind_cache (every other key: the default branch) 1/true/on/yes ->
    "1", 0/false/off/no -> "0". ico_ini_export sets them. */
 const char *ico_dev_env_name(const char *key);
@@ -186,7 +197,9 @@ const char *ico_dev_env_value(const char *key, const char *value);
    only ever replaces nothing or "fixed". vu_prepass gets "0" when retry
    names a step that draws without the VU vertex pre-pass (the crash
    order's noprepass and the steps after it, every loss step:
-   startup_retry_value_no_prepass). gpu_robust gets "1" when retry names the
+   startup_retry_value_no_prepass). vu_record gets "targets" when retry
+   names the crash order's targets step or the loss order's losstargets
+   (startup_retry_value_targets). gpu_robust gets "1" when retry names the
    loss order's robust step (startup_retry_value_robust). */
 const char *ico_dev_env_export_value(const char *key, const char *value, const char *retry);
 /* Whether the clock should be fixed (ICO_FIXED_CLOCK): fixed_clock= when

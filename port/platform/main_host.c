@@ -127,12 +127,14 @@
 #include "ico_version.h" /* ICO_VERSION_LABEL, generated (CMakeLists.txt; "" in a development build) */
 #include "input_record.h"
 #include "pad_script.h"
-#include "sim_keys.h"    /* the recording's config keys */
-#include "state.h"       /* save states: the poll, the [dev] keys */
-#include "state_rules.h" /* port/game: ico_state_parse_at, ico_state_can_save_here */
+#include "sim_keys.h"                 /* the recording's config keys */
+#include "state.h"                    /* save states: the poll, the [dev] keys */
+#include "../save/state_checkpoint.h" /* ico_ckpt_box */
+#include "state_rules.h"              /* port/game: ico_state_parse_at, ico_state_can_save_here */
 #include "tables.h"
 #include "trace_host.h"
 #include "options.h"       /* the recording's effective stick_fix */
+#include "difficulty.h"    /* an older recording's difficulty rows; Permadeath's state lock */
 #include "mc_host.h"       /* ico_mc_host_second_card_changed */
 #include "video_options.h" /* the recording's frame: ico_video_frame */
 #ifdef ICO_PS5
@@ -159,6 +161,9 @@ extern int systemStatus[]; /* common/src/main.c: [0] the video mode word */
 #include "window_switch.h" /* ico_window_switch_end_text */
 #include "popup.h"         /* port/ui: the save states' results */
 #include "strings.h"
+#ifdef _WIN32
+#include "app_icon_exe.h" /* the exe's own icon, stamped by a helper after the run */
+#endif
 
 #endif
 /* Android's window build: the window opens before the game
@@ -541,10 +546,16 @@ static void record_check(const char *path)
     int diffs = 0;
     IcoFrame frame_now;
     char fixmsg[96];
+    /* an earlier version's recording lists the difficulty rows among its
+       config keys (sim_keys.h ICO_SIM_KEYS_RETIRED): "key=value\n" each */
+    char retired[1024];
+    size_t retired_n = 0;
+    int retired_keys = 0;
 
     if (f == NULL) {
         return;
     }
+    retired[0] = '\0';
     ico_video_frame(&frame_now, ScreenHeight);
     while (fgets(line, sizeof(line), f) != NULL && line[0] == '#') {
         char key[128], value[256], fixbuf[8];
@@ -559,7 +570,19 @@ static void record_check(const char *path)
             recording = 1;
             continue;
         }
-        if (sscanf(line, "# config %127s = %255[^\n]", key, value) == 2) {
+        if (sscanf(line, "# config %127s = %255[^\n]", key, value) == 2 &&
+            ico_sim_key_retired(key, strlen(key))) {
+            /* each journey's own now, not config.toml's: compared below */
+            retired_keys++;
+            if (strcmp(value, "(unset)") != 0 && retired_n + 1 < sizeof(retired)) {
+                const int w = snprintf(retired + retired_n, sizeof(retired) - retired_n, "%s=%s\n",
+                                       key, value);
+
+                retired_n = w < 0                                     ? retired_n
+                            : retired_n + (size_t)w < sizeof(retired) ? retired_n + (size_t)w
+                                                                      : sizeof(retired) - 1;
+            }
+        } else if (sscanf(line, "# config %127s = %255[^\n]", key, value) == 2) {
             now = ico_config_get_string(key, "(unset)");
         } else if (sscanf(line, "# effective %127s = %255[^\n]", key, value) == 2 &&
                    strcmp(key, "fixed_clock") == 0) {
@@ -583,6 +606,24 @@ static void record_check(const char *path)
         }
     }
     fclose(f);
+    if (recording && retired_keys > 0) {
+        /* the rows the recording ran with, against the Normal a run starts
+           at (its New Game screen may choose another, as it did then) */
+        IcoDifficulty d;
+
+        fprintf(stderr,
+                "ico_pc: pad script lists %d difficulty rows among its config keys (each "
+                "journey's own now), read as a state's keys:\n",
+                retired_keys);
+        ico_difficulty_from_keys(retired, &d);
+        if (ico_difficulty_classify(&d) != ICO_DIFF_NORMAL) {
+            fprintf(stderr,
+                    "ico_pc: pad script recorded with the difficulty rows above; this run's "
+                    "journey takes the New Game screen's choice (Normal unless the script picks "
+                    "another)\n");
+            diffs++;
+        }
+    }
     if (recording && diffs == 0) {
         fprintf(stderr, "ico_pc: pad script is a recording made with this build and settings\n");
     }
@@ -1910,6 +1951,14 @@ static int open_window(void)
                        more);
 #endif
     }
+#ifdef _WIN32
+    /* the exe's icon (app_icon_exe.h): its stamp now; the helper that
+       stamps it is started after the window has closed (atexit runs the
+       last registered first), once this run's capture has written its
+       files, while the summary's lines still go to the log */
+    ico_app_icon_exe_start();
+    at_shutdown(ico_app_icon_exe_at_exit);
+#endif
     at_shutdown(ico_window_close);
     return 0;
 }
@@ -2043,19 +2092,20 @@ static int state_refusal_str(IcoStateResult r)
         return UI_STR_STATES_REFUSED_BUILD;
     case ICO_STATE_OTHER_DISC:
         return UI_STR_STATES_REFUSED_DISC;
-    case ICO_STATE_OTHER_SETTINGS:
-        return UI_STR_STATES_REFUSED_SETTINGS;
     case ICO_STATE_BAD_FILE:
     case ICO_STATE_SELF_CHECK:
         return UI_STR_STATES_REFUSED_CHECK;
     case ICO_STATE_IO:
         return UI_STR_STATES_SAVE_FAILED;
+    case ICO_STATE_PERMADEATH:
+        return UI_STR_DIFF_STATES_LOCKED;
     case ICO_STATE_STAGE_SWITCH:
     case ICO_STATE_CARD_BUSY:
     case ICO_STATE_DISC_BUSY:
     case ICO_STATE_MOVIE:
     case ICO_STATE_PHOTO:
     case ICO_STATE_BUSY:
+    case ICO_STATE_OTHER_SETTINGS: /* never returned (state.h) */
         return UI_STR_STATES_REFUSED_BUSY;
     }
     return UI_STR_STATES_REFUSED_BUSY;
@@ -2070,8 +2120,10 @@ static void states_list(UiStateSlotInfo out[UI_STATES_SLOTS])
     for (i = 0; i < UI_STATES_SLOTS && i < ICO_STATE_SLOTS; i++) {
         out[i].present = in[i].present;
         out[i].loadable = in[i].loadable;
-        out[i].refusal_str =
-            in[i].present && !in[i].loadable ? state_refusal_str(in[i].why_not) : 0;
+        /* a slot that loads from its checkpoint says so on the page's line */
+        out[i].refusal_str = in[i].present && in[i].checkpoint  ? UI_STR_STATES_CKPT_ROW
+                             : in[i].present && !in[i].loadable ? state_refusal_str(in[i].why_not)
+                                                                : 0;
         out[i].play_frames = in[i].play_frames;
         out[i].stage_no = in[i].stage_no;
         out[i].saved_at = in[i].saved_at;
@@ -2079,10 +2131,28 @@ static void states_list(UiStateSlotInfo out[UI_STATES_SLOTS])
     }
 }
 
+/* where the request being answered came from, for the box's log line: the
+   page (on the pause menu or the title's Continue screen), else a key (F5,
+   F9) or a [dev] key */
+static const char *s_states_from = "a key";
+
 static int states_request(int action, int slot, int *refusal_str)
 {
+    s_states_from =
+        ico_state_can_save_here() ? "the page on the pause menu" : "the page on the title";
     if (!ico_state_available()) {
         *refusal_str = UI_STR_STATES_OFF;
+        return -1;
+    }
+    if (action != UI_STATES_ACT_DELETE && ico_difficulty_states_locked()) {
+        /* a Permadeath journey: the poll would refuse it the same
+           (ico_state_conditions); said at once, nothing requested, in the
+           save's or the load's words */
+        fprintf(stderr, "state: refused %s slot %d: %s (the page)\n",
+                action == UI_STATES_ACT_SAVE ? "save" : "load", slot,
+                ico_state_result_text(ICO_STATE_PERMADEATH));
+        *refusal_str = action == UI_STATES_ACT_SAVE ? UI_STR_DIFF_STATES_SAVE_LOCKED
+                                                    : UI_STR_DIFF_STATES_LOCKED;
         return -1;
     }
     if (action == UI_STATES_ACT_SAVE && !ico_state_can_save_here()) {
@@ -2120,6 +2190,9 @@ static int states_other_version(char *body, size_t n)
     case ICO_STATE_BLOCK_PINNED:
         snprintf(body, n, ui_str(UI_STR_STATES_XB_PINNED), f.saved_version);
         return 1;
+    case ICO_STATE_BLOCK_NO_CHECKPOINT:
+        snprintf(body, n, ui_str(UI_STR_STATES_CKPT_NONE), f.saved_version);
+        return 1;
     case ICO_STATE_BLOCK_NONE:
         break;
     }
@@ -2130,19 +2203,56 @@ static void states_done(int action, int slot, IcoStateResult r, const char *deta
 {
     static const int ok_str[3] = {UI_STR_STATES_SAVED, UI_STR_STATES_LOADED, UI_STR_STATES_DELETED};
     char body[UI_POPUP_TEXT];
+    char version[48];
+
+    IcoStateRefusal f;
+    int via;
 
     (void)user;
-    if (r == ICO_STATE_OK) {
+    (void)detail; /* the log's (state_host.c done); no box names a detail */
+    ico_state_last_refusal(&f);
+    via = action == UI_STATES_ACT_LOAD && ico_state_last_load_checkpoint(version, sizeof version);
+    /* one box per request, chosen without the game (state_checkpoint.h
+       ico_ckpt_box): a load that continued from its checkpoint shows the
+       notice alone */
+    switch (ico_ckpt_box(action == UI_STATES_ACT_LOAD, r, via, f.blocker)) {
+    case ICO_CKPT_BOX_NOTICE:
+        snprintf(body, sizeof body, ui_str(UI_STR_STATES_CKPT_LOADED), version);
+        break;
+    case ICO_CKPT_BOX_DONE:
         snprintf(body, sizeof body, ui_str((UiStrId)ok_str[action]), slot);
-    } else if (r == ICO_STATE_OTHER_SETTINGS) {
-        /* the key that differs, as the log has it */
-        snprintf(body, sizeof body, ui_str(UI_STR_STATES_REFUSED_SETTINGS), detail);
-    } else if (r == ICO_STATE_OTHER_BUILD && action == 1 &&
-               states_other_version(body, sizeof body)) {
+        break;
+    case ICO_CKPT_BOX_VERSION:
         /* another version's state: which one, and what in this one blocks it */
-    } else {
+        if (states_other_version(body, sizeof body)) {
+            break;
+        }
         snprintf(body, sizeof body, "%s", ui_str((UiStrId)state_refusal_str(r)));
+        break;
+    case ICO_CKPT_BOX_REFUSAL:
+        if (r == ICO_STATE_NOT_PAUSED && action == UI_STATES_ACT_LOAD) {
+            /* a checkpoint load asked for in play (F9): the pause first */
+            snprintf(body, sizeof body, "%s", ui_str(UI_STR_STATES_PAUSE_FIRST_LOAD));
+        } else if (r == ICO_STATE_PERMADEATH && action == UI_STATES_ACT_SAVE) {
+            /* a save the poll refused on a Permadeath journey: the save's words */
+            snprintf(body, sizeof body, "%s", ui_str(UI_STR_DIFF_STATES_SAVE_LOCKED));
+        } else {
+            snprintf(body, sizeof body, "%s", ui_str((UiStrId)state_refusal_str(r)));
+        }
+        break;
     }
+    {
+        static const char *const box_names[] = {"done", "the checkpoint notice",
+                                                "another version's refusal", "the refusal"};
+        const IcoCkptBox b = ico_ckpt_box(action == UI_STATES_ACT_LOAD, r, via, f.blocker);
+
+        fprintf(stderr, "state: box for slot %d (%s): %s, from %s\n", slot,
+                action == UI_STATES_ACT_SAVE   ? "save"
+                : action == UI_STATES_ACT_LOAD ? "load"
+                                               : "delete",
+                box_names[b], s_states_from);
+    }
+    s_states_from = "a key";
     (void)ui_popup_push(ui_str(UI_STR_STATES), body);
 }
 #endif
@@ -2511,6 +2621,10 @@ static int host_main(int argc, char **argv)
     /* crash handlers and the unbuffered diagnostics writer, first thing;
        no log file when none was opened */
     ico_diag_init(log_file());
+    /* the first direct line (diag_host.h ico_diag_step): a start that hangs
+       before the host loop flushes stderr still names where it is */
+    ico_diag_step("ico_pc: start: the log is open; next the settings, the game data and the "
+                  "window");
     /* what starting the program again needs, ready before any crash */
     ico_diag_prepare_relaunch(argc, argv);
 #ifdef __ANDROID__
@@ -2746,6 +2860,7 @@ static int host_main(int argc, char **argv)
 #endif
 #ifndef ICO_HEADLESS
 #ifndef ICO_ANDROID_UI
+    ico_diag_step("ico_pc: start: the game data is ready; opening the window and the renderer");
     (void)open_window(); /* exits on failure (the 1 is Android's) */
 #endif
     open_texture_pack(exe_dir);

@@ -42,16 +42,54 @@ void ico_config_reset(const char *toml_path, const char *ini_path)
    they always keep their texels. [dev] hand_probe names a log of the
    characters' hand-holding numbers, which the port does not write.
    [video] effect_glow_size named the glow's size above 1x; the glow is
-   drawn at the PS2's size at every resolution. */
-static const char *const retired_keys[] = {"game.classic_menu_text", "game.port_font",
-                                           "dev.hand_probe", "video.effect_glow_size"};
+   drawn at the PS2's size at every resolution.  [video] effect_water_sharp
+   was v0.11.6's Water reflections row; since v0.11.7 the reflections in
+   water and the queen barrier's picture always take the scene's scale
+   (port/render/rd_core.c rd__target_scale_of).  The fifteen gameplay keys
+   from [gameplay] yorda_safe to [variants] peaceful_shadows are rows of each
+   save's difficulty record since v0.11.3 (port/game/difficulty.h, chosen on
+   the New Game screen); their getters still read them, once, for the
+   carry-over of a save that has no record yet, and no file is rewritten. */
+static const char *const retired_keys[] = {
+    "game.classic_menu_text",     "game.port_font",           "dev.hand_probe",
+    "video.effect_glow_size",     "video.effect_water_sharp", "gameplay.yorda_safe",
+    "gameplay.pit_time",          "gameplay.shadow_speed",    "gameplay.yorda_trips",
+    "gameplay.shadows_together",  "variants.shade_toughness", "variants.one_hit",
+    "variants.never_dodge",       "variants.aggression",      "variants.no_hints",
+    "variants.barrier_hits",      "variants.auto_guard",      "variants.attack_turn",
+    "variants.shadows_wait_down", "variants.peaceful_shadows"};
 
+/* the first of retired_keys that is one of the fifteen gameplay keys */
+#define RETIRED_GAMEPLAY_FIRST 5
+_Static_assert(sizeof(retired_keys) / sizeof(retired_keys[0]) == RETIRED_GAMEPLAY_FIRST + 15,
+               "five keys nothing reads, then the fifteen gameplay keys");
+
+/* one line for the keys nothing reads; one line naming the fifteen gameplay
+   keys the file holds, which are read still (once, for a save's carry-over) */
 static void log_retired(void)
 {
+    char kept[512];
+    size_t at = 0;
+
+    kept[0] = '\0';
     for (size_t i = 0; i < sizeof(retired_keys) / sizeof(retired_keys[0]); i++) {
-        if (ico_toml_has(toml, retired_keys[i])) {
-            fprintf(stderr, "config: %s is not used; ignored\n", retired_keys[i]);
+        if (!ico_toml_has(toml, retired_keys[i])) {
+            continue;
         }
+        if (i < RETIRED_GAMEPLAY_FIRST) {
+            fprintf(stderr, "config: %s is not used; ignored\n", retired_keys[i]);
+        } else if (at < sizeof(kept)) {
+            const int n = snprintf(kept + at, sizeof(kept) - at, "%s%s", at == 0 ? "" : ", ",
+                                   retired_keys[i]);
+
+            at += n > 0 ? (size_t)n : 0;
+        }
+    }
+    if (kept[0] != '\0') {
+        fprintf(stderr,
+                "config: %s: kept for saves made before v0.11.3: they give such a save its "
+                "difficulty the first time it is loaded\n",
+                kept);
     }
 }
 
@@ -301,6 +339,15 @@ static const char first_run_text[] =
     "# Draw the picture at the resolution you chose and shrink it to the game's\n"
     "# own size (the Downsampling row): \"off\" or \"box\".\n"
     "downsample = \"off\"\n"
+    "# Sharpen the picture when it is drawn smaller than the screen (the\n"
+    "# Upscaling row): \"off\", \"fsr1\" (AMD FidelityFX Super Resolution 1.0) or\n"
+    "# \"fsr3\" (FSR 3.1, on a graphics card that can run it).\n"
+    "# upscaling_sharpness is the Sharpness row, 0 to 100. upscaling_quality is\n"
+    "# the Upscaling quality row for FSR 3.1: \"native\", \"quality\", \"balanced\"\n"
+    "# or \"performance\".\n"
+    "upscaling = \"off\"\n"
+    "upscaling_sharpness = 80\n"
+    "upscaling_quality = \"native\"\n"
     "# A PCSX2 texture pack: copy its SCES-50760 folder (SCPS-11003 for the\n"
     "# Japanese disc) into a folder named\n"
     "# textures beside the program or in your user folder. false shows the\n"
@@ -354,10 +401,12 @@ static const char first_run_text[] =
     "effect_fog = true\n"
     "# Cinematic bars: the black bars above and below the picture in cutscenes.\n"
     "effect_cinematic_bars = true\n"
-    "# Water reflections: true draws the reflections in water (and the picture\n"
-    "# through the queen's barrier) at the game's resolution; false keeps the\n"
-    "# PS2's softer ones.\n"
-    "effect_water_sharp = false\n"
+    "# The colour of the picture, the Picture page's Gamma, Picture brightness,\n"
+    "# Contrast and Saturation rows. 50 is the game's own picture; 1 to 100.\n"
+    "gamma = 50\n"
+    "brightness = 50\n"
+    "contrast = 50\n"
+    "saturation = 50\n"
     "# Depth for an effects program such as ReShade: true lets its depth\n"
     "# effects see how far away things are (not with the CRT filter).\n"
     "effects_depth = true\n"
@@ -380,6 +429,13 @@ static const char first_run_text[] =
     "effects = 1.0\n"
     "output = \"auto\"\n"
     "device = \"\"\n"
+    "\n"
+    "[input]\n"
+    "# The button pictures in the menus, the game's prompts, photo mode and on\n"
+    "# the touch screen (Options > Controls > Button pictures): \"auto\" shows the\n"
+    "# buttons of the controller you used last; or \"playstation\", \"xbox\",\n"
+    "# \"nintendo\" (Switch, Wii U) or \"wii_classic\" (Wii Classic Controller).\n"
+    "button_pictures = \"auto\"\n"
     "\n"
     "[game]\n"
     "# \"auto\" follows the system; or en, fr, de, it, es.\n"
@@ -406,35 +462,45 @@ static const char first_run_text[] =
     "# to let go on the North American disc and the 2001 previews); \"hold\": keep\n"
     "# R1 held; \"toggle\": press R1 once to take it, again to let go.\n"
     "hold_type = \"disc\"\n"
-    "# How long a shadow takes to pull Yorda into a pit: \"half\", \"original\",\n"
-    "# \"longer\", \"double\" or \"triple\".\n"
-    "pit_time = \"original\"\n"
-    "# How fast shadows walk, run and fly: \"slower\", \"original\", \"faster\" or\n"
-    "# \"fastest\". It does not change how often they attack.\n"
-    "shadow_speed = \"original\"\n"
-    "# true: running hand in hand for three seconds makes Yorda fall, as she\n"
-    "# does after the main gate opens. From the next room.\n"
-    "yorda_trips = false\n"
+    "# \"hold\": the camera zooms in while you keep R2 held; \"toggle\": press R2\n"
+    "# once to zoom in, again to zoom out.\n"
+    "zoom_type = \"hold\"\n"
+    "# \"on\": click the right stick (R3) to bring the camera straight back to Ico\n"
+    "# after turning it with the right stick; \"off\": the game as it shipped.\n"
+    "camera_reset = \"off\"\n"
+    "# \"hold\": Ico and the camera look at Yorda while you hold L3 (the left stick\n"
+    "# click), without calling her; \"toggle\": press L3 once to look, again to\n"
+    "# stop; \"off\": the game as it shipped.\n"
+    "yorda_look = \"off\"\n"
     "# true: a second memory card with ten more saves (the folder memcard2\n"
     "# beside memcard); the game's save and load screens offer both cards.\n"
     "second_memory_card = false\n"
     "\n"
     "[variants]\n"
-    "# Options > Extras > Game variants. Every line is the game as the disc\n"
-    "# ships it. shade_toughness: \"original\", \"american\" (every Shadow as tough\n"
-    "# as on the North American disc, and no tougher on later playthroughs) or\n"
-    "# \"no_plus\" (no tougher on later playthroughs). aggression: \"own\" (each\n"
-    "# Shadow's own), \"bold_patient\", \"bold_quick\", \"wary_patient\" or\n"
-    "# \"wary_quick\". barrier_hits (5 or 7, the Queen's barrier) is not written:\n"
-    "# without it the disc's own number is used. one_hit, never_dodge and\n"
-    "# ignore_cutscene_cameras switch achievements off while they are on.\n"
-    "shade_toughness = \"original\"\n"
-    "one_hit = false\n"
-    "never_dodge = false\n"
-    "aggression = \"own\"\n"
-    "no_hints = false\n"
+    "# Gameplay > Cutscenes, the weapon rows and Gameplay > Chains. Every line is\n"
+    "# the game as the disc ships it. The Shadow, Combat and Rules rows are\n"
+    "# chosen for each journey on the New Game screen, not here.\n"
+    "# ignore_cutscene_cameras switches achievements off while it is on.\n"
+    "# sword_colour: \"original\" or \"red\" (the light sword's trail is red;\n"
+    "# the European, Japanese, Korean and Asian discs). weapon: \"original\" or\n"
+    "# \"net\" (every stick is the makers' unused insect net: it is never swung,\n"
+    "# cannot be lit and cannot hurt a Shadow). Both from the next room.\n"
+    "# chain_swing_speed and chain_swing_damping (Gameplay > Chains): 1 to 10, the\n"
+    "# game's own debug values, 4 and 4. A higher speed is a shorter swing; a\n"
+    "# higher damping lets a swing die down quicker while Ico is not swinging.\n"
     "no_cutscene_look = false\n"
     "ignore_cutscene_cameras = false\n"
+    "sword_colour = \"original\"\n"
+    "weapon = \"original\"\n"
+    "chain_swing_speed = 4\n"
+    "chain_swing_damping = 4\n"
+    "\n"
+    "[developer]\n"
+    "# true: with Developer mode on (Options > Developer), L2 hands Ico to the\n"
+    "# game's own debug move: the left stick moves him over the ground, the\n"
+    "# right stick up and down, L3 puts him on the floor under him and L2 let go\n"
+    "# after that gives him back. Achievements are off while it is on.\n"
+    "free_movement = false\n"
     "\n"
     "[photo]\n"
     "# How fast photo mode's camera moves, turns, rolls and zooms (1.0 is normal).\n"

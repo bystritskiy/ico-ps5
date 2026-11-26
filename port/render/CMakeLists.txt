@@ -71,6 +71,7 @@ target_include_directories(ico_bisect_plan PUBLIC "${CMAKE_CURRENT_SOURCE_DIR}")
 target_compile_options(ico_bisect_plan PRIVATE ${ICO_SEMANTIC_OPTIONS} ${ICO_PORT_WARNINGS})
 # the platform's state file of the second level (diag_host.c)
 target_link_libraries(ico_platform PUBLIC ico_bisect_plan)
+include(rd_passring.cmake) # ico_passring
 
 # rd_bisect_plan_test: the planner against oracles (a draw that faults with
 # every draw before it found within 12 steps, random verdicts end within 16)
@@ -108,6 +109,13 @@ target_compile_options(ico_pipe_finish PRIVATE ${ICO_SEMANTIC_OPTIONS} ${ICO_POR
 add_executable(rd_pipe_finish_test test/rd_pipe_finish_test.c)
 target_compile_options(rd_pipe_finish_test PRIVATE ${ICO_SEMANTIC_OPTIONS} ${ICO_PORT_WARNINGS})
 target_link_libraries(rd_pipe_finish_test PRIVATE ico_pipe_finish)
+
+# rd_perf_gap_test: the GPU's time between two timed replays (rd_perf_gap.h,
+# issue 123): kept across untimed replays and counted, refused past 60 s, the
+# first replay and a restart without one, a gap under 0 kept (CPU only)
+add_executable(rd_perf_gap_test test/rd_perf_gap_test.c rd_perf_gap.c)
+target_include_directories(rd_perf_gap_test PRIVATE "${CMAKE_CURRENT_SOURCE_DIR}")
+target_compile_options(rd_perf_gap_test PRIVATE ${ICO_SEMANTIC_OPTIONS} ${ICO_PORT_WARNINGS})
 
 # rd_submit_queue_test: the submit thread's queue (rd_submit_queue.h): jobs
 # in order, at most RD_SUBMIT_DEPTH queued and running, the running job
@@ -152,6 +160,7 @@ if(ICO_RUN_TESTS)
     add_test(NAME rd_cache_name COMMAND rd_cache_name_test)
     add_test(NAME rd_pipe_finish COMMAND rd_pipe_finish_test)
     add_test(NAME rd_submit_queue COMMAND rd_submit_queue_test)
+    add_test(NAME rd_perf_gap COMMAND rd_perf_gap_test)
     add_test(NAME gltf COMMAND gltf_test "${CMAKE_CURRENT_BINARY_DIR}")
     add_test(NAME texpack_disc COMMAND texpack_disc_test "${ICO_DISC_IMAGE}" "${ICO_TEXPACK_DIR}"
              WORKING_DIRECTORY "${CMAKE_CURRENT_BINARY_DIR}")
@@ -175,10 +184,15 @@ add_library(ico_render STATIC
     rd_blur.c # staticBlur.c's sprites
     rd_blur_border.c # the post sprites' replay: the reduction's open border, its outer columns
     rd_blur_smooth.c # Motion blur: Smooth, the motion blur's accumulator
+    rd_blur_texels.c # the texels a staticBlur sprite reads (rd_replay.c blurSnapArea's helpers)
     rd_const_read.c # a sprite whose source holds only its clear drawn in that colour
     rd_core.c
     rd_crack_fill.c # above 1x: the pixels no draw covered between drawn ones, before the fog
     rd_crt.c # the CRT filter at present time
+    rd_fsr1.c # Upscaling: FSR 1.0 (AMD FidelityFX Super Resolution 1.0) at present time
+    rd_jitter.c # the scene's sub-pixel jitter after the GS's snap (a temporal upscaler's; [dev] jitter_test)
+    rd_upscale_temporal.c # Upscaling: FSR 3.1's rows (support query, quality ratios, exclusions)
+    rd_tone.c # the colour adjustment's settings (Options > Picture: gamma, brightness, contrast, saturation)
     rd_date_selftest.c # DATE through the stencil bit: the start-up check on the device
     rd_dst_read.c # the exact GS blend: the destination read
     rd_dump.c
@@ -187,37 +201,58 @@ add_library(ico_render STATIC
     rd_frame.c
     rd_fx_plan.c # the frame-size post sprites' plan: fixed-function forms, local read
     rd_interp.c # interpolation between the retained frames
+    rd_present_clock.c # the present clock the timer path takes alpha from; Motion blur: Smooth's time between presents
     rd_interp_mesh.c # the interpolation's reads of a mesh's stream, kept while it is unchanged
     rd_reshow.c # a between-tick picture the same as the last rendered one's is shown again
+    rd_glow_fold.c # the glow's mask computed in its reduction: WORK2 neither drawn nor read ([dev] glow_fold)
     rd_glow_hold.c # the between-tick presents paste the glow of the tick's first present
     rd_join.c
     rd_local_probe.c # the desktop's local reads: the start-up cost probe
     rd_mesh.c
     rd_occlusion.c # the replay's GPU draw issue and the hidden-draw measurement around it
     rd_msaa.c # the MSAA epoch's resolve pass (the covered-majority rule) and its close line
-    rd_passring.c # the last passes recorded, for the device-loss report
     rd_profile.c # the device profile: what this device class gets 
+    rd_device_rows.c # the renderer's pure reads of the device table (rd_device_rows.h)
     rd_content_hide.c # the content table: stage geometry made for the 4:3 picture
     rd_content_extend.c # the content table's sheets: overlays continued to the frame's edges
     rd_content_chain.c # Natural chains: the chains a stage animation lets down
     modelpack.c # model packs, the index, the glTF conversion, the dump
     rd_perf.c # per-replay performance records
+    rd_perf_gap.c # the GPU's time between timed replays (pure)
     rd_pixel_plan.c # the VU pixel side at a fractional scale
     rd_pipeline.c
     rd_png.c
     rd_post.c
     rd_present.c
+    rd_prerotate.c # the present turned into a swapchain made in the surface's own turn
     rd_present_info.c # rd_last_present_info's record: what the last present drew
+    rd_icon_hold.c # the title's last picture held on screen while the icon capture's frames are drawn
     rd_replay.c
+    rd_readback.c # the readbacks (moved from rd_replay.c for the file cap)
     rd_replay_tiler.c # the replay's tiler passes: DATE through the stencil bit, the blur fold
     rd_replay_vu.c # the replay's VU draws
     rd_vuprepass_selftest.c # the VU vertex pre-pass's start-up check on the device
+    rd_vu_record.c # the VU record's write: render targets and copies, or vertex stores
+    rd_vu_rec_sink.c # the store passes' throwaway target
+    rd_vu_skin_check.c # the skinned draws' bone-block check in the game (issue 163)
+    rd_vu_skin_capture.c # its capture on failure: the sidecar, the frame dump asked (issue 123)
+    rd_vu_bones.c # issue 123's ladder: the bones through the ring, the evidence for the window
+    rd_vu_skin_judge.c # its judgement against vu1_ref (pure)
+    rd_vu_skin_trace.c # its stamps, the search of a wrong copy (pure)
+    rd_vu_skin_selftest.c # its start-up probe on the device
     rd_window.c
     rd_upload.c # the upload ring and the uploads before a replay's first pass
+    rd_velocity.c # the scene's motion vectors: each VU draw's previous transform, VELOCITY
+    rd_upscale.c # the upscale point: the render/display scale split, the marker's replay, UPSCALED
+    rd_upscale_capture.c # F12's upscaler pictures
+    rd_layer.c # the display layer: lists 11-12 into the display-scale composite after the upscale, keep frames held
+    rd_upscale_hook.c # the temporal upscaler's dispatch: FSR 3.1, or the test's bilinear stand-in
+    rd_fsr3.c # FSR 3.1 (the FidelityFX SDK, port/rhi/ffx): support, context, dispatch
     rd_screen_planes.c # the screen-prim triangles' planes
     rd_shadow.c
     rd_shadow_one.c # the shadow count resolved in one draw from the stencil view
     rd_shadow_selftest.c # the shadow count's one draw: the start-up check on the device
+    rd_shader_plan.c # the start-up shader set's size, for the progress screens' count
     rd_store_plan.c # the depth stores and loads a replay drops: no later pass touches the depth
     rd_submit.c # a replay's end: the present's pass, the submit and the present
     rd_submit_queue.c # the submit thread's queue (pure)
@@ -228,6 +263,9 @@ add_library(ico_render STATIC
     rd_tex_decode.c # the texture decode pool: rdtex_store's decodes off the game thread
     rd_water.c # block targets, aliases, camera scopes
     rd_video.c # the FMV picture (port/fmv/rd_video.h)
+    rd_vis.c # the scene draws' visibility test: a draw off its target replayed as a NOP ([dev] cull)
+    rd_vis_hiz.c # its occlusion test: a draw of list 0 behind the depth written before it
+    rd_vis_hiz_fast.c # what its collect keeps: the collect cache, the pending scans
     texpack_dds.c # texture packs: the DDS and PNG loaders (texpack.h)
     texpack_image.c
     texpack_png.c
@@ -237,7 +275,17 @@ target_include_directories(ico_render
     PRIVATE "${CMAKE_SOURCE_DIR}/port/shaders")
 target_compile_options(ico_render PRIVATE ${ICO_SEMANTIC_OPTIONS} ${ICO_PORT_WARNINGS})
 target_link_libraries(ico_render PUBLIC ico_rhi_vk ico_shaders ico_vu1_ref ico_texpack_name
-                      ico_cache_name ico_pipe_finish)
+                      ico_cache_name ico_pipe_finish ico_passring)
+# rd_fsr3.c: FSR 3.1 (issue 99) from the FidelityFX SDK built in port/rhi/ffx
+# (option ICO_FFX, docs/BUILDING.md).  ico_ffx_upscaler is EXCLUDE_FROM_ALL;
+# linked here, it is built for every program and test that links the
+# renderer (the program among them), and only then.  It calls volk's
+# pointers, which ico_rhi_vulkan's volk.c defines (listed after it).
+# Without it rd_fsr3.c builds its "not in this build" answers alone.
+if(ICO_FFX AND TARGET ico_ffx_upscaler)
+    target_compile_definitions(ico_render PRIVATE ICO_FFX=1)
+    target_link_libraries(ico_render PRIVATE ico_ffx_upscaler ico_rhi_vulkan)
+endif()
 # rd_tex_decode.c: the decode pool's threads (port/platform/ico_thread.h)
 target_link_libraries(ico_render PUBLIC ico_thread)
 # texpack.c, modelpack.c: the selected disc's pack folder (port/core)
@@ -277,7 +325,8 @@ endif()
 
 # rd_replay_tool: a dump to a PNG, headless.
 # (and a F12 .zip: platform/dump_zip.c reads it)
-add_executable(rd_replay_tool tools/rd_replay_tool.c ../platform/dump_zip.c)
+add_executable(rd_replay_tool tools/rd_replay_tool.c tools/rd_replay_region.c
+                              ../platform/dump_zip.c)
 target_compile_options(rd_replay_tool PRIVATE ${ICO_SEMANTIC_OPTIONS} ${ICO_PORT_WARNINGS})
 target_include_directories(rd_replay_tool PRIVATE ../platform)
 target_link_libraries(rd_replay_tool PRIVATE ico_render ico_vu1_ref ico_miniz ico_host_fs)
@@ -424,13 +473,15 @@ target_link_libraries(rd_present_test PRIVATE ico_render ico_math ico_options)
 # GsBase.c as rd_present_test has it, with the display options; synthetic
 # cameras a tick apart (moves to 300 units, turns to 30 degrees) at three
 # widths: a box an in-between picture shows is never culled.  Records
-# only: no device.
+# only: no device.  --sweep DISC: every stage of the disc at the cameras of
+# the corpus dumps (tools/sweep_cameras.txt), against tools/sweep_baseline.txt.
 add_executable(gsb_cull_test test/gsb_cull_test.c
     "${CMAKE_SOURCE_DIR}/ico2/seki/src/GsBase.c"
     "${CMAKE_SOURCE_DIR}/ico2/seki/src/GifPacket.c"
     "${CMAKE_SOURCE_DIR}/ico2/seki/src/DisplayList.c"
     "${CMAKE_SOURCE_DIR}/ico2/seki/src/DmaPacket.c"
-    "${CMAKE_SOURCE_DIR}/port/platform/host_config.c")
+    "${CMAKE_SOURCE_DIR}/port/platform/host_config.c"
+    ../platform/dump_zip.c)
 target_include_directories(gsb_cull_test PRIVATE ${_ico_seki_incs}
                            "${CMAKE_SOURCE_DIR}/port/shaders" "${CMAKE_SOURCE_DIR}/port/shaders/test"
                            "${CMAKE_SOURCE_DIR}/port/math" "${CMAKE_SOURCE_DIR}/port/rhi"
@@ -438,7 +489,9 @@ target_include_directories(gsb_cull_test PRIVATE ${_ico_seki_incs}
 target_compile_definitions(gsb_cull_test PRIVATE ICO_HOST=1 ICO_RD=1)
 target_compile_options(gsb_cull_test PRIVATE ${ICO_SEMANTIC_OPTIONS} ${ICO_GAME_LAYOUT_OPTIONS}
                        ${ICO_GAME_WARNINGS})
-target_link_libraries(gsb_cull_test PRIVATE ico_render ico_math ico_options ico_port_data)
+# (--sweep: the region rule through ico_vu1_ref, a dump's camera from a F12 zip)
+target_link_libraries(gsb_cull_test PRIVATE ico_render ico_vu1_ref ico_math ico_options
+                      ico_port_data ico_miniz ico_host_fs)
 
 # rd_crt_test: the CRT filter (rd_crt.c, crt.hlsl): its [video]
 # options with their config (host_config.c), the modes and overrides, and on
@@ -457,6 +510,25 @@ target_compile_options(rd_filter_test PRIVATE ${ICO_SEMANTIC_OPTIONS} ${ICO_PORT
 target_include_directories(rd_filter_test PRIVATE "${CMAKE_SOURCE_DIR}/port/rhi")
 target_link_libraries(rd_filter_test PRIVATE ico_render)
 
+# rd_icon_pass_test: the title's icon pass (rd.h rd_set_icon_pass): the
+# menus' prims and text left out, the head's clear the pass's colour, and a
+# frame recorded after it byte-identical to one before; recorded without a
+# device.
+add_executable(rd_icon_pass_test test/rd_icon_pass_test.c)
+target_compile_options(rd_icon_pass_test PRIVATE ${ICO_SEMANTIC_OPTIONS} ${ICO_PORT_WARNINGS})
+target_include_directories(rd_icon_pass_test PRIVATE "${CMAKE_SOURCE_DIR}/port/rhi")
+target_link_libraries(rd_icon_pass_test PRIVATE ico_render)
+
+# rd_icon_hold_test: the title's last picture held on screen while the icon
+# capture's frames are drawn (rd.h rd_icon_hold): the rule, and on a device
+# the pass frames' presents showing the title's last picture while the
+# state picture reads the pass's own, black with no picture held, live
+# again past the pass.
+add_executable(rd_icon_hold_test test/rd_icon_hold_test.c)
+target_compile_options(rd_icon_hold_test PRIVATE ${ICO_SEMANTIC_OPTIONS} ${ICO_PORT_WARNINGS})
+target_include_directories(rd_icon_hold_test PRIVATE "${CMAKE_SOURCE_DIR}/port/rhi")
+target_link_libraries(rd_icon_hold_test PRIVATE ico_render)
+
 # rd_still_test: the still re-present (rd_reshow.c): the frame hash that is the
 # proof a between-tick picture repeats the tick's last rendered one, and the
 # decision on synthetic frames recorded without a device.
@@ -474,6 +546,17 @@ target_compile_options(rd_interp_test PRIVATE ${ICO_SEMANTIC_OPTIONS} ${ICO_PORT
 target_include_directories(rd_interp_test PRIVATE "${CMAKE_SOURCE_DIR}/port/rhi")
 target_link_libraries(rd_interp_test PRIVATE ico_render)
 
+# rd_velocity_test: the scene's motion vectors (rd_velocity.c, the velocity
+# pass of rd_replay_vu.c): the source rule on synthetic pairs (a moved mesh's
+# VuPrevCB and its delta, no pair, a cut, off, two presents between ticks)
+# and on a device the moving mesh's pixels in VELOCITY, SCENE unchanged, the
+# dump rd_replay_tool_velocity replays
+add_executable(rd_velocity_test test/rd_velocity_test.c)
+target_compile_options(rd_velocity_test PRIVATE ${ICO_SEMANTIC_OPTIONS} ${ICO_PORT_WARNINGS})
+target_include_directories(rd_velocity_test PRIVATE "${CMAKE_SOURCE_DIR}/port/rhi")
+target_link_libraries(rd_velocity_test PRIVATE ico_render)
+ico_copy_sdl3_dll(rd_velocity_test)
+
 # rd_mirror_test: the mirror mode: the present is the exact
 # flip with it on (Original, Enhanced, interpolated), UI prims land on the
 # same output pixels (the replay's flip cancels the present's), SCENE's UI
@@ -482,6 +565,29 @@ add_executable(rd_mirror_test test/rd_mirror_test.c)
 target_compile_options(rd_mirror_test PRIVATE ${ICO_SEMANTIC_OPTIONS} ${ICO_PORT_WARNINGS})
 target_include_directories(rd_mirror_test PRIVATE "${CMAKE_SOURCE_DIR}/port/rhi")
 target_link_libraries(rd_mirror_test PRIVATE ico_render)
+
+# rd_jitter_test: the scene's sub-pixel jitter (rd_jitter.c): the Halton
+# (2, 3) table and the switch's parse on the CPU; on a device the scene's
+# sub-pixel edges moved by the jitter exactly (Original 1x, Enhanced 2x),
+# 0, 0 the same bytes, a whole-texel jitter moving SCENE exactly (the
+# screen planes evaluated at the jittered position) while WORK1, the
+# reduction and the present take none; 77 without a device.
+add_executable(rd_jitter_test test/rd_jitter_test.c)
+target_compile_options(rd_jitter_test PRIVATE ${ICO_SEMANTIC_OPTIONS} ${ICO_PORT_WARNINGS})
+target_include_directories(rd_jitter_test PRIVATE "${CMAKE_SOURCE_DIR}/port/rhi")
+target_link_libraries(rd_jitter_test PRIVATE ico_render)
+
+# rd_upscale_test: the upscale point (rd_upscale.c): the render scale from
+# the display scale on the CPU; on a device the marker before the
+# reduction, the marker a no-op with the upscaler off (DISPLAY and the
+# present byte for byte), the test's upscale at Enhanced 3x over 1.5
+# (UPSCALED is SCENE upscaled bilinearly, the reduction reads it, the fades
+# fold off), the edge guard under a jitter, the jitter per present, the
+# window resolution and Auto's cap; 77 without a device.
+add_executable(rd_upscale_test test/rd_upscale_test.c)
+target_compile_options(rd_upscale_test PRIVATE ${ICO_SEMANTIC_OPTIONS} ${ICO_PORT_WARNINGS})
+target_include_directories(rd_upscale_test PRIVATE "${CMAKE_SOURCE_DIR}/port/rhi")
+target_link_libraries(rd_upscale_test PRIVATE ico_render)
 
 # rd_msaa_test: the anti-aliasing's MSAA epoch: MSAA4 against no
 # anti-aliasing on a synthetic scene (identical away from edges, integer
@@ -503,6 +609,18 @@ target_compile_options(rd_display_change_test PRIVATE ${ICO_SEMANTIC_OPTIONS} ${
 target_include_directories(rd_display_change_test PRIVATE "${CMAKE_SOURCE_DIR}/port/rhi")
 target_link_libraries(rd_display_change_test PRIVATE ico_render)
 
+# rd_set_resume_test: the start-up set resumed after a low-memory stop (issue
+# 123; rd_pipeline.c rd_set_pipeline_resume, rd_pipeline_set_stop): a set
+# stopped after its first batch, then resumed there in half the batch with
+# the keys before it made after the rest (the progress the whole set), in a
+# batch of 8 with them left to the cache (the progress the rest), from past
+# the set's end (from its first), a batch under 4 made 4, and the whole set
+# with no stop.  77 without a device.
+add_executable(rd_set_resume_test test/rd_set_resume_test.c)
+target_compile_options(rd_set_resume_test PRIVATE ${ICO_SEMANTIC_OPTIONS} ${ICO_PORT_WARNINGS})
+target_include_directories(rd_set_resume_test PRIVATE "${CMAKE_SOURCE_DIR}/port/rhi")
+target_link_libraries(rd_set_resume_test PRIVATE ico_render)
+
 # rd_perf_test: a synthetic game-shaped frame replayed 200
 # times and recorded 200 times: no resource is created or destroyed and no
 # texture or static mesh uploaded again in steady state, and the CPU time of
@@ -520,8 +638,20 @@ target_link_libraries(rd_perf_test PRIVATE ico_render)
 # rule's truth table and the VS->PS prefix match, and the sprite planes' skip
 # (issue 161); the fades fold's step against the GS blend, its bar rows and
 # its plan on recorded frames (the fade, the letterbox, the brightness, and
-# the frames it leaves alone).
-foreach(_t rd_alpha_plan rd_fx_frame rd_vu_frac rd_fades_fold)
+# the frames it leaves alone).  rd_vis_test: the scene draws' visibility test
+# (rd_vis.c, rd_vis_hiz.c), CPU only: the bounds of synthetic streams, the
+# plane test under random matrices, the VU references (vu1_ref) as its
+# oracle in both rounding modes, the shadow frame on recorded frames, the
+# occlusion test's bounds, rasterisation and verdicts, and the discard-free
+# twins' box proof (rd__vis_gs_proof: fixed boxes in front, straddling,
+# behind, at GS Z 0, saturating, code 36's w range, empty, NaN and infinite;
+# random cameras: every proved box's points keep their GS position).  rd_vis_hiz_test: the
+# occlusion test's cheaper collect (rd_vis_hiz.c rd__vis_hiz_mesh_ex,
+# rd_vis_hiz_fast.c), CPU only: the batch screen box's bound, the fast vertex
+# pass against the full one on random meshes, random frames under the plain
+# and the fast collect (the same verdicts and counts, the check's none
+# wrong), the collect cache's hits and misses.
+foreach(_t rd_alpha_plan rd_fx_frame rd_vu_frac rd_fades_fold rd_vis rd_vis_hiz)
     add_executable(${_t}_test test/${_t}_test.c)
     target_compile_options(${_t}_test PRIVATE ${ICO_SEMANTIC_OPTIONS} ${ICO_PORT_WARNINGS})
     target_include_directories(${_t}_test PRIVATE "${CMAKE_SOURCE_DIR}/port/rhi"
@@ -699,6 +829,16 @@ target_link_libraries(rd_blend_selftest_test PRIVATE ico_render)
 # (rd_vuprepass_selftest.c) in either VU shader variant: the pre-pass left
 # on or off, the summary, the reachable set made after it, SCENE left to its
 # clear (the log line is matched by test/rd_vuprepass_selftest.cmake).
+# rd_vu_skin_check_test: the skinned draws' bone-block check (issue 163;
+# rd_vu_skin_check.c, rd_vu_skin_judge.c, rd_vu_skin_selftest.c): the
+# judgement alone, then on a device the start-up probe and a frame of one
+# skinned command checked clean and under the two sabotages (the log lines
+# are matched by test/rd_vu_skin_check.cmake).
+add_executable(rd_vu_skin_check_test test/rd_vu_skin_check_test.c)
+target_compile_options(rd_vu_skin_check_test PRIVATE ${ICO_SEMANTIC_OPTIONS} ${ICO_PORT_WARNINGS})
+target_include_directories(rd_vu_skin_check_test PRIVATE "${CMAKE_SOURCE_DIR}/port/rhi")
+target_link_libraries(rd_vu_skin_check_test PRIVATE ico_render)
+
 add_executable(rd_vuprepass_selftest_test test/rd_vuprepass_selftest_test.c)
 target_compile_options(rd_vuprepass_selftest_test PRIVATE ${ICO_SEMANTIC_OPTIONS}
                        ${ICO_PORT_WARNINGS})
@@ -801,6 +941,32 @@ target_compile_options(rd_raw_test PRIVATE ${ICO_SEMANTIC_OPTIONS} ${ICO_GAME_LA
                        ${ICO_GAME_WARNINGS})
 target_link_libraries(rd_raw_test PRIVATE ico_render ico_vu1_ref ico_math)
 
+# weapon_draw_test: the insect net of Gameplay > Combat's Stick row through
+# the game's weapon code: sugipon/src/weapon.c with lineManager.c,
+# matrixDrive.c and the 2D layer as the window build has them, the variants
+# (ico_options) linked, the rest of the game stubbed; recording only. Per
+# disc (its InitWeaponGeo, WeaponGeo and WeaponDL copies): the layout stick
+# made as the net with no torch, found and picked up by the boy, then held
+# and drawn as dispInsectNet's 17 grey lines in list 11 at his hand and no
+# model; at Original the stick with its torch and its model. CPU only.
+add_executable(weapon_draw_test test/weapon_draw_test.c
+    "${CMAKE_SOURCE_DIR}/ico2/sugipon/src/weapon.c"
+    "${CMAKE_SOURCE_DIR}/ico2/sugipon/src/lineManager.c"
+    "${CMAKE_SOURCE_DIR}/ico2/sugipon/src/matrixDrive.c"
+    "${CMAKE_SOURCE_DIR}/ico2/seki/src/Matrix.c"
+    "${CMAKE_SOURCE_DIR}/ico2/seki/src/GifPacket.c"
+    "${CMAKE_SOURCE_DIR}/ico2/seki/src/DisplayList.c"
+    "${CMAKE_SOURCE_DIR}/ico2/seki/src/DmaPacket.c"
+    "${CMAKE_SOURCE_DIR}/port/platform/host_config.c")
+target_include_directories(weapon_draw_test PRIVATE ${_ico_sugipon_incs}
+                           "${CMAKE_SOURCE_DIR}/port/shaders" "${CMAKE_SOURCE_DIR}/port/math"
+                           "${CMAKE_SOURCE_DIR}/port/rhi" "${CMAKE_SOURCE_DIR}/port/platform"
+                           "${CMAKE_SOURCE_DIR}/port/include")
+target_compile_definitions(weapon_draw_test PRIVATE ICO_HOST=1 ICO_RD=1)
+target_compile_options(weapon_draw_test PRIVATE ${ICO_SEMANTIC_OPTIONS} ${ICO_GAME_LAYOUT_OPTIONS}
+                       ${ICO_GAME_WARNINGS})
+target_link_libraries(weapon_draw_test PRIVATE ico_render ico_options ico_math)
+
 # rd_debug_test: common/src/debug.c on the host, with the 2D
 # layer as the window build has them and port/data/sifdev_host.c for host0:,
 # the rest of the game stubbed: the debug font's points (the VU1 routine
@@ -837,6 +1003,12 @@ add_executable(rd_mip_test test/rd_mip_test.c)
 target_compile_options(rd_mip_test PRIVATE ${ICO_SEMANTIC_OPTIONS} ${ICO_PORT_WARNINGS})
 target_link_libraries(rd_mip_test PRIVATE ico_render)
 
+# rd_png_mem_test: rd_write_png_mem (rd_png.c) read back through the texture
+# pack's PNG loader, and equal to the bytes rd_write_png puts in a file.
+add_executable(rd_png_mem_test test/rd_png_mem_test.c)
+target_compile_options(rd_png_mem_test PRIVATE ${ICO_SEMANTIC_OPTIONS} ${ICO_PORT_WARNINGS})
+target_link_libraries(rd_png_mem_test PRIVATE ico_render ico_miniz ico_host_fs)
+
 # texpack_load_test (texture packs): the DDS and PNG loaders on files built
 # in memory (every DDS layout and BC format, truncated files, a BC size
 # that is not a multiple of 4; PNG colour types, depths, filters, Adam7,
@@ -856,7 +1028,9 @@ add_executable(texpack_test test/texpack_test.c texpack.c)
 target_include_directories(texpack_test PRIVATE "${CMAKE_CURRENT_SOURCE_DIR}"
                            "${CMAKE_SOURCE_DIR}/port/rhi")
 target_compile_options(texpack_test PRIVATE ${ICO_SEMANTIC_OPTIONS} ${ICO_PORT_WARNINGS})
-target_link_libraries(texpack_test PRIVATE ico_host_fs ico_texpack_name ico_region)
+# ico_thread: the loader thread puts itself back on the process's cores
+# (cpu_place.h cpu_place_thread_free)
+target_link_libraries(texpack_test PRIVATE ico_host_fs ico_texpack_name ico_region ico_thread)
 if(TARGET SDL3::SDL3-shared)
     target_link_libraries(texpack_test PRIVATE SDL3::SDL3-shared)
     target_compile_definitions(texpack_test PRIVATE ICO_TEXPACK_THREAD=1)
@@ -883,25 +1057,36 @@ target_link_libraries(texpack_export_test PRIVATE ico_texpack_export)
 # stream bounds audit"): every stream index the VU vertex shaders can read for
 # every VU draw of the dumps, computed on the CPU and checked against the
 # draw's stream; a self-test (a stream one vertex short fails) always runs.
-# The dumps are machine-local (tools/native_frame_dumps.txt, the boot
-# corpus's title frame): 77 when none is there.
+# rd_stream_audit runs it on the fixtures of test/fixtures/lists/stream_audit.txt
+# (test/rd_stream_audit.cmake).
 add_executable(rd_stream_audit_test test/rd_stream_audit_test.c ../platform/dump_zip.c)
 target_compile_options(rd_stream_audit_test PRIVATE ${ICO_SEMANTIC_OPTIONS} ${ICO_PORT_WARNINGS})
 target_include_directories(rd_stream_audit_test PRIVATE ../platform
                            "${CMAKE_SOURCE_DIR}/port/shaders")
 target_link_libraries(rd_stream_audit_test PRIVATE ico_render ico_vu1_ref ico_miniz ico_host_fs)
 
+include(rd_perf_clock.cmake) # the slot clock (ico_render) and rd_perf_clock_test
+include(rd_msaa_shadow.cmake) # the shadow count in MSAA
+include(rd_present_scene.cmake)
+# the committed fixtures' arguments for the visibility test's family
+include(rd_fixture.cmake)
+set(_ico_vis_fx -DFIXTURE_TOOL=$<TARGET_FILE:rd_fixture_tool> "-DFIXTURES=${ICO_FIXTURE_DIR}"
+                "-DFIXTURE_HELPERS=${ICO_FIXTURE_HELPERS}")
+
 # Windows: SDL3.dll beside the programs
 ico_copy_sdl3_dll(texpack_test texpack_e2e_test texpack_export_test rd_replay_tool rd_state_test
                   rd_sheet_bake_test rd_pixel_test
                   rd_layout_test rd_tex_test rd_tex_pool_test rd_gsbase_test rd_mesh_test modelpack_test
                   rd_shadow_test rd_fog_test rd_fog_selftest_test rd_blend_selftest_test
-                  rd_vuprepass_selftest_test rd_blur_test rd_water_test rd_raw_test rd_debug_test
-                  rd_present_test rd_filter_test rd_interp_test rd_still_test rd_mirror_test rd_msaa_test rd_mip_test
-                  rd_perf_test rd_display_change_test rd_boot_present_test rd_crt_test
-                  texpack_load_test gsb_cull_test
+                  rd_vuprepass_selftest_test rd_vu_skin_check_test rd_blur_test rd_water_test
+                  rd_raw_test rd_debug_test
+                  rd_present_test rd_filter_test rd_icon_pass_test rd_icon_hold_test rd_interp_test rd_still_test rd_mirror_test rd_msaa_test rd_mip_test
+                  rd_jitter_test rd_upscale_test
+                  rd_perf_test rd_display_change_test rd_set_resume_test rd_boot_present_test rd_crt_test
+                  texpack_load_test rd_png_mem_test gsb_cull_test
                   rd_native_test rd_passring_test rd_stream_audit_test rd_alpha_plan_test
-                  rd_fx_frame_test rd_vu_frac_test rd_crack_test rd_local_probe_test)
+                  rd_fx_frame_test rd_vu_frac_test rd_crack_test rd_local_probe_test rd_vis_test
+                  rd_vis_hiz_test)
 
 if(ICO_RUN_TESTS)
     add_test(NAME rd_state COMMAND rd_state_test "${CMAKE_CURRENT_BINARY_DIR}")
@@ -915,11 +1100,13 @@ if(ICO_RUN_TESTS)
     set_tests_properties(rd_layout PROPERTIES SKIP_RETURN_CODE 77)
     add_test(NAME rd_mip COMMAND rd_mip_test)
     add_test(NAME rd_passring COMMAND rd_passring_test)
+    file(MAKE_DIRECTORY "${CMAKE_CURRENT_BINARY_DIR}/stream_audit")
     add_test(NAME rd_stream_audit
-             COMMAND rd_stream_audit_test --list "${CMAKE_SOURCE_DIR}/tools/native_frame_dumps.txt"
-                     "${CMAKE_SOURCE_DIR}/build-host/tmp/corpus/dumps/boot/rd-00200.rddump"
-             WORKING_DIRECTORY "${CMAKE_CURRENT_BINARY_DIR}")
-    set_tests_properties(rd_stream_audit PROPERTIES SKIP_RETURN_CODE 77 TIMEOUT 600)
+             COMMAND "${CMAKE_COMMAND}" -DTEST=$<TARGET_FILE:rd_stream_audit_test> ${_ico_vis_fx}
+                     "-DLIST=${ICO_FIXTURE_DIR}/lists/stream_audit.txt"
+                     "-DOUT=${CMAKE_CURRENT_BINARY_DIR}/stream_audit"
+                     -P "${CMAKE_CURRENT_SOURCE_DIR}/test/rd_stream_audit.cmake")
+    set_tests_properties(rd_stream_audit PROPERTIES TIMEOUT 600)
     add_test(NAME rd_tex COMMAND rd_tex_test)
     add_test(NAME texpack COMMAND texpack_test "${CMAKE_CURRENT_BINARY_DIR}")
     get_filename_component(_ico_texpack_textures "${ICO_TEXPACK_DIR}/../.." ABSOLUTE)
@@ -945,6 +1132,16 @@ if(ICO_RUN_TESTS)
     # 77 without the disc image
     add_test(NAME gsb_cull_stage COMMAND gsb_cull_test --stage "${ICO_DISC_IMAGE}")
     set_tests_properties(gsb_cull_stage PROPERTIES SKIP_RETURN_CODE 77)
+    # every stage of the disc at the cameras of the corpus dumps (issue 29's regression gate):
+    # the box cull, the blend span and the region rule's drops per stage and aspect against
+    # tools/sweep_baseline.txt; eight shards, each the stages numbered k mod 8; main only (77
+    # without the disc image).  A manual full run: gsb_cull_test --sweep DISC --sweep-step 1 --eye
+    # --out DIR (docs/port/TESTING_PROGRAMS.md)
+    ico_add_sharded_test(gsb_cull_sweep 8 PROGRAM gsb_cull_test
+                         ARGS --sweep "${ICO_DISC_IMAGE}"
+                              --cameras "${CMAKE_SOURCE_DIR}/tools/sweep_cameras.txt"
+                              --baseline "${CMAKE_SOURCE_DIR}/tools/sweep_baseline.txt"
+                         PROPERTIES SKIP_RETURN_CODE 77 TIMEOUT 1800)
     # 50 s of it is the disc's models, in four slices: four shards (port/test/ico_shard.h)
     ico_add_sharded_test(rd_mesh 4 PROGRAM rd_mesh_test ARGS "${ICO_DISC_IMAGE}"
                          PROPERTIES SKIP_RETURN_CODE 77)
@@ -990,6 +1187,97 @@ if(ICO_RUN_TESTS)
     set_tests_properties(rd_replay_tool_downsample PROPERTIES
                          PASS_REGULAR_EXPRESSION "present: downsample 1024x512 -> 512x256, window reduce off"
                          SKIP_RETURN_CODE 77 FIXTURES_REQUIRED rd_dump)
+    # Upscaling: FSR 1.0 (issue 99): the 1x picture (the dump's 512x256
+    # DISPLAY line-doubled to 512x512) EASU-upscaled and RCAS-sharpened to
+    # the 960x720 box, named by --stats (at 640x480 the box has fewer rows
+    # than the picture and FSR 1.0 does not run)
+    add_test(NAME rd_replay_tool_fsr1
+             COMMAND rd_replay_tool "${CMAKE_CURRENT_BINARY_DIR}/rd_pixel_frame.rddump"
+                     "${CMAKE_CURRENT_BINARY_DIR}/rd_replay_tool_fsr1.png" --present 960x720
+                     --fsr1 --stats)
+    set_tests_properties(rd_replay_tool_fsr1 PROPERTIES
+                         PASS_REGULAR_EXPRESSION "present: fsr1 512x512 -> 960x720"
+                         SKIP_RETURN_CODE 77 FIXTURES_REQUIRED rd_dump)
+    # Upscaling: FSR 3.1 (issue 99; rd_fsr3.c): the dump's frame at Enhanced
+    # in the 1280x960 box (the display scale the box's) at Quality (1.5),
+    # SCENE upscaled by the FidelityFX upscaler into UPSCALED at the upscale
+    # point, under the validation layer (the environment below): --stats
+    # names the presents it ran and the layer's errors.  A dump holds no
+    # history (each run starts FSR from empty), so this proves the dispatch
+    # runs, not FSR's picture.  77 only where FSR 3.1 cannot be expected (a
+    # build without the upscaler, not Vulkan, a device below Vulkan 1.2), with
+    # the reason; a build with it on a 1.2 device that refuses it fails
+    add_test(NAME rd_replay_tool_fsr3
+             COMMAND rd_replay_tool "${CMAKE_CURRENT_BINARY_DIR}/rd_pixel_frame.rddump"
+                     "${CMAKE_CURRENT_BINARY_DIR}/rd_replay_tool_fsr3.png" --enhanced
+                     --fsr3 quality --present 1280x960 --stats)
+    set_tests_properties(rd_replay_tool_fsr3 PROPERTIES
+                         PASS_REGULAR_EXPRESSION "upscale: fsr3 ran [1-9][0-9]* presents \\(context render [0-9]+x[0-9]+ -> display [0-9]+x[0-9]+, [^)]*, refused 0, failed 0, [^)]*\\), validation errors 0"
+                         SKIP_RETURN_CODE 77 FIXTURES_REQUIRED rd_dump)
+    # rd_replay_tool_fsr3's run with [dev] fsr3_fp16 = on (issue 203; full
+    # precision is the default): it dispatches and says "fp16 on (dev)"
+    add_test(NAME rd_replay_tool_fsr3_fp16
+             COMMAND rd_replay_tool "${CMAKE_CURRENT_BINARY_DIR}/rd_pixel_frame.rddump"
+                     "${CMAKE_CURRENT_BINARY_DIR}/rd_replay_tool_fsr3_fp16.png" --enhanced
+                     --fsr3 quality --present 1280x960 --stats)
+    set_tests_properties(rd_replay_tool_fsr3_fp16 PROPERTIES
+                         ENVIRONMENT "ICO_RD_FSR3_FP16=on"
+                         PASS_REGULAR_EXPRESSION "by FSR 3.1 at frame [0-9]+;[^\n]*fp16 on \\(dev\\)"
+                         SKIP_RETURN_CODE 77 FIXTURES_REQUIRED rd_dump)
+    # --fsr3-dump (issue 203; test/rd_replay_tool_fsr3_dump.cmake)
+    add_test(NAME rd_replay_tool_fsr3_dump
+             COMMAND "${CMAKE_COMMAND}" -DTOOL=$<TARGET_FILE:rd_replay_tool>
+                     "-DDUMP=${CMAKE_CURRENT_BINARY_DIR}/rd_pixel_frame.rddump"
+                     "-DOUT=${CMAKE_CURRENT_BINARY_DIR}/rd_replay_tool_fsr3_dump"
+                     -P "${CMAKE_CURRENT_SOURCE_DIR}/test/rd_replay_tool_fsr3_dump.cmake")
+    set_tests_properties(rd_replay_tool_fsr3_dump PROPERTIES SKIP_REGULAR_EXPRESSION "SKIP:"
+                                                             FIXTURES_REQUIRED rd_dump TIMEOUT 600)
+    # the scene's jitter (rd_jitter.h; test/rd_replay_tool_jitter.cmake): at
+    # Original 1x and Enhanced 2x, --jitter 0,0 draws every target and the
+    # present byte for byte as without it, --jitter 0.25,0.25 moves SCENE and
+    # the present, ICO_RD_JITTER_TEST ([dev] jitter_test) equals --jitter,
+    # --stats names it; a jitter outside -0.5..0.5 is refused
+    add_test(NAME rd_replay_tool_jitter
+             COMMAND "${CMAKE_COMMAND}" -DTOOL=$<TARGET_FILE:rd_replay_tool>
+                     "-DDUMP=${CMAKE_CURRENT_BINARY_DIR}/rd_pixel_frame.rddump"
+                     "-DOUT=${CMAKE_CURRENT_BINARY_DIR}/rd_replay_tool_jitter"
+                     -P "${CMAKE_CURRENT_SOURCE_DIR}/test/rd_replay_tool_jitter.cmake")
+    set_tests_properties(rd_replay_tool_jitter PROPERTIES SKIP_REGULAR_EXPRESSION "SKIP:"
+                                                          FIXTURES_REQUIRED rd_dump TIMEOUT 600)
+    # the upscale point (rd_upscale.h): the dump's 512x512 frame at Enhanced
+    # 3x with the test's upscaler at 1.5 (FSR's Quality): SCENE at 2x, the
+    # reduction's marker dispatched once, UPSCALED at 3x read by the
+    # reduction, the jitter's phase count 8 (the present takes term 0)
+    add_test(NAME rd_replay_tool_upscale_test
+             COMMAND rd_replay_tool "${CMAKE_CURRENT_BINARY_DIR}/rd_pixel_frame.rddump"
+                     "${CMAKE_CURRENT_BINARY_DIR}/rd_replay_tool_upscale_test.png" --present 960x720
+                     --enhanced --resolution 3x --upscale-test 1.5 --upscale-phases 8 --stats)
+    set_tests_properties(rd_replay_tool_upscale_test PROPERTIES
+                         PASS_REGULAR_EXPRESSION "upscale point: SCENE 1024x1024 -> UPSCALED 1536x1536 \\(render scale 2x2, display scale 3x3\\), markers [1-9][0-9]*, dispatched [1-9][0-9]*, refused 0, reductions remapped [1-9]"
+                         SKIP_RETURN_CODE 77 FIXTURES_REQUIRED rd_dump)
+    # the keep loop of a stage switch's fade under a temporal upscaler (the
+    # display layer, rd_layer.h; test/rd_replay_tool_keep.cmake): rd_pixel's
+    # keep frame replayed 20 times (--repeat 20) after rd_pixel's frame
+    # (--prev), at Enhanced in the 1280x960 box: one dispatch (the picture
+    # before), 20 keep frames held as 1:1 copies of the composite, none
+    # refused; under FSR 3.1 Quality (77 where FSR 3.1 cannot run, as
+    # rd_replay_tool_fsr3) and under the test's upscaler at 1.5 (every
+    # backend)
+    foreach(_keep fsr3 upscale)
+        set(_mode test)
+        if(_keep STREQUAL "fsr3")
+            set(_mode fsr3)
+        endif()
+        add_test(NAME rd_replay_tool_${_keep}_keep
+                 COMMAND "${CMAKE_COMMAND}" -DTOOL=$<TARGET_FILE:rd_replay_tool>
+                         "-DDUMP=${CMAKE_CURRENT_BINARY_DIR}/rd_pixel_keep.rddump"
+                         "-DPREV=${CMAKE_CURRENT_BINARY_DIR}/rd_pixel_frame.rddump"
+                         "-DOUT=${CMAKE_CURRENT_BINARY_DIR}/rd_replay_tool_${_keep}_keep.png"
+                         "-DMODE=${_mode}"
+                         -P "${CMAKE_CURRENT_SOURCE_DIR}/test/rd_replay_tool_keep.cmake")
+        set_tests_properties(rd_replay_tool_${_keep}_keep PROPERTIES SKIP_REGULAR_EXPRESSION "SKIP:"
+                             FIXTURES_REQUIRED rd_dump TIMEOUT 600)
+    endforeach()
     # the same dump listed without a device (--list --no-device)
     add_test(NAME rd_replay_tool_list
              COMMAND "${CMAKE_COMMAND}" -DTOOL=$<TARGET_FILE:rd_replay_tool>
@@ -1006,6 +1294,19 @@ if(ICO_RUN_TESTS)
                      -P "${CMAKE_CURRENT_SOURCE_DIR}/test/rd_replay_tool_pass_dump.cmake")
     set_tests_properties(rd_replay_tool_pass_dump PROPERTIES SKIP_REGULAR_EXPRESSION "SKIP:"
                                                              FIXTURES_REQUIRED rd_dump TIMEOUT 300)
+    # the motion vectors (rd_velocity.h; test/rd_replay_tool_velocity.cmake):
+    # --velocity --velocity-dump on rd_velocity's moving mesh writes a PNG
+    # with moving texels; every target and the present the same bytes with
+    # and without --velocity on that dump and on rd_pixel's (Off identity)
+    add_test(NAME rd_replay_tool_velocity
+             COMMAND "${CMAKE_COMMAND}" -DTOOL=$<TARGET_FILE:rd_replay_tool>
+                     "-DDUMP=${CMAKE_CURRENT_BINARY_DIR}/rd_velocity_moving.rddump"
+                     "-DPIXEL=${CMAKE_CURRENT_BINARY_DIR}/rd_pixel_frame.rddump"
+                     "-DOUT=${CMAKE_CURRENT_BINARY_DIR}/rd_replay_tool_velocity"
+                     -P "${CMAKE_CURRENT_SOURCE_DIR}/test/rd_replay_tool_velocity.cmake")
+    set_tests_properties(rd_replay_tool_velocity
+                         PROPERTIES SKIP_REGULAR_EXPRESSION "SKIP:"
+                                    FIXTURES_REQUIRED "rd_dump;rd_velocity_dump" TIMEOUT 300)
     # --loss-bisect (the frame one pass longer each time, clean on this
     # device) and --passes (the pass window: the whole frame's window draws
     # the plain picture; one pass stops the walk at the next)
@@ -1025,6 +1326,21 @@ if(ICO_RUN_TESTS)
                      -P "${CMAKE_CURRENT_SOURCE_DIR}/test/rd_replay_tool_pass_split.cmake")
     set_tests_properties(rd_replay_tool_pass_split PROPERTIES SKIP_REGULAR_EXPRESSION "SKIP:"
                                                               FIXTURES_REQUIRED rd_dump TIMEOUT 300)
+    # the present turned into a pre-rotated swapchain's headless twin
+    # (ICO_VK_FAKE_TRANSFORM=90, 180, 270; rd_prerotate.c) and read back turned
+    # back is the identity present byte for byte: rd_pixel's dump plain, wide,
+    # with the overlay test pattern and under the CRT filter, and the fixtures
+    # of test/fixtures/lists/prerotate.txt (the twin drawn: prerotate_turned)
+    add_test(NAME rd_replay_tool_prerotate
+             COMMAND "${CMAKE_COMMAND}" -DTOOL=$<TARGET_FILE:rd_replay_tool>
+                     "-DDUMP=${CMAKE_CURRENT_BINARY_DIR}/rd_pixel_frame.rddump"
+                     -DFIXTURE_TOOL=$<TARGET_FILE:rd_fixture_tool>
+                     "-DFIXTURES=${ICO_FIXTURE_DIR}" "-DFIXTURE_HELPERS=${ICO_FIXTURE_HELPERS}"
+                     "-DLIST=${ICO_FIXTURE_DIR}/lists/prerotate.txt"
+                     "-DOUT=${CMAKE_CURRENT_BINARY_DIR}/rd_replay_tool_prerotate"
+                     -P "${CMAKE_CURRENT_SOURCE_DIR}/test/rd_replay_tool_prerotate.cmake")
+    set_tests_properties(rd_replay_tool_prerotate PROPERTIES SKIP_REGULAR_EXPRESSION "SKIP:"
+                                                             FIXTURES_REQUIRED rd_dump TIMEOUT 1200)
     # the storage pass merge (issue 103): under ICO_RD_BLEND=storage the
     # replay draws ICO_RD_PASS_MERGE=0's DISPLAY picture byte for byte, at 1x
     # and 2x, with no more pass switches; skips without the storage read
@@ -1057,15 +1373,21 @@ if(ICO_RUN_TESTS)
     set_tests_properties(rd_replay_tool_keys PROPERTIES SKIP_REGULAR_EXPRESSION "SKIP:"
                                                         TIMEOUT 3600)
     # the native frame gates (tools/native_frame_check.py, docs/port/TESTING.md): gate-a
-    # re-renders the dump list ICO_DUMPS names and compares with
-    # docs/native_frame_baseline.json; gate-b checks the aspect sweeps ICO_SWEEPS names.
-    # Both skip (77) without the variable, the dumps, a device or Pillow; the selftest
-    # of the gate-b logic always runs.
+    # (test/native_frame_gate_a.cmake) renders the committed fixtures of
+    # lists/native_frame.txt and compares with docs/native_frame_baseline.json (the
+    # release before's pictures of them); gate-b checks the aspect sweeps ICO_SWEEPS names
+    # (local only: skips (77) without them). The selftest of the gate-b logic always runs.
     if(Python3_FOUND)
         set(ICO_NFC "${CMAKE_SOURCE_DIR}/tools/native_frame_check.py")
         add_test(NAME native_frame_gate_a
-                 COMMAND "${Python3_EXECUTABLE}" -I "${ICO_NFC}" gate-a --ctest
-                         --tool $<TARGET_FILE:rd_replay_tool>)
+                 COMMAND "${CMAKE_COMMAND}" -DTOOL=$<TARGET_FILE:rd_replay_tool>
+                         "-DPYTHON=${Python3_EXECUTABLE}" "-DNFC=${ICO_NFC}"
+                         "-DMANIFEST=${CMAKE_SOURCE_DIR}/docs/native_frame_baseline.json"
+                         -DFIXTURE_TOOL=$<TARGET_FILE:rd_fixture_tool> "-DFIXTURES=${ICO_FIXTURE_DIR}"
+                         "-DFIXTURE_HELPERS=${ICO_FIXTURE_HELPERS}"
+                         "-DLIST=${ICO_FIXTURE_DIR}/lists/native_frame.txt"
+                         "-DOUT=${CMAKE_CURRENT_BINARY_DIR}/native_frame_gate_a"
+                         -P "${CMAKE_CURRENT_SOURCE_DIR}/test/native_frame_gate_a.cmake")
         add_test(NAME native_frame_gate_b
                  COMMAND "${Python3_EXECUTABLE}" -I "${ICO_NFC}" gate-b --ctest)
         add_test(NAME native_frame_check_selftest
@@ -1073,11 +1395,12 @@ if(ICO_RUN_TESTS)
         set_tests_properties(native_frame_gate_a native_frame_gate_b native_frame_check_selftest
                              PROPERTIES SKIP_RETURN_CODE 77)
         set_tests_properties(native_frame_gate_a PROPERTIES TIMEOUT 3600)
-        # the regression renders (tools/coverage_check.py, tools/coverage_corpus.txt): every
-        # corpus dump at its own aspect, per-mesh draw counts and the pixel change against the
-        # previous run's pictures in tools/.coverage.  Seed the baseline after a build with
-        #   python3 -I tools/coverage_check.py seed --tool <rd_replay_tool>
-        # Skips (77) when the dumps, the tool or Pillow are absent.
+        # the regression renders (tools/coverage_check.py; local only: the corpus list
+        # ICO_COVERAGE_CORPUS names, dumps kept outside the repository): every corpus dump
+        # at its own aspect, per-mesh draw counts and the pixel change against the previous
+        # run's pictures (ICO_COVERAGE_DIR).  Seed the baseline after a build with
+        #   python3 -I tools/coverage_check.py seed --tool <rd_replay_tool> --corpus LIST
+        # Skips (77) without ICO_COVERAGE_CORPUS, the dumps, the tool or Pillow.
         set(ICO_COV "${CMAKE_SOURCE_DIR}/tools/coverage_check.py")
         add_test(NAME coverage_corpus
                  COMMAND "${Python3_EXECUTABLE}" -I "${ICO_COV}" check --ctest
@@ -1086,11 +1409,22 @@ if(ICO_RUN_TESTS)
                  COMMAND "${Python3_EXECUTABLE}" -I "${ICO_COV}" selftest)
         set_tests_properties(coverage_corpus coverage_check_selftest PROPERTIES SKIP_RETURN_CODE 77)
         set_tests_properties(coverage_corpus PROPERTIES TIMEOUT 3600)
+        # local-only validation on dumps kept outside the repository (docs/port/TESTING.md):
+        # the label `local` (ctest -L local runs them; they skip without their inputs)
+        foreach(_t native_frame_gate_b coverage_corpus)
+            get_test_property(${_t} LABELS _labels)
+            set_tests_properties(${_t} PROPERTIES LABELS "${_labels};local")
+        endforeach()
     endif()
     add_test(NAME rd_water COMMAND rd_water_test)
     set_tests_properties(rd_water PROPERTIES SKIP_RETURN_CODE 77)
     add_test(NAME rd_raw COMMAND rd_raw_test WORKING_DIRECTORY "${CMAKE_CURRENT_BINARY_DIR}")
     set_tests_properties(rd_raw PROPERTIES SKIP_RETURN_CODE 77)
+    add_test(NAME weapon_draw COMMAND weapon_draw_test pal "${CMAKE_CURRENT_BINARY_DIR}")
+    foreach(_slug jpn kor cn ntsc aug6 jun26)
+        add_test(NAME weapon_draw_${_slug}
+                 COMMAND weapon_draw_test ${_slug} "${CMAKE_CURRENT_BINARY_DIR}")
+    endforeach()
     add_test(NAME rd_debug COMMAND rd_debug_test "${CMAKE_CURRENT_BINARY_DIR}")
     set_tests_properties(rd_debug PROPERTIES SKIP_RETURN_CODE 77)
     add_test(NAME rd_present COMMAND rd_present_test "${CMAKE_CURRENT_BINARY_DIR}")
@@ -1098,17 +1432,30 @@ if(ICO_RUN_TESTS)
     add_test(NAME rd_crt COMMAND rd_crt_test "${CMAKE_CURRENT_BINARY_DIR}")
     set_tests_properties(rd_crt PROPERTIES SKIP_RETURN_CODE 77)
     add_test(NAME rd_filter COMMAND rd_filter_test)
+    add_test(NAME rd_icon_pass COMMAND rd_icon_pass_test)
+    add_test(NAME rd_icon_hold COMMAND rd_icon_hold_test)
+    set_tests_properties(rd_icon_hold PROPERTIES SKIP_RETURN_CODE 77)
     add_test(NAME rd_interp COMMAND rd_interp_test)
+    # the motion vectors; leaves rd_velocity_moving.rddump (a frame with
+    # VuPrevCBs) for rd_replay_tool_velocity
+    add_test(NAME rd_velocity COMMAND rd_velocity_test "${CMAKE_CURRENT_BINARY_DIR}")
+    set_tests_properties(rd_velocity PROPERTIES FIXTURES_SETUP rd_velocity_dump)
     add_test(NAME rd_still COMMAND rd_still_test)
     add_test(NAME rd_mirror COMMAND rd_mirror_test)
     set_tests_properties(rd_mirror PROPERTIES SKIP_RETURN_CODE 77)
     add_test(NAME rd_msaa COMMAND rd_msaa_test)
     set_tests_properties(rd_msaa PROPERTIES SKIP_RETURN_CODE 77)
+    add_test(NAME rd_jitter COMMAND rd_jitter_test)
+    set_tests_properties(rd_jitter PROPERTIES SKIP_RETURN_CODE 77)
+    add_test(NAME rd_upscale COMMAND rd_upscale_test)
+    set_tests_properties(rd_upscale PROPERTIES SKIP_RETURN_CODE 77)
     add_test(NAME rd_perf COMMAND rd_perf_test)
     set_tests_properties(rd_perf PROPERTIES SKIP_RETURN_CODE 77)
     add_test(NAME rd_display_change COMMAND rd_display_change_test)
     set_tests_properties(rd_display_change PROPERTIES SKIP_RETURN_CODE 77)
-    foreach(_t rd_alpha_plan rd_fx_frame rd_vu_frac rd_fades_fold)
+    add_test(NAME rd_set_resume COMMAND rd_set_resume_test)
+    set_tests_properties(rd_set_resume PROPERTIES SKIP_RETURN_CODE 77)
+    foreach(_t rd_alpha_plan rd_fx_frame rd_vu_frac rd_fades_fold rd_vis rd_vis_hiz)
         add_test(NAME ${_t} COMMAND ${_t}_test)
         set_tests_properties(${_t} PROPERTIES SKIP_RETURN_CODE 77)
     endforeach()
@@ -1117,6 +1464,11 @@ if(ICO_RUN_TESTS)
     if(ICO_BOOT_DUMP_OLD)
         set_tests_properties(rd_boot_present PROPERTIES ENVIRONMENT "ICO_BOOT_OLD=1")
     endif()
+    # local-only validation (docs/port/TESTING.md): a start-up's dumps kept outside the
+    # repository; the label `local`
+    get_test_property(rd_boot_present LABELS _labels)
+    set_tests_properties(rd_boot_present PROPERTIES LABELS "${_labels};local")
+    add_test(NAME rd_png_mem COMMAND rd_png_mem_test "${CMAKE_CURRENT_BINARY_DIR}")
     add_test(NAME texpack_load COMMAND texpack_load_test)
     add_test(NAME texpack_pack_files COMMAND texpack_load_test --pack "${ICO_TEXPACK_DIR}")
     set_tests_properties(texpack_pack_files PROPERTIES SKIP_RETURN_CODE 77)
@@ -1124,7 +1476,7 @@ if(ICO_RUN_TESTS)
     set(_ico_vvl "${ICO_DEPS_DIR}/vulkan-validation")
     if(NOT WIN32 AND EXISTS "${_ico_vvl}/VkLayer_khronos_validation.json")
         set(_env "VK_ADD_LAYER_PATH=${_ico_vvl}" "VK_KHRONOS_VALIDATION_VALIDATE_SYNC=true"
-                 "ICO_VK_VALIDATION=1")
+                 "VK_KHRONOS_VALIDATION_SYNCVAL_SHADER_ACCESSES_HEURISTIC=true" "ICO_VK_VALIDATION=1")
     endif()
     if(ICO_SANITIZE MATCHES "address")
         list(APPEND _env "ASAN_OPTIONS=detect_leaks=0")
@@ -1132,10 +1484,48 @@ if(ICO_RUN_TESTS)
     if(_env)
         set_tests_properties(rd_water PROPERTIES ENVIRONMENT "${_env}")
         set_tests_properties(rd_pixel rd_replay_tool rd_layout rd_tex rd_tex_pool rd_gsbase ${rd_mesh_SHARDS} modelpack
-                             rd_shadow rd_shadow_edges rd_fog rd_raw rd_debug rd_present rd_crt rd_interp rd_mirror rd_msaa rd_perf rd_display_change rd_native PROPERTIES ENVIRONMENT
+                             rd_shadow rd_shadow_edges rd_fog rd_raw rd_debug rd_present rd_crt rd_interp rd_mirror rd_msaa rd_perf rd_display_change rd_set_resume rd_native rd_icon_hold PROPERTIES ENVIRONMENT
                                                                            "${_env}")
         set_tests_properties(${rd_blur_SHARDS} PROPERTIES ENVIRONMENT "${_env}")
+        set_tests_properties(rd_velocity PROPERTIES ENVIRONMENT "${_env}")
+        # the jitter and the upscale point under the layer too; their OpenGL
+        # twins inherit the environment, with ASAN_OPTIONS=detect_leaks=0
+        # (llvmpipe's LLVM leaks under LeakSanitizer: CI's asan shards failed
+        # rd_jitter_gl and rd_upscale_gl, 2026-11-08)
+        set_tests_properties(rd_jitter rd_upscale PROPERTIES ENVIRONMENT "${_env}")
+        if(TEST rd_replay_tool_fsr3)
+            # FSR 3.1's dispatch under the layer (rd_replay_tool's --stats
+            # counts its errors)
+            set_tests_properties(rd_replay_tool_fsr3 PROPERTIES ENVIRONMENT "${_env}")
+        endif()
+        if(TEST rd_replay_tool_fsr3_keep)
+            # and the keep loop's (the composite held, one dispatch)
+            set_tests_properties(rd_replay_tool_fsr3_keep rd_replay_tool_upscale_keep
+                                 PROPERTIES ENVIRONMENT "${_env}")
+        endif()
     endif()
+    include(test/rd_display_change_2x.cmake)
+    # rd_blur's glow fold case (k) alone on the tile class's fake
+    # (ICO_VK_FAKE_LIMITS=moltenvk: the Apple row of the device profile):
+    # the profile's glow fold off by default there (rd_profile.c, the
+    # PowerVR phone's 8 ms a glow picture), so post mode 7 not forced draws
+    # the mask's pass; _on with [dev] glow_fold = true (ICO_RD_GLOW_FOLD=1)
+    # folds it.  The same bytes either way, and every forced frame as in
+    # the shards
+    set(_gft "${CMAKE_CURRENT_BINARY_DIR}/glow_fold_tile")
+    file(MAKE_DIRECTORY "${_gft}")
+    add_test(NAME rd_blur_glow_fold_tile
+             COMMAND rd_blur_test --only glow_fold --glow-fold-default off
+             WORKING_DIRECTORY "${_gft}")
+    add_test(NAME rd_blur_glow_fold_tile_on
+             COMMAND rd_blur_test --only glow_fold --glow-fold-default on
+             WORKING_DIRECTORY "${_gft}")
+    set_tests_properties(rd_blur_glow_fold_tile rd_blur_glow_fold_tile_on
+                         PROPERTIES SKIP_RETURN_CODE 77 TIMEOUT 900)
+    set_tests_properties(rd_blur_glow_fold_tile PROPERTIES
+                         ENVIRONMENT "${_env};ICO_VK_FAKE_LIMITS=moltenvk")
+    set_tests_properties(rd_blur_glow_fold_tile_on PROPERTIES
+                         ENVIRONMENT "${_env};ICO_VK_FAKE_LIMITS=moltenvk;ICO_RD_GLOW_FOLD=1")
     # the same tests and expectations in the two-pass blend
     # fallback (ICO_RD_NO_DUAL=1: lavapipe has dualSrcBlend, so it is forced)
     set(_env_nodual ${_env} "ICO_RD_NO_DUAL=1")
@@ -1155,6 +1545,17 @@ if(ICO_RUN_TESTS)
                          rd_msaa_nodual
                          PROPERTIES SKIP_RETURN_CODE 77 WORKING_DIRECTORY "${_nd}"
                                     ENVIRONMENT "${_env_nodual}")
+    # issue 182 (the Vulkan device loss with MSAA on): rd_msaa with the
+    # reporter's NVIDIA profile forced (the fog's local read, DATE through
+    # the stencil, the effects' local read, the seven-draw shadow count by
+    # the profile), under the validation layer where it is installed:
+    # testShadowCount's counts by every form under MSAA4, no shadow reset
+    # pass of its own, no validation message
+    set(_env_nvpath ${_env} "ICO_RD_FOG_PATH=local" "ICO_RD_DATE_PATH=stencil"
+                    "ICO_RD_FX_DST_LOCAL=1" "ICO_RD_SHADOW_ONE=0")
+    add_test(NAME rd_msaa_nvpath COMMAND rd_msaa_test)
+    set_tests_properties(rd_msaa_nvpath PROPERTIES SKIP_RETURN_CODE 77
+                                                   ENVIRONMENT "${_env_nvpath}")
     # the exact GS blend (rd_dst_read.c) by each path: lavapipe has both
     # destination reads and takes the attachment read by default, so the
     # storage path (fragment shader interlock, the Deck's and the desktop
@@ -1179,6 +1580,18 @@ if(ICO_RUN_TESTS)
     set_tests_properties(rd_pixel_fixed rd_fog_fixed rd_present_fixed rd_crt_fixed
                          PROPERTIES SKIP_RETURN_CODE 77 WORKING_DIRECTORY "${_bf}"
                                     ENVIRONMENT "${_env_blend_fixed}")
+    # the VU record's two writes (rd_vu_record.h): rd_pixel's pictures and
+    # hashes with the record stored by the vertex shaders (the default on
+    # lavapipe, asked by name) and drawn into the render targets and copied
+    set(_vrs "${CMAKE_CURRENT_BINARY_DIR}/vu_record_stores")
+    set(_vrt "${CMAKE_CURRENT_BINARY_DIR}/vu_record_targets")
+    file(MAKE_DIRECTORY "${_vrs}" "${_vrt}")
+    add_test(NAME rd_pixel_stores COMMAND rd_pixel_test "${_vrs}")
+    add_test(NAME rd_pixel_targets COMMAND rd_pixel_test "${_vrt}")
+    set_tests_properties(rd_pixel_stores PROPERTIES SKIP_RETURN_CODE 77 WORKING_DIRECTORY "${_vrs}"
+                                                    ENVIRONMENT "${_env};ICO_RD_VU_RECORD=stores")
+    set_tests_properties(rd_pixel_targets PROPERTIES SKIP_RETURN_CODE 77 WORKING_DIRECTORY "${_vrt}"
+                                                     ENVIRONMENT "${_env};ICO_RD_VU_RECORD=targets")
     # the fog on the 24-bit depth buffer a phone GPU without a sampled
     # D32S8 gets (ICO_VK_FAKE_D24S8=1, port/rhi/vk/vk_device.c): the same
     # pixels as on D32S8, one-pass and two-pass blends
@@ -1347,20 +1760,22 @@ if(ICO_RUN_TESTS)
                      -P "${_crk}")
     set_tests_properties(rd_replay_tool_crack PROPERTIES SKIP_REGULAR_EXPRESSION "SKIP:"
                                                          FIXTURES_REQUIRED rd_dump)
-    # the filler after the MSAA resolve (issue 26 with MSAA on): a corpus
-    # room (lightning rd-00300, machine-local, SKIP without it) whose MSAA
+    # the filler after the MSAA resolve (issue 26 with MSAA on): the corpus
+    # room's fixture fx-lightning-0300 (test/fixtures, no art), whose MSAA
     # epoch closes at the shadow count's pass in list 3, before the fog, at
     # Enhanced 2x with --aa msaa2 and msaa4: the state line says the fill
     # was drawn after the resolve, the --stats line counts one fill pass
     # with more than 0 pixels filled, none left unfilled, that fill after
-    # the resolve; SKIP where the device does not offer the count (no
+    # the resolve, the fixture's declared crack_pixels and crack_msaa_fills
+    # (the path ran); SKIP where the device does not offer the count (no
     # "rd: msaa: N samples" line: lavapipe offers 4 only)
-    set(_crk_room "${CMAKE_SOURCE_DIR}/build-host/tmp/corpus/dumps/lightning/rd-00300.rddump")
     foreach(_s 2 4)
         add_test(NAME rd_crack_resolved_msaa${_s}
                  COMMAND "${CMAKE_COMMAND}" -DTOOL=$<TARGET_FILE:rd_replay_tool>
-                         "-DARGS=${_crk_room}|${CMAKE_CURRENT_BINARY_DIR}/rd_crack_resolved_msaa${_s}.png|--enhanced|--resolution|2x|--aa|msaa${_s}|--stats"
-                         "-DNEED_FILE=${_crk_room}"
+                         "-DARGS=%FIXTURE%|${CMAKE_CURRENT_BINARY_DIR}/rd_crack_resolved_msaa${_s}.png|--enhanced|--resolution|2x|--aa|msaa${_s}|--stats"
+                         -DFIXTURE=fx-lightning-0300 -DFIXTURE_TOOL=$<TARGET_FILE:rd_fixture_tool>
+                         "-DFIXTURES=${ICO_FIXTURE_DIR}" "-DFIXTURE_HELPERS=${ICO_FIXTURE_HELPERS}"
+                         "-DOUT=${CMAKE_CURRENT_BINARY_DIR}/crack_resolved_msaa${_s}"
                          "-DNEED=rd: msaa: ${_s} samples"
                          "-DEXPECT=${_crk_on} 2x2, reach 1x1 ${_crk_tail} \\(drawn after the MSAA resolve\\)"
                          "-DEXPECT2=stats: crack fill on: 1 passes, [1-9][0-9]* pixels filled \\(1 replays counted; scale 2x2, reach 1x1 texels; 0 fogged replays above 1x not filled; 1 fills after lists 4-6; 1 fills after the MSAA resolve; 0 fills in the aura's paste pass; 0 fills after the glow's alpha\\)"
@@ -1369,114 +1784,92 @@ if(ICO_RUN_TESTS)
                                                                      TIMEOUT 600)
     endforeach()
 
-    # issue 106: the reporter's drained-room dumps (copied into the corpus,
-    # build-host/tmp/corpus/dumps/ripple) at their settings with Full pixel
-    # on: the ripples' read of the puddle's block keeps REPEAT (rd_water.c
-    # rd__block_keeps_repeat), so the ring area holds no near-white pixel
-    # (2089 and 3014 before the fix), and the water line names the clamp's
-    # counts; the ripple wholly past the first period (10:04:36) and the
-    # mirror floor (the pool's grids over its scene copy, corpus puddle
-    # rd-00200) byte for byte as before on lavapipe.  Not Run without the dumps
+    # issue 106: the reporter's drained-room frames as committed fixtures
+    # (test/fixtures, docs/port/TESTING_FIXTURES.md) at their settings with
+    # Full pixel on: the ripples' read of the puddle's block keeps REPEAT
+    # (rd_water.c rd__block_keeps_repeat; the water line's counts, the path
+    # ran: water_blocks_kept), the ripple wholly past the first period
+    # (10:04:36) at the scene's scale, its GS size (--water-ps2) and 1x, and
+    # the mirror floor (the pool's grids over its scene copy, corpus puddle
+    # rd-00200: water_targets_clamped); each picture the fixture's own as
+    # v0.11.6's tool drew it (--water-sharp for the scene's scale), byte for
+    # byte on lavapipe.  The ripple frames 09:45:12 and 10:04:36 are fixtures
+    # made with @water place (docs/port/TESTING_FIXTURES.md "The water's
+    # rule"): the block's reflection and the ripples' wrap reach the picture,
+    # so above 1x the scene's scale and the GS size draw different pictures
+    # (DIFFER), at 1x one, and the block's reads clamped (ICO_RD_BLOCK_CLAMP=1,
+    # CLAMP_DIFFERS) a different picture: issue 106's defect would be seen.
+    # 10:04:47 stays on its plain fixture (made with the rule, it reaches no
+    # pixel: its pin guards the frame as a whole)
     set(_rip "${CMAKE_CURRENT_SOURCE_DIR}/test/rd_replay_tool_ripple.cmake")
-    set(_rip_dir "${CMAKE_SOURCE_DIR}/build-host/tmp/corpus/dumps")
+    set(_rip_fx -DTOOL=$<TARGET_FILE:rd_replay_tool> -DFIXTURE_TOOL=$<TARGET_FILE:rd_fixture_tool>
+                "-DFIXTURES=${ICO_FIXTURE_DIR}" "-DFIXTURE_HELPERS=${ICO_FIXTURE_HELPERS}")
+    set(_rip_out "${CMAKE_CURRENT_BINARY_DIR}/ripple")
     set(_rip_args "--enhanced|--aspect|16:9|--resolution|1920x1080|--full-height|--full-pixel|--aa|ssaa2|--present|1920x1080|--list")
-    set(_rip_py "")
-    if(Python3_FOUND)
-        set(_rip_py "-DPYTHON=${Python3_EXECUTABLE}")
-    endif()
     add_test(NAME rd_replay_tool_ripple
-             COMMAND "${CMAKE_COMMAND}" -DTOOL=$<TARGET_FILE:rd_replay_tool>
-                     "-DDUMP=${_rip_dir}/ripple/frame-20261024-094512-v13782.zip"
-                     "-DOUT=${CMAKE_CURRENT_BINARY_DIR}/rd_replay_tool_ripple.png"
-                     "-DARGS=${_rip_args}"
+             COMMAND "${CMAKE_COMMAND}" ${_rip_fx} -DFIXTURE=fx-water-13782
+                     "-DOUT=${_rip_out}/rd_replay_tool_ripple.png" "-DARGS=${_rip_args}"
                      "-DEXPECT=Full pixel on, border mask off: [0-9]+ render-target reads clamped, 2 block reads kept on REPEAT"
                      "-DEXPECT2=block 344x256 GS with depth [^;]*REPEAT 2, 2 of them kept on REPEAT"
-                     -DBOX=870,430,1210,890 -DMAXBRIGHT=0 ${_rip_py} -P "${_rip}")
+                     -DREQUIRE=water_blocks_kept -DSHA=68228c420b97467859075e325e083d477bde0f902c70cd50927da0b53cccd8bf
+                     -DDIFFER=f0746b440f3a96f3fbd8fa2d95d30be88feb00e82b7ba43cd37d003c91382c57
+                     -DCLAMP_DIFFERS=1 -P "${_rip}")
     add_test(NAME rd_replay_tool_ripple_447
-             COMMAND "${CMAKE_COMMAND}" -DTOOL=$<TARGET_FILE:rd_replay_tool>
-                     "-DDUMP=${_rip_dir}/ripple/frame-20261024-100447-v84109.zip"
-                     "-DOUT=${CMAKE_CURRENT_BINARY_DIR}/rd_replay_tool_ripple_447.png"
-                     "-DARGS=${_rip_args}" "-DEXPECT=REPEAT 2, 2 of them kept on REPEAT"
-                     -DBOX=90,700,400,1080 -DMAXBRIGHT=0 ${_rip_py} -P "${_rip}")
+             COMMAND "${CMAKE_COMMAND}" ${_rip_fx} -DFIXTURE=fx-ripple-84109
+                     "-DOUT=${_rip_out}/rd_replay_tool_ripple_447.png" "-DARGS=${_rip_args}"
+                     "-DEXPECT=REPEAT 2, 2 of them kept on REPEAT" -DREQUIRE=water_blocks_kept
+                     -DSHA=bad9eda099e34b11a9fc810928c99e556e30b2fcb6f1d0689c8d661eb570ef2a -P "${_rip}")
+    # the puddle's block at the scene's scale (rd_core.c rd__target_scale_of, since
+    # v0.11.7); _ps2 (--water-ps2, ICO_RD_WATER_SCALE=0) at its GS size, v0.11.6's
+    # Original; _1x and _1x_ps2 the same picture at 1x (one SHA-256: nothing
+    # changes there)
     add_test(NAME rd_replay_tool_ripple_436
-             COMMAND "${CMAKE_COMMAND}" -DTOOL=$<TARGET_FILE:rd_replay_tool>
-                     "-DDUMP=${_rip_dir}/ripple/frame-20261024-100436-v83439.zip"
-                     "-DOUT=${CMAKE_CURRENT_BINARY_DIR}/rd_replay_tool_ripple_436.png"
-                     "-DARGS=${_rip_args}" "-DEXPECT=REPEAT 2, 2 of them kept on REPEAT"
-                     -DSHA=984695adef5d6d26cc065d7bff996b0234b600cc2c0fd87cd50c365a3cc083aa
-                     ${_rip_py} -P "${_rip}")
+             COMMAND "${CMAKE_COMMAND}" ${_rip_fx} -DFIXTURE=fx-water-83439
+                     "-DOUT=${_rip_out}/rd_replay_tool_ripple_436.png" "-DARGS=${_rip_args}"
+                     "-DEXPECT=REPEAT 2, 2 of them kept on REPEAT"
+                     "-DEXPECT2=block 344x256 GS with depth at 1920x1234 texels \\(5.5814x4.82143, the scene's scale\\)"
+                     -DREQUIRE=water_blocks_kept -DSHA=7724423f63c22ccab2b918516da6d8699c3a7174eae0b60a1ef5d1b33c84d331
+                     -DDIFFER=82ed072acb6fcc5500ba9890add938766970778230afeb599dbcee396e1200f2
+                     -DCLAMP_DIFFERS=1 -P "${_rip}")
+    add_test(NAME rd_replay_tool_ripple_436_ps2
+             COMMAND "${CMAKE_COMMAND}" ${_rip_fx} -DFIXTURE=fx-water-83439
+                     "-DOUT=${_rip_out}/rd_replay_tool_ripple_436_ps2.png"
+                     "-DARGS=${_rip_args}|--water-ps2"
+                     "-DEXPECT=water reflections at their GS size \\(ICO_RD_WATER_SCALE=0\\)"
+                     "-DEXPECT2=block 344x256 GS with depth at 344x256 texels \\(1x1, not the scene's scale\\)"
+                     -DREQUIRE=water_blocks_kept -DSHA=82ed072acb6fcc5500ba9890add938766970778230afeb599dbcee396e1200f2
+                     -DDIFFER=7724423f63c22ccab2b918516da6d8699c3a7174eae0b60a1ef5d1b33c84d331 -P "${_rip}")
+    foreach(_w "" _ps2)
+        set(_wa "")
+        set(_wc -DCLAMP_DIFFERS=1)
+        if(_w)
+            set(_wa "|--water-ps2")
+            set(_wc "")
+        endif()
+        add_test(NAME rd_replay_tool_ripple_436_1x${_w}
+                 COMMAND "${CMAKE_COMMAND}" ${_rip_fx} -DFIXTURE=fx-water-83439
+                         "-DOUT=${_rip_out}/rd_replay_tool_ripple_436_1x${_w}.png"
+                         "-DARGS=--enhanced|--aspect|16:9|--resolution|1x|--full-pixel|--present|1920x1080|--list${_wa}"
+                         "-DEXPECT=block 344x256 GS with depth at 344x256 texels \\(1x1, the scene's scale\\)"
+                         -DREQUIRE=water_blocks_kept ${_wc}
+                         -DSHA=747e5c2c0cfb190ee68154af541557b963ee2ef8a4911a083108099d93a6f747 -P "${_rip}")
+    endforeach()
     add_test(NAME rd_replay_tool_mirror_floor
-             COMMAND "${CMAKE_COMMAND}" -DTOOL=$<TARGET_FILE:rd_replay_tool>
-                     "-DDUMP=${_rip_dir}/puddle/rd-00200.rddump"
-                     "-DOUT=${CMAKE_CURRENT_BINARY_DIR}/rd_replay_tool_mirror_floor.png"
+             COMMAND "${CMAKE_COMMAND}" ${_rip_fx} -DFIXTURE=fx-puddle-0200
+                     "-DOUT=${_rip_out}/rd_replay_tool_mirror_floor.png"
                      "-DARGS=--enhanced|--resolution|2x|--full-pixel|--present|1024x896|--list"
                      "-DEXPECT=Full pixel on, border mask off: [0-9]+ render-target reads clamped, 0 block reads kept on REPEAT"
-                     -DSHA=613d1be7e8d7c1437ffa90c237eed6dfb7db2995e39a708270403afee18e1d28
-                     ${_rip_py} -P "${_rip}")
-    # the pinned SHA-256s are of the pictures without the fades fold: above 1x the
-    # brightness step folded into the reduction (GPUROUND) moves the ripple frame's
-    # pixels by one level (591,187 of them on v83439), inside the fold's bound, which
-    # rd_fades_fold_ab tests; these tests pin the water's exact bytes
+                     "-DREQUIRE=water_targets_clamped|water_blocks_kept" -DSHA=1bf91cb49971f536ee0fac57ce0904b2ac790b02e06a2de0b5da5598f1305bb0
+                     -P "${_rip}")
+    # the pinned SHA-256s are of the pictures without the fades fold (rd_fades_fold_ab
+    # tests the fold) and with the shadow's levels at the PS2's size
+    # (ICO_RD_SHADOW_FINE=0, rd_shadow_fine_ab tests the levels): these tests pin the
+    # water's exact bytes
     set_tests_properties(rd_replay_tool_ripple rd_replay_tool_ripple_447 rd_replay_tool_ripple_436
-                         rd_replay_tool_mirror_floor
+                         rd_replay_tool_ripple_436_ps2 rd_replay_tool_ripple_436_1x
+                         rd_replay_tool_ripple_436_1x_ps2 rd_replay_tool_mirror_floor
                          PROPERTIES SKIP_REGULAR_EXPRESSION "SKIP:" TIMEOUT 600
-                                    ENVIRONMENT "ICO_RD_FADES_FOLD=0")
-    # the still re-present (rd_reshow.c): a corpus dump as its own tick before
-    # (nothing moves), 4 presents at Enhanced 4:3 2x at 1280x960: presents
-    # 1..3 shown again, all 4 pictures byte for byte the ones rendered with
-    # ICO_RD_STILL_REPRESENT=0 (the lavapipe A/B; Not Run without the dump)
-    add_test(NAME rd_replay_tool_still
-             COMMAND "${CMAKE_COMMAND}" -DTOOL=$<TARGET_FILE:rd_replay_tool>
-                     "-DDUMP=${CMAKE_SOURCE_DIR}/build-host/tmp/pcsx2cmp/godrays/port2/keep/rd-00428.rddump"
-                     "-DOUT=${CMAKE_CURRENT_BINARY_DIR}/rd_replay_tool_still" -DPRESENTS=4
-                     "-DARGS=--enhanced|--aspect|4:3|--resolution|2x|--present|1280x960"
-                     -P "${CMAKE_CURRENT_SOURCE_DIR}/test/rd_replay_tool_still.cmake")
-    set_tests_properties(rd_replay_tool_still PROPERTIES SKIP_REGULAR_EXPRESSION "SKIP:" TIMEOUT 600)
-    # the glow held between ticks (rd_glow_hold.c) against its chain drawn at
-    # every present (ICO_RD_GLOW_REDRAW=1), 2 presents a tick at Enhanced 4:3
-    # 2x, every present rendered: a still tick (rd-01076 as its own tick
-    # before) the same bytes both ways, SCENE and the presented picture; a
-    # moving one (rd-01076 then rd-01077) the first present the same bytes and
-    # the later one differing only within 128 texels of the glow's mask (WORK2)
-    # (the lavapipe A/B; Not Run without the dumps)
-    set(_gh "${CMAKE_SOURCE_DIR}/build-host/tmp/pcsx2cmp/godrays/port2/keep")
-    set(_gh_py "")
-    if(Python3_FOUND)
-        set(_gh_py "-DPYTHON=${Python3_EXECUTABLE}")
-    endif()
-    add_test(NAME rd_replay_tool_glow_hold
-             COMMAND "${CMAKE_COMMAND}" -DTOOL=$<TARGET_FILE:rd_replay_tool>
-                     "-DSTILL=${_gh}/rd-01076.rddump" "-DPREV=${_gh}/rd-01076.rddump"
-                     "-DMOVE=${_gh}/rd-01077.rddump"
-                     "-DOUT=${CMAKE_CURRENT_BINARY_DIR}/rd_replay_tool_glow_hold" -DPRESENTS=2
-                     -DREACH=128 "-DARGS=--enhanced|--aspect|4:3|--resolution|2x" ${_gh_py}
-                     -P "${CMAKE_CURRENT_SOURCE_DIR}/test/rd_replay_tool_glow_hold.cmake")
-    set_tests_properties(rd_replay_tool_glow_hold PROPERTIES SKIP_REGULAR_EXPRESSION "SKIP:"
-                                                             TIMEOUT 900)
-    # the blended present's frame F12 saves (rd.h rd_dump_blended_arm),
-    # written by --save-blended from --interp T PREV, replayed on its own:
-    # SCENE and the presented picture byte for byte the --interp run's, and
-    # the same --interp run with the interpolation and the replays on the
-    # render thread (--render-thread sync and on: the picture and the saved
-    # frame byte for byte the main thread's).
-    # rd-01076 then rd-01077 at alpha 0.5, Enhanced 4:3 2x; the issue 163
-    # pair (the tablet's tick and the tick before) at its present's alpha
-    # 0.999000013 (the lavapipe A/B; Not Run without the dumps)
-    add_test(NAME rd_replay_tool_save_blended
-             COMMAND "${CMAKE_COMMAND}" -DTOOL=$<TARGET_FILE:rd_replay_tool>
-                     "-DPREV=${_gh}/rd-01076.rddump" "-DCUR=${_gh}/rd-01077.rddump" -DT=0.5
-                     "-DOUT=${CMAKE_CURRENT_BINARY_DIR}/rd_replay_tool_save_blended"
-                     "-DARGS=--enhanced|--aspect|4:3|--resolution|2x" "-DRT=sync|on"
-                     -P "${CMAKE_CURRENT_SOURCE_DIR}/test/rd_replay_tool_save_blended.cmake")
-    set(_sb163 "${CMAKE_SOURCE_DIR}/build-host/tmp/v097/evidence/163/frame/frame-20261031-211530-v10103")
-    add_test(NAME rd_replay_tool_save_blended_163
-             COMMAND "${CMAKE_COMMAND}" -DTOOL=$<TARGET_FILE:rd_replay_tool>
-                     "-DPREV=${_sb163}-prev.rddump" "-DCUR=${_sb163}.rddump" -DT=0.999000013
-                     "-DOUT=${CMAKE_CURRENT_BINARY_DIR}/rd_replay_tool_save_blended_163"
-                     "-DARGS=--resolution|2x|--full-height|--full-pixel" "-DRT=sync|on"
-                     -P "${CMAKE_CURRENT_SOURCE_DIR}/test/rd_replay_tool_save_blended.cmake")
-    set_tests_properties(rd_replay_tool_save_blended rd_replay_tool_save_blended_163
-                         PROPERTIES SKIP_REGULAR_EXPRESSION "SKIP:" TIMEOUT 900)
+                                    ENVIRONMENT "ICO_RD_FADES_FOLD=0;ICO_RD_SHADOW_FINE=0")
     # the fog on the depth's words copied out through a buffer
     # (ICO_RD_FOG_PATH=buffer, rd_fog_path.c: the fallback of a device whose
     # depth reads fail), on D32S8 and on D24S8 (the top byte masked off):
@@ -1537,7 +1930,7 @@ if(ICO_RUN_TESTS)
     set(_bst_kept "fixed-function ok [0-2], kept by \\[dev\\] blend")
     add_test(NAME rd_blend_selftest
              COMMAND "${CMAKE_COMMAND}" -DTOOL=$<TARGET_FILE:rd_blend_selftest_test> -DMODE=fixed
-                     "-DNAME=${_bst_fix}" "-DRESULTS=${_bst_ok}"
+                     "-DNAME=${_bst_fix}" "-DRESULTS=${_bst_ok}" -DGLYPH=font_sheet_baked_ps
                      "-DEXTRA=rd: blend: fixed-function \\(the default. \\[dev\\] blend = attachment\\|storage opts into an exact mode\\)"
                      "-DEXTRA2=rd: profile: immediate-mode GPU \\(Mesa, Vulkan\\): blend fixed-function. "
                      -P "${_bst}")
@@ -1562,6 +1955,7 @@ if(ICO_RUN_TESTS)
     add_test(NAME rd_blend_selftest_blend_attachment
              COMMAND "${CMAKE_COMMAND}" -DTOOL=$<TARGET_FILE:rd_blend_selftest_test> -DMODE=attachment
                      "-DNAME=${_bst_att}" "-DRESULTS=attachment fail [0-9]+, ${_bst_kept}"
+                     -DGLYPH=font_sheet_ps
                      "-DFAIL=attachment fail [0-9]+" -P "${_bst}")
     add_test(NAME rd_blend_selftest_blend_exact
              COMMAND "${CMAKE_COMMAND}" -DTOOL=$<TARGET_FILE:rd_blend_selftest_test> -DMODE=attachment
@@ -1605,14 +1999,25 @@ if(ICO_RUN_TESTS)
                      "-DNAME=${_bst_fix}" "-DRESULTS=${_bst_ok}"
                      "-DEXTRA=rd: pipelines: GS state as shader data: off \\(\\[dev\\] blend = fixed\\)"
                      -P "${_bst}")
+    # the glyph cell through the sheet shader where the device draws it
+    # ([dev] sheet_shader, ICO_RD_SHEET_SHADER=1); the default above takes
+    # the 1x bake's font_sheet_baked_ps, an exact mode asked font_sheet_ps
+    # (issue 188)
+    add_test(NAME rd_blend_selftest_sheet_shader
+             COMMAND "${CMAKE_COMMAND}" -DTOOL=$<TARGET_FILE:rd_blend_selftest_test> -DMODE=fixed
+                     "-DNAME=${_bst_fix}" "-DRESULTS=${_bst_ok}" -DGLYPH=font_sheet_ps
+                     -P "${_bst}")
     set(_bst_tests rd_blend_selftest rd_blend_selftest_sabotage rd_blend_selftest_adreno
                    rd_blend_selftest_adreno_forced rd_blend_selftest_no_dst
                    rd_blend_selftest_blend_attachment rd_blend_selftest_blend_exact
                    rd_blend_selftest_blend_storage rd_blend_selftest_blend_fixed
                    rd_blend_selftest_moltenvk_storage rd_blend_selftest_uber
-                   rd_blend_selftest_uber_sabotage rd_blend_selftest_uber_blend_fixed)
+                   rd_blend_selftest_uber_sabotage rd_blend_selftest_uber_blend_fixed
+                   rd_blend_selftest_sheet_shader)
     set_tests_properties(${_bst_tests} PROPERTIES SKIP_REGULAR_EXPRESSION "SKIP:")
     set_tests_properties(rd_blend_selftest PROPERTIES ENVIRONMENT "${_bst_env}")
+    set_tests_properties(rd_blend_selftest_sheet_shader
+                         PROPERTIES ENVIRONMENT "${_bst_env};ICO_RD_SHEET_SHADER=1")
     set_tests_properties(rd_blend_selftest_sabotage
                          PROPERTIES ENVIRONMENT "${_bst_env};ICO_RD_BLEND_SABOTAGE=fixed")
     set_tests_properties(rd_blend_selftest_adreno PROPERTIES ENVIRONMENT "${_bst_env};ICO_VK_FAKE_ADRENO=1")
@@ -1635,17 +2040,50 @@ if(ICO_RUN_TESTS)
                                     "${_bst_env};ICO_RD_UBER=on;ICO_RD_BLEND_SABOTAGE=attachment")
     set_tests_properties(rd_blend_selftest_uber_blend_fixed
                          PROPERTIES ENVIRONMENT "${_bst_env};ICO_RD_UBER=on;ICO_RD_BLEND=fixed")
+    # Under asan, the twins whose glyph goes through font_sheet_ps (an exact
+    # mode asked, or [dev] sheet_shader) end with LeakSanitizer's 112 bytes
+    # (2 x 56, calloc) on Ubuntu 24.04's lavapipe (Mesa 25.2.8): every frame
+    # is in the driver, on a thread the driver started (asan_thread_start
+    # with no port frame: the driver compiles its shader variants at draw
+    # time, and v0.10.2's branch-free font_sheet_ps is what changed; v0.10.1,
+    # whose every twin drew the glyph through the old one, was clean on the
+    # same Mesa build; the dev container's Mesa 25.0.7 is clean); the roots are unscanned
+    # once the loader dlcloses it at vkDestroyInstance (the rhi_vk and
+    # settings_render leak, port/rhi/CMakeLists.txt). An LSan suppression
+    # cannot name it (the frames are "<unknown module>" after the unload).
+    # The leak is not steady: CI run 41925244605 showed it on the four
+    # font_sheet_ps twins and 41937286231 on _adreno, _adreno_forced and
+    # _uber (the baked-glyph ones) instead, the same 2 x 56 bytes, so it is
+    # the driver's compile thread racing the exit, which any twin can hit;
+    # the leak check is off for the whole family under asan
+    if(ICO_SANITIZE MATCHES "address")
+        set_property(TEST rd_blend_selftest rd_blend_selftest_sabotage rd_blend_selftest_adreno
+                          rd_blend_selftest_adreno_forced rd_blend_selftest_no_dst
+                          rd_blend_selftest_blend_attachment rd_blend_selftest_blend_exact
+                          rd_blend_selftest_blend_storage rd_blend_selftest_blend_fixed
+                          rd_blend_selftest_moltenvk_storage rd_blend_selftest_uber
+                          rd_blend_selftest_uber_sabotage rd_blend_selftest_uber_blend_fixed
+                          rd_blend_selftest_sheet_shader
+                     APPEND PROPERTY ENVIRONMENT "ASAN_OPTIONS=detect_leaks=0")
+    endif()
     # the VU vertex pre-pass's self-test (rd_vuprepass_selftest.c): on
     # lavapipe the pre-pass draws the self-test's meshes byte for byte as
-    # the programs' entries do and stays on, in the extended variant (a wide
-    # scaled scene) and the plain one (Original at 4:3 and 1x); with its
-    # first command's records drawn a texel off (ICO_RD_VU_PREPASS_SABOTAGE,
-    # a driver whose record goes wrong) the pictures differ and it is
-    # turned off before the set; with it off by the settings
-    # (ICO_RD_VU_PREPASS=0) nothing runs
+    # the programs' entries do, over its four moved replays in both frame
+    # slots, and stays on, in the extended variant (a wide scaled scene)
+    # and the plain one (Original at 4:3 and 1x); with its first command's
+    # records drawn a texel off (ICO_RD_VU_PREPASS_SABOTAGE, a driver whose
+    # record goes wrong) the pictures differ and it is turned off before the
+    # set; with it off by the settings (ICO_RD_VU_PREPASS=0) nothing runs
     set(_vst "${CMAKE_CURRENT_SOURCE_DIR}/test/rd_vuprepass_selftest.cmake")
-    set(_vst_on "on \\(self-test: prelit, lit, skin(, the tick cameras)? and particles byte for byte, [0-9]+ vertices and 4 sprites in [0-9]+ pre-pass draws \\(2 passes, [0-9]+ triangle slots\\), [0-9]+ of [0-9]+ pixels drawn\\) on SCENE [0-9]+x[0-9]+ at [0-9]+x[0-9]+ texels in [0-9.]+ ms")
-    set(_vst_off "off \\(self-test: the pictures differ: [0-9]+ of [0-9]+ bytes, the first at texel [0-9]+,[0-9]+: [0-9,]+ want [0-9,]+\\) on SCENE")
+    set(_vst_on "on \\(self-test: prelit, lit, skin(, the tick cameras)?(, the index compaction \\(a copy past the target's edge, its lists from value [0-9]+ of the fourth plane, the record at [0-9]+ rows, no stamp of the test's [0-9]+ pictures unwritten\\))? and particles byte for byte over 4 replays in both frame slots, [0-9]+ vertices and 4 sprites in [0-9]+ pre-pass draws \\(2 passes, [0-9]+ triangle slots\\), [0-9]+ of [0-9]+ pixels drawn\\) on SCENE [0-9]+x[0-9]+ at [0-9]+x[0-9]+ texels in [0-9.]+ ms")
+    set(_vst_off "off \\(self-test: the pictures differ: in replay [1-4] of 4 \\(frame slot [01]\\), [0-9]+ of [0-9]+ bytes, the first at texel [0-9]+,[0-9]+: [0-9,]+ want [0-9,]+\\) on SCENE")
+    # a stale record (ICO_RD_VU_PREPASS_SABOTAGE=stale: the record's copies
+    # left out from the second replay on, so a replay reads what an earlier
+    # one left in its frame slot's buffer): the pictures differ from replay
+    # 2 on, never in replay 1.  The self-test of v0.10.x replayed the frame
+    # once (replay 1 alone) and passed this sabotage: only the moved replays
+    # across both frame slots see a record that straddles two pictures
+    set(_vst_stale "off \\(self-test: the pictures differ: in replay [2-4] of 4 \\(frame slot [01]\\), [0-9]+ of [0-9]+ bytes, the first at texel [0-9]+,[0-9]+: [0-9,]+ want [0-9,]+\\) on SCENE")
     add_test(NAME rd_vuprepass_selftest
              COMMAND "${CMAKE_COMMAND}" -DTOOL=$<TARGET_FILE:rd_vuprepass_selftest_test> -DMODE=on
                      "-DLINE=${_vst_on}" -P "${_vst}")
@@ -1659,6 +2097,11 @@ if(ICO_RUN_TESTS)
     add_test(NAME rd_vuprepass_selftest_off
              COMMAND "${CMAKE_COMMAND}" -DTOOL=$<TARGET_FILE:rd_vuprepass_selftest_test>
                      -DMODE=notrun "-DLINE=off \\(self-test not run\\)" -P "${_vst}")
+    add_test(NAME rd_vuprepass_selftest_sabotage_straddle
+             COMMAND "${CMAKE_COMMAND}" -DTOOL=$<TARGET_FILE:rd_vuprepass_selftest_test> -DMODE=off
+                     "-DLINE=${_vst_stale}"
+                     "-DEXTRA=rd: VU pre-pass: ICO_RD_VU_PREPASS_SABOTAGE: in the self-test the record's copies"
+                     -P "${_vst}")
     # the same with the pre-pass's draws one an entry and stage
     # (ICO_RD_VU_PREPASS_BATCH=0: the vu_X_pre_vs builds, as before the
     # batches; rd_replay_vu.c vuPrepassRun)
@@ -1671,9 +2114,84 @@ if(ICO_RUN_TESTS)
     add_test(NAME rd_vuprepass_selftest_unmerged
              COMMAND "${CMAKE_COMMAND}" -DTOOL=$<TARGET_FILE:rd_vuprepass_selftest_test> -DMODE=on
                      "-DLINE=${_vst_on}" -P "${_vst}")
+    # the record's writes (rd_vu_record.h; issue 179): lavapipe has
+    # vertexPipelineStoresAndAtomics, so the runs above take the stores (the
+    # shipped path, [dev] vu_record = auto).  _stores and _stores_plain ask
+    # for them by name and must say so on the verdict line; _targets keeps
+    # the render targets and copies; _stores_sabotage_straddle: a stale
+    # record under the stores (replays 2 on store into the sink buffer) fails
+    # the stores' run from replay 2 on, which is logged with its first
+    # texel, then the compute dispatches' run, then the targets' (the final
+    # verdict names both failed rungs); _nostores_fallback: a device made
+    # without the feature (ICO_VK_FAKE_NO_VERTEX_STORES=1) says so on the
+    # start line, takes the compute dispatches and passes (the compute rows:
+    # test/rd_vu_compute_tests.cmake)
+    set(_vst_stores_line "rd: VU pre-pass: on \\(self-test: [^\n]* ms, record stores")
+    set(_vst_targets_line "rd: VU pre-pass: on \\(self-test: [^\n]* ms, record targets")
+    add_test(NAME rd_vuprepass_selftest_stores
+             COMMAND "${CMAKE_COMMAND}" -DTOOL=$<TARGET_FILE:rd_vuprepass_selftest_test> -DMODE=on
+                     "-DLINE=${_vst_on}" "-DEXTRA=${_vst_stores_line}" -P "${_vst}")
+    add_test(NAME rd_vuprepass_selftest_stores_plain
+             COMMAND "${CMAKE_COMMAND}" -DTOOL=$<TARGET_FILE:rd_vuprepass_selftest_test> -DMODE=on
+                     -DVARIANT=plain "-DLINE=${_vst_on}" "-DEXTRA=${_vst_stores_line}" -P "${_vst}")
+    add_test(NAME rd_vuprepass_selftest_targets
+             COMMAND "${CMAKE_COMMAND}" -DTOOL=$<TARGET_FILE:rd_vuprepass_selftest_test> -DMODE=on
+                     "-DLINE=${_vst_on}" "-DEXTRA=${_vst_targets_line}" -P "${_vst}")
+    add_test(NAME rd_vuprepass_selftest_stores_sabotage_straddle
+             COMMAND "${CMAKE_COMMAND}" -DTOOL=$<TARGET_FILE:rd_vuprepass_selftest_test> -DMODE=off
+                     "-DLINE=${_vst_stale}"
+                     "-DEXTRA=rd: VU pre-pass: the record stored by the vertex shaders failed the self-test \\(the pictures differ: in replay [2-4] of 4.*rd: VU pre-pass: the record stored by compute dispatches failed the self-test \\(the pictures differ: in replay [2-4] of 4.*, record targets, the stores and compute failed the self-test"
+                     -P "${_vst}")
+    add_test(NAME rd_vuprepass_selftest_nostores_fallback
+             COMMAND "${CMAKE_COMMAND}" -DTOOL=$<TARGET_FILE:rd_vuprepass_selftest_test> -DMODE=on
+                     "-DLINE=${_vst_on}"
+                     "-DEXTRA=the record stored by compute dispatches into the frame slot's record buffer: no render targets, no copies \\(no vertex stores: the device has no vertexPipelineStoresAndAtomics.*, record compute"
+                     -P "${_vst}")
+    set_tests_properties(rd_vuprepass_selftest_stores rd_vuprepass_selftest_stores_plain
+                         PROPERTIES ENVIRONMENT "${_env};ICO_RD_VU_RECORD=stores")
+    set_tests_properties(rd_vuprepass_selftest_targets
+                         PROPERTIES ENVIRONMENT "${_env};ICO_RD_VU_RECORD=targets")
+    set_tests_properties(rd_vuprepass_selftest_stores_sabotage_straddle
+                         PROPERTIES ENVIRONMENT
+                                    "${_env};ICO_RD_VU_RECORD=stores;ICO_RD_VU_PREPASS_SABOTAGE=stale")
+    set_tests_properties(rd_vuprepass_selftest_nostores_fallback
+                         PROPERTIES ENVIRONMENT "${_env};ICO_VK_FAKE_NO_VERTEX_STORES=1")
+    # the device table's no-pre-pass row (adreno-740-qualcomm, issue
+    # 123: the Adreno 740 under Qualcomm's own driver), given to lavapipe by
+    # ICO_VK_FAKE_NO_PREPASS=1: devtable the pre-pass off by the table and
+    # the self-test not run; devtable_on the same with ICO_RD_VU_PREPASS=on
+    # ([dev] vu_prepass = true written in config.toml): on over the table,
+    # the self-test passed, the start line naming the override after the
+    # record's words ("...; the record <why>; [dev] vu_prepass = true over
+    # the device table (<reason>)")
+    add_test(NAME rd_vuprepass_selftest_devtable
+             COMMAND "${CMAKE_COMMAND}" -DTOOL=$<TARGET_FILE:rd_vuprepass_selftest_test>
+                     -DMODE=notrun "-DLINE=off \\(self-test not run\\)"
+                     "-DEXTRA=rd: VU pre-pass: off by the device table \\(ICO_VK_FAKE_NO_PREPASS, \\[dev\\] vu_prepass = true draws with it anyway\\): every VU draw"
+                     -P "${_vst}")
+    add_test(NAME rd_vuprepass_selftest_devtable_on
+             COMMAND "${CMAKE_COMMAND}" -DTOOL=$<TARGET_FILE:rd_vuprepass_selftest_test> -DMODE=on
+                     "-DLINE=${_vst_on}"
+                     "-DEXTRA=rd: VU pre-pass: on: each mesh [^\n]*, the record [^\n]*, \\[dev\\] vu_prepass = true over the device table \\(ICO_VK_FAKE_NO_PREPASS\\)"
+                     -P "${_vst}")
+    # the skin check at its every-draw mode around the self-test (issue
+    # 123's v0.11.0 log: the self-test's skinned toy mesh twinned, armed the
+    # capture and a frame dump): the self-test's replays are neither checked
+    # nor twinned, so no check of a frame and no end-of-run count is logged
+    add_test(NAME rd_vuprepass_selftest_skincheck
+             COMMAND "${CMAKE_COMMAND}" -DTOOL=$<TARGET_FILE:rd_vuprepass_selftest_test> -DMODE=on
+                     "-DLINE=${_vst_on}"
+                     "-DEXTRA=rd: VU skin check: on "
+                     "-DNOT_=VU skin check: (frame|at the end of the run|twins at the end of the run)"
+                     -P "${_vst}")
     set(_vst_tests rd_vuprepass_selftest rd_vuprepass_selftest_plain
                    rd_vuprepass_selftest_sabotage rd_vuprepass_selftest_off
-                   rd_vuprepass_selftest_unbatched rd_vuprepass_selftest_unmerged)
+                   rd_vuprepass_selftest_unbatched rd_vuprepass_selftest_unmerged
+                   rd_vuprepass_selftest_sabotage_straddle rd_vuprepass_selftest_stores
+                   rd_vuprepass_selftest_stores_plain rd_vuprepass_selftest_targets
+                   rd_vuprepass_selftest_stores_sabotage_straddle
+                   rd_vuprepass_selftest_nostores_fallback rd_vuprepass_selftest_devtable
+                   rd_vuprepass_selftest_devtable_on rd_vuprepass_selftest_skincheck)
     set_tests_properties(${_vst_tests} PROPERTIES SKIP_REGULAR_EXPRESSION "SKIP:")
     if(_env)
         set_tests_properties(rd_vuprepass_selftest rd_vuprepass_selftest_plain
@@ -1681,12 +2199,151 @@ if(ICO_RUN_TESTS)
     endif()
     set_tests_properties(rd_vuprepass_selftest_sabotage
                          PROPERTIES ENVIRONMENT "${_env};ICO_RD_VU_PREPASS_SABOTAGE=1")
+    set_tests_properties(rd_vuprepass_selftest_sabotage_straddle
+                         PROPERTIES ENVIRONMENT "${_env};ICO_RD_VU_PREPASS_SABOTAGE=stale")
     set_tests_properties(rd_vuprepass_selftest_unbatched
                          PROPERTIES ENVIRONMENT "${_env};ICO_RD_VU_PREPASS_BATCH=0")
     set_tests_properties(rd_vuprepass_selftest_unmerged
                          PROPERTIES ENVIRONMENT "${_env};ICO_RD_VU_MERGE=0")
     set_tests_properties(rd_vuprepass_selftest_off
                          PROPERTIES ENVIRONMENT "${_env};ICO_RD_VU_PREPASS=0")
+    set_tests_properties(rd_vuprepass_selftest_devtable
+                         PROPERTIES ENVIRONMENT "${_env};ICO_VK_FAKE_NO_PREPASS=1")
+    set_tests_properties(rd_vuprepass_selftest_devtable_on
+                         PROPERTIES ENVIRONMENT "${_env};ICO_VK_FAKE_NO_PREPASS=1;ICO_RD_VU_PREPASS=on")
+    set_tests_properties(rd_vuprepass_selftest_skincheck
+                         PROPERTIES ENVIRONMENT "${_env};ICO_RD_VU_SKIN_CHECK=2;ICO_RD_VU_SKIN_INTERVAL_MS=0")
+    # the skinned draws' bone-block check (issue 163; docs/port/VU_SKIN_CHECK.md
+    # "Tests", test/rd_vu_skin_check.cmake): judge the judgement and the
+    # trace alone (no device); clean a frame of one skinned command checked
+    # right; probe and ring the bone at 200 read as zeros by the probe alone
+    # (H1) or in the ring (H2); robust and probe_robust with the c2 variant
+    set(_vsk "${CMAKE_CURRENT_SOURCE_DIR}/test/rd_vu_skin_check.cmake")
+    set(_vsk_wrong "rd: VU skin check: frame [0-9]+ command 0:[0-9]+ mesh rd vu skin check test #[0-9]+ \\(120 vertices\\): [0-9]+ vertices wrong of 120, address 200: got \\([-0-9., ]+\\) want \\([-0-9., ]+\\) \\(a zero matrix at 200 gives it: yes")
+    add_test(NAME rd_vu_skin_check_judge
+             COMMAND "${CMAKE_COMMAND}" -DTOOL=$<TARGET_FILE:rd_vu_skin_check_test> -DMODE=judge
+                     -P "${_vsk}")
+    # clean also 31.: a command of 1025 vertices (past the probe's 1024
+    # rows) boxed over every batch it draws, counted at the run's end
+    add_test(NAME rd_vu_skin_check
+             COMMAND "${CMAKE_COMMAND}" -DTOOL=$<TARGET_FILE:rd_vu_skin_check_test> -DMODE=clean
+                     "-DEXTRA=rd: VU skin check: frame [0-9]+ command 0:[0-9]+ mesh rd vu skin check past #[0-9]+ \\(1025 vertices\\): past the probe's 1024 rows \\(it compares the first 820 vertices\\): its box check made over every batch the command draws \\(1025 vertices\\), on the CPU.*rd: VU skin check: at the end of the run: [0-9]+ checks drawn.*[;,] 1 checks past the probe's 1024 rows, 1 of them boxed over every batch the command draws"
+                     "-DNOT_=vertices wrong" -P "${_vsk}")
+    add_test(NAME rd_vu_skin_check_robust
+             COMMAND "${CMAKE_COMMAND}" -DTOOL=$<TARGET_FILE:rd_vu_skin_check_test> -DMODE=clean
+                     "-DNOT_=vertices wrong" -P "${_vsk}")
+    add_test(NAME rd_vu_skin_check_probe
+             COMMAND "${CMAKE_COMMAND}" -DTOOL=$<TARGET_FILE:rd_vu_skin_check_test> -DMODE=probe
+                     "-DEXTRA=${_vsk_wrong}.*the bone block as the GPU copied it: equal[;,] as the CPU reads it after the fence: equal.*\\(c1\\) the block at a fresh ring offset \\(page phase [0-9]+, the draw's [0-9]+\\): right.*reads as: H1, address-dependent"
+                     -P "${_vsk}")
+    add_test(NAME rd_vu_skin_check_probe_robust
+             COMMAND "${CMAKE_COMMAND}" -DTOOL=$<TARGET_FILE:rd_vu_skin_check_test> -DMODE=probe
+                     "-DEXTRA=${_vsk_wrong}.*\\(c1\\) the block at a fresh ring offset \\(page phase [0-9]+, the draw's [0-9]+\\): right.*\\(c2\\) uniform robustness off: (right|not offered)"
+                     -P "${_vsk}")
+    add_test(NAME rd_vu_skin_check_ring
+             COMMAND "${CMAKE_COMMAND}" -DTOOL=$<TARGET_FILE:rd_vu_skin_check_test> -DMODE=ring
+                     "-DEXTRA=${_vsk_wrong}.*the bone block as the GPU copied it: differs at qwords 184..187[;,] as the CPU reads it after the fence: differs at qwords 184..187.*reads as: H2, a port race.*the GPU's copy of the bone block .*as it is now \\(replay [0-9]+'s, the draw's own offset"
+                     -P "${_vsk}")
+    # the twins (issue 123): twin the frame replayed three times under the
+    # game's mode with the twins on and the scheduled probe off, the bone at
+    # 200 zeroed in the ring after its bytes were kept: the first replay's
+    # twins differ (nothing probed there), the next replay's probe targeted
+    # at that command is wrong at address 200; twin_nan the same with the
+    # bone made NaN (the v0.10.4 picture's form): the probe's wrong vertices
+    # dropped, address 200 named by its non-finite matrix; capture the same
+    # with the sidecar written to a folder: its header and sections read back
+    set(_vsk_twin "rd: VU skin check: frame [0-9]+ command 0:[0-9]+ mesh rd vu skin check test #[0-9]+ \\(120 vertices\\): twins differ: A \\(the draw's offset, page phase [0-9]+\\) [0-9]+ samples, B \\(fresh, phase [0-9]+\\) [0-9]+ samples(, C \\(ring read\\) [0-9]+ samples)?[;,] through [a-z0-9_]+ with colour and Z writes off[^;,]*[;,] the probe of this command: not probed")
+    add_test(NAME rd_vu_skin_check_twin
+             COMMAND "${CMAKE_COMMAND}" -DTOOL=$<TARGET_FILE:rd_vu_skin_check_test> -DMODE=twin
+                     "-DEXTRA=${_vsk_twin}.*${_vsk_wrong}.*the probe targeted after a twin event.*twins at the end of the run: [1-9][0-9]* drawn"
+                     -P "${_vsk}")
+    add_test(NAME rd_vu_skin_check_twin_nan
+             COMMAND "${CMAKE_COMMAND}" -DTOOL=$<TARGET_FILE:rd_vu_skin_check_test> -DMODE=twin
+                     "-DEXTRA=${_vsk_twin}.*vertices wrong of 120, address 200: .*reads as non-finite / dropped: [1-9][0-9]* of them \\(a non-finite matrix at 200 drops [1-9][0-9]*\\).*the probe targeted after a twin event"
+                     -P "${_vsk}")
+    add_test(NAME rd_vu_skin_check_capture
+             COMMAND "${CMAKE_COMMAND}" -DTOOL=$<TARGET_FILE:rd_vu_skin_check_test> -DMODE=capture
+                     "-DARG=${CMAKE_CURRENT_BINARY_DIR}/vu_skin_check_capture"
+                     "-DEXTRA=rd: VU skin check: captured [^,]*vu-skin-fail-[0-9]+-0-[0-9]+\\.bin and asked for a frame dump"
+                     -P "${_vsk}")
+    set_tests_properties(rd_vu_skin_check_twin rd_vu_skin_check_capture
+                         PROPERTIES ENVIRONMENT
+                                    "${_env};ICO_RD_VU_SKIN_SABOTAGE=200,ring;ICO_RD_VU_SKIN_INTERVAL_MS=off")
+    # the twins' thinning (issue 123 after v0.10.5, rd_vu_skin_check.h
+    # RD_SKIN_THIN_REPLAYS, at 4 here): thin a frame of three skinned
+    # commands, three twins a replay until four clean replays, then one a
+    # replay through the box check's pipeline; the ring's bone at 200 zeroed
+    # in the run: the one twin differs and re-arms all three; the sabotage
+    # off: thinned again after four more
+    add_test(NAME rd_vu_skin_check_thin
+             COMMAND "${CMAKE_COMMAND}" -DTOOL=$<TARGET_FILE:rd_vu_skin_check_test> -DMODE=thin
+                     "-DEXTRA=rd: VU skin check: twins thinned to one a picture after 4 clean replays \\(through the box check's pipeline.*twins differ: .*rd: VU skin check: twins re-armed by a twin event: every skinned draw twinned again until 4 replays with none differing \\(re-armed 1 times\\).*rd: VU skin check: twins thinned to one a picture after 4 clean replays.*thinned 2 times, re-armed 2 times \\(thinned at the end\\)"
+                     -P "${_vsk}")
+    set_tests_properties(rd_vu_skin_check_thin
+                         PROPERTIES ENVIRONMENT "${_env};ICO_RD_VU_SKIN_INTERVAL_MS=off"
+                                    SKIP_REGULAR_EXPRESSION "SKIP:")
+    set_tests_properties(rd_vu_skin_check_twin_nan
+                         PROPERTIES ENVIRONMENT
+                                    "${_env};ICO_RD_VU_SKIN_SABOTAGE=200,nan;ICO_RD_VU_SKIN_INTERVAL_MS=off")
+    # issue 123's ladder (rd_vu_bones.c, docs/port/VU_SKIN_CHECK.md "The
+    # ladder"), under the plain set (ICO_RD_VU_SET=plain, the Turnip
+    # profile's: the ring builds are plain variants): probe_c3 the probe's
+    # sabotage (the draw's bytes right): the probe's column 3, the bones
+    # through the ring at the draw's block, right; twin_c the ring's
+    # sabotage: twin C drawn and reading the zeroed bone as A does (it
+    # differs from B); twin_bones_ring the same with the ring builds in force
+    # ([dev] vu_bones = ring): the start line, the twins (both ring reads)
+    # differing and saying so, "the ring read: not healed" at the end
+    add_test(NAME rd_vu_skin_check_probe_c3
+             COMMAND "${CMAKE_COMMAND}" -DTOOL=$<TARGET_FILE:rd_vu_skin_check_test> -DMODE=probe
+                     "-DEXTRA=${_vsk_wrong}.*\\(c3\\) the bones through the ring: right \\(0 wrong\\)[;,] reads as: H1, address-dependent"
+                     -P "${_vsk}")
+    add_test(NAME rd_vu_skin_check_twin_c
+             COMMAND "${CMAKE_COMMAND}" -DTOOL=$<TARGET_FILE:rd_vu_skin_check_test> -DMODE=twin
+                     "-DEXTRA=twins differ: A \\(the draw's offset, page phase [0-9]+\\) [0-9]+ samples, B \\(fresh, phase [0-9]+\\) [0-9]+ samples, C \\(ring read\\) [0-9]+ samples.*the ring read's twin \\(C\\) [1-9][0-9]* drawn, [1-9][0-9]* read, [1-9][0-9]* differ from B"
+                     -P "${_vsk}")
+    add_test(NAME rd_vu_skin_check_twin_bones_ring
+             COMMAND "${CMAKE_COMMAND}" -DTOOL=$<TARGET_FILE:rd_vu_skin_check_test> -DMODE=twin
+                     "-DEXTRA=rd: VU bones: through the ring \\(storage buffer\\) on the skinned entries \\(\\[dev\\] vu_bones = ring, set without the skin check's mark\\).*twins differ: .*A and B read the bones through the ring: step 1 of the ladder in force.*rd: VU skin check: the ring read: not healed \\([1-9][0-9]* of [1-9][0-9]* twins differ"
+                     -P "${_vsk}")
+    set_tests_properties(rd_vu_skin_check_probe_c3 PROPERTIES ENVIRONMENT
+                         "${_env};ICO_RD_VU_SKIN_SABOTAGE=200;ICO_RD_VU_SET=plain")
+    # twin_record (issue 123 after v0.10.5): the twin frame with the pre-pass
+    # on and its batch builds (the record's bones read through t5): the
+    # twins of the record draw read the bones through the entry's ring
+    # build as the record did (A and B the ring read, no C), and still see
+    # the zeroed bone; twin_c is the entry path's C (the pre-pass off)
+    add_test(NAME rd_vu_skin_check_twin_record
+             COMMAND "${CMAKE_COMMAND}" -DTOOL=$<TARGET_FILE:rd_vu_skin_check_test> -DMODE=twin
+                     "-DEXTRA=twins differ: A \\(the draw's offset, page phase [0-9]+\\) [0-9]+ samples, B \\(fresh, phase [0-9]+\\) [0-9]+ samples[;,] through [a-z0-9_]+ with colour and Z writes off \\(the program's own vertex entry's ring build: the draw read the pre-pass record and its batch builds read the bones through the ring\\).*A and B read the bones through the ring, as the pre-pass record did"
+                     "-DNOT_=C \\(ring read\\) [0-9]+ samples"
+                     -P "${_vsk}")
+    set_tests_properties(rd_vu_skin_check_twin_record PROPERTIES ENVIRONMENT
+                         "${_env};ICO_RD_VU_SKIN_SABOTAGE=200,ring;ICO_RD_VU_SKIN_INTERVAL_MS=off;ICO_RD_VU_SET=plain;ICO_RD_VU_PREPASS=1"
+                         SKIP_REGULAR_EXPRESSION "SKIP:")
+    set_tests_properties(rd_vu_skin_check_twin_c PROPERTIES ENVIRONMENT
+                         "${_env};ICO_RD_VU_SKIN_SABOTAGE=200,ring;ICO_RD_VU_SKIN_INTERVAL_MS=off;ICO_RD_VU_SET=plain;ICO_RD_VU_PREPASS=0")
+    set_tests_properties(rd_vu_skin_check_twin_bones_ring PROPERTIES ENVIRONMENT
+                         "${_env};ICO_RD_VU_SKIN_SABOTAGE=200,ring;ICO_RD_VU_SKIN_INTERVAL_MS=off;ICO_RD_VU_SET=plain;ICO_RD_VU_BONES=ring")
+    include("${CMAKE_CURRENT_SOURCE_DIR}/test/rd_vu_skin_trace_tests.cmake")
+    set_tests_properties(rd_vu_skin_check_judge rd_vu_skin_check rd_vu_skin_check_robust
+                         rd_vu_skin_check_probe rd_vu_skin_check_probe_robust
+                         rd_vu_skin_check_ring rd_vu_skin_check_twin rd_vu_skin_check_twin_nan
+                         rd_vu_skin_check_capture rd_vu_skin_check_probe_c3
+                         rd_vu_skin_check_twin_c rd_vu_skin_check_twin_bones_ring
+                         PROPERTIES SKIP_REGULAR_EXPRESSION "SKIP:")
+    set_tests_properties(rd_vu_skin_check PROPERTIES ENVIRONMENT "${_env}")
+    # ICO_RD_VU_SKIN_CHECK=1: the device is made with VK_EXT_pipeline_robustness
+    # only where the check can run (an Adreno, or the setting: vk_device.c)
+    set_tests_properties(rd_vu_skin_check_robust
+                         PROPERTIES ENVIRONMENT "${_env};ICO_GPU_ROBUST=1;ICO_RD_VU_SKIN_CHECK=1")
+    set_tests_properties(rd_vu_skin_check_probe_robust
+                         PROPERTIES ENVIRONMENT
+                                    "${_env};ICO_GPU_ROBUST=1;ICO_RD_VU_SKIN_CHECK=1;ICO_RD_VU_SKIN_SABOTAGE=200")
+    set_tests_properties(rd_vu_skin_check_probe
+                         PROPERTIES ENVIRONMENT "${_env};ICO_RD_VU_SKIN_SABOTAGE=200")
+    set_tests_properties(rd_vu_skin_check_ring
+                         PROPERTIES ENVIRONMENT "${_env};ICO_RD_VU_SKIN_SABOTAGE=200,ring")
     # odd texel counts under MSAA (1935x1080 is 645x360 at scale 3;
     # 2341x1080 at scale 1) and the big scenes: in place passes as at an even
     # width.  Sample counts the device lacks are skipped.  With the buffer path
@@ -1751,26 +2408,11 @@ if(ICO_RUN_TESTS)
     if(_env)
         set_tests_properties(rd_fog_selftest PROPERTIES ENVIRONMENT "${_env}")
     endif()
-    # a player dump with the fog (the dark hall) replayed with the depth in
-    # place and with its copy: SCENE byte for byte the same, on D32S8 and
-    # on D24S8.  Not Run without the dump (dist/dumps is not in the tree)
-    set(ICO_FOG_DUMP "${CMAKE_SOURCE_DIR}/dist/dumps/frame-20261009-083248-v13836.rddump"
-        CACHE FILEPATH "a player dump with the depth fog, for rd_fog_depth_copy_dump")
-    add_test(NAME rd_fog_depth_copy_dump
-             COMMAND "${CMAKE_COMMAND}" -DTOOL=$<TARGET_FILE:rd_replay_tool>
-                     "-DDUMP=${ICO_FOG_DUMP}" "-DOUT=${_dc}/dump"
-                     -P "${CMAKE_CURRENT_SOURCE_DIR}/test/rd_depth_copy_dump.cmake")
-    add_test(NAME rd_fog_depth_copy_dump_d24s8
-             COMMAND "${CMAKE_COMMAND}" -DTOOL=$<TARGET_FILE:rd_replay_tool>
-                     "-DDUMP=${ICO_FOG_DUMP}" "-DOUT=${_dc}/dump_d24s8"
-                     "-DEXTRA_ENV=ICO_VK_FAKE_D24S8=1" -DNO_BUFFER=1
-                     -P "${CMAKE_CURRENT_SOURCE_DIR}/test/rd_depth_copy_dump.cmake")
-    set_tests_properties(rd_fog_depth_copy_dump rd_fog_depth_copy_dump_d24s8
-                         PROPERTIES SKIP_REGULAR_EXPRESSION "SKIP:" TIMEOUT 600)
-    if(_env)
-        set_tests_properties(rd_fog_depth_copy_dump rd_fog_depth_copy_dump_d24s8
-                             PROPERTIES ENVIRONMENT "${_env}")
-    endif()
+    # the replay tool's still re-present, held glow and saved blended frame
+    # (rd_replay_tool_still, _glow_hold, _save_blended, _save_blended_163) and
+    # a fogged frame with the depth in place, its copy and its words through a
+    # buffer (rd_fog_depth_copy_dump, _d24s8), on the committed fixtures
+    include(rd_replay_tool_fixtures.cmake)
     # the same tests and expectations on a device with a
     # phone GPU's limits (ICO_VK_FAKE_LIMITS=mali, port/rhi/vk/vk_device.c:
     # four descriptor sets, 16 sampled images a stage, 256-byte storage
@@ -1794,8 +2436,99 @@ if(ICO_RUN_TESTS)
     endforeach()
     ico_add_sharded_test(rd_mesh_mali 4 PROGRAM rd_mesh_test ARGS "${ICO_DISC_IMAGE}")
     list(APPEND _ico_mali_tests ${rd_mesh_mali_SHARDS})
+    # the upscale marker's Off identity (rd_upscale_test off: the frame
+    # replayed with RDC_UPSCALE_POINT an RDC_NOP gives DISPLAY and the
+    # present byte for byte) under these limits; the corpus's dumps (version
+    # 16 and older) carry no marker.  rd_upscale_off_tiler, below: the same
+    # on the tile-based device profile
+    add_test(NAME rd_upscale_off_mali COMMAND rd_upscale_test off)
+    list(APPEND _ico_mali_tests rd_upscale_off_mali)
     set_tests_properties(${_ico_mali_tests} PROPERTIES SKIP_RETURN_CODE 77 WORKING_DIRECTORY "${_ml}"
                                                        ENVIRONMENT "${_env_mali}")
+    # rd_tex's rate cases (the GPU's end first, threadPresentFree) time real
+    # waits against 33 to 40 ms ticks: alone on the machine, not beside three
+    # other tests (CI run 44468091552: five jobs lost ticks there)
+    set_tests_properties(rd_tex rd_tex_mali PROPERTIES RUN_SERIAL TRUE)
+    # rd_upscale_off_tiler: rd_upscale_test off on the tile-based device
+    # profile (ICO_VK_FAKE_LIMITS=moltenvk, the Apple class of rd_profile.c:
+    # pass areas, the aura box, no glow fold, no UINT views; the class the
+    # mali limits alone do not give on lavapipe), so the list walkers that
+    # pass over the marker on a tiler (the store plan, the pass areas, the
+    # folds' look-ahead, the crack fill's place) leave the picture as with
+    # the marker a NOP
+    add_test(NAME rd_upscale_off_tiler COMMAND rd_upscale_test off)
+    set_tests_properties(rd_upscale_off_tiler PROPERTIES SKIP_RETURN_CODE 77
+                                              ENVIRONMENT "${_env};ICO_VK_FAKE_LIMITS=moltenvk")
+    # rd_upscale_layer_tiler: the whole of rd_upscale_test (the display
+    # layer's pixels and keep hold among it, rd_layer.c) on the same profile:
+    # its store plan, pass areas, pass cuts and folds plan SCENE's passes
+    # before the walk, and the layer lends SCENE's record to the
+    # display-scale composite mid-walk
+    add_test(NAME rd_upscale_layer_tiler COMMAND rd_upscale_test)
+    set_tests_properties(rd_upscale_layer_tiler PROPERTIES SKIP_RETURN_CODE 77
+                                                ENVIRONMENT "${_env};ICO_VK_FAKE_LIMITS=moltenvk")
+    # the two whole runs of rd_upscale_test write and remove the same capture
+    # pictures (rd_upscale_capture_test-*.png in the working directory): run
+    # together, one's "nothing written" check sees the other's file (the
+    # v0.11.8 tag's linux-arm64 job, run 44009812895), so never together
+    set_property(TEST rd_upscale rd_upscale_layer_tiler APPEND PROPERTY RESOURCE_LOCK
+                                                                rd_upscale_capture_files)
+    # issue 179: the VU vertex pre-pass under a phone's limits
+    # (ICO_VK_FAKE_LIMITS=mali clamps the limits; RhiLimits.tiler stays the
+    # device's, so these are the desktop runs under those limits: the
+    # tiler rule itself, rd__vu_prepass_init on RhiLimits.tiler, is
+    # rd_vuprepass_selftest_test's step 6 in every run).
+    # rd_vuprepass_selftest_mali: the
+    # start-up self-test passes over its four replays under synchronisation
+    # validation with the submit-time checks (a hazard between two lists of
+    # the record's copies and reads: the open barrier's job across lists);
+    # _mali_sabotage_straddle: a stale record fails it from replay 2 on;
+    # _mali_vk11: the same self-test through VkRenderPass objects (the
+    # legacy render passes of a Vulkan 1.1 phone without dynamic rendering
+    # and without dynamic state, ICO_VK_FAKE_API=1.1 and
+    # ICO_VK_FAKE_NO_DYNAMIC=1, vk_device.c, vk_renderpass.c): the one of
+    # the three that adds coverage the desktop runs lack.
+    set(_env_mali_pre ${_env_mali} "ICO_RD_VU_PREPASS=1")
+    if(_env)
+        list(APPEND _env_mali_pre "VK_KHRONOS_VALIDATION_SYNCVAL_SUBMIT_TIME_VALIDATION=true")
+    endif()
+    add_test(NAME rd_vuprepass_selftest_mali
+             COMMAND "${CMAKE_COMMAND}" -DTOOL=$<TARGET_FILE:rd_vuprepass_selftest_test> -DMODE=on
+                     "-DLINE=${_vst_on}" -P "${_vst}")
+    add_test(NAME rd_vuprepass_selftest_mali_sabotage_straddle
+             COMMAND "${CMAKE_COMMAND}" -DTOOL=$<TARGET_FILE:rd_vuprepass_selftest_test> -DMODE=off
+                     "-DLINE=${_vst_stale}"
+                     "-DEXTRA=rd: VU pre-pass: ICO_RD_VU_PREPASS_SABOTAGE: in the self-test the record's copies"
+                     -P "${_vst}")
+    add_test(NAME rd_vuprepass_selftest_mali_vk11
+             COMMAND "${CMAKE_COMMAND}" -DTOOL=$<TARGET_FILE:rd_vuprepass_selftest_test> -DMODE=on
+                     "-DLINE=${_vst_on}" -P "${_vst}")
+    # the record stored by the vertex shaders under the phone's limits
+    # (_stores_mali) and through VkRenderPass objects (_stores_vk11: the
+    # record's passes without attachments as legacy subpasses), both named
+    # on the verdict line, under the same validation
+    add_test(NAME rd_vuprepass_selftest_stores_mali
+             COMMAND "${CMAKE_COMMAND}" -DTOOL=$<TARGET_FILE:rd_vuprepass_selftest_test> -DMODE=on
+                     "-DLINE=${_vst_on}" "-DEXTRA=${_vst_stores_line}" -P "${_vst}")
+    add_test(NAME rd_vuprepass_selftest_stores_vk11
+             COMMAND "${CMAKE_COMMAND}" -DTOOL=$<TARGET_FILE:rd_vuprepass_selftest_test> -DMODE=on
+                     "-DLINE=${_vst_on}" "-DEXTRA=${_vst_stores_line}" -P "${_vst}")
+    set_tests_properties(rd_vuprepass_selftest_stores_mali
+                         PROPERTIES ENVIRONMENT "${_env_mali_pre};ICO_RD_VU_RECORD=stores")
+    set_tests_properties(
+        rd_vuprepass_selftest_stores_vk11
+        PROPERTIES ENVIRONMENT
+                   "${_env_mali_pre};ICO_RD_VU_RECORD=stores;ICO_VK_FAKE_API=1.1;ICO_VK_FAKE_NO_DYNAMIC=1")
+    set_tests_properties(rd_vuprepass_selftest_mali rd_vuprepass_selftest_mali_sabotage_straddle
+                         rd_vuprepass_selftest_mali_vk11 rd_vuprepass_selftest_stores_mali
+                         rd_vuprepass_selftest_stores_vk11
+                         PROPERTIES SKIP_REGULAR_EXPRESSION "SKIP:")
+    set_tests_properties(rd_vuprepass_selftest_mali PROPERTIES ENVIRONMENT "${_env_mali_pre}")
+    set_tests_properties(rd_vuprepass_selftest_mali_sabotage_straddle
+                         PROPERTIES ENVIRONMENT "${_env_mali_pre};ICO_RD_VU_PREPASS_SABOTAGE=stale")
+    set_tests_properties(
+        rd_vuprepass_selftest_mali_vk11
+        PROPERTIES ENVIRONMENT "${_env_mali_pre};ICO_VK_FAKE_API=1.1;ICO_VK_FAKE_NO_DYNAMIC=1")
     # the same tests and expectations at the limits every Vulkan device is
     # required to meet (ICO_VK_FAKE_LIMITS=min, vk_device.c: 256-byte offset
     # alignment, 2^27-byte storage ranges, 4096-texel images), where phone
@@ -1835,16 +2568,18 @@ if(ICO_RUN_TESTS)
                          PROPERTIES ENVIRONMENT "${_env};ICO_RD_VU_PREPASS_SABOTAGE=ticks")
     set_tests_properties(rd_vuprepass_selftest_sabotage_tri
                          PROPERTIES ENVIRONMENT "${_env};ICO_RD_VU_PREPASS_SABOTAGE=tri")
-    # rd_vustage_ab (test/rd_vustage_ab.cmake): every dump of the
-    # machine-local list tools/vustage_dumps.txt replayed the old way
+    # rd_vustage_ab (test/rd_vustage_ab.cmake): the fixtures of
+    # test/fixtures/lists/vustage.txt (rd_fixture.cmake; _vu_fx the tool,
+    # the folder and the helpers) replayed the old way
     # (ICO_RD_VU_PREPASS=0, the programs' entries) and through the record,
     # at Original 4:3 1x and Enhanced 4:3 2x under ICO_RD_BLEND=fixed: every
-    # named target byte for byte; SKIP without the list, its dumps or a
-    # device
+    # named target byte for byte, the record's vertices; SKIP without a device
+    set(_vu_fx -DFIXTURE_TOOL=$<TARGET_FILE:rd_fixture_tool> "-DFIXTURES=${ICO_FIXTURE_DIR}"
+               "-DFIXTURE_HELPERS=${ICO_FIXTURE_HELPERS}")
+    set(_vu_list "-DLIST=${ICO_FIXTURE_DIR}/lists/vustage.txt")
     file(MAKE_DIRECTORY "${CMAKE_CURRENT_BINARY_DIR}/vustage_ab")
     add_test(NAME rd_vustage_ab
-             COMMAND "${CMAKE_COMMAND}" -DTOOL=$<TARGET_FILE:rd_replay_tool>
-                     "-DLIST=${CMAKE_SOURCE_DIR}/tools/vustage_dumps.txt"
+             COMMAND "${CMAKE_COMMAND}" -DTOOL=$<TARGET_FILE:rd_replay_tool> ${_vu_fx} "${_vu_list}"
                      "-DOUT=${CMAKE_CURRENT_BINARY_DIR}/vustage_ab"
                      -P "${CMAKE_CURRENT_SOURCE_DIR}/test/rd_vustage_ab.cmake")
     set_tests_properties(rd_vustage_ab PROPERTIES SKIP_REGULAR_EXPRESSION "SKIP:" TIMEOUT 3600)
@@ -1859,13 +2594,55 @@ if(ICO_RUN_TESTS)
     # vertices, fewer pre-pass draws batched; SKIP as rd_vustage_ab
     file(MAKE_DIRECTORY "${CMAKE_CURRENT_BINARY_DIR}/vubatch_ab")
     add_test(NAME rd_vubatch_ab
-             COMMAND "${CMAKE_COMMAND}" -DTOOL=$<TARGET_FILE:rd_replay_tool>
-                     "-DLIST=${CMAKE_SOURCE_DIR}/tools/vustage_dumps.txt"
+             COMMAND "${CMAKE_COMMAND}" -DTOOL=$<TARGET_FILE:rd_replay_tool> ${_vu_fx} "${_vu_list}"
                      "-DOUT=${CMAKE_CURRENT_BINARY_DIR}/vubatch_ab"
                      -P "${CMAKE_CURRENT_SOURCE_DIR}/test/rd_vubatch_ab.cmake")
     set_tests_properties(rd_vubatch_ab PROPERTIES SKIP_REGULAR_EXPRESSION "SKIP:" TIMEOUT 3600)
     if(_env)
         set_tests_properties(rd_vubatch_ab PROPERTIES ENVIRONMENT "${_env}")
+    endif()
+    # rd_vurecord_ab (test/rd_vu_env_ab.cmake): rd_pixel's dump and the same
+    # fixtures with the VU record drawn into the render targets and copied
+    # (ICO_RD_VU_RECORD=targets) and stored by the vertex shaders (=stores;
+    # rd_vu_record.h) at Original 4:3 1x and Enhanced 16:9 2x under
+    # ICO_RD_BLEND=fixed: every named target byte for byte, both runs every VU
+    # command through the record, each naming its write, each fixture's
+    # record vertices (FX_A, FX_B).  rd_vuprepass_min_ab:
+    # the same fixtures with [dev] vu_prepass_min under every frame
+    # (ICO_RD_VU_PREPASS_MIN=0) and above every frame (2147483647: each frame
+    # skipped, every VU command the old way): byte for byte, the skips counted
+    file(MAKE_DIRECTORY "${CMAKE_CURRENT_BINARY_DIR}/vurecord_ab"
+         "${CMAKE_CURRENT_BINARY_DIR}/vuprepass_min_ab")
+    add_test(NAME rd_vurecord_ab
+             COMMAND "${CMAKE_COMMAND}" -DTOOL=$<TARGET_FILE:rd_replay_tool> -DNAME=rd_vurecord_ab
+                     "-DDUMP=${CMAKE_CURRENT_BINARY_DIR}/rd_pixel_frame.rddump" ${_vu_fx} "${_vu_list}"
+                     -DFX_A=prepass_vertices -DFX_B=prepass_vertices
+                     "-DOUT=${CMAKE_CURRENT_BINARY_DIR}/vurecord_ab"
+                     "-DENV_A=ICO_RD_VU_RECORD=targets" "-DENV_B=ICO_RD_VU_RECORD=stores"
+                     "-DREQ_A=0 mesh and grid draws the old way.*stats: VU record targets: drawn into 3"
+                     "-DREQ_B=0 mesh and grid draws the old way.*stats: VU record stores: stored by"
+                     -P "${CMAKE_CURRENT_SOURCE_DIR}/test/rd_vu_env_ab.cmake")
+    add_test(NAME rd_vuprepass_min_ab
+             COMMAND "${CMAKE_COMMAND}" -DTOOL=$<TARGET_FILE:rd_replay_tool>
+                     -DNAME=rd_vuprepass_min_ab
+                     # no rd_pixel dump: rd_pixel_frame.rddump has no VU draws (0 passes either
+                     # way); the list's fixtures alone, each with VU commands (a frame without
+                     # them would be skipped: 0 passes with the floor at 0, nothing to skip)
+                     ${_vu_fx} "${_vu_list}" -DFX_A=prepass_vertices
+                     "-DOUT=${CMAKE_CURRENT_BINARY_DIR}/vuprepass_min_ab"
+                     "-DSKIP_UNLESS=stats: VU pre-pass on: [1-9][0-9]* passes"
+                     "-DENV_A=ICO_RD_VU_PREPASS_MIN=0" "-DENV_B=ICO_RD_VU_PREPASS_MIN=2147483647"
+                     "-DREQ_A=stats: VU pre-pass on: [12] passes.*pre-pass skipped 0 frames under 0 slots"
+                     "-DREQ_B=stats: VU pre-pass on: 0 passes.*pre-pass skipped [1-9][0-9]* frames under 2147483647 slots"
+                     -P "${CMAKE_CURRENT_SOURCE_DIR}/test/rd_vu_env_ab.cmake")
+    set_tests_properties(rd_vurecord_ab rd_vuprepass_min_ab
+                         PROPERTIES SKIP_REGULAR_EXPRESSION "SKIP:" TIMEOUT 3600
+                                    FIXTURES_REQUIRED rd_dump)
+    # the record by compute dispatches (issue 179): rd_pixel_compute, the
+    # self-test's compute rows, rd_vurecord_ab_compute
+    include("${CMAKE_CURRENT_SOURCE_DIR}/test/rd_vu_compute_tests.cmake")
+    if(_env)
+        set_tests_properties(rd_vurecord_ab rd_vuprepass_min_ab PROPERTIES ENVIRONMENT "${_env}")
     endif()
     # rd_vumerge_ab (test/rd_vumerge_ab.cmake): the same dumps with every VU
     # draw a GPU draw of its own (ICO_RD_VU_MERGE=0) and with the draw merge
@@ -1876,27 +2653,27 @@ if(ICO_RUN_TESTS)
     # joined; SKIP as rd_vustage_ab
     file(MAKE_DIRECTORY "${CMAKE_CURRENT_BINARY_DIR}/vumerge_ab")
     add_test(NAME rd_vumerge_ab
-             COMMAND "${CMAKE_COMMAND}" -DTOOL=$<TARGET_FILE:rd_replay_tool>
-                     "-DLIST=${CMAKE_SOURCE_DIR}/tools/vustage_dumps.txt"
+             COMMAND "${CMAKE_COMMAND}" -DTOOL=$<TARGET_FILE:rd_replay_tool> ${_vu_fx} "${_vu_list}"
                      "-DOUT=${CMAKE_CURRENT_BINARY_DIR}/vumerge_ab"
                      -P "${CMAKE_CURRENT_SOURCE_DIR}/test/rd_vumerge_ab.cmake")
     set_tests_properties(rd_vumerge_ab PROPERTIES SKIP_REGULAR_EXPRESSION "SKIP:" TIMEOUT 3600)
     if(_env)
         set_tests_properties(rd_vumerge_ab PROPERTIES ENVIRONMENT "${_env}")
     endif()
-    # rd_vumerge_mali (test/rd_vumerge_mali.cmake, issue 164): the dumps of
-    # the machine-local list tools/vumerge_mali_dumps.txt (the Mali-G52
-    # reporter's frame, /primary/dev/ico-dumps/164/, the phone frames and a
-    # capture) on the plain device and under a phone GPU's limits without
+    # rd_vumerge_mali (test/rd_vumerge_mali.cmake, issue 164): the fixtures
+    # of test/fixtures/lists/vumerge_mali.txt (the Mali-G52 reporter's
+    # frame, the phone frames and a capture, each with its expect= figure)
+    # on the plain device and under a phone GPU's limits without
     # dual-source blending (ICO_VK_FAKE_LIMITS=mali ICO_VK_FAKE_NO_DUAL=1:
     # every lerp draw two passes), under ICO_RD_BLEND=fixed: every named
     # target byte for byte, the draw merge's figures and the fused pairs the
-    # plain device's (826 draws merged into 87 on the 164 frame); label
+    # plain device's (the list's figure: 1012 draws merged into 110 on the
+    # 164 frame's fixture, the cull off); label
     # mali; SKIP as rd_vustage_ab
     file(MAKE_DIRECTORY "${CMAKE_CURRENT_BINARY_DIR}/vumerge_mali")
     add_test(NAME rd_vumerge_mali
-             COMMAND "${CMAKE_COMMAND}" -DTOOL=$<TARGET_FILE:rd_replay_tool>
-                     "-DLIST=${CMAKE_SOURCE_DIR}/tools/vumerge_mali_dumps.txt"
+             COMMAND "${CMAKE_COMMAND}" -DTOOL=$<TARGET_FILE:rd_replay_tool> ${_vu_fx}
+                     "-DLIST=${ICO_FIXTURE_DIR}/lists/vumerge_mali.txt"
                      "-DOUT=${CMAKE_CURRENT_BINARY_DIR}/vumerge_mali"
                      -P "${CMAKE_CURRENT_SOURCE_DIR}/test/rd_vumerge_mali.cmake")
     set_tests_properties(rd_vumerge_mali PROPERTIES SKIP_REGULAR_EXPRESSION "SKIP:" TIMEOUT 1800
@@ -1905,42 +2682,139 @@ if(ICO_RUN_TESTS)
         set_tests_properties(rd_vumerge_mali PROPERTIES ENVIRONMENT "${_env}")
     endif()
     # rd_occlusion_tool (test/rd_occlusion_tool.cmake, docs/port/RENDER.md
-    # "Culling"): rd_replay_tool --occlusion on the first dump of the
-    # machine-local list tools/occlusion_corpus.txt here, at Original 4:3 1x:
-    # the hidden-draw line's shape and its --nop spec, then the plain replay
-    # and the replay with the hidden commands NOPs, DISPLAY and PRESENT byte
-    # for byte under ICO_RD_BLEND=fixed; SKIP without the list, a dump or a
-    # device
+    # "Culling"): rd_replay_tool --occlusion on the fixture of
+    # test/fixtures/lists/occlusion_tool.txt, at Original 4:3 1x: the
+    # hidden-draw line's shape (a draw hidden) and its --nop spec, then the
+    # plain replay and the replay with the hidden commands NOPs, DISPLAY and
+    # PRESENT byte for byte under ICO_RD_BLEND=fixed; SKIP without a device
     add_test(NAME rd_occlusion_tool
-             COMMAND "${CMAKE_COMMAND}" -DTOOL=$<TARGET_FILE:rd_replay_tool>
-                     "-DLIST=${CMAKE_SOURCE_DIR}/tools/occlusion_corpus.txt"
+             COMMAND "${CMAKE_COMMAND}" -DTOOL=$<TARGET_FILE:rd_replay_tool> ${_ico_vis_fx}
+                     "-DLIST=${ICO_FIXTURE_DIR}/lists/occlusion_tool.txt"
                      "-DOUT=${CMAKE_CURRENT_BINARY_DIR}/occlusion_tool"
                      -P "${CMAKE_CURRENT_SOURCE_DIR}/test/rd_occlusion_tool.cmake")
     set_tests_properties(rd_occlusion_tool PROPERTIES SKIP_REGULAR_EXPRESSION "SKIP:" TIMEOUT 1800)
     if(_env)
         set_tests_properties(rd_occlusion_tool PROPERTIES ENVIRONMENT "${_env}")
     endif()
-    # rd_noplanes_ab (test/rd_noplanes_ab.cmake, issue 161): the dumps of the
-    # machine-local list tools/noplanes_dumps.txt (the title and the boot,
-    # each drawing one screen-prim triangle key with planes, and a capture
-    # that draws none) with the sprite planes builds and without them
-    # (ICO_RD_NO_SPRITE_PLANES=1, the fallback [dev] pipeline_skip turns on):
-    # every target byte for byte on all four, the title's and the boot's 2
-    # commands each through the plain builds (none on the capture); SKIP as
-    # rd_vustage_ab
+    # the skinned draws' checks on the committed fixtures (issue 163, issue
+    # 123's ladder): rd_vu_skin_check_dump, the rd_vu_skin_check_163* and
+    # rd_vu_skin_check_123* rows, rd_vu_skin_check_ab, rd_vu_bones_ring_ab and
+    # _prepass (test/rd_vu_skin_fx_tests.cmake)
+    set(_vskd "${CMAKE_CURRENT_SOURCE_DIR}/test/rd_vu_skin_check_dump.cmake")
+    set(_vskd_clean "[0-9]+ skinned commands, [1-9][0-9]* checks, 0 wrong \\(address 0\\), 0 blocks whose bytes differed \\(0 changed after the draw\\), 0 of [0-9]+ box checks with samples outside")
+    include("${CMAKE_CURRENT_SOURCE_DIR}/test/rd_vu_skin_fx_tests.cmake")
+    # rd_region_stats (test/rd_region_stats.cmake, docs/port/VU1_PROGRAMS.md
+    # "The region rule"): rd_replay_tool --region-stats on the fixtures of
+    # test/fixtures/lists/region_stats.txt, at Original 4:3 1x and Enhanced
+    # 4:3 2x: the lines' shapes, then the pass dumps of the plain replay and
+    # of the replay with the draws the CPU oracle says draw nothing NOPs
+    # (--region-out's spec), byte for byte; the orig setting's spec the same
+    # without a device; SKIP without a device
+    add_test(NAME rd_region_stats
+             COMMAND "${CMAKE_COMMAND}" -DTOOL=$<TARGET_FILE:rd_replay_tool> ${_ico_vis_fx}
+                     "-DLIST=${ICO_FIXTURE_DIR}/lists/region_stats.txt"
+                     "-DOUT=${CMAKE_CURRENT_BINARY_DIR}/region_stats"
+                     -P "${CMAKE_CURRENT_SOURCE_DIR}/test/rd_region_stats.cmake")
+    set_tests_properties(rd_region_stats PROPERTIES SKIP_REGULAR_EXPRESSION "SKIP:" TIMEOUT 1800)
+    if(_env)
+        set_tests_properties(rd_region_stats PROPERTIES ENVIRONMENT "${_env}")
+    endif()
+    # rd_sideband_ab (test/rd_sideband_ab.cmake, issue 29, docs/port/VU1_PROGRAMS.md
+    # "The region rule"): the committed fixtures of lists/wide.txt at their own
+    # aspect, Original 1x and Enhanced 2x, with the PS2's drop on every VU draw
+    # (ICO_RD_VU_BESIDE=0) and with the side bands: tools/cmp_dirs_band.py holds
+    # SCENE's centre 512 GS pixels byte for byte and every changed side pixel to
+    # one the drop left at the fog colour; the side bands' mode as each fixture
+    # declares (side_band_card_draws); SKIP without a device
+    file(MAKE_DIRECTORY "${CMAKE_CURRENT_BINARY_DIR}/sideband_ab")
+    add_test(NAME rd_sideband_ab
+             COMMAND "${CMAKE_COMMAND}" -DTOOL=$<TARGET_FILE:rd_replay_tool>
+                     "-DPYTHON=${Python3_EXECUTABLE}"
+                     "-DCMP=${CMAKE_SOURCE_DIR}/tools/cmp_dirs_band.py"
+                     -DFIXTURE_TOOL=$<TARGET_FILE:rd_fixture_tool> "-DFIXTURES=${ICO_FIXTURE_DIR}"
+                     "-DFIXTURE_HELPERS=${ICO_FIXTURE_HELPERS}"
+                     "-DLIST=${ICO_FIXTURE_DIR}/lists/wide.txt"
+                     "-DOUT=${CMAKE_CURRENT_BINARY_DIR}/sideband_ab"
+                     -P "${CMAKE_CURRENT_SOURCE_DIR}/test/rd_sideband_ab.cmake")
+    set_tests_properties(rd_sideband_ab PROPERTIES SKIP_REGULAR_EXPRESSION "SKIP:" TIMEOUT 3600)
+    if(_env)
+        set_tests_properties(rd_sideband_ab PROPERTIES ENVIRONMENT "${_env}")
+    endif()
+    # rd_sideband_cards (test/rd_sideband_cards.cmake, issue 189,
+    # docs/port/VU1_PROGRAMS.md "The region rule", step 7): the committed
+    # fixtures of lists/sideband_cards.txt (fx-cards-189: the reporter's frame
+    # made with @scene cards, whose only drops are its cards), at Original
+    # 4:3, Enhanced 4:3 2x, Enhanced 16:10 and the reporter's settings: every
+    # target byte for byte with and without the side bands (a card keeps the
+    # drop beside the picture), --stats's "side bands: N draws with cards",
+    # --region-stats's card drops (the list's counts) and nothing beside, the
+    # camera rule drawing the facing card, and tools/band_seam.py's picture
+    # edges within 1.5 levels on the 16:10 presents; SKIP without a device
+    file(MAKE_DIRECTORY "${CMAKE_CURRENT_BINARY_DIR}/sideband_cards")
+    set(_sbc_py "")
+    if(Python3_FOUND)
+        set(_sbc_py "-DPYTHON=${Python3_EXECUTABLE}")
+    endif()
+    add_test(NAME rd_sideband_cards
+             COMMAND "${CMAKE_COMMAND}" -DTOOL=$<TARGET_FILE:rd_replay_tool>
+                     -DFIXTURE_TOOL=$<TARGET_FILE:rd_fixture_tool> "-DFIXTURES=${ICO_FIXTURE_DIR}"
+                     "-DFIXTURE_HELPERS=${ICO_FIXTURE_HELPERS}"
+                     "-DLIST=${ICO_FIXTURE_DIR}/lists/sideband_cards.txt"
+                     "-DSEAM=${CMAKE_SOURCE_DIR}/tools/band_seam.py" ${_sbc_py}
+                     "-DOUT=${CMAKE_CURRENT_BINARY_DIR}/sideband_cards"
+                     -P "${CMAKE_CURRENT_SOURCE_DIR}/test/rd_sideband_cards.cmake")
+    set_tests_properties(rd_sideband_cards PROPERTIES SKIP_REGULAR_EXPRESSION "SKIP:" TIMEOUT 900)
+    if(_env)
+        set_tests_properties(rd_sideband_cards PROPERTIES ENVIRONMENT "${_env}")
+    endif()
+    # rd_region_camera_ab (test/rd_region_camera_ab.cmake, docs/port/VU1_PROGRAMS.md
+    # "The region rule", DIVERGENCES.md VD-29): the camera rule against the
+    # PS2's region rule on the committed fixtures of lists/wide.txt at their own
+    # aspect, Original 1x and Enhanced 2x: tools/region_camera_report.py holds
+    # every SCENE pixel the camera rule changes to the CPU oracle's mask
+    # (--region-mask) and every target byte for byte where the mask is empty,
+    # the camera rule's mode on each (region_rule_draws); and --region-stats
+    # under the camera rule gives the same verdicts at the Original preset and
+    # Enhanced at 1x; SKIP without a device
+    if(Python3_FOUND)
+        file(MAKE_DIRECTORY "${CMAKE_CURRENT_BINARY_DIR}/region_camera_ab")
+        add_test(NAME rd_region_camera_ab
+                 COMMAND "${CMAKE_COMMAND}" -DTOOL=$<TARGET_FILE:rd_replay_tool>
+                         "-DPYTHON=${Python3_EXECUTABLE}"
+                         "-DREPORT=${CMAKE_SOURCE_DIR}/tools/region_camera_report.py"
+                         -DFIXTURE_TOOL=$<TARGET_FILE:rd_fixture_tool>
+                         "-DFIXTURES=${ICO_FIXTURE_DIR}" "-DFIXTURE_HELPERS=${ICO_FIXTURE_HELPERS}"
+                         "-DLIST=${ICO_FIXTURE_DIR}/lists/wide.txt"
+                         "-DOUT=${CMAKE_CURRENT_BINARY_DIR}/region_camera_ab"
+                         -P "${CMAKE_CURRENT_SOURCE_DIR}/test/rd_region_camera_ab.cmake")
+        set_tests_properties(rd_region_camera_ab PROPERTIES SKIP_REGULAR_EXPRESSION "SKIP:"
+                                                            TIMEOUT 3600)
+        if(_env)
+            set_tests_properties(rd_region_camera_ab PROPERTIES ENVIRONMENT "${_env}")
+        endif()
+    endif()
+    # rd_noplanes_ab (test/rd_noplanes_ab.cmake, issue 161): the fixtures of
+    # test/fixtures/lists/noplanes.txt (the title and the boot, each drawing
+    # screen-prim triangle keys with planes, and a capture that draws none)
+    # with the sprite planes builds and without them (ICO_RD_NO_SPRITE_PLANES=1,
+    # the fallback [dev] pipeline_skip turns on): every target byte for byte,
+    # the commands each line names through the plain builds (the path ran:
+    # noplanes_fallback); SKIP without a device
     file(MAKE_DIRECTORY "${CMAKE_CURRENT_BINARY_DIR}/noplanes_ab")
     add_test(NAME rd_noplanes_ab
              COMMAND "${CMAKE_COMMAND}" -DTOOL=$<TARGET_FILE:rd_replay_tool>
-                     "-DLIST=${CMAKE_SOURCE_DIR}/tools/noplanes_dumps.txt"
+                     -DFIXTURE_TOOL=$<TARGET_FILE:rd_fixture_tool>
+                     "-DFIXTURES=${ICO_FIXTURE_DIR}" "-DFIXTURE_HELPERS=${ICO_FIXTURE_HELPERS}"
+                     "-DLIST=${ICO_FIXTURE_DIR}/lists/noplanes.txt"
                      "-DOUT=${CMAKE_CURRENT_BINARY_DIR}/noplanes_ab"
                      -P "${CMAKE_CURRENT_SOURCE_DIR}/test/rd_noplanes_ab.cmake")
     set_tests_properties(rd_noplanes_ab PROPERTIES SKIP_REGULAR_EXPRESSION "SKIP:" TIMEOUT 1800)
     if(_env)
         set_tests_properties(rd_noplanes_ab PROPERTIES ENVIRONMENT "${_env}")
     endif()
-    # rd_vufuse_ab (test/rd_vufuse_ab.cmake): the same dumps and the phone's
-    # frames (tools/vufuse_dumps.txt) with code 36's kicks under their own
-    # pipelines (ICO_RD_VU_FUSE=0) and with the fused scissor pair
+    # rd_vufuse_ab (test/rd_vufuse_ab.cmake): the fixtures of
+    # test/fixtures/lists/vufuse.txt (the phone's frames marked) with code
+    # 36's kicks under their own pipelines (ICO_RD_VU_FUSE=0) and with the fused scissor pair
     # (rd_replay_vu.c vuFuseVerdict), at the phone's profile (the programs'
     # entries, 2x at 2.189 presented at 2364x1080, and Resolution Auto: the
     # no-planes twins) and Enhanced 2x 4:3 and 16:9 through the entries and
@@ -1950,9 +2824,8 @@ if(ICO_RUN_TESTS)
     # by what the merge joined; SKIP as rd_vustage_ab
     file(MAKE_DIRECTORY "${CMAKE_CURRENT_BINARY_DIR}/vufuse_ab")
     add_test(NAME rd_vufuse_ab
-             COMMAND "${CMAKE_COMMAND}" -DTOOL=$<TARGET_FILE:rd_replay_tool>
-                     "-DLIST=${CMAKE_SOURCE_DIR}/tools/vustage_dumps.txt"
-                     "-DEXTRA=${CMAKE_SOURCE_DIR}/tools/vufuse_dumps.txt"
+             COMMAND "${CMAKE_COMMAND}" -DTOOL=$<TARGET_FILE:rd_replay_tool> ${_vu_fx}
+                     "-DLIST=${ICO_FIXTURE_DIR}/lists/vufuse.txt"
                      "-DOUT=${CMAKE_CURRENT_BINARY_DIR}/vufuse_ab"
                      -P "${CMAKE_CURRENT_SOURCE_DIR}/test/rd_vufuse_ab.cmake")
     set_tests_properties(rd_vufuse_ab PROPERTIES SKIP_REGULAR_EXPRESSION "SKIP:" TIMEOUT 5400)
@@ -1997,7 +2870,7 @@ if(ICO_RUN_TESTS)
     # ICO_RD_UBER=on: lavapipe orders the attachment read): the VU draws
     # through the colour read, merged and fused, byte for byte as one GPU
     # draw a draw and as the kicks apart; on rd_pixel's frames and on the
-    # corpus lists (SKIP without them)
+    # fixture lists
     file(MAKE_DIRECTORY "${CMAKE_CURRENT_BINARY_DIR}/vumerge_ab_pixel_uber"
          "${CMAKE_CURRENT_BINARY_DIR}/vufuse_ab_pixel_uber"
          "${CMAKE_CURRENT_BINARY_DIR}/vumerge_ab_uber" "${CMAKE_CURRENT_BINARY_DIR}/vufuse_ab_uber")
@@ -2015,15 +2888,13 @@ if(ICO_RUN_TESTS)
                          PROPERTIES SKIP_REGULAR_EXPRESSION "SKIP:" FIXTURES_REQUIRED rd_dump
                                     TIMEOUT 600)
     add_test(NAME rd_vumerge_ab_uber
-             COMMAND "${CMAKE_COMMAND}" -DTOOL=$<TARGET_FILE:rd_replay_tool>
-                     "-DLIST=${CMAKE_SOURCE_DIR}/tools/vustage_dumps.txt"
+             COMMAND "${CMAKE_COMMAND}" -DTOOL=$<TARGET_FILE:rd_replay_tool> ${_vu_fx} "${_vu_list}"
                      "-DBLEND_ENV=ICO_RD_UBER=on"
                      "-DOUT=${CMAKE_CURRENT_BINARY_DIR}/vumerge_ab_uber"
                      -P "${CMAKE_CURRENT_SOURCE_DIR}/test/rd_vumerge_ab.cmake")
     add_test(NAME rd_vufuse_ab_uber
-             COMMAND "${CMAKE_COMMAND}" -DTOOL=$<TARGET_FILE:rd_replay_tool>
-                     "-DLIST=${CMAKE_SOURCE_DIR}/tools/vustage_dumps.txt"
-                     "-DEXTRA=${CMAKE_SOURCE_DIR}/tools/vufuse_dumps.txt"
+             COMMAND "${CMAKE_COMMAND}" -DTOOL=$<TARGET_FILE:rd_replay_tool> ${_vu_fx}
+                     "-DLIST=${ICO_FIXTURE_DIR}/lists/vufuse.txt"
                      "-DBLEND_ENV=ICO_RD_UBER=on"
                      "-DOUT=${CMAKE_CURRENT_BINARY_DIR}/vufuse_ab_uber"
                      -P "${CMAKE_CURRENT_SOURCE_DIR}/test/rd_vufuse_ab.cmake")
@@ -2050,9 +2921,9 @@ if(ICO_RUN_TESTS)
         set_tests_properties(rd_vumerge_ab_pixel rd_vufuse_ab_pixel rd_vustage_ab_pixel
                              rd_vumerge_fallback PROPERTIES ENVIRONMENT "${_env}")
     endif()
-    # rd_store_plan_ab (test/rd_store_plan_ab.cmake): the same dumps and the
-    # phone's frame with every depth store kept (ICO_RD_STORE_PLAN=0), with the
-    # store plan (rd_store_plan.c) and with every depth store dropped
+    # rd_store_plan_ab (test/rd_store_plan_ab.cmake): the fixtures of
+    # test/fixtures/lists/store_plan.txt with every depth store kept
+    # (ICO_RD_STORE_PLAN=0), with the store plan (rd_store_plan.c) and with every depth store dropped
     # (ICO_RD_STORE_PLAN=all), under ICO_RD_STORE_POISON=1 (a load the plan
     # leaves undefined clears to garbage: lavapipe keeps the contents itself),
     # at the phone's profile and the desktop's at 4:3 and 16:9 2x, under
@@ -2061,35 +2932,68 @@ if(ICO_RUN_TESTS)
     # rd_vustage_ab
     file(MAKE_DIRECTORY "${CMAKE_CURRENT_BINARY_DIR}/store_plan_ab")
     add_test(NAME rd_store_plan_ab
-             COMMAND "${CMAKE_COMMAND}" -DTOOL=$<TARGET_FILE:rd_replay_tool>
-                     "-DLIST=${CMAKE_SOURCE_DIR}/tools/vustage_dumps.txt"
-                     "-DEXTRA=${CMAKE_SOURCE_DIR}/tools/vufuse_dumps.txt"
+             COMMAND "${CMAKE_COMMAND}" -DTOOL=$<TARGET_FILE:rd_replay_tool> ${_vu_fx}
+                     "-DLIST=${ICO_FIXTURE_DIR}/lists/store_plan.txt"
                      "-DOUT=${CMAKE_CURRENT_BINARY_DIR}/store_plan_ab"
                      -P "${CMAKE_CURRENT_SOURCE_DIR}/test/rd_store_plan_ab.cmake")
     set_tests_properties(rd_store_plan_ab PROPERTIES SKIP_REGULAR_EXPRESSION "SKIP:" TIMEOUT 3600)
     if(_env)
         set_tests_properties(rd_store_plan_ab PROPERTIES ENVIRONMENT "${_env}")
     endif()
-    # rd_thread_ab (test/rd_thread_ab.cmake): the same dumps through
-    # rd_replay_tool --render-thread off, sync and on (the replays, the
-    # interpolation and the renderer's calls on a thread of their own,
-    # rd_thread.h), at Original and Enhanced 2x and, for the F12 zips, the
-    # blended present at 0.5: every target's PNG byte for byte; SKIP as
-    # rd_vustage_ab
+    # rd_cull_ab (test/rd_cull_ab.cmake): the scene draws' visibility test
+    # (rd_vis.c, rd_vis_hiz.c) against every draw replayed, byte for byte: the
+    # fixtures of test/fixtures/lists/cull.txt, under ICO_RD_BLEND=fixed, with
+    # ICO_RD_CULL=off, frustum and full, through --pass-dump --stats at Original
+    # 4:3 640x480, Enhanced 4:3 2x, Enhanced 2x at the frame's own aspect where
+    # it is wider than 4:3, and MSAA 4x on the first fixture and on the list's
+    # msaa lines: every target's PNG equal, the stats line read, the declared
+    # frustum and occluded counts, draws skipped and hidden over the list
+    file(MAKE_DIRECTORY "${CMAKE_CURRENT_BINARY_DIR}/cull_ab")
+    add_test(NAME rd_cull_ab
+             COMMAND "${CMAKE_COMMAND}" -DTOOL=$<TARGET_FILE:rd_replay_tool> ${_ico_vis_fx}
+                     "-DLIST=${ICO_FIXTURE_DIR}/lists/cull.txt"
+                     "-DOUT=${CMAKE_CURRENT_BINARY_DIR}/cull_ab"
+                     -P "${CMAKE_CURRENT_SOURCE_DIR}/test/rd_cull_ab.cmake")
+    set_tests_properties(rd_cull_ab PROPERTIES SKIP_REGULAR_EXPRESSION "SKIP:" TIMEOUT 5400)
+    if(_env)
+        set_tests_properties(rd_cull_ab PROPERTIES ENVIRONMENT "${_env}")
+    endif()
+    # rd_vis_hiz_corpus (test/rd_vis_hiz_corpus.cmake): the occlusion test's
+    # cheaper collect over the visibility test's fixtures: for every row of
+    # test/rd_vis_hiz_corpus.txt (Original 4:3, Enhanced 4:3 2x, and the same
+    # with --repeat 3: the collect cache's), --cull full --stats under
+    # ICO_RD_CULL_HIZ_FAST=0 and under the fast collect with
+    # ICO_RD_CULL_HIZ_CHECK=1: the same counts as each other and as the
+    # table, no check wrong, a row hiding draws; SKIP as rd_cull_ab
+    file(MAKE_DIRECTORY "${CMAKE_CURRENT_BINARY_DIR}/vis_hiz_corpus")
+    add_test(NAME rd_vis_hiz_corpus
+             COMMAND "${CMAKE_COMMAND}" -DTOOL=$<TARGET_FILE:rd_replay_tool> ${_ico_vis_fx}
+                     "-DTABLE=${CMAKE_CURRENT_SOURCE_DIR}/test/rd_vis_hiz_corpus.txt"
+                     "-DOUT=${CMAKE_CURRENT_BINARY_DIR}/vis_hiz_corpus"
+                     -P "${CMAKE_CURRENT_SOURCE_DIR}/test/rd_vis_hiz_corpus.cmake")
+    set_tests_properties(rd_vis_hiz_corpus PROPERTIES SKIP_REGULAR_EXPRESSION "SKIP:" TIMEOUT 1800)
+    if(_env)
+        set_tests_properties(rd_vis_hiz_corpus PROPERTIES ENVIRONMENT "${_env}")
+    endif()
+    # rd_thread_ab (test/rd_thread_ab.cmake): test/fixtures/lists/thread.txt
+    # through rd_replay_tool --render-thread off, sync and on (the replays,
+    # the interpolation and the renderer's calls on a thread of their own,
+    # rd_thread.h), at Original and Enhanced 2x and, for the fixture with its
+    # tick before (prev=), the blended present at 0.5: every target's PNG
+    # byte for byte; SKIP as rd_vustage_ab
     file(MAKE_DIRECTORY "${CMAKE_CURRENT_BINARY_DIR}/thread_ab")
     add_test(NAME rd_thread_ab
-             COMMAND "${CMAKE_COMMAND}" -DTOOL=$<TARGET_FILE:rd_replay_tool>
-                     "-DLIST=${CMAKE_SOURCE_DIR}/tools/vustage_dumps.txt"
-                     "-DEXTRA=${CMAKE_SOURCE_DIR}/tools/vufuse_dumps.txt"
+             COMMAND "${CMAKE_COMMAND}" -DTOOL=$<TARGET_FILE:rd_replay_tool> ${_vu_fx}
+                     "-DLIST=${ICO_FIXTURE_DIR}/lists/thread.txt"
                      "-DOUT=${CMAKE_CURRENT_BINARY_DIR}/thread_ab"
                      -P "${CMAKE_CURRENT_SOURCE_DIR}/test/rd_thread_ab.cmake")
     set_tests_properties(rd_thread_ab PROPERTIES SKIP_REGULAR_EXPRESSION "SKIP:" TIMEOUT 3600)
     if(_env)
         set_tests_properties(rd_thread_ab PROPERTIES ENVIRONMENT "${_env}")
     endif()
-    # rd_constant_reads_ab (test/rd_constant_reads_ab.cmake): the same dumps
-    # and the phone's frames (tools/constant_reads_dumps.txt) with every post
-    # sprite reading its source (ICO_RD_CONSTANT_READS=0) and with a source
+    # rd_constant_reads_ab (test/rd_constant_reads_ab.cmake): the fixtures
+    # of test/fixtures/lists/constant_reads.txt (the phone's marked) with
+    # every post sprite reading its source (ICO_RD_CONSTANT_READS=0) and with a source
     # that holds only its clear drawn as its colour (rd_const_read.c), at the
     # phone's profile at 2x and at its Resolution Auto size and at the
     # desktop's Enhanced 2x 4:3 and 16:9, under ICO_RD_BLEND=fixed: every
@@ -2097,9 +3001,8 @@ if(ICO_RUN_TESTS)
     # phone's frames served; SKIP as rd_vustage_ab
     file(MAKE_DIRECTORY "${CMAKE_CURRENT_BINARY_DIR}/constant_reads_ab")
     add_test(NAME rd_constant_reads_ab
-             COMMAND "${CMAKE_COMMAND}" -DTOOL=$<TARGET_FILE:rd_replay_tool>
-                     "-DLIST=${CMAKE_SOURCE_DIR}/tools/vustage_dumps.txt"
-                     "-DEXTRA=${CMAKE_SOURCE_DIR}/tools/constant_reads_dumps.txt"
+             COMMAND "${CMAKE_COMMAND}" -DTOOL=$<TARGET_FILE:rd_replay_tool> ${_vu_fx}
+                     "-DLIST=${ICO_FIXTURE_DIR}/lists/constant_reads.txt"
                      "-DOUT=${CMAKE_CURRENT_BINARY_DIR}/constant_reads_ab"
                      -P "${CMAKE_CURRENT_SOURCE_DIR}/test/rd_constant_reads_ab.cmake")
     set_tests_properties(rd_constant_reads_ab PROPERTIES SKIP_REGULAR_EXPRESSION "SKIP:"
@@ -2107,9 +3010,9 @@ if(ICO_RUN_TESTS)
     if(_env)
         set_tests_properties(rd_constant_reads_ab PROPERTIES ENVIRONMENT "${_env}")
     endif()
-    # rd_fades_fold_ab (test/rd_fades_fold_ab.cmake): the fade dumps
-    # (tools/fades_fold_dumps.txt) and, with ICO_BOOT_DUMP_DIR, the start-up's
-    # frames 115 to 123, with list 11's last full-frame lerp sprites drawn
+    # rd_fades_fold_ab (test/rd_fades_fold_ab.cmake): the fixtures of
+    # test/fixtures/lists/fades_fold.txt (the path ran: fades_folded), with
+    # list 11's last full-frame lerp sprites drawn
     # into SCENE (ICO_RD_FADES_FOLD=0, the tests' way) and applied by the
     # reduction (rd_fades_fold.c, the default on every device), under
     # ICO_RD_BLEND=attachment and fixed, at Original, Enhanced 2x and the
@@ -2120,8 +3023,9 @@ if(ICO_RUN_TESTS)
         file(MAKE_DIRECTORY "${CMAKE_CURRENT_BINARY_DIR}/fades_fold_ab")
         add_test(NAME rd_fades_fold_ab
                  COMMAND "${CMAKE_COMMAND}" -DTOOL=$<TARGET_FILE:rd_replay_tool>
-                         "-DLIST=${CMAKE_SOURCE_DIR}/tools/fades_fold_dumps.txt"
-                         "-DBOOT=${ICO_BOOT_DUMP_DIR}" "-DPY=${Python3_EXECUTABLE}"
+                         -DFIXTURE_TOOL=$<TARGET_FILE:rd_fixture_tool>
+                         "-DFIXTURES=${ICO_FIXTURE_DIR}" "-DFIXTURE_HELPERS=${ICO_FIXTURE_HELPERS}"
+                         "-DLIST=${ICO_FIXTURE_DIR}/lists/fades_fold.txt" "-DPY=${Python3_EXECUTABLE}"
                          "-DDIFF=${CMAKE_CURRENT_SOURCE_DIR}/test/png_level_diff.py"
                          "-DOUT=${CMAKE_CURRENT_BINARY_DIR}/fades_fold_ab"
                          -P "${CMAKE_CURRENT_SOURCE_DIR}/test/rd_fades_fold_ab.cmake")
@@ -2131,57 +3035,52 @@ if(ICO_RUN_TESTS)
             set_tests_properties(rd_fades_fold_ab PROPERTIES ENVIRONMENT "${_env}")
         endif()
     endif()
-    # rd_crack_late_ab (test/rd_crack_late_ab.cmake): the dumps and baselines of
-    # tools/crack_late_dumps.txt (machine-local: the gate's Enhanced 2x pass
-    # dumps and the PowerVR phone's frames at its Resolution Auto, made by the
-    # build that drew the crack fill before the fog) replayed with the fill
-    # after lists 4-6 (rd_crack_fill.c): every target within the measured bound
-    # (DIVERGENCES.md VD-20), the fill drawn once after lists 4-6, at the
-    # phone's setting one copy fewer and no pass more; SKIP as rd_vustage_ab
-    if(Python3_FOUND)
-        file(MAKE_DIRECTORY "${CMAKE_CURRENT_BINARY_DIR}/crack_late_ab")
-        add_test(NAME rd_crack_late_ab
-                 COMMAND "${CMAKE_COMMAND}" -DTOOL=$<TARGET_FILE:rd_replay_tool>
-                         "-DLIST=${CMAKE_SOURCE_DIR}/tools/crack_late_dumps.txt"
-                         "-DPY=${Python3_EXECUTABLE}"
-                         "-DDIFF=${CMAKE_CURRENT_SOURCE_DIR}/test/png_level_diff.py"
-                         "-DOUT=${CMAKE_CURRENT_BINARY_DIR}/crack_late_ab"
-                         -P "${CMAKE_CURRENT_SOURCE_DIR}/test/rd_crack_late_ab.cmake")
-        set_tests_properties(rd_crack_late_ab PROPERTIES SKIP_REGULAR_EXPRESSION "SKIP:"
-                             TIMEOUT 3600)
-        if(_env)
-            set_tests_properties(rd_crack_late_ab PROPERTIES ENVIRONMENT "${_env}")
-        endif()
+    # rd_crack_late_ab (test/rd_crack_late_ab.cmake): the fixtures of
+    # test/fixtures/lists/crack_late.txt at the gate's Enhanced 2x and the
+    # PowerVR phone's Resolution Auto with the fill after lists 4-6
+    # (rd_crack_fill.c): the fill drawn once after lists 4-6 with the declared
+    # crack_pixels, every PNG the release before's (crack_late_goldens.txt),
+    # the same bytes with the fill at the start of list 7; SKIP without a device
+    file(MAKE_DIRECTORY "${CMAKE_CURRENT_BINARY_DIR}/crack_late_ab")
+    add_test(NAME rd_crack_late_ab
+             COMMAND "${CMAKE_COMMAND}" -DTOOL=$<TARGET_FILE:rd_replay_tool>
+                     -DFIXTURE_TOOL=$<TARGET_FILE:rd_fixture_tool> "-DFIXTURES=${ICO_FIXTURE_DIR}"
+                     "-DFIXTURE_HELPERS=${ICO_FIXTURE_HELPERS}"
+                     "-DLIST=${ICO_FIXTURE_DIR}/lists/crack_late.txt"
+                     "-DGOLDENS=${ICO_FIXTURE_DIR}/lists/crack_late_goldens.txt"
+                     "-DOUT=${CMAKE_CURRENT_BINARY_DIR}/crack_late_ab"
+                     -P "${CMAKE_CURRENT_SOURCE_DIR}/test/rd_crack_late_ab.cmake")
+    set_tests_properties(rd_crack_late_ab PROPERTIES SKIP_REGULAR_EXPRESSION "SKIP:"
+                         TIMEOUT 3600)
+    if(_env)
+        set_tests_properties(rd_crack_late_ab PROPERTIES ENVIRONMENT "${_env}")
     endif()
-    # rd_aura_box_ab (test/rd_aura_box_ab.cmake): the dumps of
-    # tools/aura_box_dumps.txt (vustage_dumps.txt's and the PowerVR phone's
-    # three F12 frames) with the aura's read of the picture into FEED128 in
-    # one pass (ICO_RD_AURA_BOX=0) and in two (=1, rd_aura_box.c), under
-    # ICO_RD_BLEND=fixed at the phone's Resolution Auto and Enhanced 2x 4:3:
-    # every target byte for byte, one pass and one draw more a read in two
-    # passes; SKIP as rd_vustage_ab
+    # rd_aura_box_ab (test/rd_aura_box_ab.cmake): lists/aura_box.txt's fixtures
+    # with the aura's read into FEED128 in one pass and in two: the same bytes
     file(MAKE_DIRECTORY "${CMAKE_CURRENT_BINARY_DIR}/aura_box_ab")
     add_test(NAME rd_aura_box_ab
              COMMAND "${CMAKE_COMMAND}" -DTOOL=$<TARGET_FILE:rd_replay_tool>
-                     "-DLIST=${CMAKE_SOURCE_DIR}/tools/aura_box_dumps.txt"
+                     -DFIXTURE_TOOL=$<TARGET_FILE:rd_fixture_tool>
+                     "-DFIXTURES=${ICO_FIXTURE_DIR}" "-DLIST=${ICO_FIXTURE_DIR}/lists/aura_box.txt"
+                     "-DFIXTURE_HELPERS=${ICO_FIXTURE_HELPERS}"
                      "-DOUT=${CMAKE_CURRENT_BINARY_DIR}/aura_box_ab"
                      -P "${CMAKE_CURRENT_SOURCE_DIR}/test/rd_aura_box_ab.cmake")
     set_tests_properties(rd_aura_box_ab PROPERTIES SKIP_REGULAR_EXPRESSION "SKIP:" TIMEOUT 3600)
     if(_env)
         set_tests_properties(rd_aura_box_ab PROPERTIES ENVIRONMENT "${_env}")
     endif()
-    # rd_shadow_merge_ab (test/rd_shadow_merge_ab.cmake): the dumps of
-    # tools/shadow_merge_dumps.txt (vustage_dumps.txt's, the PowerVR phone's
-    # F12 frames and the heavy stage 6 room of 2026-11-02) with the shadow volumes in a pass
-    # of their own (ICO_RD_SHADOW_MERGE=0) and in the scene's open pass (=1,
-    # rd_shadow_merge.c), under ICO_RD_BLEND=fixed and ICO_RD_STORE_POISON=1
+    # rd_shadow_merge_ab (test/rd_shadow_merge_ab.cmake): the fixtures of
+    # test/fixtures/lists/shadow_merge.txt with the shadow volumes in a pass
+    # of their own (ICO_RD_SHADOW_MERGE=0) and in the scene's open pass (=1),
     # at the phone's Resolution Auto (the MoltenVK fakes) and Enhanced 2x
     # 4:3: every target byte for byte, the same draws, one pass fewer a reset
-    # taken, some reset taken; SKIP as rd_vustage_ab
+    # taken, a reset taken on each fixture (the path ran)
     file(MAKE_DIRECTORY "${CMAKE_CURRENT_BINARY_DIR}/shadow_merge_ab")
     add_test(NAME rd_shadow_merge_ab
              COMMAND "${CMAKE_COMMAND}" -DTOOL=$<TARGET_FILE:rd_replay_tool>
-                     "-DLIST=${CMAKE_SOURCE_DIR}/tools/shadow_merge_dumps.txt"
+                     -DFIXTURE_TOOL=$<TARGET_FILE:rd_fixture_tool>
+                     "-DFIXTURES=${ICO_FIXTURE_DIR}" "-DLIST=${ICO_FIXTURE_DIR}/lists/shadow_merge.txt"
+                     "-DFIXTURE_HELPERS=${ICO_FIXTURE_HELPERS}"
                      "-DOUT=${CMAKE_CURRENT_BINARY_DIR}/shadow_merge_ab"
                      -P "${CMAKE_CURRENT_SOURCE_DIR}/test/rd_shadow_merge_ab.cmake")
     set_tests_properties(rd_shadow_merge_ab PROPERTIES SKIP_REGULAR_EXPRESSION "SKIP:"
@@ -2189,44 +3088,34 @@ if(ICO_RUN_TESTS)
     if(_env)
         set_tests_properties(rd_shadow_merge_ab PROPERTIES ENVIRONMENT "${_env}")
     endif()
-    # rd_pass_area_ab (test/rd_pass_area_ab.cmake): the dumps of
-    # tools/pass_area_dumps.txt (vustage_dumps.txt's, the PowerVR phone's
-    # three F12 frames and its rc3 frame) with the passes' render areas off
-    # (ICO_RD_PASS_AREA=0) and on (=1, rd_pass_area.c), under
-    # ICO_RD_BLEND=fixed at the phone's Resolution Auto and Enhanced 2x 4:3:
-    # every target byte for byte (lavapipe clips to the area, so a wrong
-    # area would show), the same passes and draws but for the passes ended
-    # early, and some pass with an area on the phone's frames; SKIP as
-    # rd_vustage_ab
+    # rd_pass_area_ab (test/rd_pass_area_ab.cmake): lists/pass_area.txt's
+    # fixtures with the passes' render areas off and on: the same bytes
     file(MAKE_DIRECTORY "${CMAKE_CURRENT_BINARY_DIR}/pass_area_ab")
     add_test(NAME rd_pass_area_ab
              COMMAND "${CMAKE_COMMAND}" -DTOOL=$<TARGET_FILE:rd_replay_tool>
-                     "-DLIST=${CMAKE_SOURCE_DIR}/tools/pass_area_dumps.txt"
+                     -DFIXTURE_TOOL=$<TARGET_FILE:rd_fixture_tool>
+                     "-DFIXTURES=${ICO_FIXTURE_DIR}" "-DLIST=${ICO_FIXTURE_DIR}/lists/pass_area.txt"
+                     "-DFIXTURE_HELPERS=${ICO_FIXTURE_HELPERS}"
                      "-DOUT=${CMAKE_CURRENT_BINARY_DIR}/pass_area_ab"
                      -P "${CMAKE_CURRENT_SOURCE_DIR}/test/rd_pass_area_ab.cmake")
     set_tests_properties(rd_pass_area_ab PROPERTIES SKIP_REGULAR_EXPRESSION "SKIP:" TIMEOUT 3600)
     if(_env)
         set_tests_properties(rd_pass_area_ab PROPERTIES ENVIRONMENT "${_env}")
     endif()
-    # rd_glow_cheap_ab (test/rd_glow_cheap_ab.cmake): the glow dumps of
-    # tools/glow_cheap_dumps.txt against the pass dumps the build before the
-    # glow's cheaper passes stored (machine-local: the phone's profile under
-    # build-host/tmp/v098/evidence/glow/pd-phone, Original and Enhanced 2x 4:3
-    # under build-host/tmp/v095/after/w3/pd): every target within 0 levels,
-    # at least two glow passes fewer at the phone's setting (WORK2's fill in
-    # the mask's pass, cleanUpFB in the fog's), none more elsewhere (counted
-    # in a replay without the crack fill where it is drawn: it ends the fog's
-    # pass before the glow); the frames the crack fill changed against their
-    # refreshed pictures (build-host/tmp/v098/evidence/glow/pd-w15); SKIP
-    # without the dumps or their baselines
+    # rd_glow_cheap_ab (test/rd_glow_cheap_ab.cmake): the fixtures of
+    # test/fixtures/lists/glow_cheap.txt with the glow's cheaper passes
+    # against the fill's pass back (ICO_RD_CLEAR_CARRY=0): every target
+    # within 0 levels; against the passes counted with ICO_RD_FX_PLAN=0 too:
+    # at least two glow passes fewer at the phone's setting (cleanUpFB in the
+    # fog's pass; three where WORK2's fill rides the mask's), none more
+    # elsewhere; the mask folded (ICO_RD_GLOW_FOLD=1) the same bytes but WORK2
     if(Python3_FOUND)
         file(MAKE_DIRECTORY "${CMAKE_CURRENT_BINARY_DIR}/glow_cheap_ab")
         add_test(NAME rd_glow_cheap_ab
                  COMMAND "${CMAKE_COMMAND}" -DTOOL=$<TARGET_FILE:rd_replay_tool>
-                         "-DLIST=${CMAKE_SOURCE_DIR}/tools/glow_cheap_dumps.txt"
-                         "-DBASE_PHONE=${CMAKE_SOURCE_DIR}/build-host/tmp/v098/evidence/glow/pd-phone"
-                         "-DBASE_DESK=${CMAKE_SOURCE_DIR}/build-host/tmp/v095/after/w3/pd"
-                         "-DBASE_REFRESH=${CMAKE_SOURCE_DIR}/build-host/tmp/v098/evidence/glow/pd-w15"
+                         -DFIXTURE_TOOL=$<TARGET_FILE:rd_fixture_tool>
+                         "-DFIXTURES=${ICO_FIXTURE_DIR}" "-DFIXTURE_HELPERS=${ICO_FIXTURE_HELPERS}"
+                         "-DLIST=${ICO_FIXTURE_DIR}/lists/glow_cheap.txt"
                          "-DPY=${Python3_EXECUTABLE}"
                          "-DDIFF=${CMAKE_CURRENT_SOURCE_DIR}/test/png_level_diff.py"
                          "-DOUT=${CMAKE_CURRENT_BINARY_DIR}/glow_cheap_ab"
@@ -2237,19 +3126,14 @@ if(ICO_RUN_TESTS)
             set_tests_properties(rd_glow_cheap_ab PROPERTIES ENVIRONMENT "${_env}")
         endif()
     endif()
-    # rd_pass_cut_ab (test/rd_pass_cut_ab.cmake): the dumps of
-    # tools/pass_cut_dumps.txt with every pass cut off and each on alone and
-    # all on (rd_pass_cut.c: ICO_RD_CLEAR_CARRY, ICO_RD_CLEAR_SKIP,
-    # ICO_RD_LAST_STORE), under ICO_RD_BLEND=fixed, the store plan and its
-    # poison, at the phone's Resolution Auto with its paths and Enhanced 2x
-    # 4:3: every target and the present byte for byte, the passes fewer by
-    # the clears carried and skipped, the depth stores dropped more by those
-    # at the last touch, and each cut cutting something on the phone's
-    # frames; SKIP as rd_vustage_ab
+    # rd_pass_cut_ab (test/rd_pass_cut_ab.cmake): lists/pass_cut.txt's
+    # fixtures with every pass cut off, each alone and all on: the same bytes
     file(MAKE_DIRECTORY "${CMAKE_CURRENT_BINARY_DIR}/pass_cut_ab")
     add_test(NAME rd_pass_cut_ab
              COMMAND "${CMAKE_COMMAND}" -DTOOL=$<TARGET_FILE:rd_replay_tool>
-                     "-DLIST=${CMAKE_SOURCE_DIR}/tools/pass_cut_dumps.txt"
+                     -DFIXTURE_TOOL=$<TARGET_FILE:rd_fixture_tool>
+                     "-DFIXTURES=${ICO_FIXTURE_DIR}" "-DLIST=${ICO_FIXTURE_DIR}/lists/pass_cut.txt"
+                     "-DFIXTURE_HELPERS=${ICO_FIXTURE_HELPERS}"
                      "-DOUT=${CMAKE_CURRENT_BINARY_DIR}/pass_cut_ab"
                      -P "${CMAKE_CURRENT_SOURCE_DIR}/test/rd_pass_cut_ab.cmake")
     set_tests_properties(rd_pass_cut_ab PROPERTIES SKIP_REGULAR_EXPRESSION "SKIP:" TIMEOUT 3600)
@@ -2257,167 +3141,7 @@ if(ICO_RUN_TESTS)
         set_tests_properties(rd_pass_cut_ab PROPERTIES ENVIRONMENT "${_env}")
     endif()
 endif()
-# The blend policy (rd_dst_read.c)
-# rd_dst_usage_test: the fixed-function blend by default makes no
-# destination-read layout, shader twin, target usage or start-up key; an
-# ICO_RD_BLEND=attachment opt-in makes the attachment read's alone.
-add_executable(rd_dst_usage_test test/rd_dst_usage_test.c)
-target_compile_options(rd_dst_usage_test PRIVATE ${ICO_SEMANTIC_OPTIONS} ${ICO_PORT_WARNINGS})
-target_include_directories(rd_dst_usage_test PRIVATE "${CMAKE_SOURCE_DIR}/port/rhi")
-target_link_libraries(rd_dst_usage_test PRIVATE ico_render)
-if(ICO_RUN_TESTS)
-    add_test(NAME rd_dst_usage COMMAND rd_dst_usage_test)
-    set_tests_properties(rd_dst_usage PROPERTIES SKIP_RETURN_CODE 77)
-    if(_env)
-        set_tests_properties(rd_dst_usage PROPERTIES ENVIRONMENT "${_env}")
-    endif()
-    # the exact blend's attachment read, now an opt-in, by the tests that
-    # drew it by default before (lavapipe has the read): the same
-    # expectations and recorded hashes (rd_present's and rd_crt's *_EXACT),
-    # rd_pixel's comparison of the modes, rd_perf's destination-read counts
-    set(_env_blend_attachment ${_env} "ICO_RD_BLEND=attachment")
-    set(_bat "${CMAKE_CURRENT_BINARY_DIR}/blend_attachment")
-    file(MAKE_DIRECTORY "${_bat}")
-    add_test(NAME rd_pixel_attachment COMMAND rd_pixel_test "${_bat}")
-    add_test(NAME rd_fog_attachment COMMAND rd_fog_test)
-    add_test(NAME rd_present_attachment COMMAND rd_present_test "${_bat}")
-    add_test(NAME rd_crt_attachment COMMAND rd_crt_test "${_bat}")
-    add_test(NAME rd_perf_attachment COMMAND rd_perf_test)
-    set_tests_properties(rd_pixel_attachment rd_fog_attachment rd_present_attachment
-                         rd_crt_attachment rd_perf_attachment
-                         PROPERTIES SKIP_RETURN_CODE 77 WORKING_DIRECTORY "${_bat}"
-                                    ENVIRONMENT "${_env_blend_attachment}")
-    # GS state as shader data (rd_uber.c) on lavapipe, which orders the
-    # attachment read (ICO_RD_UBER=on: auto takes it on tile-based GPUs
-    # only): rd_pixel's cases and expectations as under the attachment read
-    # (its exact-mode matrix leaves out and counts the cells the colour read
-    # draws its own way: the premultiplied subtracts' floor and DATE per
-    # primitive; testUberSubtractOracle holds the subtracts to the GS's
-    # arithmetic, testDateStencil checks the per-primitive DATE)
-    set(_env_uber ${_env} "ICO_RD_UBER=on")
-    set(_bub "${CMAKE_CURRENT_BINARY_DIR}/uber")
-    file(MAKE_DIRECTORY "${_bub}")
-    add_test(NAME rd_pixel_uber COMMAND rd_pixel_test "${_bub}")
-    set_tests_properties(rd_pixel_uber PROPERTIES SKIP_RETURN_CODE 77 WORKING_DIRECTORY "${_bub}"
-                                                  ENVIRONMENT "${_env_uber}")
-endif()
-
-# The tiler passes (rd_replay.c: the fog's local read, DATE through
-# the stencil bit, the blur pair fold)
-# The fog's depth read inside the scene pass (ICO_RD_FOG_PATH=local: the
-# profile's local read on lavapipe, which has it): rd_fog_test's grid, edge
-# and above-1x cases on the local path, and case d's replays on the other
-# paths the same pixels byte for byte; the fog's self-test tries local first
-# and takes it (a scaled, wide Full pixel SCENE), its probe logged; DATE's
-# self-test (ICO_RD_DATE_PATH=stencil) finds the stencil bit and the
-# snapshot right on every sample.  rd_pixel's DATE case and rd_blur's fold
-# case (b) run in their own tests.
-if(ICO_RUN_TESTS)
-    set(_env_fog_local ${_env} "ICO_RD_FOG_PATH=local")
-    set(_fl "${CMAKE_CURRENT_BINARY_DIR}/fog_local")
-    file(MAKE_DIRECTORY "${_fl}")
-    add_test(NAME rd_fog_local COMMAND rd_fog_test)
-    set_tests_properties(rd_fog_local PROPERTIES SKIP_RETURN_CODE 77 WORKING_DIRECTORY "${_fl}"
-                                                 ENVIRONMENT "${_env_fog_local}")
-    add_test(NAME rd_fog_selftest_local
-             COMMAND "${CMAKE_COMMAND}" -DTOOL=$<TARGET_FILE:rd_fog_selftest_test>
-                     -DFOG_PATH=local
-                     "-DRESULTS=local ok [0-2], copy not tried, inplace not tried, buffer not tried"
-                     -P "${CMAKE_CURRENT_SOURCE_DIR}/test/rd_fog_selftest.cmake")
-    set_tests_properties(rd_fog_selftest_local PROPERTIES SKIP_REGULAR_EXPRESSION "SKIP:"
-                                                          ENVIRONMENT "${_env_fog_local}")
-    set(_env_date_stencil ${_env} "ICO_RD_DATE_PATH=stencil")
-    add_test(NAME rd_date_selftest
-             COMMAND "${CMAKE_COMMAND}" -DTOOL=$<TARGET_FILE:rd_fog_selftest_test> -DPATH=stencil
-                     "-DRESULTS=stencil ok 5, snapshot ok 5"
-                     -P "${CMAKE_CURRENT_SOURCE_DIR}/test/rd_date_selftest.cmake")
-    set_tests_properties(rd_date_selftest PROPERTIES SKIP_REGULAR_EXPRESSION "SKIP:"
-                                                     ENVIRONMENT "${_env_date_stencil}")
-    # DATE under GS state as shader data (rd_uber.c, ICO_RD_UBER=on): the
-    # colour read's per-primitive DATE first (its fifth sample the GS's:
-    # the second sprite fails over the first), then the stencil bit and the
-    # snapshot with it held off (their fifth sample the alpha before the
-    # draw); the path stays the colour read
-    add_test(NAME rd_date_selftest_uber
-             COMMAND "${CMAKE_COMMAND}" -DTOOL=$<TARGET_FILE:rd_fog_selftest_test>
-                     "-DPATH=colour read"
-                     "-DRESULTS=colour read ok 5, stencil ok 5, snapshot ok 5"
-                     "-DEXTRA=pipelines: GS state as shader data: on \\(raster-order read, \\[dev\\] uber = on\\)"
-                     -P "${CMAKE_CURRENT_SOURCE_DIR}/test/rd_date_selftest.cmake")
-    set_tests_properties(rd_date_selftest_uber
-                         PROPERTIES SKIP_REGULAR_EXPRESSION "SKIP:"
-                                    ENVIRONMENT "${_env_date_stencil};ICO_RD_UBER=on")
-    # the shadow count's self-test (rd_shadow_selftest.c): the one draw
-    # equal to the seven draws byte for byte at both scene sizes of the
-    # tool (a wide scene at scale 2 with Full pixel's left-out texels, then
-    # another size), every band centre the count's colour, and the line that
-    # says how the stencil is read (four texels a gather, or a texel a load
-    # where the gathers' count differs); sabotaged (the
-    # one draw's table wrong at m = 1), the one draw differs, the profile's
-    # flag goes off and the seven draws resolve the count (no second line:
-    # nothing to check then); [dev] shadow_one = false, no self-test and the
-    # profile's words "shadow count seven draws ([dev])"
-    add_test(NAME rd_shadow_selftest
-             COMMAND "${CMAKE_COMMAND}" -DTOOL=$<TARGET_FILE:rd_fog_selftest_test>
-                     "-DPATH=one draw"
-                     "-DRESULTS=equal to the seven draws over [0-9]+x[0-9]+, 142 band centres ok"
-                     "-DEXTRA=profile: .*shadow count one draw"
-                     "-DEXTRA2=shadow count: the stencil read (four texels a gather, equal to the seven draws byte for byte|a texel a load, as the gathers' count)"
-                     -P "${CMAKE_CURRENT_SOURCE_DIR}/test/rd_shadow_selftest.cmake")
-    set_tests_properties(rd_shadow_selftest PROPERTIES SKIP_REGULAR_EXPRESSION "SKIP:"
-                                                       ENVIRONMENT "${_env}")
-    add_test(NAME rd_shadow_selftest_sabotage
-             COMMAND "${CMAKE_COMMAND}" -DTOOL=$<TARGET_FILE:rd_fog_selftest_test>
-                     "-DPATH=seven draws"
-                     "-DRESULTS=one draw differs at [0-9]+ of [0-9]+ texels, the first \\([0-9]+,[0-9]+\\): [0-9A-F]+ for [0-9A-F]+"
-                     "-DEXTRA=profile: shadow count one draw off \\(self-test\\)"
-                     "-DEXTRA2=shadow count: ICO_RD_SHADOW_SABOTAGE: "
-                     -P "${CMAKE_CURRENT_SOURCE_DIR}/test/rd_shadow_selftest.cmake")
-    set_tests_properties(rd_shadow_selftest_sabotage
-                         PROPERTIES SKIP_REGULAR_EXPRESSION "SKIP:"
-                                    ENVIRONMENT "${_env};ICO_RD_SHADOW_SABOTAGE=1")
-    # the store plan's keep (rd_store_plan_test.c; rd_store_plan_ab below
-    # holds the drops byte for byte over the corpus)
-    add_test(NAME rd_store_plan COMMAND rd_store_plan_test)
-    set_tests_properties(rd_store_plan PROPERTIES SKIP_RETURN_CODE 77 ENVIRONMENT "${_env}")
-    # the passes cut (rd_pass_cut_test.c; rd_pass_cut_ab holds them byte for
-    # byte over the corpus)
-    add_test(NAME rd_pass_cut COMMAND rd_pass_cut_test)
-    set_tests_properties(rd_pass_cut PROPERTIES SKIP_RETURN_CODE 77 ENVIRONMENT "${_env}")
-endif()
-
-# The desktop's local reads and their start-up cost probe (rd_local_probe.c):
-# the verdict's rule on synthetic times (rd_local_probe_rule, no device), then
-# the probe on lavapipe (the desktop class, with local read) through
-# rd_fog_selftest_test with ICO_RD_LOCAL_PROBE=1 (a headless run keeps the
-# snapshots without it), the local reads' time biased by
-# ICO_RD_LOCAL_PROBE_SABOTAGE so both verdicts run: fast, the local reads
-# kept (the fog's depth path local at both scene sizes, "kept (probe x vs y
-# ms)"); slow, turned off ("DATE stencil off (probe)", every named target
-# made again, the fog's self-test run again: in place at both sizes)
-if(ICO_RUN_TESTS)
-    add_test(NAME rd_local_probe_rule COMMAND rd_local_probe_test)
-    add_test(NAME rd_local_probe_kept
-             COMMAND "${CMAKE_COMMAND}" -DTOOL=$<TARGET_FILE:rd_fog_selftest_test>
-                     -DFOG_PATH=local
-                     "-DRESULTS=local ok [0-2], inplace not tried, copy not tried, buffer not tried"
-                     "-DEXTRA=profile: local read on the desktop: kept \\(probe [0-9.]+ vs [0-9.]+ ms\\): "
-                     "-DEXTRA2=profile: ICO_RD_LOCAL_PROBE_SABOTAGE: "
-                     -P "${CMAKE_CURRENT_SOURCE_DIR}/test/rd_fog_selftest.cmake")
-    set_tests_properties(rd_local_probe_kept
-                         PROPERTIES SKIP_REGULAR_EXPRESSION "SKIP:"
-                                    ENVIRONMENT "${_env};ICO_RD_LOCAL_PROBE=1;ICO_RD_LOCAL_PROBE_SABOTAGE=fast")
-    add_test(NAME rd_local_probe_off
-             COMMAND "${CMAKE_COMMAND}" -DTOOL=$<TARGET_FILE:rd_fog_selftest_test>
-                     -DFOG_PATH=inplace
-                     "-DRESULTS=inplace ok [0-2], copy not tried, buffer not tried"
-                     "-DEXTRA=profile: local read on the desktop: off \\(probe: slower, [0-9.]+ vs [0-9.]+ ms\\): "
-                     "-DEXTRA2=profile: DATE stencil off \\(probe\\)"
-                     -P "${CMAKE_CURRENT_SOURCE_DIR}/test/rd_fog_selftest.cmake")
-    set_tests_properties(rd_local_probe_off
-                         PROPERTIES SKIP_REGULAR_EXPRESSION "SKIP:"
-                                    ENVIRONMENT "${_env};ICO_RD_LOCAL_PROBE=1;ICO_RD_LOCAL_PROBE_SABOTAGE=slow")
-endif()
+include(rd_selftest_tests.cmake) # the self-tests' tests (moved verbatim)
 # ---- FIXT: the tiler self-tests' failure paths ----
 # Under the MoltenVK report (ICO_VK_FAKE_LIMITS=moltenvk: the Apple row of the
 # device profile, fogLocal and dateStencil on as the profile's own, not
@@ -2447,6 +3171,7 @@ if(ICO_RUN_TESTS)
     set_tests_properties(rd_fog_selftest_local_sabotage
                          PROPERTIES SKIP_REGULAR_EXPRESSION "SKIP:"
                                     ENVIRONMENT "${_env};ICO_VK_FAKE_LIMITS=moltenvk;ICO_RD_FOG_SABOTAGE=local")
+    include(test/rd_date_subpass.cmake)
 endif()
 # ---- FIXT end ----
 
@@ -2638,8 +3363,10 @@ endif()
 #    rd_crack's replay, rd_fog_depth_copy_dump*, rd_vustage_ab, rd_vubatch_ab, rd_vumerge_ab,
 #    rd_vufuse_ab, rd_store_plan_ab, rd_constant_reads_ab, rd_fades_fold_ab, rd_thread_ab,
 #    the native frame gates, coverage_corpus; tools/native_frame_check.py compare runs the dumps
-#    on both backends)
-#  * tests with no device (rd_alpha_plan, rd_fx_frame, rd_vu_frac, rd_fades_fold, rd_mip,
+#    on both backends; rd_cull_ab is twinned: the culler's byte identity is proven on
+#    both lavapipe backends; rd_vis_hiz_corpus is not: its counts are the CPU's)
+#  * tests with no device (rd_alpha_plan, rd_fx_frame, rd_vu_frac, rd_fades_fold, rd_vis,
+#    rd_vis_hiz, rd_mip,
 #    rd_passring,
 #    rd_filter, rd_bisect_plan, rd_stream_audit, fog_lut*, gsb_cull*, texpack*, gltf)
 #
@@ -2726,6 +3453,7 @@ if(ICO_RUN_TESTS AND ICO_RHI_OPENGL AND ICO_SHADERS_GLSL AND TARGET ico_rhi_open
         rd_state rd_pixel rd_native rd_layout rd_tex rd_gsbase ${rd_mesh_SHARDS} modelpack
         rd_shadow rd_shadow_edges rd_fog ${rd_blur_SHARDS} rd_water rd_raw rd_debug rd_present
         rd_crt rd_mirror rd_msaa rd_perf rd_display_change rd_interp rd_boot_present rd_dst_usage
+        rd_jitter rd_upscale rd_icon_hold
         # the two-pass blend (ICO_RD_NO_DUAL=1 is the renderer's own switch, not a Vulkan fake)
         rd_pixel_nodual rd_present_nodual rd_fog_nodual rd_shadow_nodual rd_water_nodual
         rd_raw_nodual rd_mirror_nodual rd_interp_nodual rd_msaa_nodual rd_crack_nodual
@@ -2746,16 +3474,92 @@ if(ICO_RUN_TESTS AND ICO_RHI_OPENGL AND ICO_SHADERS_GLSL AND TARGET ico_rhi_open
         # has not (localRead false: the copy and inplace paths, DATE by snapshot);
         # nor rd_local_probe_kept and rd_local_probe_off (the desktop's probe of
         # Vulkan's local read: never on OpenGL)
-        rd_shadow_selftest rd_shadow_selftest_sabotage
+        rd_shadow_selftest rd_shadow_selftest_cropped rd_shadow_selftest_wide
+        rd_shadow_selftest_sabotage
         rd_vuprepass_selftest rd_vuprepass_selftest_plain
         rd_vuprepass_selftest_sabotage rd_vuprepass_selftest_off rd_vuprepass_selftest_ticks
         rd_vuprepass_selftest_sabotage_tri rd_vuprepass_selftest_unbatched
-        rd_vuprepass_selftest_unmerged)
+        rd_vuprepass_selftest_unmerged rd_vuprepass_selftest_sabotage_straddle
+        # the scene draws' visibility test against every draw replayed, byte for
+        # byte on OpenGL too (rd_cull_ab.cmake: the tool takes ICO_RHI_BACKEND)
+        rd_cull_ab)
     foreach(_n IN LISTS _ico_rd_gl_tests)
         ico_rd_gl_twin(${_n})
     endforeach()
+    # Under the sanitizers the presenter's OpenGL twins run one at a time: on
+    # CI's runner (its llvmpipe; not on the build host, where each holds about
+    # 0.9 GB) each of them grows by about 0.25 GB a minute for its 11 to 14
+    # minutes, and three started together in asan 5/6 took the runner's memory
+    # from 10 GB to under 0.5 GB, where the runner was shut down (CI runs
+    # 44181572046 and 44247320150; in run 44206485203 the three ended with
+    # 0.66 GB left and 11 GB came back when they did). The other suites keep
+    # them in parallel.
+    if(ICO_SANITIZE)
+        foreach(_n rd_present_gl rd_present_nodual_gl rd_present_storage_gl rd_present_fixed_gl
+                   rd_present_attachment_gl rd_present_depth_copy_gl)
+            if(TEST ${_n})
+                set_property(TEST ${_n} APPEND PROPERTY RESOURCE_LOCK ico_rd_present_gl_memory)
+            endif()
+        endforeach()
+    endif()
     get_property(_gl_done GLOBAL PROPERTY ICO_RD_GL_DONE)
     list(LENGTH _gl_done _gl_n)
     message(STATUS "ico: ${_gl_n} render tests registered again on OpenGL (ctest -L gl)")
 endif()
 # ---- OpenGL twins end ----
+include(rd_early.cmake)
+include(rd_vu_flat0.cmake) # the main shader's flat outputs at the provoking corner
+include(rd_pass_objects.cmake) # Qualcomm's passes as VkRenderPass objects (issue 123)
+include(rd_pass_area.cmake) # the frame whose passes take a render area (fx-pass-area)
+include(rd_smallcuts.cmake) # the turn in the present's blit, the VU record by compute on the PowerVR
+include(rd_vu_compact.cmake) # the index compaction (issue 179)
+include(rd_vu_share.cmake) # shared vertices for clip-mode-none strips (issue 179)
+include(rd_vu_zero.cmake) # the zero-area cull in the pre-pass rule stage (issue 179)
+include(rd_ab.cmake) # the in-play A/B judge of the zero-area cull (issue 179)
+include(rd_nodiscard.cmake) # the discard-free twins (issue 179)
+include(rd_fastps.cmake) # the fast pixel build (issue 179)
+include(rd_onepass.cmake) # the one-pass blend (issue 179)
+include(rd_vu_audit.cmake) # the VU record path's bounds audit (issue 179, tests)
+include(rd_subpass_probe.cmake) # the subpass read's first-start probe
+include(rd_ratecard.cmake) # the rate card: the device's unit costs at start-up (issue 179)
+include(rd_bench.cmake) # the rc-only bench: kept frames measured part by part
+include(rd_shadowres.cmake) # the shadow's levels at the scene's scale above 1x
+include(rd_hold.cmake) # the paused scene held under the menu (issue 123)
+include(rd_dump_reads.cmake) # the game thread's dumps wait for the reads alone (issue 179)
+
+# the lavapipe driver's compile thread racing the exit (the leak described at
+# rd_blend_selftest above: 240 or 480 bytes, every frame in libasan, libc or an
+# unloaded module, none of the port's) reached the replay tool's tests in CI
+# run 43554209427 (asan 5/5: these twelve, clean in run 43548413539 on the
+# same sources): the leak check is off for them under asan, as for that family
+if(ICO_SANITIZE MATCHES "address")
+    foreach(_t rd_replay_tool_jitter rd_replay_tool_fsr3_dump rd_replay_tool_pass_dump
+               rd_replay_tool_velocity rd_replay_tool_loss_bisect rd_replay_tool_pass_split
+               rd_replay_tool_prerotate rd_replay_tool_pass_merge rd_replay_tool_snap_swap
+               rd_replay_tool_crack rd_vu_flat0_ab_pixel rd_vu_compact_ab_pixel)
+        if(TEST ${_t})
+            set_property(TEST ${_t} APPEND PROPERTY ENVIRONMENT "ASAN_OPTIONS=detect_leaks=0")
+        endif()
+    endforeach()
+endif()
+# the picture-health report (rd_health.c, rd_health_live.c, rd_health.h; issue 179)
+include(rd_health.cmake)
+# the draws left at their tick's position by name (rd_inames.c, rd_inames_live.c)
+include(rd_inames.cmake)
+# a list's draws by fragment entry and DATE mode (rd_list_draws.c, rd_list_draws_live.c)
+include(rd_list_draws.cmake)
+# the held glow's camera against the present's (rd_glow_offset.c)
+include(rd_glow_offset.cmake)
+# the shadow volumes' clip box by disc (port/include/ico_shadow_clip.h)
+include(shadow_clip.cmake)
+# the camera rule for static meshes on the plain set (rd_plain_camera.c; issue 123)
+include(rd_plain_camera.cmake)
+# the draw pattern gate: each faked phone profile's counts against its table (issue 179)
+include(rd_draw_pattern.cmake)
+# the scene ledger: what each stage held and left out, by model and reason (rd_ledger.c, issue 221)
+include(rd_ledger.cmake)
+# the display line at the frame width's first change, the ring's grow words (rd_diag_notes.c)
+include(rd_diag_notes.cmake)
+# last: under asan the fixture replays run without the leak check (the driver's
+# exit leak); after every test's ENVIRONMENT is set
+include(rd_asan_fixture_leaks.cmake)

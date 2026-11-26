@@ -30,6 +30,45 @@ held on those discs too. The row shows from the title screen as well as the
 pause menu, on every disc, and it is kept in your settings, so it stays as
 you set it for every save.
 
+## Do I have to hold R2 to zoom?
+
+**The camera only zooms in while I keep R2 down. Can I press it once
+instead?**
+
+Yes. Open **Options > Controls > Zoom type** and choose **Toggle**. Then one
+press of R2 zooms the camera in and another press zooms it out. The camera
+also zooms back out by itself when a cutscene takes over or the game zooms
+the camera itself, and when you go into another room. **Hold** is the
+game's own way. The row shows from the title screen and the pause menu, on
+every disc, and it is kept in your settings. A save state made with the
+other Zoom type loads with the one you have now.
+
+## The camera is slow to come back to Ico
+
+**After I look around with the right stick, the camera takes a while to
+swing back. Can it come back at once?**
+
+Yes. Open **Options > Controls > Camera reset** and turn it **On**. Then a
+press of R3 (click the right stick in, or keyboard B) puts the camera right
+back on Ico. If you are still pushing the stick, the camera waits on Ico
+until you let go, so it does not swing straight back out. You can move R3 to
+another button under **Remap controls**. The touch screen has no R3 button.
+Save states load whichever way it is set.
+
+## Can I see where Yorda is without calling her?
+
+**Pressing R1 to find Yorda makes her come to me. Can I just look at her?**
+
+Yes. Open **Options > Controls > Look at Yorda** and choose **Hold** or
+**Toggle**. Then L3 (click the left stick in, or keyboard V) turns Ico's
+head and the camera to her, as a call does, but she stays where she is.
+With **Hold** the camera looks while you keep L3 held; with **Toggle** one
+press starts the look and the next ends it. When she is in another part of
+the castle, the camera turns toward her wherever R1 would. You can move L3 to another button
+under **Remap controls**. The touch screen has no L3 button. The row shows
+from the title screen and the pause menu, on every disc. Save states load
+whichever way it is set.
+
 ## The on-screen buttons are in my way
 
 **Can I move them, make them smaller or hide some?**
@@ -43,6 +82,35 @@ If the D-pad, Cross or Circle is off, tap the menu lines directly; the Back
 gesture or button opens the pause menu during play, and **Options >
 Controls > Touch screen > Reset layout** puts everything back. Each way you
 hold or fold the phone has its own arrangement. [How it works](CONTROLS.md#arranging-the-buttons-yourself).
+
+## What is the climbing test room?
+
+An early cut of the trolley room (the one where Ico rides the cart), kept
+on the disc as a place the makers built to try climbing and boxes. Every
+one of its files carries the trolley room's name, it uses that room's
+camera data, and its one entrance is the trolley room's main entrance. It
+is not the finished room, though: it has about one floor in seven in
+common with the shipped one, its structure is built from far fewer and
+rougher pieces with its own set of textures, it stops at the floor where
+the shipped room goes on below, and it has none of the shadows, doors or
+switches. Fifteen marker objects of a kind the finished game does not
+know lie along its walkways. The disc holds no date or version for it, so
+how early it is cannot be told. Its main model was emptied at some point
+while its floor data stayed attached to it, which is why the room had no
+floor until the port gave it one.
+
+## Ico runs in circles in the climbing test room
+
+The second room under Options > Extras > Unused content (Test room:
+climbing) was left on the disc without a floor; the port gives it one.
+Its camera, though, was made for a different room (the one with the
+trolley): in the room's lower part five camera spots sit close together on
+different sides of the ramp, and the game moves the camera between them
+by how near Ico is to each. Because the controls follow the camera, when
+Ico runs the view jumps from one spot to the next and his path curves
+with it. At walking speed the view settles and he keeps his line. It is
+how the room was built, not a fault in the port; the arena test room and
+every real room of the game are not affected.
 
 ## Ico and Yorda come straight back out of a doorway
 
@@ -96,6 +164,26 @@ then start the game again. If the picture is still black, send a report as
 described in [When something goes wrong](TROUBLESHOOTING.md#send-a-problem-report)
 and attach the log and say which disc you play (the European, Japanese, Korean, North American or Asian disc, the August 2001 preview or the June 2001 magazine demo).
 
+## The game starts without sound, or the sound starts late
+
+**The game started, but for the first seconds there was no sound. Or the
+sound only started after a while.**
+
+Some sound devices take a long time to get ready (one report had a
+controller with a headphone socket plugged in by USB). The game does not
+wait for them: if the sound device is not ready within 2 seconds, the game
+starts anyway, runs silently, and the sound joins as soon as the device is
+ready.
+Nothing is lost but the sound of those first seconds.
+
+To see how long your device took, look in `ico-pc.log` for the line
+`audio: the device opened after` (the time is in milliseconds). If the
+sound never starts, the log says `audio: still waiting for the device`
+every 10 seconds; unplug the controller or headset, or choose another
+output in the Windows sound settings, and start the game again. If that
+does not help, send a report as described in
+[When something goes wrong](TROUBLESHOOTING.md#send-a-problem-report).
+
 ## How do I use a texture pack?
 
 A texture pack is a set of sharper pictures that fans made to replace the
@@ -129,7 +217,9 @@ Open **Options > Display** and turn **Frame rate counter** On. A small
 number such as "60 fps" appears in the top-left corner of the screen,
 updated once a second. With the touch controls showing, it moves along the top
 edge to the first place no visible control covers (between the D-pad and
-Select unless you moved them). Turn it Off the same way.
+Select unless you moved them). After you come back to the game, save a picture
+for a bug report or turn the screen, it keeps its last number until a whole
+second of play has passed. Turn it Off the same way.
 [What the row does](OPTIONS.md#display).
 
 ## The counter shows 30 at Frame rate 60
@@ -180,6 +270,30 @@ would get its own dark lines, and the whole screen would look like a fine
 mesh, a bit like looking through a screen door. So the filter keeps the
 original resolution on purpose. Texture packs still show through it.
 
+## What are FSR 1.0 and FSR 3.1? Why is there no DLSS or XeSS?
+
+Both are on the Picture page, in the **Upscaling** row, and both are off by default, so the picture
+is the one the original game gave. They help when the game draws the picture smaller than your
+screen and has to stretch it.
+
+**FSR 1.0** (AMD's upscaler) looks at the picture it is about to stretch and keeps edges crisp
+instead of blurring them. It works at **Resolution 1x** and after **Downsampling**, on every
+computer and phone, whatever the graphics card.
+
+**FSR 3.1** (AMD's newer upscaler) builds each picture from the pictures before it. **Native AA**
+only smooths edges at your screen's size. **Quality**, **Balanced** and **Performance** draw the
+picture 1.5, 1.7 or 2 times smaller than your screen first and rebuild it, which costs the graphics
+card less. It is offered on Windows and Linux computers that run the game with Vulkan; on a Mac, a
+phone, or the Direct3D and OpenGL renderers the row stays at Off. The game's text, fades and
+film grain are drawn over the finished picture and stay sharp; sparks and smoke can leave a faint
+trail.
+[Details](OPTIONS.md#picture).
+
+DLSS (NVIDIA) and XeSS (Intel) are not offered because this port ships only open-source code. Both
+come as libraries under their makers' own licences, not as source the project can include and build,
+so they are left out on purpose, not for lack of work. FSR 1.0 and FSR 3.1 are published by AMD
+under the MIT licence.
+
 ## How are the movies shown without comb lines?
 
 The movies on the disc are stored the way a TV shows them: each frame is
@@ -196,6 +310,31 @@ Options > Extras > Add to Steam on the title screen.
 The game then shows in your Steam library, and on a Steam Deck in Game
 Mode. If Steam is open, the game tells you to close it first.
 [Details](OPTIONS.md#extras) and [Steam Deck tips](TROUBLESHOOTING.md#steam-deck).
+
+## Where does the game's icon come from? Why is the file's icon plain?
+
+The icon is the I of the title lettering. The game makes it from your own
+disc the first time the title screen shows (the title holds still for about
+half a second),
+and keeps it in the game's `icon` folder, so nothing of it is in the
+download. Windows and Linux (X11) show it on the game's window and
+taskbar, [Add to Steam](OPTIONS.md#extras) uses it, and on a Mac it is the Dock
+icon while the game runs. On Linux, Options > Extras > Add to the
+applications menu puts the game in your desktop's menu with the icon (on
+a Wayland desktop that entry is also what gives the window its icon). On
+Windows the program file (`ico_pc_x64.exe`, its shortcuts and a pinned
+taskbar button) takes the icon too, from the next start after the title
+screen has made it: a small helper in the `tools` folder puts it into the
+file as the game closes. If the game is in a folder you cannot write to
+(such as Program Files), or the helper has been deleted, the file keeps
+the plain icon; `logs\icon-stamp.log` says what happened. Windows may show
+the old icon for a while until Explorer refreshes it. The Mac app in Finder
+keeps a plain icon, because the icon does not exist until your disc has
+made it. It is made again after an update, and
+waits while the CRT filter or a Picture colour setting (Gamma, Brightness,
+Contrast or Saturation) is changed, or while Upscaling is on: it is made at
+the title screen once they are back to normal. On Android the home-screen icon stays plain; the recent-apps card shows the I. A
+Wayland session shows no window icon until the menu entry exists.
 
 ## My browser or Windows says the download is dangerous
 
@@ -239,10 +378,41 @@ saves to slot 1 from the pause menu. The state keeps the game exactly as it
 is, and you can load it from the pause menu or from the title screen
 (choose **Continue**, then press **Square** for **Save states**; F9 loads
 slot 1). It does not replace
-the game's own save points: those still write to the memory card. A state
-only loads in the version of the game that saved it, so keep a save point
-too before you update.
+the game's own save points: those still write to the memory card. Until
+version 1.0, a save state is not guaranteed to resume where you saved it in
+another version of the game: it often does, and when it cannot it continues
+from its last checkpoint, so keep a save point too before you update. From
+1.0 on, states are meant to keep resuming exactly in later versions. On a journey with Permadeath on, save states are off.
 [The details](OPTIONS.md#save-states).
+
+## Can I change the difficulty in the middle of a game?
+
+**I picked Hard and want Normal again. Where is the row?**
+
+No. The difficulty is chosen on the New Game screen, and the save keeps it
+for the whole journey. From the pause menu, **Options > Gameplay >
+Difficulty** shows the rules the journey runs with, greyed, and nothing there
+can be changed. That is so a Permadeath journey cannot be softened halfway,
+and so the knock-down count means the same all the way through. To play the
+same game on other rules, start a New Game and choose them there; your first
+save is not touched. The rows for the Shadows, the Combat rules, Time to
+rescue Yorda and the rest are under **Customize** on the New Game screen,
+not in Options. [The details](OPTIONS.md#difficulty).
+
+## My Permadeath save will not load
+
+**I get "This journey has ended." when I choose my save, or the game over
+screen has no Continue.**
+
+That is Permadeath doing its job: a journey with it on ends at the first game
+over, and the save of that journey is refused from then on. The game
+remembers which journeys have ended in `difficulty.toml`, in your user folder
+([where that is](PORTABLE_MODE.md#where-your-saves-are)); the memory card
+file itself is untouched. Start a New Game to play again. If a save is
+refused that did not have Permadeath on, or you moved your saves to another
+device and want them to load, see
+[moving to another computer or phone](#moving-to-another-computer-or-phone).
+[The details](OPTIONS.md#permadeath).
 
 ## Can I bring my PS2 save over?
 
@@ -271,6 +441,15 @@ take several minutes. [The Android guide](ANDROID.md) has the details.
 
 On an iPhone with iOS 15 or newer, it runs inside LiveContainer.
 [How to install it](../README.md#iphone).
+
+## Does it work on my ARM Linux handheld?
+
+Only if its graphics driver offers Vulkan 1.1 or later and the system is
+fairly new (Debian 13, Ubuntu 24.04 or newer). The game does not draw with
+OpenGL ES, which is all that many handhelds offer (for example the ones built
+on the RK3326 chip with Mali-G31 graphics), so on those it stops with the
+message that it needs a graphics driver with Vulkan 1.1 or later. On an older
+system it does not start at all; the libraries it needs are too new.
 
 ## Can I use ReShade?
 
@@ -316,8 +495,14 @@ computer and a phone, and on Android 13 and later, where the game's own folder
 cannot be opened from a file manager.
 [The details](OPTIONS.md#extras).
 
-Your save states come with the backup, but a state only loads in a version of
-the game that can resume it, the same as on the device that made it.
+If you move your saves by copying folders instead, copy `difficulty.toml` from
+your user folder along with `memcard`. It holds the difficulty each save was
+started on, and which Permadeath journeys have ended. Without it every save
+loads with the rules in the other device's `config.toml` (Normal when you
+never changed them), and a Permadeath journey that had ended loads again.
+
+Your save states come with the backup. A state that the game on the other
+device cannot resume where it was saved continues from its last checkpoint.
 
 ## Going back to the version you had before
 
@@ -326,8 +511,8 @@ you update, make a backup (Options > Extras > **Back up your data**). After
 you go back, restore it (**Restore from a backup**): your memory card,
 settings and achievements are as they were when you made the backup. A
 backup made by a newer version also restores in an older one: the memory card
-and the settings work, but its save states only load in a version that can
-resume them, so a state the newer version made may be greyed in the older one.
+and the settings work, but a save state the newer version made may not load
+in the older one.
 Save at one of the game's own save points before you switch, so your progress
 is on the memory card.
 
@@ -407,6 +592,33 @@ Choose **Quit to desktop** on the title screen (**Quit game** on a phone
 or tablet). While you play, open the pause menu (Start, or Escape on a
 computer), choose **End Game** to reach the title screen, and quit from
 there. On a computer you can also close the window.
+
+## The game wrote an extra file called slow-something.zip
+
+When a scene runs slowly, the game may write extra files in the `logs` folder: `slow-` and the date
+and time, ending in `.zip`, at most three each time you start it, each one taken from a heavier moment
+than the one before. A file holds one picture from the slow scene and a copy of the log. The game
+keeps the newest three. If you are reporting that the game runs slowly, please attach them with the
+log. They are safe to delete. To stop the game writing them, set `slow_scene_dump_ms = 0` under
+`[dev]` in `config.toml`.
+
+## What are vu-zero-mark.txt, ahead-mark.txt and nodiscard-mark.txt?
+
+They are small notes the game keeps in the `logs` folder about three ways it saves work for the
+graphics card or phone:
+
+- `vu-zero-mark.txt`: leaving out pieces of scenery too small to cover a single pixel;
+- `ahead-mark.txt`: on some Android phones, handing the next picture to the graphics chip while
+  the one before is still finishing;
+- `nodiscard-mark.txt`: on some phones, drawing some of the scenery in a simpler way that can let
+  the graphics chip skip the hidden parts sooner.
+
+If the game closes with a crash or a graphics problem while one of them is in use, if the game's
+check at start finds that the first or the third does not work, or if the game is stopped while it
+starts using one of them, the note keeps that way off on your computer or phone until you install a newer
+version of the game. Closing the game the usual way once it has started never turns any of them
+off. Leave the files where they are: the log's first lines say what each note decided, and the game
+puts the notes in a problem report by itself.
 
 ## Something went wrong. What now?
 

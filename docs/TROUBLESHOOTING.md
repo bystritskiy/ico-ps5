@@ -31,8 +31,11 @@ loses the graphics card, or cannot start its graphics, it also writes a
 report file in the same `logs` folder: its name starts with `report-` and
 goes on with the date and time, ending in `.zip` (for example
 `report-20261016-142301.zip`). It holds the log, the log of the run
-before, your settings and a short summary, so it is the one file a
-problem report needs. The message the game shows names it. The five
+before, your settings, a short summary and a list of what each of the
+last few areas you played contained and what was left out of its
+pictures, so it is the one file a problem report needs. On Android 11 and later it also says how Android
+ended the game the time before (for example, when the phone ran low on
+memory). The message the game shows names it. The five
 newest are kept. Whenever you report a problem, also say which disc you
 play (the European, Japanese, Korean, North American or Asian disc, the August 2001 preview or the June 2001 magazine demo).
 
@@ -120,9 +123,12 @@ freeze for seconds; the next start prepares everything at the start again.
 On a device using Qualcomm's own graphics driver (above), on one whose
 graphics driver the game cannot tell, and whenever the system itself said it
 was low on memory, the game prepares the rest the first time the game needs
-it instead: the next start then skips **Preparing graphics** and goes
-straight to the title, and the first minutes of play can pause for a moment
-here and there while graphics are prepared. Apps left open in the
+it instead for that start, and the first minutes of play can pause for a
+moment here and there while graphics are prepared. The next start picks the
+preparation up where the earlier one stopped, in smaller steps (half the
+size each time it stops again, down to a small least size), and the log says
+where it resumed. Once it finishes, later starts prepare everything at the
+start again. Apps left open in the
 background hold memory too: close them before you start the game. A new
 version of the game tries preparing everything at the start again. The log
 says how much memory the device had left each time the system asked the
@@ -264,14 +270,16 @@ from the front page. If you have no sound with the newest version, send the
 
 When the graphics card cannot draw every picture in time, the game keeps
 its normal speed and leaves some pictures out, so it looks less smooth
-instead of slowing down. This works at every frame rate except Original.
+instead of slowing down. This works at every frame rate.
 If the game stutters, or your graphics card is always at full load, these
 settings lower the load the most (Options):
 
 - **Frame rate** Original draws one picture per game step, as on the PS2,
   instead of also drawing the pictures in between: about half the work.
-  It never leaves a picture out, so if the card still cannot keep up there,
-  the game slows down a little instead.
+  The game does not wait for the screen to take each picture: if the card
+  cannot draw them all in time, the game keeps its speed and some pictures
+  are left out, so it looks less smooth, which is the best choice on a
+  slow phone.
 - **Resolution** 1x is the PS2's own sharpness and the lightest of all.
 
 On a Mac the game runs fast with anti-aliasing on or off: it draws with
@@ -370,6 +378,53 @@ see such lines:
    rate showed the lines and where in the game you were. On a phone, a short
    screen recording of the lines helps.
 
+## Something close to the camera looks wrong
+
+On the PlayStation 2, walls, water and mist that come very close to the
+camera vanish all at once. The game now draws them to the edge of the
+picture instead, in every preset. If something close to the camera looks
+wrong since (a shape that should not be there, a surface seen from the
+wrong side), you can bring back the PlayStation 2's way to compare: close
+the game, open `config.toml` from the folder with your saves
+([where that is](PORTABLE_MODE.md#where-your-saves-are)) in a text editor
+and add these two lines at the end (if the file already has a `[dev]`
+line, add only the second line under it):
+
+```toml
+[dev]
+region_rule = "ps2"
+```
+
+If that changes what you saw, say so in the report with a picture of the
+spot both ways ([save a picture of a problem](#save-a-picture-of-a-problem));
+the log's line with `region rule:` in it says which way the game
+ran. To go back, delete the line.
+
+## A piece of the scenery is missing
+
+To save work, the game leaves out pieces of scenery so small that they
+would not cover a single pixel of the picture. Before it does, it checks at
+start that this works on your graphics card or phone, and it uses it only
+when that check passes. If a part of a room, a wall or an object is missing
+all the same, save a picture of it while it shows
+([save a picture of a problem](#save-a-picture-of-a-problem)) and send it
+with a [problem report](#send-a-problem-report), saying where you were and
+what should be there. On a phone, use **Save a picture for a bug report**
+([how](ANDROID.md#send-a-problem-report)).
+
+## A piece of the scenery looks wrong or has stray dots
+
+On some phones the game draws some of the scenery in a simpler way that
+lets the graphics chip skip hidden parts sooner. It checks at start that
+the picture comes out the same, and it keeps this only where it makes the
+game faster. If a piece of the scenery looks wrong all the same, for example
+stray dots or small black or coloured specks on a wall, a dock or a boat
+close to the camera, save a picture of it while it shows
+([save a picture of a problem](#save-a-picture-of-a-problem)) and send it
+with a [problem report](#send-a-problem-report), saying where you were. On
+a phone, use **Save a picture for a bug report**
+([how](ANDROID.md#send-a-problem-report)).
+
 ## A program that adds frames or scales the game (Lossless Scaling) does not work
 
 Programs that scale the game's window, add frames to it or draw over it,
@@ -393,7 +448,8 @@ does not work, send a [problem report](#send-a-problem-report) with
 3. Say which version of the game you have, and whether you play the
    the European, Japanese, Korean, North American or Asian disc, the August 2001 preview or the June 2001 magazine demo. A downloaded release shows its version
    in the top-right corner of the Options menu's first page, and the log
-   says both at the top.
+   says both at the top. On Android the log
+   also has a `window: device:` line with the Android version and the phone.
 4. Attach the newest file in `logs` that starts with `report-`, when the
    game wrote one for the problem (it already holds the log and your
    settings). Otherwise attach `ico-pc.log`. If the problem is in a
@@ -542,6 +598,23 @@ under `[video]` in `config.toml` ([more](OPTIONS.md#choosing-the-renderer)). Ope
 renderer, so if it fails or looks wrong, send `logs/ico-pc.log` (the lines starting `window:`
 and `rhi_gl:`) with your graphics card and driver.
 
+**The window goes black and "Not Responding" after switching the Graphics API to OpenGL.**
+Some graphics drivers take a very long time, or never finish, getting OpenGL's graphics ready.
+The game now keeps its window responding meanwhile, and from the first second it shows a screen
+that says "Preparing graphics for OpenGL" with how many of the graphics are ready and a bar that
+fills; then the usual "Preparing graphics" screen finishes the job. On some graphics cards (NVIDIA
+among them) the first switch to OpenGL can take a long time: as long as the count moves, the game
+is working. If the driver gives no answer for about 15
+seconds, the game goes back to the Graphics API you had before and shows a message that says
+"OpenGL could not start: the graphics driver stalled compiling ...". Keep the Graphics API you
+had, or update the graphics driver and try again. If the game stops responding during a switch
+for a whole minute, it closes itself with a message and writes a report file. Either way the log
+says how far the switch got: its last lines start with `window: switch` and name each step, and
+a line with `compiling for` in it names what the driver was busy with, and the lines with
+`start-up set` in them say how far it got. Send the
+newest file in `logs` that starts with `report-` (or `ico-pc.log`) with your graphics card and
+driver.
+
 **I chose Direct3D 11 and the game does not start.** Direct3D 11 has not been tried on any
 Windows computer, so this can happen. Open `ico-pc.ini` in the `x64` folder with Notepad and
 delete the line `backend=d3d11` (or change it to `backend=` with nothing after it, which is
@@ -567,7 +640,24 @@ the next start either, the game says so and the box comes back.
 later in Options > Graphics driver. See
 [Using a different graphics driver](ANDROID.md#using-a-different-graphics-driver).
 
-**"The file picker could not be opened."** (on a phone, after **Add a
+**"This driver package is not built for this phone's 16 KB memory pages."**
+(on a phone, after **Add a driver**) The phone uses 16 KB memory pages and
+the driver package was built for 4 KB ones, so it could not be loaded. The
+game did not add it. Download a build made for 16 KB pages (the release's
+text may say) or use another driver. See
+[Using a different graphics driver](ANDROID.md#using-a-different-graphics-driver).
+
+**The game uses the phone's own driver after the graphics stopped
+responding with a driver you added.** (on a phone) If the graphics stop responding within the first
+30 seconds of playing with a driver package, the game counts it against the
+driver: the next start uses the phone's own driver and says so, as when a
+driver does not start. The driver is not removed. To try it again, set
+**Driver** to it in Options > Graphics driver. If you report the stop,
+attach the report file: its log says how many seconds after the first
+picture it happened, and which driver and version ran
+(`gpu driver: this start runs ...`).
+
+**"The file picker did not open."** (on a phone, after **Add a
 driver**) The phone would not open its file picker. Copy the driver's zip
 file into `Android/data/com.defnf.icopc/files/drivers` (the `drivers` folder
 in the game's folder; the message names the path) with the USB cable, then
@@ -577,13 +667,13 @@ If you report it, send `ico-pc.log` from right after you pressed **Add a
 driver**: the line that starts `gpu driver: the file picker` says what the
 phone answered.
 
-**"No app on this device can choose a file."** (on a phone) The phone has no
+**"No app here can choose a file."** (on a phone) The phone has no
 app that can offer a file to pick. Use the same way: copy the zip into the
 `drivers` folder and choose **Add from the drivers folder**. The
 `gpu driver: the file picker` line in `ico-pc.log` says what the phone
 answered.
 
-**"No file was chosen."** (on a phone, after **Add a driver**, or in the box
+**"No file chosen."** (on a phone, after **Add a driver**, or in the box
 at the start) The file picker closed without a file: either you backed out,
 or the phone's picker closes at once. The game names the folder to use
 instead, `Android/data/com.defnf.icopc/files/drivers`: copy the zip into it
@@ -649,9 +739,12 @@ driver** and used from the next start (see the driver note above). Start the gam
 That start has the graphics driver check every read it makes, for that
 start only, which can keep it from stopping (the game may run a little
 slower). If the graphics driver stops again in that start or in the one
-after it, the game keeps the checks on from then on and writes
-`gpu_robust = true` into `config.toml`; delete that line to turn them off
-again. If it happens every time at the same place, report it and attach
+after it, the game keeps the checks on and writes `gpu_robust = true`
+(with a `gpu_robust_by` line beside it) into `config.toml`. The game turns
+them off again by itself, and removes both lines, after three starts in a
+row that end without the graphics driver stopping, or at once after an
+update; the log says how many of the three have passed.
+A `gpu_robust = true` line without the `gpu_robust_by` line beside it (left by an older copy of the game, or written by hand) is removed at the next start, so the checks are off from then on, and the game turns them back on by itself as above if the graphics driver stops again. Delete the lines yourself to turn the checks off sooner. If it happens every time at the same place, report it and attach
 the newest file in `logs` that starts with `report-` (the message names
 it; it shows what was being drawn) and say which disc you play, the
 European or the Japanese.
@@ -682,11 +775,7 @@ afterwards:
   the fog.
 - `gpu_checkpoints=true` makes the log say more exactly what the graphics
   card was doing when it stopped. The game may run a little slower with it.
-- `gpu_robust=true` makes the graphics card check every read and write the
-  game asks for. The game may run a little slower with it. It is off unless
-  you turn it on; on a phone the game turns it on by itself for one start
-  after the graphics driver stopped responding (see above), and
-  `gpu_robust=false` keeps it off.
+- `gpu_robust=true` makes the graphics card check every read and write the game asks for. The game may run a little slower with it. It is off unless you turn it on. This line stays in `ico-pc.ini` until you delete it: the game never changes this file. Separately, on a phone the game turns the same check on by itself for one start after the graphics driver stopped responding (see above), and its own setting for it in `config.toml` turns off again after three clean starts or an update. `gpu_robust=false` keeps it off.
 
 ## The game closes by itself
 
@@ -771,16 +860,28 @@ stopped. If a controller of yours stops working, delete the line.
 The game says why on the screen. In the Save states list, a slot that cannot
 be loaded is greyed and the line under the cards gives the reason:
 
-- **Saved by another version of the game.** A state only works in the exact
-  version that saved it. Go back to that version to use it, or save a new
-  one.
+- **Loads from its last checkpoint (made by another version).** The
+  slot is not greyed: the game cannot resume this state where it was saved,
+  so Load continues from the last checkpoint the state holds (the place a
+  game over would have taken you back to), and a message says it continued from there.
+  Until version 1.0 this can happen to any state from another version: exact
+  resuming across versions is not guaranteed before 1.0.
+- **Made by version ...: it cannot be resumed and has no checkpoint.** The state
+  was saved in a new game before its first
+  checkpoint, or its checkpoint could not be found. Go back to the version
+  that saved it to resume it, or start from your memory card save.
+- **Made by version ...; version ... changed that part of the game (or how
+  progress is kept), so it cannot load.** The version you play now cannot
+  continue that state where it was saved, and it has no checkpoint to fall
+  back on. Go back to the version that saved it, or use your memory card
+  save. **Made by version ..., too old to load** is the same for a state
+  made before save states could move to newer versions.
 - **Saved from another disc.** Each disc has its own four slots. Start the
   game from the disc the state was saved on.
-- **A gameplay setting differs.** The message names the setting and the value
-  it had when you saved. Put the setting back (a few, such as Analogue stick
-  fix, Skip the opening and the Game variants, change how the game plays),
-  and the state loads.
-- **The state could not be restored; the game goes on.** The file is damaged,
+- **Save states are off on a Permadeath journey.** None can be saved or
+  loaded while the journey has Permadeath on, and a state made on such a
+  journey never loads. The message says so.
+- **Could not load it; play goes on.** The file is damaged,
   or the game found something wrong in it. Your game carries on as it was.
   Try another slot.
 - **Pause the game to save a state.** Saving only works from the pause menu.
@@ -792,28 +893,52 @@ be loaded is greyed and the line under the cards gives the reason:
 - **Save states are off on this build.** The game cannot use them on
   your device.
 
+A setting never stops a state from loading. A state loads with the
+settings you have now, whatever they were when you saved it (Hold type, Zoom
+type, Camera reset, Look at Yorda, the rows on the Gameplay pages and the rest). The
+journey's difficulty comes from the state, as always. The one setting a
+state keeps is **Video mode**: a state saved in the other of 50 Hz and 60 Hz
+plays in the one it was saved in until you restart the game, and your
+setting is used again from then on. A state saved with **Developer mode** on
+and loaded with it off closes the debug menu if it was open, and achievements
+stay off until you restart the game (as after using the debug menu); some of
+that menu's settings stay as the state had them until then.
+
 If a state fails to load for any other reason, send a
 [problem report](#send-a-problem-report): the log has lines that start with
 `state:` that say what happened.
+
+## A save says "This journey has ended."
+
+The save belongs to a journey with Permadeath on that has had its game over.
+The game refuses to load it, and the game over screen of such a journey has
+no Continue. That is the rule, not a fault: Start a New Game to play again.
+The memory card file is not changed. The game keeps the list of ended journeys
+in `difficulty.toml` in your user folder, so a card copied to another device
+without that file loads again, and a save refused by mistake loads again if the
+file is moved out of the way (close the game first; every save then takes its
+difficulty from `config.toml` again). The log lines that start
+with `difficulty:` say which save was refused and why, and if the file could not
+be read.
+[Permadeath](OPTIONS.md#permadeath).
 
 ## A backup will not save or restore
 
 Options > Extras > Back up your data and Restore from a backup say why in a
 message:
 
-- **Not now: the game is saving.** The memory card or a save state was being
+- **The game is saving.** The memory card or a save state was being
   written. Wait a moment and try again.
 - **There is nothing to back up yet.** The game has no memory card save, save
   state or settings file yet.
-- **The data could not be written.** The place you chose is full, read-only or
+- **Could not write the data.** The place you chose is full, read-only or
   gone (a USB stick taken out). Free some space or choose another place. When
   restoring, the device itself is short of space.
 - **This file is not a backup made by this game.** Choose the `.zip` that
   Back up your data saved. A zip you made yourself, or one that was unpacked
   and packed again, is not taken.
-- **This backup was made by a newer version.** Update the game, then restore
-  it.
-- **This backup is damaged** or **holds files outside the game's own
+- **Made by a newer version.** Update the game, then restore it.
+- **This backup is damaged** or **It holds files outside the game's
   folders.** The file changed after it was saved (a download that did not
   finish, or a program that edited it). Use another copy.
 - **The backup could not be put in place** (a box when the game starts after a
@@ -909,6 +1034,26 @@ driver makes the game stutter, with long stops every few seconds, while a
 newer driver from the community does not. Try a Turnip driver package:
 **Options > Graphics driver**, **Add a driver**, then set **Driver** to it
 and restart ([the steps](ANDROID.md#using-a-different-graphics-driver)).
+The log line `window: a present blocked 360 ms in the driver's present
+call` means one picture waited that long inside the phone's graphics driver
+before it could be shown: the game was not slow, the driver or the screen
+held the picture. The line `window: present calls: ...` in every 10
+second block counts those waits by size, and `window: display refresh: ...`
+says what rate the screen ran at; if the rate changes just before such a
+wait, the screen changing its refresh rate is the cause. On a Qualcomm
+graphics chip the lines `window: kernel GPU driver ...` say how fast the
+graphics chip ran and how busy it was in each 10 second block and just
+before and after each such wait, and the lines `window: thermal: ...` say how
+warm the phone was and whether the screen was being recorded. With
+**Vsync** off, phones with a Qualcomm graphics driver send pictures to the
+screen one after another from the start, as the chip maker advises, instead
+of switching to that only after a few held-back pictures; this is not
+expected to remove the stutter. Every other graphics chip does not switch
+at all, phones with a Mali or PowerVR chip and the graphics cards of
+computers included: with **Vsync** off they keep showing pictures the usual
+way, as that switch only helped with Qualcomm's own driver. With **Frame
+rate** set to a number the game asks the phone to hold one rate
+([the details](ANDROID.md#a-fixed-refresh-rate-for-a-frame-rate-you-set)).
 On a tablet, a high **Resolution** with Vsync off and Frame rate
 Uncapped asks the most of the driver: set **Vsync** On, or **Frame rate**
 60, and lower the **Resolution** a step. If it still stutters, play for a

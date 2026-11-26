@@ -242,6 +242,16 @@ float gsb_HostShadowClipX(void)
     return x > GSB_SHADOW_CLIP_MAX ? GSB_SHADOW_CLIP_MAX : x;
 }
 
+/* GsBase.c: the same clip down.  This program's volumes are clipped to the
+   European disc's box under every region it records with (the frame's
+   width by ScreenHeight), so its recordings do not depend on the disc's
+   box; shadow_clip_test checks the box of each disc and gsb_cull_test
+   GsBase.c's own */
+float gsb_HostShadowClipY(void)
+{
+    return (float)ScreenHeight;
+}
+
 float GetTableSin(short angle)
 {
     return sinf((float)angle * (3.14159265f / 32768.0f));
@@ -1526,9 +1536,12 @@ static bool abRecord(int vol, bool one, AbPics *p, const char *what)
               : (g_rdPerf.shadowSeven >= 1 && g_rdPerf.shadowOne == 0),
           "(o) %s: the %s path resolved the count (one %u, seven %u)", what,
           one ? "one-draw" : "seven-draw", g_rdPerf.shadowOne, g_rdPerf.shadowSeven);
-    CHECK(g_rdPerf.shadowGathered == (g_rd.shadowLoad ? 0u : g_rdPerf.shadowOne),
-          "(o) %s: %u of %u one draws by gathers (loads asked %d)", what, g_rdPerf.shadowGathered,
-          g_rdPerf.shadowOne, (int)g_rd.shadowLoad);
+    /* the loads where asked or where the stencil view takes no gather
+     * (RhiLimits.stencilGather: Direct3D) */
+    CHECK(g_rdPerf.shadowGathered == (rd__shadow_count_loads() ? 0u : g_rdPerf.shadowOne),
+          "(o) %s: %u of %u one draws by gathers (loads asked %d, gather offered %d)", what,
+          g_rdPerf.shadowGathered, g_rdPerf.shadowOne, (int)g_rd.shadowLoad,
+          (int)rhi_limits()->stencilGather);
     p->colorDropped = g_rdPerf.shadowColorDropped;
     p->storeColorDropped = g_rdPerf.storeColorDropped;
     p->merged = g_rdPerf.shadowMerged;

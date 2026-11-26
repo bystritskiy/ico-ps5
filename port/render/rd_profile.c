@@ -2,16 +2,18 @@
  * docs/port/RENDER.md "The device profile").
  *
  * One renderer, one table: after rd__gpu_init the profile is decided once
- * from RhiLimits (tiler, localRead, vendorId, moltenvk, uintView, the
- * driver text) and the backend, and every vendor-dependent choice in the
- * renderer reads a flag of it; no other file of the renderer branches on a
- * vendor.  The device classes and their defaults:
+ * from the device table's choices for this device (the class, its tile
+ * columns, the blur fold: port/rhi/rhi_device_table.c, rd_device_rows.h,
+ * docs/port/DEVICE_TABLE.md) and RhiLimits' capabilities (localRead,
+ * uintView, the stencil view), and every vendor-dependent choice in the
+ * renderer reads a flag of it or a choice of the table; no file of the
+ * renderer branches on a vendor.  The device classes and their defaults:
  *
  *   flag          desktop  D3D12   Adreno    Adreno   Mali  PowerVR  Apple /
  *                 Vulkan           Qualcomm  Turnip                  MoltenVK
  *   blend         fixed-function on every class; [dev] blend opts into an
  *                 exact mode (rd_dst_read.c)
- *   fogLocal      on (1)   off     on where the device has local read
+ *   fogLocal      on (1)   off     on where the device has local read (2)
  *   dateStencil   on (1)   off     on where the device has local read
  *   storePlan     on on every class: a pass after its depth's last touch in
  *                 the replay neither loads nor stores the depth and its
@@ -21,6 +23,19 @@
  *                 store; ICO_RD_STORE_PLAN=all (tests) drops every depth
  *                 store (storeAll)
  *   blurFold      on       on      on        on       off   on       on
+ *   glowFold      on       on      off       off      off   off      off
+ *                 (the glow's mask computed inside its reduction,
+ *                 rd_glow_fold.c: on the immediate-mode classes, D3D11 and
+ *                 OpenGL too, off on every tile-based one, another tiler
+ *                 too; [dev] glow_fold = true|false, ICO_RD_GLOW_FOLD=1|0,
+ *                 over it.  The fold leaves out a full-frame pass, which on
+ *                 a tile-based GPU costs little (its tiles stay on the chip
+ *                 until their store), and runs the mask's arithmetic and
+ *                 its four reads of SCENE at every tap of the reduction's
+ *                 box, about 70 a WORK0 texel at the phone's 2364 x 1080:
+ *                 the PowerVR phone's folded reduction measured 8 ms more
+ *                 a glow picture than the mask's pass and the plain
+ *                 reduction together, v0.10.1 to v0.10.2-rc4)
  *   robust access off: the Vulkan backend's default (vk_device.c;
  *                 gpu_robust = true turns it on); D3D12 and D3D11 their
  *                 own bounds; OpenGL the backend's RhiLimits.robustText
@@ -56,6 +71,13 @@
  *                 holding its last touch dropped (rd_pass_cut.c; [dev]
  *                 clear_carry, clear_skip, last_store = auto|on|off, read
  *                 there, each with its start line)
+ *   shadowMerge   on on the tile-based classes, off on the others: the
+ *                 shadow volumes drawn in the scene's open pass, not a pass
+ *                 of their own that loads and stores the scene's depth
+ *                 (rd_shadow_merge.c; ICO_RD_SHADOW_MERGE=0|1, the tests')
+ *   sheetBake2x   on on the tile-based classes, off on the others: menu
+ *                 text pages baked on the CPU at scale 2 (rd_tex.c
+ *                 rd__sheet_bake_scale; issue 126)
  *   crackFill     on on every class (the crack filler above 1x,
  *                 rd_crack_fill.c: on the local read's path it draws in
  *                 the pass the fog then keeps, so a tile-based GPU pays
@@ -85,6 +107,15 @@
  * self-tests run), 0 the local reads without the probe.  Where the device
  * has no local read the three stay off.
  *
+ * (2) Not where the local read is the Vulkan VkRenderPass path's subpass
+ * read (RhiLimits.localReadSubpass: a device without dynamic rendering,
+ * port/rhi/vk/vk_renderpass.c), which reads the colour of a pass with a
+ * depth target and nothing else: DATE's stencil setup is its one user;
+ * fogLocal and fxDstLocal stay off there (their [dev] keys too, with a
+ * line), and the profile's words say "local read yes (the subpass read:
+ * a pass's colour with a depth target)".  DATE's self-test
+ * (rd_date_selftest.c) decides it on the device as everywhere.
+ *
  * The OpenGL and D3D11 classes take the desktop column whatever the
  * vendor (neither backend reports a tiler: gl_device.c, d3d11_device.c);
  * what differs from desktop Vulkan comes from their limits, not the class:
@@ -105,7 +136,7 @@
  * The [dev] keys override one flag at a time, through the environment the
  * host exports (port/platform/host_config.c): ICO_RD_FOG_PATH=local
  * (fogLocal on; inplace, copy or buffer: off), ICO_RD_DATE_PATH=stencil|
- * snapshot, ICO_RD_STORE_PLAN=1|0|all, ICO_RD_BLUR_FOLD=1|0, ICO_RD_UINT_VIEW=
+ * snapshot, ICO_RD_STORE_PLAN=1|0|all, ICO_RD_BLUR_FOLD=1|0, ICO_RD_GLOW_FOLD=1|0, ICO_RD_UINT_VIEW=
  * 1|work|0 (both views, the work buffers' only, none), ICO_RD_ALPHA_PLAN=
  * 1|0, ICO_RD_FX_PLAN=1|0, ICO_RD_FX_DST_LOCAL=1|0, ICO_RD_VU_PLANES=1|0,
  * ICO_RD_SHADOW_ONE=1|0 (1 asks for the one draw, held to the view),
@@ -118,15 +149,16 @@
  * three local-read flags on the desktop class leaves the probe out.
  *
  *   rd: profile: tile-based GPU (Imagination, Vulkan): blend fixed-function;
- *     fog local on; DATE stencil; depth stores planned; blur fold on; robust
- *     access off (the default; gpu_robust = true turns it on); local read
- *     yes; uint views off; alpha plan on; fx plan on; fx local read on;
+ *     fog local on; DATE stencil; depth stores planned; blur fold on; glow
+ *     fold off; robust access off (the default; gpu_robust = true turns it
+ *     on); local read yes; uint views off; alpha plan on; fx plan on; fx
+ *     local read on;
  *     VU planes whole scales only; shadow count one draw; shadow edges:
  *     bilinear; pipelines the start-up set
  *
  * and the summary's words (rd__profile_text, after the blend's):
  *   tile-based GPU (Imagination, Vulkan): fog local on, DATE stencil, depth
- *   stores planned, blur fold on, local read yes, uint views off, alpha
+ *   stores planned, blur fold on, glow fold off, local read yes, uint views off, alpha
  *   plan on, fx plan on, fx local on, VU planes whole scales only, shadow
  *   count one draw, shadow edges: bilinear
  *
@@ -140,6 +172,13 @@
 #include <stdlib.h>
 #include <string.h>
 #include "rd_internal.h"
+#include "rd_vis.h"
+#include "rhi_driver_version.h" /* rhi_mesa_version_text */
+#include "rd_vu_skin_check.h"
+#include "rd_stencil_selftest.h" /* rd__profile_powervr */
+#include "rd_shadow_tile.h"      /* rd__profile_tile_class */
+#include "rd_subpass_probe.h"    /* rd__subpass_probe_begin */
+#include "rd_device_rows.h"      /* rd__device_value */
 
 /* the device classes of the table */
 typedef enum ProfileClass {
@@ -202,56 +241,71 @@ static const char *vendorName(uint32_t v, char *buf, size_t n)
     }
 }
 
-/* s holds word, ASCII letters in any case */
-static bool hasWord(const char *s, const char *word)
+void rd__turnip_note(const RhiLimits *lim, char *out, size_t n)
 {
-    const size_t n = strlen(word);
-    for (; s && *s; s++) {
-        size_t i = 0;
-        while (i < n && s[i] && (s[i] | 0x20) == (word[i] | 0x20)) {
-            i++;
-        }
-        if (i == n) {
-            return true;
-        }
+    char mesa[32];
+    if (n == 0) {
+        return;
     }
-    return false;
+    out[0] = '\0';
+    if (!rd__driver_is_turnip(lim)) {
+        return;
+    }
+    snprintf(out, n, "; turnip: %s",
+             lim->mesa.known ? rhi_mesa_version_text(&lim->mesa, mesa, sizeof mesa)
+                             : "Mesa version not named by the driver");
 }
 
-bool rd__driver_is_turnip(const RhiLimits *lim)
+/* the class: the device table's PROFILE_CLASS (port/rhi/rhi_device_table.c:
+ * by backend D3D12, OpenGL, D3D11; on Vulkan the rows adreno (Qualcomm's
+ * vendor id, not through MoltenVK; turnip-adreno over it where the driver
+ * is Turnip, rd__driver_is_turnip), moltenvk, mali, powervr, and
+ * other-tiler (RhiLimits.tiler: another tile-based GPU), else desktop) */
+_Static_assert((int)PC_DESKTOP == RHI_DT_CLASS_DESKTOP && (int)PC_D3D12 == RHI_DT_CLASS_D3D12 &&
+                   (int)PC_OPENGL == RHI_DT_CLASS_OPENGL && (int)PC_D3D11 == RHI_DT_CLASS_D3D11 &&
+                   (int)PC_ADRENO_QUALCOMM == RHI_DT_CLASS_ADRENO_QUALCOMM &&
+                   (int)PC_ADRENO_TURNIP == RHI_DT_CLASS_ADRENO_TURNIP &&
+                   (int)PC_MALI == RHI_DT_CLASS_MALI && (int)PC_POWERVR == RHI_DT_CLASS_POWERVR &&
+                   (int)PC_APPLE == RHI_DT_CLASS_APPLE && (int)PC_TILER == RHI_DT_CLASS_TILER,
+               "ProfileClass is the table's PROFILE_CLASS");
+_Static_assert((int)RHI_BACKEND_VULKAN == RHI_DT_VULKAN && (int)RHI_BACKEND_D3D12 == RHI_DT_D3D12 &&
+                   (int)RHI_BACKEND_OPENGL == RHI_DT_OPENGL &&
+                   (int)RHI_BACKEND_D3D11 == RHI_DT_D3D11,
+               "RhiBackendKind is the table's backend");
+
+int32_t rd__device_value(RhiDeviceChoice choice)
 {
-    return lim != NULL && hasWord(lim->driverText, "turnip");
+    /* the backend zeroes its limits at rhi_init and at rhi_shutdown and fills
+       them after the table's evaluation (vk_device.c vkr_pick_device,
+       gl_device.c, d3d11_device.c, d3d12_device.c): a device's limits have
+       a render target size */
+    const RhiLimits *lim = rhi_limits();
+    return rd_device_rows_value(rhi_device_table_current(), (int)rhi_backend(),
+                                lim != NULL && lim->maxRenderTargetSize != 0u, choice);
 }
 
-static ProfileClass classOf(const RhiLimits *lim)
+static ProfileClass classOf(void)
 {
-    switch (rhi_backend()) {
-    case RHI_BACKEND_D3D12:
-        return PC_D3D12;
-    case RHI_BACKEND_OPENGL:
-        return PC_OPENGL;
-    case RHI_BACKEND_D3D11:
-        return PC_D3D11;
-    default:
-        break;
-    }
-    if (lim->moltenvk) {
-        return PC_APPLE;
-    }
-    switch (lim->vendorId) {
-    case VENDOR_QUALCOMM:
-        /* Mesa's Turnip reports Qualcomm's vendor id and names itself in
-         * the driver text (VkPhysicalDeviceDriverProperties.driverName
-         * "turnip Mesa driver", RhiLimits.driverText); Qualcomm's own
-         * driver does not */
-        return rd__driver_is_turnip(lim) ? PC_ADRENO_TURNIP : PC_ADRENO_QUALCOMM;
-    case VENDOR_ARM:
-        return PC_MALI;
-    case VENDOR_IMAGINATION:
-        return PC_POWERVR;
-    default:
-        return lim->tiler ? PC_TILER : PC_DESKTOP;
-    }
+    return (ProfileClass)rd__device_value(RHI_DC_PROFILE_CLASS);
+}
+
+bool rd__profile_adreno(void)
+{
+    return rd_device_rows_adreno(classOf());
+}
+
+/* rd_stencil_selftest.h: classOf's PowerVR class (Imagination's vendor id on
+ * Vulkan, not through MoltenVK); another tiler that takes its row is not it */
+bool rd__profile_powervr(void)
+{
+    return classOf() == PC_POWERVR;
+}
+
+/* rd_shadow_tile.h: 1 the PowerVR class, 2 a desktop class, 0 any other
+ * (the table's TILE_CLASS) */
+int rd__profile_tile_class(void)
+{
+    return (int)rd__device_value(RHI_DC_TILE_CLASS);
 }
 
 /* ICO_<name>: -1 unset, else 1 for 1/true/on/yes, 0 for anything else */
@@ -315,19 +369,34 @@ static const char *edgeWords(const RdProfile *p)
 static void makeText(RdProfile *p)
 {
     snprintf(p->text, sizeof p->text,
-             "%s: fog local %s%s, DATE %s%s, depth stores %s%s, blur fold %s%s, local read %s, "
+             "%s: fog local %s%s, DATE %s%s, depth stores %s%s, blur fold %s%s, glow fold %s%s, "
+             "local read %s, "
              "uint views %s%s, alpha plan %s%s, fx plan %s%s, fx local %s%s, VU planes %s%s, "
-             "shadow count %s%s, shadow edges: %s%s%s%s",
+             "shadow count %s%s, shadow edges: %s%s%s%s%s",
              p->cls, p->fogLocal ? "on" : "off", mark(p, RD_PROFILE_FOG_LOCAL),
              p->dateStencil ? "stencil" : "snapshot", mark(p, RD_PROFILE_DATE_STENCIL),
              storeWords(p), mark(p, RD_PROFILE_STORE_PLAN), p->blurFold ? "on" : "off",
-             mark(p, RD_PROFILE_BLUR_FOLD), p->localRead ? "yes" : "no", uintWords(p),
+             mark(p, RD_PROFILE_BLUR_FOLD), p->glowFold ? "on" : "off",
+             mark(p, RD_PROFILE_GLOW_FOLD), p->localRead ? "yes" : "no", uintWords(p),
              mark(p, UINT_BITS), p->alphaPlan ? "on" : "off", mark(p, RD_PROFILE_ALPHA_PLAN),
              p->fxPlan ? "on" : "off", mark(p, RD_PROFILE_FX_PLAN), p->fxDstLocal ? "on" : "off",
              mark(p, RD_PROFILE_FX_DST_LOCAL), planesWords(p), mark(p, RD_PROFILE_VU_PLANES),
              shadowWords(p), mark(p, RD_PROFILE_SHADOW_ONE), edgeWords(p),
              mark(p, RD_PROFILE_SHADOW_BSPLINE), p->localWords[0] ? ", desktop local read " : "",
-             p->localWords);
+             p->localWords,
+             rd__vis_profile_default()
+                 ? ", cull frustum (the profile: the occlusion test costs more on this chip's CPU "
+                   "than it saves)"
+                 : "");
+    /* the Vulkan backend's barrier scopes and submission wait (rhi.h
+       RhiLimits.barrierWords, rhi_tile_rule.h; issues 179 and 211): the
+       summary says which of v0.11.2's and v0.11.3's this start ran */
+    const RhiLimits *lim = rhi_limits();
+    if (lim != NULL && lim->barrierWords != NULL && lim->waitWords != NULL) {
+        const size_t n = strlen(p->text);
+        snprintf(p->text + n, sizeof p->text - n, ", barriers %s, submission wait %s",
+                 lim->barrierWords, lim->waitWords);
+    }
 }
 
 void rd__profile_init(void)
@@ -335,12 +404,14 @@ void rd__profile_init(void)
     RdProfile *p = &g_rd.profile;
     const RhiLimits *lim = rhi_limits();
     memset(p, 0, sizeof(*p));
-    const ProfileClass c = classOf(lim);
+    const ProfileClass c = classOf();
     /* D3D12 and D3D11: no local read in the API ("n/a") and the API's own
      * bounds on buffer access (both report robustText NULL) */
     const bool d3d = c == PC_D3D12 || c == PC_D3D11;
-    const bool tile = c != PC_DESKTOP && c != PC_D3D12 && c != PC_OPENGL && c != PC_D3D11;
-    p->tiler = lim->tiler;
+    /* the table's TILE_COLUMNS: a class not desktop, D3D12, OpenGL or D3D11
+       (the row tile-classes) */
+    const bool tile = rd__device_value(RHI_DC_TILE_COLUMNS) != 0;
+    p->tiler = rd__device_value(RHI_DC_TILER) != 0; /* RhiLimits.tiler */
     p->localRead = lim->localRead;
     /* the desktop's local reads (the file comment's (1)): with a window, or
        as ICO_RD_LOCAL_PROBE asks in a headless run */
@@ -349,18 +420,30 @@ void rd__profile_init(void)
     p->desktopLocal = desk && (g_rd.windowed || probeEnv >= 0);
     p->localProbe = p->desktopLocal && probeEnv != 0;
     const bool local = (tile || p->desktopLocal) && p->localRead;
+    /* the Vulkan VkRenderPass path's subpass read (RhiLimits
+     * .localReadSubpass, port/rhi/vk/vk_renderpass.c): the colour of a pass
+     * with a depth target only, so DATE's stencil setup alone (its draws
+     * always have the scene's depth bound: rd_replay.c dateStencilFor).
+     * The fog reads the depth (and its shader's input attachment has no
+     * index, which only dynamic rendering's read maps: fog_lut.hlsl), the
+     * fx plan's reads land in the scene's colour-only passes (the post
+     * effects', the crack fill's paste): both stay on their snapshots */
+    const bool subpass = lim->localReadSubpass;
 
     /* the table (the file comment) */
-    p->fogLocal = local;
+    p->fogLocal = local && !subpass;
     p->dateStencil = local;
     p->storePlan = true; /* rd_store_plan.c; nothing changes where the device keeps the contents */
-    p->blurFold = c != PC_MALI;
+    p->blurFold = !rd__device_value(RHI_DC_BLUR_FOLD_OFF); /* the row mali */
+    /* the glow's mask in its reduction on the immediate-mode classes only
+     * (the table's glowFold row; rd_glow_fold.c reads it) */
+    p->glowFold = !tile;
     p->uintViewWork = !tile && lim->uintView;
     p->uintViewScene = !tile && lim->uintView;
     p->carefulSet = false;
     p->alphaPlan = true;
     p->fxPlan = true;
-    p->fxDstLocal = local;
+    p->fxDstLocal = local && !subpass;
     p->vuPlanesFrac = true;
     p->crackFill = true; /* rd_crack_fill.c reads ICO_RD_CRACK_FILL over it */
     const bool stencilView = lim->stencilView && lim->depthSampled;
@@ -382,14 +465,20 @@ void rd__profile_init(void)
      * classes, where their own pass loaded and stored the scene's depth
      * (rd_shadow_merge.c reads ICO_RD_SHADOW_MERGE over it, the tests') */
     p->shadowMerge = tile;
+    /* scale 2 menu text baked on the tile-based classes only (rd_tex.c
+     * rd__sheet_bake_scale; issue 126: on the others the bake's upload held
+     * a picture back) */
+    p->sheetBake2x = tile;
 
     /* the [dev] keys, through the host's environment */
     const char *notHere = NULL; /* a [dev] key asked for what the device lacks */
     const char *fog = getenv("ICO_RD_FOG_PATH");
     if (fog && strcmp(fog, "local") == 0) {
-        p->fogLocal = p->localRead;
+        p->fogLocal = p->localRead && !subpass;
         p->devSet |= RD_PROFILE_FOG_LOCAL;
-        notHere = p->localRead ? notHere : "[dev] fog_path = local (no local read)";
+        notHere = !p->localRead ? "[dev] fog_path = local (no local read)"
+                  : subpass     ? "[dev] fog_path = local (the subpass read reads no depth)"
+                                : notHere;
     } else if (fog && (strcmp(fog, "inplace") == 0 || strcmp(fog, "copy") == 0 ||
                        strcmp(fog, "buffer") == 0)) {
         p->fogLocal = false;
@@ -419,6 +508,14 @@ void rd__profile_init(void)
         p->blurFold = fold == 1;
         p->devSet |= RD_PROFILE_BLUR_FOLD;
     }
+    /* [dev] glow_fold: rd_glow_fold.c rd__glow_fold_on reads the key
+       itself as well (it forces the fold on even without an output, the
+       A/B); here for the lines' "([dev])" */
+    const int glow = envBool("ICO_RD_GLOW_FOLD");
+    if (glow >= 0) {
+        p->glowFold = glow == 1;
+        p->devSet |= RD_PROFILE_GLOW_FOLD;
+    }
     const char *uv = getenv("ICO_RD_UINT_VIEW");
     if (uv && uv[0]) {
         const bool work = strcmp(uv, "work") == 0;
@@ -441,9 +538,12 @@ void rd__profile_init(void)
     }
     const int fxLocal = envBool("ICO_RD_FX_DST_LOCAL");
     if (fxLocal >= 0) {
-        p->fxDstLocal = fxLocal == 1 && p->localRead;
+        p->fxDstLocal = fxLocal == 1 && p->localRead && !subpass;
         p->devSet |= RD_PROFILE_FX_DST_LOCAL;
-        notHere = fxLocal == 1 && !p->localRead ? "[dev] fx_dst_local (no local read)" : notHere;
+        notHere = fxLocal == 1 && !p->localRead ? "[dev] fx_dst_local (no local read)"
+                  : fxLocal == 1 && subpass
+                      ? "[dev] fx_dst_local (the subpass read: no read in a colour-only pass)"
+                      : notHere;
     }
     const int planes = envBool("ICO_RD_VU_PLANES");
     if (planes >= 0) {
@@ -494,6 +594,9 @@ void rd__profile_init(void)
                  rhi_backend_kind_name(rhi_backend()));
     }
     makeText(p);
+    /* the subpass read's probe as a phase of the run, where the device
+       made its shape for this start's probe (rd_subpass_probe.c) */
+    rd__subpass_probe_begin();
 
     /* the start line: the blend as rd__dst_init will set it (the ask read
      * now, as rd__gpu_init read it), robust access as the backend made the
@@ -501,32 +604,43 @@ void rd__profile_init(void)
     const int asked = rd__dst_asked_env();
     const bool exact = (asked == RD_BLEND_EXACT_ATTACHMENT && lim->rasterOrderAttachment) ||
                        (asked == RD_BLEND_EXACT_STORAGE && (lim->fragmentInterlock || lim->rov));
+    /* Turnip: the Mesa version its driverInfo names, which a report of the
+     * extended set's sliver (issue 163) is compared by; the plain set stays
+     * for every Turnip whatever it is (rd_pipeline.c rd__vu_set_choose) */
+    char turnip[112];
+    rd__turnip_note(lim, turnip, sizeof turnip);
     /* the ask is [dev] blend's, or GS state as shader data's (rd_uber.c) */
     const char *blendAsk = getenv("ICO_RD_BLEND");
     const char *exactMark = blendAsk && blendAsk[0] ? " ([dev])" : " (GS state as shader data)";
-    rd__log("profile: %s: blend %s%s; fog local %s%s; DATE %s%s; depth stores %s%s; blur fold "
-            "%s%s; robust access %s; local read %s; uint views %s%s; alpha plan %s%s; fx plan "
-            "%s%s; fx local read %s%s; VU planes %s%s; shadow count %s%s; shadow edges: %s%s; "
-            "pipelines the start-up set%s%s%s; %s; %s; %s",
-            p->cls, exact ? rd__blend_exact_name(asked) : "fixed-function", exact ? exactMark : "",
-            p->fogLocal ? "on" : "off", mark(p, RD_PROFILE_FOG_LOCAL),
-            p->dateStencil ? "stencil" : "snapshot", mark(p, RD_PROFILE_DATE_STENCIL),
-            storeWords(p), mark(p, RD_PROFILE_STORE_PLAN), p->blurFold ? "on" : "off",
-            mark(p, RD_PROFILE_BLUR_FOLD),
-            lim->robustText ? lim->robustText
-            : c == PC_D3D11 ? "D3D11's own"
-            : d3d           ? "D3D12's own"
-                            : "off",
-            d3d            ? "n/a"
-            : p->localRead ? "yes"
-                           : "no",
-            uintWords(p), mark(p, UINT_BITS), p->alphaPlan ? "on" : "off",
-            mark(p, RD_PROFILE_ALPHA_PLAN), p->fxPlan ? "on" : "off", mark(p, RD_PROFILE_FX_PLAN),
-            p->fxDstLocal ? "on" : "off", mark(p, RD_PROFILE_FX_DST_LOCAL), planesWords(p),
-            mark(p, RD_PROFILE_VU_PLANES), shadowWords(p), mark(p, RD_PROFILE_SHADOW_ONE),
-            edgeWords(p), mark(p, RD_PROFILE_SHADOW_BSPLINE), p->carefulSet ? " (careful)" : "",
-            p->localWords[0] ? "; desktop local read " : "", p->localWords,
-            rd__uber_profile_words(), rd__aura_box_profile_words(), rd__pass_area_profile_words());
+    rd__log(
+        "profile: %s: blend %s%s; fog local %s%s; DATE %s%s; depth stores %s%s; blur fold "
+        "%s%s; glow fold %s%s; robust access %s; local read %s; uint views %s%s; alpha plan "
+        "%s%s; fx plan "
+        "%s%s; fx local read %s%s; VU planes %s%s; shadow count %s%s; shadow edges: %s%s; "
+        "pipelines the start-up set%s%s%s; %s; %s; %s%s%s",
+        p->cls, exact ? rd__blend_exact_name(asked) : "fixed-function", exact ? exactMark : "",
+        p->fogLocal ? "on" : "off", mark(p, RD_PROFILE_FOG_LOCAL),
+        p->dateStencil ? "stencil" : "snapshot", mark(p, RD_PROFILE_DATE_STENCIL), storeWords(p),
+        mark(p, RD_PROFILE_STORE_PLAN), p->blurFold ? "on" : "off", mark(p, RD_PROFILE_BLUR_FOLD),
+        p->glowFold ? "on" : "off", mark(p, RD_PROFILE_GLOW_FOLD),
+        lim->robustText ? lim->robustText
+        : c == PC_D3D11 ? "D3D11's own"
+        : d3d           ? "D3D12's own"
+                        : "off",
+        d3d            ? "n/a"
+        : subpass      ? "yes (the subpass read: a pass's colour with a depth target)"
+        : p->localRead ? "yes"
+                       : "no",
+        uintWords(p), mark(p, UINT_BITS), p->alphaPlan ? "on" : "off",
+        mark(p, RD_PROFILE_ALPHA_PLAN), p->fxPlan ? "on" : "off", mark(p, RD_PROFILE_FX_PLAN),
+        p->fxDstLocal ? "on" : "off", mark(p, RD_PROFILE_FX_DST_LOCAL), planesWords(p),
+        mark(p, RD_PROFILE_VU_PLANES), shadowWords(p), mark(p, RD_PROFILE_SHADOW_ONE), edgeWords(p),
+        mark(p, RD_PROFILE_SHADOW_BSPLINE), p->carefulSet ? " (careful)" : "",
+        p->localWords[0] ? "; desktop local read " : "", p->localWords, rd__uber_profile_words(),
+        rd__aura_box_profile_words(), rd__pass_area_profile_words(), turnip,
+        /* the device's plain VU set keeps the side bands off
+         * (rd_pipeline.c rd__vu_policy_init, before this line) */
+        g_rd.vuNoBeside ? "; side bands: off on this device's plain set (issue 163)" : "");
     if (notHere) {
         rd__log("profile: %s: not on this device, the flag stays off", notHere);
     }

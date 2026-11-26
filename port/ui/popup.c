@@ -16,18 +16,15 @@
 #include "menu_font.h"
 #include "strings.h"
 
-/* the panel, in the layout grid (font.h) */
-#define TITLE_SIZE 26.0f
-#define BODY_SIZE 21.0f
-#define PAD_X 14.0f
-/* the text's dark halo reaches 4 field lines (8 units) past the letters,
-   the letters' weight (menu_font.c) a line more and the bilinear read a
-   texel more: the panel holds it (11 let it spill) */
-#define PAD_Y 13.0f
-#define GAP_Y 3.0f
-#define MARGIN_X 18.0f /* from the right edge of the 4:3 picture */
+/* the panel, in the layout grid (font.h): popup.h's UI_POPUP_* sizes */
+#define TITLE_SIZE UI_POPUP_TITLE_SIZE
+#define BODY_SIZE UI_POPUP_BODY_SIZE
+#define PAD_X UI_POPUP_PAD_X
+#define PAD_Y UI_POPUP_PAD_Y
+#define GAP_Y UI_POPUP_GAP_Y
+#define MARGIN_X UI_POPUP_MARGIN_X
 #define TOP_Y 30.0f
-#define MIN_W 200.0f
+#define MIN_W UI_POPUP_MIN_W
 #define MAX_W (UI_GRID_W - 2.0f * MARGIN_X)
 #define DEV_TEST_TICK 100u
 #define DEV_TEST_PERIOD 150u /* ticks: 6 s at 25 Hz, longer than one popup */

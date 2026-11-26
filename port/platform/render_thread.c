@@ -7,16 +7,35 @@
 #include "render_thread.h"
 
 #include <SDL3/SDL.h>
+#include <errno.h>
 #include <stdio.h>
 #include <string.h>
+#include "ahead_mark.h" /* the next picture submitted ahead: the install's mark */
+#include "attempt_ledger.h"
 #include "config.h"
+#include "core_share.h"
+#include "cpu_keep.h"
 #include "cpu_place.h"
 #include "diag_host.h"
+#include "exit_info.h"   /* exit_info_last_reason */
+#include "host_config.h" /* ico_host_logs_dir */
+#include "ico_thread.h"  /* ico_thread_now_ms */
 #include "pace_policy.h"
 #include "rd.h"
 #include "rd_submit_thread.h"
 #include "rd_thread.h"
 #include "rhi.h"
+#include "stall_coincide.h"
+#include "sys_cell.h"
+#include "thread_stat.h"
+#include "window_clock_trap.h" /* window_clock_trap_ask */
+#include "window_lines.h"      /* window_log_cost_mark */
+
+#if defined(__linux__)
+#include <sys/prctl.h> /* PR_GET_NAME */
+#include <time.h>      /* CLOCK_PROCESS_CPUTIME_ID */
+#include <unistd.h>    /* getpid */
+#endif
 
 static struct {
     SDL_Thread *thread;
@@ -51,6 +70,10 @@ static struct {
     Uint64 cpuEst, interpEst, submitEst;
     /* the reads' mean and deviation, for the 10 s line */
     Uint64 readsMean, readsDev;
+    /* The idle ask: the last picture's job end and whether its slot ahead
+       blocked (ico_render_thread_plan) */
+    Uint64 jobEnd;
+    int jobByFence;
     /* the estimates' state, the render thread's alone: reads, whole job,
        own reads, interpolation, the submit thread's job */
     PaceRtTyp readsTyp, pictureTyp, cpuTyp, interpTyp, submitTyp;
@@ -68,8 +91,14 @@ static struct {
     unsigned lateStarts, misses, backoffSteps;
     unsigned pictureMisses; /* of the misses, the pictures' (the rest the game's own) */
     /* of the pictures': under the floor (nothing changed), the margin
-       widened, the third in the window (the whole period) */
+       widened, the third counted in the window (the whole period) */
     unsigned smallMisses, widens, fallbacks;
+    /* the misses judged in the block (pace_policy.h PaceStepEvent): counted
+       toward the back-off, outliers (the longest outlier picture's GPU time
+       and its typical); the back-offs ended by the pictures fitting, at
+       the limit */
+    unsigned counted, outliers, fitEnds, limitEnds;
+    Uint64 outlierNs, outlierTypNs;
     Uint64 lateStartMaxNs, missMaxNs, stepPlanNs;
     /* the plan's parts as last noted: a step between frames, the margin's
        widening; the steps left out of the typical times in the block */
@@ -92,9 +121,913 @@ static struct {
     CpuClasses classes;
     uint64_t slowMask, fastMask, renderMask, submitMask;
     bool pin, split;
+    CpuPlan plan;
+    bool pinSubmit; /* the submit thread is kept too (not with two or fewer faster cores) */
     const char *noPin;
     CpuPlaceHist game, render;
+    /* the threads' ids for their schedstat (thread_stat.h): the game
+       thread's at place_init, the render and submit threads' at their
+       start (atomic: the game thread reads them at its 10 s line); 0 not
+       known */
+    long gameTid, renderTid, submitTid;
+    /* the process's cores at place_init, before any pin (the pipeline
+       set's workers under the few-cores rule, ico_render_thread_pipeline_set) */
+    uint64_t allMask;
 } s_place;
+
+/* the game thread's own pin when the rule keeps it (two faster cores: it
+   and the render thread take them), the cores read back, one line; the
+   start line says why a phone's threads are where they are */
+static void place_game_pin(void)
+{
+    const CpuPlan *p = &s_place.plan;
+    char fast[96], got[96], why[128], gotText[96];
+
+    if (!s_place.pin || p->kind == CPU_PLAN_NONE) {
+        return;
+    }
+    (void)cpu_place_mask_text(p->kind == CPU_PLAN_TWO_FAST ? p->game : p->render, fast,
+                              sizeof(fast));
+    if (p->kind == CPU_PLAN_MANY_FAST) {
+        fprintf(stderr,
+                "window: big cores: %d fast of %d: render and submit threads on them, "
+                "the game thread free\n",
+                p->fastCount, p->coreCount);
+    } else if (p->kind == CPU_PLAN_ONE_FAST) {
+        fprintf(stderr,
+                "window: big cores: 1 fast of %d: the render thread alone on it (%s), "
+                "the game and the submit thread free\n",
+                p->coreCount, fast);
+    } else {
+        uint64_t read = 0;
+        const CpuPinResult res = cpu_place_pin_checked(p->game, &read, why, sizeof(why));
+
+        (void)cpu_place_mask_text(read, gotText, sizeof(gotText));
+        snprintf(got, sizeof(got), "%s",
+                 res == CPU_PIN_KEPT      ? "kept"
+                 : res == CPU_PIN_UNKNOWN ? "kept (the cores could not be read back)"
+                                          : "NOT kept");
+        fprintf(stderr,
+                "window: big cores: 2 fast of %d: game and render threads on them (%s), the "
+                "submit thread free; the game thread %s%s%s\n",
+                p->coreCount, fast, got,
+                res == CPU_PIN_OTHER     ? ": the system keeps it to cores "
+                : res == CPU_PIN_REFUSED ? ": "
+                                         : "",
+                res == CPU_PIN_OTHER ? gotText : (res == CPU_PIN_REFUSED ? why : ""));
+    }
+}
+
+/* The pipeline set's span (ico_render_thread_pipeline_set): on, its
+   workers seen starting and their ids (the sweep leaves them while it
+   runs), its start on the monotonic and the process's CPU clocks.  The
+   few-cores rule's flag is set at place_init (the keeper's own CpuKeep is
+   the log thread's) */
+#define SET_TIDS ((int)RHI_PIPELINE_THREADS_MAX)
+
+static struct {
+    int on;             /* __atomic */
+    int fewOn;          /* __atomic: the few-cores rule applies (place_init) */
+    long tid[SET_TIDS]; /* __atomic: 0 free */
+    unsigned workers;   /* __atomic */
+    uint64_t cores;     /* the cores they kept (the game thread's at the set's start) */
+    double t0Ms, cpu0S;
+} s_set;
+
+/* the process's CPU time, s; -1 where not measured */
+static double process_cpu_s(void)
+{
+#if defined(__linux__)
+    struct timespec ts;
+    if (clock_gettime(CLOCK_PROCESS_CPUTIME_ID, &ts) == 0) {
+        return (double)ts.tv_sec + (double)ts.tv_nsec / 1e9;
+    }
+#endif
+    return -1.0;
+}
+
+/* the calling thread is a pipeline worker (vk_pipeline.c names them
+   "rhi-pipelines": SDL names a thread before its function runs) */
+static bool pipe_worker_now(void)
+{
+#if defined(__linux__)
+    char name[17] = "";
+    if (prctl(PR_GET_NAME, name, 0, 0, 0) == 0) {
+        return strncmp(name, "rhi-pipelines", 13) == 0;
+    }
+#endif
+    return false;
+}
+
+/* rhi_set_thread_begin's hook: a backend's thread (the pipeline workers,
+   the present-wait thread) back on the process's cores; a pipeline worker
+   of a set made under the few-cores rule on every core of the process
+   instead (cpu_keep.h cpu_keep_set_cores), its id kept for the sweep */
+static void place_rhi_thread_begin(void)
+{
+    const bool setOn = __atomic_load_n(&s_set.on, __ATOMIC_ACQUIRE) != 0;
+    if (setOn && __atomic_load_n(&s_set.fewOn, __ATOMIC_ACQUIRE) && pipe_worker_now() &&
+        s_place.allMask != 0) {
+        char why[128];
+        const long tid = thread_stat_tid();
+        if (cpu_place_pin(s_place.allMask, why, sizeof(why))) {
+            for (int i = 0; i < SET_TIDS; i++) {
+                long none = 0;
+                if (__atomic_compare_exchange_n(&s_set.tid[i], &none, tid, false, __ATOMIC_ACQ_REL,
+                                                __ATOMIC_ACQUIRE)) {
+                    break;
+                }
+            }
+            __atomic_fetch_add(&s_set.workers, 1u, __ATOMIC_RELAXED);
+            return;
+        }
+    }
+    if (setOn) {
+        __atomic_fetch_add(&s_set.workers, pipe_worker_now() ? 1u : 0u, __ATOMIC_RELAXED);
+    }
+    (void)cpu_place_thread_free();
+}
+
+/* "window: threads: 31; kept to cores 6-7: ico_pc (the game thread),
+   ico-render; on 0-7: ..." (cpu_place.h cpu_place_threads_format): once
+   after the game thread's pin, then at a 10 s block when the text changed
+   (a hash of it kept; the first 8 changes, then every 100th).  Linux and
+   Android (nothing read elsewhere).  The game thread's */
+/* The per-thread reads the 10 s block made on the game thread, moved to
+ * the log thread's once-a-second tick (ico_render_thread_tick, Android;
+ * window_stall.c asks_tick): the three threads' schedstat (one file each)
+ * into cells every tick, and the thread list (opendir /proc/self/task and
+ * every thread's comm and status: about 100 file reads, the owner's
+ * Pixel's 2.5 ms "hold and game thread lines", rc10) every tenth tick into
+ * a buffer.  The block reads the cells and the buffer; without the tick
+ * (no log thread, or not Android) it reads the files itself, as before */
+#define TICK_LIST_EVERY 10u
+static int s_tickOn; /* __atomic: the tick has run: the block reads its cells */
+/* the game, render and submit threads, then the two audio threads: SDL's
+   device thread (SDLAudioP..., the mixing and SPU2) and the system's
+   output thread AAudio makes inside the process (AudioTrack, or AAudio_N
+   on its MMAP path), found by name in the log thread's list (issue 179:
+   both inherited the game thread's two cores) */
+#define STAT_THREADS 5
+static SysCell s_statCell[STAT_THREADS];
+static long s_audioTid[2]; /* __atomic: 0 not found */
+/* What a stall coincided with (stall_coincide.h; window_stall.c): the
+   five threads' core waits and run times over the last tick (each tick's
+   difference from the one before: the log thread's), the threads named
+   like the graphics driver's (found on a list tick, at most
+   STALL_DRIVERS) and theirs, and the render thread's core at its last
+   picture */
+static SysCell s_secCell[STAT_THREADS];
+static SysCell s_drvCell[STALL_DRIVERS];
+
+static struct {
+    SDL_SpinLock lock;
+    int n;
+    long tid[STALL_DRIVERS];
+    char name[STALL_DRIVERS][16];
+    char all[512]; /* every such name of the list (the once line) */
+} s_drv;
+
+static int s_renderCore = -1; /* __atomic */
+
+static struct {
+    SDL_SpinLock lock;
+    uint32_t gen; /* under lock: a new list in text */
+    char text[1024];
+} s_list;
+
+static long stat_tid(int i)
+{
+    return i == 0   ? s_place.gameTid
+           : i == 1 ? __atomic_load_n(&s_place.renderTid, __ATOMIC_ACQUIRE)
+           : i == 2 ? __atomic_load_n(&s_place.submitTid, __ATOMIC_ACQUIRE)
+                    : __atomic_load_n(&s_audioTid[i - 3], __ATOMIC_ACQUIRE);
+}
+
+/* the audio threads' ids from a list (the first of each name's family) */
+static void audio_tids(const CpuThreads *list)
+{
+    long found[2] = {0, 0};
+
+    for (int i = 0; i < list->n; i++) {
+        const char *nm = list->t[i].name;
+
+        if (found[0] == 0 && strncmp(nm, "SDLAudioP", 9) == 0) {
+            found[0] = list->t[i].tid;
+        } else if (found[1] == 0 &&
+                   (strncmp(nm, "AudioTrack", 10) == 0 || strncmp(nm, "AAudio", 6) == 0)) {
+            found[1] = list->t[i].tid;
+        }
+    }
+    __atomic_store_n(&s_audioTid[0], found[0], __ATOMIC_RELEASE);
+    __atomic_store_n(&s_audioTid[1], found[1], __ATOMIC_RELEASE);
+}
+
+/* The keeper (cpu_keep.h): the render, game and submit threads' cores
+ * after the start, on the log thread's tick (Android, the rule on, two or
+ * more cores faster than the slowest).  The owner's Pixel answered yes to
+ * the render thread on core 7 alone and read back 2-7 in 20 of 25 starts;
+ * the keeper asks again when a 3D scene begins, on focus gained, back
+ * from the background, when the system changes the threads' cores or the
+ * cores it allows, and every 10 s while not on the ideal core.  Its lines
+ * are made on the log thread (it must not write to the pipe it drains)
+ * and written by the game thread: a try's line when its outcome changed
+ * (ico_render_thread_note_game_core, a load and a compare a step), the
+ * block's with the 10 s lines.  The requests from the other threads are
+ * bits in s_keepWhy */
+static CpuKeep s_keep; /* the log thread's */
+static int s_keepOn;   /* __atomic: the keeper runs (set before the threads start) */
+static unsigned s_keepWhy;
+static uint32_t s_keepTaken; /* __atomic: the block lines the game thread took */
+
+static struct {
+    SDL_SpinLock lock;
+    uint32_t tryGen; /* under lock (and read alone by the game thread's step) */
+    char tryText[1024];
+    char blockText[1024];
+} s_keepOut;
+
+static int s_keepRelease; /* __atomic: the game thread's wish, the pins let go (pin_release.h) */
+static unsigned s_keepMoved, s_keepEnded; /* the log thread's: threads moved off the kept cores */
+static unsigned s_sweepMoved, s_sweepFailed; /* the log thread's: the few-cores rule's sweep */
+
+static void keep_request(unsigned why)
+{
+    if (__atomic_load_n(&s_keepOn, __ATOMIC_ACQUIRE)) {
+        (void)__atomic_fetch_or(&s_keepWhy, why, __ATOMIC_RELAXED);
+    }
+}
+
+static bool keep_pin(void *u, long tid, uint64_t mask, int *err)
+{
+    char why[128];
+    const bool ok = cpu_place_pin_tid(tid, mask, why, sizeof(why));
+
+    (void)u;
+    *err = 0;
+    if (!ok && sscanf(why, "errno %d", err) != 1) {
+        *err = -1;
+    }
+    return ok;
+}
+
+static uint64_t keep_read(void *u, long tid)
+{
+    (void)u;
+    return cpu_place_allowed_tid(tid);
+}
+
+/* the free mask for the threads made from now, and the registered ones
+   moved to it (cpu_place_refree), the three picture threads left to the
+   keeper */
+static void keep_free(void *u, uint64_t mask)
+{
+    const long skip[3] = {s_place.gameTid, stat_tid(1), stat_tid(2)};
+    unsigned ended = 0;
+
+    (void)u;
+    cpu_place_keep_free(mask);
+    const unsigned moved = cpu_place_refree(mask, skip, 3, &ended);
+    s_keepMoved += moved;
+    s_keepEnded += ended;
+    if (s_keep.few) {
+        ico_attempt_fire(ICO_ATT_FEW_CORES, moved);
+    }
+}
+
+/* the log thread's part of the tick: the system's view of the render
+   thread (the process's cores, its cpuset, its clamps), the keeper's tick,
+   on a list tick the threads that inherited a kept core alone moved off
+   it, the lines made */
+static void keep_tick(const CpuThreads *list)
+{
+    static const CpuKeepOps ops = {NULL, keep_pin, keep_read, keep_free};
+    static char s_lastPath[64];
+    static uint32_t s_tryHash, s_taken;
+    static bool s_said;
+    const long rtid = stat_tid(1);
+    char path[64], sys[256], text[1024], m[96];
+    uint64_t proc = 0, cs = 0, allowed;
+    unsigned why = __atomic_exchange_n(&s_keepWhy, 0u, __ATOMIC_RELAXED);
+    unsigned umin = 0, umax = 0;
+    int e = ENOENT;
+    size_t n = 0;
+
+#if defined(__linux__)
+    proc = cpu_place_allowed_tid((long)getpid());
+#endif
+    path[0] = '\0';
+    if (rtid > 0) {
+        e = cpu_place_cpuset_read(NULL, NULL, rtid, path, sizeof(path), &cs);
+    }
+    allowed = proc != 0 && cs != 0 && (proc & cs) != 0 ? proc & cs : (proc != 0 ? proc : cs);
+    if (e == 0 && s_lastPath[0] != '\0' && strcmp(path, s_lastPath) != 0) {
+        why |= CPU_KEEP_WHY_ALLOWED; /* moved to another cpuset (foreground, top-app) */
+    }
+    if (e == 0) {
+        snprintf(s_lastPath, sizeof(s_lastPath), "%s", path);
+    }
+    {
+        const uint32_t taken = __atomic_load_n(&s_keepTaken, __ATOMIC_ACQUIRE);
+
+        if (taken != s_taken) {
+            s_taken = taken;
+            cpu_keep_block_reset(&s_keep);
+        }
+    }
+    (void)cpu_keep_release(&s_keep, __atomic_load_n(&s_keepRelease, __ATOMIC_ACQUIRE) != 0);
+    const bool tried = cpu_keep_tick(&s_keep, &ops, ico_thread_now_ms(), why, allowed, rtid,
+                                     stat_tid(2), s_place.gameTid);
+    const uint64_t held = cpu_keep_held(&s_keep);
+
+    if (held != 0) {
+        /* the few-cores rule (cpu_keep.h): every other thread found on the
+           render or game thread's faster cores (the audio threads, the
+           driver's, those inherited) moved to the others' cores; Android's
+           UI thread (the process's id) left to the system */
+        long pid = 0;
+        unsigned failed = 0;
+#if defined(__linux__)
+        pid = (long)getpid();
+#endif
+        long skip[4 + SET_TIDS] = {rtid, stat_tid(2), s_place.gameTid, pid};
+        int nSkip = 4;
+        if (__atomic_load_n(&s_set.on, __ATOMIC_ACQUIRE)) {
+            /* the pipeline set's workers keep every core while it runs */
+            for (int i = 0; i < SET_TIDS; i++) {
+                const long t = __atomic_load_n(&s_set.tid[i], __ATOMIC_ACQUIRE);
+                if (t != 0) {
+                    skip[nSkip++] = t;
+                }
+            }
+        }
+
+        const unsigned moved =
+            cpu_place_sweep(held, s_keep.sets.others, skip, nSkip, NULL, &failed);
+        s_sweepMoved += moved;
+        s_sweepFailed += failed;
+        ico_attempt_fire(ICO_ATT_FEW_CORES, moved);
+    }
+
+    if (list != NULL && s_keep.have) {
+        /* a thread the render or game thread made starts on its creator's
+           cores (pthread_create(3)): a driver's thread made by the render
+           thread kept to its core alone ("kept to core 7: ico render (2)",
+           rc9, rc12) shares that core with it; moved to the others' */
+        const CpuKeepSets *ks = &s_keep.sets;
+
+        for (int i = 0; i < list->n; i++) {
+            const CpuThread *t = &list->t[i];
+            const bool alone =
+                (ks->level == CPU_KEEP_ALONE && t->mask == ks->render) ||
+                (ks->game != 0 && (ks->game & (ks->game - 1)) == 0 && t->mask == ks->game);
+            char w[96];
+
+            if (alone && t->tid != rtid && t->tid != stat_tid(2) && t->tid != s_place.gameTid &&
+                cpu_place_pin_tid(t->tid, ks->others, w, sizeof(w))) {
+                s_keepMoved++;
+                if (s_keep.few) {
+                    ico_attempt_fire(ICO_ATT_FEW_CORES, 1);
+                }
+            }
+        }
+    }
+    /* the system's view of the render thread */
+    if (e == 0) {
+        (void)cpu_place_mask_text(cs, m, sizeof(m));
+        n = (size_t)snprintf(sys, sizeof(sys), "cpuset %s (cores %s)", path,
+                             cs != 0 ? m : "not read");
+    } else {
+        n = (size_t)snprintf(sys, sizeof(sys), "cpuset not readable (errno %d)", e);
+    }
+    if (rtid > 0 && cpu_place_uclamp_read(rtid, &umin, &umax) && n < sizeof(sys)) {
+        n += (size_t)snprintf(sys + n, sizeof(sys) - n, ", clamps %u-%u", umin, umax);
+    }
+    if (tried) {
+        uint32_t h = 2166136261u; /* FNV-1a: the same outcome is not written again */
+
+        (void)cpu_keep_try_text(&s_keep, sys, text, sizeof(text));
+        for (const char *c = text; *c != '\0'; c++) {
+            h = (h ^ (uint8_t)*c) * 16777619u;
+        }
+        if (!s_said || h != s_tryHash) {
+            s_said = true;
+            s_tryHash = h;
+            SDL_LockSpinlock(&s_keepOut.lock);
+            memcpy(s_keepOut.tryText, text, sizeof(text));
+            __atomic_store_n(&s_keepOut.tryGen, s_keepOut.tryGen + 1u, __ATOMIC_RELEASE);
+            SDL_UnlockSpinlock(&s_keepOut.lock);
+        }
+    }
+    n = cpu_keep_block_text(&s_keep, sys, text, sizeof(text));
+    if (n < sizeof(text)) {
+        const int w =
+            snprintf(text + n, sizeof(text) - n,
+                     "; threads moved off the kept cores %u since the start (%u had ended)",
+                     s_keepMoved, s_keepEnded);
+        n += w > 0 ? (size_t)w : 0u;
+    }
+    if (s_keep.few && n < sizeof(text)) {
+        (void)cpu_place_mask_text(s_keep.sets.others, m, sizeof(m));
+        snprintf(text + n, sizeof(text) - n,
+                 ", %u moved to %s by the few-cores rule once a second since the start (%u "
+                 "refused)",
+                 s_sweepMoved, s_keep.have ? m : "the others' cores", s_sweepFailed);
+    }
+    SDL_LockSpinlock(&s_keepOut.lock);
+    memcpy(s_keepOut.blockText, text, sizeof(text));
+    SDL_UnlockSpinlock(&s_keepOut.lock);
+}
+
+void ico_render_thread_place_scene(bool play)
+{
+    static bool s_play;
+
+    if (play && !s_play) {
+        keep_request(CPU_KEEP_WHY_SCENE);
+    }
+    s_play = play;
+}
+
+void ico_render_thread_place_focus(void)
+{
+    keep_request(CPU_KEEP_WHY_FOCUS);
+}
+
+void ico_render_thread_pin_release(bool on)
+{
+    __atomic_store_n(&s_keepRelease, on ? 1 : 0, __ATOMIC_RELEASE);
+}
+
+int ico_render_thread_pin_release_rule(void)
+{
+    if (!__atomic_load_n(&s_keepOn, __ATOMIC_ACQUIRE)) {
+        return 0;
+    }
+    /* s_keep.few is written before s_keepOn's release store (place_init) */
+    return s_keep.few ? 2 : 1;
+}
+
+long ico_render_thread_render_tid(void)
+{
+    return stat_tid(1);
+}
+
+int ico_render_thread_render_core(void)
+{
+    return __atomic_load_n(&s_renderCore, __ATOMIC_RELAXED);
+}
+
+bool ico_render_thread_last_second(double waitMs[5], double *ageMs)
+{
+    bool any = false;
+    double oldest = -1.0;
+    for (int i = 0; i < STAT_THREADS; i++) {
+        double v[4], at;
+        waitMs[i] = -1.0;
+        if (sys_cell_get(&s_secCell[i], v, 4, &at, NULL) == 4 && (long)v[3] == stat_tid(i)) {
+            waitMs[i] = v[1];
+            any = true;
+            const double age = ico_thread_now_ms() - at;
+            oldest = age > oldest ? age : oldest;
+        }
+    }
+    if (ageMs != NULL) {
+        *ageMs = oldest;
+    }
+    return any;
+}
+
+int ico_render_thread_driver_threads(char names[][16], double *runMs, double *waitMs, int cap)
+{
+    long tid[STALL_DRIVERS];
+    SDL_LockSpinlock(&s_drv.lock);
+    int n = s_drv.n < cap ? s_drv.n : cap;
+    memcpy(tid, s_drv.tid, sizeof(tid[0]) * (size_t)n);
+    for (int i = 0; i < n; i++) {
+        memcpy(names[i], s_drv.name[i], 16);
+    }
+    SDL_UnlockSpinlock(&s_drv.lock);
+    int k = 0;
+    for (int i = 0; i < n; i++) {
+        double v[4], at;
+        if (sys_cell_get(&s_drvCell[i], v, 4, &at, NULL) == 4 && (long)v[3] == tid[i]) {
+            if (k != i) {
+                memcpy(names[k], names[i], 16);
+            }
+            runMs[k] = v[0];
+            waitMs[k] = v[1];
+            k++;
+        }
+    }
+    return k;
+}
+
+size_t ico_render_thread_driver_names(char *out, size_t cap)
+{
+    if (cap == 0) {
+        return 0;
+    }
+    SDL_LockSpinlock(&s_drv.lock);
+    snprintf(out, cap, "%s", s_drv.all);
+    SDL_UnlockSpinlock(&s_drv.lock);
+    return strlen(out);
+}
+
+void ico_render_thread_pipeline_set(bool on)
+{
+    if (on) {
+        for (int i = 0; i < SET_TIDS; i++) {
+            __atomic_store_n(&s_set.tid[i], 0L, __ATOMIC_RELEASE);
+        }
+        __atomic_store_n(&s_set.workers, 0u, __ATOMIC_RELEASE);
+        s_set.t0Ms = ico_thread_now_ms();
+        s_set.cpu0S = process_cpu_s();
+        s_set.cores = cpu_place_free_mask();
+        __atomic_store_n(&s_set.on, 1, __ATOMIC_RELEASE);
+        return;
+    }
+    if (!__atomic_exchange_n(&s_set.on, 0, __ATOMIC_ACQ_REL)) {
+        return;
+    }
+    const double wallS = (ico_thread_now_ms() - s_set.t0Ms) / 1000.0;
+    const double cpu1 = process_cpu_s();
+    const double cpuS = s_set.cpu0S >= 0.0 && cpu1 >= 0.0 ? cpu1 - s_set.cpu0S : -1.0;
+    const unsigned workers = __atomic_load_n(&s_set.workers, __ATOMIC_ACQUIRE);
+    const bool few = __atomic_load_n(&s_set.fewOn, __ATOMIC_ACQUIRE) != 0;
+    /* mode 0: nothing pinned yet (the first start: place_init not run);
+       1: the few-cores rule's exception; 2: another rule's free mask */
+    const int mode = !s_place.read || !s_place.pin ? 0 : few ? 1 : 2;
+    const uint64_t cores = mode == 1 ? s_place.allMask : s_set.cores;
+    char text[640];
+    (void)cpu_keep_set_text(text, sizeof(text), mode, workers, cores, cpu_place_free_mask(), wallS,
+                            cpuS);
+    fprintf(stderr, "window: pipeline set: %s\n", text);
+    if (mode == 1) {
+        ico_attempt_fire(ICO_ATT_PIPE_SET_CORES, workers);
+        ico_attempt_fire2(ICO_ATT_PIPE_SET_CORES, 1);
+    }
+}
+
+/* the log thread's: a thread's last read for the per-second differences */
+typedef struct SecPrev {
+    long tid;
+    ThreadStat st;
+    double atMs;
+} SecPrev;
+
+/* now's read of tid against prev: the difference's run and wait ms into
+   cell (with the interval and the id) when prev was the same thread's */
+static void sec_note(SecPrev *prev, SysCell *cell, long tid, const ThreadStat *now, double atMs)
+{
+    if (prev->tid == tid && now->runNs >= prev->st.runNs && now->waitNs >= prev->st.waitNs) {
+        const double v[4] = {(double)(now->runNs - prev->st.runNs) / 1e6,
+                             (double)(now->waitNs - prev->st.waitNs) / 1e6, atMs - prev->atMs,
+                             (double)tid};
+        sys_cell_put(cell, atMs, 0.0, v, 4);
+    }
+    prev->tid = tid;
+    prev->st = *now;
+    prev->atMs = atMs;
+}
+
+/* The share of run time on the faster cores (core_share.h) of the threads
+   that do not sample their own core: the submit thread, the two audio
+   threads, the driver's (s_drv), the pipeline workers (the set's ids and
+   those a list tick found, named "rhi-pipelines"); the log thread adds a
+   second's run time at the core each last ran on, the game thread's block
+   line takes the sums (ico_render_thread_block_line) */
+#define SHARE_PIPES 8
+
+static struct {
+    SDL_SpinLock lock;
+    CoreShare acc;
+} s_share;
+
+static long s_pipeTid[SHARE_PIPES]; /* the log thread's: found on the last list tick */
+
+#if defined(__linux__)
+/* the core tid last ran on (/proc/self/task/<tid>/stat field 39), -1 not read */
+static int last_core(long tid)
+{
+    char path[64], buf[1024];
+    snprintf(path, sizeof path, "/proc/self/task/%ld/stat", tid);
+    FILE *f = fopen(path, "r");
+    if (f == NULL) {
+        return -1;
+    }
+    const size_t n = fread(buf, 1, sizeof buf, f);
+    fclose(f);
+    int core = -1;
+    return core_share_parse_stat(buf, n, &core) ? core : -1;
+}
+
+static void share_tick(void)
+{
+    const uint64_t fast = cpu_place_fast_mask(&s_place.classes);
+    if (fast == 0) {
+        return; /* cores of one speed (or not known): no share to say */
+    }
+
+    enum { WHO = 5 + STALL_DRIVERS + 2 * SHARE_PIPES };
+
+    long tid[WHO];
+    char name[WHO][24];
+    int n = 0;
+    static const char *const k_own[3] = {"submit", "SDL audio", "system audio"};
+    for (int i = 0; i < 3; i++) {
+        if (stat_tid(2 + i) > 0) {
+            tid[n] = stat_tid(2 + i);
+            snprintf(name[n], sizeof name[n], "%s", k_own[i]);
+            n++;
+        }
+    }
+    SDL_LockSpinlock(&s_drv.lock);
+    for (int i = 0; i < s_drv.n; i++) {
+        tid[n] = s_drv.tid[i];
+        snprintf(name[n], sizeof name[n], "%.15s", s_drv.name[i]);
+        n++;
+    }
+    SDL_UnlockSpinlock(&s_drv.lock);
+    for (int i = 0; i < SHARE_PIPES; i++) {
+        const long a = __atomic_load_n(&s_set.tid[i], __ATOMIC_ACQUIRE);
+        const long b = s_pipeTid[i];
+        if (a > 0) {
+            tid[n] = a;
+            snprintf(name[n], sizeof name[n], "pipeline workers");
+            n++;
+        }
+        if (b > 0 && b != a) {
+            tid[n] = b;
+            snprintf(name[n], sizeof name[n], "pipeline workers");
+            n++;
+        }
+    }
+
+    /* each id's last run time (the log thread's) */
+    static struct {
+        long tid;
+        uint64_t run;
+    } s_prev[WHO];
+
+    static int s_nPrev;
+
+    struct {
+        long tid;
+        uint64_t run;
+    } next[WHO];
+
+    int nNext = 0;
+    for (int i = 0; i < n; i++) {
+        ThreadStat now;
+        if (thread_stat_read(NULL, tid[i], &now) != 0) {
+            continue; /* ended (a worker), or not readable */
+        }
+        bool dup = false;
+        for (int k = 0; k < nNext; k++) {
+            dup = dup || next[k].tid == tid[i];
+        }
+        if (dup) {
+            continue;
+        }
+        next[nNext].tid = tid[i];
+        next[nNext].run = now.runNs;
+        nNext++;
+        for (int k = 0; k < s_nPrev; k++) {
+            if (s_prev[k].tid == tid[i] && now.runNs >= s_prev[k].run) {
+                const int core = last_core(tid[i]);
+                SDL_LockSpinlock(&s_share.lock);
+                core_share_add(&s_share.acc, name[i], core, now.runNs - s_prev[k].run, fast);
+                SDL_UnlockSpinlock(&s_share.lock);
+                break;
+            }
+        }
+    }
+    memcpy(s_prev, next, sizeof(next[0]) * (size_t)nNext);
+    s_nPrev = nNext;
+}
+#endif
+
+/* the threads named like the graphics driver's in a list tick's list */
+static void driver_tids(const CpuThreads *list)
+{
+    long tid[STALL_DRIVERS];
+    char name[STALL_DRIVERS][16], all[512];
+    int n = 0, pipes = 0;
+    size_t at = 0;
+    all[0] = '\0';
+    memset(s_pipeTid, 0, sizeof(s_pipeTid));
+    for (int i = 0; i < list->n; i++) {
+        if (strncmp(list->t[i].name, "rhi-pipelines", 13) == 0 && pipes < SHARE_PIPES) {
+            s_pipeTid[pipes++] = list->t[i].tid; /* the shares' workers */
+        }
+        if (!stall_driver_name(list->t[i].name)) {
+            continue;
+        }
+        if (n < STALL_DRIVERS) {
+            tid[n] = list->t[i].tid;
+            snprintf(name[n], sizeof name[n], "%.15s", list->t[i].name);
+            n++;
+        }
+        if (at < sizeof all) {
+            const int w =
+                snprintf(all + at, sizeof all - at, "%s%.19s", at ? ", " : "", list->t[i].name);
+            at += w > 0 ? (size_t)w : 0u;
+        }
+    }
+    SDL_LockSpinlock(&s_drv.lock);
+    s_drv.n = n;
+    memcpy(s_drv.tid, tid, sizeof(tid[0]) * (size_t)n);
+    memcpy(s_drv.name, name, sizeof(name[0]) * (size_t)n);
+    if (all[0] != '\0' && s_drv.all[0] == '\0') {
+        memcpy(s_drv.all, all, sizeof all); /* the first list that has them */
+    }
+    SDL_UnlockSpinlock(&s_drv.lock);
+}
+
+void ico_render_thread_tick(void)
+{
+    static uint32_t s_ticks;
+    static SecPrev s_prev[STAT_THREADS], s_drvPrev[STALL_DRIVERS];
+    const CpuThreads *list = NULL;
+    for (int i = 0; i < STAT_THREADS; i++) {
+        ThreadStat now;
+        const long tid = stat_tid(i);
+        if (tid > 0 && thread_stat_read(NULL, tid, &now) == 0) {
+            const double v[4] = {(double)now.runNs, (double)now.waitNs, (double)now.slices,
+                                 (double)tid};
+            const double at = ico_thread_now_ms();
+            sys_cell_put(&s_statCell[i], at, 0.0, v, 4);
+            sec_note(&s_prev[i], &s_secCell[i], tid, &now, at);
+        }
+    }
+    {
+        long tid[STALL_DRIVERS];
+        SDL_LockSpinlock(&s_drv.lock);
+        const int n = s_drv.n;
+        memcpy(tid, s_drv.tid, sizeof(tid[0]) * (size_t)n);
+        SDL_UnlockSpinlock(&s_drv.lock);
+        for (int i = 0; i < n; i++) {
+            ThreadStat now;
+            if (thread_stat_read(NULL, tid[i], &now) == 0) {
+                sec_note(&s_drvPrev[i], &s_drvCell[i], tid[i], &now, ico_thread_now_ms());
+            }
+        }
+    }
+#if defined(__linux__)
+    share_tick(); /* the faster cores' share of the threads that sample none */
+#endif
+    if (s_ticks++ % TICK_LIST_EVERY == 0u) {
+        static char text[1024]; /* the log thread's alone */
+        static CpuThreads s_threads;
+        (void)cpu_place_threads_read(NULL, &s_threads);
+        list = &s_threads;
+        audio_tids(list);
+        driver_tids(list);
+        if (cpu_place_threads_format(&s_threads, s_place.gameTid, text, sizeof(text)) > 0) {
+            SDL_LockSpinlock(&s_list.lock);
+            memcpy(s_list.text, text, sizeof(text));
+            s_list.gen++;
+            SDL_UnlockSpinlock(&s_list.lock);
+        }
+    }
+    if (__atomic_load_n(&s_keepOn, __ATOMIC_ACQUIRE)) {
+        keep_tick(list);
+    }
+    __atomic_store_n(&s_tickOn, 1, __ATOMIC_RELEASE);
+}
+
+static void place_threads_line(void)
+{
+    static uint32_t s_hash;
+    static bool s_said;
+    static uint32_t s_gen;
+    char text[1024];
+    uint32_t h = 2166136261u; /* FNV-1a */
+
+    if (__atomic_load_n(&s_tickOn, __ATOMIC_ACQUIRE)) {
+        /* the log thread's last list (up to TICK_LIST_EVERY s old) */
+        SDL_LockSpinlock(&s_list.lock);
+        const uint32_t gen = s_list.gen;
+        if (gen != s_gen) {
+            memcpy(text, s_list.text, sizeof(text));
+        }
+        SDL_UnlockSpinlock(&s_list.lock);
+        if (gen == s_gen) {
+            return; /* nothing new read */
+        }
+        s_gen = gen;
+        text[sizeof(text) - 1] = '\0';
+        if (text[0] == '\0' || strcmp(text, "threads: none read") == 0) {
+            return;
+        }
+    } else if (cpu_place_threads_text(NULL, s_place.gameTid, text, sizeof(text)) == 0 ||
+               strcmp(text, "threads: none read") == 0) {
+        return;
+    }
+    for (const char *c = text; *c != '\0'; c++) {
+        h = (h ^ (uint8_t)*c) * 16777619u;
+    }
+    if (s_said && h == s_hash) {
+        return;
+    }
+    s_said = true;
+    s_hash = h;
+    ico_log_limited("window: threads", "window: %s", text);
+}
+
+/* The 10 s game-thread line's run-queue part (thread_stat.h): the game,
+   render and submit threads' time on a core and waiting for one since the
+   last block, "ran / waited for a core: game 3.9 s / 0.4 s, render 2.1 s /
+   1.8 s, submit 0.0 s / 0.0 s"; a thread first read in this block (the
+   render thread made again) is left out until the next.  Once, when no
+   thread's could be read and the game thread's read failed: "ran / waited
+   for a core: schedstat not readable (EACCES)".  "" off Linux (no thread
+   ids).  The game thread's */
+static ThreadStatTrack s_statTrack[STAT_THREADS];
+
+static void place_stat_prime(void)
+{
+    ThreadStat now, d;
+
+    if (s_place.gameTid > 0 && thread_stat_read(NULL, s_place.gameTid, &now) == 0) {
+        (void)thread_stat_track(&s_statTrack[0], s_place.gameTid, &now, &d);
+    }
+}
+
+static size_t place_stat_part(char *out, size_t cap, bool submitOn)
+{
+    static const char *const who[STAT_THREADS] = {"game", "render", "submit", "SDL audio",
+                                                  "system audio"};
+    static bool s_failSaid;
+    const long tids[STAT_THREADS] = {
+        s_place.gameTid, __atomic_load_n(&s_place.renderTid, __ATOMIC_ACQUIRE),
+        submitOn ? __atomic_load_n(&s_place.submitTid, __ATOMIC_ACQUIRE) : 0, stat_tid(3),
+        stat_tid(4)};
+    ThreadStat d[STAT_THREADS];
+    bool have[STAT_THREADS] = {false, false, false, false, false};
+    int gameErr = 0;
+
+    if (cap > 0) {
+        out[0] = '\0';
+    }
+    const bool cells = __atomic_load_n(&s_tickOn, __ATOMIC_ACQUIRE);
+    double oldest = -1.0;
+
+    for (int i = 0; i < STAT_THREADS; i++) {
+        ThreadStat now;
+        int e;
+
+        memset(&d[i], 0, sizeof(d[i]));
+        if (tids[i] <= 0) {
+            continue;
+        }
+        if (cells) {
+            /* the log thread's last read of this thread (a cell of another
+               thread id is an old one: not this thread's) */
+            double v[4], at;
+            e = sys_cell_get(&s_statCell[i], v, 4, &at, NULL) == 4 && (long)v[3] == tids[i]
+                    ? 0
+                    : ENOENT;
+            if (e == 0) {
+                now.runNs = (uint64_t)v[0];
+                now.waitNs = (uint64_t)v[1];
+                now.slices = (uint64_t)v[2];
+                const double age = ico_thread_now_ms() - at;
+                oldest = age > oldest ? age : oldest;
+            } else {
+                e = thread_stat_read(NULL, tids[i], &now); /* none read there: its own errno */
+            }
+        } else {
+            e = thread_stat_read(NULL, tids[i], &now);
+        }
+        if (e != 0) {
+            gameErr = i == 0 ? e : gameErr;
+            s_statTrack[i].tid = 0; /* read again from nothing */
+            continue;
+        }
+        have[i] = thread_stat_track(&s_statTrack[i], tids[i], &now, &d[i]);
+    }
+    if (have[0] || have[1] || have[2]) {
+        size_t n = thread_stat_text(out, cap, who, d, have, STAT_THREADS);
+        if (cells && oldest >= 0.0 && n < cap) {
+            /* the deltas run between the log thread's reads, not the
+               block's ends: up to a second more or less than the block */
+            const int w = snprintf(out + n, cap - n,
+                                   " (the threads' run times as the log thread read them up to "
+                                   "%.0f ms before)",
+                                   oldest);
+            n += w > 0 ? (size_t)w : 0u;
+            n = n < cap ? n : cap - 1;
+        }
+        return n;
+    }
+    if (gameErr != 0 && !s_failSaid) {
+        s_failSaid = true;
+        return thread_stat_fail_text(out, cap, gameErr);
+    }
+    return 0;
+}
 
 /* the cores' speeds and the placement rule, once (the game thread, before
    the render thread starts) */
@@ -106,10 +1039,16 @@ static void place_init(void)
         return;
     }
     s_place.read = true;
+    s_place.gameTid = thread_stat_tid();
+    s_place.allMask = cpu_place_allowed(); /* before any pin */
+    place_stat_prime();
     (void)cpu_place_classes_read(NULL, &s_place.classes);
     s_place.slowMask = cpu_place_slow_mask(&s_place.classes);
     s_place.fastMask = cpu_place_fast_mask(&s_place.classes);
-    s_place.split = cpu_place_split(&s_place.classes, &s_place.renderMask, &s_place.submitMask);
+    cpu_place_plan(&s_place.classes, &s_place.plan);
+    s_place.split = s_place.plan.split;
+    s_place.renderMask = s_place.plan.render;
+    s_place.submitMask = s_place.plan.submit;
 #if defined(__ANDROID__)
     if (!ico_config_get_bool("dev.big_cores", 1)) {
         s_place.noPin = "[dev] big_cores = false";
@@ -117,17 +1056,45 @@ static void place_init(void)
         s_place.noPin = "the cores are of one speed, or their speeds are not known";
     } else {
         s_place.pin = true;
+        s_place.pinSubmit = s_place.plan.submit != 0;
+        if (cpu_keep_applies(&s_place.classes)) {
+            /* the render, game and submit threads kept after the start
+               (cpu_keep.h), from the log thread's first tick */
+            cpu_keep_init(&s_keep, &s_place.classes);
+            __atomic_store_n(&s_keepOn, 1, __ATOMIC_RELEASE);
+        } else if (cpu_keep_few(&s_place.classes)) {
+            /* one or two faster cores: the few-cores rule (cpu_keep.h),
+               from the log thread's first tick, its sweep with it */
+            char few[768];
+
+            cpu_keep_init(&s_keep, &s_place.classes);
+            __atomic_store_n(&s_keepOn, 1, __ATOMIC_RELEASE);
+            __atomic_store_n(&s_set.fewOn, 1, __ATOMIC_RELEASE);
+            (void)cpu_keep_few_text(&s_place.classes, cpu_place_allowed(), few, sizeof(few));
+            fprintf(stderr, "window: cores after the start: %s\n", few);
+        }
     }
 #else
     s_place.noPin = "only on Android";
 #endif
+    /* the attempt ledger's rows (attempt_ledger.h) */
+    ico_attempt_decide_cores(__builtin_popcountll(cpu_place_fast_mask(&s_place.classes)),
+                             s_place.pin, s_place.noPin);
     (void)cpu_place_classes_text(&s_place.classes, cls, sizeof(cls));
     (void)cpu_place_mask_text(cpu_place_allowed(), allowed, sizeof(allowed));
     (void)cpu_place_priority_text(pr, sizeof(pr));
     (void)cpu_place_mask_text(s_place.renderMask, rm, sizeof(rm));
     (void)cpu_place_mask_text(s_place.submitMask, sm, sizeof(sm));
     split[0] = '\0';
-    if (s_place.pin) {
+    if (s_place.pin && s_place.plan.kind != CPU_PLAN_MANY_FAST) {
+        snprintf(split, sizeof(split),
+                 s_place.plan.kind == CPU_PLAN_TWO_FAST
+                     ? "; the game and the render thread to the two faster cores %s, the submit "
+                       "thread left to the system"
+                     : "; the render thread to the one faster core %s alone, the game and the "
+                       "submit thread left to the system",
+                 rm);
+    } else if (s_place.pin) {
         snprintf(split, sizeof(split),
                  s_place.split ? "; the render thread to the fastest core %s alone, the submit "
                                  "thread to the next faster cores %s, the game thread left to "
@@ -140,6 +1107,28 @@ static void place_init(void)
     fprintf(stderr, "window: cores: %s; the game thread %s%s%s, may run on cores %s%s\n", cls,
             pr[0] ? "at " : "at its priority as made", pr, pr[0] ? " (not changed)" : "",
             cpu_place_allowed() != 0 ? allowed : "not known", split);
+    if (s_place.pin && cpu_place_allowed() != 0) {
+        /* the process's cores, kept before any pin: a thread made by a
+           kept thread starts with its creator's cores (pthread_create(3)),
+           so every thread the rule leaves free (the submit thread under
+           the two-core rule, the texture decode pool, the pipeline
+           workers, the pack loader, the save-state writers) puts itself
+           back on these at its entry (cpu_place.h cpu_place_thread_free;
+           ico_thread_create's threads in ico_thread.c, the RHI's through
+           rhi_thread_begin) */
+        cpu_place_keep_free(cpu_place_allowed());
+        rhi_set_thread_begin(place_rhi_thread_begin);
+        fprintf(stderr,
+                "window: big cores: kept to the faster cores: %s; every other thread the "
+                "game makes runs on every core it may (%s)\n",
+                s_place.plan.kind == CPU_PLAN_TWO_FAST   ? "the game and the render thread"
+                : s_place.plan.kind == CPU_PLAN_ONE_FAST ? "the render thread"
+                : s_place.pinSubmit                      ? "the render and the submit thread"
+                                                         : "the render thread",
+                allowed);
+    }
+    place_game_pin();
+    place_threads_line(); /* the threads so far and their cores, after the pin */
 }
 
 /* a thread the pictures wait on (the render thread, the submit thread), at
@@ -151,16 +1140,22 @@ static void place_thread_begin(const char *who, bool render)
     const uint64_t mask = render ? s_place.renderMask : s_place.submitMask;
     /* which cores (cpu_place_split): the fastest alone, the next ones, or
        the faster ones */
-    const char *what = !s_place.split ? "the faster cores"
-                       : render       ? "the fastest core"
-                                      : "the next faster cores";
+    const bool mine = render || s_place.pinSubmit;
+    const char *what = s_place.plan.kind == CPU_PLAN_TWO_FAST   ? "the two faster cores"
+                       : s_place.plan.kind == CPU_PLAN_ONE_FAST ? "the one faster core"
+                       : !s_place.split                         ? "the faster cores"
+                       : render                                 ? "the fastest core"
+                                                                : "the next faster cores";
     char err[160], pr[64], fast[96], cores[160], allowed[96], why[128], place[768];
 
+    __atomic_store_n(render ? &s_place.renderTid : &s_place.submitTid, thread_stat_tid(),
+                     __ATOMIC_RELEASE);
     snprintf(err, sizeof(err), "%s", granted ? "" : SDL_GetError());
     (void)cpu_place_priority_text(pr, sizeof(pr));
     (void)cpu_place_mask_text(mask, fast, sizeof(fast));
-    snprintf(cores, sizeof(cores), "%s %s%s", what, fast, s_place.split && render ? " alone" : "");
-    if (s_place.pin) {
+    snprintf(cores, sizeof(cores), "%s %s%s", what, fast,
+             (s_place.split || s_place.plan.kind == CPU_PLAN_ONE_FAST) && render ? " alone" : "");
+    if (s_place.pin && mine) {
         /* the cores read back after the call, not the call's answer alone:
            a phone's kernel may say yes and keep the thread elsewhere
            (cpu_place.h CpuPinResult) */
@@ -201,6 +1196,20 @@ static void place_thread_begin(const char *who, bool render)
         } else {
             snprintf(place, sizeof(place), "could not be kept to %s (%s)%s", cores, why, fb);
         }
+    } else if (s_place.noPin == NULL && !mine) {
+        /* left free: on the process's cores, not the game thread's two
+           (ico_thread.c has already put it back at its entry; said here) */
+        const CpuFreeResult fr = cpu_place_thread_free();
+        char keep[96];
+
+        (void)cpu_place_mask_text(cpu_place_free_mask(), keep, sizeof(keep));
+        snprintf(place, sizeof(place), "free (%s): %s cores %s",
+                 s_place.plan.kind == CPU_PLAN_TWO_FAST
+                     ? "the game and render threads have the two faster cores"
+                     : "the render thread has the one faster core",
+                 fr == CPU_FREE_FAILED ? "could not be put back on the process's"
+                                       : "on the process's",
+                 keep);
     } else {
         snprintf(place, sizeof(place), "placed by the system (%s)",
                  s_place.noPin != NULL ? s_place.noPin : "no rule");
@@ -307,7 +1316,9 @@ static int SDLCALL rt_main(void *u)
         FmPresent p;
 
         if (job.kind == FM_JOB_PICTURE) {
-            cpu_place_note(&s_place.render, cpu_place_now()); /* the 10 s line's cores */
+            const int core = cpu_place_now();
+            cpu_place_note(&s_place.render, core);                   /* the 10 s line's cores */
+            __atomic_store_n(&s_renderCore, core, __ATOMIC_RELAXED); /* a stall's line */
         }
 
         if (job.kind == FM_JOB_PICTURE) {
@@ -320,6 +1331,14 @@ static int SDLCALL rt_main(void *u)
             uint64_t waits = 0, interp = 0;
 
             rd_thread_take_reads_parts(&waits, &interp);
+            {
+                /* The idle ask: its end, and whether the slot ahead set it */
+                const uint64_t ahead = rd_thread_take_ahead_ns();
+
+                __atomic_store_n(&s_rt.jobByFence, ahead >= ICO_RT_FENCE_WAIT_NS ? 1 : 0,
+                                 __ATOMIC_RELAXED);
+                __atomic_store_n(&s_rt.jobEnd, t1, __ATOMIC_RELAXED);
+            }
             if (sub != 0) {
                 /* the submit thread's job finished since (the picture
                    before's, one picture late) */
@@ -369,7 +1388,9 @@ static int SDLCALL rt_main(void *u)
             fm_present_note(&s_rt.mb, &p);
         }
         fm_finish(&s_rt.mb, &job, t1);
-        __atomic_store_n(&s_rt.beatSince, (Uint64)0, __ATOMIC_RELAXED);
+        /* release: the game thread that reads no picture in progress
+           (ico_render_thread_plan's acquire) reads its job's end too */
+        __atomic_store_n(&s_rt.beatSince, (Uint64)0, __ATOMIC_RELEASE);
         __atomic_store_n(&s_rt.beatDone, (unsigned long long)job.seq, __ATOMIC_RELEASE);
         if (fm_idle(&s_rt.mb)) {
             /* what the job wrote is the game thread's once it reads this */
@@ -551,6 +1572,13 @@ static int rt_heartbeat(unsigned long long *seq, unsigned long long *done)
     return 1;
 }
 
+/* ahead_mark.h's lines (at the start, and on the submit thread as the
+   order first takes effect) */
+static void rt_mark_log(const char *line)
+{
+    ico_diag_log("ico_pc: %s", line);
+}
+
 FmMode ico_render_thread_start(void)
 {
     static const RhiCallGuard guard = {NULL, rt_busy, rt_wait, rt_stale};
@@ -577,6 +1605,8 @@ FmMode ico_render_thread_start(void)
         s_rt.readsEst = s_rt.pictureEst = s_rt.presentEst = 0;
         s_rt.cpuEst = s_rt.interpEst = s_rt.submitEst = 0;
         s_rt.readsMean = s_rt.readsDev = 0;
+        s_rt.jobEnd = 0;
+        s_rt.jobByFence = 0;
         memset(&s_rt.readsTyp, 0, sizeof(s_rt.readsTyp));
         memset(&s_rt.pictureTyp, 0, sizeof(s_rt.pictureTyp));
         memset(&s_rt.cpuTyp, 0, sizeof(s_rt.cpuTyp));
@@ -630,6 +1660,24 @@ FmMode ico_render_thread_start(void)
         s_rt.mode = mode;
         rhi_set_call_guard(&guard);
         host.sync = mode == FM_MODE_SYNC; /* every picture waited: none counted as handed over */
+        /* the next picture's submit ahead (rd_submit_thread.h "ahead"):
+           off on this install until the version changes after a run of it
+           that ended badly with the order in effect (ahead_mark.h, decided
+           once a process); else the previous run's watchdog end holds it
+           off for this start (a device loss or a hung driver comes through
+           the loss ladder) */
+        {
+            char logs[ICO_PATH_MAX];
+            const char *blocked = ico_host_logs_dir(logs, sizeof(logs)) == 0
+                                      ? ahead_mark_begin(logs, ico_diag_version(),
+                                                         exit_info_last_reason(NULL), rt_mark_log)
+                                      : NULL;
+            rd_thread_submit_ahead_prev(blocked != NULL ? blocked
+                                        : ico_diag_startup_prev_watchdog()
+                                            ? "the previous run was ended by the watchdog"
+                                            : NULL);
+            rd_thread_submit_ahead_mark_fn(ahead_mark_in_effect);
+        }
         rd_set_thread_host(&host);
         ico_diag_set_render_heartbeat(rt_heartbeat);
     }
@@ -670,6 +1718,11 @@ void ico_render_thread_stop(void)
     SDL_UnlockMutex(s_rt.lock);
     SDL_WaitThread(s_rt.thread, NULL);
     s_rt.thread = NULL;
+    /* both threads ended: their ids are not known until they start again
+       (ico_render_thread_tids: a session must not be given an ended
+       thread's id) */
+    __atomic_store_n(&s_place.renderTid, 0, __ATOMIC_RELEASE);
+    __atomic_store_n(&s_place.submitTid, 0, __ATOMIC_RELEASE);
     SDL_DestroyCondition(s_rt.cond);
     SDL_DestroyMutex(s_rt.lock);
     s_rt.cond = NULL;
@@ -712,6 +1765,7 @@ void ico_render_thread_unpark(void)
     if (s_rt.thread == NULL) {
         return;
     }
+    keep_request(CPU_KEEP_WHY_RESUME); /* back from the background: the cores asked again */
     SDL_LockMutex(s_rt.lock);
     fm_unpark(&s_rt.mb);
     SDL_BroadcastCondition(s_rt.cond);
@@ -758,7 +1812,55 @@ bool ico_render_thread_plan(IcoRtPlan *out)
     out->submitNs = rd_thread_submit_on() && !rd_thread_submit_slots_apart()
                         ? __atomic_load_n(&s_rt.submitEst, __ATOMIC_RELAXED)
                         : 0;
+    /* The idle ask: the last job's end (written before the heartbeat's start
+       is cleared, read after it: a picture done is seen with its end) */
+    out->endNs = __atomic_load_n(&s_rt.jobEnd, __ATOMIC_RELAXED);
+    out->byFence = __atomic_load_n(&s_rt.jobByFence, __ATOMIC_RELAXED) != 0;
+    out->slotAhead = rd_thread_slot_ahead_on();
     return true;
+}
+
+bool ico_render_thread_wait_idle(uint64_t untilNs)
+{
+    bool idle;
+
+    if (s_rt.thread == NULL) {
+        return true;
+    }
+    SDL_LockMutex(s_rt.lock);
+    for (;;) {
+        const Uint64 now = SDL_GetTicksNS();
+
+        idle = fm_idle(&s_rt.mb);
+        if (idle || now >= untilNs) {
+            break;
+        }
+        if (untilNs - now < 1000000ull) {
+            /* under a millisecond left: the condition's wait counts whole
+               ms, so the rest is slept and the state read once more */
+            SDL_UnlockMutex(s_rt.lock);
+            SDL_DelayPrecise(untilNs - now);
+            SDL_LockMutex(s_rt.lock);
+            idle = fm_idle(&s_rt.mb);
+            break;
+        }
+        /* woken by the job's end (rt_main broadcasts it), at most the whole
+           ms left */
+        (void)SDL_WaitConditionTimeout(s_rt.cond, s_rt.lock,
+                                       (Sint32)((untilNs - now) / 1000000ull));
+    }
+    SDL_UnlockMutex(s_rt.lock);
+    return idle;
+}
+
+void ico_render_thread_note_fill(uint64_t waitNs, bool late)
+{
+    pace_rt_trace_sum_fill(&s_rt.asks, waitNs, late);
+}
+
+void ico_render_thread_note_fix(uint64_t fixNs)
+{
+    pace_rt_trace_sum_fix(&s_rt.asks, fixNs);
 }
 
 void ico_render_thread_note_held(int why)
@@ -773,10 +1875,18 @@ void ico_render_thread_note_held(int why)
     }
 }
 
+/* the step rule's held asks of the run: the trace line's limit, the first 8
+   of the run then every 100th (it was the block's count, so every block
+   with holds wrote 8 lines of about 900 bytes: 11 KB of a 37 KB block on
+   the owner's Pixel); the block's summary line is unchanged */
+static unsigned s_heldLines;
+
 void ico_render_thread_note_ask(const struct PaceRtAsk *q, const struct PaceRtTrace *t, int why)
 {
     pace_rt_trace_sum_add(&s_rt.asks, q, t, (PaceRtHold)why);
-    if (why == PACE_RT_MISS && (s_rt.asks.held <= 8u || s_rt.asks.held % 100u == 0)) {
+    window_clock_trap_ask(why == PACE_RT_MISS, q->asMade); /* its second (clock_trap.h) */
+    const unsigned run = why == PACE_RT_MISS ? ++s_heldLines : 0u;
+    if (why == PACE_RT_MISS && (run <= 8u || run % 100u == 0)) {
         char line[1536];
 
         (void)pace_rt_trace_text(q, t, s_rt.asks.held, line, sizeof(line));
@@ -786,9 +1896,24 @@ void ico_render_thread_note_ask(const struct PaceRtAsk *q, const struct PaceRtTr
 
 void ico_render_thread_note_step(uint64_t readWaitNs, bool missed, uint64_t missNs, bool backedOff,
                                  uint64_t planCloseNs, uint64_t planBetweenNs, uint64_t widenNs,
-                                 uint64_t closeMeanNs, uint64_t closeDevNs, bool leftOut, int act)
+                                 uint64_t closeMeanNs, uint64_t closeDevNs, bool leftOut, int act,
+                                 const struct PaceStepEvent *ev)
 {
     const bool byPictures = act != PACE_STEP_NONE;
+
+    if (ev != NULL) {
+        s_rt.counted += ev->judged == PACE_STEP_COUNTED ? 1u : 0u;
+        s_rt.fallbacks += ev->began ? 1u : 0u;
+        s_rt.fitEnds += ev->ended == PACE_STEP_END_FIT ? 1u : 0u;
+        s_rt.limitEnds += ev->ended == PACE_STEP_END_LIMIT ? 1u : 0u;
+        if (ev->judged == PACE_STEP_OUTLIER) {
+            s_rt.outliers++;
+            if (ev->miss.picNs > s_rt.outlierNs) {
+                s_rt.outlierNs = ev->miss.picNs;
+                s_rt.outlierTypNs = ev->miss.typNs;
+            }
+        }
+    }
 
     if (readWaitNs != 0) {
         s_rt.lateStarts++;
@@ -799,7 +1924,6 @@ void ico_render_thread_note_step(uint64_t readWaitNs, bool missed, uint64_t miss
         s_rt.pictureMisses += byPictures ? 1u : 0u;
         s_rt.smallMisses += act == PACE_STEP_SMALL ? 1u : 0u;
         s_rt.widens += act == PACE_STEP_WIDEN ? 1u : 0u;
-        s_rt.fallbacks += act == PACE_STEP_STRICT ? 1u : 0u;
         s_rt.missMaxNs = missNs > s_rt.missMaxNs ? missNs : s_rt.missMaxNs;
     }
     s_rt.backoffSteps += backedOff ? 1u : 0u;
@@ -811,12 +1935,37 @@ void ico_render_thread_note_step(uint64_t readWaitNs, bool missed, uint64_t miss
     s_rt.leftOut += leftOut ? 1u : 0u;
 }
 
-void ico_render_thread_note_game_core(void)
+void ico_render_thread_tids(long *render, long *submit)
 {
-    cpu_place_note(&s_place.game, cpu_place_now());
+    const bool on = s_rt.thread != NULL;
+    const long r = __atomic_load_n(&s_place.renderTid, __ATOMIC_ACQUIRE);
+    const long sub = __atomic_load_n(&s_place.submitTid, __ATOMIC_ACQUIRE);
+
+    *render = !on ? 0 : (r > 0 ? r : -1);
+    *submit = !on || !rd_thread_submit_on() ? 0 : (sub > 0 ? sub : -1);
 }
 
-void ico_render_thread_block_line(double stepMs, double pictureCpuMs, double pumpMs)
+void ico_render_thread_note_game_core(void)
+{
+    static uint32_t s_tryPrinted;
+
+    cpu_place_note(&s_place.game, cpu_place_now());
+    if (__atomic_load_n(&s_keepOut.tryGen, __ATOMIC_ACQUIRE) != s_tryPrinted) {
+        /* the keeper's try with a new outcome (the log thread's text) */
+        char text[1024];
+
+        SDL_LockSpinlock(&s_keepOut.lock);
+        s_tryPrinted = s_keepOut.tryGen;
+        memcpy(text, s_keepOut.tryText, sizeof(text));
+        SDL_UnlockSpinlock(&s_keepOut.lock);
+        text[sizeof(text) - 1] = '\0';
+        ico_log_limited_n("window: render thread cores", 32u, 100u,
+                          "window: render thread cores: %s", text);
+    }
+}
+
+void ico_render_thread_block_line(double stepMs, double stepCpuMs, double pictureCpuMs,
+                                  double pumpMs)
 {
     const unsigned waits = __atomic_exchange_n(&s_rt.slotWaits, 0u, __ATOMIC_RELAXED);
     const Uint64 waitNs = __atomic_exchange_n(&s_rt.slotWaitNs, (Uint64)0, __ATOMIC_RELAXED);
@@ -826,6 +1975,10 @@ void ico_render_thread_block_line(double stepMs, double pictureCpuMs, double pum
     const unsigned pictureMisses = s_rt.pictureMisses;
     const unsigned smallMisses = s_rt.smallMisses, widens = s_rt.widens;
     const unsigned fallbacks = s_rt.fallbacks;
+    const unsigned counted = s_rt.counted, outliers = s_rt.outliers;
+    const unsigned fitEnds = s_rt.fitEnds, limitEnds = s_rt.limitEnds;
+    const double outlierMs = (double)s_rt.outlierNs / 1e6;
+    const double outlierTypMs = (double)s_rt.outlierTypNs / 1e6;
     const unsigned backoffSteps = s_rt.backoffSteps;
     const unsigned leftOut = s_rt.leftOut;
     const double lateStartMaxMs = (double)s_rt.lateStartMaxNs / 1e6;
@@ -834,12 +1987,14 @@ void ico_render_thread_block_line(double stepMs, double pictureCpuMs, double pum
     RdSubmitBlock sb;
     unsigned closes;
     double closeMs, closeMaxMs;
-    char rt[1536], st[384], cores[320];
+    char rt[1536], st[2048], cores[1600];
     CpuPlaceHist gc, rc, sc;
 
     s_rt.held = s_rt.heldMiss = s_rt.heldOverrun = s_rt.heldBehind = 0;
     s_rt.lateStarts = s_rt.misses = s_rt.backoffSteps = s_rt.pictureMisses = 0;
     s_rt.smallMisses = s_rt.widens = s_rt.fallbacks = 0;
+    s_rt.counted = s_rt.outliers = s_rt.fitEnds = s_rt.limitEnds = 0;
+    s_rt.outlierNs = s_rt.outlierTypNs = 0;
     s_rt.lateStartMaxNs = s_rt.missMaxNs = 0;
     s_rt.leftOut = 0;
 
@@ -850,9 +2005,63 @@ void ico_render_thread_block_line(double stepMs, double pictureCpuMs, double pum
     rd_thread_submit_take_cores(&sc);
     (void)cpu_place_part(cores, sizeof(cores), &gc, &rc, rd_thread_submit_on() ? &sc : NULL,
                          s_place.slowMask);
+#if defined(__ANDROID__)
+    {
+        /* each thread's samples by core (one a step, a picture, a submit
+           job: the thread's own getcpu, no file read), where the most-run
+           core alone does not say how a thread spread */
+        char sh[400];
+        const size_t at = strlen(cores);
+
+        (void)cpu_place_shares_text(sh, sizeof(sh), &gc, &rc, rd_thread_submit_on() ? &sc : NULL);
+        snprintf(cores + at, sizeof(cores) - at, "; %s", sh);
+    }
+#endif
+    if (cpu_place_free_mask() != 0) {
+        /* the threads made by a kept thread and put back on every core at
+           their entry since the start (cpu_place_thread_free) */
+        unsigned resets, failures;
+        const size_t at = strlen(cores);
+
+        cpu_place_free_counts(&resets, &failures);
+        snprintf(cores + at, sizeof(cores) - at,
+                 ", threads put back on every core %u (%u could not be)", resets, failures);
+    }
+    {
+        /* the threads' time on a core and waiting for one in the block
+           (thread_stat.h), after the cores */
+        char ran[320];
+        const size_t at = strlen(cores);
+
+        if (place_stat_part(ran, sizeof(ran), rd_thread_submit_on()) > 0) {
+            snprintf(cores + at, sizeof(cores) - at, "; %s", ran);
+        }
+        /* beside them, the faster cores' share of the threads that do not
+           sample their own core (core_share.h; the log thread's tick) */
+        CoreShare sh;
+        SDL_LockSpinlock(&s_share.lock);
+        sh = s_share.acc;
+        core_share_reset(&s_share.acc);
+        SDL_UnlockSpinlock(&s_share.lock);
+        char share[560];
+        const size_t at2 = strlen(cores);
+        if (core_share_text(&sh, cpu_place_fast_mask(&s_place.classes), share, sizeof(share)) > 0 &&
+            at2 < sizeof(cores)) {
+            snprintf(cores + at2, sizeof(cores) - at2, "; %s", share);
+        }
+    }
+    window_log_cost_mark("the game thread line's cores and run times");
     rd_thread_block_take(&tb);
     rd_thread_submit_block_take(&sb);
     rd_frame_close_take(&closes, &closeMs, &closeMaxMs);
+    /* Frame rate Original's pictures: handed over, waited, skipped while
+       the render thread was busy, replayed inside the step (rd.h
+       rd_frame_post_take; empty at the other frame rates) */
+    RdFramePost fp;
+    char post[448];
+
+    rd_frame_post_take(&fp);
+    rd_frame_post_text(&fp, post, sizeof(post));
     /* the submit thread (rd_submit_thread.h): per picture its submit and
        present, the most pictures queued and running at once, the render
        thread's waits for it (its next picture's first graphics call) and
@@ -868,6 +2077,32 @@ void ico_render_thread_block_line(double stepMs, double pictureCpuMs, double pum
                  sb.submitMs + sb.presentMs, sb.submitMs, sb.presentMs, sb.jobs, sb.longestMs,
                  sb.depthMax, sb.renderWaits, sb.renderWaitMs, sb.waits - sb.renderWaits,
                  sb.waitMs - sb.renderWaitMs, sb.waitMaxMs, sb.onRender);
+        if (sb.gfJobs != 0) {
+            /* the GPU's end first's samples (rd_submit_thread.h): only in
+               the blocks whose jobs ran while its verdict was not taken
+               (the block it arrives in the last) */
+            const size_t at = strlen(st);
+
+            snprintf(st + at, sizeof(st) - at,
+                     " (the GPU's end first's samples: %u Original presents timed, %u under "
+                     "2 ms, %u long with the picture before already finished, %u counted (%u "
+                     "waited for the GPU, %u early), %u unknown (last result %d), %u reads of "
+                     "the picture before failed, %u jobs not Original, %u Original jobs without "
+                     "a present or a driver call)",
+                     sb.gfTimed, sb.gfShort, sb.gfPrevDone, sb.gfCounted, sb.gfWaited,
+                     sb.gfCounted - sb.gfWaited, sb.gfUnknown, (int)sb.gfLastResult,
+                     sb.gfReadFailed, sb.gfNotOriginal, sb.gfNoPresent);
+        }
+        {
+            /* the next picture submitted ahead (rd_submit_thread.h "ahead"):
+               "p of q submitted before the picture before's GPU end", the
+               GPU's idle gaps in parts, the present calls the guard timed;
+               only in the blocks where it ran or is off for the run */
+            const size_t at = strlen(st);
+
+            (void)rd__sq_ahead_text(&sb, rd_thread_submit_ahead_off_why(), st + at,
+                                    sizeof(st) - at);
+        }
     } else {
         snprintf(st, sizeof(st), "; submit thread: off");
     }
@@ -896,8 +2131,11 @@ void ico_render_thread_block_line(double stepMs, double pictureCpuMs, double pum
                  "ms of it the margin widened after a miss; %u long steps of the game's own left "
                  "out)); steps started late by the pictures: %u (longest %.1f ms); steps "
                  "that missed their period: %u (%u the pictures': %u under %.0f ms, %u widened "
-                 "the margin, %u the third in %u steps; %u the game's own; latest %.1f ms past "
-                 "it; %u steps planned at the whole period after the pictures')",
+                 "the margin (%u counted toward the back-off, %u outliers at %.1f ms against a "
+                 "typical %.1f ms), %u the third in %u steps; %u the game's own; latest %.1f ms "
+                 "past it; %u steps planned at the whole period after the pictures' (back-offs "
+                 "ended: %u by the pictures between frames fitting, %u at the limit of %u "
+                 "steps))",
                  pictureCpuMs, b.idlePercent, b.waitMaxMs, b.busyMaxMs, b.pictures,
                  s_rt.mode == FM_MODE_SYNC ? ", sync" : "", tb.interpMs, tb.walkMs, tb.submitMs,
                  tb.waitMs, tb.retired, held, heldMiss, heldOverrun, heldBehind,
@@ -912,8 +2150,10 @@ void ico_render_thread_block_line(double stepMs, double pictureCpuMs, double pum
                  (double)s_rt.stepPlanNs / 1e6, (double)s_rt.stepCloseMean / 1e6,
                  (double)s_rt.stepCloseDev / 1e6, (double)s_rt.stepPlanBetweenNs / 1e6,
                  (double)s_rt.stepWidenNs / 1e6, leftOut, lateStarts, lateStartMaxMs, misses,
-                 pictureMisses, smallMisses, (double)PACE_STEP_MISS_FLOOR_NS / 1e6, widens,
-                 fallbacks, PACE_STEP_MISS_WINDOW, misses - pictureMisses, missMaxMs, backoffSteps);
+                 pictureMisses, smallMisses, (double)PACE_STEP_MISS_FLOOR_NS / 1e6, widens, counted,
+                 outliers, outlierMs, outlierTypMs, fallbacks, PACE_STEP_MISS_WINDOW,
+                 misses - pictureMisses, missMaxMs, backoffSteps, fitEnds, limitEnds,
+                 PACE_STEP_BACKOFF_STEPS);
     } else {
         snprintf(rt, sizeof(rt), "render thread: off (CPU %.1f ms a picture on the game thread)",
                  pictureCpuMs);
@@ -928,20 +2168,28 @@ void ico_render_thread_block_line(double stepMs, double pictureCpuMs, double pum
        walk; rd_thread.h) */
     const unsigned byPresents = tb.freshWaits + tb.furtherWaits;
     /* the read waits by what the render thread was doing as each began,
-       and the frame slots it waited for outside the hand-over (rd_thread.h) */
-    char rw[640];
+       the frame slots it waited for outside the hand-over and the
+       display's waits it made there (rd_thread.h) */
+    char rw[1024], cpu[48];
 
     rd_thread_read_waits_text(&tb, rw, sizeof(rw));
+    /* the step's CPU time against its wall time (cpu_place.h
+       cpu_place_thread_cpu_ns; left out when not known) */
+    if (cpu_place_cpu_text(stepCpuMs, cpu, sizeof(cpu)) > 0) {
+        const size_t at = strlen(cpu);
+
+        snprintf(cpu + at, sizeof(cpu) - at, "; ");
+    }
     fprintf(stderr,
-            "window: game thread: step %.1f ms (closing a frame %.1f ms of it, longest %.1f ms, "
-            "%u frames), pump %.1f ms, slot waits %u (%.1f ms; %u (%.1f ms) by a new frame's "
+            "window: game thread: step %.1f ms (%sclosing a frame %.1f ms of it, longest %.1f ms, "
+            "%u frames%s), pump %.1f ms, slot waits %u (%.1f ms; %u (%.1f ms) by a new frame's "
             "present, %u (%.1f ms) by a further present's, %u other), read waits %u (%.1f ms, "
             "longest %.1f ms%s); %s%s; %s\n",
-            stepMs, closeMs, closeMaxMs, closes, pumpMs, waits, (double)waitNs / 1e6, tb.freshWaits,
-            tb.freshWaitMs, tb.furtherWaits, tb.furtherWaitMs,
+            stepMs, cpu, closeMs, closeMaxMs, closes, post, pumpMs, waits, (double)waitNs / 1e6,
+            tb.freshWaits, tb.freshWaitMs, tb.furtherWaits, tb.furtherWaitMs,
             waits > byPresents ? waits - byPresents : 0u, tb.readWaits, tb.readWaitMs,
             tb.readWaitMaxMs, rw, rt, st, cores);
-    if (s_rt.asks.asks != 0) {
+    if (s_rt.asks.asks != 0 || s_rt.asks.fillWaits != 0) {
         /* the step rule's asks in the block: which test held them, by how
            much, what set the reads' end, the inputs' means */
         char ask[1536];
@@ -950,4 +2198,28 @@ void ico_render_thread_block_line(double stepMs, double pictureCpuMs, double pum
         fprintf(stderr, "window: step rule: %s\n", ask);
     }
     memset(&s_rt.asks, 0, sizeof(s_rt.asks));
+    if (__atomic_load_n(&s_keepOn, __ATOMIC_ACQUIRE) &&
+        __atomic_load_n(&s_tickOn, __ATOMIC_ACQUIRE)) {
+        /* the keeper's block (the log thread's text, up to a second old),
+           with the game thread's own step: the cores it is kept to beside
+           the time it took (rc12's cage: 9-14 ms steps on cores 2-6) */
+        char kt[1024], kc[48];
+
+        (void)cpu_place_cpu_text(stepCpuMs, kc, sizeof(kc));
+        SDL_LockSpinlock(&s_keepOut.lock);
+        memcpy(kt, s_keepOut.blockText, sizeof(kt));
+        SDL_UnlockSpinlock(&s_keepOut.lock);
+        kt[sizeof(kt) - 1] = '\0';
+        if (kt[0] != '\0') {
+            fprintf(
+                stderr,
+                "window: render thread cores: in 10 s: %s; the game thread's step %.1f ms%s%s%s "
+                "(the log thread's, up to 1 s old)\n",
+                kt, stepMs, kc[0] != '\0' ? " (" : "", kc, kc[0] != '\0' ? ")" : "");
+        }
+        (void)__atomic_fetch_add(&s_keepTaken, 1u, __ATOMIC_RELEASE);
+    }
+    window_log_cost_mark("the game thread line");
+    place_threads_line(); /* again only when the threads or their cores changed */
+    window_log_cost_mark("the thread list");
 }

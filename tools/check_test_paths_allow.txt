@@ -1,0 +1,18 @@
+# tools/check_test_paths.py's allow-list: the test lists, test scripts and
+# registration files that still read frame dumps from outside the repository
+# (machine-local paths), not yet converted to committed fixtures
+# (docs/port/TESTING_FIXTURES.md).  One repo-relative path a line.  The guard
+# skips a file named here and FAILS when a named file no longer names such a
+# path (take it off: this list only shrinks) or is gone.  Converted so far:
+# rd_shadow_box_ab and its OpenGL twin (port/render/test/rd_shadow_box_ab.cmake;
+# the old tools/shadow_box_dumps.txt stays below while the other tests that
+# read it are not converted).
+port/render/CMakeLists.txt
+tools/coverage_corpus.txt
+tools/date_cut_dumps.txt
+tools/lamps_dumps.txt
+tools/native_frame_dumps.txt
+tools/no_volume_dumps.txt
+tools/occlusion_corpus.txt
+tools/shadow_box_dumps.txt
+tools/shadow_cuts_dumps.txt

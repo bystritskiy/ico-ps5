@@ -9,7 +9,11 @@ There are two ways in, and both open the same menu:
 - On the title screen, choose **Options**.
 - During play, press Start and choose **Options**.
 
-Up and Down move between rows. Left and Right change a value. Cross opens
+Up and Down move between rows. Left and Right change a value. On the
+slider rows, holding Left or Right keeps changing the value: Brightness,
+Gamma, Picture brightness, Contrast, Saturation, CRT strength, Sharpness
+(upscaling), Motion blur strength, Volume, Music volume, Effects volume,
+Time to rescue Yorda, Mouse sensitivity and Mouse camera speed. Cross opens
 a page or confirms. Triangle goes back, and so does Circle (see **Circle
 goes back** under [Controls](#controls)). On the Japanese, Korean and Asian
 discs it is the other way round, as on those PS2 releases: Circle opens a
@@ -62,8 +66,9 @@ The window, the picture's size and shape, and the speed.
   Original makes it Original, and changing that row yourself makes the
   Preset say **Custom**.
 - **Resolution** is how sharp the picture is: 1x is the PS2's, up to 16x,
-  or the size of your window. Very high values need a lot of graphics
-  memory; when your graphics card cannot hold the picture, the game lowers
+  or the size of your window. The reflections in water and the picture
+  seen through the Queen's barrier are drawn as sharp as the rest. Very
+  high values need a lot of graphics memory; when your graphics card cannot hold the picture, the game lowers
   it on its own and the row shows both, for example **16x (8x)**. **Auto**
   starts at the size of your window and steps down (3x, then 2x, then 1x)
   when your computer or phone cannot draw the pictures in time. It never
@@ -126,7 +131,12 @@ The window, the picture's size and shape, and the speed.
   screen, 120 on a 120 Hz screen) follows the screen, so motion stays
   smooth. On a 144 Hz or 240 Hz screen the 144 or 240 limit counts as equal
   to it, even when the system reports 143 or 239. On phones and tablets it
-  starts at 60. If motion ever looks uneven, check that this limit matches
+  starts at 60. On phones whose screen changes its refresh rate by itself,
+  a number asks the screen to hold that rate, and Uncapped now asks the
+  screen for its highest rate (Android 12 and later; the phone can say no).
+  Original asks for nothing and lets the phone choose
+  ([Android](ANDROID.md#a-fixed-refresh-rate-for-a-frame-rate-you-set)).
+  If motion ever looks uneven, check that this limit matches
   your screen's refresh rate (see your system's display settings). If a
   faint trailing image stays while you move, try another limit, or on
   Windows the Direct3D 12 renderer ([Choosing the renderer](#choosing-the-renderer)).
@@ -141,7 +151,11 @@ The window, the picture's size and shape, and the speed.
   covers (with the normal layout, between the D-pad and Select), so
   nothing covers it; controls you set to Hidden or Off do not count, and
   when the controls fade away the number goes back to the corner. It updates once a second and shows nothing until the
-  first second has passed.
+  first second has passed. Time the game spends away from the screen (the
+  app in the background, a picture saved for a bug report, the screen
+  turned) is not counted: the number keeps its last value until a whole
+  second of play has passed again. A short freeze during play does lower
+  it, as it should.
 - **Video mode** is PAL 50 Hz or 60 Hz. The normal choice is 60 Hz. This
   row is only on the title screen's Options, and only with the European
   disc: the other six discs always run at 60 Hz, as they did on the
@@ -151,7 +165,7 @@ The window, the picture's size and shape, and the speed.
 
 This page is in the Options menu, right under Display.
 
-How the picture is drawn and finished: smoothing, the picture's size and sharpness, brightness, the CRT filter and the packs.
+How the picture is drawn and finished: smoothing, the picture's size and sharpness, brightness and colours, the CRT filter and the packs.
 
 - **Anti-aliasing** smooths jagged edges. The choices go in this order:
   **Off**, **MSAA 2x**, **MSAA 4x**, **MSAA 8x**, **2x supersampling** and
@@ -179,6 +193,43 @@ How the picture is drawn and finished: smoothing, the picture's size and sharpne
   more); nothing changes with the CRT filter, at **Window**, or when the
   Resolution is 1x. It works with either Preset and with Anti-aliasing:
   supersampling is then counted against the game's own size.
+- **Upscaling** is **Off**, **FSR 1.0** or **FSR 3.1**. FSR 1.0 (AMD's open upscaler)
+  makes the picture sharper when it is drawn smaller than your screen, as
+  at Resolution 1x or after Downsampling: edges are traced and kept crisp
+  instead of being stretched soft. It works on every computer and phone.
+  Nothing changes with the CRT filter, at **Window**, or when the picture
+  is already as large as your screen. Off shows the picture as the
+  original game did.
+  **FSR 3.1** is AMD's newer upscaler, which draws the picture smaller than
+  your screen and builds it back up from several pictures in a row. It
+  is offered on Windows and Linux computers that run the game with the
+  Vulkan renderer, on a graphics card with Vulkan 1.2 or newer (not with
+  the Direct3D or OpenGL renderers, on Macs or on phones); when the row is
+  saved as FSR 3.1 on a computer that cannot run it, it says
+  **(off: not available)** after the name (the log says why),
+  the picture is drawn as with Off, and your choice stays in the settings
+  file. FSR 3.1 is off with the CRT filter and while **Downsampling** is
+  on (one or the other), and at the Original Preset (1x) only Native AA
+  applies. While it runs, Anti-aliasing is off, and says
+  **(off: FSR 3.1)** after the name. The game's own text, save tiles,
+  subtitles, fades, film grain and cinematic bars are drawn over the
+  finished picture at your screen's size, not through the upscaler, so
+  they stay sharp, and an area change fades to black cleanly. Because it
+  builds each picture from the ones before, sparks and smoke can leave a
+  faint trail while they move. If the log says "the vertex pre-pass is off", every moving thing trails, not only those (a
+  developer setting or a graphics card problem turned that pass off). It
+  uses some of the graphics card's memory (tens of megabytes, more at
+  large window sizes).
+- **Upscaling quality** (shown while Upscaling is FSR 3.1) is how much
+  smaller than your screen the picture is drawn: **Native AA** (the picture
+  is drawn at your screen's size and only smoothed, the default), **Quality**
+  (1.5 times smaller), **Balanced** (1.7 times) or **Performance** (2 times
+  smaller). The game never draws below its own 1x size, so on a small
+  window the picture can be drawn at a little more than the ratio says.
+- **Sharpness** (shown while Upscaling is FSR 1.0 or FSR 3.1) is how much
+  FSR sharpens, from 0 to 100 in steps of 10; 80 is the default. Lower it
+  if edges look too hard. With FSR 1.0, when the picture is stretched more
+  than twice its size, it is sharpened a little less on its own.
 - **Full-height picture** shows every line of the picture. The PS2 showed
   half of them, which looks a little softer.
 - **Texture filtering** is how smooth the textures look up close: Original
@@ -207,8 +258,8 @@ How the picture is drawn and finished: smoothing, the picture's size and sharpne
   50 Hz the border at the top and bottom is a little taller. With Aspect
   ratio at 4:3, or at a shape the game's picture fills exactly (such as
   48:9), Off is the PS2's own picture and border, exactly as before.
-- **Brightness** sets how bright the picture is. Square puts back the
-  normal value, 7.
+- **Brightness** sets how bright the picture is. Holding Left or Right
+  keeps changing it. Square puts back the normal value, 7.
 - **CRT filter** makes the picture look like an old tube television. Off
   turns it off; the other choices are the styles Scanlines, Consumer TV,
   Trinitron, PVM and Shadow mask. **CRT strength** is how strong it is. It
@@ -216,6 +267,20 @@ How the picture is drawn and finished: smoothing, the picture's size and sharpne
   lines would look like a fine mesh on a sharper picture). Texture packs
   still show through it. To adjust a style's details, see
   [the lines you can change in a file](#settings-you-can-only-change-in-a-file).
+- **Gamma**, **Picture brightness**, **Contrast** and **Saturation** change
+  the colours of the game's picture, from 1 to 100. 50 is the picture as the
+  game draws it, and it is what each row starts at. They work the way the
+  same four settings do in PCSX2: Gamma makes the middle tones lighter or
+  darker, Picture brightness lightens or darkens everything, Contrast
+  pulls the light and dark tones apart or together, and Saturation changes
+  how strong the colours are (1 is almost black and white). Left or Right
+  changes a row by 1, and holding it keeps changing the row; L1 or R1
+  changes it by 10. Square puts the row back to 50. They apply with
+  every Preset and with the CRT filter, which gets the same colours. With
+  the Enhanced preset, the menu text and subtitles, which are drawn sharp
+  on top of the picture, keep their own colours. The films are not
+  changed. Picture brightness is not the game's own **Brightness** row
+  above.
 - **Texture pack** turns an installed texture pack On or Off. It says
   **None installed** when there is none. [About texture packs](TEXTURE_PACKS.md).
 - **Model pack** turns an installed model pack On or Off. It says **None
@@ -231,11 +296,10 @@ This page is in the Options menu, right under Picture.
 The game's own picture effects.
 
 The game's own effects are each On or Off (Motion blur is Off, Original
-or Smooth, Water reflections is Original or Sharp, and Glow between frames
-is Original or Smooth). All On, with Motion blur, Water reflections and
-Glow between frames at Original, is the picture the PS2 gives you, and that
-is how the game starts, with Motion blur strength at 100 %. The Preset does
-not change these rows, except Glow between frames.
+or Smooth, and Glow between frames is Original or Smooth). All On, with
+Motion blur and Glow between frames at Original, is the picture the PS2
+gives you, and that is how the game starts, with Motion blur strength at
+100 %. The Preset does not change these rows, except Glow between frames.
 
 - **Glow:** the soft glow around bright light, and the flare of the sun.
   It is drawn at the PlayStation 2's size at every Resolution and spread
@@ -267,12 +331,6 @@ not change these rows, except Glow between frames.
   trail lasts, not how far it spreads, and works the same with Original and
   Smooth.
 - **Fog:** the haze that hides the distance.
-- **Water reflections:** Original or Sharp. Original is the PS2's
-  reflection in puddles, pools and the water at the mill, which looks soft
-  when the rest of the picture is sharper than the PS2's. Sharp draws the
-  reflections as sharp as the rest of the picture, and also the picture you
-  see through the Queen's barrier. At the PS2's resolution (1x) the two look
-  the same. Original is how the game starts.
 - **Cinematic bars:** the black bars at the top and bottom of the picture
   during cutscenes. With them Off you see the whole picture, and the
   subtitles are not dimmed.
@@ -367,10 +425,33 @@ A change takes effect the next time you start the game.
   column. Cross changes the one you are on, Square clears it, and the
   **Reset to defaults** row puts everything back. Giving a button to
   another action swaps the two. In the menus the gamepad's face buttons and
-  d-pad always go by position.
+  d-pad always go by position. On the discs that have hints (not the North
+  American disc or the two 2001 previews) the last action is **Ask Yorda for a
+  hint**. It has no button or key until you give it one. Press it while a
+  hint is waiting in a room and Yorda gives it at once, instead of after her
+  usual wait. It does nothing in a room with no hint waiting, or with No hints
+  on.
 - **Button configuration** opens the game's own screen for choosing which
   button does what. It applies on top of Remap controls. Pause menu only.
 - **Vibration** is On or Off, as the game's own setting. Pause menu only.
+- **Button pictures** chooses whose button pictures the game shows: in the
+  menus, in the game's own prompts (such as saving), on the Button
+  configuration screen, in photo mode and on the touch screen buttons.
+  **Auto** shows the buttons of the controller you used last: an Xbox
+  controller (or a Steam Controller) gets Xbox pictures, a Nintendo Switch
+  Pro Controller or a pair of Joy-Cons gets Nintendo pictures, and any other
+  controller, the keyboard, the mouse and the touch screen get the
+  PlayStation ones. The row shows which Auto picked, for example **Auto
+  (Xbox)**. You can also pick **PlayStation**, **Xbox**, **Nintendo**
+  (Switch, Wii U) or **Wii Classic Controller** yourself; the Wii Classic
+  Controller pictures are only used when you pick them. Buttons are shown by
+  where they sit on the controller, so the bottom face button is always the
+  one the game calls Cross. Not covered: button names written in sentences
+  and the Remap controls page stay as they are, Start, Select and the
+  sticks are still words, and other controllers (GameCube, Dreamcast, the
+  first Xbox, Ouya, PSP, Vita, the Wii Remote) have no pictures yet. It
+  shows from the title screen and the pause menu, on every disc. The
+  pictures are by MesaBlack.
 - **Hold type** is **Disc's own**, **A (hold)**, where Yorda's hand stays
   held while you keep R1 down, or **B (toggle)**, where you press R1 once to
   take her hand and again to let go. **Disc's own** is how the disc you play
@@ -380,6 +461,38 @@ A change takes effect the next time you start the game.
   always works as B). Choosing A or B uses that way on every disc. It shows
   from the title screen and the pause menu, on every disc, and is kept in
   the settings file for every save.
+- **Zoom type** is **Hold**, where the camera zooms in while you keep R2
+  held (the game's own way, on every disc), or **Toggle**, where you press
+  R2 once to zoom in and again to zoom out. With Toggle the camera also
+  zooms back out by itself when a cutscene takes over or the game zooms the
+  camera itself, and when you go into another room. It follows the game's
+  **Button configuration**, shows from the title screen and the pause menu,
+  on every disc, and is kept in the settings file for every save.
+- **Camera reset** is **Off** (the game as it shipped) or **On**. With it
+  on, pressing R3 (clicking the right stick in) brings the camera straight
+  back to Ico after you have turned it with the right stick, instead of
+  letting it drift back slowly. A zoom you turned on with Zoom type
+  **Toggle** ends too, and while you keep pushing the right stick the camera
+  stays on Ico until you let go. You can give R3 to another key or button
+  under **Remap controls**. It shows from the title screen and the pause
+  menu, on every disc, and is kept in the settings file. Save states load
+  whichever way it is set.
+- **Look at Yorda** is **Off** (the game as it shipped), **Hold** or
+  **Toggle**. It lets L3 (clicking the left stick in, or V on the keyboard)
+  turn Ico's head and the camera to Yorda without calling her: she does not
+  come. With **Hold** the look lasts while you keep L3 held; with
+  **Toggle** one press starts it and the next ends it, and it also ends
+  when a cutscene takes over, in another room, when you take her hand,
+  when Camera reset brings the camera back or when you load a save state
+  (pausing and the menus leave it on). The camera turns even when she is
+  already on the screen, and, when she is in another part of the castle,
+  toward her wherever R1 would. Where the game keeps the camera still for a
+  call, only Ico's head turns. You can give L3 to another key or button
+  under **Remap controls**; the touch screen has no L3 button, so it works
+  with a controller or a keyboard. It shows from the title screen and the pause
+  menu, on every disc, and is kept in the settings file. Save states load
+  whichever way it is set.
+  [More about Look at Yorda](CONTROLS.md#play-with-a-gamepad-a-keyboard-or-a-mouse).
 - **Analogue stick fix** is the same switch as the one on the Gameplay
   page, shown here too so you find it with the other controls. Turn it on
   in either place and it is on in both.
@@ -407,8 +520,12 @@ The six mouse rows do not show on phones and tablets.
 - **Touch screen** opens a page for the on-screen buttons. It only shows
   up on a device with a touch screen.
   [About touch controls](CONTROLS.md#touch-controls-phones-and-tablets).
-  - **Touch controls:** Auto, Always or Off. A phone offers only Auto and
-    Always: with Off and no gamepad, nothing could turn the buttons back on.
+  - **Touch controls:** Auto, Always, Always with Start only in scenes, or
+    Off. The third keeps the buttons on screen like Always, but while a
+    scene or a movie plays only the Start button stays (the others fade
+    out and come back after), so the scene can be skipped. A phone offers
+    only Auto and the two Always choices: with Off and no gamepad, nothing
+    could turn the buttons back on.
   - **Touch size** and **Touch opacity** set how big and how see-through
     the buttons are. Their size is a real size, so they feel about the
     same on every screen (smaller only when the screen cannot hold them).
@@ -423,24 +540,27 @@ The six mouse rows do not show on phones and tablets.
 
 ## Gameplay
 
-The first five are off unless you turn them on, on a phone too.
+Every row here plays as the original until you change it, on a phone too.
+The Gameplay page has its own rows, then two pages of their own, each
+opened from its row just above Back: [Chains](#chains) and
+[Cutscenes](#cutscenes). All of it is there from
+the title screen or the pause menu, on every disc.
 
-- **Shadows never take Yorda** makes the game gentler. A few scenes in the
-  story still show her being taken.
-- **Time to rescue Yorda** sets how long a shadow takes to pull Yorda into a
-  pit once it has her there: **Half**, **Original**, **Longer** (one and a
-  half times), **Double** or **Triple**. The time is the shadow's dive with her
-  (where the game's camera shows her in danger, its hard limit scales too),
-  and Ico taking her hand still ends it, so a longer
-  time gives you more of a chance to get to her. The row above, Shadows never
-  take Yorda, stops it altogether.
-- **Shadow speed** sets how fast shadows walk, run and fly: **Slower** (three
-  quarters of the original speed), **Original**, **Faster** (a quarter faster)
-  or **Fastest** (half as fast again). Only their walking, running and flying
-  change: their attacks, grabs, flinches and fading away play at the original
-  speed. It does not change how often they attack, how long they wait before
-  they do, or how long a shadow takes to pull Yorda into a pit (Time to rescue
-  Yorda sets that).
+The rows that make the game easier or harder (how the Shadows fight, how
+long you have to rescue Yorda, the rules about being knocked down, and more)
+are not here. They belong to a journey and are chosen when it begins,
+on the New Game screen: see [Difficulty](#difficulty). From the pause menu,
+the **Difficulty** row at the bottom of this page shows what your journey
+was started with, and changes nothing.
+
+The line under a row says what it does, and whether it switches
+achievements off. Of the rows in Options, only **Ignore cutscene cameras**
+(and the Debug menu, under [Developer mode](#developer-mode)) do so. They
+switch achievements off for as long as they are on, like Developer mode, so
+you cannot earn an achievement by accident while playing a changed game.
+Turn them off again and achievements come back. None of the difficulty rows
+switches achievements off.
+
 - **Analogue stick fix** lets Ico run in any direction you push the stick,
   not only the eight the original game knows. It is also on the Controls
   page, and it is the same switch.
@@ -450,23 +570,6 @@ The first five are off unless you turn them on, on a phone too.
   of the ladder in the East Reflector. For a few seconds after you come
   through a door holding her hand, that door does not take you back.
   [Why this is needed](FAQ.md#ico-and-yorda-come-straight-back-out-of-a-doorway).
-- **Yorda trips** makes Yorda trip and fall the way she does in the original
-  game after the main gate opens: when Ico has run pulling her by the hand
-  for three seconds, she falls, and again after every three more seconds of
-  it. She gets up again when Ico moves on. It takes effect from
-  the next room you go into, or the next time you continue from a save. The
-  June 2001 demo does not have her fall, so on that disc it does nothing.
-- **Natural chains** changes how two chains look as they come down for Ico:
-  the one at the Stone Pillar and one underground. In the original game the
-  links look squashed until the chain is all the way down. With this on, the
-  links stay the right size and more of the chain shows as it comes down. It
-  only changes the picture, not the game.
-- **Skip the opening** starts the game at the title screen, without the
-  Sony sign ("Sony Computer Entertainment Europe Presents" on the European
-  disc) and the opening scene.
-  The memory card check still runs, and its warning still shows if the card
-  is missing or full. It takes effect the next time you start the game.
-  Without it, Start still skips the opening scene once the sign has gone.
 - **Second memory card** puts a second memory card in the second slot, as
   on a PS2 with two cards: ten more saves. The game's own save and load
   screens then ask which card to use. It takes effect at once, the next
@@ -475,6 +578,19 @@ The first five are off unless you turn them on, on a phone too.
   come back when you turn it on again. The second card is the folder
   `memcard2` beside `memcard` in your user folder
   ([where that is](PORTABLE_MODE.md#a-second-memory-card)).
+- **Light sword colour:** Original or Red. The light sword of a finished game
+  leaves a pale trail when it swings; the game also has a red twin of it that
+  is never handed out. Red gives you that one: the same sword, as strong and
+  as long, with a red trail. Only the colour changes. It takes effect from
+  the next room. The row is on the European, Japanese, Korean and Asian
+  discs; the North American disc and the 2001 previews have no light sword.
+  Achievements stay on.
+- **Stick:** Original or Insect net. Insect net turns every stick into an
+  insect net the makers left in the game unused, drawn as fine grey lines.
+  Ico picks it up and carries it like the stick, but he cannot swing it, it
+  cannot be set alight at a torch, and it never hurts a Shadow. Where the
+  game asks for a burning stick, turn the row back to Original: the sticks
+  return from the next room. On every disc. Achievements stay on.
 
 Two more rows are the game's own, and only show up in the pause menu's
 Options once you have finished the game:
@@ -495,6 +611,252 @@ European game added for it are missing there: Yorda does not jump up to
 Ico's hand at the highest ledges (he pulls her up the usual way), and the
 second controller does not rumble. Your choice is kept with each save, as on the
 other discs.
+
+### Chains
+
+Options > Gameplay > Chains:
+
+- **Natural chains** changes how two chains look as they come down for Ico:
+  the one at the Stone Pillar and one underground. In the original game the
+  links look squashed until the chain is all the way down. With this on, the
+  links stay the right size and more of the chain shows as it comes down. It
+  only changes the picture, not the game.
+- **Chain swing speed** sets how fast a chain swings back and forth when Ico
+  hangs on it and swings it, from **1** to **10**. A higher number is a
+  quicker swing: 1 is the slowest and 10 the fastest. It starts at
+  **4 (original)**, the game's own. The speed is set when Ico takes hold, so a
+  change reaches the next chain he grabs. It does not switch achievements off.
+- **Chain swing slowdown** sets how quickly a swing dies down while Ico is not
+  swinging the chain, from **1** to **10**. A higher number stops it sooner: 1
+  lets it swing on the longest and 10 stops it quickest. It starts at
+  **4 (original)**, the game's own. It does not switch achievements off.
+
+The rows about rescuing Yorda (**Time to rescue Yorda**, **Yorda trips**,
+**Shadows never take Yorda**) are part of a journey's [Difficulty](#difficulty).
+
+### Cutscenes
+
+Options > Gameplay > Cutscenes:
+
+- **Skip the opening** starts the game at the title screen, without the
+  Sony sign ("Sony Computer Entertainment Europe Presents" on the European
+  disc) and the opening scene.
+  The memory card check still runs, and its warning still shows if the card
+  is missing or full. It takes effect the next time you start the game.
+  Without it, Start still skips the opening scene once the sign has gone.
+- **No cutscene look-around:** the right stick does not move the camera
+  during cutscenes. Achievements stay on. The North American disc, the August
+  2001 preview and the June 2001 demo have no look-around in cutscenes, so
+  there it changes nothing, and the line under it says so.
+- **Ignore cutscene cameras:** the game's cutscene cameras are not used.
+  Cutscenes can look wrong, and the game may show places it never meant you to
+  see. Switches achievements off.
+
+The Light sword colour, Stick, chain and cutscene rows, and the Debug menu
+under [Developer mode](#developer-mode), are kept in `config.toml`, under the
+heading `[variants]`. A journey's difficulty rows are not: they are kept with
+the save ([Difficulty](#difficulty)).
+
+## Difficulty
+
+A journey's difficulty is chosen once, on the [New Game screen](#starting-a-new-game),
+and stays with that save. There are three modes, and **Customize** under
+them to change every rule on its own. The pause menu cannot change it: a
+journey is played as it began, so a Permadeath journey cannot be softened
+halfway and a knock-down count means the same all the way through. From the
+pause menu, **Options > Gameplay > Difficulty** shows the rules the journey
+was started with, greyed, Mirror mode and New Game+ among them, and the pause screen's journey lines show the mode,
+the knock-down count (as `2 / 3`, when there is a limit) and the word
+Permadeath when it is on.
+
+None of the difficulty rows switches achievements off. Achievements count on
+every mode.
+
+### Easy, Normal and Hard
+
+**Normal** is the game as it shipped. Easy and Hard change these rows and leave
+all the others as in Normal:
+
+| Row | Easy | Normal | Hard |
+| --- | --- | --- | --- |
+| Shadow speed | Slower | Original | Faster |
+| Shadow toughness | Not tougher later | Original | Third journey on the European, Japanese, Korean and Asian discs; American on the North American disc and the August 2001 preview; Original on the June 2001 demo |
+| Shadow aggression | Wary, patient | Their own | Bold, quick |
+| Shadows never take Yorda | On | Off | Off |
+| Shadows never dodge | On | Off | Off |
+| Shadows attack together | Off | Off | On |
+| Automatic guard, Turn to face shadows, Shadows wait while Ico is down | On | On | Off |
+| Queen barrier | your disc's number | your disc's number | 7 |
+| Time to rescue Yorda | 25 s | Original (15 s) | 8 s |
+| Knock-down limit | Off | Off | 3, in each room |
+
+One hit per swing, Peaceful shadows, No Shadows, Yorda trips, No hints and
+Permadeath stay Off in all three. When you change a row of Customize's three
+pages, the mode shown is the one whose rows match exactly, or **Custom** when none does.
+The Easy and Hard values are a judgement, not a measured balance.
+
+### Customize
+
+Customize has three pages, then the **Mirror mode** and **New Game+** rows
+(for every difficulty; [Starting a New Game](#starting-a-new-game) says
+what they do). Each row's line says what it does.
+
+**Shadows**
+
+- **Shadow speed** sets how fast shadows walk, run and fly: **Slower** (three
+  quarters of the original speed), **Original**, **Faster** (a quarter faster)
+  or **Fastest** (half as fast again). Only their walking, running and flying
+  change: their attacks, grabs, flinches and fading away play at the original
+  speed. It does not change how often they attack, how long they wait before
+  they do, or how long a shadow takes to pull Yorda into a pit (Time to rescue
+  Yorda sets that).
+- **Shadow toughness:** **Original** keeps your disc's Shadows. **American**
+  makes every Shadow as tough as on the North American disc, and no tougher on
+  later playthroughs. **Not tougher later** keeps your disc's Shadows but they
+  do not get tougher on later playthroughs. On the June
+  2001 magazine demo there is no **American** choice: the demo's Shadows are
+  not the North American disc's, so the row has Original and Not tougher
+  later only (an `american` found in an old `config.toml` counts as Original there).
+  **Third journey** makes every Shadow as tough as the game's own table makes
+  them on a third playthrough, which is twice as tough as on the first
+  journey. The game has that number but you can never reach it: finishing the
+  game once is as far as the count goes, and a second journey is only half as
+  much again (one and a half times). The row has this
+  choice only on the European, Japanese, Korean and Asian discs, because
+  only their game makes Shadows tougher on a later journey; on the North
+  American disc, the August 2001 preview and the June 2001 demo it is not
+  offered.
+- **Shadow aggression:** how the Shadows fight. **Their own** leaves each
+  Shadow as the game made it. The other four make them all **Bold** or
+  **Wary**, and **patient** or **quick**.
+- **Peaceful shadows:** the Shadows come out of their pits as usual, but they
+  stand where they appear and never go after Ico or Yorda: they do not walk
+  up to you, attack, or carry Yorda off. It is the game's own switch that
+  turns the Shadows' thinking off, used here for the Shadows only; Yorda
+  keeps hers. It is different from **Shadows never take Yorda**, where the
+  Shadows still come for you and fight but do not carry her
+  off: with Peaceful shadows they do not come at all. The story's own
+  scenes were checked by reading the game's code, not by playing them all
+  with the row On: if a scene ever stalls waiting for a Shadow, please report
+  it. The row cannot be changed on a journey that has begun.
+- **Shadows never take Yorda** stops the Shadows from carrying Yorda off, and
+  the timer that sends one for her while Ico is in another room. A few scripted
+  scenes still show the capture.
+- **Shadows attack together** lets several shadows attack Ico at the same
+  time. In the original game they take turns: while one shadow is attacking,
+  the others hold back and wait. With this on, none of them waits for the
+  others. How they come at you, how long they wait before they strike and how
+  they go after Yorda stay as in the original, and still only one shadow at a
+  time can carry Yorda away (several can already go after her at once).
+- **No Shadows:** no Shadow ever appears, anywhere in the game, and the story
+  goes on as if you had won each fight, the cage room and the final hall
+  included. **Some story moments are lost or play differently without them.**
+  No preset turns it on. On the June 2001 demo the spiders still come out.
+
+**Combat**
+
+- **Automatic guard:** in the game Ico blocks a Shadow's attack by himself
+  when it comes from the front. Off: Ico does not block a Shadow's attack
+  from the front; it lands as an attack from behind does.
+- **Turn to face shadows:** in the game Ico's swing turns him toward the
+  nearest Shadow in front of him. Off: Ico swings straight ahead. The swing
+  itself is the weapon's own, so a Shadow beside him can still be caught by
+  it.
+- **Shadows wait while Ico is down:** in the game the Shadows hold back while
+  Ico is knocked down and getting up, and while he lies there the game also
+  makes him untouchable, so a swing that reaches him passes through. Off: they
+  do not hold back, and their swings land while he is on the ground and
+  getting up.
+- **One hit per swing:** a swing of Ico's weapon can hurt a Shadow only once.
+- **Shadows never dodge:** Shadows never step aside from Ico's swings.
+- **Queen barrier:** how many hits it takes to break the Queen's barrier,
+  5 or 7. Your disc's own number is shown until you choose.
+
+**Rules**
+
+- **Time to rescue Yorda** sets how many seconds a shadow takes to pull Yorda
+  into a pit, from the moment it starts to sink into the ground with her until
+  she is gone (in most scenes; see below): from 4 to 30 seconds, one second a
+  press. It starts at
+  **15 s (Original)**, the game's own time (15.4 seconds). The whole pull-in
+  speeds up or slows down evenly, so a short time leaves less time to reach
+  her at every point of it, and a long one more. Ico taking her hand still
+  pulls her back out. In some scenes, where the game shows the pit with a
+  camera of its own, the pull-in is quicker: the original takes her after 5
+  of its 15 seconds there, and the time you set scales that in the same
+  proportion (at 8 s she is taken after about 2.6 seconds there; at 30 s
+  after about 9.7). Shadows never take Yorda stops it
+  altogether.
+- **Yorda trips** makes Yorda trip and fall the way she does in the original
+  game after the main gate opens: when Ico has run pulling her by the hand
+  for three seconds, she falls, and again after every three more seconds of
+  it. She gets up again when Ico moves on. The June 2001 demo does not have
+  her fall, so on that disc it does nothing.
+- **No hints:** Yorda gives no hints about where to go, as on the North
+  American disc. The North American disc, the August
+  2001 preview and the June 2001 demo have no hints, so there it changes
+  nothing, and the line under it says so.
+- **Knock-down limit** is Off or 1 to 9 ([below](#the-knock-down-limit)).
+- **Knock-downs count** is **Each room** or **Whole journey**. It does nothing,
+  and is greyed, while the limit is Off.
+- **Permadeath** ([below](#permadeath)).
+
+### The knock-down limit
+
+With a limit on, the game is over once Ico has been knocked down that many
+times. Hard sets 3, counted in each room; Customize can set 1 to 9 and count
+the whole journey instead.
+
+- **What counts** is a hit that knocks Ico down onto the ground. That includes
+  the explosions of boxes and bombs. It does not count when Ico stumbles at a
+  ledge and falls (that is a fall, not a hit), when Yorda or a Shadow is
+  knocked down, or for the Queen's attack in the final fight, which never
+  knocks him down.
+- **One count per fall.** A fall lasts until Ico is back on his feet, so being
+  hit again while he lies there, or as he lands, is the same fall. A hit that
+  knocks him down again while he is getting up is a new one.
+- **Each room** starts the count again every time you enter a room, and when
+  you continue from a save. **Whole journey** keeps one count, saved with each
+  save (loading an earlier save brings back the count it had then), and starts
+  it again after the game over it causes.
+- The count is on the pause screen (such as "Hard 1 / 3"); no message
+  appears during play when Ico is knocked down.
+- At the limit Ico lies on the ground for two seconds, and cannot be hit
+  meanwhile, and then the game is over as for any other game over: Continue,
+  or Quit (with Permadeath, only Quit).
+
+### Permadeath
+
+**Permadeath** makes any game over the end of that journey. The game over
+screen has no Continue, only Quit. The save of that journey does not load: on
+the title screen's Continue list, choosing it plays the refusal sound and says
+"This journey has ended." The journey ends from the moment a game over cannot
+be avoided, for example once a Shadow has carried Yorda off, or when the knock-down
+limit is reached, so pausing and choosing End Game at that moment does not
+escape it.
+
+Permadeath is an honour system. Your memory card file is not changed or
+deleted. The game remembers which journeys have ended in a file of its own,
+`difficulty.toml`, in your user folder beside `config.toml`
+([where that is](PORTABLE_MODE.md#where-your-saves-are)). If you copy the memory
+card to another device without that file, or delete the file, the saves load
+again. Save states are off on a Permadeath journey: none can be saved or
+loaded (see [Save states](#save-states)).
+
+### Saves you already have
+
+A save that has no difficulty of its own yet (one made before saves kept
+their difficulty) takes it the first time you load it, from the rows your
+`config.toml` holds for the Shadows, the Combat rules, the time to rescue
+Yorda, Yorda trips and No hints: **Normal** if none differs from the game's
+own, **Custom** otherwise. From then on the save keeps those rows, whatever you
+do to the file later. The game does not rewrite `config.toml`. A save state of
+that kind takes the rows it was made with.
+
+Each save keeps its difficulty in `difficulty.toml`. To bring a save to another
+device, copy that file with the memory card folder (Options > Extras > **Back
+up your data** already does).
+
 ## Language
 
 - **Language** is the game's own language: English, French, German,
@@ -545,8 +907,10 @@ other discs.
   translations by players).
   The North American disc, the August 2001 preview and the June 2001
   magazine demo start on English. It does not
-  change the game's own text, which is always the disc's or the Language
-  row's translation.
+  change the game's own text, which is always the disc's, except while
+  Language is one of the translations by players: then the game's own menu
+  words (New Game, Continue, the saves' places) follow the Menu language
+  too.
 - **Disc** shows only when more than one disc is set up. It is the disc the
   game plays: Europe (SCES-50760), Japan (SCPS-11003), Korea (SCPS-56001), USA
   (SCUS-97113), Preview 2001-08 (the August 2001 preview), Demo 2001-06
@@ -558,7 +922,9 @@ other discs.
 
 The list of achievements and what each one asks. Secret ones show as ???
 until you earn them. You cannot earn achievements while Developer mode is
-on. One secret achievement cannot be earned on the North American disc,
+on. The
+[difficulty](#difficulty) you play on does not matter: no difficulty row
+switches achievements off. One secret achievement cannot be earned on the North American disc,
 the August 2001 preview or the June 2001 demo: those versions of the game
 do not have what it asks for.
 
@@ -570,10 +936,11 @@ page, and it is the same setting in both places.
 ## Extras
 
 On the title screen's Options this page has Music, Models, Credits,
-Character Customization, Game variants, Add to Steam (on Windows and Linux),
-Export textures, Back up your data, Restore from a backup and Achievement
-pop-ups. In the pause menu's Options it has only Character Customization,
-Game variants and Achievement pop-ups.
+Character Customization, Unused content, Add to Steam (on Windows and Linux),
+Add to the applications menu (on Linux), Export textures, Back up your data, Restore from a backup and Achievement
+pop-ups. In the pause menu's Options it has only Character Customization
+and Achievement pop-ups. The rows that change how the game plays are under
+[Gameplay](#gameplay).
 [Save states](#save-states) are on the pause menu and the Continue screen.
 
 - **Music:** listen to the game's music and sound effects.
@@ -584,8 +951,9 @@ Game variants and Achievement pop-ups.
   its disc, so the row is not there with that disc.
 - **Character Customization:** change the colours of Ico and Yorda.
   [Details below](#character-customization).
-- **Game variants:** change how the game plays.
-  [Details below](#game-variants).
+- **Unused content** (on the title screen's Extras page only): things the
+  makers left on the disc that the game never shows.
+  [Details below](#unused-content).
 - **Achievement pop-ups** is the switch that is also the first row of the
   [Achievements](#achievements) list. Turn it on or off in either place.
 - **Add to Steam** (on the title screen's Extras page only; it finds Steam
@@ -595,12 +963,31 @@ Game variants and Achievement pop-ups.
   Steam is open, and says so if Steam is running. On a Steam Deck, use
   Desktop Mode, where you can quit Steam from its icon in the taskbar
   (right-click it, then Exit Steam). If Steam has several accounts, the game goes to the one
-  used last. It adds no pictures, so Steam shows its plain tile for it. If
-  the game is already in your library, the row says so and changes
-  nothing. When it adds the game, it first keeps a copy of Steam's old
+  used last. It uses the game's icon (the I from the title) once
+  the game has made it, and adds no other pictures, so Steam shows its
+  plain tile for the rest. If the game is already in your library, the
+  row says so, and if that entry has no icon or only the game's own file as
+  its icon, it gets the game's icon (an icon you chose yourself stays). When
+  it changes Steam's list, it first keeps a copy of Steam's old
   list, `shortcuts.vdf.bak`, beside Steam's own list. If you move the game
   to another folder, add it again from there. The row is only on Windows
   and Linux, the Steam Deck included.
+- **Add to the applications menu** (on the title screen's Extras page only;
+  on Linux only): puts the game in your desktop's applications menu, with
+  its icon, so you can start it from there. It writes two files in your
+  user folder, never anywhere else and never before you press the row:
+  `com.defnf.icopc.desktop` in `~/.local/share/applications` and the icon
+  in `~/.local/share/icons/hicolor/256x256/apps` (if you have set
+  `XDG_DATA_HOME`, that folder replaces `~/.local/share`). The menu entry
+  starts the program you are running now: the AppImage file when you run
+  one, so if you move or rename the game, press the row again from there.
+  The icon is the I from the title, once the game has made it; until then
+  the entry is written without it, and pressing the row again after the
+  next title screen adds it. To remove the entry, delete those two files.
+  Some desktops show a new entry only after you log in again. On Wayland
+  desktops the entry is also what gives the game's window its icon.
+  [Details](port/APP_ICON.md#the-applications-menu). On Windows and the Mac
+  the row is not there; on Android the app keeps its plain icon.
 - **Export textures** (on the title screen's Extras page only; it needs no
   Developer mode): saves every picture on your disc as a PNG file, under
   the name PCSX2 gives it, in the game's `textures` folder (`textures/`,
@@ -644,53 +1031,6 @@ Game variants and Achievement pop-ups.
   memory card and the settings, but its save states only load in the version
   that can resume them ([save states and versions](#save-states)).
 
-### Game variants
-
-Options > Extras > Game variants, from the title screen or the pause menu,
-on every disc. Every row starts as the game shipped on your disc, and the line
-under a row says what it does and whether it switches achievements off. The
-rows that switch them off do so for as long as they are on, like Developer
-mode, so you cannot earn an achievement by accident while playing a changed
-game. Turn them off again and achievements come back.
-
-- **Shadow toughness:** **Original** keeps your disc's Shadows. **American**
-  makes every Shadow as tough as on the North American disc, and no tougher on
-  later playthroughs. **Not tougher later** keeps your disc's Shadows but they
-  do not get tougher on later playthroughs. Achievements stay on. On the June
-  2001 magazine demo there is no **American** choice: the demo's Shadows are
-  not the North American disc's, so the row has Original and Not tougher
-  later only (an `american` set in `config.toml` counts as Original there).
-- **One hit per swing:** a swing of Ico's weapon can hurt a Shadow only once.
-  Switches achievements off.
-- **Shadows never dodge:** Shadows never step aside from Ico's swings.
-  Switches achievements off.
-- **Shadow aggression:** how the Shadows fight. **Their own** leaves each
-  Shadow as the game made it. The other four make them all **Bold** or
-  **Wary**, and **patient** or **quick**. Achievements stay on.
-- **No hints:** Yorda gives no hints about where to go, as on the North
-  American disc. Achievements stay on. The North American disc, the August
-  2001 preview and the June 2001 demo have no hints, so there it changes
-  nothing, and the line under it says so.
-- **Queen barrier:** how many hits it takes to break the Queen's barrier,
-  5 or 7. Your disc's own number is shown until you choose. Achievements stay
-  on.
-- **No cutscene look-around:** the right stick does not move the camera
-  during cutscenes. Achievements stay on. The North American disc, the August
-  2001 preview and the June 2001 demo have no look-around in cutscenes, so
-  there it changes nothing, and the line under it says so.
-- **Ignore cutscene cameras:** the game's cutscene cameras are not used.
-  Cutscenes can look wrong, and the game may show places it never meant you to
-  see. Switches achievements off.
-- **Debug menu** (only while [Developer mode](#developer-mode) is on): opens
-  the game's own debug menu, made for the people who built the game. Options
-  closes and the menu opens over the game, or over the title screen if you
-  came from there; it works as the Select button opens it in Developer mode.
-  Switches achievements off. The June 2001 magazine demo has no Debug menu
-  row: the demo's debug menu is not right for it (it is the August 2001
-  preview's).
-
-The same choices are kept in `config.toml`, under the heading `[variants]`.
-
 ### Character Customization
 
 This page recolours Ico's skin, poncho, tunic and shorts, and Yorda's skin
@@ -731,6 +1071,38 @@ colours. While a texture pack is on, the page reminds you of this.
 
 Your choices are saved when you leave the page.
 
+### Unused content
+
+This page, on the title screen's Options only, opens things the makers left
+on the disc that the game itself never shows. Each disc has its own: the
+European disc has all four rows; the Japanese, Korean, Asian and North
+American discs and the August 2001 preview have all but the attract movie,
+which only the European disc carries; the June 2001 magazine demo has none
+of them, so its Extras page has no Unused content row.
+
+- **Test room: arena:** a room the makers built to try fights with the
+  Shadows: an arena with Shadows, a sword and two statues. Ico is there
+  alone.
+- **Test room: climbing:** a room the makers built to try climbing and
+  boxes, with Yorda, torches, wooden boxes and a chain. Its camera was made
+  for the trolley room, so when Ico runs the view jumps between camera
+  spots and his path curves; walk, or steer with the camera, to go straight.
+- **Attract movie (576 lines)** (when the disc has it): a second copy of the
+  film the title screen plays when you leave it alone, made for European
+  televisions. The game never plays it.
+- **Early show title art** (when the disc has it): pictures from the title
+  screen of an early show version of the game, left on the disc and never
+  shown. They open in the model viewer's list, where you pick one: the
+  version mark, Press Start and the copyright line. The European disc has
+  only the copyright line. Back in the list returns to this page.
+
+The test rooms have no exit. To leave one, press Start and choose End Game:
+the game goes back to the title screen and opens Options on this page
+again. If Ico falls or is caught, either choice on the game over screen also
+takes you back to the title screen. Nothing is saved in a test room, it does
+not change your game, and achievements do not count there. You cannot save
+or load a state in a test room.
+
 ## Save states
 
 A save state keeps the game exactly as it is, anywhere, in one of four slots
@@ -742,6 +1114,7 @@ picture. One that could not get a picture shows the screen as it was when
 you saved.
 
 - **During play:** press Start and choose **Save states**, under Photo mode.
+  Back on that page returns to the pause menu.
   On a keyboard, **F6** does both: it pauses the game and opens the page.
   In the pause menu F6 opens the page, and on the page F6 takes you back to
   the game. F6 does nothing on the title screen or in photo mode.
@@ -755,17 +1128,42 @@ Choose a slot and press Left or Right to pick **Save**, **Load** or
 use, and deleting, ask you to press again within two seconds. Saving is
 only possible from the pause menu, so from the title screen the page only
 loads and deletes. A slot that cannot be loaded (it was saved on another
-disc, with different gameplay settings, or by another version of the game
-that it cannot carry over to) is greyed, and the line under the cards says
-why. After a load the game is back on the pause menu, on **Save states**. On
+disc, for example) is greyed, and the line under the cards says why. A
+setting never stops a state from loading: it loads with the settings you
+have now, whatever they were when it was saved. The one it keeps is **Video
+mode**: a state saved in the other of 50 Hz and 60 Hz plays in its own until
+you restart the game. A state keeps the journey's [Difficulty](#difficulty) with it:
+loading one brings back the difficulty and the knock-down count it was
+saved with. On a journey with Permadeath on, save states are off: none can be
+saved or loaded, and a state made on such a journey never loads. After a load the game is back on the pause menu, on **Save states**. On
 a computer, F5 saves to slot 1 and F9 loads it. On Windows and Android a
 state carries over to a later version of the game when the part of the game
-it was saved in has not changed; states made before the game could carry
-them over do not.
-On Linux, the Steam Deck and Mac a state loads only in the version that
-saved it, so after you update the game those states are greyed. A gameplay
-setting that a later version adds does not stop an older state from loading
-while you leave that setting as it starts. Your
+it was saved in has not changed and the game can be sure it resumes it
+exactly. On Linux, the Steam Deck and Mac count on a state resuming where it
+was saved only in the version that saved it.
+
+Until version 1.0 a save state is not guaranteed to resume where it was saved
+in another version of the game. It often does; it cannot when the newer
+version changed a part of the game the state was in the middle of. From 1.0
+on, states are meant to keep resuming exactly in later versions.
+
+A state that the game cannot resume where it was saved (one made by another
+version of the game, or on another kind of device) still loads: the game
+continues from the last checkpoint the state holds, the place a game over
+would have taken you back to (the last save point, idol door or story
+checkpoint you passed before saving the state), the way Continue loads a
+memory card save. The line under the cards says so for such a slot, and a
+message says so after the load. The difficulty comes from the state; the
+play time and the settings a memory card save keeps (the screen effect and
+Players) come from the state when the game can find them in it, and stay as
+they are otherwise. Nothing is written to your memory card. Such a load
+works from the pause menu and the title screen: F9 during play asks you to
+pause first. A state from another disc or a Permadeath journey is refused,
+and a state saved in a new game before its first checkpoint, or one whose
+checkpoint the game cannot find, has nothing to continue from; the message
+then says so. A state made before states kept
+their difficulty takes the gameplay rows it was made with as its difficulty.
+Your
 achievements keep counting as before and are not taken back by a load. The
 states are kept in the `states` folder of your
 [user folder](PORTABLE_MODE.md#where-your-saves-are), apart from your memory
@@ -787,7 +1185,8 @@ Developer mode for it. It saves what is on the screen 3 seconds after you
 press it, so leave the menu right away. It goes into the `dumps` folder as
 two `.png` pictures (the frame the game drew, and one ending in
 `-present.png` as your screen showed it) and a `.zip` file that also holds
-the log; attach the `.zip` to your report. It is the same as F12 on a
+the log, with a list of what the area contained up to that moment and what
+was left out of its pictures; attach the `.zip` to your report. It is the same as F12 on a
 computer, and it is how a phone or a handheld makes one.
 
 ## Developer mode
@@ -801,45 +1200,82 @@ game even after you turn it off, until you go back to the title screen. A
 game you save in that time keeps them off when you load it again, until
 you start a New Game.
 
-With Developer mode on, two more rows show up under it on the same page, for people who
-make packs:
+With Developer mode on, four more rows show up under it on the same page:
+two for people who make packs, the game's own debug menu, and a way to move
+Ico about freely:
 
 - **Dump textures** saves every texture as a picture file when the game
   loads it. [More](TEXTURE_PACKS.md#make-a-texture-pack).
 - **Dump models** saves every model piece as a 3D model file when the game
   draws it. [More](MODEL_PACKS.md#make-a-model-pack).
+- **Debug menu** opens
+  the game's own debug menu, made for the people who built the game. Options
+  closes and the menu opens over the game, or over the title screen if you
+  came from there; it works as the Select button opens it in Developer mode.
+  Switches achievements off. A save state made with Developer mode on and
+  loaded with it off also switches them off until you restart the game, and
+  some of the menu's settings stay as the state had them until then. The June
+  2001 magazine demo has no Debug menu row: the demo's debug menu is not right for it (it is the August 2001
+  preview's).
+- **Free movement** is Off or On. On, pressing L2 (Z on the keyboard) hands
+  Ico to the sticks, as the people who built the game moved him about to test
+  it: the left stick moves him over the ground, the right stick moves him up
+  and down, L3 (V on the keyboard) sets him on the floor under him, and
+  letting go of L2 after that gives him back. Switches achievements off while
+  it is On. It works on every disc, and only while Developer mode is On.
 
 ## The pause menu's journey panel
 
 The pause menu shows your journey's numbers on the right: play time,
-deaths, how often Yorda was taken, saves, enemies defeated, whether New
-Game+ and Mirror mode are on, and how many achievements you have. Any
-helpers you turned on (Shadows never take Yorda, the stick fix, Developer
-mode) are listed too. Where the game has a name for the area you are in,
-the panel shows it.
+deaths, how often Yorda was taken, saves and enemies defeated. A
+**Difficulty** line shows the mode the journey was started with, the
+knock-down count when there is a limit (as `2 / 3`: knock-downs so far, and
+the limit) and the word Permadeath when it is on; Options > Gameplay >
+Difficulty shows the rules in full ([Difficulty](#difficulty)), Mirror mode
+and New Game+ among them. Where the game has a name for the area you are
+in, the panel shows it.
 
 A save that has no count of saves and enemies keeps those two lines
 hidden until you start a New Game.
 
 ## Starting a New Game
 
-**Mirror mode** and **New Game+** are not in Options. When you start a New
-Game, the screen after the Vibration question has a row for each, Off or
-On. Up and Down move between them, Left and Right pick, and Cross or Start
-starts the game.
+**Difficulty**, **Mirror mode** and **New Game+** are not in Options. When you
+start a New Game, the screen after the Vibration question has three rows:
+**Difficulty**, **Customize** and **Start**. Up and Down move between them,
+Left and Right pick the difficulty, Cross on Customize opens it, and the
+Start row (or the Start button on any row) begins the game. Triangle goes
+back to the Vibration question. Mirror mode and New Game+ are rows of
+Customize, whatever the difficulty.
 
-- **Mirror mode** plays the whole game flipped left to right. The sticks
-  and the D-pad both walk the way you press.
-- **New Game+** plays the second journey, the one the PS2 gives you after
-  you finish the game. Yorda's words are translated, and the ending and
+- **Difficulty** is Easy, Normal (the game as it shipped, and what the screen
+  starts on) or Hard. It shows **Custom** once Customize has made a mix that
+  matches none of the three. The line under the row says what the mode does.
+  What each mode changes, every row of Customize, the knock-down limit and
+  Permadeath are under [Difficulty](#difficulty). The choice stays with that
+  save and cannot be changed once the journey has begun.
+- **Customize** opens the Shadows, Combat and Rules pages and the Mirror mode
+  and New Game+ rows. Nothing on them is kept until you start the game, and
+  Back returns to this screen. Going back to Easy, Normal or Hard replaces
+  the rows of the three pages; going back to Custom brings your own rows
+  back. Changing the difficulty never changes Mirror mode or New Game+, and
+  changing those two never changes the difficulty.
+- **Mirror mode** (under Customize) plays the whole game flipped left to
+  right. The sticks and the D-pad both walk the way you press, and in the
+  menus, on the save and memory card screens and on the screens after the
+  ending, left and right on the stick and the D-pad move the way you press.
+  It starts Off.
+- **New Game+** (under Customize) plays the second journey, the one the PS2
+  gives you after you finish the game. Yorda's words are translated, and the ending and
   some items change. It starts On when you begin from a finished game's
-  save, and Off otherwise. You can change it either way.
+  save, and Off otherwise. You can change it either way. When you begin from a
+  finished game's save, Difficulty starts with that save's rules.
 
 Two things follow from that choice. If you turn New Game+ On before you
 have finished the game, the ending does not offer to save a finished game,
 and finishing counts for the "Once More" achievement. If you turn it Off
 after finishing, Film effect and Players are not in Options for that
-journey. Both choices stay with that save.
+journey. All of these choices stay with that save.
 
 ## Settings you can only change in a file
 
@@ -878,7 +1314,7 @@ Under `[video]`:
 | `effect_glow_mode = "original"` | How the glow is made for the frames shown between the game's own: `"original"` or `"smooth"`. It only matters above Frame rate Original, with `effect_glow = true`. The Enhanced Preset writes `"smooth"`. A file without this line gets `"smooth"` when its Display rows are the Enhanced Preset's, and `"original"` otherwise. |
 | `effect_motion_blur_mode = "original"` | How Motion blur moves while it is on: `"original"` or `"smooth"`. `effect_motion_blur = false` is Off whatever this says. |
 | `effect_motion_blur_strength = 100` | The Motion blur strength row: `10` to `100` in steps of 10. Lower values make the trail fade faster; `100` is the PS2's. A number between the steps is rounded to the nearest step. |
-| `effect_water_sharp = false` | Water reflections on the Effects page: `false` is Original, `true` is Sharp. |
+| `effect_water_sharp` | Not used: the reflections in water, and the picture seen through the Queen's barrier, are always drawn as sharp as the rest of the picture, so there is no Water reflections row. A file that has this line keeps it, and the game ignores it. |
 | `crt = false`, `crt_mode = "consumer"`, `crt_strength = 1.0` | The CRT filter and CRT strength rows. `crt_mode` is `"scanlines"`, `"consumer"`, `"trinitron"`, `"pvm"` or `"shadow"`. `crt_strength` goes from `0.0` to `1.0`. |
 | `crt_scanlines`, `crt_mask`, `crt_halation`, `crt_bloom` | Fine tuning of the CRT filter, each from `0.0` to `1.0`: how strong the dark lines are, how strong the fine pattern of dots or stripes is, how much glow surrounds bright spots and how much bright areas spread softly. A line that is missing, or a negative number, keeps the chosen style's own value. |
 | `crt_curvature` | How much the screen bulges, from `0.0` to `0.25`. Missing keeps the style's own value. |
@@ -887,12 +1323,15 @@ Under `[video]`:
 | `gpu_driver = ""` | Android only. The Driver row of the Graphics driver page: empty is the phone's own driver. The game also writes a `gpu_driver_failed` line when a driver did not start. [About Android](ANDROID.md#using-a-different-graphics-driver). |
 | `show_fps = false` | The Frame rate counter row on the Display page. `true` shows the frames per second in the top-left corner of the screen. |
 | `downsample = "off"` | The Downsampling row on the Picture page: `"off"` or `"box"` (To original size). |
+| `upscaling = "off"` | The Upscaling row on the Picture page: `"off"`, `"fsr1"` (FSR 1.0) or `"fsr3"` (FSR 3.1, where your graphics card can run it; otherwise it is drawn as Off and the word is kept). |
+| `upscaling_quality = "native"` | The Upscaling quality row, for FSR 3.1: `"native"` (Native AA), `"quality"`, `"balanced"` or `"performance"`. |
+| `upscaling_sharpness = 80` | The Sharpness row under Upscaling: 0 to 100. |
 | `model_pack = true` | The Model pack row on the Picture page. `false` shows the game's own models. |
 | `dump_models = false` | The Dump models row on the Developer page. Only works with Developer mode on. |
 | `effects_depth = true` | Lets an effects program such as ReShade see how far away things are. [About ReShade](RESHADE.md). |
 | `texture_pack_budget_mb`, `texture_pack_precache`, `texture_pack_cache_mb` | How much memory a texture pack may use. [About texture packs](TEXTURE_PACKS.md#if-the-pack-uses-a-lot-of-memory). |
 
-Under `[input]`, for the mouse camera and vibration:
+Under `[input]`, for the mouse camera, vibration and the button pictures:
 
 | Line | What it does |
 | --- | --- |
@@ -902,6 +1341,7 @@ Under `[input]`, for the mouse camera and vibration:
 | `mouse_return = true` | The Camera swings back row. |
 | `mouse_hold = 0.75` | How many seconds the mouse must stay still before the camera swings back behind Ico. |
 | `rumble = true` | `false` stops all vibration: a gamepad's rumble and, on a phone, the phone's own. |
+| `button_pictures = "auto"` | The Button pictures row: `"auto"`, `"playstation"`, `"xbox"`, `"nintendo"` or `"wii_classic"`. Any other word counts as `"auto"`. |
 
 Under `[game]`:
 

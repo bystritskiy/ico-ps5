@@ -50,22 +50,35 @@ typedef enum IcoStateResult {
     ICO_STATE_OTHER_BUILD,    /* saved by another build of the program */
     ICO_STATE_OTHER_DISC,     /* saved from another disc */
     ICO_STATE_OTHER_PLATFORM, /* saved on another platform */
-    ICO_STATE_OTHER_SETTINGS, /* a simulation setting differs (detail names the key) */
+    /* never returned: a state loads whatever the settings are (state_file.h
+       ico_state_header_check); the value stays so the numbering holds */
+    ICO_STATE_OTHER_SETTINGS,
     ICO_STATE_SELF_CHECK, /* the restored memory failed its checks; the game went on as before */
     ICO_STATE_IO,         /* the file could not be written */
-    ICO_STATE_BUSY        /* a save or load is already in flight */
+    ICO_STATE_BUSY,       /* a save or load is already in flight */
+    /* a load on a journey with Permadeath on (port/game/difficulty.h
+       ico_difficulty_states_locked): refused before anything is read or
+       touched; saving stays allowed */
+    ICO_STATE_PERMADEATH
 } IcoStateResult;
 
 /* What the UI shows for a slot (state_host.c fills it from the header). */
 typedef struct IcoStateSlotInfo {
     int present;              /* 1 when a file exists */
-    int loadable;             /* 1 when it would load (build, disc, platform, settings match) */
+    int loadable;             /* 1 when it would load (build, disc, platform match) */
     IcoStateResult why_not;   /* when !loadable */
     unsigned int play_frames; /* the game's play time at the save (ico_gs_play_frames) */
     int stage_no;             /* for the area name (settings.c areaName) */
     long long saved_at;       /* time(NULL) at the save */
     char build_commit[48];    /* text, for the refusal popup */
     char png_path[260];       /* the thumbnail's path ("" when none) */
+    /* 1 when it loads but cannot resume where it was saved: Load continues
+       the game from the checkpoint the state holds (port/save/state_checkpoint.h) */
+    int checkpoint;
+    /* 1 while its verdict (another build's or platform's state) is still
+       being worked out on a thread: listed from its header, loadable; a
+       Load waits for the verdict (state_host.c) */
+    int pending;
 } IcoStateSlotInfo;
 
 /* 1 when save states work on this build and start-up (game_data_range
@@ -89,10 +102,13 @@ void ico_state_host_poll(void);
    ICO_STATE_OTHER_BUILD), for the refusal box's words. */
 typedef enum IcoStateBlocker {
     ICO_STATE_BLOCK_NONE = 0,
-    ICO_STATE_BLOCK_OLD,   /* made before states carried over to later versions (format 1) */
-    ICO_STATE_BLOCK_CODE,  /* the code it was saved in (a function a thread sits in) changed */
-    ICO_STATE_BLOCK_DATA,  /* how the game holds its state in memory changed */
-    ICO_STATE_BLOCK_PINNED /* nothing to carry it over with: only its own version resumes it */
+    ICO_STATE_BLOCK_OLD,    /* made before states carried over to later versions (format 1) */
+    ICO_STATE_BLOCK_CODE,   /* the code it was saved in (a function a thread sits in) changed */
+    ICO_STATE_BLOCK_DATA,   /* how the game holds its state in memory changed */
+    ICO_STATE_BLOCK_PINNED, /* nothing to carry it over with: only its own version resumes it */
+    /* it cannot resume here and holds no checkpoint to continue from (or
+       none that could be found: state_checkpoint.h) */
+    ICO_STATE_BLOCK_NO_CHECKPOINT
 } IcoStateBlocker;
 
 typedef struct IcoStateRefusal {
@@ -104,6 +120,12 @@ typedef struct IcoStateRefusal {
 /* The last load refused as ICO_STATE_OTHER_BUILD: what blocked it and the
    two versions (blocker NONE when the last load was not refused so). */
 void ico_state_last_refusal(IcoStateRefusal *out);
+
+/* 1 when the last load that succeeded went through the state's checkpoint
+   (it could not resume where it was saved; port/save/state_checkpoint.h),
+   with the saving version's text ("vX.Y.Z...") in saved_version; 0 when it
+   resumed exactly (or none succeeded since the last request). */
+int ico_state_last_load_checkpoint(char *saved_version, size_t n);
 
 /* The result of the last performed request (the UI's popup, the log line
    is written by state_host.c itself).  `detail` is a short UTF-8 text with

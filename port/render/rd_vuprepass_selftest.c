@@ -37,17 +37,28 @@
  *           left out where the fallback is the plain variant (no tick
  *           cameras there: the two would differ by design)
  *   sprites four particles (RD_PROG_PARTICLE) across the block in front.
- * The pipelines of both replays are made first on the worker threads (two
- * replays that draw nothing name them, rd__pipeline_gather;
- * rd__pipeline_create_gathered).  The frame is replayed without the
- * pre-passes (the programs' entries: the reference) and
- * with them, and the block is read back after each.  The pre-passes pass
- * when their replay drew every command through them (two passes, the draws
+ * The pipelines of both kinds of replay are made first on the worker
+ * threads (two replays that draw nothing name them, rd__pipeline_gather;
+ * rd__pipeline_create_gathered).  The frame is built ST_REPLAYS (4) times,
+ * replay k's moved: every mesh's strips ST_SHIFT_X model units a replay to
+ * the right (2 GS pixels) and the ticks copy's blended camera's x and y
+ * offsets (kTickCam[3][0..1]) ST_SHIFT_CAM a replay, so each replay's
+ * vertex and triangle records differ from the one before.  The four
+ * frames are replayed without the pre-passes (the programs' entries: the
+ * references), then the four with them back to back as a run draws its
+ * pictures, each replay in the next frame slot (rd__ring_slot: the
+ * record's buffer is one a slot, so the four alternate between both), the
+ * block copied out after each and read back after the four.  A record a
+ * replay did not write, or one read before its copy landed, draws an
+ * earlier replay's picture: one replay of one frame would draw the same
+ * picture from it and could not see it.  The pre-passes pass when every
+ * replay with them drew every command through them (two passes, the draws
  * the frame's commands make: a vertex draw a mesh, two a particle command,
  * the rule and planes stages a mesh and the tick stage's two for the ticks
  * copy, counted one an entry and stage whether or not the pre-pass's
- * batches merged them, rd__vu_prepass_entry_draws; no draw the old way) and
- * the two blocks are equal byte for byte.
+ * batches merged them, rd__vu_prepass_entry_draws; no draw the old way,
+ * vuPreFallbacks 0) and each replay's block equals its own reference's
+ * byte for byte.
  * A difference, a pipeline that could not be made (its draws then take
  * their programs' entries) or a device error turns the pre-passes off for
  * the run (g_rd.vuPrepass); the window calls this before the start-up set,
@@ -57,27 +68,66 @@
  * runs nothing.
  *
  *   rd: VU pre-pass: on (self-test: prelit, lit, skin, the tick cameras and
- *     particles byte for byte, 48 vertices and 4 sprites in 16 pre-pass
- *     draws (2 passes, 90 triangle slots), N of M pixels drawn) on SCENE
- *     WxH at TWxTH texels in T ms
+ *     particles byte for byte over 4 replays in both frame slots, 48
+ *     vertices and 4 sprites in 16 pre-pass draws (2 passes, 90 triangle
+ *     slots), N of M pixels drawn) on SCENE WxH at TWxTH texels in T ms
  *   (the pre-pass draws as made: 16 one an entry and stage, fewer under the
  *   batches, g_rd.vuPreBatch)
- *   rd: VU pre-pass: off (self-test: the pictures differ: N of M bytes, the
- *     first at texel X,Y: R,G,B,A want R,G,B,A) on SCENE ...
+ *   rd: VU pre-pass: off (self-test: the pictures differ: in replay K of 4
+ *     (frame slot S), N of M bytes, the first at texel X,Y: R,G,B,A want
+ *     R,G,B,A) on SCENE ...
  *
  * ICO_RD_VU_PREPASS_SABOTAGE (tests): the replay with the pre-passes draws
  * wrong, as a driver whose record write or read went wrong would, so the
  * fallback can be run where the pre-passes are right
  * (rd__vu_prepass_sabotage): 1 the first mesh's vertex records one texel
  * off, tri its triangles' slot A one slot off, ticks the tick stage's tick
- * 1 tested at tick 0's camera (the ticks copy is then dropped).
+ * 1 tested at tick 0's camera (the ticks copy is then dropped), each in
+ * every replay; stale the record's copies left out from the second replay
+ * on (RD_VU_SABOTAGE_STALE: each such replay reads what an earlier replay
+ * left in its frame slot's buffer, or nothing), which only the replays
+ * after the first can show; under the stores the record of those replays
+ * is stored into a sink buffer of its size instead (rd_replay_vu.c
+ * recStoreBuffer), so the slot's buffer is left as the copies would leave
+ * it.
+ *
+ * The record's write (rd_vu_record.h): the test runs in the mode the run
+ * starts with.  Under the stores (the vertex shaders store the record) a
+ * failure is logged first, with its own words and first differing texel,
+ *   rd: VU pre-pass: the record stored by the vertex shaders failed the
+ *     self-test (the pictures differ: ...) in T ms: the self-test again
+ *     with the render targets and copies
+ *   rd: VU record: drawn into 3 RGBA32_UINT render targets ... (the stores
+ *     off: they failed the start-up self-test)
+ * and the test is run again with the render targets; the line above (on
+ * or off) is then that second run's, its "record" part saying so.  [dev]
+ * vu_prepass_min is held off while the test runs.
+ *
+ * After a pass, first the index compaction's own test where its class has
+ * the Mali-G52's form (rd_vu_compact_selftest.c; the record's test then
+ * runs without the compaction), then the zero-area cull's own self-test (rd_vu_zero_selftest.c,
+ * rd_vu_zero.h) runs on the same SCENE and logs its line, then the
+ * discard-free twins' (rd_nodiscard_selftest.c, rd_nodiscard.h); after a
+ * failure or without a run both are off.
  */
 #include <stdio.h>
 #include <stdlib.h>
 #include <string.h>
 
 #include "rd_internal.h"
+#include "rd_early_plan.h" /* rd_early_start_rows: the play record's size */
+#include "rd_health.h"     /* the test's own pictures' stamps */
 #include "rd_mesh.h"
+#include "rd_vu_compact.h"
+#include "rd_vu_rec_early.h"
+#include "rd_vu_record.h"
+#include "rd_vu_skin_check.h"
+#include "rd_fastps.h"
+#include "rd_nodiscard.h"
+#include "rd_onepass.h" /* the one-pass blend's check, after the fast build's */
+#include "rd_vu_zero.h"
+#include "rd_velocity.h"
+#include "shader_consts.h" /* ICO_VU_REC_W */
 
 #define ST_W 256 /* the block, GS pixels */
 #define ST_H 96
@@ -86,6 +136,11 @@
 enum { M_PRELIT, M_LIT, M_SKIN, M_COUNT };
 
 #define ST_SPRITES 4 /* the particle command's */
+
+/* the replays with the pre-pass (and as many references), each moved */
+#define ST_REPLAYS 4
+#define ST_SHIFT_X 0.25f  /* model units a replay: GS X 8 x this (2 pixels) */
+#define ST_SHIFT_CAM 0.25 /* the blended camera's x' and y' offsets a replay */
 
 static const uint8_t kProg[M_COUNT] = {RD_PROG_PRELIT, RD_PROG_LIT, RD_PROG_SKIN};
 static const uint8_t kCode[M_COUNT] = {32, 32, 20};
@@ -168,15 +223,16 @@ static void sceneBones(void)
  * strip, Gouraud, no texture; ST, RGBAQ, XYZ2), then per vertex its
  * quadwords (rd_mesh.h RD_VU_QW_*): pos, [normal, [weights,]] ST with the
  * strip flag (ST.w 0 on vertices 0 and 6), colour */
-static uint32_t buildStream(int i, float (*q)[4])
+static uint32_t buildStream(int i, int replay, float (*q)[4])
 {
+    const float x0 = kX0[i] + ST_SHIFT_X * (float)replay;
     qw(q[0], fbits(0x8000u | ST_VERTS), fbits(0x30064000u), fbits(0x512u), 0);
     uint32_t at = 1;
     for (int k = 0; k < ST_VERTS; k++) {
         const int col = k / 2, row = k % 2;
         const float z = kZ0[i] + 0.04f * (float)(k % 3);
         /* GS X = 2048 + 16 x / z, Y = 2048 + 16 y / z */
-        const float x = (kX0[i] + 2.4f * (float)col) * z / 2.0f;
+        const float x = (x0 + 2.4f * (float)col) * z / 2.0f;
         const float y = (row ? 4.5f : -4.5f) * z / 2.0f + 0.3f * (float)col;
         qw(q[at++], x, y, z, 1);
         if (i != M_PRELIT) {
@@ -193,15 +249,15 @@ static uint32_t buildStream(int i, float (*q)[4])
     return at;
 }
 
-static RdMesh makeMesh(int i)
+static RdMesh makeMesh(int i, int replay)
 {
     static float q[1 + ST_VERTS * RD_VU_QW_SKIN][4];
     static const char *const kName[M_COUNT] = {"rd vu pre-pass self-test prelit",
                                                "rd vu pre-pass self-test lit",
                                                "rd vu pre-pass self-test skin"};
-    const uint32_t n = buildStream(i, q);
+    const uint32_t n = buildStream(i, replay, q);
     const RdVuBatchDesc batch = {0, 0, 0};
-    const RdVuMeshDesc d = {(const float (*)[4])q, n, kQpv[i], 1, &batch, 0, kName[i]};
+    const RdVuMeshDesc d = {(const float (*)[4])q, n, kQpv[i], 1, &batch, 0, kName[i], NULL, 0, 0};
     return rd_create_vu_mesh(&d);
 }
 
@@ -212,28 +268,39 @@ static const double kTickCam[4][4] = {{0.16, 0.0, 0.0, 0.0},
                                       {2048.0, 2048.0, 4.0e6, 1.0},
                                       {-2048.0 * 2.22, -2048.0 * 2.22, -8.92e6, -2.22}};
 
+/* replay k's blended camera: kTickCam with its x' and y' offsets moved */
+static void tickCam(int replay, double cam[4][4])
+{
+    memcpy(cam, kTickCam, sizeof(kTickCam));
+    cam[3][0] += ST_SHIFT_CAM * (double)replay;
+    cam[3][1] += ST_SHIFT_CAM * (double)replay;
+}
+
 /* the ticks' cameras (RdFrame.tickCams, vu_common.hlsli vu_ticks: R_k = S_k
  * St^-1 as four columns): tick 0 the blended camera itself (the identity),
  * tick 1 the scene's camera (sceneBlock's 16..19) times the blended one's
  * inverse, so tick 1 sees the mesh as the prelit one is drawn */
-static void tickCams(float out[2][16])
+static void tickCams(int replay, float out[2][16])
 {
+    double kc[4][4];
+    tickCam(replay, kc);
     memset(out, 0, 2 * 16 * sizeof(float));
     for (int i = 0; i < 4; i++) {
         out[0][i * 4 + i] = 1.0f;
     }
-    /* St (rows r, columns c: St[r][c] = kTickCam[c][r]) is the 2 x 2 block
-     * [[0.16, 0, 2048, -4546.56], [0, 0.16, 2048, -4546.56], [0, 0, 4e6,
-     * -8.92e6], [0, 0, 1, -2.22]]; its inverse by its blocks */
+    /* St (rows r, columns c: St[r][c] = kc[c][r]) is the 2 x 2 block
+     * [[0.16, 0, 2048, -4546.56 + d], [0, 0.16, 2048, -4546.56 + d], [0, 0,
+     * 4e6, -8.92e6], [0, 0, 1, -2.22]] (d the replay's move); its inverse by
+     * its blocks */
     double inv[4][4];
     memset(inv, 0, sizeof(inv));
-    const double a = kTickCam[2][2], b = kTickCam[3][2], c = kTickCam[2][3], d = kTickCam[3][3];
+    const double a = kc[2][2], b = kc[3][2], c = kc[2][3], d = kc[3][3];
     const double det = a * d - b * c;
     /* (z, 1) from (z', w') */
     const double zz = d / det, zw = -b / det, oz = -c / det, ow = a / det;
     /* x = (x' - 2048 z - x0 * 1) / 0.16, the same for y */
     for (int r = 0; r < 2; r++) {
-        const double s = kTickCam[r][r], k2 = kTickCam[2][r], k3 = kTickCam[3][r];
+        const double s = kc[r][r], k2 = kc[2][r], k3 = kc[3][r];
         inv[r][r] = 1.0 / s;
         inv[r][2] = -(k2 * zz + k3 * oz) / s;
         inv[r][3] = -(k2 * zw + k3 * ow) / s;
@@ -258,8 +325,10 @@ static void tickCams(float out[2][16])
 
 /* mesh i's command: RdVuPayload, its VU memory and, for the cluster, the
  * bones (rd_mesh.h's payload; no card verdicts); ticks: the prelit mesh
- * through the blended camera, its draw RD_VU_TICK_CAMERAS */
-static bool pushMesh(RdFrame *f, int i, RdMesh mesh, bool ticks)
+ * through the blended camera, its draw RD_VU_TICK_CAMERAS; shiftX GS
+ * pixels added to every vertex's X (the index compaction's copy past the
+ * target's right edge, 0 elsewhere) */
+static bool pushMesh(RdFrame *f, int i, RdMesh mesh, bool ticks, int replay, float shiftX)
 {
     uint8_t buf[sizeof(RdVuPayload) + sizeof(RdVuBlock) + sizeof(s_bones)];
     RdVuPayload p;
@@ -272,10 +341,19 @@ static bool pushMesh(RdFrame *f, int i, RdMesh mesh, bool ticks)
     p.boneQw = i == M_SKIN ? 8u : 0u;
     p.qwPerVertex = kQpv[i];
     sceneBlock(&vu);
+    /* x' = 16 x + (2048 + shiftX) z: GS X moved by shiftX.  The prelit
+       program reads its model to GS screen from VU memory 16..19
+       (vu_prelit.hlsl vu_matm(16u, ...)), the z column 18; until v0.11.16
+       only 4..7 (the cluster's world matrix) was moved, so the copy was
+       drawn over the prelit mesh at the centre and nothing was left out */
+    vu.mem[18][0] += shiftX;
+    vu.mem[6][0] += shiftX;
     if (ticks) {
+        double cam[4][4];
+        tickCam(replay, cam);
         for (int k = 0; k < 4; k++) {
             for (int r = 0; r < 4; r++) {
-                vu.mem[16 + k][r] = (float)kTickCam[k][r];
+                vu.mem[16 + k][r] = (float)cam[k][r];
             }
         }
     }
@@ -295,7 +373,7 @@ static bool pushMesh(RdFrame *f, int i, RdMesh mesh, bool ticks)
     c->u[1] = off;
     c->u[2] = size;
     c->u[3] = ticks ? RD_VU_TICK_CAMERAS : 0u;
-    c->keyLo = (uint32_t)i + 1u + (ticks ? 8u : 0u);
+    c->keyLo = (uint32_t)i + 1u + (ticks ? 8u : 0u) + (shiftX != 0.0f ? 4u : 0u);
     return true;
 }
 
@@ -350,7 +428,17 @@ static bool fallbackPlain(void)
     return g_rd.vuFallbackPlain; /* rd_pipeline.c rd__vu_policy_init */
 }
 
-static bool buildFrame(RdFrame *f, uint32_t scene, uint32_t w, uint32_t h, const RdMesh *m)
+/* the index compaction runs in this test's replays (rd_vu_compact.h): the
+ * frame gets the copy past the target's edge whose triangles it leaves
+ * out.  Read as the frames are built (the compaction is held off for the
+ * whole run once refused, rd__vu_compact_refuse) */
+static bool cullCopy(void)
+{
+    return rd__vu_compact_active();
+}
+
+static bool buildFrame(RdFrame *f, uint32_t scene, uint32_t w, uint32_t h, const RdMesh *m,
+                       int replay)
 {
     memset(f, 0, sizeof(*f));
     rd__reset_state_block(&f->startState);
@@ -373,12 +461,23 @@ static bool buildFrame(RdFrame *f, uint32_t scene, uint32_t w, uint32_t h, const
          rd__st_push1(f, 0, RDC_PABE, 0) && rd__st_push1(f, 0, RDC_COLCLAMP, 1) &&
          rd__st_push1(f, 0, RDC_SHADE, 1);
     for (int i = 0; i < M_COUNT && ok; i++) {
-        ok = pushMesh(f, i, m[i], false);
+        ok = pushMesh(f, i, m[i], false, replay, 0.0f);
     }
     if (ok && !fallbackPlain()) {
         f->hasTickCams = 1;
-        tickCams(f->tickCams);
-        ok = pushMesh(f, M_PRELIT, m[M_PRELIT], true);
+        tickCams(replay, f->tickCams);
+        ok = pushMesh(f, M_PRELIT, m[M_PRELIT], true, replay, 0.0f);
+    }
+    if (ok && cullCopy()) {
+        /* the index compaction's copy: the prelit mesh moved right by the
+         * frame's GS width, its strips' GS X 2048 + w - 112 .. 2048 + w - 4
+         * (the strips 8 (x0 + 2.4 col) GS pixels off the centre, x0 -14, the
+         * moves 2 pixels a replay): wholly right of the target's edge at
+         * 2048 + w / 2 by w / 2 - 112 GS pixels, at least 16 (w >= ST_W):
+         * every triangle left out as a clipped filler, nothing in the
+         * picture; after the ticks copy with the same pipeline, so the
+         * draw merge joins their lists in one draw */
+        ok = pushMesh(f, M_PRELIT, m[M_PRELIT], false, replay, (float)w);
     }
     return ok && pushSprites(f);
 }
@@ -386,8 +485,8 @@ static bool buildFrame(RdFrame *f, uint32_t scene, uint32_t w, uint32_t h, const
 /* ------------------------------------------------------------- the runs */
 
 static struct {
-    RhiTexture read;
-    RhiState readState;
+    RhiTexture read[ST_REPLAYS]; /* replay k's block */
+    RhiState readState[ST_REPLAYS];
     RhiRect rect; /* the block's texels in SCENE */
     int sabotage; /* RD_VU_SABOTAGE_* */
 } s_vt;
@@ -407,18 +506,19 @@ static RhiRect blockRect(const RdTargetRec *t)
     return (RhiRect){(int32_t)x[0], (int32_t)y[0], x[1] - x[0], y[1] - y[0]};
 }
 
-/* one replay of f, the block into px (rect.w x rect.h RGBA8) */
-static bool runOnce(const RdFrame *f, RdTargetRec *t, uint8_t *px, size_t size)
+/* one replay of f, the block copied into replay k's texture (read back
+ * after the four, readBlocks: no wait between the replays) */
+static bool runOnce(const RdFrame *f, RdTargetRec *t, int k)
 {
     if (!rd__replay_frame(f, 0, false) || rhi_device_lost()) {
         return false;
     }
-    if (!s_vt.read.id) {
-        s_vt.read = rhi_create_texture(&(RhiTextureDesc){s_vt.rect.w, s_vt.rect.h, 1, t->format,
-                                                         RHI_TEX_COPY_DST | RHI_TEX_COPY_SRC,
-                                                         "rd vu pre-pass self-test", 0});
-        s_vt.readState = RHI_STATE_UNDEFINED;
-        if (!s_vt.read.id) {
+    if (!s_vt.read[k].id) {
+        s_vt.read[k] = rhi_create_texture(&(RhiTextureDesc){s_vt.rect.w, s_vt.rect.h, 1, t->format,
+                                                            RHI_TEX_COPY_DST | RHI_TEX_COPY_SRC,
+                                                            "rd vu pre-pass self-test", 0});
+        s_vt.readState[k] = RHI_STATE_UNDEFINED;
+        if (!s_vt.read[k].id) {
             return false;
         }
     }
@@ -427,19 +527,31 @@ static bool runOnce(const RdFrame *f, RdTargetRec *t, uint8_t *px, size_t size)
         return false;
     }
     rd__transition(cl, t->color, &t->colorState, RHI_STATE_COPY_SRC);
-    rd__transition(cl, s_vt.read, &s_vt.readState, RHI_STATE_COPY_DST);
-    rhi_cmd_copy_texture(cl, t->color, s_vt.rect, s_vt.read, 0, 0);
+    rd__transition(cl, s_vt.read[k], &s_vt.readState[k], RHI_STATE_COPY_DST);
+    rhi_cmd_copy_texture(cl, t->color, s_vt.rect, s_vt.read[k], 0, 0);
     rhi_end_commands(cl);
     rhi_submit(cl);
-    return rd__read_rhi_texture(s_vt.read, &s_vt.readState, s_vt.rect.w, s_vt.rect.h, px, size) &&
-           !rhi_device_lost();
+    return true;
+}
+
+/* the four blocks into px (ST_REPLAYS x size bytes, rect.w x rect.h RGBA8
+ * each) */
+static bool readBlocks(uint8_t *px, size_t size)
+{
+    for (int k = 0; k < ST_REPLAYS; k++) {
+        if (!rd__read_rhi_texture(s_vt.read[k], &s_vt.readState[k], s_vt.rect.w, s_vt.rect.h,
+                                  px + (size_t)k * size, size)) {
+            return false;
+        }
+    }
+    return !rhi_device_lost();
 }
 
 /* on: the pre-pass stays on; pass: it was run and passed; text: the log
  * line's words inside its parentheses after "on (" or "off (self-test: " */
 typedef struct Verdict {
     bool on, pass;
-    char text[320];
+    char text[512]; /* the index compaction's words (runSelftest's cmpWords) included */
 } Verdict;
 
 static void readSabotage(void)
@@ -449,13 +561,18 @@ static void readSabotage(void)
                                         "texel off",
                                         "the first command's triangles' slot A is drawn one "
                                         "slot off",
-                                        "the tick stage tests tick 1 at tick 0's camera"};
+                                        "the tick stage tests tick 1 at tick 0's camera",
+                                        "the record's copies are left out from the second "
+                                        "replay on (under the stores: the record stored into "
+                                        "a sink buffer)"};
     const char *sb = getenv("ICO_RD_VU_PREPASS_SABOTAGE");
     s_vt.sabotage = RD_VU_SABOTAGE_OFF;
     if (sb != NULL && strcmp(sb, "tri") == 0) {
         s_vt.sabotage = RD_VU_SABOTAGE_TRI;
     } else if (sb != NULL && strcmp(sb, "ticks") == 0) {
         s_vt.sabotage = RD_VU_SABOTAGE_TICKS;
+    } else if (sb != NULL && strcmp(sb, "stale") == 0) {
+        s_vt.sabotage = RD_VU_SABOTAGE_STALE;
     } else if (sb != NULL && sb[0] != '\0' && sb[0] != '0') {
         s_vt.sabotage = RD_VU_SABOTAGE_VERTEX;
     }
@@ -465,23 +582,126 @@ static void readSabotage(void)
     }
 }
 
+/* the pre-pass's replay k: what it counted and the frame slot it drew in */
+typedef struct PreRun {
+    RdPerfRecord r;
+    uint32_t entryDraws, slot;
+} PreRun;
+
+/* the verdict of the four replays against their references */
+static void judge(Verdict *v, const PreRun *run, const uint8_t *ref, const uint8_t *pre,
+                  size_t size, uint32_t wantDraws, bool ticks, const char *cmp)
+{
+    for (int k = 0; k < ST_REPLAYS; k++) {
+        const RdPerfRecord *r = &run[k].r;
+        if (r->vuPrePasses != 2 || run[k].entryDraws != wantDraws || r->vuPreFallbacks != 0 ||
+            r->vuPreSprites != ST_SPRITES) {
+            v->on = false;
+            snprintf(v->text, sizeof v->text,
+                     "a pipeline could not be made (replay %d of %d: %u passes, %u of %u "
+                     "pre-pass draws, %u sprites, %u draws the old way)",
+                     k + 1, ST_REPLAYS, r->vuPrePasses, run[k].entryDraws, wantDraws,
+                     r->vuPreSprites, r->vuPreFallbacks);
+            return;
+        }
+    }
+    size_t drawn = 0;
+    for (int k = 0; k < ST_REPLAYS; k++) {
+        const uint8_t *a0 = ref + (size_t)k * size, *p0 = pre + (size_t)k * size;
+        size_t diff = 0, first = 0;
+        for (size_t i = 0; i < size; i++) {
+            if (a0[i] != p0[i] && diff++ == 0) {
+                first = i / 4u;
+            }
+        }
+        size_t d = 0;
+        for (size_t i = 0; i < size / 4u; i++) {
+            d += memcmp(&a0[i * 4u], kClear, 4) != 0;
+        }
+        drawn = k == 0 ? d : drawn;
+        if (diff) {
+            /* the first replay that differs, its frame slot and its first
+               texel: a stale record differs from the second replay on */
+            const uint8_t *a = &p0[first * 4u], *b = &a0[first * 4u];
+            v->on = false;
+            snprintf(v->text, sizeof v->text,
+                     "the pictures differ: in replay %d of %d (frame slot %u), %zu of %zu "
+                     "bytes, the first at texel %u,%u: %u,%u,%u,%u want %u,%u,%u,%u",
+                     k + 1, ST_REPLAYS, run[k].slot, diff, size,
+                     (unsigned)(s_vt.rect.x + (int32_t)(first % s_vt.rect.w)),
+                     (unsigned)(s_vt.rect.y + (int32_t)(first / s_vt.rect.w)), a[0], a[1], a[2],
+                     a[3], b[0], b[1], b[2], b[3]);
+            return;
+        }
+        if (d == 0) {
+            /* both drew nothing: no verdict on the pre-pass */
+            snprintf(v->text, sizeof v->text,
+                     "self-test inconclusive: neither replay drew the meshes (replay %d of %d)",
+                     k + 1, ST_REPLAYS);
+            return;
+        }
+    }
+    bool both = false;
+    for (int k = 1; k < ST_REPLAYS; k++) {
+        both = both || run[k].slot != run[0].slot;
+    }
+    const RdPerfRecord *r = &run[0].r;
+    v->pass = true;
+    snprintf(v->text, sizeof v->text,
+             "self-test: prelit, lit, skin%s%s and particles byte for byte over %d replays in %s, "
+             "%u vertices and %u sprites in %u pre-pass draws (%u passes, %u triangle slots), "
+             "%zu of %zu pixels drawn",
+             ticks ? ", the tick cameras" : "", cmp != NULL ? cmp : "", ST_REPLAYS,
+             both ? "both frame slots" : "one frame slot", r->vuPreVertices, r->vuPreSprites,
+             r->vuPreDraws, r->vuPrePasses, r->vuTriSlots, drawn, size / 4u);
+}
+
 static void runSelftest(RdTargetRec *t, Verdict *v)
 {
     v->on = true;
     v->pass = false;
-    sceneBones();
-    RdMesh m[M_COUNT];
-    bool made = true;
-    for (int i = 0; i < M_COUNT; i++) {
-        m[i] = makeMesh(i);
-        made = made && m[i].id != 0;
+    const bool cmpCopy = cullCopy(); /* the frames' copy past the edge (buildFrame) */
+    /* the index compaction's run as play draws it (issue 179: it passed at
+       16 rows and 60 vertices while the Mali-G52's play came back black):
+       the record at the play's size (rd_vu_rec_early.h's need: made here
+       now, kept for play), the draws' lists from the fourth plane's middle
+       (large first indices), the frames moved a replay as before; and the
+       test's own pictures' stamps (rd_health.h): one unwritten after its
+       work was signalled finished, or a clock restart with work queued,
+       fails it */
+    uint32_t cmpRows = 0;
+    if (cmpCopy) {
+        const uint32_t want =
+            rd_early_start_rows(rd_interpolation_active(), rd__velocity_on(), rd__vu_rec_rows_min(),
+                                rd__vu_rec_rows_max(), ICO_VU_REC_W);
+        if (want > rd__vu_rec_rows() && rd__vu_rec_presize(want)) {
+            cmpRows = want;
+        } else {
+            cmpRows = rd__vu_rec_rows();
+        }
+        rd__vu_compact_selftest_far(true);
     }
-    static RdFrame f;
+    sceneBones();
+    RdMesh m[ST_REPLAYS][M_COUNT];
+    bool made = true;
+    for (int k = 0; k < ST_REPLAYS; k++) {
+        for (int i = 0; i < M_COUNT; i++) {
+            m[k][i] = makeMesh(i, k);
+            made = made && m[k][i].id != 0;
+        }
+    }
+    static RdFrame f[ST_REPLAYS];
     s_vt.rect = blockRect(t);
     const size_t size = (size_t)s_vt.rect.w * s_vt.rect.h * 4u;
-    uint8_t *ref = size ? malloc(size) : NULL;
-    uint8_t *pre = size ? malloc(size) : NULL;
-    if (!made || !ref || !pre || !buildFrame(&f, rd_target(RD_TARGET_SCENE).id, t->w, t->h, m)) {
+    uint8_t *ref = size ? malloc(size * ST_REPLAYS) : NULL;
+    uint8_t *pre = size ? malloc(size * ST_REPLAYS) : NULL;
+    bool built = made && ref && pre;
+    for (int k = 0; k < ST_REPLAYS; k++) {
+        /* every frame built (and freed below) whatever the one before did */
+        const bool ok = buildFrame(&f[k], rd_target(RD_TARGET_SCENE).id, t->w, t->h, m[k], k);
+        built = built && ok;
+    }
+    if (!built) {
         snprintf(v->text, sizeof v->text, "self-test not run: could not build its frame");
     } else {
         const bool wasBlocked = g_rd.msaaBlocked;
@@ -491,13 +711,13 @@ static void runSelftest(RdTargetRec *t, Verdict *v)
            bisectPipelines): a replay of each with nothing drawn names the
            keys the cache lacks (rd__pipeline_gather); on a phone's driver
            each VU pipeline takes a second or more, serial on this thread
-           several */
+           several.  The moved frames ask for the same keys */
         rd__replay_set_window(UINT32_MAX, 0);
         rd__pipeline_gather(true);
         g_rd.vuPrepass = false;
-        (void)rd__replay_frame(&f, 0, false);
+        (void)rd__replay_frame(&f[0], 0, false);
         g_rd.vuPrepass = true;
-        (void)rd__replay_frame(&f, 0, false);
+        (void)rd__replay_frame(&f[0], 0, false);
         rd__pipeline_gather(false);
         rd__replay_set_window(0, 0);
         rhi_wait_idle();
@@ -505,84 +725,107 @@ static void runSelftest(RdTargetRec *t, Verdict *v)
             bool stopped = false;
             (void)rd__pipeline_create_gathered(&stopped);
         }
-        /* the reference: every command through its program's entry */
+        if (cmpCopy) {
+            rd__health_selftest_begin(); /* every record collected from here */
+        }
+        /* the references: every command through its program's entry */
         g_rd.vuPrepass = false;
-        const bool refOk = runOnce(&f, t, ref, size);
-        /* the pre-pass, its first command one texel off when sabotaged */
+        bool refOk = true;
+        for (int k = 0; k < ST_REPLAYS && refOk; k++) {
+            refOk = runOnce(&f[k], t, k);
+        }
+        refOk = refOk && readBlocks(ref, size);
+        /* the pre-pass's four, back to back: replay k in the frame slot
+           after replay k - 1's (rd__ring_slot), sabotaged as asked (stale:
+           the record's copies left out from the second on) */
         g_rd.vuPrepass = true;
-        rd__vu_prepass_sabotage(s_vt.sabotage);
-        const bool preOk = refOk && runOnce(&f, t, pre, size);
+        PreRun run[ST_REPLAYS];
+        memset(run, 0, sizeof(run));
+        bool preOk = refOk;
+        for (int k = 0; k < ST_REPLAYS && preOk; k++) {
+            const bool stale = s_vt.sabotage == RD_VU_SABOTAGE_STALE;
+            rd__vu_prepass_sabotage(stale && k == 0 ? RD_VU_SABOTAGE_OFF : s_vt.sabotage);
+            preOk = runOnce(&f[k], t, k);
+            run[k].r = g_rdPerf; /* the record the replay closed */
+            run[k].entryDraws = rd__vu_prepass_entry_draws();
+            run[k].slot = rd__ring_slot();
+        }
         rd__vu_prepass_sabotage(RD_VU_SABOTAGE_OFF);
-        const RdPerfRecord r = g_rdPerf; /* the record the replay with it closed */
+        preOk = preOk && readBlocks(pre, size);
+        uint32_t stBad = 0, stN = 0;
+        if (cmpCopy) {
+            /* the last two replays' records are collected by the two after
+               them (rd_perf.c: a slot's at its next use): two more of the
+               last frame, nothing read from them */
+            for (int k = 0; k < RHI_FRAMES_IN_FLIGHT && preOk; k++) {
+                preOk = rd__replay_frame(&f[ST_REPLAYS - 1], 0, false) && !rhi_device_lost();
+            }
+            stBad = rd__health_selftest_end(&stN);
+        }
         /* the draws the frame makes through the pre-passes: pass V a vertex
          * draw a mesh and two for the sprites, pass T the rule and planes
          * stages a mesh and the tick stage's two for the ticks copy, counted
          * one an entry and stage whatever the batches merged them into
          * (g_rd.vuPreBatch: r.vuPreDraws the draws made) */
-        const uint32_t entryDraws = rd__vu_prepass_entry_draws();
-        const uint32_t meshes = M_COUNT + (fallbackPlain() ? 0u : 1u);
-        const uint32_t wantDraws = meshes + 2u + 2u * meshes + (meshes > M_COUNT ? 2u : 0u);
+        const bool ticksCopy = !fallbackPlain();
+        const uint32_t meshes = M_COUNT + (ticksCopy ? 1u : 0u) + (cmpCopy ? 1u : 0u);
+        const uint32_t wantDraws = meshes + 2u + 2u * meshes + (ticksCopy ? 2u : 0u);
         g_rd.msaaBlocked = wasBlocked;
         if (!refOk || !preOk) {
             v->on = false;
-            snprintf(v->text, sizeof v->text, "the device failed in the replay %s the pre-pass",
+            snprintf(v->text, sizeof v->text, "the device failed in the replays %s the pre-pass",
                      refOk ? "with" : "without");
-        } else if (r.vuPrePasses != 2 || entryDraws != wantDraws || r.vuPreFallbacks != 0 ||
-                   r.vuPreSprites != ST_SPRITES) {
-            v->on = false;
-            snprintf(v->text, sizeof v->text,
-                     "a pipeline could not be made (%u passes, %u of %u pre-pass draws, %u "
-                     "sprites, %u draws the old way)",
-                     r.vuPrePasses, entryDraws, wantDraws, r.vuPreSprites, r.vuPreFallbacks);
         } else {
-            size_t diff = 0, first = 0, drawn = 0;
-            for (size_t i = 0; i < size; i++) {
-                if (ref[i] != pre[i] && diff++ == 0) {
-                    first = i / 4u;
-                }
-            }
-            for (size_t i = 0; i < size / 4u; i++) {
-                drawn += memcmp(&ref[i * 4u], kClear, 4) != 0;
-            }
-            if (diff) {
-                const uint8_t *a = &pre[first * 4u], *b = &ref[first * 4u];
+            char cmpWords[200];
+            snprintf(cmpWords, sizeof cmpWords,
+                     ", the index compaction (a copy past the target's edge; its lists from value "
+                     "%u of the fourth plane, the record at %u rows; no stamp of the test's %u "
+                     "pictures unwritten)",
+                     rd__vu_compact_far_at(), cmpRows, stN);
+            judge(v, run, ref, pre, size, wantDraws, ticksCopy, cmpCopy ? cmpWords : NULL);
+            if (v->on && v->pass && stBad != 0u) {
+                /* the pictures matched, but the GPU left part of the test's
+                   own work undone (issue 179's sign): not a pass */
                 v->on = false;
+                v->pass = false;
                 snprintf(v->text, sizeof v->text,
-                         "the pictures differ: %zu of %zu bytes, the first at texel %u,%u: "
-                         "%u,%u,%u,%u want %u,%u,%u,%u",
-                         diff, size, (unsigned)(s_vt.rect.x + (int32_t)(first % s_vt.rect.w)),
-                         (unsigned)(s_vt.rect.y + (int32_t)(first / s_vt.rect.w)), a[0], a[1], a[2],
-                         a[3], b[0], b[1], b[2], b[3]);
-            } else if (drawn == 0) {
-                /* both drew nothing: no verdict on the pre-pass */
-                snprintf(v->text, sizeof v->text,
-                         "self-test inconclusive: neither replay drew the meshes");
-            } else {
-                v->pass = true;
-                snprintf(v->text, sizeof v->text,
-                         "self-test: prelit, lit, skin%s and particles byte for byte, %u vertices "
-                         "and %u sprites in %u pre-pass draws (%u passes, %u triangle slots), "
-                         "%zu of %zu pixels drawn",
-                         meshes > M_COUNT ? ", the tick cameras" : "", r.vuPreVertices,
-                         r.vuPreSprites, r.vuPreDraws, r.vuPrePasses, r.vuTriSlots, drawn,
-                         size / 4u);
+                         "the GPU's own sign of a reset in %u of the test's %u pictures (recorded "
+                         "stamps unwritten after the work was signalled finished, or the clock "
+                         "restarted with work queued)",
+                         stBad, stN);
             }
+        }
+        if (cmpCopy && (!refOk || !preOk)) {
+            (void)rd__health_selftest_end(NULL); /* not ended above */
         }
     }
     free(ref);
     free(pre);
-    rd__frame_free(&f);
-    for (int i = 0; i < M_COUNT; i++) {
-        if (m[i].id) {
-            rd_destroy_vu_mesh(m[i]);
+    for (int k = 0; k < ST_REPLAYS; k++) {
+        rd__frame_free(&f[k]);
+        for (int i = 0; i < M_COUNT; i++) {
+            if (m[k][i].id) {
+                rd_destroy_vu_mesh(m[k][i]);
+            }
         }
+        if (s_vt.read[k].id) {
+            rhi_destroy_texture(s_vt.read[k]);
+        }
+        s_vt.read[k] = (RhiTexture){0};
     }
-    if (s_vt.read.id) {
-        rhi_destroy_texture(s_vt.read);
-    }
-    s_vt.read = (RhiTexture){0};
     /* the next replay starts SCENE from its clear, not from the block */
     t->clearPending = 1;
+    if (cmpCopy) {
+        rd__vu_compact_selftest_far(false);
+    }
+}
+
+/* runSelftest is replaying (rd__vu_prepass_selftest_running) */
+static bool s_vtRunning;
+
+bool rd__vu_prepass_selftest_running(void)
+{
+    return s_vtRunning;
 }
 
 bool rd_vuprepass_selftest(void)
@@ -590,22 +833,76 @@ bool rd_vuprepass_selftest(void)
     if (!g_rd.inited || !g_rd.hasDevice) {
         return false;
     }
+    /* first, whatever the pre-pass: the skin check's start-up probe and its
+     * start line (rd_vu_skin_selftest.c; issue 163) */
+    (void)rd__vu_skin_selftest();
     if (!g_rd.vuPrepass) {
         snprintf(g_rdSumPrepass, sizeof g_rdSumPrepass, "off %s (self-test not run)",
                  g_rd.vuPrepassWhy);
         rd__log("VU pre-pass: off (self-test not run)");
+        rd__vu_zero_selftest_skip("the VU pre-pass is off"); /* rd_vu_zero.h */
+        rd__nd_selftest_skip("the VU pre-pass is off");      /* rd_nodiscard.h */
+        rd__fps_selftest_skip("the VU pre-pass is off");     /* rd_fastps.h */
+        /* the one-pass blend's check (rd_onepass.h): its frames drawn
+           through the programs' own entries, as play draws them here */
+        rd__op_selftest(rd__target_rec(rd_target(RD_TARGET_SCENE).id));
+        rd__vu_zero_start_line();
         return true;
     }
     RdTargetRec *t = rd__target_rec(rd_target(RD_TARGET_SCENE).id);
     if (!t || !t->color.id || t->format != RHI_FMT_RGBA8_UNORM || t->w < ST_W || t->h < ST_H) {
         snprintf(g_rdSumPrepass, sizeof g_rdSumPrepass, "on (self-test not run: no SCENE target)");
         rd__log("VU pre-pass: on (self-test not run: no SCENE target to run it on)");
+        rd__vu_compact_selftest_not_run("no SCENE target"); /* off: never tried */
+        rd__vu_zero_selftest_skip("no SCENE target to run it on");
+        rd__nd_selftest_skip("no SCENE target to run it on");
+        rd__fps_selftest_skip("no SCENE target to run it on");
+        rd__op_selftest_skip("no SCENE target to run it on");
+        rd__vu_zero_start_line();
         return true;
     }
     readSabotage();
     const double t0 = rd__now_ms();
     Verdict v;
+    /* the record's write is judged as it starts (rd_vu_record.h): a
+     * failure of the stores or the compute dispatches is logged with its
+     * first differing texel and the test run again one rung down
+     * (rd__vu_record_fall_back: stores, compute, targets), whose verdict
+     * decides; the targets' failure turns the pre-pass off.  [dev]
+     * vu_prepass_min never skips the test's own frames; the skin check
+     * leaves every run's replays out */
+    g_rdRec.minHeld = true;
+    s_vtRunning = true;
+    const size_t failed0 = strlen(g_rdRec.failed); /* rungs given up before (a build) */
+    const bool cmpTried = rd__vu_compact_active(); /* the index compaction in the replays */
     runSelftest(t, &v);
+    if (!v.on && cmpTried) {
+        /* the index compaction judged with the record (rd_vu_compact.h): a
+         * failure with it is run again without it before the record's own
+         * rungs; a pass then refuses it for the run */
+        rd__log("VU pre-pass: the record with the index compaction failed the self-test (%s) in "
+                "%.1f ms: the self-test again without it",
+                v.text, rd__now_ms() - t0);
+        rd__vu_compact_refuse(v.text);
+        runSelftest(t, &v);
+    }
+    while (!v.on && rd__vu_record_buffered()) {
+        const bool compute = rd__vu_record_compute();
+        rd__log("VU pre-pass: the record %s failed the self-test (%s) in %.1f ms: the "
+                "self-test again one rung down",
+                compute ? "stored by compute dispatches" : "stored by the vertex shaders", v.text,
+                rd__now_ms() - t0);
+        if (!rd__vu_record_fall_back("they failed the start-up self-test")) {
+            break;
+        }
+        runSelftest(t, &v);
+    }
+    if (v.on) {
+        rd__vu_compact_own_selftest(t); /* the Mali-G52 form's own test (rd_vu_compact.h) */
+    }
+    s_vtRunning = false;
+    g_rdRec.minHeld = false;
+    rd__vu_compact_selftest_done(v.on); /* its row and its line */
     if (!v.on) {
         g_rd.vuPrepass = false;
         snprintf(g_rd.vuPrepassWhy, sizeof g_rd.vuPrepassWhy, "by its self-test");
@@ -623,9 +920,51 @@ bool rd_vuprepass_selftest(void)
         }
     }
     const char *head = v.on ? "on (" : "off (self-test: ";
-    snprintf(g_rdSumPrepass, sizeof g_rdSumPrepass, "%s%s)", head,
-             v.pass ? "self-test: ok" : v.text);
-    rd__log("VU pre-pass: %s%s) on SCENE %ux%u at %ux%u texels in %.1f ms", head, v.text, t->w,
-            t->h, t->tw, t->th, rd__now_ms() - t0);
+    /* the final mode, and the rungs that failed before it ("targets, the
+       stores and compute failed the self-test") */
+    char rec[160];
+    const char *failed = g_rdRec.failed + failed0;
+    failed += failed[0] == ',' ? 2 : 0;
+    const char *comma = strrchr(failed, ',');
+    /* each result read (gcc 14's -Wformat-truncation: the words fit) */
+    int recN;
+    if (failed[0] == '\0') {
+        recN = snprintf(rec, sizeof rec, "%s", rd__vu_record_name());
+    } else if (comma == NULL) {
+        recN = snprintf(rec, sizeof rec, "%s, the %s failed the self-test", rd__vu_record_name(),
+                        failed);
+    } else {
+        recN = snprintf(rec, sizeof rec, "%s, the %.*s and %s failed the self-test",
+                        rd__vu_record_name(), (int)(comma - failed), failed, comma + 2);
+    }
+    if (recN < 0 || recN >= (int)sizeof rec) {
+        rec[sizeof rec - 1] = '\0';
+    }
+    /* the result is read so gcc 14's -Wformat-truncation at -O2 sees a cut
+       verdict text is deliberate (the buffer holds the usual words whole) */
+    const int sumN = snprintf(g_rdSumPrepass, sizeof g_rdSumPrepass, "%s%s; record %s)", head,
+                              v.pass ? "self-test: ok" : v.text, rec);
+    if (sumN < 0 || sumN >= (int)sizeof g_rdSumPrepass) {
+        g_rdSumPrepass[sizeof g_rdSumPrepass - 1] = '\0';
+    }
+    rd__log("VU pre-pass: %s%s) on SCENE %ux%u at %ux%u texels in %.1f ms, record %s", head, v.text,
+            t->w, t->h, t->tw, t->th, rd__now_ms() - t0, rec);
+    /* the zero-area cull's own (rd_vu_zero_selftest.c), on the pre-pass that
+       passed */
+    if (v.on) {
+        rd__vu_zero_selftest(t);
+        rd__nd_selftest(t);  /* the discard-free twins' (rd_nodiscard_selftest.c) */
+        rd__fps_selftest(t); /* the fast pixel build's (rd_fastps_selftest.c), after them */
+    } else {
+        rd__vu_zero_selftest_skip("the VU pre-pass failed its self-test");
+        rd__nd_selftest_skip("the VU pre-pass failed its self-test");
+        rd__fps_selftest_skip("the VU pre-pass failed its self-test");
+    }
+    /* the one-pass blend's check (rd_onepass_selftest.c), with the pre-pass,
+       the twins and the fast build as play will have them */
+    rd__op_selftest(t);
+    /* its state and the modules of it made, then the in-play judge's line,
+       which knows both attempts' states */
+    rd__vu_zero_start_line();
     return v.on;
 }

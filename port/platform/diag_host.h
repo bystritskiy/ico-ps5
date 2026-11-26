@@ -79,6 +79,14 @@ void ico_diag_set_movie(int playing);
    <longest_ms / 1000> s"; total 0 (when the set is done) takes it off. Any
    thread. */
 void ico_diag_set_pipelines(unsigned int done, unsigned int total, unsigned int longest_ms);
+/* The start-up set over with made pipelines made in it (rd_precreate_pipelines'
+   count), after rd_precreate_pipelines: the heartbeat's count off, as
+   (0, 0, 0); a set still open (stopped early by its budget or the memory
+   size rule: the renderer makes no last progress call then) is closed with
+   that count, so logs/last-run.txt says "start-up set 51 made of 684, the
+   rest on first use" and the memory summary divides by 51 (issue 215); a
+   set the last progress call closed is left as it is. Main thread. */
+void ico_diag_set_pipelines_over(unsigned int made);
 /* Run on a fatal end (crash, abort, watchdog) after the report, to write
    the run's summary. Must not take locks the main thread may hold. */
 void ico_diag_set_exit_hook(void (*fn)(const char *reason));
@@ -257,6 +265,47 @@ void ico_diag_start_reporter(void);
    background), 0 when it runs again: while paused neither watchdog limit
    counts and the heartbeat is quiet. Any thread. */
 void ico_diag_watchdog_pause(int paused);
+/* Whether ico_diag_watchdog_pause holds it paused: the kernel GPU
+   driver's sampler (android/gpu_sysfs_android.c) reads nothing then.
+   Any thread. */
+int ico_diag_watchdog_paused(void);
+/* Options > Graphics > Apply's switch of the renderer (window_switch.c), in
+   place of a pause: seconds not 0 starts the switch's own limit, what names
+   it ("switching the renderer from d3d11 to opengl"); 0 ends it.  While it
+   is on neither of the game's limits counts (the device's start is not a
+   hang of the game) and the heartbeat goes on with "<what> for N s, last
+   step: <the last ico_diag_step line>"; when nothing moves for `seconds` (no
+   ico_diag_step, no ico_diag_switch_progress: a shader or a pipeline made,
+   rhi.h RhiWaitHooks.made; no pipeline of the set finished) the run ends
+   with the watchdog's report "WATCHDOG: <what>: nothing moved for N s (the
+   last step: ...)", the main thread's stack sampled where it stands (inside
+   the graphics driver when it hung there), exit code 4.  Only while a limit
+   is in force (ico_diag_start with a limit not 0), as the GPU hang limit;
+   ico_diag_watchdog_pause wins over it (a box). Main thread. */
+void ico_diag_watchdog_switch(unsigned int seconds, const char *what);
+/* A shader or pipeline made: progress for the switch's limit only. Any thread. */
+void ico_diag_switch_progress(void);
+/* A step of the start or of the switch, one line written to the log at
+   once (what stdout and stderr hold flushed first, so the log keeps its
+   order): a hang or a kill inside the step leaves the line naming it.  The
+   crash and watchdog reports repeat it ("ico_pc: the last step: <line>"),
+   and it is progress for the switch's limit. Main thread. */
+void ico_diag_step(const char *fmt, ...) ICO_DIAG_PRINTF(1, 2);
+/* The device's start-up shader set as it is made (window_switch.c's made
+   hook from rhi.h rhi_plan_progress): made of total so far, secs since its
+   first shader; total 0 once the set ended (rhi_plan_end).  Steps
+   (ico_diag_step) at the set's first shader, at each quarter of it passed
+   ("window: shaders: 103 of 412 made in 21.4 s"; a total that grows later
+   does not write a quarter twice) and at its end with the count and the
+   time; the same made count again (a pipeline made) writes nothing.  The
+   progress screens draw the same count (OpenGL's own while its shaders
+   compile, port/rhi/gl/gl_start_screen.c).  Main thread. */
+void ico_diag_shader_set(unsigned made, unsigned total, double secs);
+/* The last ico_diag_step line ("" before the first; tests). */
+const char *ico_diag_last_step(void);
+/* The GPU hang limit in seconds (ico_diag_set_gpu_hang_limit; 0 off): the
+   window's limit for one OpenGL shader compile (rhi.h RhiWaitHooks). */
+double ico_diag_gpu_hang_limit(void);
 /* The thread that called ico_diag_init is about to end (Android: Quit,
    with the process possibly kept): from now on the watchdog neither
    samples nor signals it. */
@@ -264,6 +313,13 @@ void ico_diag_main_thread_end(void);
 
 /* One line to the log, written at once (a newline is added). */
 void ico_diag_log(const char *fmt, ...) ICO_DIAG_PRINTF(1, 2);
+/* Android (issue 215: a restart of the device left the log all zero bytes):
+   the log's lines so far to the disc, asked after a line is written (a
+   stall's); the watchdog thread drains the stderr pipe into the file and
+   calls fdatasync at its next poll (250 ms), so the asking thread never
+   waits on the disc. The start-up steps, heartbeats and losses ask by
+   themselves. Elsewhere nothing. Any thread. */
+void ico_diag_log_sync_ask(void);
 /* A boot milestone: the line gets the wall time, vsyncs, Main ticks and
    the current thread. */
 void ico_diag_milestone(const char *fmt, ...) ICO_DIAG_PRINTF(1, 2);
@@ -376,6 +432,23 @@ void ico_diag_startup_activity_batch(const char *line);
 #define ICO_DIAG_END_VU_PRE 1
 #define ICO_DIAG_END_LOSS 2
 int ico_diag_startup_end_count(int kind);
+/* The loss ladder's count (diag_host.c loss_ladder_export; issues 179 and
+   211): the starts in a row that lost the graphics device before this one,
+   on every device and whatever robust access is (a hand-set gpu_robust
+   keeps the row since v0.11.4), in a slot of its own ("loss_row <n>" in
+   the counts file: the loss slot is the robust step's count, which a start
+   that ran robust without a loss keeps), the desktop's loss-order restarts
+   counted in theirs ("loss_chain <n>") and added to the row, at the
+   restarts and at the fresh start after them. Set by
+   ico_diag_startup_activity_begin and handed to the graphics backend as
+   ICO_LOSS_ROW (unset when 0; port/rhi/rhi_tile_rule.h): on a desktop's
+   Vulkan after one the v0.11.2 barrier scopes, after two the single
+   submission wait too; on a tile-based phone GPU the VU pre-pass off; the
+   other backends change nothing. Logged: "ico_pc: loss ladder: <n>
+   start(s) in a row lost the graphics device before this one ...". Never
+   written to the settings. The window sets ICO_LOSS_ROW one less around the
+   start-up loss bisect (the lost start's row). */
+unsigned int ico_diag_startup_loss_row(void);
 /* The start-up set's policy for this start (issues 93 and 107), after
    ico_diag_startup_activity_begin (file_lazy: its result) and before the
    renderer starts; setting: [dev] pipeline_set ("full", "careful",
@@ -415,8 +488,11 @@ int ico_diag_startup_end_count(int kind);
                                       saying its set stopped at the
                                       system's low-memory signal (issue 128,
                                       ico_diag_startup_activity_budget_stop;
-                                      not after a restart): no set, the
-                                      line kept in this start's file;
+                                      not after a restart): the window
+                                      resumes the set where it stopped
+                                      (issue 123, window_pipe_finish.c),
+                                      the line kept in this start's file
+                                      until it does;
      ICO_DIAG_PIPESET_CAREFUL_SETTING setting is "careful" (and none of the
                                       above);
      ICO_DIAG_PIPESET_FULL            the start-up set.
@@ -449,6 +525,16 @@ int ico_diag_startup_pipeline_set(int relaunched, int file_lazy, const char *set
    draw without it ([dev] vu_prepass = false in <config_name>); delete that
    line to try it again"); 0: neither. */
 int ico_diag_startup_vu_prepass(void);
+/* 1 when that count is not 0 and the end's note names a build of the
+   pre-pass's record stored by the vertex shaders or by compute dispatches
+   (startup_retry_note_has_vu_store): the rung before. This start draws the
+   record into render targets with the pre-pass kept (the window sets
+   ICO_RD_VU_RECORD=targets instead of turning the pre-pass off), and the
+   second such end writes [dev] vu_record = "targets" instead of [dev]
+   vu_prepass = false (ico_diag_startup_end_persist's lines name the record
+   stores and that key). An end in the targets' own pre-pass pipelines
+   after it counts towards [dev] vu_prepass = false as before. 0 otherwise. */
+int ico_diag_startup_vu_store(void);
 /* After the device is made, for a kind this start counted (else nothing,
    0): the window calls it for the pipelines on ICO_DIAG_PIPESET_CAREFUL_ONCE,
    ICO_DIAG_PIPESET_LAZY_ONCE and ICO_DIAG_PIPESET_LAZY_NOW, for the
@@ -458,15 +544,17 @@ int ico_diag_startup_vu_prepass(void);
    that kind (NULL when none does; the window passes none for the pipelines
    and the pre-pass, and for the losses "[dev] gpu_robust" when the player
    set it). With a rule nothing is written and the count is cleared (the
-   setting would be redundant, and would outlive a change of the rule), the
+   setting would be redundant, and would outlive a change of the rule;
+   not the losses' count since v0.11.4: it stays, for the loss ladder,
+   ico_diag_startup_loss_row), the
    pipelines' lazy run no longer "for this start only": the first end
    "ico_pc: the previous start ended while preparing the graphics (<note>);
    nothing is counted or written to <config_name>: <rule> (<table>)", the
    second "ico_pc: the second start in a row ended while preparing the
    graphics (<note>); <setting> is not written to <config_name>: <rule>
    (<table>)" (the losses: "ico_pc: the previous start lost the graphics
-   device; nothing is counted or written to <config_name>: robust access
-   is as the settings say (<table>)"). Without one, the first logs what this
+   device (<n> in a row); nothing is written to <config_name>: robust
+   access is as the settings say (<table>)"). Without one, the first logs what this
    start does: the pipelines on CAREFUL_ONCE "ico_pc: the previous start
    ended while preparing the graphics (<note>); this start only makes the
    start-up set the careful way (small batches on one thread, the pipeline
@@ -548,16 +636,28 @@ void ico_diag_note_low_memory(int level);
    ico_diag_startup_activity_budget_stop. Any thread. */
 int ico_diag_low_memory_stop(char *why, size_t size);
 /* The free-memory floor's driver class (memory_floor.h
-   ico_memory_floor_driver: vendor id and driver text, the window's
+   ico_memory_floor_driver: vendor id, Vulkan driver id and driver text, the window's
    rhi_limits() before the start-up set): Qualcomm's own driver keeps 17 %
    of total, at most 2048 MB above 8 GB; any other driver at most 512 MB
    above 8 GB; until set, the cautious rule.  A stop at the floor on
    another driver is for this start only
    (ico_diag_startup_activity_budget_stop: "the next start makes the set
    again"). */
-void ico_diag_set_memory_floor_driver(unsigned vendor_id, const char *driver_text);
+void ico_diag_set_memory_floor_driver(unsigned vendor_id, unsigned driver_id,
+                                      const char *driver_text);
 /* The class set (IcoMemoryFloorDriver) */
 int ico_diag_memory_floor_driver(void);
+/* Issue 188: the driver's compiles run one at a time (rhi.h
+   RhiLimits.serialPipelines: why, "PowerVR B-Series"; NULL none), set by the
+   window with the floor's driver class: the pipeline limit before the game
+   starts is then 60 s, not 10 (gpu_hang.h ico_pipe_stall_limit_s), logged
+   once when set.  ico_diag_set_selftest: 1 while the window runs the blend
+   and VU pre-pass self-tests (which run first at every start, whatever the
+   set), 0 after; an end by the pipeline limit inside them does not tell the
+   player the next start prepares the graphics another way
+   (gpu_hang.h ico_pipe_stall_next_differs). */
+void ico_diag_set_pipe_compiler_serial(const char *why);
+void ico_diag_set_selftest(int on);
 /* 1 when the start-up set stopped at the free-memory floor and no
    low-memory signal has come (the window's background finisher may run),
    else 0 */
@@ -595,6 +695,37 @@ const char *ico_diag_startup_activity_prev(void);
    (rd_set_vu_plain_only), so a slow compiler cannot end the same pipeline
    every run. */
 int ico_diag_startup_stall_end(void);
+/* The previous run was ended by the watchdog with the main thread not
+   waiting for the GPU (the game stopped responding; a GPU hang counts as a
+   device loss instead, ICO_DIAG_END_LOSS): the mark "<activity file
+   without .txt>-watchdog.txt" ("<version>\n<reason>\n"), written by the
+   watchdog's thread as it ends the run, read and deleted by
+   ico_diag_startup_activity_begin, which logs "ico_pc: the previous run
+   (version V) was ended by the watchdog: <reason>".  1 then: the window's
+   robust step (window_robust.c) counts that start as an unclean end, not
+   a clean one (review 2 N5). */
+int ico_diag_startup_prev_watchdog(void);
+/* A first-start probe as a named phase of the run (the subpass read's,
+   port/rhi/rhi_subpass_verdict.h, port/render/rd_subpass_probe.c): name
+   while the device runs with what the probe tries (the window, from the
+   device's start until the renderer's verdict), NULL after it.  A name
+   writes the mark "<activity file without .txt>-probe.txt"
+   ("<version>\n<name>\n", flushed to the disc) and logs "ico_pc: <name>
+   runs at this start: ..."; NULL removes it, and so does an exit without a
+   device loss (ico_diag_startup_activity_exit).  The next start
+   (ico_diag_startup_activity_begin) reads and deletes it and logs
+   "ico_pc: the previous run (version V) ended while <name> was running:
+   its end is not counted on the loss ladder, the robust step or the
+   watchdog's mark ...": that run's device loss or GPU hang counts on no
+   loss step (loss_count_prev: the row, the robust count), its loss dump is
+   not replayed, and its watchdog mark is not an unclean end
+   (ico_diag_startup_prev_watchdog 0).  A device loss while it is set
+   restarts the desktop game as a fresh start, with no loss step
+   (ico_diag_device_lost_restart).  The probe's own verdict file keeps the
+   probed feature off on that driver.  ico_diag_startup_prev_probe: 1 when
+   the previous run ended with the mark. */
+void ico_diag_set_probe(const char *name);
+int ico_diag_startup_prev_probe(void);
 /* This start's set is made under the careful policy (on != 0; the window,
    before ICO_DIAG_ACTIVITY_STARTUP): while the file records it holds the
    line "set: careful" after the note, so an end inside that set makes the
@@ -618,13 +749,17 @@ void ico_diag_startup_activity_careful(int on);
    lazy run that is not for this start only, with the line "set: stopped
    at the system's low-memory signal (running critical)" after the note
    (and the careful line), and logs "ico_pc: the start-up set stopped at
-   the system's low-memory signal (running critical); the next start
-   makes the pipelines as the game needs them, with no start-up set". The
-   next start of the same version that finds the line beside the lazy
-   run's exit or its note between two creations logs "ico_pc: the previous
-   start stopped preparing the graphics when the system ran low on memory
-   (<note>); this start prepares them as the game needs them" and is lazy
-   (ICO_DIAG_PIPESET_LAZY_LOW_MEMORY), its own file keeping the line; one
+   the system's low-memory signal (running critical); this start makes the
+   rest as the game needs them, and the next start resumes the set where
+   this one stopped, in smaller batches" (the window then appends where it
+   stopped to the line: ico_diag_startup_set_resume_part). The next start
+   of the same version that finds the line beside the lazy run's exit or
+   its note between two creations logs "ico_pc: the previous start stopped
+   preparing the graphics when the system ran low on memory (<note>); this
+   start resumes them where it stopped" and is
+   ICO_DIAG_PIPESET_LAZY_LOW_MEMORY, its own file keeping the line until
+   the window resumes the set (issue 123, window_pipe_finish.c
+   window_pipe_floor_retry: ico_diag_startup_resume clears it); one
    ended inside a creation logs "ico_pc: the previous start had stopped
    preparing the graphics when the system ran low on memory (<line>)" and
    counts as an end while preparing the graphics, stepping from no set
@@ -667,8 +802,23 @@ void ico_diag_startup_activity_exit(void);
    hang (ico_diag_set_gpu_hang) it writes the hang's own line instead,
    which is counted but never bisected. */
 void ico_diag_note_device_loss(const char *dump_zip);
+/* A device loss found at a wait for the GPU outside the main loop (issue
+   179: window_host.c's lifecycle wait as the app goes to the background,
+   VK_ERROR_DEVICE_LOST at vkDeviceWaitIdle): noted at once
+   (ico_diag_note_device_loss(NULL)), because the system may end the app in
+   the background before the main loop's device_lost_quit writes the loss
+   and its dump (the reporter's 5-minute v0.11.6 run ended so, and its next
+   start said "no lost start"); that later call replaces the line with the
+   dump's.  Once a run; logged: "ico_pc: the graphics device was lost at
+   <where>; counted now as a start that lost it ...".  Nothing is noted
+   without a loss: an app the system ends in the background is not one. */
+void ico_diag_note_device_loss_at_wait(const char *where);
 /* The loss dump the previous run left for this one (NULL: none). */
 const char *ico_diag_loss_dump(void);
+/* The slow-scene dump this run wrote (window_host.c slow_scene_dump, issue
+   179): its zip's path, kept for the crash and hang reports, which carry it
+   (report.h IcoReportInputs.slow_zip).  NULL or "": none. */
+void ico_diag_note_slow_scene(const char *zip);
 /* The loss bisect (docs/port/RENDER.md, "The loss bisect"), once, before
    the game: with a loss dump pending, the activity file's note says the
    bisect is running (so a run ended inside it does not bisect again at the
@@ -750,6 +900,12 @@ int ico_diag_loss_bisect2(const char *dump_zip, uint32_t pass, uint32_t draws, u
    lossnoprepass step first (startup_retry.h StartupRetryRun.prepassWasOn).
    0 until set. */
 void ico_diag_set_vu_prepass(int on);
+/* Whether that pre-pass's record is stored by the vertex shaders or by
+   compute dispatches (rd.h rd_vu_record_buffered, after the self-test,
+   which may turn it to the render targets): a device loss then takes the loss order's
+   losstargets step first (startup_retry.h StartupRetryRun.storesWereOn).
+   0 until set. */
+void ico_diag_set_vu_record_stores(int on);
 /* Whether the run draws with robust access off by the device's default
    (port/rhi/rhi.h RhiLimits.robustDefaultOff), not by
    gpu_robust or ICO_GPU_ROBUST: a device loss then takes the loss order's
@@ -797,6 +953,40 @@ void ico_diag_forget_startup_retry_env(void);
    (rhi_pipeline_cache_loaded), which the cache step deletes; path NULL
    keeps the path given before. */
 void ico_diag_set_pipeline_cache(int loaded, const char *path);
+/* the path given to ico_diag_set_pipeline_cache ("" before the window gave one) */
+const char *ico_diag_pipeline_cache_path(void);
+/* The three below served issue 123's floor retry (memory_floor.h
+   ico_memory_floor_retry); since v0.11.2's resume (window_pipe_finish.h
+   window_pipe_floor_retry) the window calls none of them: kept with their
+   tests (diag_test), so the retry mark is never written.
+   Issue 123: the previous start's
+   set stopped at the free-memory floor (its file's line carries the floor's
+   figures, not the system's signal level); valid after
+   ico_diag_startup_pipeline_set */
+int ico_diag_startup_prev_floor_stop(void);
+/* the window took the retry: this start's file does not carry the
+   previous start's "stopped" line (the set stopping again writes it) */
+void ico_diag_startup_floor_retry(void);
+/* the previous start was itself such a retry and stopped at the floor
+   again (its line ends with ICO_MEMORY_FLOOR_RETRIED_MARK): this start
+   does not retry (at most one in a row) */
+int ico_diag_startup_prev_floor_retried(void);
+/* Issue 123 (pipe_resume.h): the stop line of the previous start's set
+   ("set: stopped at the system's low-memory signal (<why>)" and, from
+   v0.11.2, "; resume at pipeline N of M, batches of B, stop K, <date>"),
+   "" when it had none; valid after ico_diag_startup_pipeline_set */
+const char *ico_diag_startup_prev_low_memory_line(void);
+/* the window resumes the set (ICO_DIAG_PIPESET_LAZY_LOW_MEMORY made the
+   set again from where it stopped): this start's file does not carry the
+   previous start's stop line until its own set stops */
+void ico_diag_startup_resume(void);
+/* After ico_diag_startup_activity_budget_stop: part (pipe_resume.h's
+   "; resume at ...") appended to this start's stop line and the file
+   written again, 1; 0 (nothing) when the stop was not one for memory that
+   the next start follows (the careful set's growth or slow batch, or the
+   free-memory floor on another driver than Qualcomm's own: those are for
+   this start only).  A part past the line's 255 bytes is cut. */
+int ico_diag_startup_set_resume_part(const char *part);
 /* Captures what starting the program again needs (Windows: the module
    path, GetCommandLineW and the environment block; Linux and macOS: the
    executable's path, argv and the environment's pointers), so the crash
@@ -820,6 +1010,10 @@ void ico_diag_set_relaunch_stub(int (*fn)(const char *value));
 /* Names a thread function for the thread lines; game threads are named by
    the function iosThreadCreate runs (ico_host_thread_func). */
 void ico_diag_name_func(void *func, const char *name);
+/* A game thread's name as the thread lines give it (its function's name,
+   else the function's address; "host loop" for id 0, "?" out of range);
+   tmp (size bytes) may be used for the address form.  Any thread. */
+const char *ico_diag_thread_name(int id, char *tmp, size_t size);
 /* Seconds since ico_diag_init. */
 double ico_diag_uptime(void);
 /* A monotonic clock in nanoseconds (QueryPerformanceCounter, CLOCK_MONOTONIC)

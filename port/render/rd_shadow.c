@@ -67,7 +67,9 @@
  */
 #include <string.h>
 #include "rd_internal.h"
-#include "../core/region.h" /* the running disc's step (rd__shadow_disc_step) */
+#include "rd_ledger_live.h"      /* the scene ledger: shadow volumes by ticks on */
+#include "rd_stencil_selftest.h" /* rd__stencil_cut_forced */
+#include "../core/region.h"      /* the running disc's step (rd__shadow_disc_step) */
 
 RdTarget rd_shadow_count_target(uint32_t gsW, uint32_t gsH)
 {
@@ -134,7 +136,11 @@ void rd_shadow_resolve(void)
 void rd_shadow_tris(const RdScreenVtx *v, const int8_t *sign, uint32_t triCount, RdKey key)
 {
     RdFrame *f = rd__rec_frame();
-    if (!v || !sign || triCount == 0 || !rd__draw_filter_pass(key)) {
+    if (!v || !sign || triCount == 0) {
+        return;
+    }
+    if (!rd__draw_filter_pass(key)) {
+        rd__ledger_unnamed_out("(a shadow volume)", RD_LEDGER_FILTER);
         return;
     }
     if (!f) {
@@ -161,6 +167,7 @@ void rd_shadow_tris(const RdScreenVtx *v, const int8_t *sign, uint32_t triCount,
     if (!c) {
         return;
     }
+    rd__ledger_shadow(triCount);
     c->b[0] = RD_SHADOW_TRIS;
     c->b[1] = rd__frame_projected() ? RD_SHADOW_FRAME_CAMERA : 0;
     c->u[0] = inc * 3;
@@ -229,15 +236,18 @@ bool rd__stencil_ops(RdStencilWindow *w, uint32_t depth, bool whole, RhiLoadOp d
     return false;
 }
 
-/* rd__stencil_ops, and with g_rd.depthCopy the stencil loaded with the
- * depth and stored outside the window too: no pass on a
+/* rd__stencil_ops, and where rd__stencil_cut_forced says so the stencil
+ * loaded with the depth and stored outside the window too: no pass on a
  * packed depth-stencil then asks for its depth and its stencil
- * differently */
+ * differently.  Forced on the fog's copy and buffer paths and, but on the
+ * PowerVR class after its self-test, on the local read (commit a54e2f896:
+ * an Adreno 710 read the in-place depth as far with the stencil DONT_CARE;
+ * rd_stencil_selftest.c); not on the in-place path */
 bool rd__stencil_ops_packed(RdStencilWindow *w, uint32_t depth, bool whole, RhiLoadOp depthLoad,
                             RhiLoadOp *stencilLoad, RhiStoreOp *stencilStore)
 {
     const bool took = rd__stencil_ops(w, depth, whole, depthLoad, stencilLoad, stencilStore);
-    if (g_rd.depthCopy) {
+    if (rd__stencil_cut_forced()) {
         *stencilStore = RHI_STORE_STORE;
         if (*stencilLoad == RHI_LOAD_DONT_CARE) {
             *stencilLoad = depthLoad;

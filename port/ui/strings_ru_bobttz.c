@@ -40,11 +40,7 @@ const char *const ui_strings_ru_bobttz[UI_STR_COUNT] = {
         "Для менее напряжённой игры. В некоторых сценах по сюжету всё ещё происходит захват.",
     [UI_STR_OPT_PIT_TIME] = "Время на спасение Йорды",
     [UI_STR_OPT_PIT_TIME_NOTE] =
-        "Сколько времени требуется тени, чтобы затянуть Йорду в яму. При включении опции выше процесс прекращается.",
-    [UI_STR_VAL_PIT_HALF] = "1/2",
-    [UI_STR_VAL_PIT_LONGER] = "Дольше",
-    [UI_STR_VAL_PIT_DOUBLE] = "x2",
-    [UI_STR_VAL_PIT_TRIPLE] = "x3",
+        "Время от похищения Йорды Тенями до того как она утонет. В некоторых сценах время пропорционально меньше.",
     [UI_STR_OPT_SHADOW_SPEED] = "Скорость теней",
     [UI_STR_OPT_SHADOW_SPEED_NOTE] =
         "Как быстро тени перемещаются. Это не влияет на частоту их атак.",
@@ -86,7 +82,7 @@ const char *const ui_strings_ru_bobttz[UI_STR_COUNT] = {
     [UI_STR_ACH_QUEEN_DEFEATED] = "Падение королевы",
     [UI_STR_ACH_QUEEN_DEFEATED_DESC] = "Победить Королеву.",
     [UI_STR_ACH_BEACH] = "Берег",
-    [UI_STR_ACH_BEACH_DESC] = "Добраться до берега.",
+    [UI_STR_ACH_BEACH_DESC] = "Добраться до пляжа.",
     [UI_STR_ACH_CLEAR] = "Ико",
     [UI_STR_ACH_CLEAR_DESC] = "Завершить игру.",
     [UI_STR_ACH_CLEAR2] = "Еще раз",
@@ -126,8 +122,8 @@ const char *const ui_strings_ru_bobttz[UI_STR_COUNT] = {
     [UI_STR_OPT_VOLUME] = "Громкость",
     [UI_STR_OPT_MOUSE_SENS] = "Чувствительность мыши",
     [UI_STR_OPT_VIDEO_MODE] = "Режим видео",
-    [UI_STR_VAL_PAL50] = NULL, /* empty in the CSV: English */
-    [UI_STR_VAL_60HZ] = NULL,  /* empty in the CSV: English */
+    [UI_STR_VAL_PAL50] = "PAL 50 Гц",
+    [UI_STR_VAL_60HZ] = "60 Гц",
     [UI_STR_OPT_FRAMERATE] = "Частота кадров",
     [UI_STR_VAL_WINDOW] = "Оконное",
     [UI_STR_VAL_AUTO] = "Автоматическое",
@@ -201,17 +197,26 @@ const char *const ui_strings_ru_bobttz[UI_STR_COUNT] = {
     [UI_STR_PAD_RSTICK_UP] = "Правый стик Вверх",
     [UI_STR_PAD_RSTICK_DOWN] = "Правый стик Вниз",
     [UI_STR_VAL_UNCAPPED] = "Неограниченный",
-    [UI_STR_FPS_UNIT] = NULL,              /* empty in the CSV: English */
-    [UI_STR_VIDEO_MODE_TITLE_ONLY] = NULL, /* empty in the CSV: English */
+    [UI_STR_FPS_UNIT] = NULL, /* empty in the CSV: English */
+    [UI_STR_VIDEO_MODE_TITLE_ONLY] = "только заголовок",
     [UI_STR_ACH_LOCKED] = "Заблокировано",
     [UI_STR_ACH_STATE_UNLOCKED] = "Разблокировано",
     [UI_STR_MIRROR_SCREEN] =
-        "Игра проходит в отражённом виде слева направо. Сохранение сохраняет выбранный вариант.",
+        "Игра проходит в отражённом виде слева направо. Настройки сохраняются в файле сохранения.",
     [UI_STR_OPT_NEWGAME_PLUS] = "Новая игра+",
     /* longer than a note holds (two lines, 255 bytes): English until shortened */
-    [UI_STR_NEWGAME_PLUS_SCREEN] = NULL,
+    [UI_STR_NEWGAME_PLUS_SCREEN] =
+        "«Новая игра+»: второе путешествие (перевод слов Йорды, новые предметы и концовка). «Выкл» оставляет первое путешествие даже после финала.",
+    [UI_STR_NEWGAME_START] = "Начать",
+    [UI_STR_NEWGAME_START_SCREEN] = "Начинает новую игру с выбранными выше настройками.",
     [UI_STR_OPT_CRT] = "ЭЛТ фильтр",
     [UI_STR_OPT_CRT_STRENGTH] = "Сила ЭЛТ фильтра",
+    [UI_STR_OPT_TONE_GAMMA] = "Гамма",
+    [UI_STR_OPT_TONE_BRIGHTNESS] = "Яркость",
+    [UI_STR_OPT_TONE_CONTRAST] = "Контрастность",
+    [UI_STR_OPT_TONE_SATURATION] = "Насыщенность",
+    [UI_STR_OPT_TONE_NOTE] =
+        "50 — исходное значение. Нажмите Квадрат для сброса. Влияет в том числе на ЭЛТ-фильтр. Текст не меняется.",
     [UI_STR_VAL_CRT_SCANLINES] = NULL, /* empty in the CSV: English */
     [UI_STR_VAL_CRT_CONSUMER] = NULL,  /* empty in the CSV: English */
     [UI_STR_VAL_CRT_TRINITRON] = NULL, /* empty in the CSV: English */
@@ -229,8 +234,8 @@ const char *const ui_strings_ru_bobttz[UI_STR_COUNT] = {
     [UI_STR_MT_LANG_DEUTSCH] = NULL,  /* empty in the CSV: English */
     [UI_STR_MT_LANG_ITALIANO] = NULL, /* empty in the CSV: English */
     [UI_STR_MT_LANG_ESPANOL] = NULL,  /* empty in the CSV: English */
-    [UI_STR_MT_HZ50] = NULL,          /* empty in the CSV: English */
-    [UI_STR_MT_HZ60] = NULL,          /* empty in the CSV: English */
+    [UI_STR_MT_HZ50] = "50 Гц",
+    [UI_STR_MT_HZ60] = "60 Гц",
     [UI_STR_MT_NO_CARD] = "Отсутствует Карта памяти (PS2)",
     [UI_STR_MT_NEED_START] = "По крайней мере 360КБ необходимо\nдля сохранение\nВы хотите начать?",
     [UI_STR_MT_NO_SPACE_START] =
@@ -428,8 +433,9 @@ const char *const ui_strings_ru_bobttz[UI_STR_COUNT] = {
     [UI_STR_REPORT_PICTURE_ARMED] = "Снимок через 3 секунды",
     [UI_STR_REPORT_PICTURE_ARMED_BODY] = "Покинуть это меню.\nZIP-архив сохранен в папку dumps",
 #if ICO_RC_TOOLS
-    [UI_STR_OPT_SHARE_REPORT] = NULL,  /* newer than the CSV: English */
-    [UI_STR_SHARE_REPORT_NOTE] = NULL, /* newer than the CSV: English */
+    [UI_STR_OPT_SHARE_REPORT] = "Отправить сообщение об ошибке",
+    [UI_STR_SHARE_REPORT_NOTE] =
+        "Открывает меню «Поделиться» с логом и новейшим архивом изображений в формате ZIP, который можно отправить по электронной почте или в чат.",
 #endif
     [UI_STR_SECTION_EFFECTS] = "Эффекты",
     [UI_STR_SECTION_PICTURE] = "Изображение",
@@ -439,14 +445,13 @@ const char *const ui_strings_ru_bobttz[UI_STR_COUNT] = {
     [UI_STR_OPT_EFFECT_SOFTENING] = "Смягчение экрана",
     [UI_STR_OPT_EFFECT_MOTION_BLUR] = "Размытие в движении",
     [UI_STR_OPT_EFFECT_FOG] = "Туман",
-    /* longer than a note holds (two lines, 255 bytes): English until shortened */
-    [UI_STR_EFFECTS_NOTE] = NULL,
+    [UI_STR_EFFECTS_NOTE] =
+        "Встроенные в игру эффекты изображения. В режиме «Всё включено» используется изображение с PS2",
     [UI_STR_STATS_PLAY_TIME] = "Времени в игре",
     [UI_STR_STATS_DEATHS] = "Смерти",
     [UI_STR_STATS_CAPTURES] = "Йорда схвачена",
     [UI_STR_STATS_SAVES] = "Число сохранений",
     [UI_STR_STATS_ENEMIES] = "Число побежденных противников",
-    [UI_STR_STATS_ASSISTS] = "Помощь",
     [UI_STR_STATS_AREA] = "Зона",
     [UI_STR_PHOTO_ACT_MOVE] = "двигать",
     [UI_STR_PHOTO_ACT_LOOK] = "вращать",
@@ -522,9 +527,10 @@ const char *const ui_strings_ru_bobttz[UI_STR_COUNT] = {
     [UI_STR_VAL_GRAPHICS_AUTOMATIC] = "Автоматически",
     [UI_STR_GRAPHICS_API_NOTE] =
         "Принять переключает сразу; без принятия выбор используется со следующего запуска.",
-    [UI_STR_OPT_GRAPHICS_ADAPTER] = NULL,    /* newer than the CSV: English */
-    [UI_STR_GRAPHICS_ADAPTER_NOTE] = NULL,   /* newer than the CSV: English */
-    [UI_STR_GRAPHICS_ADAPTER_FAILED] = NULL, /* newer than the CSV: English */
+    [UI_STR_OPT_GRAPHICS_ADAPTER] = "Графический адаптер",
+    [UI_STR_GRAPHICS_ADAPTER_NOTE] =
+        "Выбор графического адаптера. Принять переключает сразу; без принятия выбор используется со следующего запуска.",
+    [UI_STR_GRAPHICS_ADAPTER_FAILED] = "Не удалось запустить графический адаптер %s; %s остаётся",
     [UI_STR_GRAPHICS_APPLY] = "Принять",
     [UI_STR_GRAPHICS_APPLY_NOTE] =
         "Переключается, не выходя из игры. Небольшая пауза — это нормально.",
@@ -554,8 +560,8 @@ const char *const ui_strings_ru_bobttz[UI_STR_COUNT] = {
     [UI_STR_GPU_DRIVER_ADD_FILE] = "Добавить из папки drivers",
     [UI_STR_GPU_DRIVER_CANCELLED] =
         "Файл не выбран. Если на этом устройстве не отображается окно выбора файлов, скопируйте zip-файл драйвера в папку drivers игры и используйте команду \"Добавить из папки drivers\": %s",
-    /* longer than a note holds (two lines, 255 bytes): English until shortened */
-    [UI_STR_GPU_DRIVER_NOTE_LOST] = NULL,
+    [UI_STR_GPU_DRIVER_NOTE_LOST] =
+        "Сбой драйвера Qualcomm. Добавьте драйвер Turnip сюда или скопируйте его zip-файл в папку drivers игры (%s). Он применится при следующем запуске.",
     [UI_STR_QUIT_GAME] = "Покинуть игру",
     [UI_STR_QUIT_GAME_CONFIRM] = "Покинуть игру?",
     [UI_STR_OPT_MOUSE_INVERT] = "Инвертировать вертикальное управление мышью",
@@ -567,22 +573,29 @@ const char *const ui_strings_ru_bobttz[UI_STR_COUNT] = {
     [UI_STR_VAL_INSTANT] = "Мгновенный",
     [UI_STR_OPT_DOOR_FIX] = "Исправление двери восточного отражателя",
     [UI_STR_OPT_DOOR_FIX_NOTE] =
-        "Держась за руки, Ико и Йорда больше не выходят прямо из дверного проема.",
-    [UI_STR_OPT_YORDA_TRIPS] = NULL,      /* newer than the CSV: English */
-    [UI_STR_OPT_YORDA_TRIPS_NOTE] = NULL, /* newer than the CSV: English */
+        "Держась за руки, Ико и Йорда больше не выскакивают сразу же обратно из дверного проема.",
+    [UI_STR_OPT_YORDA_TRIPS] = "Йорда спотыкается",
+    [UI_STR_OPT_YORDA_TRIPS_NOTE] =
+        "Выкл: как в оригинале. Вкл: как после главных ворот — бегут держась за руки 3 секунды, затем Йорда падает.",
     [UI_STR_OPT_NATURAL_CHAINS] = "Правильные цепи",
     [UI_STR_OPT_NATURAL_CHAINS_NOTE] =
         "Цепь, которая обрушивается на Ико, сохраняет правильный размер звеньев на всем пути.",
     [UI_STR_OPT_SKIP_OPENING] = "Пропуск вступительной заставки",
     [UI_STR_OPT_SKIP_OPENING_NOTE] =
         "Игра начинается со стартового экрана, без логотипа Sony и вступительной сцены. Изменения вступят в силу при следующем запуске.",
+    [UI_STR_OPT_SECOND_CARD] = "Вторая карта памяти",
+    [UI_STR_OPT_SECOND_CARD_NOTE] =
+        "Добавление второй карты памяти, содержащей ещё 10 слотов сохранения. Обе карты доступны на экранах сохранения и загрузки игры.",
+    [UI_STR_OPT_SHADOWS_TOGETHER] = "Тени атакуют вместе",
+    [UI_STR_OPT_SHADOWS_TOGETHER_NOTE] =
+        "Выкл: как в оригинале, тени ждут своего хода. Вкл: несколько теней могут атаковать одновременно.",
     [UI_STR_OPT_AA] = "Сглаживание",
-    /* longer than a note holds (two lines, 255 bytes): English until shortened */
-    [UI_STR_OPT_AA_NOTE] = NULL,
+    [UI_STR_OPT_AA_NOTE] =
+        "Сглаживает края. Суперсэмплинг рендерит в 4 раза (2x) или в 16 раз (4x) больше пикселей; снизьте значение, если счётчик кадров упадет до 30.",
     [UI_STR_OPT_DOWNSAMPLE] = "Понижение разрешения",
     [UI_STR_VAL_DOWNSAMPLE_BOX] = "К оригинальному размеру",
-    /* longer than a note holds (two lines, 255 bytes): English until shortened */
-    [UI_STR_OPT_DOWNSAMPLE_NOTE] = NULL,
+    [UI_STR_OPT_DOWNSAMPLE_NOTE] =
+        "Рендерит в повышенном разрешении, затем сжимает до исходного. Нужен масштаб от 2x; не работает с ЭЛТ-фильтром или в окне.",
     [UI_STR_AA_OFF] = "Выкл",
     [UI_STR_AA_SSAA2] = "2x суперсемплинг",
     [UI_STR_AA_SSAA4] = "4x суперсемплинг",
@@ -604,7 +617,7 @@ const char *const ui_strings_ru_bobttz[UI_STR_COUNT] = {
     [UI_STR_STEAM_FAILED] = "Не удалось добавить в Steam.",
     [UI_STR_STEAM_FAILED_BODY] =
         "Список ярлыков не может быть изменен.\nВ README можно узнать как добавить вручную.",
-    [UI_STR_EXTRAS_EXPORT_TEXTURES] = "Экспорт текстур.",
+    [UI_STR_EXTRAS_EXPORT_TEXTURES] = "Экспорт текстур",
     [UI_STR_EXPORT_TEXTURES_STOP] = "Прекратить экспорт",
     [UI_STR_EXPORT_TEXTURES_NOTE] =
         "Для мододелов: сохраняет каждую текстуру под тем же именем что и в PCSX2 в папку textures.",
@@ -615,52 +628,54 @@ const char *const ui_strings_ru_bobttz[UI_STR_COUNT] = {
     [UI_STR_EXPORT_TEXTURES_STOPPED_BODY] = "Остановлено после %d текстур",
     [UI_STR_EXPORT_TEXTURES_FAILED] = "Не удалось экспортировать текстуры",
     [UI_STR_EXPORT_TEXTURES_FAILED_BODY] = "Не удалось записать\n в папку %s",
-    [UI_STR_EXTRAS_BACKUP] = NULL,         /* newer than the CSV: English */
-    [UI_STR_EXTRAS_RESTORE] = NULL,        /* newer than the CSV: English */
-    [UI_STR_BACKUP_NOTE] = NULL,           /* newer than the CSV: English */
-    [UI_STR_RESTORE_NOTE] = NULL,          /* newer than the CSV: English */
-    [UI_STR_BACKUP_CHOOSING] = NULL,       /* newer than the CSV: English */
-    [UI_STR_BACKUP_PROGRESS] = NULL,       /* newer than the CSV: English */
-    [UI_STR_RESTORE_AGAIN] = NULL,         /* newer than the CSV: English */
-    [UI_STR_RESTORE_CONFIRM_TITLE] = NULL, /* newer than the CSV: English */
-    [UI_STR_RESTORE_CONFIRM_BODY] = NULL,  /* newer than the CSV: English */
-    [UI_STR_RESTORE_CHOOSING] = NULL,      /* newer than the CSV: English */
-    [UI_STR_RESTORE_READING] = NULL,       /* newer than the CSV: English */
-    [UI_STR_RESTORE_PROGRESS] = NULL,      /* newer than the CSV: English */
-    [UI_STR_RESTORE_THIS] = NULL,          /* newer than the CSV: English */
-    [UI_STR_RESTORE_ASK_NOTE] = NULL,      /* newer than the CSV: English */
-    [UI_STR_RESTORE_ASK_TITLE] = NULL,     /* newer than the CSV: English */
-    [UI_STR_RESTORE_VERSION] = NULL,       /* newer than the CSV: English */
-    [UI_STR_RESTORE_SAVED] = NULL,         /* newer than the CSV: English */
-    [UI_STR_RESTORE_DISCS] = NULL,         /* newer than the CSV: English */
-    [UI_STR_RESTORE_OTHER_DISC] = NULL,    /* newer than the CSV: English */
-    [UI_STR_RESTORE_PRESS] = NULL,         /* newer than the CSV: English */
-    [UI_STR_BACKUP_DONE] = NULL,           /* newer than the CSV: English */
-    [UI_STR_BACKUP_DONE_BODY] = NULL,      /* newer than the CSV: English */
-    [UI_STR_BACKUP_FAILED] = NULL,         /* newer than the CSV: English */
-    [UI_STR_RESTORE_DONE] = NULL,          /* newer than the CSV: English */
-    [UI_STR_RESTORE_DONE_RESTART] = NULL,  /* newer than the CSV: English */
-    [UI_STR_RESTORE_DONE_CLOSE] = NULL,    /* newer than the CSV: English */
-    [UI_STR_RESTORE_FAILED] = NULL,        /* newer than the CSV: English */
-    [UI_STR_BACKUP_WHY_BUSY] = NULL,       /* newer than the CSV: English */
-    [UI_STR_BACKUP_WHY_NOTHING] = NULL,    /* newer than the CSV: English */
-    [UI_STR_BACKUP_WHY_WRITE] = NULL,      /* newer than the CSV: English */
-    [UI_STR_BACKUP_WHY_READ] = NULL,       /* newer than the CSV: English */
-    [UI_STR_BACKUP_WHY_NOT_BACKUP] = NULL, /* newer than the CSV: English */
-    [UI_STR_BACKUP_WHY_NEWER] = NULL,      /* newer than the CSV: English */
-    [UI_STR_BACKUP_WHY_DAMAGED] = NULL,    /* newer than the CSV: English */
-    [UI_STR_BACKUP_WHY_UNSAFE] = NULL,     /* newer than the CSV: English */
-    [UI_STR_BACKUP_WHY_TOO_BIG] = NULL,    /* newer than the CSV: English */
-    [UI_STR_BACKUP_WHY_NO_DIALOG] = NULL,  /* newer than the CSV: English */
-    [UI_STR_BACKUP_WHY_NO_SPACE] = NULL,   /* newer than the CSV: English */
-    [UI_STR_OPT_EFFECT_WATER] = "Отражения воды",
-    [UI_STR_VAL_SHARP] = "Резкие",
-    /* longer than a note holds (two lines, 255 bytes): English until shortened */
-    [UI_STR_EFFECT_WATER_NOTE] = NULL,
+    [UI_STR_EXTRAS_BACKUP] = "Создание резервной копии",
+    [UI_STR_EXTRAS_RESTORE] = "Восстановление из резервной копии",
+    [UI_STR_BACKUP_NOTE] =
+        "Сохранение карт памяти, состояний, настроек и достижений в один ZIP-файл для переноса на другое устройство.",
+    [UI_STR_RESTORE_NOTE] =
+        "Восстановлений карт памяти, состояний, настроек и достижений из ZIP-файла. Игра после этого перезапустится.",
+    [UI_STR_BACKUP_CHOOSING] = "Выберите где сохранить резервную копию",
+    [UI_STR_BACKUP_PROGRESS] = "Сохранено %d из %d файлов",
+    [UI_STR_RESTORE_AGAIN] = "Нажмите ещё раз для выбора файла резервной копии",
+    [UI_STR_RESTORE_CONFIRM_TITLE] = "Восстановить из резервной копии?",
+    [UI_STR_RESTORE_CONFIRM_BODY] =
+        "Карта памяти, состояния, настройки и достижения заменятся резервной копией, а игра перезапустится.\nНажмите еще раз для её выбора.",
+    [UI_STR_RESTORE_CHOOSING] = "Выберите резервную копию для восстановления.",
+    [UI_STR_RESTORE_READING] = "Чтение резервной копии…",
+    [UI_STR_RESTORE_PROGRESS] = "Восстановлено: %d из %d файлов",
+    [UI_STR_RESTORE_THIS] = "Восстановить эту резервную копию",
+    [UI_STR_RESTORE_ASK_NOTE] = "Создана в версии %s. Нажмите еще раз для восстановления.",
+    [UI_STR_RESTORE_ASK_TITLE] = "Восстановить эту резервную копию?",
+    [UI_STR_RESTORE_VERSION] = "Версия: %s",
+    [UI_STR_RESTORE_SAVED] = "Сохранено: %s",
+    [UI_STR_RESTORE_DISCS] = "Диски: %s",
+    [UI_STR_RESTORE_OTHER_DISC] = "Создана во время игры с другого диска",
+    [UI_STR_RESTORE_PRESS] = "Нажмите еще раз для восстановления",
+    [UI_STR_BACKUP_DONE] = "Резервная копия создана",
+    [UI_STR_BACKUP_DONE_BODY] = "Файлов сохранено: %d\nв %s",
+    [UI_STR_BACKUP_FAILED] = "Не удалось создать резервную копию",
+    [UI_STR_RESTORE_DONE] = "Данные восстанавливаются",
+    [UI_STR_RESTORE_DONE_RESTART] = "Игра перезапускается, чтобы применить резервную копию.",
+    [UI_STR_RESTORE_DONE_CLOSE] =
+        "Игра закрывается. Запустите её снова, чтобы применить резервную копию.",
+    [UI_STR_RESTORE_FAILED] = "Не удалось восстановить резервную копию",
+    [UI_STR_BACKUP_WHY_BUSY] = "Не сейчас: идет сохранение. Повторите попытку через минуту.",
+    [UI_STR_BACKUP_WHY_NOTHING] = "Пока нечего копировать.",
+    [UI_STR_BACKUP_WHY_WRITE] =
+        "Не удалось записать данные. Проверьте свободное место и повторите.",
+    [UI_STR_BACKUP_WHY_READ] = "Не удалось прочитать файл.",
+    [UI_STR_BACKUP_WHY_NOT_BACKUP] = "Этот файл не является резервной копией этой игры.",
+    [UI_STR_BACKUP_WHY_NEWER] =
+        "Копия создана в более новой версии. Обновите игру для восстановления.",
+    [UI_STR_BACKUP_WHY_DAMAGED] = "Эта резервная копия повреждена.",
+    [UI_STR_BACKUP_WHY_UNSAFE] = "Копия содержит файлы вне папок игры, поэтому она отклонена.",
+    [UI_STR_BACKUP_WHY_TOO_BIG] = "Размер резервной копии превышает допустимый лимит игры.",
+    [UI_STR_BACKUP_WHY_NO_DIALOG] = "Не удалось открыть окно выбора файла.",
+    [UI_STR_BACKUP_WHY_NO_SPACE] = "На устройстве недостаточно свободного места.",
     [UI_STR_VAL_SMOOTH] = "Плавное",
     [UI_STR_OPT_SHOW_FPS] = "Счётчик кадров",
-    /* longer than a note holds (two lines, 255 bytes): English until shortened */
-    [UI_STR_EFFECT_MOTION_BLUR_NOTE] = NULL,
+    [UI_STR_EFFECT_MOTION_BLUR_NOTE] =
+        "«Оригинальный» — след движется с кадрами игры. «Плавный» — след движется каждым выводимым кадром, сохраняя длину шлейфа.",
     [UI_STR_LANG_KO] = NULL, /* empty in the CSV: English */
     [UI_STR_LANG_ZH] = NULL, /* empty in the CSV: English */
     [UI_STR_SECTION_TOUCH] = "Сенсорное управление",
@@ -698,18 +713,19 @@ const char *const ui_strings_ru_bobttz[UI_STR_COUNT] = {
     [UI_STR_ISO_COPYING] = "Копирование образа диска в приложение",
     [UI_STR_ISO_COPYING_LONG] =
         "Копирование образа диска в приложение. Это большой образ: процесс займет несколько минут.",
-    [UI_STR_SECTION_VARIANTS] = "Варианты игры",
+    [UI_STR_SECTION_CHAINS] = "Цепи",
+    [UI_STR_SECTION_SHADOWS] = "Тени",
+    [UI_STR_SECTION_CUTSCENES] = "Внутриигровые ролики",
     [UI_STR_OPT_VAR_TOUGHNESS] = "Сила теней",
     [UI_STR_OPT_VAR_TOUGHNESS_NOTE] =
-        "Американская версия: Сила теней соответствует североамериканскому диску и не возрастает по мере прохождения. Достижения не отключаются.",
+        "Американская версия: Сила теней соответствует NTSC диску и не возрастает по мере прохождения.",
     [UI_STR_VAL_VAR_AMERICAN] = "Американская",
     [UI_STR_VAL_VAR_NOT_TOUGHER] = "Не возрастает",
     [UI_STR_OPT_VAR_ONE_HIT] = "Один удар за взмах",
     [UI_STR_OPT_VAR_ONE_HIT_NOTE] =
-        "Каждый взмах оружия Ико может нанести урон тени только один раз. Отключает достижения.",
+        "Каждый взмах оружия Ико может нанести урон тени только один раз.",
     [UI_STR_OPT_VAR_NEVER_DODGE] = "Тени никогда не уклоняются",
-    [UI_STR_OPT_VAR_NEVER_DODGE_NOTE] =
-        "Тени никогда не уклоняются от замахов Ико. Отключает достижения.",
+    [UI_STR_OPT_VAR_NEVER_DODGE_NOTE] = "Тени никогда не уклоняются от замахов Ико.",
     [UI_STR_OPT_VAR_AGGRESSION] = "Агрессивность теней",
     [UI_STR_VAL_VAR_AGG_OWN] = "Оригинальная",
     [UI_STR_VAL_VAR_AGG_BOLD_PATIENT] = "Смелые, терпеливые",
@@ -717,15 +733,14 @@ const char *const ui_strings_ru_bobttz[UI_STR_COUNT] = {
     [UI_STR_VAL_VAR_AGG_WARY_PATIENT] = "Осторожные, терпеливые",
     [UI_STR_VAL_VAR_AGG_WARY_QUICK] = "Осторожные, быстрые",
     [UI_STR_OPT_VAR_AGGRESSION_NOTE] =
-        "Как сражаются Тени: смело или осторожно, терпеливо или быстро. Каждая Тень сохраняет свои привычки. Достижения не отключаются.",
+        "Как сражаются Тени: смело или осторожно, терпеливо или быстро. Каждая Тень сохраняет свои привычки.",
     [UI_STR_OPT_VAR_NO_HINTS] = "Без подсказок",
     [UI_STR_OPT_VAR_NO_HINTS_NOTE] =
-        "Йорда не даёт никаких подсказок о том, куда идти, как в североамериканской версии диска. Достижения не отключаются.",
+        "Йорда не даёт никаких подсказок о том, куда идти, как в североамериканской версии диска.",
     [UI_STR_OPT_VAR_BARRIER] = "Барьер Королевы",
     [UI_STR_VAL_VAR_HITS_5] = "5 ударов",
     [UI_STR_VAL_VAR_HITS_7] = "7 ударов",
-    [UI_STR_OPT_VAR_BARRIER_NOTE] =
-        "Сколько ударов нужно, чтобы пробить барьер Королевы? Достижения не отключаются.",
+    [UI_STR_OPT_VAR_BARRIER_NOTE] = "Сколько ударов нужно, чтобы пробить барьер Королевы?",
     [UI_STR_OPT_VAR_NO_LOOK] = "Отключить вращение камерой во время кат-сцен",
     [UI_STR_OPT_VAR_NO_LOOK_NOTE] =
         "Правый стик больше не позволяет вращать камерой во время кат-сцен. Достижения не отключаются.",
@@ -734,10 +749,10 @@ const char *const ui_strings_ru_bobttz[UI_STR_COUNT] = {
         "В кат-сценах могут отображаться ошибки; игра может показывать места, которые она никогда не планировала показывать. Отключает достижения.",
     [UI_STR_OPT_VAR_DEBUG_MENU] = "Отладочное меню",
     [UI_STR_OPT_VAR_DEBUG_MENU_NOTE] = "Собственное отладочное меню игры. Отключает достижения.",
-    /* longer than a note holds (two lines, 255 bytes): English until shortened */
-    [UI_STR_OPT_VAR_TOUGHNESS_NOTE_DEMO] = NULL,
+    [UI_STR_OPT_VAR_TOUGHNESS_NOTE_DEMO] =
+        "Тени отличаются от NTSC-версии. Сложность не возрастает по мере прохождения.",
     [UI_STR_OPT_VAR_NO_HINTS_NOTE_2001] =
-        "В этой версии игры нет никаких подсказок, поэтому ничего не меняется. Достижения не отключаются.",
+        "В этой версии игры нет никаких подсказок, поэтому ничего не меняется.",
     [UI_STR_OPT_VAR_NO_LOOK_NOTE_2001] =
         "В этой версии игры отсутствует возможность вращения камерой в кат-сценах, поэтому это ничего не меняет. Достижения не отключаются.",
     [UI_STR_GPU_HANG_TURNIP] =
@@ -752,30 +767,192 @@ const char *const ui_strings_ru_bobttz[UI_STR_COUNT] = {
     [UI_STR_STATES_SAVED] = "Состояние сохранено в слот %d",
     [UI_STR_STATES_LOADED] = "Состояние загружено из слота %d",
     [UI_STR_STATES_DELETED] = "Слот %d очищен",
-    /* translated from the earlier English ("A state belongs to this version of the game and this
-       disc."), which the later versions changed: English until it is translated again */
-    [UI_STR_STATES_NOTE] = NULL,
+    [UI_STR_STATES_NOTE] =
+        "Состояние относится к этому диску. Более поздние версии также могут его загрузить. Кнопки Влево и Вправо выбирают действие.",
     [UI_STR_STATES_PAUSE_FIRST] = "Приостановите игру для сохранения состояния",
     [UI_STR_STATES_REFUSED_BUILD] = "Сохранено в другой версии игры",
     [UI_STR_STATES_REFUSED_DISC] = "Сохранено в другом диске",
-    [UI_STR_STATES_REFUSED_SETTINGS] = "Настройки игрового процесса различаются: %s",
     [UI_STR_STATES_REFUSED_BUSY] = "Не сейчас: игра загружается или сохраняется",
     [UI_STR_STATES_REFUSED_CHECK] = "Состояние не удалось восстановить; игра продолжается.",
     [UI_STR_STATES_OFF] = "В этой сборке функция сохранения состояний отключена.",
     [UI_STR_STATES_TITLE_HINT] = "Сохранение выполняется из меню паузы.",
     [UI_STR_STATES_SAVE_FAILED] = "Состояние не удалось сохранить",
-    [UI_STR_STATES_XB_OLD] = NULL,    /* newer than the CSV: English */
-    [UI_STR_STATES_XB_CODE] = NULL,   /* newer than the CSV: English */
-    [UI_STR_STATES_XB_DATA] = NULL,   /* newer than the CSV: English */
-    [UI_STR_STATES_XB_PINNED] = NULL, /* newer than the CSV: English */
+    [UI_STR_STATES_XB_OLD] =
+        "Это состояние создано в версии %s,\nдо появления функции переноса состояний\nв новые версии.\nСохранения с карты памяти по-прежнему работают",
+    [UI_STR_STATES_XB_CODE] =
+        "Это состояние создано в версии %s.\nВерсия %s изменила этот участок игры.\nСохранения с карты памяти по-прежнему работают.",
+    [UI_STR_STATES_XB_DATA] =
+        "Это сохранение создано в версии %s.\nВерсия %s изменила способ хранения прогресса в памяти.\nСохранения с карты памяти по-прежнему работают.",
+    [UI_STR_STATES_XB_PINNED] =
+        "Это сохранение создано в версии %s.\nи могут использоваться только в этой версии.\nСохранения с карты памяти по-прежнему работают.",
     [UI_STR_OPT_EFFECT_GLOW_SMOOTH] = "Свечение между кадрами",
     /* longer than a note holds (two lines, 255 bytes): English until shortened */
     [UI_STR_EFFECT_GLOW_SMOOTH_NOTE] = NULL,
     [UI_STR_EFFECT_GLOW_SMOOTH_LOCKED] =
         "Имеет значение только при частоте кадров выше оригинальной, при включенном эффекте свечения.",
-    [UI_STR_OPT_EFFECT_MOTION_BLUR_STRENGTH] = NULL,  /* newer than the translation: English */
-    [UI_STR_EFFECT_MOTION_BLUR_STRENGTH_NOTE] = NULL, /* newer than the translation: English */
+    [UI_STR_OPT_EFFECT_MOTION_BLUR_STRENGTH] = "Интенсивность размытия движения",
+    [UI_STR_EFFECT_MOTION_BLUR_STRENGTH_NOTE] =
+        "Более низкие значения приводят к более быстрому исчезновению следа; 100 — как на PS2.",
+    [UI_STR_SECTION_UNUSED] = "Неиспользованные материалы",
+    [UI_STR_UNUSED_ARENA] = "Тестовая комната: Арена",
+    [UI_STR_UNUSED_ARENA_NOTE] =
+        "Комната разработчиков для тестов сражения с Тенями. У неё нет выхода: выходите, нажав «Старт», а затем «Конец игры».",
+    [UI_STR_UNUSED_CLIMB] = "Тестовая комната: Подъём",
+    [UI_STR_UNUSED_CLIMB_NOTE] =
+        "Комната разработчиков для тестов карабкания и ящиков. Для выхода нажмите «Старт», а затем «Конец игры».",
+    [UI_STR_UNUSED_MOVIE] = "Развлекательный ролик (в разрешении 576p)",
+    [UI_STR_UNUSED_MOVIE_NOTE] =
+        "Вторая копия ролика из главного меню (европейская ТВ-версия, которая никогда не транслировалась).",
+    [UI_STR_UNUSED_ART] = "Ранние арты",
+    [UI_STR_UNUSED_ART_NOTE] =
+        "Картинки титульного экрана ранней демоверсии, оставшиеся на диске и никогда не показанные.",
+    [UI_STR_UNUSED_ART_VER] = NULL,        /* newer than the CSV: English */
+    [UI_STR_UNUSED_ART_START] = NULL,      /* newer than the CSV: English */
+    [UI_STR_UNUSED_ART_COPYRIGHT] = NULL,  /* newer than the CSV: English */
+    [UI_STR_STATES_REFUSED_UNUSED] = NULL, /* newer than the CSV: English */
     [UI_STR_LANG_RU_BOBTTZ] = "Русский (bob-ttz)",
     [UI_STR_LANG_RU_COBRA838] = "Русский (cobra838)",
     [UI_STR_LANG_PT_BR] = "Português (Brasil) (ichagas7)",
+    /* ---- new since v0.10.2: English until translated (bob-ttz translated most of them, pull request 213) ---- */
+    /* Written by the maintainer, please check: UI_STR_NEWGAME_START, UI_STR_NEWGAME_START_SCREEN (above). */
+    [UI_STR_VAL_ALWAYS_SCENES] =
+        "Всегда, только кнопка Start в кат-сценах",            /* "Always, Start only in scenes" */
+    [UI_STR_OPT_UPSCALE] = "Масштабирование",                  /* "Upscaling" */
+    [UI_STR_VAL_UPSCALE_FSR1] = NULL,                          /* "FSR 1.0" */
+    [UI_STR_VAL_UPSCALE_FSR3] = NULL,                          /* "FSR 3.1" */
+    [UI_STR_OPT_UPSCALE_QUALITY] = "Качество масштабирования", /* "Upscaling quality" */
+    [UI_STR_VAL_UPSCALE_Q_NATIVE] = "Нативное",                /* "Native AA" */
+    [UI_STR_VAL_UPSCALE_Q_QUALITY] = "Качество",               /* "Quality" */
+    [UI_STR_VAL_UPSCALE_Q_BALANCED] = "Баланс",                /* "Balanced" */
+    [UI_STR_VAL_UPSCALE_Q_PERFORMANCE] = "Производительность", /* "Performance" */
+    [UI_STR_OPT_UPSCALE_SHARPNESS] = "Резкость",               /* "Sharpness" */
+    /* "FSR (AMD) sharpens a picture drawn smaller than the screen. Not with the CRT filter or at Window. 3.1: no Downsampling; anti-aliasing off." */
+    [UI_STR_OPT_UPSCALE_NOTE] =
+        "FSR (AMD) увеличивает резкость картинки. Не работает с ЭЛТ-фильтром или в окне. 3.1: без понижения разрешения, отключает сглаживание.",
+    [UI_STR_AA_FSR3] = " (выкл: FSR 3.1)",                  /* " (off: FSR 3.1)" */
+    [UI_STR_EXTRAS_DESKTOP] = "Добавить в меню приложений", /* "Add to the applications menu" */
+    [UI_STR_DESKTOP_ADDED] = "Добавлено в меню",            /* "Added to the menu" */
+    [UI_STR_DESKTOP_ADDED_BODY] =
+        "Игра теперь в вашем\nменю приложений", /* "The game is in your\napplications menu." */
+    [UI_STR_DESKTOP_FAILED] = "Не удалось добавить в меню", /* "Could not add to the menu" */
+    /* "The menu entry could not be\nwritten to your user folder." */
+    [UI_STR_DESKTOP_FAILED_BODY] = "Не удалось записать в пользовательскую папку",
+    [UI_STR_SECTION_COMBAT] = "Сражения",                /* "Combat" */
+    [UI_STR_OPT_VAR_AUTO_GUARD] = "Автоматический блок", /* "Automatic guard" */
+    /* "Off: Ico no longer blocks a Shadow’s attack from the front; it lands as an attack from behind does." */
+    [UI_STR_OPT_VAR_AUTO_GUARD_NOTE] = "Выкл: Ико больше не блокирует автоматически атаки спереди.",
+    [UI_STR_OPT_VAR_ATTACK_TURN] = "Разворот к теням", /* "Turn to face shadows" */
+    /* "Off: Ico swings straight ahead instead of turning toward the nearest Shadow; the swing’s reach is unchanged." */
+    [UI_STR_OPT_VAR_ATTACK_TURN_NOTE] =
+        "Выкл: Ико делает удар перед собой, а не автоматически разворачивается к ближайшей Тени.",
+    [UI_STR_OPT_VAR_SHADOWS_WAIT_DOWN] =
+        "Тени ждут пока Ико встанет", /* "Shadows wait while Ico is down" */
+    /* "Off: the Shadows no longer hold back while Ico is knocked down, and their swings land while he is on the ground and getting up." */
+    [UI_STR_OPT_VAR_SHADOWS_WAIT_DOWN_NOTE] =
+        "Выкл: Тени больше не выжидают, когда Ико сбит с ног, и бьют по нему пока он поднимается.",
+    [UI_STR_OPT_VAR_SWORD_COLOUR] = "Цвет светового меча", /* "Light sword colour" */
+    /* "Red: the light sword leaves a red trail, as its unused twin in the game does; nothing else changes. From the next room." */
+    [UI_STR_OPT_VAR_SWORD_COLOUR_NOTE] =
+        "Красный: световой меч оставляет красный след, как и его неиспользуемый аналог в игре; больше ничего не меняется. Со следующей комнаты.",
+    [UI_STR_OPT_VAR_WEAPON] = "Палка", /* "Stick" */
+    /* "Insect net: each stick is the game’s unused insect net; it cannot be swung or lit and never hurts a Shadow. From the next room." */
+    [UI_STR_OPT_VAR_WEAPON_NOTE] =
+        "Сачок: каждая палка в игре превращается в сачок. Его нельзя использовать как оружие или поджигать. Со следующей комнаты.",
+    [UI_STR_VAL_VAR_INSECT_NET] = "Сачок",                 /* "Insect net" */
+    [UI_STR_VAL_VAR_THIRD_JOURNEY] = "Третье путешествие", /* "Third journey" */
+    /* "Shadows as tough as on a third playthrough, which the game never reaches (twice the first journey’s)." */
+    [UI_STR_OPT_VAR_TOUGHNESS_NOTE_THIRD] =
+        "Сила теней как на 3-м прохождении, которого в игре нет (вдвое сильнее 1-го)",
+    [UI_STR_OPT_VAR_PEACEFUL] = "Мирные тени", /* "Peaceful shadows" */
+    /* "On: Shadows stay where they appear and never go after Ico or Yorda." */
+    [UI_STR_OPT_VAR_PEACEFUL_NOTE] = "Вкл: Тени стоят и не пытаются напасть на Ико или Йорду.",
+    [UI_STR_OPT_VAR_CHAIN_SPEED] = "Скорость раскачивания цепи", /* "Chain swing speed" */
+    /* "How fast a chain swings when Ico hangs on it and swings it. 1 is the slowest, 10 the fastest, 4 the game’s own. Achievements stay on." */
+    [UI_STR_OPT_VAR_CHAIN_SPEED_NOTE] =
+        "Сила раскачивания цепи под Ико. 1 — самое медленное, 10 — самое быстрое, 4 — стандартное значение. Достижения не отключаются.",
+    [UI_STR_OPT_VAR_CHAIN_DAMPING] = "Замедление раскачивания цепи", /* "Chain swing slowdown" */
+    /* "How quickly a swing dies down while Ico is not swinging the chain. 1 is the slowest, 10 the quickest, 4 the game’s own. Achievements stay on." */
+    [UI_STR_OPT_VAR_CHAIN_DAMPING_NOTE] =
+        "Скорость затухания раскачивания цепи. 1 — самое медленное, 10 — самое быстрое, 4 — стандартное значение. Достижения не отключаются.",
+    [UI_STR_VAL_VAR_CHAIN_ORIGINAL] = "4 (исходное)",     /* "4 (original)" */
+    [UI_STR_OPT_FREE_MOVEMENT] = "Свободное перемещение", /* "Free movement" */
+    /* "Press L2 to fly Ico with the sticks: the left stick moves him, the right stick goes up and down, L3 sets him on the floor. Switches achievements off." */
+    [UI_STR_OPT_FREE_MOVEMENT_NOTE] =
+        "Нажмите L2 чтобы взлететь. Левый стик управляет движением, правый перемещением вверх/вниз. L3 чтобы спуститься. Отключает достижения.",
+    [UI_STR_REMAP_ASK_HINT] = "Попросить у Йорды подсказку", /* "Ask Yorda for a hint" */
+    /* ---- new since v0.11.2: English until translated (bob-ttz translated most of them, pull request 213) ---- */
+    /* longer than a note holds (two lines): English until shortened: UI_STR_DIFF_HARD_NOTE (304 bytes, three lines) */
+    [UI_STR_DIFF] = "Уровень сложности", /* "Difficulty" */
+    /* "Sets the Shadows, the rescue time and the rules for this new journey. The save keeps the choice." */
+    [UI_STR_DIFF_NOTE] =
+        "Устанавливает Теней, время на спасениее и правила нового путешествия. Настройки сохраняются в файле сохранения.",
+    [UI_STR_DIFF_EASY] = "Легкий",             /* "Easy" */
+    [UI_STR_DIFF_NORMAL] = "Средний",          /* "Normal" */
+    [UI_STR_DIFF_HARD] = "Тяжёлый",            /* "Hard" */
+    [UI_STR_DIFF_CUSTOM] = "Пользовательский", /* "Custom" */
+    /* "Slower, gentler Shadows that never take Yorda and never dodge, and more time to rescue her." */
+    [UI_STR_DIFF_EASY_NOTE] =
+        "Тени медленнее, не уворачиваются, не уносят Йорду, а время на её спасение увеличено.",
+    [UI_STR_DIFF_NORMAL_NOTE] = "Как задумано разработчиками", /* "The game as it shipped." */
+    /* "Faster, tougher Shadows that attack together, no automatic guard, less time to rescue Yorda, game over after 3 knock-downs in a room." */
+    [UI_STR_DIFF_HARD_NOTE] = NULL,
+    [UI_STR_DIFF_CUSTOM_NOTE] =
+        "Ваши собственные правила. Изменяйте настройки в разделе «Кастомизация».", /* "Your own rules. Change every row under Customize." */
+    [UI_STR_DIFF_CUSTOMIZE] = "Кастомизация", /* "Customize" */
+    /* "Change each rule on its own. A mix that matches no preset shows as Custom." */
+    [UI_STR_DIFF_CUSTOMIZE_NOTE] =
+        "Меняйте каждое правило отдельно. Своя комбинация настроек отображается как «Пользовательский».",
+    [UI_STR_DIFF_RULES] = "Правила",        /* "Rules" */
+    [UI_STR_DIFF_NO_SHADOWS] = "Без Теней", /* "No Shadows" */
+    /* "On: Shadows never appear. Some story moments are lost or play differently without them." */
+    [UI_STR_DIFF_NO_SHADOWS_NOTE] =
+        "Вкл: Тени никогда не появляются. Некоторые сюжетные моменты теряются или воспринимаются иначе без них.",
+    [UI_STR_DIFF_KNOCK_LIMIT] = "Лимит сбивания с ног", /* "Knock-down limit" */
+    /* "A game over once Ico has been knocked down this many times. Off sets no limit." */
+    [UI_STR_DIFF_KNOCK_LIMIT_NOTE] = "Игра завершается, как только Ико сбивают с ног столько раз.",
+    [UI_STR_DIFF_KNOCK_SCOPE] = "Счётчик сбиваний с ног", /* "Knock-downs count" */
+    /* "Counts knock-downs in each room (starting again on entering one) or across the whole journey. Does nothing while the limit is Off." */
+    [UI_STR_DIFF_KNOCK_SCOPE_NOTE] =
+        "Счётчик относится к каждой комнате отдельно (сбрасывается при заходе в комнату) или ко всему путешествию",
+    [UI_STR_DIFF_SCOPE_ROOM] = "Каждая комната",     /* "Each room" */
+    [UI_STR_DIFF_SCOPE_JOURNEY] = "Всё путешествие", /* "Whole journey" */
+    [UI_STR_DIFF_PERMADEATH] = "Режим одной смерти", /* "Permadeath" */
+    /* "On: any game over ends this journey. There is no Continue, and the save can no longer be loaded." */
+    [UI_STR_DIFF_PERMADEATH_NOTE] =
+        "Вкл: любая смерть завершает путешествие. Сохранение невозможно больше загрузить",
+    [UI_STR_DIFF_LOCKED_NOTE] =
+        "Выбирается при начале путешествия",                   /* "Chosen when the journey began" */
+    [UI_STR_DIFF_LINE] = "Уровень сложности",                  /* "Difficulty" */
+    [UI_STR_DIFF_LINK] = "Уровень сложности",                  /* "Difficulty" */
+    [UI_STR_DIFF_TOAST_ENDED] = "Это путешествие завершилось", /* "This journey has ended." */
+    /* "Save states cannot be loaded on a Permadeath journey." */
+    [UI_STR_DIFF_STATES_LOCKED] =
+        "В режиме одной смерти невозможно\nзагрузить сохранённое состояние.",
+    [UI_STR_DIFF_WORD_PERMADEATH] = "Режим одной смерти", /* "Permadeath" */
+    /* "Save states cannot be made on a Permadeath journey." */
+    [UI_STR_DIFF_STATES_SAVE_LOCKED] = "В режиме одной смерти невозможно сохранить состояние",
+    /* ---- new since v0.11.8: English until translated ---- */
+    [UI_STR_STATES_CKPT_ROW] = NULL, /* "Loads from its last checkpoint" */
+    /* "Resumed at its last checkpoint\n(made by version %s)." */
+    [UI_STR_STATES_CKPT_LOADED] = NULL,
+    /* "Made by version %s: it cannot be\nresumed and has no checkpoint." */
+    [UI_STR_STATES_CKPT_NONE] = NULL,
+    [UI_STR_STATES_PAUSE_FIRST_LOAD] = NULL, /* "Pause the game to load this state" */
+    /* ---- new since v0.11.12: English until translated ---- */
+    [UI_STR_OPT_BUTTON_PICTURES] = NULL, /* "Button pictures" */
+    /* "The buttons shown in menus and photo mode. Auto follows the controller you used last." */
+    [UI_STR_BUTTON_PICTURES_NOTE] = NULL,
+    /* ---- new since v0.11.14: English until translated ---- */
+    [UI_STR_OPT_ZOOM_TYPE] = NULL,   /* "Zoom type" */
+    [UI_STR_VAL_ZOOM_HOLD] = NULL,   /* "Hold" */
+    [UI_STR_VAL_ZOOM_TOGGLE] = NULL, /* "Toggle" */
+    /* "Hold: the camera zooms in while you keep R2 held. Toggle: press R2 once to zoom in, press again to zoom out." */
+    [UI_STR_ZOOM_TYPE_NOTE] = NULL,
+    [UI_STR_OPT_CAMERA_RESET] = NULL, /* "Camera reset" */
+    /* "On: click the right stick (R3) to bring the camera straight back to Ico." */
+    [UI_STR_CAMERA_RESET_NOTE] = NULL,
+    /* ---- new since v0.11.15: English until translated ---- */
+    [UI_STR_OPT_YORDA_LOOK] = NULL, /* "Look at Yorda" */
+    /* "Ico and the camera turn to Yorda without calling her. Hold: while you hold L3. Toggle: L3 starts and stops it." */
+    [UI_STR_YORDA_LOOK_NOTE] = NULL,
 };

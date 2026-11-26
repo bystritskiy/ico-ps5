@@ -5,7 +5,11 @@
 #include "../rhi_backend.h"
 #include "../rhi_adapter.h"
 #include "../rhi_driver_version.h"
+#include "../rhi_pass_row.h"
+#include "../rhi_pass_crumb.h"
+#include "../rhi_tile_rule.h"
 #include "../rhi_bind_cache.h"
+#include "../rhi_subpass_verdict.h"
 #include <stdlib.h>
 #include <string.h>
 
@@ -88,6 +92,10 @@ static int vkr_env_switch(const char *name)
                ? 0
                : -1;
 }
+
+static void vkr_tile_rule_apply(void); /* the barrier scopes and the wait, below */
+static void vkr_budget_line(void);     /* VK_EXT_memory_budget's line, below */
+static bool vkr_loader_custom(void);   /* a driver the program loaded, below */
 
 /* ------------------------------------------------------------ device loss
  * The report vkr_check prints once, at the first VK_ERROR_DEVICE_LOST
@@ -514,6 +522,7 @@ static bool s_debugUtilsExt;
  * enabled on the instance; its two queries, found through the instance
  * (NULL when the extension is not enabled: a 1.1 or later instance) */
 static PFN_vkGetPhysicalDeviceFeatures2KHR s_features2Khr;
+
 static PFN_vkGetPhysicalDeviceProperties2KHR s_props2Khr;
 
 /* Whether the core Vulkan 1.1 queries (vkGetPhysicalDeviceFeatures2,
@@ -539,6 +548,7 @@ static bool vkr_has_props2(VkPhysicalDevice pd)
 }
 
 #ifndef ICO_RHI_MOLTENVK
+
 /* ICO_VK_FAKE_API=1.0: the core Vulkan 1.1 entry points volk loaded,
  * cleared, as a Vulkan 1.0 loader and driver have none (the system's loader
  * still hands out the instance-level ones for an instance created at 1.0).
@@ -578,6 +588,7 @@ static void vkr_fake_10_entry_points(bool device)
     vkTrimCommandPool = NULL;
     vkUpdateDescriptorSetWithTemplate = NULL;
 }
+
 #endif
 
 /* vkGetPhysicalDeviceFeatures2 by the core or the KHR entry point; with
@@ -904,6 +915,101 @@ static bool vkr_format_ok(VkPhysicalDevice pd, VkFormat f, VkFormatFeatureFlags 
     return (fp.optimalTilingFeatures & need) == need;
 }
 
+/* External compute (rhi_native.h RhiComputeCaps), answered once at device
+ * creation: the device's API version (as the RHI uses it, so
+ * ICO_VK_FAKE_API lowers it) is 1.1 or later, the compute stage takes
+ * subgroup basic and arithmetic operations, the graphics queue's family
+ * also takes compute work, RGBA16F and RGBA16 UNORM are storage images,
+ * and the two without-format features are enabled.  shaderFloat16 is
+ * reported as offered (VkPhysicalDeviceVulkan12Features, 1.2 and later); the
+ * device is made with it (and with shaderInt16, which the upscaler's 16-bit
+ * shaders declare) only with the FidelityFX extensions (vkr_create_device,
+ * ICO_FFX builds). */
+static void vkr_probe_compute(const VkPhysicalDeviceFeatures avail)
+{
+    RhiComputeCaps *c = &g_vkr.compute;
+    memset(c, 0, sizeof(*c));
+    g_vkr.queueCompute = false;
+    g_vkr.computeFloat16 = false;
+    uint32_t qn = 0;
+    vkGetPhysicalDeviceQueueFamilyProperties(g_vkr.phys, &qn, NULL);
+    VkQueueFamilyProperties *qp = calloc(qn ? qn : 1, sizeof(*qp));
+    if (qp) {
+        vkGetPhysicalDeviceQueueFamilyProperties(g_vkr.phys, &qn, qp);
+        g_vkr.queueCompute =
+            g_vkr.queueFamily < qn && (qp[g_vkr.queueFamily].queueFlags & VK_QUEUE_COMPUTE_BIT);
+        free(qp);
+    }
+    c->apiVersionOk = g_vkr.apiVersion >= VK_API_VERSION_1_1;
+    VkPhysicalDeviceSubgroupProperties sg = {
+        .sType = VK_STRUCTURE_TYPE_PHYSICAL_DEVICE_SUBGROUP_PROPERTIES};
+    if (c->apiVersionOk && vkr_has_props2(g_vkr.phys)) {
+        VkPhysicalDeviceProperties2 p2 = {.sType = VK_STRUCTURE_TYPE_PHYSICAL_DEVICE_PROPERTIES_2,
+                                          .pNext = &sg};
+        vkr_props2(g_vkr.phys, &p2);
+        const VkSubgroupFeatureFlags need =
+            VK_SUBGROUP_FEATURE_BASIC_BIT | VK_SUBGROUP_FEATURE_ARITHMETIC_BIT;
+        c->subgroupOk = (sg.supportedStages & VK_SHADER_STAGE_COMPUTE_BIT) &&
+                        (sg.supportedOperations & need) == need;
+    }
+    c->storageFormatsOk = vkr_format_ok(g_vkr.phys, VK_FORMAT_R16G16B16A16_SFLOAT,
+                                        VK_FORMAT_FEATURE_STORAGE_IMAGE_BIT) &&
+                          vkr_format_ok(g_vkr.phys, VK_FORMAT_R16G16B16A16_UNORM,
+                                        VK_FORMAT_FEATURE_STORAGE_IMAGE_BIT) &&
+                          avail.shaderStorageImageReadWithoutFormat == VK_TRUE &&
+                          avail.shaderStorageImageWriteWithoutFormat == VK_TRUE;
+    if (g_vkr.apiVersion >= VK_API_VERSION_1_2 && vkr_has_props2(g_vkr.phys)) {
+        VkPhysicalDeviceVulkan12Features f12 = {
+            .sType = VK_STRUCTURE_TYPE_PHYSICAL_DEVICE_VULKAN_1_2_FEATURES};
+        VkPhysicalDeviceFeatures2 q = {.sType = VK_STRUCTURE_TYPE_PHYSICAL_DEVICE_FEATURES_2,
+                                       .pNext = &f12};
+        vkr_features2(g_vkr.phys, &q);
+        g_vkr.computeFloat16 = f12.shaderFloat16 == VK_TRUE;
+    }
+    c->float16 = g_vkr.computeFloat16;
+    c->externalExts = g_vkr.externalExts;
+    c->ok = c->apiVersionOk && c->subgroupOk && c->storageFormatsOk && g_vkr.queueCompute;
+    c->why = c->ok                 ? NULL
+             : !c->apiVersionOk    ? "Vulkan 1.1 is required"
+             : !g_vkr.queueCompute ? "the graphics queue takes no compute work"
+             : !c->subgroupOk      ? "no compute subgroup basic and arithmetic operations"
+                                   : "no RGBA16 storage images or storage image access "
+                                     "without a format";
+    VKR_LOG("external compute: %s%s%s (api 1.1 %s, subgroup %s, storage formats %s, queue compute "
+            "%s, float16 offered %s, the FidelityFX extensions enabled %s)",
+            c->ok ? "offered" : "not offered", c->ok ? "" : ": ", c->ok ? "" : c->why,
+            c->apiVersionOk ? "yes" : "no", c->subgroupOk ? "yes" : "no",
+            c->storageFormatsOk ? "yes" : "no", g_vkr.queueCompute ? "yes" : "no",
+            c->float16 ? "yes" : "no", c->externalExts ? "yes" : "no");
+}
+
+/* Compute pipelines that store (rhi.h RhiLimits.computeStores: the VU
+ * record written by compute dispatches where the vertex shaders cannot
+ * store, port/render/rd_vu_record.c), after vkr_probe_compute: wherever
+ * the graphics queue's family takes compute work.  A compute shader's
+ * storage buffer writes need no feature bit (unlike the vertex stage's
+ * vertexPipelineStoresAndAtomics), and nothing here depends on the
+ * external compute's set (RhiComputeCaps.ok: subgroups, storage image
+ * formats).  ICO_VK_FAKE_NO_COMPUTE_STORES=1 leaves it off, as on a device
+ * without it (tests: rhi_vk_nocompute, rd_vuprepass_selftest_nocompute_
+ * fallback); the device table's noComputeRecord column (vkr_vu_plain_only)
+ * turns it off for a listed device later, in vkr_fill_limits.  The line
+ * says which, so a reporter's log names the record's write by itself. */
+static void vkr_compute_stores(void)
+{
+    const char *fake = getenv("ICO_VK_FAKE_NO_COMPUTE_STORES");
+    const bool fakeOff = fake && fake[0] && fake[0] != '0';
+    g_vkr.computeStores = g_vkr.queueCompute && !fakeOff;
+    snprintf(g_vkr.computeStoresOff, sizeof g_vkr.computeStoresOff, "%s",
+             g_vkr.computeStores ? ""
+             : fakeOff           ? "ICO_VK_FAKE_NO_COMPUTE_STORES"
+                                 : "the graphics queue takes no compute work");
+    VKR_LOG("compute record stores: %s%s%s (queue compute %s, vertex stores %s)",
+            g_vkr.computeStores ? "offered" : "not offered", g_vkr.computeStores ? "" : ": ",
+            g_vkr.computeStoresOff, g_vkr.queueCompute ? "yes" : "no",
+            g_vkr.vertexStores ? "yes" : "no");
+}
+
 /* The one read of ICO_VK_FAKE_LIMITS.  =min is noted for vkr_fill_limits
  * (the RhiLimits at the spec's required values).  =mali clamps the
  * device's limits to a Mali-G68's (Samsung A36 class: four descriptor
@@ -1011,10 +1117,12 @@ static VkFormat vkr_choose_depth_stencil(VkPhysicalDevice pd, bool *fake)
  * without the extension has neither: "driver (unnamed)", driverID 0, which
  * rhi_driver_version.h reads as unknown, the vendor id deciding), and
  * driverVersion decoded the vendor's way (rhi_driver_version.h) */
-static char s_driverText[600];
+static char s_driverText[768];
+
 /* the robust access in force, for RhiLimits.robustText, and whether it is
    off by the default (RhiLimits.robustDefaultOff) */
 static char s_robustText[160];
+
 static bool s_robustDefaultOff;
 
 static void vkr_driver_text(VkPhysicalDevice pd, const VkPhysicalDeviceProperties *p)
@@ -1048,10 +1156,27 @@ static void vkr_driver_text(VkPhysicalDevice pd, const VkPhysicalDevicePropertie
             snprintf(g_vkr.compilerVersion, sizeof g_vkr.compilerVersion, "%.*s", (int)n, c);
         }
     }
-    snprintf(s_driverText, sizeof s_driverText, "; device %04x:%04x; driver %s%s%s, version %s",
+    /* one line in the log (issue 123: Qualcomm's text has newlines); the
+     * compiler line above was cut at the line's end first */
+    rhi_text_one_line(dp.driverName);
+    rhi_text_one_line(dp.driverInfo);
+    snprintf(g_vkr.driverName, sizeof g_vkr.driverName, "%s", dp.driverName);
+    /* a Mesa driver writes its Mesa version into driverInfo ("Mesa 25.3.0-devel
+     * (git-bbdd688)"); a build from Mesa's main branch carries "-devel" */
+    rhi_mesa_version_parse(dp.driverName, dp.driverInfo, &g_vkr.mesa);
+    char mesaText[40] = "";
+    if (g_vkr.mesa.known) {
+        /* the summary line and the device line name the Mesa version apart
+         * from the driver's own text: a build's driverInfo may carry only a
+         * commit, and the version is what a report is compared by */
+        char m[32];
+        snprintf(mesaText, sizeof mesaText, ", %s",
+                 rhi_mesa_version_text(&g_vkr.mesa, m, sizeof m));
+    }
+    snprintf(s_driverText, sizeof s_driverText, "; device %04x:%04x; driver %s%s%s, version %s%s",
              (unsigned)p->vendorID, (unsigned)p->deviceID,
              dp.driverName[0] ? dp.driverName : "(unnamed)", dp.driverInfo[0] ? " " : "",
-             dp.driverInfo, ver);
+             dp.driverInfo, ver, mesaText);
 }
 
 /* Whether the device has timeline semaphores at the version it is used at
@@ -1202,7 +1327,9 @@ static int vkr_rate_device(VkPhysicalDevice pd, uint32_t *outQueue, const char *
    adapter (rhi_set_adapter_wanted, from the dispatcher before each
    rhi_init) */
 static RhiAdapterInfo s_adapters[RHI_MAX_ADAPTERS];
+
 static uint32_t s_adapterCount;
+
 static char s_adapterWanted[256];
 
 /* The device: ICO_VK_DEVICE=<index> or a substring of the device name
@@ -1320,6 +1447,11 @@ static bool vkr_pick_device(void)
     g_vkr.moltenvk =
         g_vkr.fakeMoltenvk || rhi_driver_is_moltenvk(g_vkr.props.vendorID, g_vkr.driverID, 0);
 #endif
+    /* the device table (vk_device_table.c, docs/port/DEVICE_TABLE.md): the
+       rows this device matches, with the tests' fakes, once, before every
+       rule that reads them (g_vkr.devTable), and their lines */
+    vkr_device_table_start(s_driverText[0] == ';' ? s_driverText + 2 : NULL, vkr_loader_custom());
+    vkr_tile_rule_apply(); /* the barrier scopes and the submission wait (rhi_tile_rule.h) */
     vkGetPhysicalDeviceMemoryProperties(g_vkr.phys, &g_vkr.memProps);
     /* the heaps, and the one uploads (the renderer's ring, texture
        pack uploads) come from: a device-local, host-visible type first
@@ -1425,7 +1557,419 @@ static uint32_t vkr_msaa_counts(void)
     return counts | 1u;
 }
 
-static bool vkr_is_tiler(uint32_t vendor); /* below, with the vendor table */
+/* The tile-based phones' rule and the loss ladder (rhi_tile_rule.h, issues
+ * 179 and 211): the barrier scopes and the submission wait this device
+ * runs (VkrState.tile), decided once the device is picked and before it is
+ * made (the calibrated timestamps' extension follows the wait, vk_tsclock.c
+ * vkr_tsclock_pick).  A tile-based phone GPU (rhi_tile_phone): every
+ * Android GPU, and iOS through MoltenVK; a Mac (MoltenVK on macOS) and a
+ * Qualcomm or Turnip desktop keep v0.11.3's narrow scopes and polled wait.
+ * No setting: the tests alone pick, ICO_VK_FAKE_VENDOR=<id> (0x13B5 for Arm)
+ * a phone GPU of that vendor for this rule alone, nothing else, and
+ * ICO_VK_FAKE_SCOPES=wide or narrow the scopes alone on any device.  Two
+ * lines, each switch's value and why, and a third on a phone after a lost
+ * start (the VU pre-pass off for this start, RhiLimits.vuPrepassLoss): the
+ * reporter's next log is read by them (with them present and no loss, the
+ * cause was one of the two). */
+static void vkr_tile_rule_apply(void)
+{
+    /* the phone: the device table's TILE_PHONE (rows android, every Android
+       GPU, and ios, Apple's phone and tablet GPUs through MoltenVK; the
+       tests' ICO_VK_FAKE_VENDOR a tile-based vendor's id), evaluated at the
+       pick (vk_device_table.c) */
+    const bool faked = g_vkr.devFakes.vendorSet != 0;
+    const uint32_t vendor = faked ? g_vkr.devFakes.vendor : g_vkr.props.vendorID;
+    const char *name = rhi_tile_vendor_name(vendor);
+    const bool phone = g_vkr.devTable->value[RHI_DC_TILE_PHONE] != 0;
+    char device[80];
+    snprintf(device, sizeof device, "%s, vendor 0x%04X%s",
+             g_vkr.moltenvk ? "MoltenVK"
+             : name         ? name
+                            : "an Android GPU",
+             (unsigned)vendor, faked ? " (ICO_VK_FAKE_VENDOR)" : "");
+    const char *row = getenv("ICO_LOSS_ROW");
+    rhi_tile_rule(getenv("ICO_VK_FAKE_SCOPES"), phone, device, rhi_tile_loss_row(row), &g_vkr.tile);
+    VKR_LOG("barriers: %s: %s", g_vkr.tile.wideWhy,
+            g_vkr.tile.wide
+                ? "every buffer barrier waits for and is seen by the vertex input, vertex, "
+                  "fragment, compute and copy stages, and each command list begins with one "
+                  "barrier over attachment and copy writes; the renderer uploads the "
+                  "textures and the fog's table before the VU pre-pass"
+                : "each buffer barrier names only the stages that can touch the buffer, a "
+                  "command list's opening barrier only attachments and its closing one the "
+                  "copies; the renderer uploads the textures and the fog's table "
+                  "after the VU pre-pass");
+    VKR_LOG("submission wait: %s: %s", g_vkr.tile.polledWhy,
+            g_vkr.tile.polled
+                ? "a frame slot's wait that blocks past 50 ms becomes 4 ms timed waits reading "
+                  "its timestamps and the submission counter (the trace of a stalled replay's "
+                  "GPU clock line), calibrated timestamps enabled where offered"
+                : "one wait without a time limit for a frame slot, nothing of its work read "
+                  "while it runs: a stalled replay's GPU clock line has no trace (which "
+                  "of its stamps were written while the CPU waited, the longest stretch with "
+                  "nothing new, a second run of its first list are not measured) and calibrated "
+                  "timestamps are not enabled (a stalled replay's start is placed from its "
+                  "wait's end, not on the CPU's clock)");
+    if (g_vkr.tile.noPrepass) {
+        VKR_LOG("VU pre-pass: off for this start on a tile-based phone GPU (%s; %s; nothing "
+                "written to the settings): the renderer's VU pre-pass line says so",
+                device, g_vkr.tile.prepassWhy);
+    }
+}
+
+/* The driver rows and their override (rhi_pass_row.h) over legacyPasses
+ * as the device's version and extensions set it: VkRenderPass objects on a
+ * device of a row (Intel's Windows driver at Vulkan 1.3.215 or older,
+ * whose vkCmdBeginRendering crashed in the reporter's first picture after
+ * a live switch to 2x; Qualcomm's own driver, whose GPU hangs inside a
+ * dynamic rendering pass about once in 500 pictures, issue 123), or
+ * wherever ICO_VK_LEGACY_PASSES ([dev] legacy_passes) is 1; with it 0,
+ * dynamic rendering wherever offered.
+ * One line when either changes the path or the override asks for what the
+ * device cannot give.  Without the VkRenderPass path in the build
+ * (VKR_LEGACY_PASSES 0) neither applies. */
+static void vkr_pass_row_apply(void)
+{
+    g_vkr.legacyWhy = NULL;
+    g_vkr.passRowHit = false;
+    g_vkr.passRowQcom = false;
+#if VKR_LEGACY_PASSES
+    const int ov = rhi_vk_pass_override(getenv("ICO_VK_LEGACY_PASSES"));
+    /* the device table's PASS_OBJECTS (rows intel-windows-1.3.215 and
+       qualcomm-android, rhi_pass_row.h), evaluated at the pick: the store
+       passes' throwaway targets follow Intel's row whatever the path
+       (RhiLimits.storePassTarget); Qualcomm's row moves only the passes
+       (issue 123).  ICO_VK_FAKE_PASS_ROW=qualcomm (the tests alone) puts any
+       device off Intel's row on Qualcomm's, nothing else of it faked */
+    const bool fakeQcom = g_vkr.devFakes.passRowQualcomm != 0;
+#ifdef __ANDROID__
+    const int android = 1;
+#else
+    const int android = 0;
+#endif
+    const char *intelRow, *qcomRow;
+    rhi_device_pass_rows(g_vkr.devTable, &intelRow, &qcomRow);
+    if (!intelRow && !qcomRow && !android &&
+        rhi_vk_pass_row_qualcomm(g_vkr.props.vendorID, g_vkr.driverID, 1) != NULL) {
+        VKR_LOG("render passes: dynamic rendering on Qualcomm's own driver: its row (VkRenderPass "
+                "objects, issue 123) is Android's alone, its evidence the Adreno 740 and 710 "
+                "there");
+    }
+    const char *row = intelRow ? intelRow : qcomRow;
+    g_vkr.passRowHit = intelRow != NULL;
+    if (g_vkr.legacyPasses) {
+        if (ov == 0) {
+            VKR_LOG("render passes: [dev] legacy_passes = false (ICO_VK_LEGACY_PASSES=0) asks for "
+                    "dynamic rendering, which this device does not offer: VkRenderPass objects");
+        }
+        return;
+    }
+    if (ov == 1) {
+        g_vkr.legacyPasses = true;
+        g_vkr.legacyWhy = "[dev] legacy_passes = true";
+        VKR_LOG("render passes: VkRenderPass objects, not dynamic rendering: [dev] legacy_passes "
+                "= true (ICO_VK_LEGACY_PASSES=1)%s",
+                row ? "; the driver row gives them too" : "");
+    } else if (row && ov == 0) {
+        VKR_LOG("render passes: dynamic rendering on %s, as [dev] legacy_passes = false "
+                "(ICO_VK_LEGACY_PASSES=0) asks (the row would give VkRenderPass objects)",
+                row);
+    } else if (row) {
+        g_vkr.legacyPasses = true;
+        g_vkr.legacyWhy = row;
+        g_vkr.passRowQcom = qcomRow != NULL; /* RhiLimits.passObjectsRow */
+        VKR_LOG("render passes: VkRenderPass objects, not dynamic rendering: %s%s; [dev] "
+                "legacy_passes = false (ICO_VK_LEGACY_PASSES=0) gives dynamic rendering",
+                row, fakeQcom && qcomRow ? " (ICO_VK_FAKE_PASS_ROW=qualcomm)" : "");
+    }
+#endif
+}
+
+/* The subpass read (vk_internal.h vkr_subpass_class, vk_renderpass.c;
+ * RhiLimits.localReadSubpass): on the VkRenderPass path, a pass of one
+ * RGBA8 colour target and a depth target reads its own colour as an input
+ * attachment of its one subpass after a barrier its self-dependency
+ * allows, all of it Vulkan 1.0 core, so DATE's stencil setup
+ * (port/render/rd_replay_tiler.c) no longer ends the scene's pass for an
+ * R8 snapshot on a device without dynamic rendering (issue 179's
+ * Mali-G52 on Vulkan 1.1; the Adreno 740 under Qualcomm's row, the Intel
+ * driver row).  Its shape is the device's for the run: every RGBA8 render
+ * target in GENERAL with the input-attachment usage, which a driver may
+ * answer by keeping its framebuffer compression off, and a new kind of GPU
+ * work on drivers that lost the device before.  So it is decided here per
+ * device and driver (../rhi_subpass_verdict.h): an earlier start's probe's
+ * verdict, kept in a file beside the pipeline cache file, or, with none,
+ * on for this start's probe (DATE's self-test, then the read timed against
+ * the R8 snapshot and a plain pass on a target of the shape timed against
+ * one without it: port/render/rd_subpass_probe.c), the mark "probing"
+ * written first so a start that ends inside it (a loss, a GPU hang, a
+ * crash) leaves the read refused for good.  Off without a probe where it
+ * cannot decide: no GPU timestamps (the PowerVR B-Series), no file (the
+ * tools and the tests; ICO_VK_SUBPASS_VERDICT=<file> names one for the
+ * tests).  [dev] subpass_read = on (ICO_VK_SUBPASS_READ=1) forces it on
+ * any VkRenderPass path without the probe (DATE's self-test still
+ * decides), = off (=0) forces it off; ICO_VK_FAKE_NO_DST keeps it off.
+ * One line either way. */
+static void vkr_subpass_read_decide(void)
+{
+    g_vkr.subpassRead = false;
+    g_vkr.subpassRoute = g_vkr.subpassProbe = g_vkr.subpassOffDefault = false;
+    g_vkr.subpassPasses = g_vkr.subpassSkipped = g_vkr.subpassMisfit = 0;
+    g_vkr.subpassWhy[0] = g_vkr.subpassFile[0] = g_vkr.subpassKey[0] = '\0';
+    if (!g_vkr.legacyPasses) {
+        return;
+    }
+    g_vkr.subpassRoute = !g_vkr.localRead;
+    const char *env = getenv("ICO_VK_SUBPASS_READ");
+    const int ask = env && env[0] ? (env[0] != '0' ? 1 : 0) : -1;
+    const char *noDst = getenv("ICO_VK_FAKE_NO_DST");
+    const bool fake = noDst && noDst[0] && noDst[0] != '0';
+    /* the verdict file: the tests' name, else beside the pipeline cache */
+    const char *named = getenv("ICO_VK_SUBPASS_VERDICT");
+    if (named && named[0]) {
+        snprintf(g_vkr.subpassFile, sizeof g_vkr.subpassFile, "%s", named);
+    } else if (!rhi_subpass_verdict_path(g_vkr.subpassFile, sizeof g_vkr.subpassFile,
+                                         vkr_pipeline_cache_path())) {
+        g_vkr.subpassFile[0] = '\0';
+    }
+    rhi_subpass_verdict_key(g_vkr.subpassKey, sizeof g_vkr.subpassKey, g_vkr.props.vendorID,
+                            g_vkr.props.deviceID, g_vkr.props.driverVersion);
+    /* GPU timestamps on the game's queue (rhi_init reads them again for
+       g_vkr.timestamps after the device is made) */
+    bool stamps = false;
+    {
+        uint32_t qn = 0;
+        vkGetPhysicalDeviceQueueFamilyProperties(g_vkr.phys, &qn, NULL);
+        VkQueueFamilyProperties *qp = calloc(qn ? qn : 1, sizeof(*qp));
+        if (qp) {
+            vkGetPhysicalDeviceQueueFamilyProperties(g_vkr.phys, &qn, qp);
+            stamps = g_vkr.queueFamily < qn && qp[g_vkr.queueFamily].timestampValidBits > 0 &&
+                     g_vkr.props.limits.timestampPeriod > 0.0f;
+            free(qp);
+        }
+    }
+    char text[RHI_SUBPASS_VERDICT_MAX], prevWhy[RHI_SUBPASS_VERDICT_MAX];
+    const bool haveFile = g_vkr.subpassFile[0] != '\0';
+    const RhiSubpassVerdict prev =
+        haveFile && ask < 0 && rhi_subpass_verdict_read(g_vkr.subpassFile, text, sizeof text)
+            ? rhi_subpass_verdict_parse(text, g_vkr.subpassKey, prevWhy, sizeof prevWhy)
+            : RHI_SUBPASS_NONE;
+    if (prev == RHI_SUBPASS_NONE) {
+        prevWhy[0] = '\0';
+    }
+    /* the device's class (rhi_subpass_verdict.h: the probe's default this
+       release): the device table's SUBPASS_CLASS (rows intel-windows-1.3.215,
+       qualcomm and arm; ICO_VK_FAKE_VENDOR names the vendor of the last two
+       for the tests' fakes), Qualcomm's where its row holds the passes */
+    const int dtClass = rhi_device_subpass_class(g_vkr.devTable, g_vkr.passRowQcom);
+    const RhiSubpassClass cls = dtClass == RHI_DT_SUBPASS_INTEL  ? RHI_SUBPASS_CLASS_INTEL
+                                : dtClass == RHI_DT_SUBPASS_QCOM ? RHI_SUBPASS_CLASS_QCOM
+                                : dtClass == RHI_DT_SUBPASS_ARM  ? RHI_SUBPASS_CLASS_ARM
+                                                                 : RHI_SUBPASS_CLASS_OTHER;
+    const char *ce = getenv("ICO_VK_SUBPASS_PROBE_CLASS");
+    const int classEnv = ce && ce[0] ? (ce[0] != '0' ? 1 : 0) : -1;
+    RhiSubpassWrite write = RHI_SUBPASS_WRITE_NOTHING;
+    const RhiSubpassDecision d =
+        rhi_subpass_decide(ask, g_vkr.subpassRoute, fake, haveFile, stamps, cls, classEnv, prev,
+                           prevWhy, g_vkr.subpassWhy, sizeof g_vkr.subpassWhy, &write);
+    g_vkr.subpassOffDefault = d == RHI_SUBPASS_OFF_DEFAULT;
+    if (write != RHI_SUBPASS_WRITE_NOTHING) {
+        char line[RHI_SUBPASS_VERDICT_MAX];
+        if (write == RHI_SUBPASS_WRITE_PROBING) {
+            (void)rhi_subpass_verdict_line(line, sizeof line, g_vkr.subpassKey, RHI_SUBPASS_PROBING,
+                                           "the read's shape on from the device's start");
+        } else {
+            (void)rhi_subpass_verdict_line(line, sizeof line, g_vkr.subpassKey, RHI_SUBPASS_REFUSED,
+                                           "the start that probed it ended before its verdict");
+        }
+        if (!rhi_subpass_verdict_write(g_vkr.subpassFile, line)) {
+            /* a mark that cannot be kept: no probe (an end inside it would
+               not be known at the next start) */
+            if (write == RHI_SUBPASS_WRITE_PROBING) {
+                snprintf(g_vkr.subpassWhy, sizeof g_vkr.subpassWhy,
+                         "its probe's mark could not be written to %.200s, so no probe",
+                         g_vkr.subpassFile);
+                g_vkr.subpassRead = false;
+                VKR_LOG("render passes: the subpass read off (%s): a read of a pass's own colour "
+                        "ends the pass for a copy (DATE's snapshot)",
+                        g_vkr.subpassWhy);
+                return;
+            }
+            VKR_LOG("render passes: the subpass read's verdict could not be written to %s",
+                    g_vkr.subpassFile);
+        }
+    }
+    g_vkr.subpassRead = d == RHI_SUBPASS_ON || d == RHI_SUBPASS_PROBE;
+    g_vkr.subpassProbe = d == RHI_SUBPASS_PROBE;
+    if (g_vkr.subpassRead) {
+        VKR_LOG("render passes: the subpass read: a pass of one RGBA8 colour target and a depth "
+                "target names its colour as its subpass's input attachment 0, in GENERAL, with "
+                "a by-region self-dependency (Vulkan 1.0), so a read of the pass's own colour "
+                "(DATE's stencil setup) does not end the pass (%s; device and driver %s)%s",
+                g_vkr.subpassWhy, g_vkr.subpassKey,
+                g_vkr.legacyWhy ? "; on VkRenderPass objects the driver row or [dev] "
+                                  "legacy_passes chose"
+                                : "");
+    } else {
+        VKR_LOG("render passes: the subpass read off%s (%s; device and driver %s): a read of a "
+                "pass's own colour ends the pass for a copy (DATE's snapshot)",
+                g_vkr.subpassOffDefault ? " by default" : "", g_vkr.subpassWhy, g_vkr.subpassKey);
+    }
+}
+
+/* At rhi_shutdown: a start that made the read's shape for its probe and
+ * never wrote the verdict (the game quit before the self-tests, a tool)
+ * takes its mark away, so the next start probes again; after a device loss
+ * the mark stays (the next start refuses the read for good) */
+static void vkr_subpass_probe_unmark(void)
+{
+    if (!g_vkr.subpassProbe || g_vkr.deviceLost || !g_vkr.subpassFile[0]) {
+        return;
+    }
+    char text[RHI_SUBPASS_VERDICT_MAX], why[RHI_SUBPASS_VERDICT_MAX];
+    if (rhi_subpass_verdict_read(g_vkr.subpassFile, text, sizeof text) &&
+        rhi_subpass_verdict_parse(text, g_vkr.subpassKey, why, sizeof why) == RHI_SUBPASS_PROBING) {
+        (void)rhi_subpass_verdict_write(g_vkr.subpassFile, NULL);
+        VKR_LOG("render passes: the subpass read's probe did not run at this start (no verdict): "
+                "its mark taken away, the next start probes");
+    }
+}
+
+/* What the device offers that the stall diagnostics cannot use today, one
+ * line at the device's start (issue 123: whether the compositor can preempt
+ * the game's queue, whether the stalls could be placed on the CPU's clock).
+ * Read-only queries, nothing enabled: the calibrated time domains (the
+ * physical-device query vk_tsclock.c makes before it enables the
+ * extension, here whatever the submission wait), the global queue
+ * priority extensions and the game's queue family's priorities where the
+ * query is offered (VkQueueFamilyGlobalPriorityPropertiesKHR, through the
+ * extended queries), and the priority the game's one queue was made at. */
+static const char *vkr_domain_word(VkTimeDomainKHR d)
+{
+    switch (d) {
+    case VK_TIME_DOMAIN_DEVICE_KHR:
+        return "device";
+    case VK_TIME_DOMAIN_CLOCK_MONOTONIC_KHR:
+        return "CLOCK_MONOTONIC";
+    case VK_TIME_DOMAIN_CLOCK_MONOTONIC_RAW_KHR:
+        return "CLOCK_MONOTONIC_RAW";
+    case VK_TIME_DOMAIN_QUERY_PERFORMANCE_COUNTER_KHR:
+        return "the performance counter";
+    default:
+        return "another";
+    }
+}
+
+static const char *vkr_priority_word(VkQueueGlobalPriorityKHR p)
+{
+    switch (p) {
+    case VK_QUEUE_GLOBAL_PRIORITY_LOW_KHR:
+        return "low";
+    case VK_QUEUE_GLOBAL_PRIORITY_MEDIUM_KHR:
+        return "medium";
+    case VK_QUEUE_GLOBAL_PRIORITY_HIGH_KHR:
+        return "high";
+    case VK_QUEUE_GLOBAL_PRIORITY_REALTIME_KHR:
+        return "realtime";
+    default:
+        return "another";
+    }
+}
+
+static void vkr_offer_line(float queuePriority)
+{
+    const bool props2 = vkr_has_props2(g_vkr.phys);
+    char dom[192] = "not offered";
+    const bool calKhr =
+        props2 && vkr_device_has_ext(g_vkr.phys, VK_KHR_CALIBRATED_TIMESTAMPS_EXTENSION_NAME);
+    const bool calExt =
+        props2 && vkr_device_has_ext(g_vkr.phys, VK_EXT_CALIBRATED_TIMESTAMPS_EXTENSION_NAME);
+    if (calKhr || calExt) {
+        PFN_vkGetPhysicalDeviceCalibrateableTimeDomainsKHR q =
+            (PFN_vkGetPhysicalDeviceCalibrateableTimeDomainsKHR)vkGetInstanceProcAddr(
+                g_vkr.instance, calKhr ? "vkGetPhysicalDeviceCalibrateableTimeDomainsKHR"
+                                       : "vkGetPhysicalDeviceCalibrateableTimeDomainsEXT");
+        VkTimeDomainKHR d[16];
+        uint32_t n = 16u;
+        const VkResult r = q ? q(g_vkr.phys, &n, d) : VK_ERROR_EXTENSION_NOT_PRESENT;
+        if (r == VK_SUCCESS || r == VK_INCOMPLETE) {
+            size_t at = (size_t)snprintf(dom, sizeof dom, "%s:", calKhr ? "KHR" : "EXT");
+            for (uint32_t i = 0; i < n && at < sizeof dom; i++) {
+                at += (size_t)snprintf(dom + at, sizeof dom - at, "%s %s", i ? "," : "",
+                                       vkr_domain_word(d[i]));
+            }
+            if (n == 0) {
+                snprintf(dom, sizeof dom, "offered with no domains");
+            }
+        } else {
+            snprintf(dom, sizeof dom, "offered, its domains not readable");
+        }
+    }
+    const bool gpKhr = vkr_device_has_ext(g_vkr.phys, VK_KHR_GLOBAL_PRIORITY_EXTENSION_NAME);
+    const bool gpExt = vkr_device_has_ext(g_vkr.phys, VK_EXT_GLOBAL_PRIORITY_EXTENSION_NAME);
+    const bool gpQuery =
+        vkr_device_has_ext(g_vkr.phys, VK_EXT_GLOBAL_PRIORITY_QUERY_EXTENSION_NAME);
+    char fam[160] = "not queried (no priority query offered)";
+    /* the core 1.1 call only on a 1.1 device (props2 may be the KHR pair of
+       a 1.0 device, where a 1.1 loader still hands out the core pointer) */
+    if (props2 && (gpKhr || gpQuery) && vkr_props2_core(g_vkr.phys) &&
+        VKR_FUNCTION_AVAILABLE(vkGetPhysicalDeviceQueueFamilyProperties2)) {
+        uint32_t qn = 0;
+        vkGetPhysicalDeviceQueueFamilyProperties2(g_vkr.phys, &qn, NULL);
+        VkQueueFamilyProperties2 *qp = calloc(qn ? qn : 1, sizeof(*qp));
+        VkQueueFamilyGlobalPriorityPropertiesKHR *gp = calloc(qn ? qn : 1, sizeof(*gp));
+        if (qp && gp && g_vkr.queueFamily < qn) {
+            for (uint32_t i = 0; i < qn; i++) {
+                gp[i].sType = VK_STRUCTURE_TYPE_QUEUE_FAMILY_GLOBAL_PRIORITY_PROPERTIES_KHR;
+                qp[i].sType = VK_STRUCTURE_TYPE_QUEUE_FAMILY_PROPERTIES_2;
+                qp[i].pNext = &gp[i];
+            }
+            vkGetPhysicalDeviceQueueFamilyProperties2(g_vkr.phys, &qn, qp);
+            const VkQueueFamilyGlobalPriorityPropertiesKHR *g = &gp[g_vkr.queueFamily];
+            size_t at = (size_t)snprintf(fam, sizeof fam, "%u:", g->priorityCount);
+            for (uint32_t i = 0;
+                 i < g->priorityCount && i < VK_MAX_GLOBAL_PRIORITY_SIZE_KHR && at < sizeof fam;
+                 i++) {
+                at += (size_t)snprintf(fam + at, sizeof fam - at, "%s %s", i ? "," : "",
+                                       vkr_priority_word(g->priorities[i]));
+            }
+        }
+        free(qp);
+        free(gp);
+    }
+    const char *gp = gpKhr && gpExt ? "KHR and EXT offered"
+                     : gpKhr        ? "KHR offered"
+                     : gpExt        ? "EXT offered"
+                                    : "not offered";
+    /* the means of knowing when a picture reached the screen, for the
+       evenness line's next design (rd_even.h): offered or not, nothing
+       enabled for them here (the present wait is enabled only with
+       ICO_VK_PRESENT_WAIT=1, vkr_create_device) */
+    const char *const dt[4] = {"VK_GOOGLE_display_timing", "VK_EXT_present_timing",
+                               "VK_KHR_present_id", "VK_KHR_present_wait"};
+    bool dtHas[4];
+    for (int i = 0; i < 4; i++) {
+        dtHas[i] = vkr_device_has_ext(g_vkr.phys, dt[i]);
+    }
+    VKR_LOG("offered (read only, nothing enabled for it): calibrated time domains %s; global "
+            "queue priority %s%s (the game's queue family %u's priorities: %s); the game's one "
+            "queue made at priority %.1f with no global priority asked (the driver's default, "
+            "medium); display timing: %s %s, %s %s, %s %s, %s %s",
+            dom, gp, gpQuery ? ", its query too" : "", g_vkr.queueFamily, fam,
+            (double)queuePriority, dt[0], dtHas[0] ? "yes" : "no", dt[1], dtHas[1] ? "yes" : "no",
+            dt[2], dtHas[2] ? "yes" : "no", dt[3], dtHas[3] ? "yes" : "no");
+    /* the queue's global priority: read only.  v0.11.7 asked high on
+       Qualcomm's own driver under Android (issue 123); taken off in v0.11.8
+       (issues 215 and 123: the hangs did not change, a tablet slowed down
+       around the game, and the Retroid Pocket 6 ended at every start with
+       it granted).  No device is asked any more: the line keeps the
+       device's offer in the log */
+    VKR_LOG("queue priority: the driver's default (medium), not asked: global queue priority %s "
+            "(the game's queue family %u's priorities: %s); the game asks no device for a "
+            "global priority (the high priority asked on Qualcomm's own driver under Android "
+            "taken off, issues 215 and 123)",
+            gp, g_vkr.queueFamily, fam);
+}
 
 static bool vkr_create_device(void)
 {
@@ -1433,8 +1977,12 @@ static bool vkr_create_device(void)
     /* the version the device is used at: no more than the instance's */
     g_vkr.apiVersion = vkr_effective_api(g_vkr.props.apiVersion);
     const bool core12 = g_vkr.apiVersion >= VK_API_VERSION_1_2;
-    const char *exts[32];
+    const char *exts[48];
     uint32_t extCount = 0;
+    /* the crash report's breadcrumb counts this device's passes */
+    g_vkr.passSeq = 0;
+    g_vkr.lastMarker = 0;
+    rhi_pass_crumb_reset();
     if (g_vkr.surface) {
         exts[extCount++] = VK_KHR_SWAPCHAIN_EXTENSION_NAME;
     }
@@ -1464,6 +2012,7 @@ static bool vkr_create_device(void)
     g_vkr.legacyPasses =
         !core13 &&
         (!core11 || !vkr_device_has_ext(g_vkr.phys, VK_KHR_DYNAMIC_RENDERING_EXTENSION_NAME));
+    vkr_pass_row_apply(); /* the driver row and [dev] legacy_passes */
 #if !VKR_LEGACY_PASSES
     if (g_vkr.legacyPasses) {
         VKR_LOG("no dynamic rendering, and this build has no VkRenderPass path");
@@ -1541,6 +2090,13 @@ static bool vkr_create_device(void)
     /* occlusion queries count samples exactly with it (rhi.h
      * rhi_cmd_begin_occlusion; the replay tool's measurement) */
     g_vkr.occPrecise = avail.occlusionQueryPrecise == VK_TRUE;
+    /* whether the device's own counters could split a list's vertex work
+     * from its fragment work (issue 179's list 0): read only,
+     * nothing enabled, no query made (docs/port/ANDROID_DIAGNOSTICS.md, "The
+     * cost counters") */
+    VKR_LOG("pipeline statistics: %s (read only, nothing enabled: the vertex and fragment shader "
+            "invocations a list are not sampled in this release)",
+            avail.pipelineStatisticsQuery == VK_TRUE ? "offered" : "not offered");
     /* ICO_VK_FAKE_NO_DUAL=1 leaves the feature off, as on a device without
      * it (tests: rhi_vk_nodual) */
     const char *fakeNoDual = getenv("ICO_VK_FAKE_NO_DUAL");
@@ -1549,6 +2105,29 @@ static bool vkr_create_device(void)
     if (!g_vkr.dualSrcBlend) {
         VKR_LOG("no dualSrcBlend%s: blending takes the two-pass fallback",
                 avail.dualSrcBlend == VK_TRUE ? " (ICO_VK_FAKE_NO_DUAL)" : "");
+    }
+    /* vertex shaders that store (rhi.h RhiLimits.vertexStores: the VU
+     * record written by the pre-pass's vertex shaders, port/render/
+     * rd_vu_record.c), enabled where offered; ICO_VK_FAKE_NO_VERTEX_STORES=1
+     * leaves it off, as on a device without it (tests:
+     * rd_vuprepass_selftest_nostores_fallback) */
+    {
+        const char *noVs = getenv("ICO_VK_FAKE_NO_VERTEX_STORES");
+        const bool fakeNoVs = noVs && noVs[0] && noVs[0] != '0';
+        g_vkr.vertexStores = avail.vertexPipelineStoresAndAtomics == VK_TRUE && !fakeNoVs;
+        if (!g_vkr.vertexStores) {
+            /* the renderer decides how the record is stored instead (by
+             * compute dispatches where they pass its self-test, else drawn
+             * into render targets and copied) and says so on its own "VU
+             * pre-pass" and "VU record" lines: the backend's line said the
+             * render targets even where compute was then used (issue 179's
+             * v0.11.7 log, :45 against :140) */
+            VKR_LOG("no vertexPipelineStoresAndAtomics%s: the VU record is not stored by the "
+                    "vertex shaders (the renderer's VU record line says how it is stored)",
+                    avail.vertexPipelineStoresAndAtomics == VK_TRUE
+                        ? " (ICO_VK_FAKE_NO_VERTEX_STORES)"
+                        : "");
+        }
     }
     /* multisampling: a fragment shader reading SV_SampleIndex (the per-sample
      * fog) needs sampleRateShading; ICO_VK_FAKE_NO_MSAA=1 reports single
@@ -1614,11 +2193,16 @@ static bool vkr_create_device(void)
             vkr_device_has_ext(g_vkr.phys,
                                VK_ARM_RASTERIZATION_ORDER_ATTACHMENT_ACCESS_EXTENSION_NAME);
         /* local read needs Vulkan 1.3 (VK_KHR_dynamic_rendering_local_read
-         * depends on it): never under ICO_VK_FAKE_API, whose device is 1.1 */
+         * depends on it): never under ICO_VK_FAKE_API, whose device is 1.1,
+         * and never on the VkRenderPass path (the driver row or [dev]
+         * legacy_passes on a device that has dynamic rendering: the read is
+         * dynamic rendering's) */
         const bool extLocal =
             (g_vkr.fakeApi == NULL || g_vkr.apiVersion >= VK_API_VERSION_1_3) &&
+            !g_vkr.legacyPasses &&
             vkr_device_has_ext(g_vkr.phys, VK_KHR_DYNAMIC_RENDERING_LOCAL_READ_EXTENSION_NAME);
-        const bool core14 = !extLocal && g_vkr.apiVersion >= VK_API_VERSION_1_4;
+        const bool core14 =
+            !extLocal && !g_vkr.legacyPasses && g_vkr.apiVersion >= VK_API_VERSION_1_4;
         VkPhysicalDeviceVulkan14Features q14 = {
             .sType = VK_STRUCTURE_TYPE_PHYSICAL_DEVICE_VULKAN_1_4_FEATURES};
         void *chain = NULL;
@@ -1659,12 +2243,12 @@ static bool vkr_create_device(void)
          * offered there, so the renderer's blend self-test starts from the
          * next path.  ICO_VK_FAKE_ADRENO=1 takes this branch on any device;
          * ICO_VK_ATTACHMENT_READ=1 ([dev] attachment_read) offers it anyway */
-        const char *fakeQc = getenv("ICO_VK_FAKE_ADRENO");
-        const bool fakeAdreno = fakeQc && fakeQc[0] && fakeQc[0] != '0';
+        const bool fakeAdreno = g_vkr.devFakes.adreno != 0;
         const char *askRead = getenv("ICO_VK_ATTACHMENT_READ");
         const bool forceRead = askRead && askRead[0] && askRead[0] != '0';
-        const bool qualcomm =
-            fakeAdreno || rhi_driver_is_qualcomm_proprietary(g_vkr.props.vendorID, g_vkr.driverID);
+        /* the device table's ATTACHMENT_READ_OFF (row qualcomm: Qualcomm's
+           own driver by its id; the fake on any device) */
+        const bool qualcomm = g_vkr.devTable->value[RHI_DC_ATTACHMENT_READ_OFF] != 0;
         g_vkr.rasterOrderOff[0] = '\0';
         if (hasOrder && qualcomm && !forceRead) {
             snprintf(g_vkr.rasterOrderOff, sizeof g_vkr.rasterOrderOff,
@@ -1731,6 +2315,7 @@ static bool vkr_create_device(void)
             exts[extCount++] = VK_KHR_DYNAMIC_RENDERING_LOCAL_READ_EXTENSION_NAME;
         }
     }
+    vkr_subpass_read_decide();
 
     /* the display's timing of presents (rhi_present_timing): VK_KHR_present_id
      * and VK_KHR_present_wait on a window, with SDL for the thread that
@@ -1784,6 +2369,10 @@ static bool vkr_create_device(void)
             exts[extCount++] = VK_KHR_PRESENT_WAIT_EXTENSION_NAME;
         }
     }
+    /* the display's times of past presents read back (vk_glass.c): read
+       only, every device that offers VK_GOOGLE_display_timing on a window */
+    vkr_glass_device_exts(vkr_device_has_ext(g_vkr.phys, VK_GOOGLE_DISPLAY_TIMING_EXTENSION_NAME),
+                          g_vkr.surface != VK_NULL_HANDLE, exts, &extCount);
 
     /* VK_PRESENT_MODE_FIFO_LATEST_READY (VK_EXT_present_mode_fifo_latest_ready):
      * opt-in with ICO_VK_FIFO_LATEST_READY=1 (vkr_choose_present_mode takes it
@@ -1826,6 +2415,8 @@ static bool vkr_create_device(void)
         .sType = VK_STRUCTURE_TYPE_PHYSICAL_DEVICE_ROBUSTNESS_2_FEATURES_EXT};
     VkPhysicalDeviceAddressBindingReportFeaturesEXT qBind = {
         .sType = VK_STRUCTURE_TYPE_PHYSICAL_DEVICE_ADDRESS_BINDING_REPORT_FEATURES_EXT};
+    VkPhysicalDevicePipelineRobustnessFeaturesEXT qPipeRob = {
+        .sType = VK_STRUCTURE_TYPE_PHYSICAL_DEVICE_PIPELINE_ROBUSTNESS_FEATURES_EXT};
     {
         /* robust access: off by default on every platform.  Android had it
          * on, because a Mali GPU reads storage buffers through plain
@@ -1852,7 +2443,25 @@ static bool vkr_create_device(void)
         const bool extCheck =
             wantCheck && vkr_has_props2(g_vkr.phys) &&
             vkr_device_has_ext(g_vkr.phys, VK_NV_DEVICE_DIAGNOSTIC_CHECKPOINTS_EXTENSION_NAME);
+        /* with robust access on, VK_EXT_pipeline_robustness where offered
+         * and the skin check can run: the check's variant turns the uniform
+         * reads' robustness off on its probe pipeline alone (issue 163);
+         * nothing else uses it.  The check is on by default only on an
+         * Adreno (vendor 0x5143, port/render/rd_vu_skin_check.c), or where
+         * ICO_RD_VU_SKIN_CHECK ([dev] vu_skin_check) turns it on ("2" too):
+         * any other device is made as before the check */
+        const char *skinEnv = getenv("ICO_RD_VU_SKIN_CHECK");
+        const bool skinCheck = skinEnv && skinEnv[0]
+                                   ? vkr_env_on("ICO_RD_VU_SKIN_CHECK") || strcmp(skinEnv, "2") == 0
+                                   : g_vkr.devTable->value[RHI_DC_PIPE_ROBUST_ASK] != 0;
+        const bool extPipeRob =
+            wantRobust && skinCheck &&
+            vkr_device_has_ext(g_vkr.phys, VK_EXT_PIPELINE_ROBUSTNESS_EXTENSION_NAME);
         void *chain = NULL;
+        if (extPipeRob) {
+            qPipeRob.pNext = chain;
+            chain = &qPipeRob;
+        }
         if (extFault) {
             qFault.pNext = chain;
             chain = &qFault;
@@ -1877,6 +2486,10 @@ static bool vkr_create_device(void)
         const bool nullDesc =
             g_vkr.robust && extRobust2 && robustSaid == 1 && qRobust2.nullDescriptor;
         g_vkr.robust2 = buffer2 || image2 || nullDesc;
+        g_vkr.pipeRobust = g_vkr.robust && extPipeRob && qPipeRob.pipelineRobustness;
+        memset(&qPipeRob, 0, sizeof(qPipeRob));
+        qPipeRob.sType = VK_STRUCTURE_TYPE_PHYSICAL_DEVICE_PIPELINE_ROBUSTNESS_FEATURES_EXT;
+        qPipeRob.pipelineRobustness = VK_TRUE;
         g_vkr.addressReport = extBind && qBind.reportAddressBinding;
         g_vkr.checkpoints = extCheck;
         memset(&qFault, 0, sizeof(qFault));
@@ -1896,11 +2509,45 @@ static bool vkr_create_device(void)
         if (g_vkr.robust2) {
             exts[extCount++] = VK_EXT_ROBUSTNESS_2_EXTENSION_NAME;
         }
+        if (g_vkr.pipeRobust) {
+            exts[extCount++] = VK_EXT_PIPELINE_ROBUSTNESS_EXTENSION_NAME;
+        }
         if (g_vkr.addressReport) {
             exts[extCount++] = VK_EXT_DEVICE_ADDRESS_BINDING_REPORT_EXTENSION_NAME;
         }
         if (g_vkr.checkpoints) {
             exts[extCount++] = VK_NV_DEVICE_DIAGNOSTIC_CHECKPOINTS_EXTENSION_NAME;
+        }
+        {
+            /* calibrated timestamps where offered with the device's and the
+             * CPU's time domains (vk_tsclock.c: a stalled replay's stamps
+             * on the CPU's clock, issue 123) */
+            /* (both need VK_KHR_get_physical_device_properties2 or 1.1) */
+            const bool props2 = vkr_has_props2(g_vkr.phys);
+            const char *calib = vkr_tsclock_pick(
+                props2 &&
+                    vkr_device_has_ext(g_vkr.phys, VK_KHR_CALIBRATED_TIMESTAMPS_EXTENSION_NAME),
+                props2 &&
+                    vkr_device_has_ext(g_vkr.phys, VK_EXT_CALIBRATED_TIMESTAMPS_EXTENSION_NAME));
+            if (calib != NULL) {
+                exts[extCount++] = calib;
+            }
+        }
+        /* VK_EXT_memory_budget where offered: the device-local heaps'
+         * budget and use for rhi_get_stats (videoMem*, as Direct3D's
+         * adapter memory), read by the start-up's allocations
+         * (rd_vu_rec_early.c: half of what is free) and the window's video
+         * memory lines; a query only, nothing drawn or allocated
+         * differently.  Not on a tile-based phone GPU (the device table's
+         * MEMORY_BUDGET_OFF, row tile-phone), whose device is made as before
+         * and whose free memory is the system's own measure (Android's
+         * MemAvailable, window_pipe_finish.c) */
+        g_vkr.memBudget =
+            !g_vkr.devTable->value[RHI_DC_MEMORY_BUDGET_OFF] && vkr_props2_core(g_vkr.phys) &&
+            VKR_FUNCTION_AVAILABLE(vkGetPhysicalDeviceMemoryProperties2) &&
+            vkr_device_has_ext(g_vkr.phys, VK_EXT_MEMORY_BUDGET_EXTENSION_NAME) && extCount < 47u;
+        if (g_vkr.memBudget) {
+            exts[extCount++] = VK_EXT_MEMORY_BUDGET_EXTENSION_NAME;
         }
         /* what is on, and whether gpu_robust named it or it is the
            platform's default */
@@ -1979,11 +2626,9 @@ static bool vkr_create_device(void)
          * replay is byte-identical on lavapipe either way, so it is the
          * driver's handling); [dev] dynamic_state = true (exported as
          * ICO_VK_FAKE_NO_DYNAMIC=0) turns it on there */
-#ifdef __ANDROID__
-        const bool tilerDevice = true;
-#else
-        const bool tilerDevice = vkr_is_tiler(g_vkr.props.vendorID);
-#endif
+        /* the device table's DYNAMIC_STATE_OFF (row tiler: the tile-based
+           vendors, every Android GPU) */
+        const bool tilerDevice = g_vkr.devTable->value[RHI_DC_DYNAMIC_STATE_OFF] != 0;
         const bool forcedOn = fakeDyn && strcmp(fakeDyn, "0") == 0;
         const bool tilerOff = tilerDevice && !forcedOn && !fakeAll;
         const bool hasEds =
@@ -2045,6 +2690,155 @@ static bool vkr_create_device(void)
         }
     }
 
+    /* External compute's device extensions (rhi_native.h; docs/port/RHI.md
+     * "Native handles for external compute").  The FidelityFX Vulkan backend
+     * (programs built with ICO_FFX) reads the device's extension LIST, not
+     * what was enabled, and calls the entry points of what it finds: a
+     * listed VK_KHR_dedicated_allocation left off made it call a NULL
+     * vkGetBufferMemoryRequirements2KHR.  So on a Vulkan 1.2 device every
+     * extension it acts on is enabled when listed, with the feature it uses:
+     * shader_float16_int8 (shaderFloat16, through Vulkan12Features, and
+     * the base feature shaderInt16: the upscaler's 16-bit shader
+     * permutations, chosen whenever the listed extension reports
+     * shaderFloat16, declare the Int16 capability too),
+     * subgroup_size_control (subgroupSizeControl), synchronization2,
+     * descriptor_indexing (shaderStorageBufferArrayNonUniformIndexing,
+     * Vulkan12Features), dedicated_allocation with
+     * get_memory_requirements2, AMD_buffer_marker and
+     * AMD_device_coherent_memory (deviceCoherentMemory).  The list is the
+     * driver's own (not ICO_VK_FAKE_API's shortened one): the backend sees it.
+     * The RHI's own pipelines use none of them.  compute.externalExts says
+     * whether the set is whole (vkr_probe_compute); a listed
+     * dedicated_allocation without get_memory_requirements2 leaves it false
+     * (the backend would call the missing entry point). */
+    VkPhysicalDeviceSubgroupSizeControlFeatures qSubgroup = {
+        .sType = VK_STRUCTURE_TYPE_PHYSICAL_DEVICE_SUBGROUP_SIZE_CONTROL_FEATURES};
+    VkPhysicalDeviceSynchronization2Features qSync2 = {
+        .sType = VK_STRUCTURE_TYPE_PHYSICAL_DEVICE_SYNCHRONIZATION_2_FEATURES};
+    VkPhysicalDeviceCoherentMemoryFeaturesAMD qCoherent = {
+        .sType = VK_STRUCTURE_TYPE_PHYSICAL_DEVICE_COHERENT_MEMORY_FEATURES_AMD};
+    bool extSubgroup = false, extSync2 = false, extCoherent = false;
+    VkBool32 extFloat16 = VK_FALSE, extInt16 = VK_FALSE, extNonUniform = VK_FALSE,
+             extDescIndexing = VK_FALSE;
+    g_vkr.externalExts = false;
+#ifdef ICO_FFX
+    if (core12 && vkr_has_props2(g_vkr.phys)) {
+        static const char *const ffxExts[] = {
+            VK_KHR_SHADER_FLOAT16_INT8_EXTENSION_NAME,       /* 0 */
+            VK_EXT_SUBGROUP_SIZE_CONTROL_EXTENSION_NAME,     /* 1 */
+            VK_KHR_SYNCHRONIZATION_2_EXTENSION_NAME,         /* 2 */
+            VK_EXT_DESCRIPTOR_INDEXING_EXTENSION_NAME,       /* 3 */
+            VK_KHR_DEDICATED_ALLOCATION_EXTENSION_NAME,      /* 4 */
+            VK_KHR_GET_MEMORY_REQUIREMENTS_2_EXTENSION_NAME, /* 5 */
+            VK_AMD_BUFFER_MARKER_EXTENSION_NAME,             /* 6 */
+            VK_AMD_DEVICE_COHERENT_MEMORY_EXTENSION_NAME,    /* 7 */
+        };
+
+        enum { FFX_EXTS = (int)(sizeof(ffxExts) / sizeof(ffxExts[0])) };
+
+        bool listed[FFX_EXTS] = {false};
+        uint32_t n = 0;
+        vkEnumerateDeviceExtensionProperties(g_vkr.phys, NULL, &n, NULL);
+        VkExtensionProperties *props = calloc(n ? n : 1, sizeof(*props));
+        if (props &&
+            vkEnumerateDeviceExtensionProperties(g_vkr.phys, NULL, &n, props) == VK_SUCCESS) {
+            for (uint32_t i = 0; i < n; i++) {
+                for (int k = 0; k < FFX_EXTS; k++) {
+                    listed[k] = listed[k] || strcmp(props[i].extensionName, ffxExts[k]) == 0;
+                }
+            }
+        }
+        free(props);
+        /* an extension the RHI enabled already for itself is not named twice */
+        for (int k = 0; k < FFX_EXTS; k++) {
+            for (uint32_t i = 0; i < extCount && listed[k]; i++) {
+                if (strcmp(exts[i], ffxExts[k]) == 0) {
+                    listed[k] = false;
+                }
+            }
+        }
+        VkPhysicalDeviceVulkan12Features q12 = {
+            .sType = VK_STRUCTURE_TYPE_PHYSICAL_DEVICE_VULKAN_1_2_FEATURES};
+        void *chain = &q12;
+        if (listed[1]) {
+            qSubgroup.pNext = chain;
+            chain = &qSubgroup;
+        }
+        if (listed[2]) {
+            qSync2.pNext = chain;
+            chain = &qSync2;
+        }
+        if (listed[7]) {
+            qCoherent.pNext = chain;
+            chain = &qCoherent;
+        }
+        VkPhysicalDeviceFeatures2 q = {.sType = VK_STRUCTURE_TYPE_PHYSICAL_DEVICE_FEATURES_2,
+                                       .pNext = chain};
+        vkr_features2(g_vkr.phys, &q);
+        /* VK_EXT_descriptor_indexing enabled with VkPhysicalDeviceVulkan12Features
+         * chained needs its descriptorIndexing set (VUID-VkDeviceCreateInfo-
+         * ppEnabledExtensionNames-02833): a device listing the extension
+         * without the aggregate feature does not get the extension (its
+         * non-uniform indexing feature stays, it is core 1.2) */
+        const bool descIndexingDropped = listed[3] && !q12.descriptorIndexing;
+        extNonUniform = listed[3] ? q12.shaderStorageBufferArrayNonUniformIndexing : VK_FALSE;
+        if (descIndexingDropped) {
+            listed[3] = false;
+        }
+        extDescIndexing = listed[3] ? VK_TRUE : VK_FALSE;
+        const bool dedicatedAlone = listed[4] && !listed[5];
+        char said[256] = "";
+        size_t used = 0;
+        for (int k = 0; k < FFX_EXTS && extCount < 48u; k++) {
+            if (!listed[k] || (k == 4 && dedicatedAlone)) {
+                continue;
+            }
+            exts[extCount++] = ffxExts[k];
+            const int w = snprintf(said + used, sizeof(said) - used, "%s%s", used ? ", " : "",
+                                   ffxExts[k] + 3); /* without "VK_" */
+            used += w > 0 && (size_t)w < sizeof(said) - used ? (size_t)w : 0u;
+        }
+        extFloat16 = listed[0] ? q12.shaderFloat16 : VK_FALSE;
+        /* the backend reads shaderFloat16 from the physical device, not from
+         * what was enabled, and then builds its 16-bit permutations, whose
+         * SPIR-V declares Int16 as well (VkPhysicalDeviceFeatures::shaderInt16,
+         * else vkCreateShaderModule is a validation error): a driver
+         * reporting shaderFloat16 without shaderInt16 cannot run them */
+        extInt16 = extFloat16 ? avail.shaderInt16 : VK_FALSE;
+        const bool float16NoInt16 = extFloat16 && !extInt16;
+        extSubgroup = listed[1] && qSubgroup.subgroupSizeControl;
+        extSync2 = listed[2] && qSync2.synchronization2;
+        extCoherent = listed[7] && qCoherent.deviceCoherentMemory;
+        g_vkr.externalExts = !dedicatedAlone && !float16NoInt16;
+        VKR_LOG("external compute extensions: %s%s (features: float16 %s, int16 %s, subgroup "
+                "size control %s, synchronization2 %s, storage buffer non-uniform indexing %s, "
+                "descriptor indexing %s, AMD coherent memory %s)%s%s%s",
+                used ? "enabled " : "none listed beyond the RHI's own", said,
+                extFloat16 ? "on" : "off", extInt16 ? "on" : "off", extSubgroup ? "on" : "off",
+                extSync2 ? "on" : "off", extNonUniform ? "on" : "off",
+                extDescIndexing ? "on" : "off", extCoherent ? "on" : "off",
+                dedicatedAlone ? "; dedicated_allocation is listed without "
+                                 "get_memory_requirements2: left off, FSR 3.1 not offered"
+                               : "",
+                descIndexingDropped ? "; descriptor_indexing is listed without the "
+                                      "descriptorIndexing feature: left off"
+                                    : "",
+                float16NoInt16 ? "; shaderFloat16 is offered without shaderInt16, which the "
+                                 "upscaler's 16-bit shaders declare: FSR 3.1 not offered"
+                               : "");
+    }
+#endif
+    /* each feature structure carries only the one feature asked */
+    memset(&qSubgroup, 0, sizeof(qSubgroup));
+    qSubgroup.sType = VK_STRUCTURE_TYPE_PHYSICAL_DEVICE_SUBGROUP_SIZE_CONTROL_FEATURES;
+    qSubgroup.subgroupSizeControl = VK_TRUE;
+    memset(&qSync2, 0, sizeof(qSync2));
+    qSync2.sType = VK_STRUCTURE_TYPE_PHYSICAL_DEVICE_SYNCHRONIZATION_2_FEATURES;
+    qSync2.synchronization2 = VK_TRUE;
+    memset(&qCoherent, 0, sizeof(qCoherent));
+    qCoherent.sType = VK_STRUCTURE_TYPE_PHYSICAL_DEVICE_COHERENT_MEMORY_FEATURES_AMD;
+    qCoherent.deviceCoherentMemory = VK_TRUE;
+
     /* the head of the feature chain (dynamicRendering); on the VkRenderPass
      * path (legacyPasses) the chain starts at what dyn points to instead
      * (featHead below): the feature is neither offered nor enabled there */
@@ -2059,6 +2853,10 @@ static bool vkr_create_device(void)
     if (g_vkr.robust2) {
         qRobust2.pNext = dyn.pNext;
         dyn.pNext = &qRobust2;
+    }
+    if (g_vkr.pipeRobust) {
+        qPipeRob.pNext = dyn.pNext;
+        dyn.pNext = &qPipeRob;
     }
     if (g_vkr.addressReport) {
         qBind.pNext = dyn.pNext;
@@ -2093,6 +2891,18 @@ static bool vkr_create_device(void)
         qEds3.pNext = dyn.pNext;
         dyn.pNext = &qEds3;
     }
+    if (extSubgroup) {
+        qSubgroup.pNext = dyn.pNext;
+        dyn.pNext = &qSubgroup;
+    }
+    if (extSync2) {
+        qSync2.pNext = dyn.pNext;
+        dyn.pNext = &qSync2;
+    }
+    if (extCoherent) {
+        qCoherent.pNext = dyn.pNext;
+        dyn.pNext = &qCoherent;
+    }
     /* the submission sync (vk_sync.c): the timeline semaphore, through
      * VkPhysicalDeviceVulkan12Features at 1.2 and later, the extension's
      * own features below 1.2 (VK_KHR_timeline_semaphore enabled); nothing
@@ -2105,10 +2915,17 @@ static bool vkr_create_device(void)
         exts[extCount++] = VK_KHR_TIMELINE_SEMAPHORE_EXTENSION_NAME;
     }
     void *featHead = g_vkr.legacyPasses ? dyn.pNext : (void *)&dyn;
+    /* Vulkan12Features: the timeline semaphore, and external compute's
+     * float16, non-uniform indexing and descriptorIndexing (above; the last
+     * is required whenever VK_EXT_descriptor_indexing is enabled and this
+     * structure is chained) */
     VkPhysicalDeviceVulkan12Features f12 = {
         .sType = VK_STRUCTURE_TYPE_PHYSICAL_DEVICE_VULKAN_1_2_FEATURES,
         .pNext = featHead,
-        .timelineSemaphore = VK_TRUE,
+        .timelineSemaphore = g_vkr.syncKind == VKR_SYNC_TIMELINE ? VK_TRUE : VK_FALSE,
+        .shaderFloat16 = extFloat16,
+        .shaderStorageBufferArrayNonUniformIndexing = extNonUniform,
+        .descriptorIndexing = extDescIndexing,
     };
     VkPhysicalDeviceTimelineSemaphoreFeaturesKHR fTimeline = {
         .sType = VK_STRUCTURE_TYPE_PHYSICAL_DEVICE_TIMELINE_SEMAPHORE_FEATURES_KHR,
@@ -2118,6 +2935,8 @@ static bool vkr_create_device(void)
     void *syncFeatures = featHead;
     if (g_vkr.syncKind == VKR_SYNC_TIMELINE) {
         syncFeatures = g_vkr.apiVersion >= VK_API_VERSION_1_2 ? (void *)&f12 : (void *)&fTimeline;
+    } else if (extFloat16 || extNonUniform || extDescIndexing) {
+        syncFeatures = &f12; /* 1.2 (the external set's condition), no timeline */
     }
     VkPhysicalDeviceFeatures2 f2 = {
         .sType = VK_STRUCTURE_TYPE_PHYSICAL_DEVICE_FEATURES_2,
@@ -2132,10 +2951,22 @@ static bool vkr_create_device(void)
                 /* a fragment shader storing to an image (the interlock's
                  * destination read) */
                 .fragmentStoresAndAtomics = g_vkr.interlock ? VK_TRUE : VK_FALSE,
+                /* a vertex shader storing to a buffer (the VU record's
+                 * stores, RhiLimits.vertexStores) */
+                .vertexPipelineStoresAndAtomics = g_vkr.vertexStores ? VK_TRUE : VK_FALSE,
                 /* gpu_robust (on by default on Android): out-of-range
                  * buffer reads give zero and writes are dropped instead of
                  * reaching other memory */
                 .robustBufferAccess = g_vkr.robust ? VK_TRUE : VK_FALSE,
+                /* external compute (rhi_native.h): typed loads and stores
+                 * of storage images without a declared format, enabled
+                 * where offered (they change nothing for the RHI's own
+                 * pipelines) */
+                .shaderStorageImageReadWithoutFormat = avail.shaderStorageImageReadWithoutFormat,
+                .shaderStorageImageWriteWithoutFormat = avail.shaderStorageImageWriteWithoutFormat,
+                /* with shaderFloat16 (above): the upscaler's 16-bit shader
+                 * permutations declare the Int16 capability */
+                .shaderInt16 = extInt16,
             },
     };
 #ifdef ICO_RHI_MOLTENVK
@@ -2185,6 +3016,8 @@ static bool vkr_create_device(void)
     }
 #endif
     vkGetDeviceQueue(g_vkr.device, g_vkr.queueFamily, 0, &g_vkr.queue);
+    vkr_probe_compute(avail);
+    vkr_compute_stores();
     if (g_vkr.presentWait) {
         g_vkr.waitForPresent =
             (PFN_vkWaitForPresentKHR)vkGetDeviceProcAddr(g_vkr.device, "vkWaitForPresentKHR");
@@ -2196,6 +3029,7 @@ static bool vkr_create_device(void)
     if (g_vkr.presentWaitFake) {
         g_vkr.presentWait = true; /* the extensions stay off (vkr_present_wait_fake) */
     }
+    vkr_glass_device_made(g_vkr.device);
     /* the dynamic state's commands (through the device, as the loss
      * diagnostics' below): the core names on a 1.3 device, the EXT ones
      * otherwise; a group whose commands are not all found stays static */
@@ -2269,12 +3103,18 @@ static bool vkr_create_device(void)
         g_vkr.timestamps = bits > 0 && g_vkr.props.limits.timestampPeriod > 0.0f;
         g_vkr.timestampPeriod = g_vkr.props.limits.timestampPeriod;
         g_vkr.timestampMask = bits >= 64 ? ~0ull : ((1ull << bits) - 1ull);
+        vkr_tsclock_init(bits); /* its line, and the calibrated clocks' entry point */
     }
+    vkr_offer_line(prio); /* issue 123: the priorities and time domains on offer */
+    vkr_budget_line();    /* VK_EXT_memory_budget's, or why there is none */
     /* the VkRenderPass path (legacyPasses) records vkCmdBeginRenderPass and
      * leaves these NULL (vk_renderpass.c) */
     g_vkr.cmdBeginRendering = NULL;
     g_vkr.cmdEndRendering = NULL;
-    if (core13) {
+    if (g_vkr.legacyPasses) {
+        /* a 1.3 device on the driver row too: vkCmdBeginRendering is never
+         * called there */
+    } else if (core13) {
         g_vkr.cmdBeginRendering = vkCmdBeginRendering;
         g_vkr.cmdEndRendering = vkCmdEndRendering;
     } else if (!g_vkr.legacyPasses) {
@@ -2296,94 +3136,61 @@ static bool vkr_create_device(void)
     return VKR_CHECK(vkCreateCommandPool(g_vkr.device, &pci, NULL, &g_vkr.oneShotPool));
 }
 
-/* The PCI vendor ids of the tile-based GPUs: Qualcomm Adreno (and Mesa's
- * Turnip, which reports Qualcomm's id), ARM Mali, Imagination PowerVR,
- * Samsung Xclipse, Apple (MoltenVK) and Broadcom VideoCore */
-static bool vkr_is_tiler(uint32_t vendor)
-{
-    switch (vendor) {
-    case 0x5143: /* Qualcomm */
-    case 0x13B5: /* ARM */
-    case 0x1010: /* Imagination */
-    case 0x144D: /* Samsung */
-    case 0x106B: /* Apple */
-    case 0x14E4: /* Broadcom */
-        return true;
-    default:
-        return false;
-    }
-}
-
 /* The devices whose VU fallback takes the program entries' plain variants
  * (port/shaders/vu_common.hlsli, ICO_VU_PLAIN; docs/port/RENDER.md, "The
- * fallback entries"): the record path's modules are the same on every
- * device; a draw it cannot take (past the record, a stage pipeline that
- * could not be made, a failed self-test) draws through vu_X_plain_vs there
- * instead of vu_X_vs (port/render/rd_pipeline.c rd__vu_policy_init,
- * g_rd.vsFallback).  A row matches the vendor id, the device id under its
- * mask and, with qualcomm set, Qualcomm's own driver only
- * (rhi_driver_is_qualcomm_proprietary: Mesa's Turnip on the same GPU is
- * another compiler).  The reason is logged and goes to
- * RhiLimits.vuFallbackPlain.
- *   Adreno 740 (device 0x43050A01; AYN Thor, issue 107, and AYN Odin 2
- *   Portal, issue 93; driver 512.676.53, compiler E031.41.03.47): the
- *   whole device froze, needing a reboot, while the driver compiled the
- *   first pipelines with a VU vertex shader of v0.7.5 to v0.7.7 (46,470
- *   to 93,407 words); v0.6.1's (20,975 to 32,709 words) built
- *   (docs/port/SHADERS.md, The size history).  The plain variants are 10,011
- *   to 23,305 words, the record path's largest module about 20,000 (an
- *   estimate until the build measures it).
- * ICO_RD_VU_EXTENDED=1 gives the fallback the extended variants anyway (the
- * renderer reads it).
- *
- * The careful column: the devices whose start-up set is made under the
- * careful policy (its reason for RhiLimits.carefulPipelines;
- * docs/port/PIPELINES.md, "The start-up set"): the window passes
- * rd_pipeline_policy_careful() to rd_set_pipeline_policy (batches of 8 on
- * one thread, the pipeline cache written after each, the set stopped and
- * the rest made on first use once the process grew past the budget or a
- * batch took over 10 s).
- *   Adreno 740 again: with v0.7.7 both devices died inside the 2D half of
- *   the blind set (its first 327 keys at Original 4:3 with the
- *   fixed-function blend, before any VU key): the Odin 2 Portal at 201 of
- *   527 finished, the process shrinking from 194 MB to 47 MB until the
- *   system ended it (issue 93), the Thor at 307 or later with the whole
- *   device frozen (issue 107); the same since v0.5.3, while v0.5.2 and
- *   v0.6.1 started.  No one module explains it (font_sheet_ps and yuv_ps
- *   were as large in v0.6.1); memory pressure from the parallel compiles
- *   is the hypothesis the careful policy answers (inferred, not measured). */
-static const struct {
-    uint32_t vendor, deviceMask, device;
-    bool qualcomm;
-    const char *reason;
-    const char *careful; /* NULL: the start-up set as usual */
-} kVuPlainOnly[] = {
-    /* the Adreno 740 by the whole chip id both devices report (0x43050A01,
-     * the issue 93 and 107 logs), nothing near it: Mesa's freedreno
-     * device list (src/freedreno/common/freedreno_devices.py) gives
-     * 0x43050A00 to the Adreno A32, 0x43050B00 to the 740v3 and
-     * 0x43051401 to the Adreno 750, none of them seen failing */
-    {RHI_VENDOR_QUALCOMM, 0xFFFFFFFFu, 0x43050A01u, true, "Adreno 740, issue 107",
-     "Adreno 740, issues 93 and 107"},
-};
-
+ * fallback entries"), whose start-up set is made under the careful policy,
+ * and which draw without the VU vertex pre-pass: the device table's
+ * adreno-740-qualcomm row (port/rhi/rhi_device_table.c, where the evidence
+ * of each setting is written: the Adreno 740, device 0x43050A01, on
+ * Qualcomm's own driver by its id; Mesa's Turnip on the same GPU is another
+ * compiler), read at the pick (vk_device_table.c).
+ *   The plain set (VU_FALLBACK_PLAIN): the record path's modules are the
+ *   same on every device; a draw it cannot take (past the record, a stage
+ *   pipeline that could not be made, a failed self-test) draws through
+ *   vu_X_plain_vs there instead of vu_X_vs (port/render/rd_pipeline.c
+ *   rd__vu_policy_init, g_rd.vsFallback); its reason goes to
+ *   RhiLimits.vuFallbackPlain.  ICO_RD_VU_EXTENDED=1 gives the fallback the
+ *   extended variants anyway (the renderer reads it).
+ *   The careful set (CAREFUL_PIPELINES): its reason for
+ *   RhiLimits.carefulPipelines (docs/port/PIPELINES.md, "The start-up set"):
+ *   the window passes rd_pipeline_policy_careful() to rd_set_pipeline_policy
+ *   (batches of 8 on one thread, the pipeline cache written after each, the
+ *   set stopped and the rest made on first use once the process grew past
+ *   the budget or a batch took over 10 s).
+ *   The pre-pass off (VU_PREPASS_OFF): its reason for RhiLimits.vuPrepassOff
+ *   (the renderer's rd__vu_prepass_init logs "off by the device table
+ *   (<reason>)" and [dev] vu_prepass = true written in config.toml, exported
+ *   as ICO_RD_VU_PREPASS=on, draws with it anyway).  ICO_VK_FAKE_NO_PREPASS=1
+ *   gives any device the reason "ICO_VK_FAKE_NO_PREPASS" where no row sets
+ *   it (the ctests).
+ *   The compute record off (COMPUTE_RECORD_OFF): the devices whose VU record
+ *   is never written by compute dispatches (its reason for
+ *   RhiLimits.computeStoresOff; the renderer then takes the render targets
+ *   where the vertex shaders cannot store, rd_vu_record.c).  The hook for a
+ *   driver whose compute builds fail or hang; no row sets it (v0.11.2: the
+ *   Mali-G52 of issue 179 is the reason the compute record exists, and its
+ *   start-up self-test falls back to the targets on a wrong picture by
+ *   itself). */
 static void vkr_vu_plain_only(void)
 {
-    const uint32_t v = g_vkr.props.vendorID, d = g_vkr.props.deviceID;
+    const RhiDeviceVuRows rows = rhi_device_vu_rows(g_vkr.devTable);
     g_vkr.vuFallbackPlain[0] = '\0';
     g_vkr.carefulPipelines[0] = '\0';
-    for (size_t i = 0; i < sizeof(kVuPlainOnly) / sizeof(kVuPlainOnly[0]); i++) {
-        if (kVuPlainOnly[i].vendor == v &&
-            (d & kVuPlainOnly[i].deviceMask) == kVuPlainOnly[i].device &&
-            (!kVuPlainOnly[i].qualcomm || rhi_driver_is_qualcomm_proprietary(v, g_vkr.driverID))) {
-            snprintf(g_vkr.vuFallbackPlain, sizeof g_vkr.vuFallbackPlain, "%s",
-                     kVuPlainOnly[i].reason);
-            if (kVuPlainOnly[i].careful != NULL) {
-                snprintf(g_vkr.carefulPipelines, sizeof g_vkr.carefulPipelines, "%s",
-                         kVuPlainOnly[i].careful);
-            }
-            return;
-        }
+    g_vkr.noVuPrepass[0] = '\0';
+    if (rows.plain != NULL) {
+        snprintf(g_vkr.vuFallbackPlain, sizeof g_vkr.vuFallbackPlain, "%s", rows.plain);
+    }
+    if (rows.careful != NULL) {
+        snprintf(g_vkr.carefulPipelines, sizeof g_vkr.carefulPipelines, "%s", rows.careful);
+    }
+    if (rows.noPrepass != NULL) {
+        snprintf(g_vkr.noVuPrepass, sizeof g_vkr.noVuPrepass, "%s", rows.noPrepass);
+    }
+    if (rows.noComputeRecord != NULL && g_vkr.computeStores) {
+        g_vkr.computeStores = false;
+        snprintf(g_vkr.computeStoresOff, sizeof g_vkr.computeStoresOff, "the device table: %s",
+                 rows.noComputeRecord);
+        VKR_LOG("compute record stores: not offered (%s)", g_vkr.computeStoresOff);
     }
 }
 
@@ -2413,13 +3220,11 @@ static void vkr_fill_limits(void)
     o->depthReadback = g_vkr.dsFormat == VK_FORMAT_D32_SFLOAT_S8_UINT;
     o->depthStencilFormatName = g_vkr.dsFormat == VK_FORMAT_D24_UNORM_S8_UINT ? "D24S8" : "D32S8";
     o->depthSampled = g_vkr.dsSampled;
-    o->tiler = vkr_is_tiler(g_vkr.props.vendorID);
-#ifdef __ANDROID__
-    /* every Android GPU counts as tile-based, whatever its vendor id: the
-     * list above names the known ones, and a phone GPU missing from it
-     * would otherwise take the desktop defaults */
-    o->tiler = true;
-#endif
+    /* the device table's TILER (rows tile-vendors: Qualcomm, Arm,
+     * Imagination, Samsung, Apple and Broadcom; android: every Android GPU,
+     * whatever its vendor id, so a phone GPU missing from the list does not
+     * take the desktop defaults) */
+    o->tiler = g_vkr.devTable->value[RHI_DC_TILER] != 0;
     o->copyRowPitchAlign = 1; /* bufferRowLength is in texels; the pitch is width * texel size */
     o->copyOffsetAlign = 4;   /* bufferOffset: texel size, and 4 for depth/stencil */
     /* images carry mipLevels, views and barriers span every level, and
@@ -2441,21 +3246,63 @@ static void vkr_fill_limits(void)
     o->colorBytesPerPixel = g_vkr.moltenvk ? rhi_metal_color_bytes(g_vkr.props.deviceName) : 0u;
     /* the summary line's (s_driverText starts "; ") */
     o->driverText = s_driverText[0] == ';' ? s_driverText + 2 : NULL;
+    o->driverName = g_vkr.driverName[0] ? g_vkr.driverName : NULL;
+    o->driverVersion = g_vkr.driverVersion[0] ? g_vkr.driverVersion : NULL;
+    o->driverId = g_vkr.driverID;
+    o->apiMajor = VK_API_VERSION_MAJOR(g_vkr.apiVersion);
+    o->apiMinor = VK_API_VERSION_MINOR(g_vkr.apiVersion);
+    o->mesa = g_vkr.mesa;
     o->robustText = s_robustText[0] ? s_robustText : NULL;
+    o->uniformRobustOff = g_vkr.pipeRobust;
+    o->occlusionPrecise = g_vkr.occPrecise;
     o->robustDefaultOff = s_robustDefaultOff;
     /* texture packs: the BC formats (vkr_create_device enabled the feature) */
     o->bcTextures = g_vkr.bc;
     /* multisampling (vkr_msaa_counts, at device creation) */
     o->msaaCounts = g_vkr.msaaCounts | 1u;
     o->sampleRateShading = g_vkr.sampleRate;
+    /* the in-pass resolve (rhi.h RhiColorAttachment.resolve): dynamic
+     * rendering's resolve attachments, 4 samples */
+    o->resolveInPass = !g_vkr.legacyPasses && (g_vkr.msaaCounts & 4u) != 0u;
+    o->standardSampleLocations = g_vkr.props.limits.standardSampleLocations == VK_TRUE;
     /* the destination read (vkr_create_device) */
     o->fragmentInterlock = g_vkr.interlock;
     o->rov = false;
     o->rasterOrderAttachment = g_vkr.rasterOrder;
     o->rasterOrderOff = g_vkr.rasterOrderOff[0] ? g_vkr.rasterOrderOff : NULL;
+    /* the vertex shaders' stores (vkr_create_device) */
+    o->vertexStores = g_vkr.vertexStores;
+
+    o->validationLayer = g_vkr.validationOn;
     o->moltenvk = g_vkr.moltenvk;
+    /* the tile-based phones' rule (vkr_tile_rule_apply): the renderer's
+     * upload order follows the scopes, the summary names both */
+    o->wideBarriers = g_vkr.tile.wide;
+    o->polledWait = g_vkr.tile.polled;
+    o->barrierWords = g_vkr.tile.wideTag;
+    o->waitWords = g_vkr.tile.polledTag;
+    o->tilePhone = g_vkr.tile.phone;
+    /* the VU record's store passes begin on a colour target only on the
+     * Intel driver row (rhi_pass_row.h: the crash inside Intel's
+     * vkCmdBeginRendering) and with the subpass read on; elsewhere without
+     * an attachment, as v0.11.2 (port/render/rd_vu_rec_sink.h) */
+    o->storePassTarget = g_vkr.passRowHit || g_vkr.subpassRead;
+    /* Qualcomm's row (rhi_pass_row.h, issue 123): its reason while it holds
+       the device's passes on VkRenderPass objects */
+    o->passObjectsRow = g_vkr.passRowQcom && g_vkr.legacyPasses ? g_vkr.legacyWhy : NULL;
+    o->vuPrepassLoss = g_vkr.tile.noPrepass ? g_vkr.tile.prepassWhy : NULL;
     /* v0.7.10: the device profile's facts (rhi.h) */
-    o->localRead = g_vkr.localRead;
+    /* either path's read (RhiLimits.localReadSubpass: the subpass read,
+     * the colour of a pass with a depth target only) */
+    o->localRead = VKR_PASS_READ;
+    o->localReadSubpass = g_vkr.subpassRead && !g_vkr.localRead;
+    /* its decision (vkr_subpass_read_decide, rhi.h) */
+    o->subpassRoute = g_vkr.subpassRoute;
+    o->subpassProbe = g_vkr.subpassProbe && o->localReadSubpass;
+    o->subpassOffDefault = g_vkr.subpassOffDefault;
+    o->subpassWhy = g_vkr.subpassWhy[0] ? g_vkr.subpassWhy : NULL;
+    o->subpassVerdictFile = g_vkr.subpassFile[0] ? g_vkr.subpassFile : NULL;
+    o->subpassVerdictKey = g_vkr.subpassKey[0] ? g_vkr.subpassKey : NULL;
     o->vendorId = g_vkr.props.vendorID;
     o->dynamicDepth = g_vkr.dynDepth;
     o->dynamicBlend = g_vkr.dynBlend;
@@ -2465,11 +3312,16 @@ static void vkr_fill_limits(void)
      * is the depth's sampled-image feature */
     o->stencilView = g_vkr.dsSampled;
     o->stencilViewChannel = 0;
-    /* the VU shader variants' device table (kVuPlainOnly) and the
-     * compiler's line, for the renderer's log (rd__vu_policy_init) */
+    o->stencilGather = o->stencilView; /* OpImageGather on the stencil aspect */
+    /* the VU shader variants' device table rows (vkr_vu_plain_only) and
+     * the compiler's line, for the renderer's log (rd__vu_policy_init) */
     vkr_vu_plain_only();
     o->vuFallbackPlain = g_vkr.vuFallbackPlain[0] ? g_vkr.vuFallbackPlain : NULL;
     o->carefulPipelines = g_vkr.carefulPipelines[0] ? g_vkr.carefulPipelines : NULL;
+    o->vuPrepassOff = g_vkr.noVuPrepass[0] ? g_vkr.noVuPrepass : NULL;
+    /* the compute stores (vkr_compute_stores; the table's column above) */
+    o->computeStores = g_vkr.computeStores;
+    o->computeStoresOff = g_vkr.computeStores ? NULL : g_vkr.computeStoresOff;
     o->compilerVersion = g_vkr.compilerVersion[0] ? g_vkr.compilerVersion : NULL;
     /* ICO_VK_FAKE_LIMITS=min: the limits the renderer reads at the values
      * every Vulkan device is required to meet (the specification's Required
@@ -2524,6 +3376,12 @@ static PFN_vkGetInstanceProcAddr s_loaderGipa;
 void rhi_set_vulkan_loader(void *getInstanceProcAddr)
 {
     s_loaderGipa = (PFN_vkGetInstanceProcAddr)getInstanceProcAddr;
+}
+
+/* a driver the program loaded (an Android build's driver package) */
+static bool vkr_loader_custom(void)
+{
+    return s_loaderGipa != NULL;
 }
 
 bool rhi_init(const RhiDeviceDesc *desc)
@@ -2596,6 +3454,7 @@ bool rhi_init(const RhiDeviceDesc *desc)
         return false;
     }
     vkr_fill_limits();
+    vkr_compile_serial_init(); /* RhiLimits.serialPipelines, issue 188 */
     vkr_pipeline_cache_init();
     if (!vkr_pool_init(&g_vkr.buffers, "buffer", 4096, sizeof(VkrBuffer)) ||
         !vkr_pool_init(&g_vkr.textures, "texture", 8192, sizeof(VkrTexture)) ||
@@ -2625,13 +3484,14 @@ bool rhi_init(const RhiDeviceDesc *desc)
      * (dynamic rendering or VkRenderPass objects) and the submission sync
      * (vk_sync.c), and the ICO_VK_FAKE_API profile in force */
     VKR_LOG("%s (Vulkan %u.%u.%u%s)%s%s; index values up to %u (full 32-bit range %s); render "
-            "passes %s; sync %s%s%s",
+            "passes %s%s%s%s; sync %s%s%s",
             g_vkr.adapterName, VK_API_VERSION_MAJOR(g_vkr.apiVersion),
             VK_API_VERSION_MINOR(g_vkr.apiVersion), VK_API_VERSION_PATCH(g_vkr.apiVersion),
             s_driverText, g_vkr.moltenvk ? "; MoltenVK" : "", g_vkr.surface ? "" : ", headless",
             g_vkr.limits.maxDrawIndexedIndexValue,
             g_vkr.limits.fullDrawIndexUint32 ? "offered" : "not offered",
-            g_vkr.legacyPasses ? "legacy" : "dynamic", vkr_sync_name(),
+            g_vkr.legacyPasses ? "legacy" : "dynamic", g_vkr.legacyWhy ? " (" : "",
+            g_vkr.legacyWhy ? g_vkr.legacyWhy : "", g_vkr.legacyWhy ? ")" : "", vkr_sync_name(),
             g_vkr.fakeApi ? "; ICO_VK_FAKE_API=" : "", g_vkr.fakeApi ? g_vkr.fakeApi : "");
     return true;
 }
@@ -2646,6 +3506,20 @@ bool vkr_test_legacy_passes(void)
     return g_vkr.legacyPasses;
 }
 
+bool vkr_test_subpass_read(uint32_t *passes, uint32_t *skipped, uint32_t *misfit)
+{
+    if (passes) {
+        *passes = g_vkr.subpassPasses;
+    }
+    if (skipped) {
+        *skipped = g_vkr.subpassSkipped;
+    }
+    if (misfit) {
+        *misfit = g_vkr.subpassMisfit;
+    }
+    return g_vkr.subpassRead;
+}
+
 bool vkr_test_view_usage(void)
 {
     return g_vkr.viewUsage;
@@ -2658,6 +3532,7 @@ bool vkr_test_props2(void)
 
 void rhi_shutdown(void)
 {
+    vkr_subpass_probe_unmark();
     if (g_vkr.device) {
         vkDeviceWaitIdle(g_vkr.device);
         vkr_present_wait_shutdown(); /* the thread waiting on presents */
@@ -2669,8 +3544,10 @@ void rhi_shutdown(void)
         }
         vkr_sync_destroy();
         vkr_pipeline_cache_shutdown();
+        vkr_glass_device_gone();
         vkDestroyDevice(g_vkr.device, NULL);
     }
+    vkr_compile_serial_shutdown();
     vkr_pool_free(&g_vkr.buffers);
     vkr_pool_free(&g_vkr.textures);
     vkr_pool_free(&g_vkr.samplers);
@@ -2740,9 +3617,72 @@ bool rhi_gpu_progress(RhiGpuProgress *out)
     out->replay = __atomic_load_n(&g_vkr.progReplay, __ATOMIC_RELAXED);
     out->frame = __atomic_load_n(&g_vkr.progFrame, __ATOMIC_RELAXED);
     vkr_pipe_background_progress(&out->bgPipesDone, &out->bgPipesLeft);
-    if (out->waitingFor != 0) {
-        const uint64_t since = __atomic_load_n(&g_vkr.progWaitSinceNs, __ATOMIC_RELAXED);
-        out->waitingNs = now > since ? now - since : 0;
+    {
+        /* the tags of the submission whose wait failed and of the first one
+           above `finished`, from the last submissions (atomic words the
+           submitting thread stores in vkr_note_submit, the slot after the
+           newest first: cnt % VKR_SUBMIT_HISTORY).  That slot is the oldest
+           of a full history and the one a submit in progress overwrites, so
+           it is not read (the newest seven are); and when the count moved
+           while they were read, a later submit may have overwritten one of
+           them: read again (at most four times; the last read stands) */
+        const uint64_t lostWait = __atomic_load_n(&g_vkr.lostWaitValue, __ATOMIC_RELAXED);
+        for (int attempt = 0; attempt < 4; attempt++) {
+            const uint32_t cnt = __atomic_load_n(&g_vkr.progTagCount, __ATOMIC_ACQUIRE);
+            const uint32_t n = cnt < VKR_SUBMIT_HISTORY ? cnt : VKR_SUBMIT_HISTORY - 1u;
+
+            out->openReplay = out->openFrame = 0;
+            out->lostReplay = out->lostFrame = 0;
+            for (uint32_t k = 0; k < n; k++) {
+                const uint32_t i = (cnt - n + k) % VKR_SUBMIT_HISTORY;
+                const uint64_t value = __atomic_load_n(&g_vkr.progTagValue[i], __ATOMIC_RELAXED);
+                const uint64_t tag = __atomic_load_n(&g_vkr.progTagTag[i], __ATOMIC_RELAXED);
+
+                if (out->openReplay == 0 && value > out->finished) {
+                    out->openReplay = (uint32_t)(tag >> 32);
+                    out->openFrame = (uint32_t)tag;
+                }
+                if (lostWait != 0 && value == lostWait) {
+                    out->lostReplay = (uint32_t)(tag >> 32);
+                    out->lostFrame = (uint32_t)tag;
+                }
+            }
+            if (__atomic_load_n(&g_vkr.progTagCount, __ATOMIC_ACQUIRE) == cnt) {
+                break;
+            }
+        }
+    }
+    {
+        /* the recording thread's fence wait and the submit thread's wait
+           before its present (rhi_wait_submitted, a pair of its own): the
+           older of the two in progress, so a wait that never ends keeps one
+           value while the other thread's short waits come and go (the GPU
+           hang limit counts one submission's wait, gpu_hang.h) */
+        uint64_t since = __atomic_load_n(&g_vkr.progWaitSinceNs, __ATOMIC_RELAXED);
+        const uint64_t pre = __atomic_load_n(&g_vkr.progPresentFor, __ATOMIC_ACQUIRE);
+        const uint64_t preSince = __atomic_load_n(&g_vkr.progPresentSinceNs, __ATOMIC_RELAXED);
+        if (pre != 0 && (out->waitingFor == 0 || preSince < since)) {
+            out->waitingFor = pre;
+            since = preSince;
+        }
+        if (out->waitingFor != 0) {
+            out->waitingNs = now > since ? now - since : 0;
+        }
+    }
+    {
+        /* the time since a finish was last seen (vkr_progress_finished's
+           stamp), with a wait above it in progress: the GPU's current
+           submission's time as its current one at most (issue 179: a slot
+           wait with two pictures in flight spends its first part queued
+           behind the picture before) */
+        const uint64_t at = __atomic_load_n(&g_vkr.progFinishedNs, __ATOMIC_ACQUIRE);
+
+        if (at != 0) {
+            out->headKnown = true;
+            if (out->waitingFor > out->finished) {
+                out->headNs = now > at ? now - at : 0;
+            }
+        }
     }
     if (out->submitted != 0) {
         const uint64_t at = __atomic_load_n(&g_vkr.progSubmitNs, __ATOMIC_RELAXED);
@@ -2751,16 +3691,87 @@ bool rhi_gpu_progress(RhiGpuProgress *out)
     return true;
 }
 
+/* The device-local heaps' budget and use (VK_EXT_memory_budget), summed,
+ * read again when the last read is 250 ms old (any thread: a physical
+ * device query, no queue or device object; not after a loss) */
+static void vkr_budget_read(uint64_t *budget, uint64_t *use)
+{
+    const uint64_t now = vkr_now_ns();
+    const uint64_t at = __atomic_load_n(&g_vkr.budgetAtNs, __ATOMIC_ACQUIRE);
+    if (!g_vkr.deviceLost && (at == 0 || now - at >= 250000000ull)) {
+        VkPhysicalDeviceMemoryBudgetPropertiesEXT b = {
+            .sType = VK_STRUCTURE_TYPE_PHYSICAL_DEVICE_MEMORY_BUDGET_PROPERTIES_EXT,
+        };
+        VkPhysicalDeviceMemoryProperties2 p2 = {
+            .sType = VK_STRUCTURE_TYPE_PHYSICAL_DEVICE_MEMORY_PROPERTIES_2,
+            .pNext = &b,
+        };
+        vkGetPhysicalDeviceMemoryProperties2(g_vkr.phys, &p2);
+        uint64_t sb = 0, su = 0;
+        const uint32_t n = p2.memoryProperties.memoryHeapCount < VK_MAX_MEMORY_HEAPS
+                               ? p2.memoryProperties.memoryHeapCount
+                               : VK_MAX_MEMORY_HEAPS;
+        for (uint32_t i = 0; i < n; i++) {
+            if (p2.memoryProperties.memoryHeaps[i].flags & VK_MEMORY_HEAP_DEVICE_LOCAL_BIT) {
+                sb += b.heapBudget[i];
+                su += b.heapUsage[i];
+            }
+        }
+        __atomic_store_n(&g_vkr.budgetBytes, sb, __ATOMIC_RELAXED);
+        __atomic_store_n(&g_vkr.budgetUse, su, __ATOMIC_RELAXED);
+        __atomic_store_n(&g_vkr.budgetAtNs, now ? now : 1u, __ATOMIC_RELEASE);
+    }
+    *budget = __atomic_load_n(&g_vkr.budgetBytes, __ATOMIC_RELAXED);
+    *use = __atomic_load_n(&g_vkr.budgetUse, __ATOMIC_RELAXED);
+}
+
+/* the memory budget's line at the device's start (vkr_create_device) */
+static void vkr_budget_line(void)
+{
+    if (!g_vkr.memBudget) {
+        fprintf(stderr,
+                "rhi_vk: memory budget: %s: the start-up's allocations take the record's own "
+                "limit, and no video memory use is in the lines\n",
+                g_vkr.tile.phone ? "not asked (a tile-based phone GPU: the device made as before; "
+                                   "the system's free memory is the measure)"
+                                 : "not offered (no VK_EXT_memory_budget, or a Vulkan 1.0 device)");
+        return;
+    }
+    uint64_t budget = 0, use = 0;
+    vkr_budget_read(&budget, &use);
+    fprintf(stderr,
+            "rhi_vk: memory budget: VK_EXT_memory_budget: the device-local heaps' budget %llu MB, "
+            "%llu MB in use, %llu MB free: the start-up's allocations take at most half of what "
+            "is free; the slow-replay line's video memory and the 90 %% line read it\n",
+            (unsigned long long)(budget >> 20), (unsigned long long)(use >> 20),
+            (unsigned long long)((budget > use ? budget - use : 0u) >> 20));
+}
+
 void rhi_get_stats(RhiStats *out)
 {
     if (out) {
         *out = g_vkr.stats;
+        if (g_vkr.memBudget) {
+            uint64_t budget = 0, use = 0;
+            vkr_budget_read(&budget, &use);
+            out->videoMemBudget = budget;
+            out->videoMemUsage = use;
+            out->videoMemAvailable = budget > use ? budget - use : 0u;
+        }
         /* what a list's end, a submit and a present added, from either
            thread (VkrState.late) */
         out->barriers += __atomic_load_n(&g_vkr.late.barriers, __ATOMIC_RELAXED);
+        out->fragmentHolds += __atomic_load_n(&g_vkr.late.fragmentHolds, __ATOMIC_RELAXED);
+        for (int k = 0; k < 2; k++) {
+            for (int i = 0; i < 8; i++) {
+                out->holdSites[k][i] = __atomic_load_n(&g_vkr.holdSite[k][i], __ATOMIC_RELAXED);
+            }
+        }
         out->submits += __atomic_load_n(&g_vkr.late.submits, __ATOMIC_RELAXED);
         out->presents += __atomic_load_n(&g_vkr.late.presents, __ATOMIC_RELAXED);
         out->presentNs += __atomic_load_n(&g_vkr.late.presentNs, __ATOMIC_RELAXED);
+        out->acquireReadyAtSubmit = __atomic_load_n(&g_vkr.late.acquireReady, __ATOMIC_RELAXED);
+        out->acquireNotReady = __atomic_load_n(&g_vkr.late.acquireNotReady, __ATOMIC_RELAXED);
         out->memoryLive = g_vkr.memLive;
         out->memoryPeak = g_vkr.memPeak;
         out->memoryLiveBytes = g_vkr.memLiveBytes;
@@ -2771,6 +3782,8 @@ void rhi_get_stats(RhiStats *out)
         out->pipelinesPeak = g_vkr.pipelines.next;
         out->pipelinePoolFull = g_vkr.pipelines.full;
         out->swapImages = g_vkr.swapchain ? g_vkr.swapImageCount : 0;
+        out->swapAcquired =
+            g_vkr.swapchain ? __atomic_load_n(&g_vkr.swapAcquired, __ATOMIC_RELAXED) : 0;
     }
 }
 

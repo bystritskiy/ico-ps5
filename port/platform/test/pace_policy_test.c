@@ -27,7 +27,15 @@
  * about 1000 / (picture + step ms) pictures a second, no resync, and up to
  * 60 ms the audio's lead under its 120 ms bound; without the skip 30 ms ran
  * the game under its rate; a 30 frames a second game and a GPU-bound
- * replay waiting on its fence).
+ * replay waiting on its fence; pace_original_gate's busy arm: a frame on
+ * time left out while the render thread or the submit thread is busy with
+ * the picture before, a keep frame never; testOriginalSplit: the picture
+ * handed over to the render thread, walks of 5-40 ms and presents of
+ * 1-300 ms on the submit thread, a frame every step or every second: the
+ * game at 50 steps a second within 2 %, no resync, the pictures between
+ * 1000 / (present + walk + a frame interval) and 1000 / (present + walk)
+ * a second, the audio's lead under its bound; the same 320 ms picture
+ * replayed inside the step resyncs and runs the game under its rate).
  * The present allowance (testBudgetRule: the arm, the drop, hold, climb
  * (under the lock a probe), excuse and limits; testBudgetUnbound: the timer
  * path's start unbound, 15 presents a step never refused, a drop to max at
@@ -159,6 +167,33 @@ static void testAutoResolution(void)
     CHECK(autoRun(&s, &clock, 1, 2.41f, 10, 20, &steps) == 1 && steps == 0);
     /* a window at 1x or below has no step below it */
     CHECK(autoRun(&s, &clock, 0, 1.0f, 300, 10, &steps) == 0 && steps == 0);
+    /* under a temporal upscaler the steps act on the scene's scale, drawn at
+       the window's over the ratio: no upscaler leaves the window's scale; a
+       2400 x 1080 window (2.41x) at ratio 1.5 draws the scene at 1.61x, so
+       the first step is 1x (2x would be above it); a 4K window (4.82x) at
+       1.5 starts at 3.21x and steps to 3x, then 2x, then 1x; at ratio 3 the
+       2.41x window's scene is 0.80x (drawn at 1x): no step below */
+    CHECK(pace_auto_window_scale(2.41f, 0.0f) == 2.41f);
+    CHECK(pace_auto_window_scale(2.41f, 1.5f) > 1.6f &&
+          pace_auto_window_scale(2.41f, 1.5f) < 1.61f);
+    {
+        PaceSamples k = {0};
+        uint64_t c = 1000 * MS;
+        int n = 0;
+        k.budgetNs = 16666667ull;
+        CHECK(autoRun(&k, &c, 0, pace_auto_window_scale(2.41f, 1.5f), 140, 2, &n) == 1 && n == 1);
+        PaceSamples q = {0};
+        uint64_t cq = 1000 * MS;
+        int m = 0;
+        q.budgetNs = 16666667ull;
+        CHECK(autoRun(&q, &cq, 0, pace_auto_window_scale(4.82f, 1.5f), 140, 2, &m) == 3 && m == 1);
+        CHECK(autoRun(&q, &cq, 3, pace_auto_window_scale(4.82f, 1.5f), 140, 2, &m) == 2 && m == 2);
+        PaceSamples z = {0};
+        uint64_t cz = 1000 * MS;
+        int o = 0;
+        z.budgetNs = 16666667ull;
+        CHECK(autoRun(&z, &cz, 0, pace_auto_window_scale(2.41f, 3.0f), 300, 10, &o) == 0 && o == 0);
+    }
     /* a fixed 30 a second limit: its period is the budget (70 %: 23.3 ms) */
     {
         PaceSamples k = {0};
@@ -981,6 +1016,18 @@ static void testOriginalRule(void)
     CHECK(pace_original_present(false, 5000 * MS, 0, p));      /* not started */
     CHECK(pace_original_present(false, due + PERIOD - 1, due, PERIOD));
     CHECK(!pace_original_present(false, due + PERIOD, due, PERIOD));
+    /* pace_original_gate: the same late arm, and with the render thread
+       busy with the picture before a frame on time is left out too; a keep
+       frame never (it waits for the picture before) */
+    CHECK(pace_original_gate(false, false, due + 10 * MS, due, p) == PACE_ORIG_PRESENT);
+    CHECK(pace_original_gate(false, true, due + 10 * MS, due, p) == PACE_ORIG_BUSY);
+    CHECK(pace_original_gate(false, true, due - MS, due, p) == PACE_ORIG_BUSY);
+    CHECK(pace_original_gate(false, false, due + p, due, p) == PACE_ORIG_LATE);
+    CHECK(pace_original_gate(false, true, due + p, due, p) == PACE_ORIG_LATE);
+    CHECK(pace_original_gate(true, true, due + 90 * MS, due, p) == PACE_ORIG_PRESENT);
+    CHECK(pace_original_gate(true, false, due + 90 * MS, due, p) == PACE_ORIG_PRESENT);
+    CHECK(pace_original_gate(false, true, 5000 * MS, 0, p) == PACE_ORIG_BUSY);
+    CHECK(pace_original_gate(false, false, 5000 * MS, 0, p) == PACE_ORIG_PRESENT);
 }
 
 /* The window's Original loop (window_host.c pace and original_replay_gate)
@@ -1049,6 +1096,147 @@ static OrigRun origLoop(unsigned steps, unsigned every, uint64_t periodNs, uint6
     }
     r.endNs = t - 1000 * MS;
     return r;
+}
+
+/* The window's Original loop with the render thread (rd_end_frame's
+   hand-over, rd.h RdReplayGate): the step closing a frame pays only the
+   hand-over (handNs) and posts the picture; the render thread walks it
+   (walkNs: its reads, which the next step's first renderer call waits for,
+   texLock) and the submit thread then presents it (presentNs, the driver's
+   present call: the swapchain's lock held through it).  At each close the
+   gate (pace_original_gate) skips the frame while the picture before is
+   not done, its present included (busy).  The pacer as origLoop's. */
+typedef struct OrigSplit {
+    OrigRun r;
+    unsigned busy; /* frames left out with the render thread busy */
+} OrigSplit;
+
+static OrigSplit origSplitLoop(unsigned steps, unsigned every, uint64_t periodNs, uint64_t stepNs,
+                               uint64_t handNs, uint64_t walkNs, uint64_t presentNs)
+{
+    const uint64_t resyncNs = 100 * MS;
+    OrigSplit o = {{0}, 0};
+    uint64_t t = 1000 * MS, deadline = 1000 * MS;
+    uint64_t readsEnd = 0, freeAt = 0; /* the picture's reads' end, its present's end */
+
+    for (unsigned k = 0; k < steps; k++) {
+        if (readsEnd > t) {
+            t = readsEnd; /* the step's first renderer call: the reads (texLock) */
+        }
+        t += stepNs;
+        if (k % every == 0) {
+            o.r.frames++;
+            switch (pace_original_gate(false, t < freeAt, t, deadline, periodNs)) {
+            case PACE_ORIG_PRESENT:
+                t += handNs;
+                readsEnd = t + walkNs;
+                freeAt = readsEnd + presentNs; /* one present in flight */
+                o.r.presents++;
+                break;
+            case PACE_ORIG_BUSY:
+                o.busy++;
+                o.r.skipped++;
+                break;
+            default:
+                o.r.skipped++;
+                break;
+            }
+        }
+        deadline += periodNs;
+        if (t > deadline && t - deadline > o.r.lagMaxNs) {
+            o.r.lagMaxNs = t - deadline;
+        }
+        if (t < deadline) {
+            t = deadline;
+        } else {
+            o.r.late++;
+            if (t - deadline > resyncNs) {
+                o.r.resyncs++;
+                deadline = t;
+            }
+        }
+    }
+    o.r.endNs = t - 1000 * MS;
+    return o;
+}
+
+/* The rule with the render thread, a rate requirement (issue 179: a
+   Mali-G52 whose present call blocked 165-300 ms in a scene, inside the
+   step): the game keeps the disc's rate (50 steps a second, within 2 %)
+   whatever the present costs, the pictures come at about 1000 / (present +
+   walk) a second (one present in flight; a frame closes every frame
+   interval, so a picture waits for the first close after the one before
+   is done: never faster than that, never slower than with one interval
+   more), and the audio's lead stays under its bound.  The old model
+   (the picture replayed and presented inside the step, origLoop) on the
+   same 300 ms presents holds the game below its rate and resyncs: why the
+   picture left the step. */
+static void testOriginalSplit(void)
+{
+    static const unsigned walks[] = {5, 10, 20, 40};
+    static const unsigned presents[] = {1, 30, 165, 300};
+    const uint64_t p = 20 * MS, step = 9 * MS / 10, hand = MS / 2;
+
+    for (unsigned every = 1; every <= 2; every++) {
+        for (unsigned i = 0; i < sizeof walks / sizeof walks[0]; i++) {
+            for (unsigned j = 0; j < sizeof presents / sizeof presents[0]; j++) {
+                const unsigned steps = 3000; /* 60 s */
+                const uint64_t w = walks[i] * MS, pr = presents[j] * MS;
+                const OrigSplit o = origSplitLoop(steps, every, p, step, hand, w, pr);
+                const double sec = (double)o.r.endNs / 1e9;
+                const double stepsPerSec = steps / sec, presentsPerSec = o.r.presents / sec;
+                const double cycleMs = (double)(w + pr + hand) / 1e6;
+                const double frameMs = (double)(every * p) / 1e6;
+                /* at most every frame; at most one picture per present +
+                   walk; at least one per present + walk + a frame interval */
+                const double top = 1000.0 / (cycleMs > frameMs ? cycleMs : frameMs);
+                const double least = 1000.0 / (cycleMs + frameMs);
+
+                CHECK(o.r.resyncs == 0);
+                CHECK(stepsPerSec >= 0.98 * 50.0 && stepsPerSec <= 50.01);
+                CHECK(presentsPerSec <= top * 1.01 && presentsPerSec >= 0.98 * least);
+                CHECK(o.r.presents + o.r.skipped == o.r.frames);
+                CHECK(ORIG_AUDIO_STEADY + o.r.lagMaxNs < ORIG_AUDIO_BOUND);
+                if (cycleMs <= frameMs - (double)step / 1e6) {
+                    CHECK(o.busy == 0 && o.r.skipped == 0); /* the picture fits its frame */
+                }
+                if (presents[j] == 300 && every == 1) {
+                    /* the brief's 10 %: at 50 frames a second the interval is
+                       small against the present */
+                    CHECK(presentsPerSec >= 0.9 * 1000.0 / cycleMs);
+                }
+                if (presents[j] == 300 && walks[i] == 20) {
+                    printf("pace_policy_test: Original, the picture handed over, %u ms walk and "
+                           "%u ms present, a frame every %u steps: %.2f steps and %.2f presents "
+                           "a second (1000 / (present + walk) = %.2f), %u of %u frames not "
+                           "presented (%u the render thread busy), %u resyncs, lag at most %.1f "
+                           "ms\n",
+                           walks[i], presents[j], every, stepsPerSec, presentsPerSec,
+                           1000.0 / cycleMs, o.r.skipped, o.r.frames, o.busy, o.r.resyncs,
+                           (double)o.r.lagMaxNs / 1e6);
+                }
+            }
+        }
+    }
+    /* the old model: the same 20 ms walk and 300 ms present replayed inside
+       the step (the late gate on), a frame every second step as in the
+       reporter's scene: the step runs 320 ms, past RESYNC_NS, so the pacer
+       drops the lag again and again and the game runs below its rate */
+    {
+        const unsigned steps = 3000;
+        const OrigRun old = origLoop(steps, 2, p, step, 320 * MS, 0, true);
+        const OrigSplit now = origSplitLoop(steps, 2, p, step, hand, 20 * MS, 300 * MS);
+        const double oldSec = (double)old.endNs / 1e9, nowSec = (double)now.r.endNs / 1e9;
+
+        CHECK(old.resyncs > 0 && now.r.resyncs == 0);
+        CHECK(steps / oldSec < 0.9 * 50.0 && steps / nowSec >= 0.98 * 50.0);
+        CHECK(old.lagMaxNs > 100 * MS && ORIG_AUDIO_STEADY + now.r.lagMaxNs < ORIG_AUDIO_BOUND);
+        printf("pace_policy_test: Original, 320 ms pictures replayed inside the step: %.2f steps "
+               "a second, %u resyncs, lag at most %.1f ms; handed over: %.2f steps a second, %u "
+               "resyncs, lag at most %.1f ms\n",
+               steps / oldSec, old.resyncs, (double)old.lagMaxNs / 1e6, steps / nowSec,
+               now.r.resyncs, (double)now.r.lagMaxNs / 1e6);
+    }
 }
 
 /* the rates per picture time (memory: a pacing rule is a throughput
@@ -1652,8 +1840,9 @@ static void testBudgetLines(void)
         pace_budget_reset(&q.b, 1);
         seqSteps(&q, 600, 1, 2, 10 * MS, 1, 0);
         pace_budget_block_text(&q.b, 0, 0, 0, 0, q.gpuNs, true, "no GPU timestamps", t, sizeof(t));
-        CHECK(textIs(t, "; presents held to 0 a step (lowest 0, 298 refused, 3 drops, 2 climbs, "
-                        "climbs refused 0); GPU span 19.0 ms a timed replay"));
+        CHECK(textIs(
+            t, "; presents held to 0 a step (lowest 0, 298 refused, 3 drops, 2 climbs, "
+               "climbs refused 0); GPU span 19.0 ms (the median of the last 8 timed replays)"));
         pace_budget_block(&q.b);
         pace_budget_block_text(&q.b, q.b.refused, q.b.drops, q.b.climbs, q.b.climbRefusals, 0, true,
                                "no GPU timestamps", t, sizeof(t));
@@ -1669,8 +1858,9 @@ static void testBudgetLines(void)
                         "climbs refused 0); GPU not timed yet"));
         /* a busy time (gpuIsSpan false) is named so */
         pace_budget_block_text(&b, 0, 0, 0, 0, 3 * MS, false, "GPU not timed yet", t, sizeof(t));
-        CHECK(textIs(t, "; presents not held (lowest not held, 0 refused, 0 drops, 0 climbs, "
-                        "climbs refused 0); GPU busy 3.0 ms a timed replay"));
+        CHECK(textIs(
+            t, "; presents not held (lowest not held, 0 refused, 0 drops, 0 climbs, "
+               "climbs refused 0); GPU busy 3.0 ms (the median of the last 8 timed replays)"));
     }
     {
         /* paced by the GPU (12 ms a picture: 1.4 a step): the budget's
@@ -1685,8 +1875,10 @@ static void testBudgetLines(void)
         CHECK(textIs(t, "presents paced by the GPU: 1.4 a step (GPU span 12.0 ms a picture, "
                         "period 16.7 ms)"));
         pace_budget_block_text(&b, 0, 0, 0, 0, 12 * MS, true, "GPU not timed yet", t, sizeof(t));
-        CHECK(textIs(t, "; presents paced to 1.4 a step (lowest not held, 120 refused, 0 drops, 0 "
-                        "climbs, climbs refused 0); GPU span 12.0 ms a timed replay"));
+        CHECK(textIs(
+            t,
+            "; presents paced to 1.4 a step (lowest not held, 120 refused, 0 drops, 0 "
+            "climbs, climbs refused 0); GPU span 12.0 ms (the median of the last 8 timed replays)"));
         pace_budget_present(&b, true);
         pace_budget_present(&b, false);
         (void)pace_budget_step(&b, 10 * MS, PERIOD, REFRESH, 0, 12 * MS, MS / 2, 0);
@@ -1699,8 +1891,9 @@ static void testBudgetLines(void)
                         "21.5 ms for the GPU and 0.1 ms for the display; GPU span 12.0 ms a "
                         "replay); back to paced by the GPU after 60 steps on time"));
         pace_budget_block_text(&b, 120, 0, 0, 0, 12 * MS, true, "GPU not timed yet", t, sizeof(t));
-        CHECK(textIs(t, "; presents held to 1 a step (lowest 1, 0 refused, 1 drops, 0 climbs, "
-                        "climbs refused 0); GPU span 12.0 ms a timed replay"));
+        CHECK(textIs(
+            t, "; presents held to 1 a step (lowest 1, 0 refused, 1 drops, 0 climbs, "
+               "climbs refused 0); GPU span 12.0 ms (the median of the last 8 timed replays)"));
         (void)pacedSteps(&b, PACE_ALLOW_HOLD, 8, 1, 12 * MS, MS / 2, 0, NULL);
         pace_budget_event_text(&b, PACE_BUDGET_TEXT_CLIMB, &w, t, sizeof(t));
         CHECK(textIs(t, "presents back to paced by the GPU (where they started) after 60 steps "
@@ -1712,8 +1905,9 @@ static void testBudgetLines(void)
         CHECK(textIs(t, "presents paced by the GPU: not held (GPU span 1.0 ms a picture, period "
                         "16.7 ms)"));
         pace_budget_block_text(&b, 0, 0, 0, 0, 1 * MS, true, "GPU not timed yet", t, sizeof(t));
-        CHECK(textIs(t, "; presents not held (lowest not held, 0 refused, 0 drops, 0 climbs, "
-                        "climbs refused 0); GPU span 1.0 ms a timed replay"));
+        CHECK(textIs(
+            t, "; presents not held (lowest not held, 0 refused, 0 drops, 0 climbs, "
+               "climbs refused 0); GPU span 1.0 ms (the median of the last 8 timed replays)"));
     }
     {
         PaceLock L = {0};
@@ -2376,87 +2570,225 @@ static void testStepRule(void)
 
     /* the step's estimate: up at once, down an eighth a step.  A miss of
        the pictures' under the floor (2 ms) changes nothing; over it the
-       margin widens by its lateness, falling an eighth a step; the third
-       over it within 300 steps plans the whole period for 120 steps, the
-       next fall-back 240, then 480 at most; 300 steps without one over
-       the floor halve it, then forget it */
+       margin widens by its lateness at once, falling an eighth a step, and
+       the miss is judged two steps on, once the GPU's records around it
+       are in (none here: counted); the third counted within 300 steps
+       plans the whole period for at most 120 steps (PACEBACK: no doubling
+       to 480, no halving by clean spells; v0.11.4 began it at the third
+       miss's own step) */
     {
         PaceStepEst e;
 
         memset(&e, 0, sizeof e);
         CHECK(pace_step_est_ns(&e, P) == P); /* none yet: the whole period */
+        CHECK(pace_step_plan_normal_ns(&e, true, P) == P);
         CHECK(pace_step_est_note(&e, step, false, 0, false) == PACE_STEP_NONE);
-        CHECK(e.estNs == step && pace_step_est_ns(&e, P) == step);
+        CHECK(e.estNs == step && pace_step_est_ns(&e, P) == step && e.steps == 1);
         pace_step_est_note(&e, 10 * MS, false, 0, false);
         CHECK(e.estNs == 10 * MS);
         pace_step_est_note(&e, step, false, 0, false);
         CHECK(e.estNs == 9312500ull);
-        /* under the floor (rc9: 0.0-0.6 ms): nothing changed */
+        /* under the floor (rc9: 0.0-0.6 ms): nothing changed, nothing to judge */
         CHECK(pace_step_est_note(&e, 0, true, MS, true) == PACE_STEP_SMALL);
         CHECK(pace_step_est_note(&e, 0, true, PACE_STEP_MISS_FLOOR_NS - 1, true) ==
               PACE_STEP_SMALL);
-        CHECK(e.widenNs == 0 && e.backoff == 0 && e.recent == 0 && e.backoffs == 0);
+        CHECK(e.widenNs == 0 && e.backoff == 0 && e.pending == 0 && e.backoffs == 0);
         CHECK(e.misses == 2 && e.pictureMisses == 2 && e.smallMisses == 2 && e.widens == 0);
         CHECK(pace_step_est_ns(&e, P) == 9312500ull);
-        /* over it: the margin wider by the lateness, an eighth less a step */
+        /* over it (step 6): the margin wider by the lateness at once, an
+           eighth less a step; judged at step 8 */
         CHECK(pace_step_est_note(&e, 0, true, 3 * MS, true) == PACE_STEP_WIDEN);
-        CHECK(e.widenNs == 3 * MS && e.recent == 1 && e.widens == 1 && e.backoff == 0);
+        CHECK(e.widenNs == 3 * MS && e.pending == 1 && e.widens == 1 && e.backoff == 0);
+        CHECK(e.ev.judged == PACE_STEP_UNJUDGED && e.pend[0].at == 6u);
         CHECK(pace_step_est_ns(&e, P) == 9312500ull + 3 * MS);
         CHECK(pace_step_est_note(&e, 0, false, 0, false) == PACE_STEP_NONE);
         CHECK(e.widenNs == 2625000ull && pace_step_est_ns(&e, P) == 11937500ull);
-        /* the game's own miss widens nothing */
+        CHECK(e.pending == 1 && e.ev.judged == PACE_STEP_UNJUDGED);
+        /* the game's own miss widens nothing; the miss at step 6 judged:
+           counted (no record came: no outlier) */
         CHECK(pace_step_est_note(&e, 0, true, 13 * MS, false) == PACE_STEP_NONE);
-        CHECK(e.widenNs == 2296875ull && e.gameMisses == 1 && e.recent == 1);
-        /* a second over the floor: wider again */
+        CHECK(e.widenNs == 2296875ull && e.gameMisses == 1 && e.pending == 0);
+        CHECK(e.ev.judged == PACE_STEP_COUNTED && e.ev.miss.at == 6u && e.ev.miss.lateNs == 3 * MS);
+        CHECK(e.ev.miss.picNs == 0 && e.counted == 1 && pace_step_est_recent(&e) == 1u);
+        /* a second over the floor (step 9): wider again */
         CHECK(pace_step_est_note(&e, 0, true, 4 * MS, true) == PACE_STEP_WIDEN);
-        CHECK(e.widenNs == 6009766ull && e.recent == 2 && e.backoff == 0);
-        /* the third within the window: the whole period for 120 steps */
-        CHECK(pace_step_est_note(&e, 0, true, 2 * MS, true) == PACE_STEP_STRICT);
-        CHECK(e.backoff == PACE_STEP_BACKOFF_MIN && e.backoffs == 1 && e.widens == 3);
+        CHECK(e.widenNs == 6009766ull && e.backoff == 0);
+        /* the third (step 10): the back-off begins once it is judged, at
+           step 12; step 11 judges step 9's */
+        CHECK(pace_step_est_note(&e, 0, true, 2 * MS, true) == PACE_STEP_WIDEN);
+        CHECK(e.ev.judged == PACE_STEP_UNJUDGED && e.pending == 2 && e.backoff == 0);
+        CHECK(pace_step_est_note(&e, 0, false, 0, false) == PACE_STEP_NONE);
+        CHECK(e.ev.judged == PACE_STEP_COUNTED && !e.ev.began && e.backoff == 0);
+        CHECK(pace_step_est_recent(&e) == 2u && e.pending == 1);
+        CHECK(pace_step_est_note(&e, 0, false, 0, false) == PACE_STEP_NONE);
+        CHECK(e.ev.judged == PACE_STEP_COUNTED && e.ev.began && e.ev.miss.at == 10u);
+        CHECK(e.backoff == PACE_STEP_BACKOFF_STEPS && e.backoffs == 1 && e.widens == 3);
+        CHECK(e.cnt[0].at == 10u && e.cnt[1].at == 9u && e.cnt[2].at == 6u && e.recent == 3u);
+        CHECK(e.cnt[2].lateNs == 3 * MS && e.cnt[1].lateNs == 4 * MS && e.cnt[0].lateNs == 2 * MS);
         CHECK(pace_step_est_ns(&e, P) == P && e.missMaxNs == 13 * MS);
-        for (unsigned i = 0; i < PACE_STEP_BACKOFF_MIN; i++) {
+        /* backed off: the plan the whole period, the normal plan beside it */
+        CHECK(pace_step_plan_ns(&e, true, P) == P && pace_step_plan_ns(&e, false, P) == P);
+        CHECK(pace_step_plan_normal_ns(&e, true, P) == e.estNs + e.widenNs);
+        /* at its limit of 120 steps it ends */
+        for (unsigned i = 1; i < PACE_STEP_BACKOFF_STEPS; i++) {
             pace_step_est_note(&e, step, false, 0, false);
         }
+        CHECK(e.backoff == 1 && e.ev.ended == PACE_STEP_END_NONE);
+        pace_step_est_note(&e, step, false, 0, false);
+        CHECK(e.backoff == 0 && e.ev.ended == PACE_STEP_END_LIMIT && e.limitEnds == 1);
+        CHECK(e.ev.endSteps == PACE_STEP_BACKOFF_STEPS && e.ev.endFrames == 0 && e.fitEnds == 0);
         /* the widening gone, the estimate back down */
-        CHECK(e.backoff == 0 && e.estNs == 4500007ull && e.widenNs == 0);
-        CHECK(pace_step_est_ns(&e, P) == 4500007ull);
-        CHECK(e.recent == 2 && e.since[0] == 120u && e.since[1] == 121u);
-        /* a fourth inside the window: 240 */
-        CHECK(pace_step_est_note(&e, step, true, 3 * MS, true) == PACE_STEP_STRICT);
-        CHECK(e.backoff == 2 * PACE_STEP_BACKOFF_MIN && e.backoffLen == 2 * PACE_STEP_BACKOFF_MIN);
-        for (unsigned i = 0; i < 2 * PACE_STEP_BACKOFF_MIN; i++) {
-            pace_step_est_note(&e, step, false, 0, false);
-        }
-        /* the one before it out of the window: the next widens only */
-        CHECK(e.backoff == 0 && e.recent == 1 && e.since[0] == 240u);
+        CHECK(e.estNs == 4500007ull && e.widenNs == 0 && pace_step_est_ns(&e, P) == 4500007ull);
+        CHECK(e.steps == 132u && pace_step_est_recent(&e) == 2u);
+        /* a fourth inside the window of the two before it (step 133): 120
+           steps again, not 240 */
         CHECK(pace_step_est_note(&e, step, true, 3 * MS, true) == PACE_STEP_WIDEN);
-        CHECK(e.recent == 2);
-        CHECK(pace_step_est_note(&e, step, true, 3 * MS, true) == PACE_STEP_STRICT);
-        CHECK(e.backoff == PACE_STEP_BACKOFF_MAX); /* 240 doubled */
-        /* at most PACE_STEP_BACKOFF_MAX */
-        CHECK(pace_step_est_note(&e, step, true, 3 * MS, true) == PACE_STEP_STRICT);
-        CHECK(e.backoff == PACE_STEP_BACKOFF_MAX && e.backoffLen == PACE_STEP_BACKOFF_MAX);
-        CHECK(e.backoffs == 4 && e.pictureMisses == 9 && e.gameMisses == 1);
-        for (unsigned i = 0; i < PACE_STEP_BACKOFF_MAX; i++) {
+        pace_step_est_note(&e, step, false, 0, false);
+        CHECK(e.backoff == 0);
+        pace_step_est_note(&e, step, false, 0, false);
+        CHECK(e.ev.began && e.backoff == PACE_STEP_BACKOFF_STEPS && e.backoffs == 2);
+        /* the evidence: a judgement only while backed off, the frame's
+           first ask (a later one changes nothing), fifteen frames in a row
+           of 33.4 ms (half a second) */
+        CHECK(pace_step_fit_frames(2u * 16683333ull) == 15u);
+        CHECK(pace_step_fit_frames(0) == 15u);
+        CHECK(pace_step_fit_frames(40 * MS) == 13u); /* PAL: 12.5 rounded up */
+        CHECK(pace_step_fit_frames(16683333ull) == 30u);
+        CHECK(pace_step_fit_frames(2000 * MS) == 1u);
+        for (unsigned f = 0; f < 14; f++) {
+            pace_step_est_note(&e, step, false, 0, false);
+            pace_step_est_judge(&e, true);
+            pace_step_est_judge(&e, false); /* a later one: the frame still fitted */
+            pace_step_est_note(&e, step, false, 0, false);
+            CHECK(!pace_step_est_frame(&e, 2u * 16683333ull));
+        }
+        CHECK(e.fitRun == 14u && e.backoff == PACE_STEP_BACKOFF_STEPS - 28u);
+        /* a frame whose picture between frames would not have fitted: the
+           run again from none; a frame with no ask judged: unchanged */
+        pace_step_est_judge(&e, false);
+        pace_step_est_judge(&e, true); /* a later one: still not */
+        CHECK(!pace_step_est_frame(&e, 2u * 16683333ull) && e.fitRun == 0);
+        pace_step_est_judge(&e, true);
+        CHECK(!pace_step_est_frame(&e, 2u * 16683333ull) && e.fitRun == 1u);
+        CHECK(!pace_step_est_frame(&e, 2u * 16683333ull) && e.fitRun == 1u);
+        /* a counted miss is evidence against: the run again from none */
+        CHECK(pace_step_est_note(&e, step, true, 3 * MS, true) == PACE_STEP_WIDEN);
+        pace_step_est_note(&e, step, false, 0, false);
+        pace_step_est_note(&e, step, false, 0, false);
+        CHECK(e.ev.judged == PACE_STEP_COUNTED && e.ev.began && e.fitRun == 0);
+        CHECK(e.backoffs == 3 && e.backoff == PACE_STEP_BACKOFF_STEPS);
+        for (unsigned f = 0; f < 15; f++) {
+            pace_step_est_note(&e, step, false, 0, false);
+            pace_step_est_judge(&e, true);
+            pace_step_est_note(&e, step, false, 0, false);
+            CHECK(pace_step_est_frame(&e, 2u * 16683333ull) == (f == 14u));
+        }
+        CHECK(e.backoff == 0 && e.ev.ended == PACE_STEP_END_FIT && e.ev.endFrames == 15u);
+        CHECK(e.ev.endSteps == 30u && e.fitEnds == 1 && e.limitEnds == 1 && e.fitRun == 0);
+        CHECK(pace_step_plan_ns(&e, true, P) == pace_step_plan_normal_ns(&e, true, P));
+        /* not backed off: no judgement, no run */
+        pace_step_est_judge(&e, true);
+        CHECK(e.judgedFrame == 0 && !pace_step_est_frame(&e, 2u * 16683333ull) && e.fitRun == 0);
+    }
+
+    /* an outlier miss (pace_step_est_gpu): a GPU record over 7/4 of the
+       median of the 8 before it, from 3 steps before the miss to 1 after
+       it, makes the miss an outlier one: not counted, its widening taken
+       back; a record at exactly 7/4, or one 4 steps before, or the first 8
+       (no typical yet), does not */
+    {
+        PaceStepEst e;
+        PaceHist h;
+        const uint64_t g = 13500000ull;
+
+        memset(&e, 0, sizeof e);
+        memset(&h, 0, sizeof h);
+        CHECK(pace_step_est_gpu(&e, &h, 40 * MS) == 40 * MS); /* no typical yet */
+        CHECK(e.pic[0].maxNs == 40 * MS && e.pic[0].maxTypNs == 0 && e.pic[0].overNs == 0);
+        for (unsigned i = 0; i < 8; i++) {
+            pace_step_est_gpu(&e, &h, g);
+        }
+        CHECK(h.count == PACE_HIST_LEN && pace_step_est_gpu(&e, &h, g) == g);
+        for (unsigned i = 0; i < 4; i++) {
             pace_step_est_note(&e, step, false, 0, false);
         }
-        CHECK(e.backoff == 0 && e.recent == 0 && e.clean == 0);
-        /* clean spells of 300 steps: 480, 240, 120, none */
-        for (unsigned i = 0; i < PACE_STEP_BACKOFF_CLEAN; i++) {
-            pace_step_est_note(&e, step, false, 0, false);
+        /* after step 4's note: 7/4 of the median, then just over */
+        CHECK(pace_step_est_gpu(&e, &h, g * 7u / 4u) == g);
+        CHECK(e.pic[4].at == 4u && e.pic[4].maxNs == g * 7u / 4u && e.pic[4].overNs == 0);
+        CHECK(e.pic[4].maxTypNs == g);
+        pace_step_est_gpu(&e, &h, g * 7u / 4u + 1u);
+        CHECK(e.pic[4].maxNs == g * 7u / 4u + 1u && e.pic[4].overNs == g * 7u / 4u + 1u);
+        CHECK(e.pic[4].overTypNs == g);
+        /* a miss at step 5 (the record one step before): an outlier at 7 */
+        CHECK(pace_step_est_note(&e, 0, true, 5 * MS, true) == PACE_STEP_WIDEN);
+        pace_step_est_note(&e, 0, false, 0, false);
+        CHECK(e.widenNs == 4375000ull && e.ev.judged == PACE_STEP_UNJUDGED);
+        pace_step_est_note(&e, 0, false, 0, false);
+        CHECK(e.ev.judged == PACE_STEP_OUTLIER && e.ev.miss.at == 5u);
+        CHECK(e.ev.miss.picNs == g * 7u / 4u + 1u && e.ev.miss.typNs == g);
+        CHECK(e.outliers == 1 && e.counted == 0 && e.widenNs == 0 && e.recent == 0);
+        for (unsigned i = 0; i < 8; i++) {
+            pace_step_est_gpu(&e, &h, g); /* the median back to 13.5 */
         }
-        CHECK(e.backoffLen == PACE_STEP_BACKOFF_MAX / 2 && e.clean == 0);
-        /* a miss under the floor or the game's breaks no clean spell */
-        pace_step_est_note(&e, step, true, MS, true);
-        pace_step_est_note(&e, step, true, 30 * MS, false);
-        for (unsigned i = 2; i < PACE_STEP_BACKOFF_CLEAN; i++) {
+        /* a record after step 9's note, a miss at step 13 (4 steps on):
+           counted, its longest record around it a typical one */
+        pace_step_est_note(&e, step, false, 0, false);
+        pace_step_est_note(&e, step, false, 0, false);
+        CHECK(e.steps == 9u);
+        pace_step_est_gpu(&e, &h, 40 * MS);
+        for (unsigned i = 0; i < 3; i++) {
             pace_step_est_note(&e, step, false, 0, false);
+            pace_step_est_gpu(&e, &h, g);
         }
-        CHECK(e.backoffLen == PACE_STEP_BACKOFF_MIN);
-        for (unsigned i = 0; i < PACE_STEP_BACKOFF_CLEAN; i++) {
-            pace_step_est_note(&e, step, false, 0, false);
-        }
-        CHECK(e.backoffLen == 0 && e.backoff == 0);
+        CHECK(pace_step_est_note(&e, step, true, 3 * MS, true) == PACE_STEP_WIDEN);
+        CHECK(e.steps == 13u);
+        pace_step_est_note(&e, step, false, 0, false);
+        pace_step_est_note(&e, step, false, 0, false);
+        CHECK(e.ev.judged == PACE_STEP_COUNTED && e.ev.miss.picNs == g && e.ev.miss.typNs == g);
+        CHECK(e.counted == 1 && e.outliers == 1);
+        /* a miss at step 16 whose record comes one step after it (after
+           step 17's note): an outlier, judged at 18 */
+        CHECK(pace_step_est_note(&e, step, true, 3 * MS, true) == PACE_STEP_WIDEN);
+        pace_step_est_note(&e, step, false, 0, false);
+        CHECK(e.steps == 17u);
+        pace_step_est_gpu(&e, &h, 40 * MS);
+        pace_step_est_note(&e, step, false, 0, false);
+        CHECK(e.ev.judged == PACE_STEP_OUTLIER && e.ev.miss.picNs == 40 * MS);
+        CHECK(e.outliers == 2 && e.counted == 1 && pace_step_est_recent(&e) == 1u);
+    }
+
+    /* the back-off's evidence (pace_step_normal_fits): a further present
+       the whole period holds (its reads past the next step's due time),
+       the normal plan by the kinds' typical times hands over while its
+       reads end within the slack (16.683 - 4.5 - 2 ms) */
+    {
+        PaceStepEst e;
+        const PaceRtPipe none = {0, {0, 0}};
+
+        memset(&e, 0, sizeof e);
+        pace_step_typ_note(&e.typ[0], step, P, false);
+        pace_step_typ_note(&e.typ[1], step, P, false);
+        e.estNs = step;
+        e.backoff = PACE_STEP_BACKOFF_STEPS;
+        memset(&q, 0, sizeof q);
+        q.nowNs = 10 * MS;
+        q.dueNs = 10 * MS;
+        q.periodNs = P;
+        q.stepNs = pace_step_plan_ns(&e, true, P);
+        q.afterNs = pace_step_plan_ns(&e, false, P);
+        q.nextBetween = false;
+        q.readsNs = q.pictureNs = 10 * MS;
+        CHECK(q.stepNs == P && pace_rt_further_ask(&q, &none) == PACE_RT_MISS);
+        CHECK(pace_step_normal_fits(&e, &q, &none, true, false));
+        q.readsNs = q.pictureNs = slack;
+        CHECK(pace_step_normal_fits(&e, &q, &none, true, false));
+        q.readsNs = q.pictureNs = slack + 1;
+        CHECK(!pace_step_normal_fits(&e, &q, &none, true, false));
+        /* the picture in progress past its estimate: held by the normal plan too */
+        q.readsNs = q.pictureNs = 5 * MS;
+        q.paced = true;
+        q.sinceNs = 1;
+        CHECK(!pace_step_normal_fits(&e, &q, &none, true, false));
     }
 
     /* rc9's pattern (build-host/tmp/v098/evidence/rc9/ico-pc.log): 15.1 ms,
@@ -2508,9 +2840,13 @@ static void testStepRule(void)
         for (unsigned i = 0; i < 3; i++) {
             pace_step_est_note(&e, step, true, 2 * MS, true);
         }
-        CHECK(e.backoff == PACE_STEP_BACKOFF_MIN && e.backoffs == 1 && e.pictureMisses == 3);
+        /* the third judged two steps on */
+        CHECK(e.backoff == 0 && e.backoffs == 0 && e.pictureMisses == 3);
+        pace_step_est_note(&e, step, false, 0, false);
+        pace_step_est_note(&e, step, false, 0, false);
+        CHECK(e.backoff == PACE_STEP_BACKOFF_STEPS && e.backoffs == 1 && e.ev.began);
         pace_step_est_note(&e, 30 * MS, true, 13 * MS, false); /* inside the back-off */
-        CHECK(e.backoff == PACE_STEP_BACKOFF_MIN - 1 && e.backoffs == 1 && e.gameMisses == 2);
+        CHECK(e.backoff == PACE_STEP_BACKOFF_STEPS - 1 && e.backoffs == 1 && e.gameMisses == 2);
         CHECK(e.misses == 5);
     }
     /* which miss is the pictures': the presents' run past the later of the
@@ -2667,9 +3003,11 @@ static void testStepRule(void)
                         "yet"));
         b.pacedTenths = 7;
         pace_budget_block_text(&b, 0, 0, 0, 0, 24 * MS, true, "GPU not timed yet", t, sizeof(t));
-        CHECK(textIs(t, "; vsync off, uncapped: pictures as made (2 in flight at most, the GPU's "
-                        "time would pace them to 0.7 a step) (lowest not held, 0 refused, 0 "
-                        "drops, 0 climbs, climbs refused 0); GPU span 24.0 ms a timed replay"));
+        CHECK(textIs(
+            t,
+            "; vsync off, uncapped: pictures as made (2 in flight at most, the GPU's "
+            "time would pace them to 0.7 a step) (lowest not held, 0 refused, 0 "
+            "drops, 0 climbs, climbs refused 0); GPU span 24.0 ms (the median of the last 8 timed replays)"));
     }
 }
 
@@ -3148,17 +3486,19 @@ static void testStepTrace(void)
    idle floor), and a third whose first stamp came 3.0 ms before the one
    before ended (a driver that writes its first stamp early: its 10.0 ms
    span counts 3.0 ms of the one before); an overlap past the span counts
-   the span alone */
+   the span alone.  Issue 123: gaps timed across untimed replays counted,
+   the gaps after the presents that blocked listed (the first 8 kept, every
+   one counted) */
 static void testGpuGap(void)
 {
     PaceGpuGap g;
-    char text[384];
+    char text[768];
 
     memset(&g, 0, sizeof g);
     CHECK(pace_gpu_gap_text(&g, text, sizeof text) == 0 && text[0] == '\0');
-    pace_gpu_gap_add(&g, 21200000ull, 4000000ll);
-    pace_gpu_gap_add(&g, 8200000ull, 20000ll);
-    pace_gpu_gap_add(&g, 10000000ull, -3000000ll);
+    pace_gpu_gap_add(&g, 21200000ull, 4000000ll, 0);
+    pace_gpu_gap_add(&g, 8200000ull, 20000ll, 0);
+    pace_gpu_gap_add(&g, 10000000ull, -3000000ll, 0);
     CHECK(g.n == 3 && g.idle == 1 && g.overlap == 1);
     CHECK(g.idleNs == 4000000ull && g.idleMaxNs == 4000000ull && g.overlapNs == 3000000ull);
     CHECK(g.spanNs == 39400000ull);
@@ -3167,15 +3507,313 @@ static void testGpuGap(void)
                        "ms on average, the longest 4.0 ms), 1 begun before the one before ended "
                        "(by 3.0 ms on average: their spans count that end too); the GPU's time a "
                        "replay past the one before's end 12.13 ms, its span 13.13 ms"));
-    pace_gpu_gap_add(&g, 2000000ull, -5000000ll);
+    pace_gpu_gap_add(&g, 2000000ull, -5000000ll, 0);
     CHECK(g.overlap == 2 && g.overlapNs == 5000000ull && g.spanNs == 41400000ull);
     /* a short buffer: cut, the whole length returned */
     CHECK(pace_gpu_gap_text(&g, text, 16) > 16 && strlen(text) == 15);
+
+    /* issue 123: a reporter's block with three stalls, the replay after
+       each one 301.2, 298.0 and 310.5 ms behind (the first across one
+       untimed replay) */
+    memset(&g, 0, sizeof g);
+    pace_gpu_gap_add(&g, 27000000ull, 1000000ll, 0);
+    pace_gpu_gap_add(&g, 27000000ull, 301200000ll, 1);
+    pace_gpu_gap_stall(&g, 301200000ll);
+    pace_gpu_gap_add(&g, 27000000ull, 298000000ll, 0);
+    pace_gpu_gap_stall(&g, 298000000ll);
+    pace_gpu_gap_add(&g, 27000000ull, 310500000ll, 0);
+    pace_gpu_gap_stall(&g, 310500000ll);
+    CHECK(g.n == 4 && g.across == 1 && g.stalls == 3);
+    pace_gpu_gap_text(&g, text, sizeof text);
+    CHECK(textIs(text, "4 timed replays after the one before: the GPU idle before 4 of them (227.7 "
+                       "ms on average, the longest 310.5 ms), 0 begun before the one before ended "
+                       "(by 0.0 ms on average: their spans count that end too); the GPU's time a "
+                       "replay past the one before's end 27.00 ms, its span 27.00 ms; 1 of them "
+                       "timed across untimed replays; after the 3 presents blocked over 50 ms: the "
+                       "GPU was idle 301.2, "
+                       "298.0, 310.5 ms before the next replay"));
+    /* one stall; then past the 8 kept */
+    memset(&g, 0, sizeof g);
+    pace_gpu_gap_add(&g, 27000000ull, -400000ll, 0);
+    pace_gpu_gap_stall(&g, -400000ll);
+    pace_gpu_gap_text(&g, text, sizeof text);
+    CHECK(strstr(text, "its span 27.00 ms; after the 1 present blocked over 50 ms: the GPU was "
+                       "idle -0.4 ms before the next replay") != NULL);
+    for (int i = 0; i < 10; i++) {
+        pace_gpu_gap_stall(&g, (int64_t)(i + 1) * 1000000ll);
+    }
+    CHECK(g.stalls == 11 && g.stallNs[7] == 7000000ll);
+    pace_gpu_gap_text(&g, text, sizeof text);
+    CHECK(strstr(text, "; after the first 8 of the 11 presents blocked over 50 ms: the GPU was "
+                       "idle -0.4, 1.0, 2.0, "
+                       "3.0, 4.0, 5.0, 6.0, 7.0 ms before the next replay") != NULL);
+
+    /* the window's buffer (PACE_GPU_GAP_TEXT_MAX, window_host.c perf_log;
+       v0.10.2's first build gave it 384 and cut the stall list): the
+       longest text fits whole: counts far past any 10 s block's (10 digits
+       where the sums allow, a million idle and overlapped replays at the
+       60 s refusal's mean, rd_perf_gap.h), the longest gap 59999.9 ms and
+       8 kept stalls each -59999.9 ms */
+    {
+        char big[PACE_GPU_GAP_TEXT_MAX];
+
+        memset(&g, 0, sizeof g);
+        g.n = g.across = g.stalls = 4000000000u;
+        g.idle = g.overlap = 1000000u;
+        g.idleNs = g.overlapNs = 1000000ull * 59999900000ull;
+        g.idleMaxNs = 59999900000ull;
+        g.spanNs = 18000000000000000000ull;
+        for (unsigned i = 0; i < PACE_GPU_GAP_STALLS; i++) {
+            g.stallNs[i] = -59999900000ll;
+        }
+        const int w = pace_gpu_gap_text(&g, big, sizeof big);
+        CHECK(w > 0 && (unsigned)w < sizeof big && strlen(big) == (size_t)w);
+        CHECK(strstr(big, "; after the first 8 of the 4000000000 presents blocked over 50 ms: the "
+                          "GPU was idle "
+                          "-59999.9, -59999.9, -59999.9, -59999.9, -59999.9, -59999.9, -59999.9, "
+                          "-59999.9 ms before the next replay") != NULL);
+        /* a reporter's block (review S1): 3 stalls and the across part
+           were past 383 bytes */
+        CHECK(w > 383);
+    }
+}
+
+/* FIFO from the first swapchain on Qualcomm's own driver (QCOMFIX): vsync
+   off with a FIFO swapchain (rhi_present_mailbox false) is the state the
+   FIFO fallback leaves after its switch, and every uncapped rule reads the
+   options and the render thread, never the present mode: the pictures are
+   as made, the allowance is paced, and the presents go back to back */
+static void testFifoFromStart(void)
+{
+    const uint64_t r6000 = 16666667ull;
+
+    /* vsync off, uncapped, render thread on: as made, FIFO or not */
+    CHECK(pace_rt_as_made(false, true, false, true));
+    /* the paced allowance is for vsync off whatever the present mode */
+    CHECK(pace_budget_paced_mode(false, false));
+    /* uncapped, vsync off, FIFO: not the mailbox "one a refresh" gap, the
+       presents are back to back */
+    CHECK(pace_present_gap(-1, false, false, r6000) == 0);
+    /* a cap above the refresh keeps its own gap under FIFO (mailbox false) */
+    CHECK(!pace_cap_above_refresh(144, false, r6000));
+    CHECK(pace_present_gap(144, false, false, r6000) == 1000000000ull / 144u);
+}
+
+/* The idle ask's parts (pace_policy.h pace_rt_fill, pace_rt_pipe_idle,
+   pace_rt_gpu_long, pace_rt_fill_gpu_ns, PACE_RT_TEST_GPU, the block's
+   line); their rates are pace_loop_test's testFill */
+static PaceRtAsk fillAsk(void)
+{
+    PaceRtAsk q;
+
+    memset(&q, 0, sizeof q);
+    q.nowNs = 90 * MS;
+    q.dueNs = 100 * MS;
+    q.periodNs = 16683333ull;
+    q.stepNs = 5 * MS;
+    q.afterNs = 7 * MS / 10;
+    q.readsNs = 8 * MS;
+    q.pictureNs = 20 * MS;
+    q.cpuNs = 8 * MS;
+    q.interpNs = 3 * MS;
+    q.submitOn = true;
+    q.gpuNs = 20 * MS;
+    q.gpuTypNs = 22 * MS;
+    q.gpuLongNs = 30 * MS;
+    q.slotAhead = true;
+    q.paced = true;
+    q.asMade = true;
+    return q;
+}
+
+static void testFillParts(void)
+{
+    /* the pace's answer before an ask */
+    CHECK(pace_rt_fill(10 * MS, 0, 20 * MS) == PACE_FILL_ASK);
+    CHECK(pace_rt_fill(10 * MS, 5 * MS, 20 * MS) == PACE_FILL_WAIT);
+    CHECK(pace_rt_fill(20 * MS, 0, 20 * MS) == PACE_FILL_NONE);
+    CHECK(pace_rt_fill(25 * MS, 5 * MS, 20 * MS) == PACE_FILL_NONE);
+
+    /* the GPU's longest lately: up at once, down a 32nd of the way a record;
+       20 ms over, 40 records later 5.5-5.7 ms over */
+    {
+        uint64_t e = pace_rt_gpu_long(0, 20 * MS);
+
+        CHECK(e == 20 * MS);
+        e = pace_rt_gpu_long(e, 40 * MS);
+        CHECK(e == 40 * MS);
+        e = pace_rt_gpu_long(e, 20 * MS);
+        CHECK(e == 40 * MS - 20 * MS / 32u);
+        e = 40 * MS;
+        for (unsigned i = 0; i < 40; i++) {
+            e = pace_rt_gpu_long(e, 20 * MS);
+        }
+        CHECK(e >= 20 * MS + 55 * MS / 10 && e <= 20 * MS + 57 * MS / 10);
+    }
+
+    /* the pipe's GPU time: the larger of the records' median and mean */
+    {
+        PaceHist h;
+        static const unsigned a[8] = {20, 20, 20, 20, 20, 20, 20, 36};
+        static const unsigned b[8] = {30, 30, 30, 30, 30, 10, 10, 10};
+
+        memset(&h, 0, sizeof h);
+        CHECK(pace_hist_mean(&h) == 0 && pace_rt_fill_gpu_ns(&h) == 0);
+        for (unsigned i = 0; i < 8; i++) {
+            (void)pace_hist_add(&h, a[i] * MS);
+        }
+        CHECK(pace_hist_mean(&h) == 22 * MS && pace_rt_fill_gpu_ns(&h) == 22 * MS);
+        memset(&h, 0, sizeof h);
+        for (unsigned i = 0; i < 8; i++) {
+            (void)pace_hist_add(&h, b[i] * MS);
+        }
+        CHECK(pace_hist_mean(&h) == 45 * MS / 2 && pace_rt_fill_gpu_ns(&h) == 30 * MS);
+    }
+
+    /* the step rule's GPU records keep the typical and the longest lately */
+    {
+        PaceStepEst e;
+        PaceHist h;
+
+        memset(&e, 0, sizeof e);
+        memset(&h, 0, sizeof h);
+        for (unsigned i = 0; i < 3; i++) {
+            (void)pace_step_est_gpu(&e, &h, 20 * MS);
+        }
+        (void)pace_step_est_gpu(&e, &h, 36 * MS);
+        CHECK(e.gpuLongNs == 36 * MS && e.gpuTyp.n == 4);
+        CHECK(e.gpuTyp.meanNs == 21 * MS); /* a 16th of the way: 20 + 16 / 16 */
+    }
+
+    /* the pipe at an ask with the render thread idle */
+    {
+        PaceRtAsk q = fillAsk();
+        PaceRtPipe p;
+
+        q.nowNs = 100 * MS;
+        q.slotAhead = false;
+        p = (PaceRtPipe){110 * MS, {105 * MS, 130 * MS}};
+        CHECK(pace_rt_pipe_idle(&p, &q, 90 * MS, true) == 20 * MS);
+        CHECK(p.submitFreeNs == 90 * MS && p.gpuDoneNs[0] == 105 * MS &&
+              p.gpuDoneNs[1] == 130 * MS);
+        /* the slot ahead blocked: the GPU's end of the picture before is
+           the job's end, the one after it a picture later at the earliest */
+        q.slotAhead = true;
+        p = (PaceRtPipe){95 * MS, {105 * MS, 108 * MS}};
+        CHECK(pace_rt_pipe_idle(&p, &q, 96 * MS, true) == 17 * MS);
+        CHECK(p.submitFreeNs == 95 * MS && p.gpuDoneNs[0] == 96 * MS && p.gpuDoneNs[1] == 116 * MS);
+        /* it found its slot free: that end is past, the other kept */
+        p = (PaceRtPipe){95 * MS, {105 * MS, 108 * MS}};
+        CHECK(pace_rt_pipe_idle(&p, &q, 96 * MS, false) == 9 * MS);
+        CHECK(p.gpuDoneNs[0] == 96 * MS && p.gpuDoneNs[1] == 108 * MS);
+        /* no job end known (0) or one later than now: now */
+        p = (PaceRtPipe){110 * MS, {105 * MS, 108 * MS}};
+        (void)pace_rt_pipe_idle(&p, &q, 0, false);
+        CHECK(p.submitFreeNs == 100 * MS && p.gpuDoneNs[0] == 100 * MS);
+        p = (PaceRtPipe){110 * MS, {105 * MS, 108 * MS}};
+        (void)pace_rt_pipe_idle(&p, &q, 120 * MS, false);
+        CHECK(p.submitFreeNs == 100 * MS && p.gpuDoneNs[0] == 100 * MS);
+        /* the submit thread's job before the next picture: its end not the
+           render thread's */
+        q.submitNs = 7 * MS;
+        p = (PaceRtPipe){110 * MS, {80 * MS, 108 * MS}};
+        CHECK(pace_rt_pipe_idle(&p, &q, 96 * MS, false) == 0);
+        CHECK(p.submitFreeNs == 110 * MS);
+        /* nothing to move */
+        q.submitNs = 0;
+        p = (PaceRtPipe){90 * MS, {80 * MS, 108 * MS}};
+        CHECK(pace_rt_pipe_idle(&p, &q, 96 * MS, false) == 0);
+    }
+
+    /* the GPU test (PACE_RT_TEST_GPU), the next step closing a frame: the
+       reads end at +98 ms (measured 8 ms from 90), the picture before ends
+       on the GPU at 120 ms, typical 22 ms against the pipe's 20 */
+    {
+        const PaceRtPipe p = {0, {80 * MS, 120 * MS}};
+        const uint64_t period = 16683333ull;
+        const uint64_t slackB = period - 7 * MS / 10 - PACE_RT_STEP_MARGIN_NS;
+        PaceRtAsk q = fillAsk();
+        PaceRtTrace t;
+
+        /* its job ends at 122 (the GPU's end of the picture before at its
+           typical), the GPU ends it at 152 (its longest lately, 30): the
+           steps between after the next two frames' pictures may start by
+           +130.7 and +164.0: passed by this test (the step after's test
+           then: 130 against 130.7, passed) */
+        CHECK(!pace_rt_step_trace(&q, &p, 0, false, &t));
+        CHECK(t.gpuAsked && t.jobEndNs == 122 * MS && t.gpuEndNs == 152 * MS);
+        CHECK(t.limitANs == 100 * MS + period + slackB);
+        CHECK(t.limitBNs == 100 * MS + 3u * period + slackB);
+        CHECK(t.test == PACE_RT_TEST_NONE && t.afterAsked);
+        /* a GPU the frames fill (a frame of 33.4 ms under 22 + 45 - 20): the
+           picture before at its longest lately, 145, the further one 190,
+           past +164.0 */
+        q.gpuLongNs = 45 * MS;
+        CHECK(pace_rt_step_trace(&q, &p, 0, false, &t));
+        CHECK(t.test == PACE_RT_TEST_GPU && t.jobEndNs == 145 * MS && t.gpuEndNs == 190 * MS);
+        {
+            char line[1536];
+            PaceRtTraceSum sum;
+
+            (void)pace_rt_trace_text(&q, &t, 1, line, sizeof(line));
+            CHECK(strstr(line, "; its job would end at +45.0 (a new frame's picture after it "
+                               "waits for that), the GPU end it at +90.0 at its longest lately "
+                               "(45.0 ms a picture; the new frame's picture after the next waits "
+                               "for that): the steps between frames after them may start by "
+                               "+30.7 and +64.0; held: past them by 26.0 ms") != NULL);
+            memset(&sum, 0, sizeof sum);
+            pace_rt_trace_sum_add(&sum, &q, &t, PACE_RT_MISS);
+            CHECK(sum.held == 1 && sum.byGpu == 1 && sum.byNext == 0 && sum.byAfter == 0);
+            pace_rt_trace_sum_fill(&sum, 4 * MS, false);
+            pace_rt_trace_sum_fill(&sum, 2 * MS, true);
+            pace_rt_trace_sum_fix(&sum, 0);
+            pace_rt_trace_sum_fix(&sum, 6 * MS);
+            CHECK(sum.fillWaits == 2 && sum.fillLate == 1 && sum.fixes == 1);
+            (void)pace_rt_trace_sum_text(&sum, 10.0, line, sizeof(line));
+            CHECK(strstr(line,
+                         "; 1 more held by the GPU's ends behind the next new frames' "
+                         "pictures, by 26.0 ms on average; asked with the render thread "
+                         "idle: 2 waits for it before an ask (3.0 ms on average; 1 not "
+                         "idle by the step's deadline, none asked), the pipe's ends "
+                         "corrected by what had ended in 1 asks (6.0 ms on average)") != NULL);
+            memset(&sum, 0, sizeof sum);
+            pace_rt_trace_sum_fill(&sum, 4 * MS, true);
+            (void)pace_rt_trace_sum_text(&sum, 10.0, line, sizeof(line));
+            CHECK(strcmp(line, "in 10 s 0 further presents asked of the rule; 1 waits for the "
+                               "render thread before an ask (4.0 ms on average), 1 not idle by "
+                               "the step's deadline") == 0);
+        }
+        /* without the slot ahead: not asked */
+        q.slotAhead = false;
+        (void)pace_rt_step_trace(&q, &p, 0, false, &t);
+        CHECK(!t.gpuAsked && t.test != PACE_RT_TEST_GPU);
+        /* the next step between frames: the further picture's job before the
+           next frame's own picture, the step between after it by +147.4 (its
+           slack 14.0 ms, the closing step a period on) */
+        q = fillAsk();
+        q.nextBetween = true;
+        q.stepNs = 7 * MS / 10;
+        q.afterNs = 5 * MS;
+        {
+            const PaceRtPipe p2 = {0, {80 * MS, 140 * MS}};
+
+            CHECK(pace_rt_step_trace(&q, &p, 0, false, &t) == false && t.gpuAsked);
+            CHECK(t.limitANs == 100 * MS + 2u * period + slackB);
+            /* its job at 142 (140 and the typical's 2 ms), the GPU's end of
+               it at 172, under +80.7: held by neither; at the longest 45 the
+               GPU's frames full: 165 past +147.4 */
+            CHECK(!pace_rt_step_trace(&q, &p2, 0, false, &t) && t.jobEndNs == 142 * MS);
+            q.gpuLongNs = 45 * MS;
+            CHECK(pace_rt_step_trace(&q, &p2, 0, false, &t) && t.test == PACE_RT_TEST_GPU);
+            CHECK(t.jobEndNs == 165 * MS && t.jobEndNs > t.limitANs);
+        }
+    }
 }
 
 int main(void)
 {
     PaceHist h = {0};
+    testFifoFromStart();
     testStepRule();
     testStepTrace();
     testGpuGap();
@@ -3202,6 +3840,7 @@ int main(void)
     testLateSkipLoop();
     testOriginalRule();
     testOriginalLoop();
+    testOriginalSplit();
     testLockPause();
     testIntervals();
     testFirstPresentPause();
@@ -3311,6 +3950,7 @@ int main(void)
     testLockTable();
     testGridPeriod();
     testVblankLaws();
+    testFillParts();
 
     if (fails) {
         printf("pace_policy_test: %d failures\n", fails);

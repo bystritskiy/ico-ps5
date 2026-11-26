@@ -43,7 +43,12 @@
  * (rd_store_plan.c's header) is that a pass begun while command k is
  * replayed (g_rdStoreOrd) holds the work of command k and later ones only
  * (a screen run or a VU merge is flushed into the pass it was recorded in;
- * a fold reads ahead, never back).  The scan (rd__pass_area_scan_cmd, in
+ * a fold reads ahead, never back).  One draw is replayed out of its order:
+ * the glow's paste the late pass defers to the aura's paste pass
+ * (rd_late_pass.c RD_LATE_DEFER, rd_fx_plan.c rd__fx_defer_draw); it is
+ * drawn with g_rdStoreOrd set back to its own command, so a pass it begins
+ * is read here as begun at the paste (a sprite of the WHOLE kind: no area),
+ * and it lands only in an aura's pass that has no area.  The scan (rd__pass_area_scan_cmd, in
  * rd__store_plan_scan's one walk of the lists before the replay's walk,
  * beside the pass cut's and the store plan's; rd__pass_area_scan alone in
  * the tests) reads the lists with their state once and gives every command
@@ -123,6 +128,7 @@
 #include <stdlib.h>
 #include <string.h>
 
+#include "rd_lamps.h"
 #include "rd_replay.h"
 
 static int32_t floorDiv16(int32_t v)
@@ -351,6 +357,7 @@ void rd__pass_area_init(void)
     memset(s_pa.whyRun, 0, sizeof(s_pa.whyRun));
     s_pa.nSaid = 0;
     note();
+    rd__lamps_init(); /* the lamps' pass area, which reads this one's switch (rd_lamps.c) */
 }
 
 bool rd__pass_area_on(void)
@@ -745,6 +752,7 @@ static const char *cmdWord(uint8_t type)
 void rd__pass_area_begin(RhiRenderPassDesc *p, const RdTargetRec *c, uint32_t cid, uint32_t serial,
                          bool ms, bool storage)
 {
+    rd__glow_light_pass(cid, c, (int)p->color[0].load); /* the light plan's chain passes named */
     if (s_pa.ended && cid == s_pa.endFor && p->depth.texture.id == s_pa.endDepth && !storage) {
         /* the pass the walk would have kept on: ended at its area's end,
          * begun again (rd__pass_area_due) */
@@ -753,6 +761,10 @@ void rd__pass_area_begin(RhiRenderPassDesc *p, const RdTargetRec *c, uint32_t ci
     }
     s_pa.open = s_pa.ended = false;
     p->area = (RhiRect){0, 0, 0, 0};
+    if (rd__lamps_pass(p, cid, ms, storage)) {
+        rd__perf_pass_area(&p->area); /* the lamps' pass on WORK2 (rd_lamps.c) */
+        return;
+    }
     if (!s_pa.on || !c || !c->withDepth || !c->depth.id) {
         return; /* off, or a target without its own depth: whole, not counted */
     }

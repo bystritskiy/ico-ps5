@@ -73,7 +73,31 @@
  *            picture inside).  Fairness (threadFair): a call that waits
  *            for picture 1's reads (its walk held open) runs before
  *            picture 2's reads begin, one wait of one picture's reads,
- *            counted in the walk.
+ *            counted in the walk.  The display's wait ahead
+ *            (threadRoomAhead, the render thread submitting, the backend's
+ *            wait for room in the present queue replaced by a seam): a
+ *            picture handed over that presented ends by making the next
+ *            picture's wait; held there, this thread's rd_update_texture
+ *            and rdtex_find do not wait; the next picture's acquire takes
+ *            it (none inside its reads); a picture after one whose wait
+ *            was not made waits inside its reads (counted); SCENE the
+ *            same; with ICO_RD_ACQUIRE_AHEAD=0 the seam is never asked.
+ *            Frame rate Original (threadOriginal, the window's gate set):
+ *            the frame rd_end_frame closes is handed over to the render
+ *            thread (rd_submit_async, rd_last_present_info at once), the
+ *            gate runs on this thread, SCENE and DISPLAY byte for byte as
+ *            without the thread, the presents on the submit thread; the
+ *            gate leaving out every second frame gives 15 pictures of 30;
+ *            ICO_RD_ORIGINAL_ASYNC=0 replays each inside the step.  The
+ *            GPU's end first (threadPresentFree, rd_submit_thread.h; issue
+ *            179): on a faked GPU and driver, a present that waits for the
+ *            GPU gets the rule from the first presents, then 45 ms
+ *            pictures at a 40 ms tick present at least 1000/45 a second
+ *            less a tenth (about 1000/80 without, printed), 20 ms ones at
+ *            25.0, keep frames every one; a present that returns at once
+ *            never gets it (no wait, 17 ms GPU + 10 ms walk + 8 ms submit
+ *            at 30.0 a second), nor one that waits every second time; the
+ *            GPU held one picture at a time; SCENE and DISPLAY as without.
  *
  * Exit 0, 1 on a mismatch, 77 when there is no device (after the CPU
  * checks passed).
@@ -81,6 +105,7 @@
 #include <stdio.h>
 #include <stdlib.h>
 #include <string.h>
+#include <time.h>
 #include "ico_thread.h"
 #include "rd_internal.h"
 #include "rd_submit.h"
@@ -1501,6 +1526,175 @@ static void threadFair(void)
     rd_thread_local_stop();
 }
 
+/* The display's wait ahead's seam (rd_thread.h rd__thread_room_hook), in
+ * place of the backend's rhi_wait_present_room: mode 1 holds the next wait
+ * until this thread releases it (a display that keeps the queue full),
+ * mode 2 answers false once (no wait made: as a present that queued
+ * nothing), else true at once; every call counted */
+static int s_roomMode;
+static unsigned s_roomCalls;
+
+static bool roomHook(void)
+{
+    ico_mutex_lock(s_hk.m);
+    s_roomCalls++;
+    const int mode = s_roomMode;
+    s_roomMode = 0;
+    ico_mutex_unlock(s_hk.m);
+    if (mode == 1) {
+        hookSet(&s_hk.entered);
+        hookWait(&s_hk.release);
+    }
+    return mode != 2;
+}
+
+static void roomSet(int mode)
+{
+    ico_mutex_lock(s_hk.m);
+    s_roomMode = mode;
+    ico_mutex_unlock(s_hk.m);
+}
+
+static unsigned roomCalls(void)
+{
+    ico_mutex_lock(s_hk.m);
+    const unsigned n = s_roomCalls;
+    ico_mutex_unlock(s_hk.m);
+    return n;
+}
+
+/* The display's wait ahead (rd_thread.h rd__room_ahead_take): with the
+ * render thread submitting (ICO_RD_SUBMIT_THREAD=0, as Direct3D 11 and
+ * OpenGL run), a picture handed over that presented ends, after its
+ * present, by making the next picture's wait for room in the present
+ * queue (the seam above in place of the backend's).  Held there, this
+ * thread's calls that change the renderer's state (rd_update_texture,
+ * rdtex_find: rd__texlock_wait) return without a read wait; the next
+ * picture's acquire takes the wait made ahead (none inside its reads); a
+ * picture whose predecessor made none (the seam's false) waits inside its
+ * reads and is counted; the 10 s line's clause says so; SCENE after
+ * picture 3 byte for byte as after picture 0 (the same frame; the cell
+ * runs after replacementPixels, so not checkPixels' references).  With
+ * ICO_RD_ACQUIRE_AHEAD=0 the seam is never asked.  The output is given a
+ * size so the pictures present (rd_tex_test's settings have none): run
+ * after the other device cells */
+static void threadRoomAhead(void)
+{
+    if (rhi_backend() == RHI_BACKEND_OPENGL) {
+        return;
+    }
+    rd_resize_output(256, 256);
+    for (int run = 0; run < 2; run++) {
+        setEnv("ICO_RD_SUBMIT_THREAD", "0");
+        setEnv("ICO_RD_ACQUIRE_AHEAD", run == 1 ? "0" : NULL);
+        const char *name = run == 0 ? "ICO_RD_SUBMIT_THREAD=0" : "ICO_RD_ACQUIRE_AHEAD=0";
+        if (!rd_thread_local_start(RD_THREAD_ON)) {
+            CHECK(0, "display's wait ahead, %s: the renderer's own thread could not start", name);
+            break;
+        }
+        RdThreadBlock b, mid;
+        uint8_t *pat = malloc(64 * 64 * 4);
+        uint8_t *scene0 = malloc(512 * 512 * 4), *scene3 = malloc(512 * 512 * 4);
+        uint32_t w0 = 0, h0 = 0, w3 = 0, h3 = 0;
+        RdTex u = rd_create_texture(64, 64, NULL, RD_TEXA_80_80, "room ahead");
+        memset(&mid, 0, sizeof(mid));
+        if (!pat || !scene0 || !scene3 || !hookStart(0)) {
+            free(pat);
+            free(scene0);
+            free(scene3);
+            rd_thread_local_stop();
+            break;
+        }
+        s_roomMode = 0;
+        s_roomCalls = 0;
+        rd__thread_room_hook(roomHook);
+        gif_HostFrameReset();
+        dl_Clear();
+        recordFrame(); /* replayed and presented by rd_end_frame: a call, not handed over */
+        const RdFrame *f = rd__last_frame();
+        (void)rd_thread_drain();
+        rd_thread_block_take(&b); /* the block from here */
+        /* picture 0: presents, makes the wait ahead at once */
+        const bool p0 = f != NULL && rd__replay_frame_async(f, 0, true);
+        (void)rd_thread_drain();
+        rd_thread_block_take(&b);
+        if (run == 1) {
+            CHECK(p0 && b.roomAheads == 0 && b.roomInside == 0 && roomCalls() == 0,
+                  "display's wait ahead, %s: never made (%u, the seam asked %u times), none "
+                  "counted inside (%u)",
+                  name, b.roomAheads, roomCalls(), b.roomInside);
+        } else if (!(p0 && b.roomAheads == 1 && b.pictures == 1) ||
+                   !rd__read_target(rd_target(RD_TARGET_SCENE), scene0, 512 * 512 * 4, &w0, &h0)) {
+            CHECK(0,
+                  "display's wait ahead, %s: picture 0 handed over (%d) and presented, its job "
+                  "ending with the wait ahead (%u, %u pictures; none: the picture did not "
+                  "present, the cell cannot go on)",
+                  name, (int)p0, b.roomAheads, b.pictures);
+        } else {
+            /* picture 1: takes picture 0's wait, then its own held */
+            roomSet(1);
+            const bool p1 = rd__replay_frame_async(f, 0, true);
+            CHECK(p1, "display's wait ahead, %s: picture 1 handed over", name);
+            if (p1) {
+                hookWait(&s_hk.entered); /* the render thread in the wait ahead, held */
+                for (int i = 0; i < 64 * 64 * 4; i++) {
+                    pat[i] = (uint8_t)(hash((uint32_t)(i + 313)) & 0xFF);
+                }
+                const double t0 = ico_thread_now_ms();
+                rd_update_texture(u, pat);
+                (void)rdtex_find((uint32_t)s_t8.id, 1u, RDTEX_TEXA_REPLAY);
+                const double ms = ico_thread_now_ms() - t0;
+                rd_thread_block_take(&mid);
+                CHECK(mid.readWaits == 0 && !s_hk.release,
+                      "display's wait ahead, %s: with the display's wait held, the game side's "
+                      "calls waited %u times (%.2f ms)",
+                      name, mid.readWaits, ms);
+                hookSet(&s_hk.release);
+            }
+            (void)rd_thread_drain();
+            rd_thread_block_take(&b);
+            CHECK(mid.roomAheads + b.roomAheads == 1 && mid.roomInside + b.roomInside == 0 &&
+                      mid.readWaits + b.readWaits == 0,
+                  "display's wait ahead, %s: picture 1 took the wait made ahead (%u inside its "
+                  "reads), made the next one (%u), no read wait (%u)",
+                  name, mid.roomInside + b.roomInside, mid.roomAheads + b.roomAheads,
+                  mid.readWaits + b.readWaits);
+            /* picture 2 makes none (the seam's false); picture 3 then
+               waits inside its reads, and makes its own */
+            roomSet(2);
+            const bool p2 = rd__replay_frame_async(f, 0, true);
+            const bool p3 = p2 && rd__replay_frame_async(f, 0, true);
+            (void)rd_thread_drain();
+            rd_thread_block_take(&b);
+            CHECK(p2 && p3 && b.pictures == 2 && b.roomAheads == 1 && b.roomInside == 1,
+                  "display's wait ahead, %s: after a picture that made none, the next waited "
+                  "inside its reads (%u) and made its own (%u; %u pictures)",
+                  name, b.roomInside, b.roomAheads, b.pictures);
+            CHECK(rd__read_target(rd_target(RD_TARGET_SCENE), scene3, 512 * 512 * 4, &w3, &h3) &&
+                      w3 == w0 && h3 == h0 && memcmp(scene0, scene3, (size_t)w0 * h0 * 4) == 0,
+                  "display's wait ahead, %s: SCENE after picture 3 as after picture 0 (%ux%u, "
+                  "%ux%u)",
+                  name, w0, h0, w3, h3);
+            char text[1024];
+            rd_thread_read_waits_text(&b, text, sizeof(text));
+            CHECK(strstr(text, "; the display's wait for room in the present queue made at the "
+                               "end of the picture before 1 times (") != NULL &&
+                      strstr(text, "1 pictures waited for it inside their reads") != NULL,
+                  "display's wait ahead, %s: the 10 s line's clause: %s", name, text);
+            printf("display's wait ahead, %s: %s\n", name, text);
+        }
+        rd__thread_room_hook(NULL);
+        hookStop();
+        rd_destroy_texture(u);
+        free(pat);
+        free(scene0);
+        free(scene3);
+        rd_thread_local_stop();
+    }
+    setEnv("ICO_RD_SUBMIT_THREAD", NULL);
+    setEnv("ICO_RD_ACQUIRE_AHEAD", NULL);
+}
+
 /* [dev] render_thread = sync (rd_thread.h RdThreadHost.sync): a picture is
  * posted as one that waits and is not counted as handed over
  * (rd_submit_async false after it, as with the thread off, so the window
@@ -1529,6 +1723,1647 @@ static void threadSync(void)
               handed ? "counted as" : "not counted as", posted);
         rd_thread_local_stop();
     }
+}
+
+/* ------------------------------------------------- Frame rate Original */
+
+/* The window's gate as the test's (rd.h RdReplayGate): its calls, the ones
+ * made off this thread (it runs on the game thread, never on the render
+ * thread), the frames it presented while told busy; mode 1 leaves out
+ * every second frame (its odd calls) */
+static _Thread_local int t_testThread;
+
+static struct {
+    unsigned calls, other, busy;
+    int mode;
+} s_og;
+
+static int origGate(int keep, bool busy)
+{
+    const unsigned n = s_og.calls++;
+    /* mode 2: window_orig_gate's busy arm (pace_original_gate): a frame
+       that is not a keep frame is left out while told busy */
+    const int answer = s_og.mode == 2 && busy && !keep ? RD_GATE_BUSY
+                       : s_og.mode == 1 && (n & 1u)    ? RD_GATE_LATE
+                                                       : RD_GATE_PRESENT;
+    s_og.other += !t_testThread || rd_thread_on_render();
+    s_og.busy += busy && answer == RD_GATE_PRESENT ? 1u : 0u;
+    return answer;
+}
+
+/* The submit thread's hook (rd_submit_thread.h rd__submit_test_hook): the
+ * first job held unfinished, as a driver's present call that blocks, until
+ * this thread releases it (or 10 s pass: a test that would wait for it
+ * fails instead of hanging) */
+static int s_shEntered, s_shRelease, s_shHeld;
+
+static bool spinUntil(const int *flag, double ms)
+{
+    const double t0 = ico_thread_now_ms();
+    while (!__atomic_load_n(flag, __ATOMIC_ACQUIRE)) {
+        if (ico_thread_now_ms() - t0 > ms) {
+            return false;
+        }
+    }
+    return true;
+}
+
+static void submitHold(void)
+{
+    if (__atomic_exchange_n(&s_shHeld, 1, __ATOMIC_ACQ_REL)) {
+        return;
+    }
+    __atomic_store_n(&s_shEntered, 1, __ATOMIC_RELEASE);
+    (void)spinUntil(&s_shRelease, 10000.0);
+}
+
+/* the presents' records popped since the last call: how many, and how many
+ * had their present where `want` says (RdPerfRecord.presentThread; the
+ * first RHI_FRAMES_IN_FLIGHT records of a pass are the pass before's last
+ * replays, whose GPU times came in this one) */
+static void presentWhere(int want, unsigned *n, unsigned *match)
+{
+    RdPerfRecord r;
+    *n = *match = 0;
+    while (rd_perf_pop(&r)) {
+        if (!r.presented) {
+            continue;
+        }
+        (*n)++;
+        *match += r.presentThread == want;
+    }
+}
+
+/* SCENE into scene, and DISPLAY into display where it reads back (*dw x
+ * *dh; 0 x 0 where it does not) */
+static bool readScene(uint8_t *scene, uint8_t *display, uint32_t *dw, uint32_t *dh)
+{
+    uint32_t w = 0, h = 0;
+    *dw = *dh = 0;
+    if (!rd__read_target(rd_target(RD_TARGET_SCENE), scene, 512 * 512 * 4, &w, &h) || w != 512) {
+        return false;
+    }
+    if (!rd__read_target(rd_target(RD_TARGET_DISPLAY), display, 512 * 512 * 4, dw, dh)) {
+        *dw = *dh = 0;
+    }
+    return true;
+}
+
+/* Frame rate Original with the render thread (rd.h RdReplayGate, rd_thread.h
+ * rd__replay_frame_post): with the gate set, the frame rd_end_frame closes
+ * is handed over (rd_submit_async true right after it; rd_last_present_info
+ * names it at once), the gate runs on this thread every time, and after the
+ * drain SCENE and DISPLAY are byte for byte the renderer's without the
+ * thread (RD_THREAD_OFF, the replay inside the step); the presents ran on
+ * the submit thread (inside the step without the thread).  A frame
+ * presented while the render thread was busy waited for the picture before
+ * (counted, as many as the gate was told busy).  The gate leaving out every
+ * second frame: 15 pictures of 30, the same SCENE.  Under
+ * ICO_RD_ORIGINAL_ASYNC=0 ([dev] original_async = false) every frame is
+ * replayed inside the step (rd_submit_async false), the same SCENE.  Run
+ * after threadRoomAhead: the output has a size, so the pictures present. */
+static void threadOriginal(void)
+{
+    if (rhi_backend() == RHI_BACKEND_OPENGL) {
+        return;
+    }
+    const int frames = 30;
+    uint8_t *refScene = malloc(512 * 512 * 4), *refDisplay = malloc(512 * 512 * 4);
+    uint8_t *scene = malloc(512 * 512 * 4), *display = malloc(512 * 512 * 4);
+    uint8_t *pat = malloc(64 * 64 * 4);
+    uint32_t refW = 0, refH = 0, dw = 0, dh = 0;
+    RdFramePost fp;
+    RdFramePostLast last;
+    RdThreadBlock b;
+    unsigned n, match;
+    t_testThread = 1;
+    if (!refScene || !refDisplay || !scene || !display || !pat) {
+        CHECK(0, "Original: memory");
+        goto out;
+    }
+    rd_set_replay_gate(origGate);
+    /* pass 0: no render thread, the replay inside the step */
+    memset(&s_og, 0, sizeof(s_og));
+    rd_frame_post_take(&fp);
+    presentWhere(RD_PRESENT_IN_STEP, &n, &match);
+    for (int k = 0; k < frames; k++) {
+        gif_HostFrameReset();
+        dl_Clear();
+        recordFrame();
+    }
+    rd_frame_post_take(&fp);
+    CHECK(s_og.calls == (unsigned)frames && s_og.other == 0 && s_og.busy == 0 &&
+              fp.inlines == (unsigned)frames && fp.posts == 0,
+          "Original, no render thread: the gate %u times (%u off this thread, %u busy), %u "
+          "replayed inside the step, %u handed over",
+          s_og.calls, s_og.other, s_og.busy, fp.inlines, fp.posts);
+    CHECK(rd_frame_post_last_take(&last) && last.how == RD_POST_INLINE &&
+              last.frame == rd__last_frame()->number && !rd_frame_post_last_take(&last),
+          "Original, no render thread: the last picture's record");
+    presentWhere(RD_PRESENT_IN_STEP, &n, &match);
+    CHECK(match > 0 && match + RHI_FRAMES_IN_FLIGHT >= n,
+          "Original, no render thread: %u of %u presents inside the step", match, n);
+    if (!readScene(refScene, refDisplay, &refW, &refH)) {
+        CHECK(0, "Original: SCENE readback");
+        goto out;
+    }
+    printf("Original: the reference SCENE%s\n", refW ? " and DISPLAY" : " (no DISPLAY)");
+    for (int run = 0; run < 3; run++) {
+        /* 1: handed over; 2: every second frame left out; 3: the escape */
+        setEnv("ICO_RD_ORIGINAL_ASYNC", run == 2 ? "0" : NULL);
+        const char *name = run == 0   ? "handed over"
+                           : run == 1 ? "every second frame left out"
+                                      : "ICO_RD_ORIGINAL_ASYNC=0";
+        if (!rd_thread_local_start(RD_THREAD_ON)) {
+            CHECK(0, "Original, %s: the renderer's own thread could not start", name);
+            break;
+        }
+        RdTex u = rd_create_texture(64, 64, NULL, RD_TEXA_80_80, "original");
+        memset(&s_og, 0, sizeof(s_og));
+        s_og.mode = run == 1 ? 1 : 0;
+        rd_thread_block_take(&b);
+        rd_frame_post_take(&fp);
+        presentWhere(RD_PRESENT_ON_SUBMIT, &n, &match);
+        int async = 0, infoOk = 0;
+        for (int k = 0; k < frames; k++) {
+            gif_HostFrameReset();
+            dl_Clear();
+            recordFrame();
+            RdPresentInfo pi;
+            const RdFrame *f = rd__last_frame();
+            const bool shown = run != 1 || (k & 1) == 0;
+            async += shown && rd_submit_async(); /* true until the next drain */
+            infoOk += !shown || (f != NULL && rd_last_present_info(&pi) && pi.frame == f->number);
+            /* the game's side goes on while the picture runs */
+            for (int i = 0; i < 64 * 64 * 4; i++) {
+                pat[i] = (uint8_t)(hash((uint32_t)(k * 64 * 64 * 4 + i + 7)) & 0xFF);
+            }
+            rd_update_texture(u, pat);
+        }
+        (void)rd_thread_drain();
+        rd_thread_block_take(&b);
+        rd_frame_post_take(&fp);
+        const unsigned want = run == 1 ? (unsigned)frames / 2u : (unsigned)frames;
+        CHECK(s_og.calls == (unsigned)frames && s_og.other == 0,
+              "Original, %s: the gate %u times, %u of them off this thread", name, s_og.calls,
+              s_og.other);
+        CHECK(infoOk == frames, "Original, %s: rd_last_present_info named the frame %d of %d times",
+              name, infoOk, frames);
+        if (run == 2) {
+            CHECK(async == 0 && fp.inlines == want && fp.posts == 0 && s_og.busy == 0,
+                  "Original, %s: %d handed over, %u replayed inside the step, %u handed over "
+                  "counted, the gate told busy %u times",
+                  name, async, fp.inlines, fp.posts, s_og.busy);
+        } else {
+            CHECK(async == (int)want && fp.posts == want && fp.inlines == 0 && b.pictures == want &&
+                      fp.postWaits == s_og.busy && fp.lateSkips == (unsigned)frames - want,
+                  "Original, %s: %d handed over (%u counted, %u inside the step, %u pictures on "
+                  "the render thread, want %u), %u waited for the picture before (the gate told "
+                  "busy %u times), %u left out",
+                  name, async, fp.posts, fp.inlines, b.pictures, want, fp.postWaits, s_og.busy,
+                  fp.lateSkips);
+        }
+        {
+            char text[320];
+            rd_frame_post_text(&fp, text, sizeof(text));
+            CHECK(strstr(text, "; its picture handed over in ") != NULL &&
+                      strstr(text, "); presents waited inside the step: ") != NULL,
+                  "Original, %s: the 10 s clause: %s", name, text);
+            printf("Original, %s:%s\n", name, text);
+        }
+        presentWhere(run == 2                ? RD_PRESENT_IN_STEP
+                     : rd_thread_submit_on() ? RD_PRESENT_ON_SUBMIT
+                                             : RD_PRESENT_ELSEWHERE,
+                     &n, &match);
+        CHECK(match > 0 && match + RHI_FRAMES_IN_FLIGHT >= n,
+              "Original, %s: %u of %u presents where they ran (%s)", name, match, n,
+              run == 2 ? "inside the step" : "the submit thread");
+        CHECK(readScene(scene, display, &dw, &dh) &&
+                  memcmp(scene, refScene, (size_t)512 * 512 * 4) == 0,
+              "Original, %s: SCENE as without the render thread", name);
+        CHECK(dw == refW && dh == refH &&
+                  (refW == 0 || memcmp(display, refDisplay, (size_t)refW * refH * 4) == 0),
+              "Original, %s: DISPLAY as without the render thread (%ux%u, %ux%u)", name, dw, dh,
+              refW, refH);
+        rd_destroy_texture(u);
+        rd_thread_local_stop();
+    }
+    setEnv("ICO_RD_ORIGINAL_ASYNC", NULL);
+    /* the busy skip, made certain through the submit side.  One frame is
+       handed over; its submit job is held inside the submit thread's hook
+       (rd__submit_test_hook: after the job's submit, before its present and
+       before the job marks itself finished, so rd_thread_submit_unfinished
+       stays true), as a driver's present that blocks.  The harness's
+       output is offscreen with no swapchain, so the job has no present of
+       its own: what the busy rule reads is the unfinished job, and that is
+       what is held.  With the render thread's part idle, busy is the submit
+       thread's part alone.  Then `held` frames go through rd_end_frame
+       while it is held, the gate answering as window_orig_gate does: each
+       is left out as busy (not replayed).  Released and drained, one more
+       frame is handed over.  So: the gate held + 2 times, held busy skips,
+       2 handed over, as many pictures on the render thread, SCENE the
+       handed-over frames' */
+    if (rd_thread_local_start(RD_THREAD_ON)) {
+        if (!rd_thread_submit_on()) {
+            printf("Original, busy: no submit thread on this device; the held job is not "
+                   "driven\n");
+        } else {
+            const unsigned held = 4, lead = 1;
+            memset(&s_og, 0, sizeof(s_og));
+            s_og.mode = 2;
+            __atomic_store_n(&s_shEntered, 0, __ATOMIC_RELEASE);
+            __atomic_store_n(&s_shRelease, 0, __ATOMIC_RELEASE);
+            __atomic_store_n(&s_shHeld, 0, __ATOMIC_RELEASE);
+            rd__submit_test_hook(submitHold);
+            rd_thread_block_take(&b);
+            rd_frame_post_take(&fp);
+            gif_HostFrameReset();
+            dl_Clear();
+            recordFrame(); /* both threads idle: handed over */
+            const bool entered = spinUntil(&s_shEntered, 5000.0); /* its job in the hook */
+            bool renderIdle = false;
+            {
+                const double t0 = ico_thread_now_ms();
+                while (!(renderIdle = !rd__thread_picture_busy_render()) &&
+                       ico_thread_now_ms() - t0 < 5000.0) {
+                    /* the render job's end, after its post to the submit thread */
+                }
+            }
+            const bool busyHeld = rd__thread_picture_busy();
+            CHECK(entered && renderIdle && rd_thread_submit_unfinished() && busyHeld,
+                  "Original, busy: the submit job held on the submit thread (%d), the render "
+                  "thread's part idle (%d): busy %d (the submit thread's part of it)",
+                  entered, renderIdle, busyHeld);
+            for (unsigned k = 0; k < held; k++) {
+                gif_HostFrameReset();
+                dl_Clear();
+                recordFrame(); /* told busy: left out */
+            }
+            __atomic_store_n(&s_shRelease, 1, __ATOMIC_RELEASE);
+            (void)rd_thread_drain();
+            gif_HostFrameReset();
+            dl_Clear();
+            recordFrame(); /* both idle again: handed over */
+            (void)rd_thread_drain();
+            rd__submit_test_hook(NULL);
+            rd_thread_block_take(&b);
+            rd_frame_post_take(&fp);
+            CHECK(s_og.calls == lead + held + 1u && fp.busySkips == held && fp.posts == lead + 1u &&
+                      fp.posts + fp.busySkips == s_og.calls && fp.lateSkips == 0 &&
+                      fp.inlines == 0 && b.pictures == fp.posts,
+                  "Original, busy: the gate %u times (want %u), %u left out as busy (want %u), "
+                  "%u handed over (want %u), %u inside the step, %u late, %u pictures on the "
+                  "render thread",
+                  s_og.calls, lead + held + 1u, fp.busySkips, held, fp.posts, lead + 1u, fp.inlines,
+                  fp.lateSkips, b.pictures);
+            {
+                char text[320];
+                rd_frame_post_text(&fp, text, sizeof(text));
+                CHECK(strstr(text, "skipped: render thread busy") != NULL,
+                      "Original, busy: the 10 s clause: %.300s", text);
+                printf("Original, busy:%.300s\n", text);
+            }
+            CHECK(readScene(scene, display, &dw, &dh) &&
+                      memcmp(scene, refScene, (size_t)512 * 512 * 4) == 0,
+                  "Original, busy: SCENE the handed-over frames', the frames left out not "
+                  "replayed");
+        }
+        rd_thread_local_stop();
+    } else {
+        CHECK(0, "Original, busy: the renderer's own thread could not start");
+    }
+out:
+    rd_set_replay_gate(NULL);
+    (void)rd_frame_post_last_take(&last);
+    free(refScene);
+    free(refDisplay);
+    free(scene);
+    free(display);
+    free(pat);
+}
+
+/* ------------------------------- Frame rate Original: the GPU's end first */
+
+/* The GPU's end first (rd_submit_thread.h; issue 179) at rate, with its
+ * verdict from the first presents.  The submit thread's jobs run on a
+ * faked GPU and driver (rd__submit_test_gpu): a job's GPU time begins
+ * after its submit (a faked submit time first) and after the job before's
+ * GPU time (one queue); the driver's present call waits for that end
+ * (PF_BLOCK, a present that returns at its own picture's end), returns
+ * 0.3 ms before it (PF_NEAR), returns at once (PF_EARLY, the owner's
+ * Pixel's: 0.6 ms calls with the work still running), waits on every
+ * second job (PF_MIXED), returns at the end of the job before's GPU time
+ * (PF_PREV, the Mali-G52's in issue 179's v0.11.12 log, line 562: 140.3
+ * ms, back at the picture before's signal, its own 91 ms later) or lasts a
+ * fixed 5 ms while the job before still runs (PF_FIXED).  The verdict's
+ * one wait after a long present waits for the job before's faked end
+ * (pfSampleWait), except in the case marked real: there it is the real
+ * backend's (rhi_last_submitted, rhi_wait_value_ns on lavapipe's
+ * timeline: the path a phone takes; v0.11.12's test faked that read and
+ * its phone never decided).  The render thread's walk is faked too (rd__thread_test_hook
+ * at RD_READ_WALK); the game thread closes a frame every tick with the
+ * window's busy rule (origGate mode 2). */
+enum { PF_BLOCK, PF_EARLY, PF_MIXED, PF_NEAR, PF_PREV, PF_FIXED, PF_SPORADIC };
+
+static struct {
+    double ms;      /* the faked GPU time a picture */
+    double submit;  /* the faked submit time */
+    double end;     /* the last picture's faked GPU end (ico_thread_now_ms) */
+    double prevEnd; /* and the one before's */
+    double walk;    /* the faked walk */
+    int driver;     /* PF_* */
+    unsigned jobs;
+    /* the first this many jobs light (1 ms of GPU, the present back at
+       once: short calls), the case's driver after them */
+    unsigned lightN;
+    /* the witness's read fails every time (pfPrevFinished -1) */
+    bool readFails;
+    /* the bookkeeping the checks read: each job's submit (its lists'
+       submits done, as the hook is called) and its faked GPU end, in
+       order (the first PF_LOG); the waits inside the GPU's end first
+       (their count and time, ms); the jobs whose submits came while the
+       backend had not seen the job before's submission finished
+       (rhi_gpu_progress, read at the hook) */
+    double sub[512], gpuEnd[512];
+    unsigned logged;
+    unsigned waitN;
+    double waitMs;
+    uint64_t prevValue;
+    unsigned progBad;
+    /* each job's faked GPU end and its submission value (the backend's
+       rhi_last_submitted after its submits), by job number (PF_RING of
+       them); the presents made so far (the present of job `presented`
+       next: the presents come in the order submitted, in either order of
+       the submit thread); the faked present call's own time (PfCase.callMs)
+       and the longest present call since the last clear, timed by the
+       fake itself; of those calls, the GPU work the faked driver still
+       had to wait for as its wait began (owedMaxMs, by the faked clock: 0
+       or less where that work had ended; owedN such calls) and the longest
+       time a call took past its own time (restMaxMs: a loaded runner's
+       stretch of the call's own time is not in it); the ahead order's
+       waiter's waits (pfWaitValue) */
+    double endAt[64];
+    uint64_t valueAt[64];
+    unsigned presented;
+    double call, presentMaxMs;
+    double owedMaxMs, restMaxMs;
+    unsigned owedN;
+    bool slow; /* PfCase.slowCalls */
+    /* the waiting thread's wake-up after a GPU end it waited for
+       (PfCase.wakeMs: the GPU's end first's wait and the ahead order's
+       waiter alike) */
+    double wake;
+    unsigned waitVN;
+    double waitVMs;
+} s_pf;
+
+#define PF_LOG 512u
+#define PF_RING 64u
+
+/* the pictures submitted while the GPU still held the one before: job k+1's
+   submit before job k's GPU end (the times as recorded, from first) */
+static unsigned pfOverlaps(const double *sub, const double *end, unsigned first, unsigned n)
+{
+    unsigned bad = 0;
+    for (unsigned k = first + 1u; k < n; k++) {
+        bad += sub[k] < end[k - 1u] ? 1u : 0u;
+    }
+    return bad;
+}
+
+static void pfWaitUntil(double at)
+{
+    for (;;) {
+        const double left = at - ico_thread_now_ms();
+        if (left <= 0.0) {
+            return;
+        }
+#ifndef _WIN32
+        if (left > 1.5) {
+            /* the coarse part asleep (the other threads keep the cores),
+               the last millisecond spun */
+            const double ms = left - 1.0;
+            struct timespec t = {(time_t)(ms / 1000.0),
+                                 (long)((ms - (double)(time_t)(ms / 1000.0) * 1000.0) * 1e6)};
+            nanosleep(&t, NULL);
+        }
+#endif
+    }
+}
+
+static void pfSubmitted(void)
+{
+    const double at = ico_thread_now_ms(); /* the job's own submits are done */
+    {
+        /* the backend's own view: the job before's submission seen finished
+           (its wait made) by the time this job submitted */
+        RhiGpuProgress gp;
+        if (rhi_gpu_progress(&gp)) {
+            s_pf.progBad += s_pf.prevValue != 0 && gp.finished < s_pf.prevValue ? 1u : 0u;
+            s_pf.prevValue = gp.submitted;
+        }
+    }
+    if (s_pf.submit > 0.0) {
+        pfWaitUntil(at + s_pf.submit);
+    }
+    const double t = ico_thread_now_ms();
+    s_pf.prevEnd = s_pf.end;
+    s_pf.end = (t > s_pf.end ? t : s_pf.end) + (s_pf.jobs < s_pf.lightN ? 1.0 : s_pf.ms);
+    {
+        /* for the waiter's thread (pfWaitValue): the job's end and value
+           stored before its count */
+        const unsigned k = s_pf.jobs % PF_RING;
+        const uint64_t v = rhi_last_submitted();
+        __atomic_store(&s_pf.endAt[k], &s_pf.end, __ATOMIC_RELAXED);
+        __atomic_store_n(&s_pf.valueAt[k], v, __ATOMIC_RELAXED);
+    }
+    if (s_pf.logged < PF_LOG) {
+        s_pf.sub[s_pf.logged] = at;
+        s_pf.gpuEnd[s_pf.logged] = s_pf.end;
+        s_pf.logged++;
+    }
+    __atomic_store_n(&s_pf.jobs, s_pf.jobs + 1u, __ATOMIC_RELEASE);
+}
+
+static void pfWaitEnd(void)
+{
+    const double t = ico_thread_now_ms();
+    pfWaitUntil(s_pf.end + s_pf.wake);
+    s_pf.waitN++;
+    s_pf.waitMs += ico_thread_now_ms() - t;
+}
+
+/* the driver's present call of job p (the presents come in submit order):
+   PF_BLOCK and PF_NEAR wait for the last submitted job's end (with one job
+   at a time its own; with the next submitted ahead the next's too: a
+   present that waits for all the work submitted, the guard's case),
+   PF_PREV for the end of the submission before the newest (per job: with
+   one picture at a time the end of the picture before the one presented,
+   with the next submitted ahead the presented one's own, which its waiter
+   saw first); the call's own time first (s_pf.call; with s_pf.slow 6 ms
+   for 6 calls of every 16, the later picture's work running on), its end
+   returned in
+   *callEnd; the GPU work still owed as the driver's wait begins noted
+   (owedMaxMs) */
+static void pfPresentCall(double *callEnd)
+{
+    const unsigned p = s_pf.presented++;
+    const double call = s_pf.slow && p % 16u < 6u ? 6.0 : s_pf.call;
+    if (call > 0.0) {
+        pfWaitUntil(ico_thread_now_ms() + call);
+    }
+    *callEnd = ico_thread_now_ms();
+    if (p < s_pf.lightN) {
+        return; /* a light job's present: back at once */
+    }
+    double gpuAt = 0.0;
+    bool gpuWait = true;
+    if (s_pf.driver == PF_BLOCK || (s_pf.driver == PF_MIXED && (s_pf.jobs & 1u) != 0)) {
+        gpuAt = s_pf.end;
+    } else if (s_pf.driver == PF_NEAR) {
+        gpuAt = s_pf.end - 0.3; /* returns 0.3 ms before the work's end */
+    } else if (s_pf.driver == PF_PREV) {
+        gpuAt = s_pf.jobs >= 2u ? s_pf.endAt[(s_pf.jobs - 2u) % PF_RING] : 0.0;
+    } else {
+        gpuWait = false;
+        if (s_pf.driver == PF_FIXED || (s_pf.driver == PF_SPORADIC && s_pf.jobs % 8u == 0)) {
+            pfWaitUntil(ico_thread_now_ms() + 5.0); /* 5 ms, whatever the GPU does */
+        }
+    }
+    if (gpuWait) {
+        const double owed = gpuAt - ico_thread_now_ms();
+        s_pf.owedMaxMs = s_pf.owedN == 0 || owed > s_pf.owedMaxMs ? owed : s_pf.owedMaxMs;
+        s_pf.owedN++;
+        pfWaitUntil(gpuAt);
+    }
+}
+
+/* timed by the fake itself: the whole call (presentMaxMs) and its part past
+   the call's own time (restMaxMs) */
+static void pfPresent(void)
+{
+    const double t0 = ico_thread_now_ms();
+    double callEnd = t0;
+    pfPresentCall(&callEnd);
+    const double t1 = ico_thread_now_ms();
+    s_pf.presentMaxMs = t1 - t0 > s_pf.presentMaxMs ? t1 - t0 : s_pf.presentMaxMs;
+    s_pf.restMaxMs = t1 - callEnd > s_pf.restMaxMs ? t1 - callEnd : s_pf.restMaxMs;
+}
+
+/* the ahead order's waiter: the faked end of the job whose submission is
+   `value` (the newest such job; none found, the last submitted's) */
+static void pfWaitValue(uint64_t value)
+{
+    /* on the waiter's thread, beside the submit thread's pfSubmitted: the
+       count read first (its stores before it) */
+    const double t = ico_thread_now_ms();
+    const unsigned jobs = __atomic_load_n(&s_pf.jobs, __ATOMIC_ACQUIRE);
+    double at = 0.0;
+    __atomic_load(&s_pf.endAt[(jobs + PF_RING - 1u) % PF_RING], &at, __ATOMIC_RELAXED);
+    for (unsigned i = 0; i < PF_RING && i < jobs; i++) {
+        const unsigned k = (jobs - 1u - i) % PF_RING;
+        if (__atomic_load_n(&s_pf.valueAt[k], __ATOMIC_RELAXED) == value) {
+            __atomic_load(&s_pf.endAt[k], &at, __ATOMIC_RELAXED);
+            break;
+        }
+    }
+    pfWaitUntil(at + s_pf.wake);
+    s_pf.waitVN++;
+    s_pf.waitVMs += ico_thread_now_ms() - t;
+}
+
+/* the present-call guard's read of the later picture's submission `value`
+   (the newest job with it; none found, the last submitted's): its faked
+   work ended by now (1) or running (0) */
+static int pfLaterFinished(uint64_t value)
+{
+    const unsigned jobs = __atomic_load_n(&s_pf.jobs, __ATOMIC_ACQUIRE);
+    double at = 0.0;
+    __atomic_load(&s_pf.endAt[(jobs + PF_RING - 1u) % PF_RING], &at, __ATOMIC_RELAXED);
+    for (unsigned i = 0; i < PF_RING && i < jobs; i++) {
+        const unsigned k = (jobs - 1u - i) % PF_RING;
+        if (__atomic_load_n(&s_pf.valueAt[k], __ATOMIC_RELAXED) == value) {
+            __atomic_load(&s_pf.endAt[k], &at, __ATOMIC_RELAXED);
+            break;
+        }
+    }
+    return ico_thread_now_ms() >= at ? 1 : 0;
+}
+
+/* the window's "in effect" mark (rd_thread_submit_ahead_mark_fn,
+   port/platform/ahead_mark.h): its calls, on the submit thread */
+static unsigned s_pfMarks;
+
+static void pfMark(void)
+{
+    __atomic_add_fetch(&s_pfMarks, 1u, __ATOMIC_RELEASE);
+}
+
+static bool pfSampleWait(void)
+{
+    pfWaitUntil(s_pf.prevEnd);
+    return true;
+}
+
+/* the witness: the job before's faked work finished by now (1), running
+   (0), or the read failing (-1, PfCase.readFails) */
+static int pfPrevFinished(void)
+{
+    if (s_pf.readFails) {
+        return -1;
+    }
+    return ico_thread_now_ms() >= s_pf.prevEnd ? 1 : 0;
+}
+
+static const RdSubmitTestGpu kPfGpu = {pfSubmitted,    pfWaitEnd,   pfPresent,      pfSampleWait,
+                                       pfPrevFinished, pfWaitValue, pfLaterFinished};
+/* the samples' waits the backend's own (PfCase.real; the witness the
+   faked clock's: lavapipe's own work ends at once) */
+static const RdSubmitTestGpu kPfGpuReal = {pfSubmitted,    pfWaitEnd,   pfPresent,      NULL,
+                                           pfPrevFinished, pfWaitValue, pfLaterFinished};
+
+static void pfWalk(int at)
+{
+    if (at == RD_READ_WALK) {
+        pfWaitUntil(ico_thread_now_ms() + s_pf.walk);
+    }
+}
+
+/* expect: the verdict wanted (RD_GPU_FIRST_ON, _OFF, or _UNDECIDED: none,
+   the warm-up then 70 ticks, past 64 presents); real: the samples' wait
+   the backend's; lightN: with the rule wanted, the first lightN jobs light
+   (ticks of 8 ms until they are made), then the warm-up as the case's;
+   forceOn: the verdict on from the start (rd__submit_test_gpu_first(2):
+   the rule's own behaviour, no samples); warmJobs: an undecided case's
+   warm-up until this many jobs (else 70 ticks); readFails: the witness's
+   read fails.  The ahead order (rd_submit_thread.h "ahead"): old, held off
+   (rd__submit_test_ahead(0): one picture at a time, the order before it);
+   callMs, the faked present call's own time; guard, the warm-up until the
+   order turns off (the present-call guard); failWait, the same with the
+   waiter's wait failing at the warm-up's fourth tick
+   (vkr_test_force_wait_result, VK_NOT_READY); lossRow, a start after a
+   lost one (ICO_LOSS_ROW=1: the order off from the start); needFps, the
+   rate requirement (pictures a second, the case's control below it), and
+   busyNeed the faked GPU's busy share wanted (0: none); slowCalls, 6 of
+   every 16 faked present calls 6 ms long while the later picture's work
+   runs on (a slow call, not one that waits: the guard must not trip);
+   wakeMs, the waiting thread's wake-up after the GPU end it waited for
+   (the serial chain's cost below); ticks, the measured ticks (0: the
+   table's 50); serialTwin, the same case run a third time one picture at a
+   time (the ahead order held off by rd__submit_test_ahead(0): v0.11.13's
+   order with the verdict on) in the same run, its loss asserted */
+typedef struct PfCase {
+    const char *name;
+    int driver;
+    double gpuMs, walkMs, submitMs, tickMs;
+    bool keep;
+    int expect;
+    bool real;
+    unsigned lightN;
+    bool forceOn;
+    unsigned warmJobs;
+    bool readFails;
+    bool old;
+    double callMs;
+    bool guard, failWait, lossRow;
+    double needFps, busyNeed;
+    bool slowCalls;
+    double wakeMs;
+    unsigned ticks;
+    bool serialTwin;
+} PfCase;
+
+typedef struct PfRun {
+    /* the ahead order in the measured ticks: the waiter's waits, the
+       presents made with a later picture submitted, the jobs submitted in
+       the order and of them before the picture before's GPU end; its off
+       reason at the end (RD_AHEAD_OFF_*); in the guard's or failed wait's
+       warm-up: it turned off (warmOff) after so many presents with a
+       later picture submitted; the skips by cause (rd.h RD_BUSY_*); the
+       faked GPU's busy share over the measured jobs; the longest faked
+       present call there, the GPU work its driver still owed as its wait
+       began (the most over the owedN calls that wait for GPU work) and the
+       longest part of a call past its own time; the fake's waiter waits
+       (count, ms) */
+    uint64_t aheadWaits, aheadPresents, aheadSubmits, aheadEarly;
+    /* the guard's long calls in the measured ticks by class (RD_GD_*) */
+    uint64_t guardWaited, guardSlow, guardDone, guardBrief, guardFailed;
+    int aheadOff;
+    bool warmOff;
+    uint64_t tripPresents, tripWaited, tripSlow;
+    unsigned busyBy[RD_BUSY_REASONS];
+    double gpuBusy, presentMaxMs, owedMaxMs, restMaxMs;
+    unsigned owedN;
+    unsigned waitVN;
+    double waitVMs;
+    unsigned posts, busySkips, beside, waits, waited, overlaps, gpuJobs, warm, progBad, waitN;
+    /* the "in effect" mark's calls over the whole run (the warm-up's too) */
+    unsigned marks;
+    /* the verdict's tally (rd__submit_gpu_first_tally) after the warm-up,
+       and the samples' waits made in the measured ticks */
+    RdGpuFirstTally tally;
+    unsigned sampleWaits;
+    /* after the light stretch (PfCase.lightN): the tally and the verdict */
+    RdGpuFirstTally light;
+    int lightVerdict;
+    int verdict;
+    double fps, waitMs;
+} PfRun;
+
+static void pfTick(double at)
+{
+    pfWaitUntil(at); /* the game step's tick */
+    gif_HostFrameReset();
+    dl_Clear();
+    recordFrame();
+}
+
+/* one case with the rule wanted or not (forced at the start): wanted, the
+ * ticks first until the verdict is taken (at most 200, counted in warm),
+ * drained; then `ticks` measured ticks; SCENE (and DISPLAY) read back
+ * after the drain */
+static bool pfRun(const PfCase *c, bool wanted, unsigned ticks, PfRun *out, uint8_t *scene,
+                  uint8_t *display, uint32_t *dw, uint32_t *dh)
+{
+    RdFramePost fp;
+    memset(out, 0, sizeof(*out));
+    rd__submit_test_gpu_first(!wanted ? 0 : c->forceOn ? 2 : 1);
+    rd__submit_test_ahead(c->old ? 0 : -1);
+    rd__submit_test_ahead_fresh(); /* each run as a new process's */
+    const unsigned marks0 = __atomic_load_n(&s_pfMarks, __ATOMIC_ACQUIRE);
+    setEnv("ICO_LOSS_ROW", c->lossRow ? "1" : NULL); /* read as the submit thread starts */
+    const bool started = rd_thread_local_start(RD_THREAD_ON);
+    setEnv("ICO_LOSS_ROW", NULL);
+    if (!started) {
+        rd__submit_test_gpu_first(-1);
+        rd__submit_test_ahead(-1);
+        return false;
+    }
+    const bool wantedNow = rd_thread_submit_gpu_first();
+    memset(&s_og, 0, sizeof(s_og));
+    s_og.mode = 2; /* window_orig_gate's busy arm */
+    memset(&s_pf, 0, sizeof(s_pf));
+    s_pf.ms = c->gpuMs;
+    s_pf.walk = c->walkMs;
+    s_pf.submit = c->submitMs;
+    s_pf.driver = c->driver;
+    s_pf.readFails = c->readFails;
+    s_pf.call = c->callMs;
+    s_pf.slow = c->slowCalls;
+    s_pf.wake = c->wakeMs;
+    rd__submit_test_gpu(c->real ? &kPfGpuReal : &kPfGpu);
+    rd__thread_test_hook(pfWalk);
+    fbKeep = c->keep ? 1 : 0;
+    double t0 = ico_thread_now_ms() + 5.0;
+    if (wantedNow && c->lightN > 0) {
+        /* the light stretch first (the reporter's run: ten light seconds
+           before the scenes that need the rule) */
+        s_pf.lightN = c->lightN;
+        for (unsigned k = 0; s_pf.jobs < c->lightN && k < 3u * c->lightN; k++) {
+            pfTick(t0 + 8.0 * k);
+        }
+        (void)rd_thread_drain();
+        rd__submit_gpu_first_tally(&out->light);
+        out->lightVerdict = rd_thread_submit_gpu_first_verdict();
+        t0 = ico_thread_now_ms() + 5.0;
+    }
+    const unsigned warmMax = c->warmJobs > 0                       ? 3u * c->warmJobs
+                             : c->expect == RD_GPU_FIRST_UNDECIDED ? 70u
+                                                                   : 200u;
+    while (wantedNow && rd_thread_submit_gpu_first_verdict() == RD_GPU_FIRST_UNDECIDED &&
+           out->warm < warmMax && (c->warmJobs == 0 || s_pf.jobs < c->warmJobs)) {
+        pfTick(t0 + c->tickMs * out->warm++);
+    }
+    if (wantedNow && (c->guard || c->failWait)) {
+        /* the ahead order until it turns off (at most 80 ticks): the
+           guard's present calls, or the waiter's wait failing at the fourth */
+        RdAheadTally a0, a;
+        rd__submit_ahead_tally(&a0);
+        const double w0 = ico_thread_now_ms() + 5.0;
+        for (unsigned k = 0; k < 80u; k++) {
+            if (c->failWait && k == 3u) {
+                vkr_test_force_wait_result(RHI_VK_TEST_NOT_READY);
+            }
+            pfTick(w0 + c->tickMs * k);
+            out->warm++;
+            rd__submit_ahead_tally(&a);
+            if (a.off != RD_AHEAD_OFF_NONE) {
+                out->warmOff = true;
+                out->tripPresents = a.presents - a0.presents;
+                out->tripWaited = a.guardWaited - a0.guardWaited;
+                out->tripSlow = a.guardSlow - a0.guardSlow;
+                break;
+            }
+        }
+        if (c->failWait) {
+            vkr_test_force_wait_result(0); /* none left for a later wait */
+        }
+    }
+    (void)rd_thread_drain();
+    out->verdict = rd_thread_submit_gpu_first_verdict();
+    rd__submit_gpu_first_tally(&out->tally);
+    rd_frame_post_take(&fp);
+    (void)rd_thread_gpu_wait_posts_take();
+    const uint64_t waits0 = rd__submit_gpu_first_waits(), waited0 = rd__submit_gpu_first_waited();
+    const unsigned jobs0 = s_pf.jobs, logged0 = s_pf.logged, progBad0 = s_pf.progBad;
+    const unsigned waitN0 = s_pf.waitN, waitVN0 = s_pf.waitVN;
+    s_pf.prevValue = 0; /* the measured jobs only (the warm-up's last made no wait) */
+    const double waitMs0 = s_pf.waitMs, waitVMs0 = s_pf.waitVMs;
+    RdAheadTally ahead0;
+    rd__submit_ahead_tally(&ahead0);
+    s_pf.presentMaxMs = 0.0;
+    s_pf.owedMaxMs = 0.0;
+    s_pf.restMaxMs = 0.0;
+    s_pf.owedN = 0;
+    t0 = ico_thread_now_ms() + 5.0;
+    for (unsigned k = 0; k < ticks; k++) {
+        pfTick(t0 + c->tickMs * k);
+    }
+    (void)rd_thread_drain();
+    {
+        RdGpuFirstTally after;
+        rd__submit_gpu_first_tally(&after);
+        out->sampleWaits = after.waits - out->tally.waits;
+    }
+    fbKeep = 0;
+    rd__thread_test_hook(NULL);
+    rd__submit_test_gpu(NULL);
+    rd_frame_post_take(&fp);
+    out->posts = fp.posts;
+    out->busySkips = fp.busySkips;
+    out->beside = rd_thread_gpu_wait_posts_take();
+    out->waits = (unsigned)(rd__submit_gpu_first_waits() - waits0);
+    out->waited = (unsigned)(rd__submit_gpu_first_waited() - waited0);
+    out->overlaps = pfOverlaps(s_pf.sub, s_pf.gpuEnd, logged0, s_pf.logged);
+    out->progBad = s_pf.progBad - progBad0;
+    out->waitN = s_pf.waitN - waitN0;
+    out->waitMs = s_pf.waitMs - waitMs0;
+    out->waitVN = s_pf.waitVN - waitVN0;
+    out->waitVMs = s_pf.waitVMs - waitVMs0;
+    out->gpuJobs = s_pf.jobs - jobs0;
+    out->fps = (double)fp.posts * 1000.0 / (c->tickMs * ticks);
+    out->presentMaxMs = s_pf.presentMaxMs;
+    out->owedMaxMs = s_pf.owedMaxMs;
+    out->restMaxMs = s_pf.restMaxMs;
+    out->owedN = s_pf.owedN;
+    memcpy(out->busyBy, fp.busyBy, sizeof(out->busyBy));
+    {
+        RdAheadTally a;
+        rd__submit_ahead_tally(&a);
+        out->aheadWaits = a.waits - ahead0.waits;
+        out->aheadPresents = a.presents - ahead0.presents;
+        out->aheadSubmits = a.submits - ahead0.submits;
+        out->aheadEarly = a.early - ahead0.early;
+        out->guardWaited = a.guardWaited - ahead0.guardWaited;
+        out->guardSlow = a.guardSlow - ahead0.guardSlow;
+        out->guardDone = a.guardDone - ahead0.guardDone;
+        out->guardBrief = a.guardBrief - ahead0.guardBrief;
+        out->guardFailed = a.guardFailed - ahead0.guardFailed;
+        out->aheadOff = a.off;
+    }
+    {
+        /* the faked GPU's busy share over the measured jobs: their work
+           against the span from the first one's start to the last one's end */
+        const unsigned n = s_pf.logged - logged0;
+        if (n >= 2u && s_pf.ms > 0.0) {
+            const double first = s_pf.gpuEnd[logged0] - s_pf.ms;
+            const double span = s_pf.gpuEnd[s_pf.logged - 1u] - first;
+            out->gpuBusy = span > 0.0 ? (double)n * s_pf.ms / span : 0.0;
+        }
+    }
+    const bool read = readScene(scene, display, dw, dh);
+    rd_thread_local_stop();
+    out->marks = __atomic_load_n(&s_pfMarks, __ATOMIC_ACQUIRE) - marks0;
+    rd__submit_test_gpu_first(-1);
+    rd__submit_test_ahead(-1);
+    return read && wantedNow == wanted;
+}
+
+/* The rate requirements (pictures a second at the tick, 50 measured
+ * ticks), each case run with the rule not wanted (the reference: the
+ * presents as before) and wanted.  The rule's own behaviour, its verdict
+ * forced on at the start (rd__submit_test_gpu_first(2)):
+ *   PF_BLOCK, 45 ms pictures at 40 ms: at least three quarters of 1000/45
+ *     a second and 1.3 times the rule-off rate (every second frame skipped
+ *     as busy), frames handed over beside the wait, every job's wait made,
+ *     the GPU holding one picture at a time; 20 ms pictures every tick
+ *     less a fifth; 45 ms keep frames every one; PF_MIXED and PF_NEAR, 20
+ *     ms, every tick less a fifth.
+ * The verdict from the first presents (the witness: the picture before's
+ * read just before each call, by the faked clock):
+ *   PF_BLOCK sampled: its present returns at its own end, so the picture
+ *     before has always finished as the next call begins: never counted,
+ *     no verdict, no sample wait (the witness's price: a driver of that
+ *     shape is not detected);
+ *   PF_EARLY (the owner's Pixel at 30 a second): short calls, no verdict,
+ *     no rule wait, at most 3 sample waits and counted (a fake call a
+ *     loaded runner stretched past 2 ms);
+ *   PF_SPORADIC, 1 ms pictures at 10 ms, a 5 ms call one in eight: after
+ *     300 presents no verdict, no sample wait, its long calls counted as
+ *     the picture before already finished (review M1);
+ *   PF_PREV, 45 ms at 40 ms, the present back at the job before's end (on
+ *     lavapipe's counter, on the faked GPU, with the witness's read
+ *     failing every time, and after 280 light jobs whose first window of
+ *     256 ends undecided and starts again): on, none early or unknown,
+ *     every timed present but the first few counted; at least three
+ *     quarters of 1000/45 a second and the rule-off posts less a fifth
+ *     (without the rule this driver's GPU already runs back to back);
+ *   PF_FIXED, 60 ms GPU at 40 ms, 5 ms calls while the job before runs:
+ *     16 counted, all early, off.
+ * Every case whose verdict is wanted reaches it within the first 64
+ * Original presents with none unknown, and after it no sample wait is
+ * made.  SCENE and DISPLAY are byte for byte the reference's. */
+static void threadPresentFree(void)
+{
+    if (rhi_backend() == RHI_BACKEND_OPENGL) {
+        return;
+    }
+    const unsigned ticksAll = 50;
+    {
+        /* the overlap check's own check: a next picture submitted 10 ms
+           into the one before's 45 ms of GPU time is found, the same jobs
+           in series are not */
+        static const double subBad[3] = {0.0, 10.0, 60.0}, endBad[3] = {45.0, 55.0, 105.0};
+        static const double subOk[3] = {0.0, 45.0, 90.0}, endOk[3] = {45.0, 90.0, 135.0};
+        CHECK(pfOverlaps(subBad, endBad, 0, 3) == 1 && pfOverlaps(subOk, endOk, 0, 3) == 0,
+              "GPU's end first: the overlap check found %u in a broken order (1 wanted), %u in "
+              "series (0 wanted)",
+              pfOverlaps(subBad, endBad, 0, 3), pfOverlaps(subOk, endOk, 0, 3));
+    }
+    uint8_t *offScene = malloc(512 * 512 * 4), *offDisplay = malloc(512 * 512 * 4);
+    uint8_t *scene = malloc(512 * 512 * 4), *display = malloc(512 * 512 * 4);
+    uint32_t offW = 0, offH = 0, dw = 0, dh = 0;
+    t_testThread = 1;
+    if (!offScene || !offDisplay || !scene || !display) {
+        CHECK(0, "GPU's end first: memory");
+        goto out;
+    }
+    rd_set_replay_gate(origGate);
+    rd_thread_submit_ahead_mark_fn(pfMark);
+    if (!rd_thread_local_start(RD_THREAD_ON)) {
+        CHECK(0, "GPU's end first: the renderer's own thread could not start");
+        goto out;
+    }
+    const bool apart = rd_thread_submit_slots_apart();
+    rd_thread_local_stop();
+    if (!apart) {
+        printf("GPU's end first: the frame slots are not apart on this device (no submit thread "
+               "or no timeline sync): the rule stays off, not driven\n");
+        goto out;
+    }
+
+    enum { ON = RD_GPU_FIRST_ON, OFF = RD_GPU_FIRST_OFF, NONE = RD_GPU_FIRST_UNDECIDED };
+
+    /* PfCase's fields by name (the others 0 or false) */
+    static const PfCase cases[] = {
+        /* one picture at a time (the ahead order held off: the order these
+           cases were written for, and the one the ways back return to) */
+        {.name = "45 ms pictures, a present that waits for its own GPU end (the rule on)",
+         .driver = PF_BLOCK,
+         .gpuMs = 45.0,
+         .walkMs = 5.0,
+         .tickMs = 40.0,
+         .expect = ON,
+         .forceOn = true,
+         .old = true},
+        {.name = "20 ms pictures, a present that waits for its own GPU end (the rule on)",
+         .driver = PF_BLOCK,
+         .gpuMs = 20.0,
+         .walkMs = 5.0,
+         .tickMs = 40.0,
+         .expect = ON,
+         .forceOn = true,
+         .old = true},
+        {.name = "45 ms keep frames, a present that waits for its own GPU end (the rule on)",
+         .driver = PF_BLOCK,
+         .gpuMs = 45.0,
+         .walkMs = 5.0,
+         .tickMs = 40.0,
+         .keep = true,
+         .expect = ON,
+         .forceOn = true,
+         .old = true},
+        {.name = "20 ms pictures, a present that waits every second time (the rule on)",
+         .driver = PF_MIXED,
+         .gpuMs = 20.0,
+         .walkMs = 5.0,
+         .tickMs = 40.0,
+         .expect = ON,
+         .forceOn = true,
+         .old = true},
+        {.name = "20 ms pictures, a present back 0.3 ms before the work's end (the rule on)",
+         .driver = PF_NEAR,
+         .gpuMs = 20.0,
+         .walkMs = 5.0,
+         .tickMs = 40.0,
+         .expect = ON,
+         .forceOn = true,
+         .old = true},
+        {.name = "45 ms pictures, a present that waits for its own GPU end (sampled)",
+         .driver = PF_BLOCK,
+         .gpuMs = 45.0,
+         .walkMs = 5.0,
+         .tickMs = 40.0,
+         .expect = NONE},
+        {.name = "17 ms pictures, a present that returns at once",
+         .driver = PF_EARLY,
+         .gpuMs = 17.0,
+         .walkMs = 10.0,
+         .submitMs = 8.0,
+         .tickMs = 1000.0 / 30.0,
+         .expect = NONE},
+        {.name = "1 ms pictures, a 5 ms present one in eight",
+         .driver = PF_SPORADIC,
+         .gpuMs = 1.0,
+         .walkMs = 3.0,
+         .tickMs = 10.0,
+         .expect = NONE,
+         .warmJobs = 300},
+        /* the verdict taken from the samples, then the next picture
+           submitted ahead */
+        {.name = "45 ms pictures, a present back at the end of the picture before's work "
+                 "(lavapipe's counter)",
+         .driver = PF_PREV,
+         .gpuMs = 45.0,
+         .walkMs = 5.0,
+         .tickMs = 40.0,
+         .expect = ON,
+         .real = true},
+        {.name = "45 ms pictures, a present back at the end of the picture before's work (faked "
+                 "GPU)",
+         .driver = PF_PREV,
+         .gpuMs = 45.0,
+         .walkMs = 5.0,
+         .tickMs = 40.0,
+         .expect = ON},
+        {.name = "45 ms pictures, a present back at the end of the picture before's work, its "
+                 "read failing",
+         .driver = PF_PREV,
+         .gpuMs = 45.0,
+         .walkMs = 5.0,
+         .tickMs = 40.0,
+         .expect = ON,
+         .readFails = true},
+        {.name = "60 ms pictures, a 5 ms present while the picture before runs",
+         .driver = PF_FIXED,
+         .gpuMs = 60.0,
+         .walkMs = 5.0,
+         .tickMs = 40.0,
+         .expect = OFF},
+        {.name = "280 light presents, then 45 ms pictures back at the end of the picture "
+                 "before's work",
+         .driver = PF_PREV,
+         .gpuMs = 45.0,
+         .walkMs = 5.0,
+         .tickMs = 40.0,
+         .expect = ON,
+         .lightN = 280},
+        /* the ahead order's rate requirements (issue 179's play: GPU 33 to
+           38 ms a picture at the 40 ms tick), the verdict on from the
+           start: a 1.5 ms present call, an 8 ms walk.  The 33 and 37.5 ms
+           cases carry the one-at-a-time chain's cost from the reporter's
+           v0.11.13 log (its lines 821, 887 and 951: 2.4 to 4.7 ms from a
+           picture's GPU end to the next one's submit with the next
+           already queued): a 1.0 ms wake-up after the GPU end, the 1.5 ms
+           call and a 2.2 ms submit, about 4.7 ms with the real list ends.
+           At 37.5 ms that chain passes the 40 ms tick one picture at a
+           time (37.5 + 4.7 = 42.2 ms a picture), and the same run's twin
+           shows the loss (v0.11.13's regression on the phone: 22 of 25 in
+           stage 3 play); the ahead order keeps the wake-up, the call and
+           the finish off the GPU's path and reaches every tick.  At 33 ms
+           the chain fits inside the tick whichever the order (the next
+           picture is posted 8 ms into its tick, after the picture before's
+           GPU end and present), so it shows the ahead order's rate and no
+           twin is run */
+        {.name = "33 ms pictures ahead, a present back at the end of the picture before's work",
+         .driver = PF_PREV,
+         .gpuMs = 33.0,
+         .walkMs = 8.0,
+         .submitMs = 2.2,
+         .tickMs = 40.0,
+         .expect = ON,
+         .forceOn = true,
+         .callMs = 1.5,
+         .needFps = 24.0,
+         .wakeMs = 1.0},
+        {.name = "37.5 ms pictures ahead, a present back at the end of the picture before's work",
+         .driver = PF_PREV,
+         .gpuMs = 37.5,
+         .walkMs = 8.0,
+         .submitMs = 2.2,
+         .tickMs = 40.0,
+         .expect = ON,
+         .forceOn = true,
+         .callMs = 1.5,
+         .needFps = 24.5,
+         .wakeMs = 1.0,
+         .ticks = 100,
+         .serialTwin = true},
+        {.name = "48 ms pictures ahead, a present back at the end of the picture before's work",
+         .driver = PF_PREV,
+         .gpuMs = 48.0,
+         .walkMs = 8.0,
+         .submitMs = 1.0,
+         .tickMs = 40.0,
+         .expect = ON,
+         .forceOn = true,
+         .callMs = 1.5,
+         .needFps = 20.0,
+         .busyNeed = 0.97},
+        /* the same with 6 of every 16 present calls 6 ms long while the
+           later picture's work runs on (the scheduler's or a slow core's
+           stretch, issue 179's phone: calls of 1.1 to 1.8 ms): slow, not
+           waiting, so the guard keeps the order and the rates hold */
+        {.name = "37.5 ms pictures ahead, 6 of 16 present calls 6 ms long",
+         .driver = PF_PREV,
+         .gpuMs = 37.5,
+         .walkMs = 8.0,
+         .submitMs = 1.0,
+         .tickMs = 40.0,
+         .expect = ON,
+         .forceOn = true,
+         .callMs = 1.5,
+         .needFps = 24.0,
+         .slowCalls = true},
+        {.name = "48 ms pictures ahead, 6 of 16 present calls 6 ms long",
+         .driver = PF_PREV,
+         .gpuMs = 48.0,
+         .walkMs = 8.0,
+         .submitMs = 1.0,
+         .tickMs = 40.0,
+         .expect = ON,
+         .forceOn = true,
+         .callMs = 1.5,
+         .needFps = 20.0,
+         /* 0.97 less the slow calls' own share: 6 of 16 calls hold their
+            picture's slot 4.5 ms longer, 6 * 4.5 / (16 * 48) = 3.5 % */
+         .busyNeed = 0.935,
+         .slowCalls = true},
+        {.name = "60 ms pictures ahead, a present back at the end of the picture before's work",
+         .driver = PF_PREV,
+         .gpuMs = 60.0,
+         .walkMs = 8.0,
+         .submitMs = 1.0,
+         .tickMs = 40.0,
+         .expect = ON,
+         .forceOn = true,
+         .callMs = 1.5,
+         .needFps = 16.0},
+        /* the ways back: a present that waits for all the work submitted
+           (the guard), the waiter's wait failing, a start after a lost one */
+        {.name = "45 ms pictures ahead, a present that waits for the last submitted work (the "
+                 "guard)",
+         .driver = PF_BLOCK,
+         .gpuMs = 45.0,
+         .walkMs = 5.0,
+         .tickMs = 40.0,
+         .expect = ON,
+         .forceOn = true,
+         .callMs = 1.5,
+         .guard = true},
+        {.name = "45 ms pictures ahead, the waiter's wait failing",
+         .driver = PF_PREV,
+         .gpuMs = 45.0,
+         .walkMs = 5.0,
+         .tickMs = 40.0,
+         .expect = ON,
+         .forceOn = true,
+         .callMs = 1.5,
+         .failWait = true},
+        {.name = "45 ms pictures, a start after a lost one (the loss ladder)",
+         .driver = PF_PREV,
+         .gpuMs = 45.0,
+         .walkMs = 5.0,
+         .tickMs = 40.0,
+         .expect = ON,
+         .forceOn = true,
+         .callMs = 1.5,
+         .lossRow = true},
+    };
+    for (size_t i = 0; i < sizeof(cases) / sizeof(cases[0]); i++) {
+        const PfCase *c = &cases[i];
+        const unsigned ticks = c->ticks > 0 ? c->ticks : ticksAll;
+        PfRun off, on;
+        bool okOff = pfRun(c, false, ticks, &off, offScene, offDisplay, &offW, &offH);
+        bool okOn = pfRun(c, true, ticks, &on, scene, display, &dw, &dh);
+        if (okOff && okOn && c->expect != RD_GPU_FIRST_ON && on.waits == 0 && on.beside == 0 &&
+            on.aheadWaits == 0 && on.aheadPresents == 0 && on.aheadSubmits == 0 && on.waitVN == 0 &&
+            on.posts + ticks / 5 < off.posts) {
+            /* no verdict or off: the rule wanted made no wait and nothing
+               of the ahead order ran, yet the pair's counts differ by more
+               than a fifth of the ticks.  The two runs come one after the
+               other, so a stretch the loaded machine took from one is not
+               in the other (merge check of 2026-11-21, rd_tex_mali: 38 and
+               50 of 50 at the 10 ms tick, 10 of the 12 skips at the slot
+               wait; rd_tex in the same check: its warm-up needed 449 ticks
+               for 300 jobs, its rule-off run 40 of 50).  The pair is
+               measured once more and the same bound read on it */
+            printf("GPU's end first, %s: %u and %u of %u presented (wanted, not), skips by "
+                   "cause %u, %u, %u, with no wait of the rule and nothing of the ahead order "
+                   "run: the pair measured once more (the runs one after the other: the "
+                   "machine's stretch of one is not in the other)\n",
+                   c->name, on.posts, off.posts, ticks, on.busyBy[RD_BUSY_RENDER],
+                   on.busyBy[RD_BUSY_SLOT], on.busyBy[RD_BUSY_SUBMIT]);
+            fflush(stdout);
+            okOff = pfRun(c, false, ticks, &off, offScene, offDisplay, &offW, &offH);
+            okOn = pfRun(c, true, ticks, &on, scene, display, &dw, &dh);
+        }
+        const RdGpuFirstTally *t = &on.tally;
+        printf("GPU's end first, %s, at a %.1f ms tick: the verdict %s after %u ticks (%u "
+               "Original presents timed, %u short, %u counted, %u at the end of GPU work, %u "
+               "unknown, %u sample waits); %.1f pictures a second with the rule wanted (%u of "
+               "%u, %u skipped as busy, %u handed over beside the wait, %u waits), %.1f without "
+               "it (%u, %u skipped as busy)\n",
+               c->name, c->tickMs,
+               on.verdict == RD_GPU_FIRST_ON    ? "on"
+               : on.verdict == RD_GPU_FIRST_OFF ? "off"
+                                                : "not taken",
+               on.warm, t->timed, t->shortCalls, t->counted, t->waited, t->unknown, t->waits,
+               on.fps, on.posts, ticks, on.busySkips, on.beside, on.waits, off.fps, off.posts,
+               off.busySkips);
+        printf("GPU's end first, %s: ahead %llu of %llu submitted before the picture before's "
+               "GPU end, %llu waiter waits, %llu presents with a later picture submitted, the "
+               "longest present call %.2f ms (%.2f ms past its own time; of %u calls that wait "
+               "for GPU work, the most still owed as the wait began %.2f ms), the faked GPU "
+               "busy %.1f %% (%.1f %% without the rule), skips by cause: %u on the picture "
+               "before, %u at its slot wait, %u for the submit thread; the guard's long calls: "
+               "%llu waiting for the later picture, %llu slow, %llu after its end, %llu brief, "
+               "%llu failed; off reason %d%s\n",
+               c->name, (unsigned long long)on.aheadEarly, (unsigned long long)on.aheadSubmits,
+               (unsigned long long)on.aheadWaits, (unsigned long long)on.aheadPresents,
+               on.presentMaxMs, on.restMaxMs, on.owedN, on.owedMaxMs, 100.0 * on.gpuBusy,
+               100.0 * off.gpuBusy, on.busyBy[RD_BUSY_RENDER], on.busyBy[RD_BUSY_SLOT],
+               on.busyBy[RD_BUSY_SUBMIT], (unsigned long long)on.guardWaited,
+               (unsigned long long)on.guardSlow, (unsigned long long)on.guardDone,
+               (unsigned long long)on.guardBrief, (unsigned long long)on.guardFailed, on.aheadOff,
+               on.warmOff ? " (in the warm-up)" : "");
+        fflush(stdout); /* in order with the renderer's lines */
+        CHECK(okOff && okOn, "GPU's end first, %s: the runs (off %d, on %d: the rule as forced)",
+              c->name, okOff, okOn);
+        /* after a verdict no sample wait is made (the code's rule: exactly
+           none); without one (PF_EARLY) a call the loaded machine
+           stretched past 2 ms makes one, so a few may come (the wall
+           clock's, not the fake's) */
+        const unsigned waitsAllowed = c->expect == RD_GPU_FIRST_UNDECIDED ? 3u : 0u;
+        CHECK(on.verdict == c->expect && on.sampleWaits <= waitsAllowed,
+              "GPU's end first, %s: verdict %d (%d wanted), %u sample waits in the measured "
+              "ticks (at most %u wanted)",
+              c->name, on.verdict, c->expect, on.sampleWaits, waitsAllowed);
+        if (c->forceOn) {
+            /* the verdict forced on at the start: no sample taken */
+            CHECK(t->timed == 0 && t->waits == 0,
+                  "GPU's end first, %s: %u presents timed, %u sample waits (none wanted: the "
+                  "verdict on from the start)",
+                  c->name, t->timed, t->waits);
+        } else if (c->expect != RD_GPU_FIRST_UNDECIDED) {
+            /* the verdict arrives: within the first 64 Original presents,
+               none unknown */
+            CHECK(t->timed <= 64u && t->counted == RD_GPU_FIRST_SAMPLES && t->unknown == 0,
+                  "GPU's end first, %s: %u Original presents timed (at most 64 wanted), %u "
+                  "counted (%u wanted), %u unknown (none wanted)",
+                  c->name, t->timed, t->counted, (unsigned)RD_GPU_FIRST_SAMPLES, t->unknown);
+        } else {
+            /* no verdict: not counted, no rule wait; PF_EARLY's calls short
+               (a loaded runner may stretch a fake call past 2 ms, its wall
+               clock: at most 3 such); the long calls of PF_SPORADIC and of
+               the own-end present find the picture before finished by the
+               faked clock: never a sample wait, the new count above 0 */
+            CHECK(t->counted <= 3u && t->waits <= 3u && t->timed > RD_GPU_FIRST_SAMPLES &&
+                      on.waits == 0,
+                  "GPU's end first, %s: %u counted, %u sample waits (at most 3 wanted), %u "
+                  "timed (more than %u wanted), %u rule waits (none wanted)",
+                  c->name, t->counted, t->waits, t->timed, (unsigned)RD_GPU_FIRST_SAMPLES,
+                  on.waits);
+            if (c->driver == PF_EARLY) {
+                CHECK(t->shortCalls + 3u >= t->timed,
+                      "GPU's end first, %s: %u of %u timed presents short (all but 3 wanted)",
+                      c->name, t->shortCalls, t->timed);
+            } else {
+                CHECK(t->waits == 0 && t->counted == 0 && t->prevDone > 0,
+                      "GPU's end first, %s: %u sample waits, %u counted (none wanted), %u long "
+                      "calls with the picture before already finished (some wanted)",
+                      c->name, t->waits, t->counted, t->prevDone);
+            }
+        }
+        if (c->lightN > 0) {
+            /* the light stretch's window ended without a verdict and
+               started again: undecided after it, its counts fewer than one
+               window, none counted (short calls only) */
+            CHECK(on.lightVerdict == RD_GPU_FIRST_UNDECIDED && on.light.timed < RD_GPU_FIRST_LATE &&
+                      on.light.counted <= 3u && on.light.waits <= 3u,
+                  "GPU's end first, %s: after the light stretch verdict %d (none wanted), %u "
+                  "timed in the window (under %u wanted: started again), %u counted, %u sample "
+                  "waits (at most 3 each: a call the machine stretched)",
+                  c->name, on.lightVerdict, on.light.timed, (unsigned)RD_GPU_FIRST_LATE,
+                  on.light.counted, on.light.waits);
+        }
+        if (c->readFails) {
+            CHECK(t->readFailed > 0, "GPU's end first, %s: %u failed reads counted (some wanted)",
+                  c->name, t->readFailed);
+        }
+        if (c->driver == PF_PREV) {
+            /* every long call read at the end of GPU work, one after the
+               other: the first (no picture before) and a few short calls
+               at the start left out, while the GPU is not yet a picture
+               behind (two in the first merge check, on lavapipe and on the
+               faked GPU alike; after a light stretch, its short calls in
+               the window too) */
+            CHECK(t->waited == t->counted &&
+                      t->timed <= t->counted + 4u + (c->lightN > 0 ? on.light.timed + 2u : 0u),
+                  "GPU's end first, %s: %u of %u counted at the end of GPU work (all wanted), %u "
+                  "timed (at most %u wanted)",
+                  c->name, t->waited, t->counted, t->timed, t->counted + 4u);
+        } else if (c->driver == PF_FIXED) {
+            /* a call can end within the rule's 1 ms of the picture
+               before's end by chance (one did in a merge check): the
+               verdict needs 14 of 16, so two leave it far off */
+            CHECK(t->waited <= 2,
+                  "GPU's end first, %s: %u of %u at the end of GPU work (at most 2 "
+                  "wanted: early but for a chance meeting)",
+                  c->name, t->waited, t->counted);
+        }
+        CHECK(on.gpuJobs == on.posts && off.gpuJobs == off.posts && off.waits == 0 &&
+                  off.beside == 0 && off.verdict == RD_GPU_FIRST_OFF,
+              "GPU's end first, %s: %u faked jobs of %u posts wanted, %u of %u not; without the "
+              "rule %u waits, %u frames beside one, verdict %d (none, none, off wanted)",
+              c->name, on.gpuJobs, on.posts, off.gpuJobs, off.posts, off.waits, off.beside,
+              off.verdict);
+        /* the ahead order: nothing of it without the rule (the waiter never
+           waits, no present is made with a later picture submitted, no job
+           is submitted in it) */
+        CHECK(off.aheadWaits == 0 && off.aheadPresents == 0 && off.aheadSubmits == 0 &&
+                  off.waitVN == 0,
+              "GPU's end first, %s: without the rule %llu waiter waits, %llu presents with a "
+              "later picture submitted, %llu jobs submitted ahead (none wanted)",
+              c->name, (unsigned long long)off.aheadWaits, (unsigned long long)off.aheadPresents,
+              (unsigned long long)off.aheadSubmits);
+        /* the measured ticks one picture at a time: held off by the test,
+           or after a way back (the guard, the failed wait, the loss ladder) */
+        const bool oneAtATime = c->old || c->guard || c->failWait || c->lossRow;
+        /* the install's "in effect" mark: asked once a start of the thread
+           as the order first takes effect (the guard's and the failed
+           wait's runs too, before their way back), never where it does not
+           (held off, the loss ladder, no verdict, without the rule) */
+        {
+            const bool took = c->expect == RD_GPU_FIRST_ON && !c->old && !c->lossRow;
+            CHECK(on.marks == (took ? 1u : 0u) && off.marks == 0,
+                  "GPU's end first, %s: the in-effect mark asked %u times with the rule, %u "
+                  "without (%u and 0 wanted)",
+                  c->name, on.marks, off.marks, took ? 1u : 0u);
+        }
+        if (c->guard || c->failWait) {
+            /* the way back taken in the warm-up: the guard within its
+               window of 16 presents with a later picture submitted, or the
+               failed wait (VK_NOT_READY: the device not lost) */
+            CHECK(
+                on.warmOff && on.aheadOff == (c->guard ? RD_AHEAD_OFF_GUARD : RD_AHEAD_OFF_WAIT) &&
+                    (!c->guard || (on.tripPresents >= RD_AHEAD_GUARD_LONG &&
+                                   on.tripPresents <= RD_AHEAD_GUARD_WINDOW)) &&
+                    !rhi_device_lost(),
+                "GPU's end first, %s: the ahead order turned off in the warm-up %d, reason %d "
+                "(%d wanted), after %llu presents with a later picture submitted (%u to %u "
+                "wanted for the guard)",
+                c->name, on.warmOff, on.aheadOff, c->guard ? RD_AHEAD_OFF_GUARD : RD_AHEAD_OFF_WAIT,
+                (unsigned long long)on.tripPresents, (unsigned)RD_AHEAD_GUARD_LONG,
+                (unsigned)RD_AHEAD_GUARD_WINDOW);
+        }
+        if (c->lossRow) {
+            CHECK(on.aheadOff == RD_AHEAD_OFF_PREV && on.aheadWaits == 0 && on.aheadSubmits == 0,
+                  "GPU's end first, %s: the ahead order off from the start (reason %d, %d "
+                  "wanted), %llu waiter waits, %llu jobs submitted ahead (none wanted)",
+                  c->name, on.aheadOff, RD_AHEAD_OFF_PREV, (unsigned long long)on.aheadWaits,
+                  (unsigned long long)on.aheadSubmits);
+        }
+        if (c->old) {
+            CHECK(on.aheadOff == RD_AHEAD_OFF_TEST && on.aheadSubmits == 0,
+                  "GPU's end first, %s: the ahead order held off (reason %d), %llu jobs "
+                  "submitted ahead (none wanted)",
+                  c->name, on.aheadOff, (unsigned long long)on.aheadSubmits);
+        }
+        if (c->guard) {
+            /* after the guard no present call waits for GPU work: by the
+               faked clock none was owed as any call's wait began (its own
+               picture's end waited for before it: exact, whatever the
+               machine's load), and by the wall clock no call took 2 ms past
+               its own time.  The whole call's time is printed, not bound: a
+               loaded runner stretched the faked 1.5 ms call to 3.70 ms in the
+               first merge check with nothing owed (the bound there was the
+               whole call under 3.5 ms) */
+            CHECK(on.owedN > 0 && on.owedMaxMs <= 0.0 && on.restMaxMs <= 2.0,
+                  "GPU's end first, %s: after the guard %u calls that wait for GPU work, the "
+                  "most still owed as the wait began %.2f ms (none wanted), the longest part "
+                  "of a call past its own %.1f ms %.2f ms (at most 2.0 wanted; the whole call "
+                  "%.2f ms)",
+                  c->name, on.owedN, on.owedMaxMs, c->callMs, on.restMaxMs, on.presentMaxMs);
+        }
+        if (c->expect == RD_GPU_FIRST_ON && oneAtATime) {
+            /* without the rule PF_PREV's and PF_MIXED's jobs are submitted
+               while the GPU holds the one before (a present that waits for
+               the picture before, or returns at once): by design, not
+               counted against them */
+            CHECK(on.waits == on.posts && on.overlaps == 0 &&
+                      (off.overlaps == 0 || c->driver == PF_PREV || c->driver == PF_MIXED) &&
+                      on.progBad == 0 && on.aheadWaits == 0 && on.aheadSubmits == 0,
+                  "GPU's end first, %s: %u waits of %u jobs, a picture submitted while the GPU "
+                  "held the one before %u times wanted, %u without, %u while the backend had not "
+                  "seen the one before finished, %llu waiter waits and %llu jobs submitted "
+                  "ahead (none wanted)",
+                  c->name, on.waits, on.posts, on.overlaps, off.overlaps, on.progBad,
+                  (unsigned long long)on.aheadWaits, (unsigned long long)on.aheadSubmits);
+            /* the wait happened and lasted: the backend's wait returned true
+               for every job, and the faked GPU time was waited out (the job
+               submitted, then its whole GPU time inside the wait) */
+            CHECK(on.waited == on.waits && on.waitN == on.waits && on.waitN > 0 &&
+                      on.waitMs / on.waitN >= 0.8 * c->gpuMs,
+                  "GPU's end first, %s: %u of %u backend waits returned true, %u faked waits of "
+                  "%.1f ms on average (at least %.1f wanted)",
+                  c->name, on.waited, on.waits, on.waitN, on.waitN ? on.waitMs / on.waitN : 0.0,
+                  0.8 * c->gpuMs);
+        } else if (c->expect == RD_GPU_FIRST_ON) {
+            /* the next picture submitted ahead: every measured job in that
+               order, each one's GPU work waited for by the waiter (the
+               faked end, then the backend's wait) and none by the submit
+               thread, nothing turned it off, no skip for the submit
+               thread's sake, no present call waiting behind the newer
+               submission: each picture presented after its own work ended
+               (the faked driver returns at the end of the submission before
+               the newest, the presented one's own with the next submitted:
+               by the faked clock nothing owed as any call's wait began, and
+               by the wall clock no call 2 ms past its own time; the whole
+               call printed, the machine's stretch of its own time in it) */
+            CHECK(on.waits == 0 && on.aheadSubmits == on.posts && on.aheadWaits == on.posts &&
+                      on.waitVN == on.posts && on.aheadOff == RD_AHEAD_OFF_NONE &&
+                      on.busyBy[RD_BUSY_SUBMIT] == 0 && on.owedN > 0 && on.owedMaxMs <= 0.0 &&
+                      on.restMaxMs <= 2.0,
+                  "GPU's end first, %s: ahead: %u submit thread waits (none wanted), %llu jobs "
+                  "submitted ahead, %llu waiter waits, %u faked waiter waits of %u posts, off "
+                  "reason %d (none wanted), %u skips for the submit thread (none wanted); of %u "
+                  "calls that wait for GPU work the most still owed as the wait began %.2f ms "
+                  "(none wanted), the longest part of a call past its own %.1f ms %.2f ms (at "
+                  "most 2.0 wanted; the whole call %.2f ms)",
+                  c->name, on.waits, (unsigned long long)on.aheadSubmits,
+                  (unsigned long long)on.aheadWaits, on.waitVN, on.posts, on.aheadOff,
+                  on.busyBy[RD_BUSY_SUBMIT], on.owedN, on.owedMaxMs, c->callMs, on.restMaxMs,
+                  on.presentMaxMs);
+            CHECK(on.waitVN > 0 && on.waitVMs / on.waitVN >= 0.5 * c->gpuMs,
+                  "GPU's end first, %s: ahead: the waiter's faked waits %.1f ms on average (at "
+                  "least %.1f wanted: the held picture's work waited out)",
+                  c->name, on.waitVN ? on.waitVMs / on.waitVN : 0.0, 0.5 * c->gpuMs);
+            /* the guard: no long call counted as waiting for the later
+               picture (the faked driver never waits for it here: a call a
+               loaded runner stretched, or the slow calls below, is slow,
+               not waiting); with the slow calls some classed so (the
+               classing ran on them) */
+            CHECK(on.guardWaited == 0 && on.guardFailed == 0 && (!c->slowCalls || on.guardSlow > 0),
+                  "GPU's end first, %s: ahead: the guard's long calls: %llu counted as waiting "
+                  "for the later picture, %llu with a read or wait failed (none wanted), %llu "
+                  "slow, not waiting (%s), %llu begun with its work ended, %llu too brief for it",
+                  c->name, (unsigned long long)on.guardWaited, (unsigned long long)on.guardFailed,
+                  (unsigned long long)on.guardSlow, c->slowCalls ? "some wanted" : "any",
+                  (unsigned long long)on.guardDone, (unsigned long long)on.guardBrief);
+        }
+        if (c->guard) {
+            /* the guard's trip came from calls found waiting for the later
+               picture's work (the faked driver waits for all the work
+               submitted), not from slow ones */
+            CHECK(on.tripWaited >= RD_AHEAD_GUARD_LONG && on.tripSlow == 0,
+                  "GPU's end first, %s: the guard tripped on %llu calls counted as waiting for "
+                  "the later picture (at least %u wanted), %llu slow (none wanted)",
+                  c->name, (unsigned long long)on.tripWaited, (unsigned)RD_AHEAD_GUARD_LONG,
+                  (unsigned long long)on.tripSlow);
+        }
+        if (c->expect == RD_GPU_FIRST_ON) {
+            if (c->needFps > 0.0) {
+                /* the rate requirement in posts over the measured ticks,
+                   less what the machine took from the run without the rule
+                   (its control here: with PF_PREV's present that run keeps
+                   the faked GPU fed too, at the tick or the GPU's rate) */
+                const double need = c->needFps * (double)ticks * c->tickMs / 1000.0;
+                const double gpuRate = (double)ticks * c->tickMs / c->gpuMs;
+                const double offIdeal =
+                    (double)(unsigned)(gpuRate < (double)ticks ? gpuRate : (double)ticks) - 1.0;
+                const double loss = offIdeal > (double)off.posts ? offIdeal - off.posts : 0.0;
+                CHECK((double)on.posts + loss >= need,
+                      "GPU's end first, %s: %u of %u presented ahead (%.1f a second; at least "
+                      "%.0f wanted, %.1f a second, less %.0f the machine took from the run "
+                      "without the rule, %u of an ideal %.0f)",
+                      c->name, on.posts, ticks, on.fps, need, c->needFps, loss, off.posts,
+                      offIdeal);
+                if (c->busyNeed > 0.0) {
+                    /* less what the machine took from the control's busy
+                       share; with the counts that tell the two orders
+                       apart on a loaded runner, where the busy share alone
+                       does not (v0.11.13's own order makes about 95 % on
+                       this fake at 48 ms, the bound with a 98 % control):
+                       every job submitted in the order, at least three
+                       quarters of them before the picture before's GPU end,
+                       half where 6 of 16 present calls are slow (30 of 41
+                       in a merge check; none can be one at a time), no wait made by the
+                       submit thread, the order never turned off */
+                    const double busyWant = c->busyNeed - (1.0 - off.gpuBusy);
+                    CHECK(on.gpuBusy >= busyWant && on.aheadSubmits == on.posts &&
+                              on.aheadEarly * 4u >= on.aheadSubmits * (c->slowCalls ? 2u : 3u) &&
+                              on.waits == 0 && on.aheadOff == RD_AHEAD_OFF_NONE,
+                          "GPU's end first, %s: the faked GPU busy %.1f %% of the measured "
+                          "span ahead (at least %.1f %% wanted; %.1f %% without the rule); %llu "
+                          "of %u posts submitted ahead (all wanted), %llu of them before the "
+                          "picture before's GPU end (three quarters wanted), %u submit thread "
+                          "waits (none wanted), off reason %d (none wanted)",
+                          c->name, 100.0 * on.gpuBusy, 100.0 * busyWant, 100.0 * off.gpuBusy,
+                          (unsigned long long)on.aheadSubmits, on.posts,
+                          (unsigned long long)on.aheadEarly, on.waits, on.aheadOff);
+                }
+            } else if (c->keep) {
+                CHECK(on.posts == ticks && off.posts == ticks && on.busySkips == 0 &&
+                          off.busySkips == 0,
+                      "GPU's end first, %s: %u and %u of %u presented (wanted, not), every keep "
+                      "frame wanted",
+                      c->name, on.posts, off.posts, ticks);
+            } else if (c->driver == PF_PREV) {
+                /* three quarters of 1000 / the GPU's time (as PF_BLOCK's
+                   45 ms case), and the rule wanted held to the run
+                   without it less a fifth of the ticks (both at the GPU's
+                   rate: the header's reckoning) */
+                const double want = 1000.0 / c->gpuMs * 0.75;
+                CHECK(on.fps >= want && on.posts + ticks / 5 >= off.posts && on.beside > 0,
+                      "GPU's end first, %s: %.1f pictures a second (%u of %u, %u handed over "
+                      "beside the wait), at least %.1f wanted (three quarters of 1000/%.0f) and "
+                      "%u without the rule less %u",
+                      c->name, on.fps, on.posts, ticks, on.beside, want, c->gpuMs, off.posts,
+                      ticks / 5);
+            } else if (c->gpuMs < c->tickMs) {
+                /* the times are the machine's: a busy one (CI's shards run
+                   four tests at once) loses a tick now and then with or
+                   without the rule (linux-arm64, run 44468091552: 49 of 50
+                   without it), so a fifth of the ticks may go (the worst there: 42 of 50) */
+                CHECK(on.posts + ticks / 5 >= ticks,
+                      "GPU's end first, %s: %.1f pictures a second (%u of %u), every tick less "
+                      "a fifth wanted",
+                      c->name, on.fps, on.posts, ticks);
+            } else {
+                /* the rate requirement: three quarters of 1000 / the GPU's
+                   time (a tenth under it on a quiet machine: 22.0 of 22.2;
+                   19.5 on a busy arm64 runner), and well over the rule-off
+                   rate of every second tick */
+                const double want = 1000.0 / c->gpuMs * 0.75;
+                CHECK(on.fps >= want && on.fps >= 1.3 * off.fps && on.beside > 0,
+                      "GPU's end first, %s: %.1f pictures a second (%u handed over beside the "
+                      "wait), at least %.1f wanted (three quarters of 1000/%.0f) and 1.3 times "
+                      "the %.1f without the rule",
+                      c->name, on.fps, on.beside, want, c->gpuMs, off.fps);
+            }
+        } else {
+            /* off or no verdict: no wait before a present, none beside;
+               the rate is the machine's (a busy runner showed 38 and 41 of
+               50 for PF_EARLY, wanted and not: its 35 ms of work a 33.3 ms
+               tick leaves no room), so the rule wanted is held to the run
+               without it, less a fifth of the ticks; nothing of the ahead
+               order runs (no waiter wait, no present ahead: the order of
+               calls as before it) */
+            CHECK(on.waits == 0 && on.beside == 0 && on.posts + ticks / 5 >= off.posts &&
+                      on.aheadWaits == 0 && on.aheadPresents == 0 && on.aheadSubmits == 0 &&
+                      on.waitVN == 0,
+                  "GPU's end first, %s: %u waits and %u frames beside one (none wanted); %u and "
+                  "%u of %u presented (wanted, not): as many with the rule wanted as without it, "
+                  "less a fifth of the ticks; %llu waiter waits, %llu presents ahead, %llu jobs "
+                  "submitted ahead (none wanted)",
+                  c->name, on.waits, on.beside, on.posts, off.posts, ticks,
+                  (unsigned long long)on.aheadWaits, (unsigned long long)on.aheadPresents,
+                  (unsigned long long)on.aheadSubmits);
+        }
+        CHECK(memcmp(scene, offScene, (size_t)512 * 512 * 4) == 0 && dw == offW && dh == offH &&
+                  (offW == 0 || memcmp(display, offDisplay, (size_t)offW * offH * 4) == 0),
+              "GPU's end first, %s: SCENE and DISPLAY as without the rule (%ux%u, %ux%u)", c->name,
+              dw, dh, offW, offH);
+        if (c->serialTwin) {
+            /* the same case one picture at a time in the same run (the
+               verdict on, the ahead order held off by the test's hook:
+               v0.11.13's order): the chain's cost between a picture's GPU
+               end and the next one's submit passes the tick, so it
+               presents measurably fewer than every tick (the model of this
+               fake: about 95 of 100; a loaded runner only takes more), and
+               fewer than the ahead order did above.  It ran as that order:
+               held off by the test, no job submitted ahead, every job's
+               GPU end waited for by the submit thread */
+            PfCase one = *c;
+            one.old = true;
+            one.serialTwin = false;
+            PfRun ser;
+            const bool okSer = pfRun(&one, true, ticks, &ser, scene, display, &dw, &dh);
+            printf("GPU's end first, %s: one picture at a time %u of %u presented (%.1f a "
+                   "second; ahead %u, without the rule %u), %u skipped as busy (%u on the picture "
+                   "before, %u at its slot wait, %u for the submit thread), %u submit thread "
+                   "waits\n",
+                   c->name, ser.posts, ticks, ser.fps, on.posts, off.posts, ser.busySkips,
+                   ser.busyBy[RD_BUSY_RENDER], ser.busyBy[RD_BUSY_SLOT], ser.busyBy[RD_BUSY_SUBMIT],
+                   ser.waits);
+            fflush(stdout);
+            CHECK(okSer && ser.aheadOff == RD_AHEAD_OFF_TEST && ser.aheadSubmits == 0 &&
+                      ser.waits == ser.posts,
+                  "GPU's end first, %s: one picture at a time: the run %d, off reason %d (%d "
+                  "wanted), %llu jobs submitted ahead (none wanted), %u submit thread waits of "
+                  "%u posts (all wanted)",
+                  c->name, okSer, ser.aheadOff, RD_AHEAD_OFF_TEST,
+                  (unsigned long long)ser.aheadSubmits, ser.waits, ser.posts);
+            CHECK(ser.posts + 3u <= ticks && ser.posts < on.posts,
+                  "GPU's end first, %s: one picture at a time %u of %u presented (at most %u "
+                  "wanted: v0.11.13's loss reproduced), the ahead order %u (more wanted)",
+                  c->name, ser.posts, ticks, ticks - 3u, on.posts);
+        }
+        if (c->failWait) {
+            /* the order turned off in this run stays off when the submit
+               thread starts again in the same process (a Graphics API
+               switch by Apply restarts it): the next start's reason is the
+               run's own, the failed wait, with no tick needed */
+            rd__submit_test_gpu_first(2);
+            const bool st = rd_thread_local_start(RD_THREAD_ON);
+            RdAheadTally a;
+            rd__submit_ahead_tally(&a);
+            const char *why = rd_thread_submit_ahead_off_why();
+            CHECK(st && rd_thread_submit_gpu_first() && a.off == RD_AHEAD_OFF_WAIT && why != NULL &&
+                      strstr(why, "wait") != NULL,
+                  "GPU's end first, %s: the thread started again in the same run: off reason "
+                  "%d (%d wanted: the run's own), \"%s\"",
+                  c->name, a.off, RD_AHEAD_OFF_WAIT, why != NULL ? why : "(none)");
+            if (st) {
+                rd_thread_local_stop();
+            }
+            rd__submit_test_gpu_first(-1);
+            rd__submit_test_ahead_fresh();
+        }
+    }
+    {
+        /* the install's mark (port/platform/ahead_mark.h) through the
+           window's channel: a start with it named never runs the order */
+        rd_thread_submit_ahead_prev("the install's mark, ahead-mark.txt: blocked v0.11.14: a run "
+                                    "of v0.11.14 ended badly with it in effect, so it stays off "
+                                    "until the version changes");
+        rd__submit_test_gpu_first(2);
+        rd__submit_test_ahead_fresh();
+        const bool st = rd_thread_local_start(RD_THREAD_ON);
+        RdAheadTally a;
+        rd__submit_ahead_tally(&a);
+        CHECK(st && rd_thread_submit_gpu_first() && a.off == RD_AHEAD_OFF_PREV &&
+                  rd_thread_submit_ahead_off_why() != NULL,
+              "GPU's end first: a start with the install's mark: off reason %d (%d wanted)", a.off,
+              RD_AHEAD_OFF_PREV);
+        if (st) {
+            rd_thread_local_stop();
+        }
+        rd_thread_submit_ahead_prev(NULL);
+        rd__submit_test_gpu_first(-1);
+    }
+out:
+    rd_thread_submit_ahead_mark_fn(NULL);
+    rd_set_replay_gate(NULL);
+    {
+        RdFramePostLast last;
+        (void)rd_frame_post_last_take(&last);
+    }
+    free(offScene);
+    free(offDisplay);
+    free(scene);
+    free(display);
 }
 
 /* ----------------------------------------------------------------- R8 */
@@ -1868,6 +3703,9 @@ int main(void)
     threadFair();
     r8Pixels();
     replacementPixels();
+    threadRoomAhead();   /* it gives the output a size */
+    threadOriginal();    /* after it: its pictures present */
+    threadPresentFree(); /* Frame rate Original's GPU's end first, at rate */
     CHECK(rhi_vk_validation_error_count() == 0, "%u validation errors",
           rhi_vk_validation_error_count());
     rd_shutdown();

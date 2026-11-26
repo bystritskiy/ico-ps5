@@ -13,6 +13,7 @@
 #include <time.h>
 
 #include "host_fs.h"
+#include "last_run.h" /* the skin check's counts (issue 217) */
 #include "miniz.h"
 
 #ifdef _WIN32
@@ -35,6 +36,9 @@ static char s_exe[PATH_BYTES];
 static char s_pref[PATH_BYTES];
 static char s_ini[PATH_BYTES];
 static char s_version_text[256];
+/* the run before's end (ico_report_set_exit_info) */
+static char s_exit_verdict[1024];
+static char s_exit_trace[128];
 /* Linux: VERSION.txt where the AppImage keeps it, beside the program in
    the mount (<program's folder>/../share/doc/ico-pc/), "" none */
 static char s_version_pkg[PATH_BYTES + 32];
@@ -86,9 +90,26 @@ void ico_report_set_paths(const char *logs_dir, const char *exe_dir, const char 
 #endif
 }
 
+/* the scene ledger's text (ico_report_set_ledger) and its buffer: the kept
+   stages and the stage in play (rd_ledger.h RD_LEDGER_KEEP + 1 stages of
+   RD_LEDGER_TEXT, 10240, bytes each) */
+static size_t (*volatile s_ledger_fn)(char *out, size_t cap);
+static char s_ledger[5 * 10240 + 1024];
+
+void ico_report_set_ledger(size_t (*fn)(char *out, size_t cap))
+{
+    s_ledger_fn = fn;
+}
+
 void ico_report_set_version_text(const char *text)
 {
     snprintf(s_version_text, sizeof s_version_text, "%s", text != NULL ? text : "");
+}
+
+void ico_report_set_exit_info(const char *verdict, const char *trace)
+{
+    snprintf(s_exit_verdict, sizeof s_exit_verdict, "%s", verdict != NULL ? verdict : "");
+    snprintf(s_exit_trace, sizeof s_exit_trace, "%s", trace != NULL ? trace : "");
 }
 
 /* dir + "/" + name into out: 0, or -1 when it does not fit or dir is "" */
@@ -324,6 +345,9 @@ static struct {
     ZipEntry e[ZIP_ENTRIES];
     uint16_t dos_time, dos_date;
 } s_zip;
+
+/* the last report's size in bytes (ico_report_last_bytes) */
+static uint64_t s_last_bytes;
 
 static tdefl_compressor s_deflate;
 static unsigned char s_in[65536];
@@ -626,9 +650,16 @@ static int starts(const char *s, const char *p)
 
 /* the log's key lines: the latest of each */
 enum {
+    /* first: the picture-health report's line (port/render/rd_health.h,
+       issue 179), a picture the GPU leaves unfinished, at the top of the
+       key lines */
+    K_UNFINISHED,
     K_SUMMARY,
     K_VERSION,
     K_DEVICE,
+    /* the device table's start-up header, which names the rows in force
+       (the summary carries their count alone: port/rhi/rhi_device_table.h) */
+    K_DEVTABLE,
     K_ROBUST,
     K_BLEND,
     K_INDEX,
@@ -643,6 +674,9 @@ static char s_key[K_COUNT][LINE_BYTES];
 
 static int key_of(const char *l)
 {
+    if (starts(l, "rd: picture health: 3D pictures are coming back unfinished")) {
+        return K_UNFINISHED;
+    }
     if (starts(l, "ico_pc: summary:")) {
         return K_SUMMARY;
     }
@@ -652,6 +686,10 @@ static int key_of(const char *l)
     if (strstr(l, "index values up to") != NULL &&
         (strstr(l, "(Vulkan ") != NULL || strstr(l, "(D3D12") != NULL)) {
         return K_DEVICE;
+    }
+    if (starts(l, "rhi_") && strstr(l, ": device table: ") != NULL &&
+        strstr(l, " of the table's ") != NULL) {
+        return K_DEVTABLE;
     }
     if (strstr(l, "loss diagnostics:") != NULL) {
         return K_ROBUST;
@@ -678,6 +716,66 @@ static int key_of(const char *l)
     return -1;
 }
 
+/* The performance lines by scene (window_perf_rank.h, issue 179): the
+   latest ranked line and profile line of each scene, in the order the
+   scenes first came, so one report carries the run's ranking whatever
+   block was last.  16 scenes (about 66 KB of the report's 128 KB at their
+   longest); the key carries the stage on every kind (window_scene_key),
+   so a long run has more: a new scene then takes the place of the one
+   seen longest ago (the report keeps the run's latest 16) */
+#define PERF_SCENES 16
+
+static struct {
+    char name[96]; /* rd_perf_rank.h RD_PERF_RANK_NAME */
+    char ranked[LINE_BYTES], profile[LINE_BYTES];
+    unsigned seen; /* the line count at its last line */
+} s_perf[PERF_SCENES];
+
+static int s_perf_n;
+static unsigned s_perf_lines;
+
+static void perf_line(const char *l)
+{
+    static const char *const kRanked = "window: perf ranked: ";
+    static const char *const kProfile = "window: performance profile: ";
+    const int ranked = starts(l, kRanked);
+    if (!ranked && !starts(l, kProfile)) {
+        return;
+    }
+    const char *name = l + strlen(ranked ? kRanked : kProfile);
+    const char *end = strstr(name, ": ");
+    if (end == NULL || end - name >= (long)sizeof s_perf[0].name) {
+        return;
+    }
+    const size_t len = (size_t)(end - name);
+    int i;
+    for (i = 0; i < s_perf_n; i++) {
+        if (strlen(s_perf[i].name) == len && strncmp(s_perf[i].name, name, len) == 0) {
+            break;
+        }
+    }
+    if (i == s_perf_n) {
+        if (s_perf_n == PERF_SCENES) {
+            /* full: the scene seen longest ago goes, the rest keep their
+               order and the new one comes last */
+            int old = 0;
+            for (int k = 1; k < s_perf_n; k++) {
+                old = s_perf[k].seen < s_perf[old].seen ? k : old;
+            }
+            memmove(&s_perf[old], &s_perf[old + 1],
+                    (size_t)(s_perf_n - 1 - old) * sizeof(s_perf[0]));
+            s_perf_n--;
+            i = s_perf_n;
+        }
+        s_perf_n++;
+        memcpy(s_perf[i].name, name, len);
+        s_perf[i].name[len] = '\0';
+        s_perf[i].ranked[0] = s_perf[i].profile[0] = '\0';
+    }
+    s_perf[i].seen = ++s_perf_lines;
+    snprintf(ranked ? s_perf[i].ranked : s_perf[i].profile, LINE_BYTES, "%s", l);
+}
+
 #define RING 20
 static char s_ring[RING][LINE_BYTES];
 static int s_ring_n, s_ring_head;
@@ -695,6 +793,7 @@ static void log_line(const char *l, void *user)
     if (k >= 0) {
         snprintf(s_key[k], sizeof s_key[k], "%s", l);
     }
+    perf_line(l);
     if (starts(l, "ico_pc: ======")) {
         /* a report block: the lines before it are the ring's */
         memcpy(s_before, s_ring, sizeof s_ring);
@@ -788,8 +887,23 @@ static void build_text(const IcoReportInputs *in)
        system ends the app on the device's memory, not the app's) */
     text_kv("memory: ",
             in->memory != NULL && in->memory[0] != '\0' ? in->memory : "(unknown on this system)");
+    /* issue 215: how the run before ended (exit_info.h) */
+    if (s_exit_verdict[0] != '\0') {
+        text_line(s_exit_verdict);
+    }
+    {
+        /* issue 217: the skin check's counts this run, when it runs (a run
+           lost before its first 10 s line has no other count of them) */
+        char skin[192];
+        last_run_skin_now(skin, sizeof skin);
+        if (skin[0] != '\0') {
+            text_line(skin);
+        }
+    }
 
     memset(s_key, 0, sizeof s_key);
+    s_perf_n = 0;
+    s_perf_lines = 0;
     s_ring_n = s_ring_head = s_before_n = s_before_head = 0;
     s_in_block = 0;
     s_block_len = 0;
@@ -804,6 +918,19 @@ static void build_text(const IcoReportInputs *in)
     for (i = 0; i < K_COUNT; i++) {
         if (s_key[i][0] != '\0') {
             text_kv("  ", s_key[i]);
+        }
+    }
+    if (s_perf_n > 0) {
+        /* the run's performance by scene (window_perf_rank.h) */
+        text_line("");
+        text_line("the performance lines by scene (the latest ranking and profile of each):");
+        for (i = 0; i < s_perf_n; i++) {
+            if (s_perf[i].ranked[0] != '\0') {
+                text_kv("  ", s_perf[i].ranked);
+            }
+            if (s_perf[i].profile[0] != '\0') {
+                text_kv("  ", s_perf[i].profile);
+            }
         }
     }
     {
@@ -869,12 +996,54 @@ int ico_report_write(const IcoReportInputs *in, char *name, size_t name_size)
     }
     build_text(in);
     zip_add_mem("report.txt", s_text, s_text_len);
+    {
+        /* what the last stages held and left out (issue 221: a report made
+           minutes after the wrong picture, in another stage) */
+        size_t (*fn)(char *, size_t) = s_ledger_fn;
+        if (fn != NULL) {
+            const size_t n = fn(s_ledger, sizeof s_ledger);
+            if (n > 0) {
+                zip_add_mem("scene-ledger.txt", s_ledger,
+                            n < sizeof s_ledger ? n : sizeof s_ledger - 1);
+            }
+        }
+    }
     (void)zip_add_file("ico-pc.log", in->log_path, 0);
     if (join(path, sizeof path, s_logs, "ico-pc-previous.log") == 0) {
         (void)zip_add_file("ico-pc-previous.log", path, 0);
     }
     if (join(path, sizeof path, s_logs, "startup-activity.txt") == 0) {
         (void)zip_add_file("startup-activity.txt", path, 0);
+    }
+    /* where this run and the one before were (last_run.h, issue 215) */
+    if (join(path, sizeof path, s_logs, "last-run.txt") == 0) {
+        (void)zip_add_file("last-run.txt", path, 0);
+    }
+    if (join(path, sizeof path, s_logs, "last-run-previous.txt") == 0) {
+        (void)zip_add_file("last-run-previous.txt", path, 0);
+    }
+    {
+        /* issue 179's attempts' marks on the install, each when there is
+           one: the zero-area cull's (vu_zero_mark.h), the submit ahead's
+           (ahead_mark.h), the discard-free twins', the fast pixel
+           build's (fastps_mark.h), the one-pass blend's (onepass_mark.h) and the
+           index compaction's (compact_mark.h) */
+        static const char *const k_marks[] = {"vu-zero-mark.txt",   "ahead-mark.txt",
+                                              "nodiscard-mark.txt", "fastps-mark.txt",
+                                              "onepass-mark.txt",   "compact-mark.txt"};
+        for (size_t i = 0; i < sizeof k_marks / sizeof k_marks[0]; i++) {
+            if (join(path, sizeof path, s_logs, k_marks[i]) == 0) {
+                (void)zip_add_file(k_marks[i], path, 0);
+            }
+        }
+    }
+    /* how the run before ended, and the newest trace Android kept
+       (exit_info.h, issue 215) */
+    if (join(path, sizeof path, s_logs, "exit-info.txt") == 0) {
+        (void)zip_add_file("exit-info.txt", path, 0);
+    }
+    if (s_exit_trace[0] != '\0' && join(path, sizeof path, s_logs, s_exit_trace) == 0) {
+        (void)zip_add_file(s_exit_trace, path, 0);
     }
     if (join(path, sizeof path, s_pref, "config.toml") == 0) {
         (void)zip_add_file("config.toml", path, 0);
@@ -886,15 +1055,35 @@ int ico_report_write(const IcoReportInputs *in, char *name, size_t name_size)
         while (b > in->loss_zip && b[-1] != '/' && b[-1] != '\\') {
             b--;
         }
-        (void)zip_add_file(b, in->loss_zip, 1);
+        /* deflated: the loss dump is written stored (window_host.c: a hang's
+           dump is zipped on the watchdog thread, possibly on a slow core),
+           and stored again here a report of issue 123's real loss zip was
+           28 MB, over GitHub's 25 MB attachment limit (deflated here at the
+           report's own level 3: 4.1 MB, about 0.2 s on a desktop core; the
+           hang handler's report pays that once, before the run ends) */
+        (void)zip_add_file(b, in->loss_zip, 0);
+    }
+    if (in->slow_zip != NULL && in->slow_zip[0] != '\0') {
+        const char *b = in->slow_zip + strlen(in->slow_zip);
+
+        while (b > in->slow_zip && b[-1] != '/' && b[-1] != '\\') {
+            b--;
+        }
+        (void)zip_add_file(b, in->slow_zip, 1);
     }
     if (zip_end() != 0) {
         r_remove(zpath);
         snprintf(name, name_size, "%s could not be written", zname);
         return -1;
     }
+    s_last_bytes = s_zip.at;
     snprintf(name, name_size, "%s", zname);
     return 0;
+}
+
+unsigned long long ico_report_last_bytes(void)
+{
+    return (unsigned long long)s_last_bytes;
 }
 
 /* --- Pruning (normal paths) ------------------------------------------------------------- */

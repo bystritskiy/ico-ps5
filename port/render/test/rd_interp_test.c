@@ -2550,6 +2550,8 @@ static void testPresentClock(void)
           "present clock: the alpha histogram's bins");
 }
 
+#include "rd_interp_clock_test.inc"
+
 /* ----------------------------------- unmatched draws, particles, lights */
 
 static const char kObjU, kObjP1, kObjP2, kObjP3, kObjL;
@@ -5887,6 +5889,12 @@ static void runCpu(void)
     testCameraLocked();
     testPhoto();
     testPresentClock();
+    testPresentClockStep();
+    testPresentClockDoubled();
+    testPresentClockSlow();
+    testPresentClockPair();
+    testPresentRebase();
+    testSmoothFixDt();
     testSprites();
     testSpriteSnaps();
     testFrameSnaps();
@@ -6115,6 +6123,14 @@ static void testEyeTicks(void)
 
 int main(void)
 {
+    /* the PS2's region rule ([dev] region_rule = ps2): this test's
+       pictures and counts are its drops' (the camera rule's are vu1's,
+       rd_native's and rd_region_camera_ab's) */
+#ifdef _WIN32
+    _putenv_s("ICO_RD_REGION_RULE", "ps2");
+#else
+    setenv("ICO_RD_REGION_RULE", "ps2", 1);
+#endif
     /* the frames here hold golden bytes (or read SCENE back) with list
        11's last sprites drawn into SCENE; the fades fold, how the game
        draws them, is ctest rd_fades_fold's and rd_fades_fold_ab's

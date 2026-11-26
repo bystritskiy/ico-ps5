@@ -7,7 +7,11 @@ the device profile's rows for the OpenGL and Direct3D 11 classes, the window eac
 the order the window tries them in, and what has not been run. How each backend works inside is
 [RHI.md](RHI.md) ([Vulkan](RHI.md#vulkan), [Direct3D 12](RHI.md#direct3d-12),
 [OpenGL](RHI.md#opengl), [Direct3D 11](RHI.md#direct3d-11)); the device profile of every class is
-[RENDER.md](RENDER.md#the-device-profile).
+[RENDER.md](RENDER.md#the-device-profile). The hardware rows behind the Vulkan classes and every
+other choice keyed on the GPU, its driver or the OS are listed in [DEVICE_TABLE.md](DEVICE_TABLE.md);
+every backend prints the rows it matches after its device line. No row is keyed on OpenGL, Direct3D
+11 or Direct3D 12: they match only the platform's rows a vendor id of 0 or a Mesa driver gives
+(`vendor-unknown`, `mesa-drivers`).
 
 ## Where the renderer branches on the backend
 
@@ -23,10 +27,10 @@ everything else follows `RhiLimits`.
 | fog buffer path, probe and edge probe depth (`depthRegionCopies`, `port/render/rd_fog_path.c`) | yes | no (a depth only whole) | yes (`glReadPixels` of the depth aspect) | no (a texture only into a readback buffer) |
 | fog local path (`rd__fog_local_offered`) | where local read is offered | no | no | no |
 | pipeline failure text (`failReason`, `port/render/rd_pipeline.c`) | `VkResult <n> (<name>)` | `HRESULT 0x<8 digits>` | `GL error 0x<4 digits>` | `HRESULT 0x<8 digits>` |
-| VU pre-pass off line (`rd__vu_prepass_init`, `port/render/rd_replay_vu.c`) | the tiler and Apple A9/A10 rules | on | on | on: the record copied by the backend's compute shader (`d3d11_cmd.c`, [RHI.md](RHI.md#direct3d-11)); off only by its start-up self-test (`off (self-test: ...)`, then `rd: VU pre-pass: self-test failed on Direct3D 11; its last draw: ...`) |
+| VU pre-pass off line (`rd__vu_prepass_init`, `port/render/rd_replay_vu.c`) | the Apple A9/A10 rule (a tile-based GPU takes the pre-pass like any device) | on | on | on: the record copied by the backend's compute shader (`d3d11_cmd.c`, [RHI.md](RHI.md#direct3d-11)); off only by its start-up self-test (`off (self-test: ...)`, then `rd: VU pre-pass: self-test failed on Direct3D 11; its last draw: ...`) |
 | window flags (`window_flags`, `port/platform/window_host.c`) | `SDL_WINDOW_VULKAN` | none (the HWND) | `SDL_WINDOW_OPENGL` after `window_gl_attributes` | none (the HWND) |
 | robust access in the summary and the profile line | `RhiLimits.robustText` (`off (the default; ...)`) | `D3D12's own` | `off (OpenGL)` (`robustText`) | `D3D11's own` |
-| occlusion queries (`rhi_occlusion_supported`; `rd_replay_tool --occlusion`, [RENDER.md](RENDER.md#culling)) | a pool a frame slot, made at the first begin, precise where offered | no (an occlusion query heap would be the form) | no (`GL_SAMPLES_PASSED`) | no (`D3D11_QUERY_OCCLUSION`); the tool exits 77 |
+| occlusion queries (`rhi_occlusion_supported`; `rd_replay_tool --occlusion`, [RENDER.md](RENDER_PERF.md#culling)) | a pool a frame slot, made at the first begin or `rhi_occlusion_prepare` (its range reset a frame), precise where offered | no (an occlusion query heap would be the form) | no (`GL_SAMPLES_PASSED`) | no (`D3D11_QUERY_OCCLUSION`); the tool exits 77 |
 
 The swapchain format is read from `rhi_swapchain_format` wherever it matters (`rd_present.c`,
 `rd_video.c`): Direct3D 12 and Direct3D 11 report BGRA8, OpenGL RGBA8, Vulkan the surface's
@@ -74,7 +78,7 @@ have static blend state only.
 
 ## The device profile on OpenGL and Direct3D 11
 
-Both classes take the desktop column whatever the vendor; what differs from desktop Vulkan comes
+Both classes take the desktop class's values whatever the vendor; what differs from desktop Vulkan comes
 from the limits above. [RENDER.md](RENDER.md#the-device-profile) has the other classes.
 
 | flag | OpenGL | Direct3D 11 |
@@ -96,8 +100,8 @@ from the limits above. [RENDER.md](RENDER.md#the-device-profile) has the other c
 The class name carries the vendor where the backend knows it and the backend's name:
 
 ```
-rd: profile: immediate-mode GPU (OpenGL): blend fixed-function; fog local off; DATE snapshot; depth stores planned; blur fold on; robust access off (OpenGL); local read no; uint views work and scene; alpha plan on; fx plan on; fx local read off; VU planes whole scales only; shadow count one draw; shadow edges: bilinear; pipelines the start-up set
-rd: profile: immediate-mode GPU (NVIDIA, D3D11): blend fixed-function; fog local off; DATE snapshot; depth stores planned; blur fold on; robust access D3D11's own; local read n/a; uint views off; alpha plan on; fx plan on; fx local read off; VU planes whole scales only; shadow count one draw; shadow edges: bilinear; pipelines the start-up set
+rd: profile: immediate-mode GPU (OpenGL): blend fixed-function; fog local off; DATE snapshot; depth stores planned; blur fold on; glow fold on; robust access off (OpenGL); local read no; uint views work and scene; alpha plan on; fx plan on; fx local read off; VU planes whole scales only; shadow count one draw; shadow edges: bilinear; pipelines the start-up set
+rd: profile: immediate-mode GPU (NVIDIA, D3D11): blend fixed-function; fog local off; DATE snapshot; depth stores planned; blur fold on; glow fold on; robust access D3D11's own; local read n/a; uint views off; alpha plan on; fx plan on; fx local read off; VU planes whole scales only; shadow count one draw; shadow edges: bilinear; pipelines the start-up set
 ```
 
 The stencil views of the four backends (`RHI_ASPECT_STENCIL`, [RHI.md](RHI.md)) are what the
@@ -229,7 +233,7 @@ debug flag) and refuses a window made without `SDL_WINDOW_OPENGL`. Android and i
 | `rd_present` scene fallback checks | run (`vkr_test_fail_texels_above`) | skipped | skipped |
 | `rd_fog` edge probe (`checkEdgeProbe`) | run | run | only on the buffer path (never) |
 | `rd_msaa` | the mask with and without `depth_resolve_ps` | the same | not run (Windows) |
-| `rd_vuprepass_selftest*` | the profile names `Vulkan` | names `OpenGL`, desktop column | not run (Windows) |
+| `rd_vuprepass_selftest*` | the profile names `Vulkan` | names `OpenGL`, the desktop class's values | not run (Windows) |
 
 The OpenGL runs of the renderer's suite are the `_gl` tests ([TESTING.md](TESTING.md)).
 
@@ -248,6 +252,21 @@ The OpenGL runs of the renderer's suite are the `_gl` tests ([TESTING.md](TESTIN
 - The equation fix on a Radeon RX 7000 card with Mesa 25 RADV: the cause is read from Mesa's
   source; lavapipe, NVIDIA and Intel have not shown the fault, so only the counters and
   the colours at an even and an odd column are checked here.
+- The Intel driver row on Vulkan (`port/rhi/rhi_pass_row.h`: Intel's Windows driver at Vulkan
+  1.3.215 or older takes `VkRenderPass` objects): the path itself runs on lavapipe at Vulkan 1.3
+  (`rd_display_change_2x_legacy`, `ICO_VK_LEGACY_PASSES=1`), the row's choice in
+  `rhi_vk_pass_row`; no Intel GPU on that driver has run it, and the crash it avoids (inside
+  `vkCmdBeginRendering` after a live switch to 2x) is not reproduced anywhere here.
+- The Qualcomm driver row on Vulkan (`rhi_pass_row.h` `rhi_vk_pass_row_qualcomm`, issue 123:
+  Qualcomm's own driver takes `VkRenderPass` objects): the path's pictures are the dynamic
+  path's byte for byte on lavapipe (`rd_pass_objects_ab`, the row faked by
+  `ICO_VK_FAKE_PASS_ROW=qualcomm`), the row's choice in `rhi_vk_pass_row`; no Adreno on
+  Qualcomm's driver has run it, and whether it changes the hangs it is aimed at is for the next
+  reporter log to say.
+- The queue's global priority on Vulkan: no device is asked one (the high priority Qualcomm's own
+  driver under Android was asked for issue 123 was taken off, issues 215 and 123); the read-only
+  start line runs on lavapipe on Qualcomm's row (`rhi_vk_qprio_none`). Whether the issue 215
+  handheld still ends at start without it is for its next log to say.
 - Direct3D 11: nothing has run on Windows; the profile text, the pre-pass line and the robust
   words are from the limits `d3d11_device.c` reports.
 - The VU vertex pre-pass on Direct3D 11 on hardware: CI's WARP job runs its self-test (batched,

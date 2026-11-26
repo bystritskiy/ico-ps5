@@ -6,6 +6,7 @@
 #include "../rhi_adapter.h"
 #include "../rhi_backend.h"
 #include "../rhi_bind_cache.h"
+#include "../rhi_device_table.h"
 #include <stdlib.h>
 #include <string.h>
 
@@ -684,6 +685,85 @@ static bool dx_rov_supported(void)
     return ok;
 }
 
+/* Typed UAV loads and stores of format `f` (a bind of it as a UAV that a
+ * compute shader reads and writes without a declared format) */
+static bool dx_typed_uav(DXGI_FORMAT f)
+{
+    D3D12_FEATURE_DATA_FORMAT_SUPPORT fs;
+    memset(&fs, 0, sizeof(fs));
+    fs.Format = f;
+    return SUCCEEDED(ID3D12Device_CheckFeatureSupport(g_dx.device, D3D12_FEATURE_FORMAT_SUPPORT,
+                                                      &fs, sizeof(fs))) &&
+           (fs.Support1 & D3D12_FORMAT_SUPPORT1_TYPED_UNORDERED_ACCESS_VIEW) &&
+           (fs.Support2 & D3D12_FORMAT_SUPPORT2_UAV_TYPED_LOAD) &&
+           (fs.Support2 & D3D12_FORMAT_SUPPORT2_UAV_TYPED_STORE);
+}
+
+/* External compute (rhi_native.h RhiComputeCaps), answered once at device
+ * creation: shader model 6.2 or later (the highest the runtime reports,
+ * asked down from 6.7), wave operations, and typed UAV loads and stores of
+ * R16G16B16A16_FLOAT and _UNORM (TypedUAVLoadAdditionalFormats and the
+ * formats' own bits).  d3dp_compute_caps (d3d12_plan.c) decides. */
+static void dx_probe_compute(void)
+{
+    uint32_t sm = 0;
+    for (uint32_t v = 0x67u; v >= 0x60u && !sm; v--) {
+        D3D12_FEATURE_DATA_SHADER_MODEL m;
+        memset(&m, 0, sizeof(m));
+        m.HighestShaderModel = (D3D_SHADER_MODEL)v;
+        if (SUCCEEDED(ID3D12Device_CheckFeatureSupport(g_dx.device, D3D12_FEATURE_SHADER_MODEL, &m,
+                                                       sizeof(m)))) {
+            sm = (uint32_t)m.HighestShaderModel;
+        }
+    }
+    D3D12_FEATURE_DATA_D3D12_OPTIONS o;
+    D3D12_FEATURE_DATA_D3D12_OPTIONS1 o1;
+    D3D12_FEATURE_DATA_D3D12_OPTIONS4 o4;
+    memset(&o, 0, sizeof(o));
+    memset(&o1, 0, sizeof(o1));
+    memset(&o4, 0, sizeof(o4));
+    const bool haveO = SUCCEEDED(
+        ID3D12Device_CheckFeatureSupport(g_dx.device, D3D12_FEATURE_D3D12_OPTIONS, &o, sizeof(o)));
+    const bool haveO1 = SUCCEEDED(ID3D12Device_CheckFeatureSupport(
+        g_dx.device, D3D12_FEATURE_D3D12_OPTIONS1, &o1, sizeof(o1)));
+    const bool haveO4 = SUCCEEDED(ID3D12Device_CheckFeatureSupport(
+        g_dx.device, D3D12_FEATURE_D3D12_OPTIONS4, &o4, sizeof(o4)));
+    const bool typed = haveO && o.TypedUAVLoadAdditionalFormats &&
+                       dx_typed_uav(DXGI_FORMAT_R16G16B16A16_FLOAT) &&
+                       dx_typed_uav(DXGI_FORMAT_R16G16B16A16_UNORM);
+    d3dp_compute_caps(sm, haveO1 && o1.WaveOps, typed, haveO4 && o4.Native16BitShaderOpsSupported,
+                      &g_dx.compute);
+    DX_LOG("external compute: %s%s%s (shader model %u.%u, wave ops %s, typed RGBA16 UAV %s, "
+           "native 16-bit %s)",
+           g_dx.compute.ok ? "offered" : "not offered", g_dx.compute.ok ? "" : ": ",
+           g_dx.compute.ok ? "" : g_dx.compute.why, sm >> 4, sm & 15u,
+           haveO1 && o1.WaveOps ? "yes" : "no", typed ? "yes" : "no",
+           g_dx.compute.float16 ? "yes" : "no");
+}
+
+/* the device table's start-up lines (../rhi_device_table.h,
+   docs/port/DEVICE_TABLE.md): no row is keyed on Direct3D 12; its vendor id
+   is 0 (RhiLimits.vendorId), so the header names the vendor-unknown row
+   (the free-memory floor's cautious rule, port/platform/memory_floor.c),
+   with no fakes (the tests' are Vulkan's); the summary's clause noted */
+static void dx_device_table_line(const char *line, void *user)
+{
+    (void)user;
+    DX_LOG("%s", line);
+}
+
+static void dx_device_table(void)
+{
+    RhiDeviceId id;
+    memset(&id, 0, sizeof id);
+    id.backend = RHI_DT_D3D12;
+    id.os = RHI_DT_OS_BUILD;
+    id.vendorId = g_dx.limits.vendorId;
+    id.deviceName = g_dx.adapterName;
+    id.driverText = g_dx.limits.driverText;
+    (void)rhi_device_table_start(&id, NULL, dx_device_table_line, NULL);
+}
+
 static void dx_fill_limits(void)
 {
     RhiLimits *o = &g_dx.limits;
@@ -732,6 +812,11 @@ static void dx_fill_limits(void)
     /* the destination read: ROVs (no interlock or attachment read here) */
     o->rov = dx_rov_supported();
     o->fragmentInterlock = false;
+    /* no vertex stores this release (rhi.h RhiLimits.vertexStores), no
+     * compute dispatches (RhiLimits.computeStores) */
+    o->vertexStores = false;
+    o->computeStores = false;
+    o->computeStoresOff = "Direct3D 12: not in this release";
     o->rasterOrderAttachment = false;
     o->rasterOrderOff = NULL;
     o->moltenvk = false;
@@ -754,8 +839,10 @@ static void dx_fill_limits(void)
      * (rd_shadow_selftest.c), then true */
     o->stencilView = false;
     o->stencilViewChannel = 1;
+    o->stencilGather = false; /* X32_TYPELESS_G8X24_UINT: no gather (as D3D11) */
     o->vuFallbackPlain = NULL;
     o->carefulPipelines = NULL;
+    o->serialPipelines = NULL;
     o->compilerVersion = NULL;
 }
 
@@ -814,6 +901,7 @@ bool rhi_init(const RhiDeviceDesc *desc)
         return false;
     }
     dx_fill_limits();
+    dx_probe_compute();
     if (!d3dp_pool_init(&g_dx.buffers, "buffer", 4096, sizeof(DxBuffer)) ||
         !d3dp_pool_init(&g_dx.textures, "texture", 8192, sizeof(DxTexture)) ||
         !d3dp_pool_init(&g_dx.samplers, "sampler", DX_SMP_PERSISTENT, sizeof(DxSampler)) ||
@@ -862,6 +950,7 @@ bool rhi_init(const RhiDeviceDesc *desc)
            "offered)",
            g_dx.adapterName, g_dx.warp ? ", WARP" : "", s_driverText,
            g_dx.swapchain ? "" : ", headless", g_dx.limits.maxDrawIndexedIndexValue);
+    dx_device_table();
     dx_video_memory();
     if (g_dx.memBudget == 0) {
         DX_LOG("video memory budget: not reported by this adapter");
@@ -1016,6 +1105,12 @@ bool rhi_present_fifo_fallback_on(void)
     return false;
 }
 
+/* rhi.h: no mailbox here, so no FIFO start either */
+void rhi_present_fifo_start(RhiFifoStartFn eligible)
+{
+    (void)eligible;
+}
+
 /* rhi.h: ignored for now; the swapchain is DXGI's flip model in the
    window, and the window's fullscreen is SDL's and DXGI's to decide */
 void rhi_set_exclusive_fullscreen(bool allowed)
@@ -1037,6 +1132,32 @@ void rhi_present_timing_use(bool on)
 uint64_t rhi_present_last_id(void)
 {
     return 0;
+}
+
+/* rhi.h: no display times read back on this backend */
+uint32_t rhi_present_glass(uint64_t *lastId, uint64_t *refreshNs, RhiGlassTime *out, uint32_t max)
+{
+    (void)out;
+    (void)max;
+    if (lastId != NULL) {
+        *lastId = 0;
+    }
+    if (refreshNs != NULL) {
+        *refreshNs = 0;
+    }
+    return 0;
+}
+
+/* rhi.h: no desired present time on this backend */
+void rhi_present_desire(uint64_t desiredNs)
+{
+    (void)desiredNs;
+}
+
+/* rhi.h: no display times on this backend */
+void rhi_present_glass_use(bool on)
+{
+    (void)on;
 }
 
 int rhi_present_timing_next(uint64_t *id, uint64_t *ns)

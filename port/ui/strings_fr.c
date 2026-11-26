@@ -36,11 +36,7 @@ const char *const
                 "Pour une partie moins stressante. Quelques scènes scriptées montrent encore l’enlèvement.",
             [UI_STR_OPT_PIT_TIME] = "Temps pour sauver Yorda",
             [UI_STR_OPT_PIT_TIME_NOTE] =
-                "Le temps qu’une ombre met à entraîner Yorda dans un gouffre. La ligne Yorda ci-dessus l’empêche complètement.",
-            [UI_STR_VAL_PIT_HALF] = "Moitié",
-            [UI_STR_VAL_PIT_LONGER] = "Plus long",
-            [UI_STR_VAL_PIT_DOUBLE] = "Double",
-            [UI_STR_VAL_PIT_TRIPLE] = "Triple",
+                "Secondes avant qu’une ombre enfoncée avec Yorda l’emporte ; moins dans certaines scènes. Sans effet si les ombres n’enlèvent jamais Yorda.",
             [UI_STR_OPT_SHADOW_SPEED] = "Vitesse des ombres",
             [UI_STR_OPT_SHADOW_SPEED_NOTE] =
                 "La vitesse à laquelle les ombres marchent, courent et volent. Cela ne change pas la fréquence de leurs attaques.",
@@ -158,6 +154,7 @@ const char *const
             [UI_STR_OPT_TOUCH_SIZE] = "Taille des commandes",
             [UI_STR_OPT_TOUCH_OPACITY] = "Opacité des commandes",
             [UI_STR_VAL_ALWAYS] = "Toujours",
+            [UI_STR_VAL_ALWAYS_SCENES] = "Toujours, Start seul dans les scènes",
             [UI_STR_VAL_SMALL] = "Petite",
             [UI_STR_VAL_MEDIUM] = "Moyenne",
             [UI_STR_VAL_LARGE] = "Grande",
@@ -209,9 +206,17 @@ const char *const
                 "Toute la partie est inversée de gauche à droite. Chaque sauvegarde garde ce choix.",
             [UI_STR_OPT_NEWGAME_PLUS] = "Nouvelle partie +",
             [UI_STR_NEWGAME_PLUS_SCREEN] =
-                "Nouvelle partie + joue le second voyage : paroles de Yorda traduites, fin et objets changés. Désactivé, c’est le premier voyage, même après avoir fini le jeu.",
+                "Nouvelle partie + joue le second voyage : paroles de Yorda traduites, fin et objets changés. Désactivé : le premier voyage, même après la fin du jeu.",
+            [UI_STR_NEWGAME_START] = "Commencer",
+            [UI_STR_NEWGAME_START_SCREEN] = "Lance la nouvelle partie avec les choix ci-dessus.",
             [UI_STR_OPT_CRT] = "Filtre CRT",
             [UI_STR_OPT_CRT_STRENGTH] = "Intensité CRT",
+            [UI_STR_OPT_TONE_GAMMA] = "Gamma",
+            [UI_STR_OPT_TONE_BRIGHTNESS] = "Luminosité de l'image",
+            [UI_STR_OPT_TONE_CONTRAST] = "Contraste",
+            [UI_STR_OPT_TONE_SATURATION] = "Saturation",
+            [UI_STR_OPT_TONE_NOTE] =
+                "50 est l'image du jeu. Carré remet 50. Le filtre CRT suit ; le texte net des menus non.",
             [UI_STR_VAL_CRT_SCANLINES] = "Lignes de balayage",
             [UI_STR_VAL_CRT_CONSUMER] = "Téléviseur",
             [UI_STR_VAL_CRT_TRINITRON] = "Trinitron",
@@ -412,6 +417,21 @@ const char *const
             [UI_STR_VAL_HOLD_DISC_B] = "Celui du disque (B)",
             [UI_STR_HOLD_TYPE_NOTE] =
                 "A : maintenez R1 pour tenir la main de Yorda. B : appuyez une fois sur R1 pour prendre sa main, puis de nouveau pour la lâcher.",
+            [UI_STR_OPT_ZOOM_TYPE] = "Type de zoom",
+            [UI_STR_VAL_ZOOM_HOLD] = "Maintenir",
+            [UI_STR_VAL_ZOOM_TOGGLE] = "Bascule",
+            [UI_STR_ZOOM_TYPE_NOTE] =
+                "Maintenir : la caméra zoome tant que vous maintenez R2. Bascule : appuyez une fois sur R2 pour zoomer, puis de nouveau pour revenir.",
+            [UI_STR_OPT_CAMERA_RESET] = "Recentrer la caméra",
+            [UI_STR_CAMERA_RESET_NOTE] =
+                "Activé : cliquez le stick droit (R3) pour ramener aussitôt la caméra sur Ico.",
+            [UI_STR_OPT_YORDA_LOOK] = "Regarder Yorda",
+            [UI_STR_YORDA_LOOK_NOTE] =
+                ("Ico et la caméra regardent Yorda sans l’appeler. Maintenir : tant que vous "
+                 "maintenez L3. Bascule : un appui sur L3 lance le regard, un autre l’arrête."),
+            [UI_STR_OPT_BUTTON_PICTURES] = "Images des boutons",
+            [UI_STR_BUTTON_PICTURES_NOTE] =
+                "Les boutons des menus et du mode photo. Auto suit la dernière manette utilisée.",
             [UI_STR_STICK_FIX_ALSO_NOTE] = "Aussi dans Jeu.",
             [UI_STR_ACH_POPUPS_ALSO_NOTE] = "Aussi dans Succès.",
             [UI_STR_PLAYERS_NOTE] = "2 : une deuxième manette dirige Yorda.",
@@ -454,7 +474,6 @@ const char *const
             [UI_STR_STATS_CAPTURES] = "Yorda enlevée",
             [UI_STR_STATS_SAVES] = "Sauvegardes de ce voyage",
             [UI_STR_STATS_ENEMIES] = "Ennemis vaincus pendant ce voyage",
-            [UI_STR_STATS_ASSISTS] = "Aides",
             [UI_STR_STATS_AREA] = "Lieu",
             [UI_STR_PHOTO_ACT_MOVE] = "avancer",
             [UI_STR_PHOTO_ACT_LOOK] = "regarder",
@@ -525,10 +544,6 @@ const char *const
             [UI_STR_VAL_WINDOWED] = "Fenêtré",
             [UI_STR_VAL_BORDERLESS] = "Sans bordure",
             /* Effects > Cinematic bars */
-            [UI_STR_OPT_EFFECT_WATER] = "Reflets de l’eau",
-            [UI_STR_VAL_SHARP] = "Net",
-            [UI_STR_EFFECT_WATER_NOTE] =
-                "Net dessine les reflets dans l’eau à la résolution choisie ; Original garde les reflets plus doux de la PS2.",
             [UI_STR_VAL_SMOOTH] = "Fluide",
             [UI_STR_OPT_SHOW_FPS] = "Compteur d’images",
             [UI_STR_EFFECT_MOTION_BLUR_NOTE] =
@@ -567,14 +582,13 @@ const char *const
                 "Le pilote choisi n’a pas démarré la dernière fois. Le pilote du téléphone est utilisé.",
             [UI_STR_GPU_DRIVER_NOSPACE] = "Pas assez d’espace pour ajouter ce pilote.",
             [UI_STR_GPU_DRIVER_NO_PICKER] =
-                "Le sélecteur de fichiers n’a pas pu s’ouvrir. Vous pouvez copier le fichier zip du pilote dans le dossier drivers du jeu : %s",
+                "Le sélecteur de fichiers ne s’est pas ouvert. Copiez le zip du pilote dans le dossier drivers : %s",
             [UI_STR_GPU_DRIVER_NO_PICKER_APP] =
-                "Aucune application de cet appareil ne permet de choisir un fichier. Copiez le fichier zip du pilote dans le dossier drivers du jeu : %s",
-            [UI_STR_GPU_DRIVER_UNREADABLE] =
-                "Le fichier choisi n’a pas pu être lu. Copiez-le d’abord sur cet appareil, puis choisissez-le à nouveau.",
+                "Aucune application ne peut choisir de fichier. Copiez le zip du pilote dans le dossier drivers : %s",
+            [UI_STR_GPU_DRIVER_UNREADABLE] = "Illisible : copiez-le d’abord sur l’appareil",
             [UI_STR_GPU_DRIVER_ADD_FILE] = "Ajouter depuis le dossier drivers",
             [UI_STR_GPU_DRIVER_CANCELLED] =
-                "Aucun fichier n’a été choisi. Si le sélecteur de fichiers ne s’affiche pas sur cet appareil, copiez le fichier zip du pilote dans le dossier drivers du jeu et utilisez Ajouter depuis le dossier drivers : %s",
+                "Aucun fichier choisi. Si le sélecteur ne s’affiche pas, copiez le zip du pilote dans le dossier drivers et utilisez Ajouter depuis le dossier drivers : %s",
             [UI_STR_GPU_DRIVER_NOTE_LOST] =
                 "Les graphismes ont cessé de répondre avec le pilote Qualcomm de cet appareil. Un pilote Turnip peut aider : ajoutez-en un ici, ou copiez son fichier zip dans le dossier drivers du jeu (%s). Appliqué au prochain démarrage.",
             [UI_STR_QUIT_GAME] = "Quitter le jeu",
@@ -602,6 +616,9 @@ const char *const
             [UI_STR_OPT_SECOND_CARD] = "Seconde memory card",
             [UI_STR_OPT_SECOND_CARD_NOTE] =
                 "Désactivé : une carte, comme l’original. Activé : une seconde carte de dix sauvegardes de plus, proposée en sauvegarde et en chargement.",
+            [UI_STR_OPT_SHADOWS_TOGETHER] = "Les ombres attaquent ensemble",
+            [UI_STR_OPT_SHADOWS_TOGETHER_NOTE] =
+                "Désactivé : comme l’original, les ombres attaquent à tour de rôle. Activé : plusieurs à la fois.",
             [UI_STR_OPT_AA] = "Anticrénelage",
             [UI_STR_OPT_AA_NOTE] =
                 "Atténue les bords crénelés. Le supersampling dessine 4 fois (2x) ou 16 fois (4x) plus de pixels ; baissez-le si le compteur tombe à 30.",
@@ -609,6 +626,17 @@ const char *const
             [UI_STR_VAL_DOWNSAMPLE_BOX] = "À la taille d’origine",
             [UI_STR_OPT_DOWNSAMPLE_NOTE] =
                 "Dessine à la résolution ci-dessus, puis réduit à la taille d’origine. Demande 2x ou plus ; pas avec le filtre CRT ni avec Fenêtre.",
+            [UI_STR_OPT_UPSCALE] = "Mise à l’échelle",
+            [UI_STR_VAL_UPSCALE_FSR1] = "FSR 1.0",
+            [UI_STR_VAL_UPSCALE_FSR3] = "FSR 3.1",
+            [UI_STR_OPT_UPSCALE_QUALITY] = "Qualité d’échelle",
+            [UI_STR_VAL_UPSCALE_Q_NATIVE] = "AA natif",
+            [UI_STR_VAL_UPSCALE_Q_QUALITY] = "Qualité",
+            [UI_STR_VAL_UPSCALE_Q_BALANCED] = "Équilibré",
+            [UI_STR_VAL_UPSCALE_Q_PERFORMANCE] = "Performance",
+            [UI_STR_OPT_UPSCALE_SHARPNESS] = "Netteté",
+            [UI_STR_OPT_UPSCALE_NOTE] =
+                "FSR (AMD) affine l’image dessinée plus petite que l’écran. Pas avec le filtre CRT ni Fenêtre. 3.1 : sans Réduction, sans anticrénelage.",
             [UI_STR_AA_OFF] = "Désactivé",
             [UI_STR_AA_SSAA2] = "Supersampling 2x",
             [UI_STR_AA_SSAA4] = "Supersampling 4x",
@@ -616,6 +644,7 @@ const char *const
             [UI_STR_AA_MSAA4] = "MSAA 4x",
             [UI_STR_AA_MSAA8] = "MSAA 8x",
             [UI_STR_AA_UNAVAILABLE] = " (désactivé : indisponible)",
+            [UI_STR_AA_FSR3] = " (désactivé : FSR 3.1)",
             [UI_STR_EXTRAS_STEAM] = "Ajouter à Steam",
             [UI_STR_STEAM_ADDED] = "Ajouté à Steam",
             [UI_STR_STEAM_ADDED_BODY] = "Lancer Steam et chercher ICO\ndans la bibliothèque.",
@@ -628,8 +657,13 @@ const char *const
             [UI_STR_STEAM_NO_USER] = "Aucun compte Steam trouvé",
             [UI_STR_STEAM_NO_USER_BODY] = "Se connecter une fois à Steam,\npuis réessayer.",
             [UI_STR_STEAM_FAILED] = "Ajout à Steam impossible",
-            [UI_STR_STEAM_FAILED_BODY] =
-                "La liste des raccourcis n’a pas pu être modifiée.\nLe README explique l’ajout manuel.",
+            [UI_STR_STEAM_FAILED_BODY] = "Le README explique l’ajout manuel.",
+            [UI_STR_EXTRAS_DESKTOP] = "Ajouter au menu des applications",
+            [UI_STR_DESKTOP_ADDED] = "Ajouté au menu",
+            [UI_STR_DESKTOP_ADDED_BODY] = "Le jeu est dans votre\nmenu des applications.",
+            [UI_STR_DESKTOP_FAILED] = "Ajout au menu impossible",
+            [UI_STR_DESKTOP_FAILED_BODY] =
+                "L’entrée de menu n’a pas pu être\nécrite dans votre dossier utilisateur.",
             [UI_STR_EXTRAS_EXPORT_TEXTURES] = "Exporter les textures",
             [UI_STR_EXPORT_TEXTURES_STOP] = "Arrêter l’export",
             [UI_STR_EXPORT_TEXTURES_NOTE] =
@@ -681,18 +715,19 @@ const char *const
             [UI_STR_ISO_COPYING] = "Copie de l’image disque dans l’application",
             [UI_STR_ISO_COPYING_LONG] =
                 "Copie de l’image disque dans l’application. C’est une grande image : cela prend quelques minutes",
-            [UI_STR_SECTION_VARIANTS] = "Variantes du jeu",
+            [UI_STR_SECTION_CHAINS] = "Chaînes",
+            [UI_STR_SECTION_SHADOWS] = "Ombres",
+            [UI_STR_SECTION_CUTSCENES] = "Cinématiques",
             [UI_STR_OPT_VAR_TOUGHNESS] = "Résistance des ombres",
             [UI_STR_OPT_VAR_TOUGHNESS_NOTE] =
-                "Américain : chaque ombre aussi résistante que sur le disque nord-américain, sans durcir aux parties suivantes. Les succès restent actifs.",
+                "Américain : chaque ombre aussi résistante que sur le disque nord-américain, sans durcir aux parties suivantes.",
             [UI_STR_VAL_VAR_AMERICAN] = "Américain",
             [UI_STR_VAL_VAR_NOT_TOUGHER] = "Sans durcissement",
             [UI_STR_OPT_VAR_ONE_HIT] = "Un seul coup par attaque",
             [UI_STR_OPT_VAR_ONE_HIT_NOTE] =
-                "Chaque coup d’Ico ne peut blesser une ombre qu’une fois. Désactive les succès.",
+                "Chaque coup d’Ico ne peut blesser une ombre qu’une fois.",
             [UI_STR_OPT_VAR_NEVER_DODGE] = "Les ombres n’esquivent jamais",
-            [UI_STR_OPT_VAR_NEVER_DODGE_NOTE] =
-                "Les ombres n’évitent jamais les coups d’Ico. Désactive les succès.",
+            [UI_STR_OPT_VAR_NEVER_DODGE_NOTE] = "Les ombres n’évitent jamais les coups d’Ico.",
             [UI_STR_OPT_VAR_AGGRESSION] = "Agressivité des ombres",
             [UI_STR_VAL_VAR_AGG_OWN] = "D’origine",
             [UI_STR_VAL_VAR_AGG_BOLD_PATIENT] = "Hardi, patient",
@@ -700,15 +735,15 @@ const char *const
             [UI_STR_VAL_VAR_AGG_WARY_PATIENT] = "Prudent, patient",
             [UI_STR_VAL_VAR_AGG_WARY_QUICK] = "Prudent, rapide",
             [UI_STR_OPT_VAR_AGGRESSION_NOTE] =
-                "La façon de combattre des ombres : hardie ou prudente, patiente ou rapide. Les succès restent actifs.",
+                "La façon de combattre des ombres : hardie ou prudente, patiente ou rapide.",
             [UI_STR_OPT_VAR_NO_HINTS] = "Sans indices",
             [UI_STR_OPT_VAR_NO_HINTS_NOTE] =
-                "Yorda ne donne aucun indice sur la direction à prendre, comme sur le disque nord-américain. Les succès restent actifs.",
+                "Yorda ne donne aucun indice sur la direction à prendre, comme sur le disque nord-américain.",
             [UI_STR_OPT_VAR_BARRIER] = "Barrière de la Reine",
             [UI_STR_VAL_VAR_HITS_5] = "5 coups",
             [UI_STR_VAL_VAR_HITS_7] = "7 coups",
             [UI_STR_OPT_VAR_BARRIER_NOTE] =
-                "Nombre de coups nécessaires pour briser la barrière de la Reine. Les succès restent actifs.",
+                "Nombre de coups nécessaires pour briser la barrière de la Reine.",
             [UI_STR_OPT_VAR_NO_LOOK] = "Vue figée en cinématique",
             [UI_STR_OPT_VAR_NO_LOOK_NOTE] =
                 "Le stick droit ne permet plus de regarder autour pendant les cinématiques. Les succès restent actifs.",
@@ -719,9 +754,9 @@ const char *const
             [UI_STR_OPT_VAR_DEBUG_MENU_NOTE] =
                 "Le menu de débogage du jeu, pour les développeurs. Désactive les succès.",
             [UI_STR_OPT_VAR_TOUGHNESS_NOTE_DEMO] =
-                "Américain n’est pas proposé sur cette démo : ses ombres ne sont pas celles du disque nord-américain. Sans durcissement : les ombres ne durcissent pas aux parties suivantes. Les succès restent actifs.",
+                "Américain n’est pas proposé sur cette démo : ses ombres ne sont pas celles du disque nord-américain. Sans durcissement : les ombres ne durcissent pas aux parties suivantes.",
             [UI_STR_OPT_VAR_NO_HINTS_NOTE_2001] =
-                "Cette version du jeu ne donne aucun indice : cela ne change rien. Les succès restent actifs.",
+                "Cette version du jeu ne donne aucun indice : cela ne change rien.",
             [UI_STR_OPT_VAR_NO_LOOK_NOTE_2001] =
                 "Dans cette version du jeu, on ne peut pas regarder autour pendant les cinématiques : cela ne change rien. Les succès restent actifs.",
             [UI_STR_GPU_HANG_TURNIP] =
@@ -739,21 +774,27 @@ const char *const
             [UI_STR_STATES_NOTE] =
                 "Un état appartient à ce disque. Les versions suivantes peuvent aussi le charger. Gauche et droite choisissent l'action.",
             [UI_STR_STATES_PAUSE_FIRST] = "Mettez le jeu en pause pour enregistrer un état",
+            [UI_STR_STATES_PAUSE_FIRST_LOAD] = "Mettez le jeu en pause pour charger cet état",
             [UI_STR_STATES_REFUSED_BUILD] = "Enregistré par une autre version du jeu",
             [UI_STR_STATES_REFUSED_DISC] = "Enregistré depuis un autre disque",
-            [UI_STR_STATES_REFUSED_SETTINGS] = "Un réglage de jeu diffère : %s",
             [UI_STR_STATES_REFUSED_BUSY] = "Pas maintenant : le jeu charge ou enregistre",
-            [UI_STR_STATES_REFUSED_CHECK] = "L'état n'a pas pu être restauré ; le jeu continue",
+            [UI_STR_STATES_REFUSED_CHECK] = "Chargement impossible ; le jeu continue",
             [UI_STR_STATES_OFF] = "Les états sauvegardés sont désactivés dans cette version",
             [UI_STR_STATES_TITLE_HINT] = "L'enregistrement se fait depuis le menu pause",
             [UI_STR_STATES_SAVE_FAILED] = "L'état n'a pas pu être enregistré",
             [UI_STR_STATES_XB_OLD] =
-                "Cet état a été créé par la version %s,\navant que les états sauvegardés puissent\npasser aux versions plus récentes.\nVos sauvegardes sur memory card fonctionnent toujours.",
-            [UI_STR_STATES_XB_CODE] = "Cet état a été créé par la version %s.\nLa version %s a modifié la partie du jeu\noù il a été sauvegardé, il ne peut donc pas\nêtre repris.\nVos sauvegardes sur memory card fonctionnent toujours.",
+                "Version %s trop ancienne :\nil ne peut être chargé.\nVos sauvegardes sur memory card\nfonctionnent toujours.",
+            [UI_STR_STATES_XB_CODE] =
+                "Créé par la version %s ; la version %s a changé\nce passage du jeu, il ne peut pas être chargé.\nVos sauvegardes sur memory card\nfonctionnent toujours.",
             [UI_STR_STATES_XB_DATA] =
-                "Cet état a été créé par la version %s.\nLa version %s a modifié la façon dont le jeu\ngarde sa progression en mémoire, il ne peut\ndonc pas être repris.\nVos sauvegardes sur memory card fonctionnent toujours.",
+                "Créé par la version %s ; la version %s garde\nla progression autrement : il ne peut pas être\nchargé. Vos sauvegardes sur memory card\nfonctionnent toujours.",
             [UI_STR_STATES_XB_PINNED] =
-                "Cet état a été créé par la version %s\net seule cette version peut le reprendre.\nVos sauvegardes sur memory card fonctionnent toujours.",
+                "Seule la version %s peut le charger.\nVos sauvegardes sur memory card\nfonctionnent toujours.",
+            [UI_STR_STATES_CKPT_ROW] = "Se charge depuis son dernier point de contrôle",
+            [UI_STR_STATES_CKPT_LOADED] =
+                "Reprise au dernier point de contrôle\n(créé par la version %s).",
+            [UI_STR_STATES_CKPT_NONE] =
+                "Créé par la version %s : il ne peut pas\nêtre repris et n'a aucun point de contrôle.",
             [UI_STR_OPT_EFFECT_GLOW_SMOOTH] = "Lueur entre les images",
             [UI_STR_EFFECT_GLOW_SMOOTH_NOTE] =
                 "Original garde la lueur de l’image du jeu entre les images. Fluide la refait pour chaque image affichée ; cela coûte plus de temps graphique.",
@@ -769,8 +810,7 @@ const char *const
             [UI_STR_BACKUP_PROGRESS] = "Sauvegarde : %d fichiers sur %d",
             [UI_STR_RESTORE_AGAIN] = "Appuyez encore pour choisir",
             [UI_STR_RESTORE_CONFIRM_TITLE] = "Restaurer une sauvegarde ?",
-            [UI_STR_RESTORE_CONFIRM_BODY] =
-                "La memory card, les états sauvegardés, les réglages et les succès d’ici seront remplacés par ceux de la sauvegarde, puis le jeu redémarrera.\nAppuyez encore pour choisir la sauvegarde.",
+            [UI_STR_RESTORE_CONFIRM_BODY] = "Remplace la memory card, les états sauvegardés,\nles réglages et les succès d’ici, puis redémarre.\nAppuyez encore pour choisir la sauvegarde.",
             [UI_STR_RESTORE_CHOOSING] = "Choisissez la sauvegarde à restaurer.",
             [UI_STR_RESTORE_READING] = "Lecture de la sauvegarde…",
             [UI_STR_RESTORE_PROGRESS] = "Restauration : %d fichiers sur %d",
@@ -787,24 +827,22 @@ const char *const
             [UI_STR_BACKUP_DONE_BODY] = "%d fichiers enregistrés dans\n%s",
             [UI_STR_BACKUP_FAILED] = "Impossible de sauvegarder vos données",
             [UI_STR_RESTORE_DONE] = "Restauration de vos données",
-            [UI_STR_RESTORE_DONE_RESTART] =
-                "Le jeu redémarre maintenant et met la sauvegarde en place.",
+            [UI_STR_RESTORE_DONE_RESTART] = "Redémarrage pour mettre la sauvegarde en place.",
             [UI_STR_RESTORE_DONE_CLOSE] =
-                "Le jeu se ferme maintenant. Relancez-le : il mettra la sauvegarde en place au démarrage.",
+                "Le jeu se ferme. Relancez-le\npour mettre la sauvegarde en place.",
             [UI_STR_RESTORE_FAILED] = "Impossible de restaurer la sauvegarde",
-            [UI_STR_BACKUP_WHY_BUSY] =
-                "Pas maintenant : le jeu enregistre. Réessayez dans un instant.",
+            [UI_STR_BACKUP_WHY_BUSY] = "Le jeu enregistre. Réessayez dans un instant.",
             [UI_STR_BACKUP_WHY_NOTHING] = "Il n’y a encore rien à sauvegarder.",
             [UI_STR_BACKUP_WHY_WRITE] =
-                "Les données n’ont pas pu être écrites. Vérifiez l’espace libre et réessayez.",
+                "Écriture impossible.\nVérifiez l’espace libre et réessayez.",
             [UI_STR_BACKUP_WHY_READ] = "Le fichier n’a pas pu être lu.",
             [UI_STR_BACKUP_WHY_NOT_BACKUP] =
                 "Ce fichier n’est pas une sauvegarde créée par ce jeu.",
             [UI_STR_BACKUP_WHY_NEWER] =
-                "Cette sauvegarde a été créée par une version plus récente. Mettez le jeu à jour pour la restaurer.",
+                "Créée par une version plus récente.\nMettez le jeu à jour pour la restaurer.",
             [UI_STR_BACKUP_WHY_DAMAGED] = "Cette sauvegarde est endommagée.",
             [UI_STR_BACKUP_WHY_UNSAFE] =
-                "Cette sauvegarde contient des fichiers hors des dossiers du jeu ; elle n’est pas utilisée.",
+                "Elle contient des fichiers hors des\ndossiers du jeu : elle n’est pas utilisée.",
             [UI_STR_BACKUP_WHY_TOO_BIG] =
                 "Cette sauvegarde est plus grande que ce que le jeu accepte.",
             [UI_STR_BACKUP_WHY_NO_DIALOG] = "Aucun sélecteur de fichiers n’a pu s’ouvrir.",
@@ -812,7 +850,99 @@ const char *const
             [UI_STR_OPT_EFFECT_MOTION_BLUR_STRENGTH] = "Intensité du flou",
             [UI_STR_EFFECT_MOTION_BLUR_STRENGTH_NOTE] =
                 "Une valeur plus basse fait s’effacer la traînée plus vite ; 100 est celle de la PS2.",
+            [UI_STR_SECTION_UNUSED] = "Contenu inutilisé",
+            [UI_STR_UNUSED_ARENA] = "Salle de test : arène",
+            [UI_STR_UNUSED_ARENA_NOTE] =
+                "Une salle où les créateurs essayaient les combats contre les Ombres ; sans sortie : quittez avec Start, puis Terminer la partie.",
+            [UI_STR_UNUSED_CLIMB] = "Salle de test : escalade",
+            [UI_STR_UNUSED_CLIMB_NOTE] =
+                "Une salle où les créateurs essayaient l’escalade et les caisses ; sans sortie : quittez avec Start, puis Terminer la partie.",
+            [UI_STR_UNUSED_MOVIE] = "Film de démonstration (576 lignes)",
+            [UI_STR_UNUSED_MOVIE_NOTE] =
+                "Une seconde copie du film que l’écran titre joue en attente, faite pour les téléviseurs européens et jamais montrée.",
+            [UI_STR_UNUSED_ART] = "Écran titre d’une version de salon",
+            [UI_STR_UNUSED_ART_NOTE] =
+                "Images de l’écran titre d’une première version de salon, restées sur le disque et jamais montrées.",
+            [UI_STR_UNUSED_ART_VER] = "Version de salon : marque de version",
+            [UI_STR_UNUSED_ART_START] = "Version de salon : Press Start",
+            [UI_STR_UNUSED_ART_COPYRIGHT] = "Version de salon : copyright",
+            [UI_STR_STATES_REFUSED_UNUSED] = "Pas dans une salle de test",
+            [UI_STR_SECTION_COMBAT] = "Combat",
+            [UI_STR_OPT_VAR_AUTO_GUARD] = "Garde automatique",
+            [UI_STR_OPT_VAR_AUTO_GUARD_NOTE] =
+                "Désactivé : Ico ne pare plus l’attaque d’une ombre venue de face ; elle le touche comme par derrière.",
+            [UI_STR_OPT_VAR_ATTACK_TURN] = "Se tourner vers les ombres",
+            [UI_STR_OPT_VAR_ATTACK_TURN_NOTE] =
+                "Désactivé : Ico frappe droit devant sans se tourner vers l’ombre la plus proche ; la portée reste.",
+            [UI_STR_OPT_VAR_SHADOWS_WAIT_DOWN] = "Les ombres attendent qu’Ico se relève",
+            [UI_STR_OPT_VAR_SHADOWS_WAIT_DOWN_NOTE] =
+                "Désactivé : les ombres ne se retiennent plus ; leurs coups touchent Ico à terre et quand il se relève.",
+            [UI_STR_OPT_VAR_SWORD_COLOUR] = "Couleur de l’épée de lumière",
+            [UI_STR_OPT_VAR_SWORD_COLOUR_NOTE] =
+                "Rouge : l’épée de lumière laisse la traînée rouge de sa jumelle inutilisée ; seule la couleur change. Dès la salle suivante.",
+            [UI_STR_OPT_VAR_WEAPON] = "Bâton",
+            [UI_STR_VAL_VAR_INSECT_NET] = "Filet à insectes",
+            [UI_STR_OPT_VAR_WEAPON_NOTE] =
+                "Filet : chaque bâton est le filet à insectes inutilisé, qui ne se brandit ni ne s’allume et ne blesse pas. Dès la salle suivante.",
+            [UI_STR_VAL_VAR_THIRD_JOURNEY] = "Troisième voyage",
+            [UI_STR_OPT_VAR_TOUGHNESS_NOTE_THIRD] =
+                "Ombres aussi résistantes qu’à une troisième partie, que le jeu n’atteint jamais (le double du premier voyage).",
+            [UI_STR_OPT_VAR_PEACEFUL] = "Ombres pacifiques",
+            [UI_STR_OPT_VAR_PEACEFUL_NOTE] =
+                "Activé : les ombres restent là où elles apparaissent et ne s’en prennent jamais à Ico ni à Yorda.",
+            [UI_STR_OPT_VAR_CHAIN_SPEED] = "Vitesse de la chaîne",
+            [UI_STR_OPT_VAR_CHAIN_SPEED_NOTE] =
+                "Vitesse à laquelle une chaîne se balance quand Ico s’y accroche et la balance. 1 est le plus lent, 10 le plus rapide, 4 la valeur du jeu. Les succès restent actifs.",
+            [UI_STR_OPT_VAR_CHAIN_DAMPING] = "Arrêt de la chaîne",
+            [UI_STR_OPT_VAR_CHAIN_DAMPING_NOTE] =
+                "Vitesse à laquelle le balancement s’éteint tant qu’Ico ne balance pas la chaîne. 1 est le plus lent, 10 le plus rapide, 4 la valeur du jeu. Les succès restent actifs.",
+            [UI_STR_VAL_VAR_CHAIN_ORIGINAL] = "4 (original)",
             [UI_STR_LANG_RU_BOBTTZ] = "Русский (bob-ttz)",
             [UI_STR_LANG_RU_COBRA838] = "Русский (cobra838)",
             [UI_STR_LANG_PT_BR] = "Português (Brasil) (ichagas7)",
+            [UI_STR_OPT_FREE_MOVEMENT] = "Déplacement libre",
+            [UI_STR_OPT_FREE_MOVEMENT_NOTE] =
+                "Appuyez sur L2 pour piloter Ico aux sticks : le gauche le déplace, le droit le monte et le descend, L3 le pose au sol. Désactive les succès.",
+            [UI_STR_REMAP_ASK_HINT] = "Demander un indice à Yorda",
+            [UI_STR_DIFF] = "Difficulté",
+            [UI_STR_DIFF_NOTE] =
+                "Règle les ombres, le temps de sauvetage et les règles de cette nouvelle partie. La sauvegarde garde ce choix.",
+            [UI_STR_DIFF_EASY] = "Facile",
+            [UI_STR_DIFF_NORMAL] = "Normal",
+            [UI_STR_DIFF_HARD] = "Difficile",
+            [UI_STR_DIFF_CUSTOM] = "Personnalisé",
+            [UI_STR_DIFF_EASY_NOTE] =
+                "Ombres plus lentes et plus douces, qui n’enlèvent jamais Yorda et n’esquivent jamais, et plus de temps pour la sauver.",
+            [UI_STR_DIFF_NORMAL_NOTE] = "Le jeu tel qu’il est sorti.",
+            [UI_STR_DIFF_HARD_NOTE] =
+                "Ombres plus rapides et coriaces qui attaquent ensemble, sans garde auto, moins de temps pour sauver Yorda, game over après 3 mises à terre par salle.",
+            [UI_STR_DIFF_CUSTOM_NOTE] =
+                "Vos propres règles. Modifiez chaque ligne sous Personnaliser.",
+            [UI_STR_DIFF_CUSTOMIZE] = "Personnaliser",
+            [UI_STR_DIFF_CUSTOMIZE_NOTE] =
+                "Modifiez chaque règle séparément. Un mélange qui ne correspond à aucun niveau s’affiche comme Personnalisé.",
+            [UI_STR_DIFF_RULES] = "Règles",
+            [UI_STR_DIFF_NO_SHADOWS] = "Aucune ombre",
+            [UI_STR_DIFF_NO_SHADOWS_NOTE] =
+                "Activé : les ombres n’apparaissent jamais. Certains moments de l’histoire sont perdus ou changent sans elles.",
+            [UI_STR_DIFF_KNOCK_LIMIT] = "Limite de mises à terre",
+            [UI_STR_DIFF_KNOCK_LIMIT_NOTE] =
+                "Game over quand Ico a été mis à terre ce nombre de fois. Désactivé : pas de limite.",
+            [UI_STR_DIFF_KNOCK_SCOPE] = "Mises à terre comptées",
+            [UI_STR_DIFF_KNOCK_SCOPE_NOTE] =
+                "Compte par salle (le compte repart de zéro à chaque entrée dans une salle) ou sur tout le voyage. Sans effet tant que la limite est désactivée.",
+            [UI_STR_DIFF_SCOPE_ROOM] = "Par salle",
+            [UI_STR_DIFF_SCOPE_JOURNEY] = "Tout le voyage",
+            [UI_STR_DIFF_PERMADEATH] = "Mort définitive",
+            [UI_STR_DIFF_PERMADEATH_NOTE] =
+                "Activé : tout game over met fin à ce voyage. Plus de Charger, et la sauvegarde ne peut plus être chargée.",
+            [UI_STR_DIFF_LOCKED_NOTE] = "Choisi au début du voyage",
+            [UI_STR_DIFF_LINE] = "Difficulté",
+            [UI_STR_DIFF_LINK] = "Difficulté",
+            [UI_STR_DIFF_TOAST_ENDED] = "Ce voyage est terminé.",
+            [UI_STR_DIFF_STATES_LOCKED] =
+                "Les états sauvegardés ne peuvent pas être chargés pendant un voyage en mort définitive.",
+            [UI_STR_DIFF_WORD_PERMADEATH] = "Mort définitive",
+            [UI_STR_DIFF_STATES_SAVE_LOCKED] =
+                "Les états sauvegardés ne peuvent pas être créés pendant un voyage en mort définitive.",
 };

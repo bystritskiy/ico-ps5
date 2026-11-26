@@ -1092,6 +1092,20 @@ static RdMesh closingMesh(const uint8_t rgb[3], float shift, int unmark)
 
 static const uint8_t kClosingBlack[3] = {0, 0, 0}, kClosingGrey[3] = {90, 90, 90};
 
+/* whether a triangle of m carries ICO_VU_MARK_HIDE (its mark bytes also
+   hold the winding marks, rd_mesh.c markWinding, which every strip mesh of
+   two triangles or more has) */
+static int hideMarked(const RdMeshRec *m)
+{
+    for (uint32_t i = 0; i + 2 < m->indexCount; i += 3) {
+        if ((rd__mesh_kick_mark(m, (m->index[i] & ICO_VU_INDEX_MASK) >> 2) & ICO_VU_MARK_HIDE) !=
+            0u) {
+            return 1;
+        }
+    }
+    return 0;
+}
+
 /* every triangle of a carries mark, and its index values are dense */
 static int closingMarked(const RdMeshRec *a, uint32_t mark)
 {
@@ -1119,13 +1133,16 @@ static void closingPlaneChecks(void)
     if (a && g && mv) {
         CHECK(closingMarked(a, ICO_VU_MARK_HIDE),
               "content table: the black box top carries HIDE (%u indices)", a->indexCount);
-        CHECK(!g->kickMark, "content table: the grey quad is not marked");
-        CHECK(!mv->kickMark, "content table: the moved black quad is not marked");
+        CHECK(!hideMarked(g), "content table: the grey quad is not marked");
+        CHECK(!hideMarked(mv), "content table: the moved black quad is not marked");
         CHECK(rd__vu_mesh_copy_marks(g, a) && g->kickMark && g->markCount == a->markCount &&
                   memcmp(g->kickMark, a->kickMark, a->markCount) == 0,
               "content table: a copy of the marks takes the mark");
-        CHECK(rd__vu_mesh_copy_marks(g, mv) && !g->kickMark,
-              "content table: a copy of an unmarked mesh drops it");
+        CHECK(rd__vu_mesh_copy_marks(g, mv) && !hideMarked(g) &&
+                  (mv->kickMark ? g->kickMark && g->markCount == mv->markCount &&
+                                      memcmp(g->kickMark, mv->kickMark, mv->markCount) == 0
+                                : !g->kickMark),
+              "content table: a copy of a mesh without HIDE takes its marks, none HIDE");
     }
     rd_destroy_vu_mesh(black);
     rd_destroy_vu_mesh(grey);
@@ -1136,7 +1153,7 @@ static void closingPlaneChecks(void)
           "content table: \"off\" overrides every entry");
     const RdMesh off = closingMesh(kClosingBlack, 0.0f, 0);
     const RdMeshRec *o = rd__mesh_rec(off.id);
-    CHECK(o && !o->kickMark, "content table: off leaves the box unmarked");
+    CHECK(o && !hideMarked(o), "content table: off leaves the box unmarked");
     rd_destroy_vu_mesh(off);
     CHECK(!rd__content_hide_set("hide43") && !rd__content_hide_set("0=hide43") &&
               !rd__content_hide_set("999=hide") && !rd__content_hide_set("0=") &&
@@ -3344,6 +3361,444 @@ static void boxDiscChecks(const char *disc, int slice)
           models, bad, tooBig);
 }
 
+/* ---- the winding of the disc's strips (the premise of the region rule's
+ * side bands, docs/port/VU1_PROGRAMS.md "The winding mark"; rd_mesh.c
+ * markWinding).  The GS draws a strip's triangle k-2, k-1, k (k = s + i, s
+ * its first vertex, i >= 2) with the winding alternating, so a model built
+ * one way has every triangle of parity p = i & 1 face one side of
+ * cross(b - a, c - a) (a, b, c the corners k-2, k-1, k as the strip lists
+ * them: Packet.c pac_makeNormalStrip's order, pac_HostStripOrder's entries
+ * included).  Every *.p2o member of the slice through PObj.c's loader, as
+ * the boxes case loads it, then for each part:
+ *   - with normals (the strip record's position index at +4, normal index
+ *     at +6, every one inside the part's lists): per triangle the sign of
+ *     cross(b - a, c - a) . (na + nb + nc): A where it is + at p = 0 and -
+ *     at p = 1, B the reverse, D zero (degenerate: two corners on one
+ *     position, or the normals across the face); a strip is A, B, C (both
+ *     A and B triangles) or D (all degenerate), its triangles counted under
+ *     its class but the degenerate ones under D (A, B, C, D sum to the lit
+ *     triangles) and, triangle by triangle, A or B alone;
+ *   - every part: the edges two strips of the part share (corners by
+ *     position, as markJoinedStrips names them; an edge of two triangles,
+ *     each of another strip), consistent when the two triangles, each as
+ *     the GS winds it (its corners in strip order, turned at p = 1),
+ *     traverse it in opposite directions; the parts without normals (the
+ *     prelit parts) apart.
+ * One line a slice, "winding: L lit triangles, A %, B %, C %; P prelit
+ * parts, E % edges consistent", then the details and a line a stage (the
+ * member's name up to its first '_': st26a, ico), in counts so the four
+ * slices add up.  The disc's answer (v0.10.1): the phase is per strip (A
+ * 73 to 76 %, B 23 to 26 %, C under 1 %) and every part has normals (0
+ * prelit parts), so no parity marks the prelit strips: the facing comes
+ * from the normals for every program (the EE's table, Packet.c
+ * pac_hostFacing, rd_mesh.h rd_vu_facing_vertex).  So the walk also feeds
+ * every part's strips through that builder, as Packet.c does, and counts
+ * per stage how many of the non-degenerate triangles' bits agree with the
+ * normals' verdict here ("facing marks M of N agree"): all of them, which
+ * the slice's CHECK holds.  Without the image: SKIP. */
+
+typedef struct WindTally {
+    char stage[16];
+    long litTris, cls[4];                /* the lit triangles by their strip's class A, B, C, D */
+    long triA, triB;                     /* triangle by triangle */
+    long strips[4];                      /* the lit strips by class */
+    long prelitParts, edges, consistent; /* the parts without normals */
+    long litParts, litEdges, litConsistent; /* the parts with them */
+    /* the EE's facing table (rd_vu_facing_vertex, Packet.c's builder) on
+       the non-degenerate triangles with normals: its bit against dot < 0 */
+    long markTris, markAgree;
+} WindTally;
+
+#define WIND_STAGES 256
+static WindTally s_wind[WIND_STAGES + 1]; /* [WIND_STAGES] the slice's sum */
+static int s_windStages;
+
+static WindTally *windStage(const char *member)
+{
+    const char *base = strrchr(member, '/');
+    base = base ? base + 1 : member;
+    char st[16];
+    size_t n = 0;
+    while (base[n] && base[n] != '_' && base[n] != '.' && n + 1 < sizeof(st)) {
+        st[n] = base[n];
+        n++;
+    }
+    st[n] = '\0';
+    for (int i = 0; i < s_windStages; i++) {
+        if (strcmp(s_wind[i].stage, st) == 0) {
+            return &s_wind[i];
+        }
+    }
+    WindTally *t = s_windStages < WIND_STAGES ? &s_wind[s_windStages++] : &s_wind[WIND_STAGES];
+    if (t != &s_wind[WIND_STAGES]) {
+        memset(t, 0, sizeof(*t));
+        snprintf(t->stage, sizeof(t->stage), "%s", st);
+    }
+    return t;
+}
+
+/* a corner's position, its float bits (the identity markJoinedStrips uses) */
+typedef struct WindPos {
+    uint32_t bits[3];
+    int32_t index;
+} WindPos;
+
+static int windPosCmp(const void *a, const void *b)
+{
+    const int c = memcmp(a, b, sizeof(((const WindPos *)0)->bits));
+    if (c) {
+        return c;
+    }
+    const int32_t x = ((const WindPos *)a)->index, y = ((const WindPos *)b)->index;
+    return x < y ? -1 : x > y;
+}
+
+/* an edge a triangle traverses: corners lo < hi (position ids), fwd 1 when
+   it goes lo to hi */
+typedef struct WindEdge {
+    uint32_t lo, hi, strip, fwd;
+} WindEdge;
+
+static int windEdgeCmp(const void *a, const void *b)
+{
+    const WindEdge *x = a, *y = b;
+    if (x->lo != y->lo) {
+        return x->lo < y->lo ? -1 : 1;
+    }
+    if (x->hi != y->hi) {
+        return x->hi < y->hi ? -1 : 1;
+    }
+    return x->strip < y->strip ? -1 : x->strip > y->strip;
+}
+
+static WindEdge *s_windEdges;
+static size_t s_windEdgeCount, s_windEdgeCap;
+
+static void windEdge(uint32_t u, uint32_t v, uint32_t strip)
+{
+    if (s_windEdgeCount == s_windEdgeCap) {
+        const size_t cap = s_windEdgeCap ? s_windEdgeCap * 2 : 4096;
+        WindEdge *e = realloc(s_windEdges, cap * sizeof(*e));
+        if (!e) {
+            return;
+        }
+        s_windEdges = e;
+        s_windEdgeCap = cap;
+    }
+    WindEdge *e = &s_windEdges[s_windEdgeCount++];
+    e->lo = u < v ? u : v;
+    e->hi = u < v ? v : u;
+    e->strip = strip;
+    e->fwd = u < v;
+}
+
+/* one model's parts into t */
+static void windModel(const PObjModel *m, const unsigned char *lo, const unsigned char *hi,
+                      WindTally *t)
+{
+    for (int j = 0; j < m->partCount; j++) {
+        const PObjPart *pt = &m->parts[j];
+        const unsigned int nvtx = pt->vtxCount;
+        if (!pt->vtx || nvtx == 0) {
+            continue;
+        }
+        /* the position ids: the corners sorted by their float bits */
+        WindPos *pos = malloc((size_t)nvtx * sizeof(*pos));
+        uint32_t *id = malloc((size_t)nvtx * sizeof(*id));
+        if (!pos || !id) {
+            free(pos);
+            free(id);
+            continue;
+        }
+        for (unsigned int v = 0; v < nvtx; v++) {
+            memcpy(pos[v].bits, pt->vtx + (size_t)v * 16, sizeof(pos[v].bits));
+            pos[v].index = (int32_t)v;
+        }
+        qsort(pos, nvtx, sizeof(*pos), windPosCmp);
+        uint32_t next = 0;
+        for (unsigned int v = 0; v < nvtx; v++) {
+            if (v > 0 && memcmp(pos[v].bits, pos[v - 1].bits, sizeof(pos[v].bits)) != 0) {
+                next++;
+            }
+            id[pos[v].index] = next;
+        }
+        free(pos);
+        /* normals: every strip vertex's normal index inside the list */
+        int normals = pt->nrm != NULL && pt->nrmCount > 0;
+        long tris = 0, cls[4] = {0, 0, 0, 0}, triA = 0, triB = 0, strips[4] = {0, 0, 0, 0};
+        long markTris = 0, markAgree = 0;
+        uint32_t built = 0; /* the vertices given to the EE's builder */
+        s_windEdgeCount = 0;
+        uint32_t stripNo = 0;
+        for (int pass = 0; pass < 2; pass++) {
+            /* pass 0 checks the normal indices, pass 1 counts */
+            if (pass == 1) {
+                rd_vu_facing_begin(); /* the part's strips as one packet */
+            }
+            for (unsigned int sl = 0; sl < pt->stripCount; sl++) {
+                const unsigned char *r = ((unsigned char *const *)pt->strips)[sl];
+                for (;;) {
+                    short cnt;
+                    if (r < lo || r + 16 > hi) {
+                        break;
+                    }
+                    memcpy(&cnt, r, 2);
+                    if (cnt <= 0 || r + 16 + (size_t)cnt * 16 > hi) {
+                        break;
+                    }
+                    short *ent = malloc((size_t)cnt * 8 * sizeof(short));
+                    if (!ent) {
+                        break;
+                    }
+                    memcpy(ent, r + 16, (size_t)cnt * 16);
+                    /* the corners in the order the packet takes them */
+                    int vi[3] = {0, 0, 0}, ni[3] = {0, 0, 0};
+                    long a = 0, b = 0, d = 0;
+                    int ok = 1;
+                    for (int i = 0; i < cnt && ok; i++) {
+                        const short *e =
+                            ent + (size_t)pac_HostStripOrder(m->name, ent + 2, 8, cnt, i) * 8;
+                        vi[0] = vi[1];
+                        vi[1] = vi[2];
+                        vi[2] = e[2];
+                        ni[0] = ni[1];
+                        ni[1] = ni[2];
+                        ni[2] = e[3];
+                        if (e[2] < 0 || (unsigned int)e[2] >= nvtx) {
+                            ok = 0;
+                            break;
+                        }
+                        if (pass == 0) {
+                            normals = normals && e[3] >= 0 && (unsigned int)e[3] < pt->nrmCount;
+                            continue;
+                        }
+                        if (normals) {
+                            /* the EE's builder, as Packet.c pac_hostFacing feeds it */
+                            rd_vu_facing_vertex(i == 0,
+                                                (const float *)(const void *)(pt->vtx + e[2] * 16),
+                                                (const float *)(const void *)(pt->nrm + e[3] * 16));
+                            built++;
+                        }
+                        if (i < 2) {
+                            continue;
+                        }
+                        const int p = i & 1;
+                        const uint32_t ia = id[vi[0]], ib = id[vi[1]], ic = id[vi[2]];
+                        const int degenerate = ia == ib || ib == ic || ia == ic;
+                        if (!degenerate) {
+                            /* the GS's winding: a, b, c at p = 0, b, a, c at p = 1 */
+                            const uint32_t u0 = p ? ib : ia, u1 = p ? ia : ib;
+                            windEdge(u0, u1, stripNo);
+                            windEdge(u1, ic, stripNo);
+                            windEdge(ic, u0, stripNo);
+                        }
+                        if (!normals) {
+                            continue;
+                        }
+                        const float *pa = (const float *)(const void *)(pt->vtx + vi[0] * 16);
+                        const float *pb = (const float *)(const void *)(pt->vtx + vi[1] * 16);
+                        const float *pc = (const float *)(const void *)(pt->vtx + vi[2] * 16);
+                        const double e1[3] = {(double)pb[0] - pa[0], (double)pb[1] - pa[1],
+                                              (double)pb[2] - pa[2]};
+                        const double e2[3] = {(double)pc[0] - pa[0], (double)pc[1] - pa[1],
+                                              (double)pc[2] - pa[2]};
+                        const double x[3] = {e1[1] * e2[2] - e1[2] * e2[1],
+                                             e1[2] * e2[0] - e1[0] * e2[2],
+                                             e1[0] * e2[1] - e1[1] * e2[0]};
+                        double dot = 0.0;
+                        for (int c = 0; c < 3; c++) {
+                            dot +=
+                                x[c] *
+                                ((double)((const float *)(const void *)(pt->nrm + ni[0] * 16))[c] +
+                                 ((const float *)(const void *)(pt->nrm + ni[1] * 16))[c] +
+                                 ((const float *)(const void *)(pt->nrm + ni[2] * 16))[c]);
+                        }
+                        tris++;
+                        if (!(degenerate || dot == 0.0 || dot != dot)) {
+                            const int bit = rd__vu_facing_bit(built - 1u);
+                            markTris++;
+                            markAgree += bit == (dot < 0.0 ? 1 : 0);
+                        }
+                        if (degenerate || dot == 0.0 || dot != dot) {
+                            d++;
+                        } else if ((dot > 0.0) == (p == 0)) {
+                            a++;
+                        } else {
+                            b++;
+                        }
+                    }
+                    free(ent);
+                    if (!ok) {
+                        break;
+                    }
+                    if (pass == 1 && normals && cnt >= 3) {
+                        const int c = a && b ? 2 : a ? 0 : b ? 1 : 3;
+                        cls[c] += a + b; /* its degenerate triangles under D */
+                        cls[3] += d;
+                        strips[c]++;
+                        triA += a;
+                        triB += b;
+                    }
+                    if (pass == 1) {
+                        stripNo++;
+                    }
+                    r += 16 + (size_t)cnt * 16;
+                }
+            }
+        }
+        /* the edges two strips share */
+        long edges = 0, consistent = 0;
+        if (s_windEdgeCount) {
+            qsort(s_windEdges, s_windEdgeCount, sizeof(*s_windEdges), windEdgeCmp);
+        }
+        for (size_t i = 0; i < s_windEdgeCount;) {
+            size_t k = i + 1;
+            while (k < s_windEdgeCount && s_windEdges[k].lo == s_windEdges[i].lo &&
+                   s_windEdges[k].hi == s_windEdges[i].hi) {
+                k++;
+            }
+            if (k - i == 2 && s_windEdges[i].strip != s_windEdges[i + 1].strip) {
+                edges++;
+                consistent += s_windEdges[i].fwd != s_windEdges[i + 1].fwd;
+            }
+            i = k;
+        }
+        free(id);
+        if (normals) {
+            t->litTris += tris;
+            for (int c = 0; c < 4; c++) {
+                t->cls[c] += cls[c];
+                t->strips[c] += strips[c];
+            }
+            t->triA += triA;
+            t->triB += triB;
+            t->litParts++;
+            t->litEdges += edges;
+            t->litConsistent += consistent;
+            t->markTris += markTris;
+            t->markAgree += markAgree;
+        } else {
+            t->prelitParts++;
+            t->edges += edges;
+            t->consistent += consistent;
+        }
+    }
+}
+
+static double windPct(long n, long of)
+{
+    return of ? 100.0 * (double)n / (double)of : 0.0;
+}
+
+static void windLine(const char *head, const WindTally *t)
+{
+    printf("  %s: %ld lit triangles, A %.2f %%, B %.2f %%, C %.2f %% (D %.2f %%; strips A %ld, B "
+           "%ld, C %ld, D %ld; triangle by triangle A %ld, B %ld); %ld prelit parts, %ld of %ld "
+           "shared edges consistent (%.2f %%); %ld lit parts, %ld of %ld consistent (%.2f %%); "
+           "facing marks %ld of %ld agree with the normals (%.2f %%)\n",
+           head, t->litTris, windPct(t->cls[0], t->litTris), windPct(t->cls[1], t->litTris),
+           windPct(t->cls[2], t->litTris), windPct(t->cls[3], t->litTris), t->strips[0],
+           t->strips[1], t->strips[2], t->strips[3], t->triA, t->triB, t->prelitParts,
+           t->consistent, t->edges, windPct(t->consistent, t->edges), t->litParts, t->litConsistent,
+           t->litEdges, windPct(t->litConsistent, t->litEdges), t->markAgree, t->markTris,
+           windPct(t->markAgree, t->markTris));
+}
+
+static void windingDiscChecks(const char *disc, int slice)
+{
+    IcoVfs *vfs = disc ? ico_vfs_mount(&ico_vfs_iso9660, disc) : NULL;
+    if (!vfs) {
+        printf("  winding: SKIP the disc's models (no disc image)\n");
+        return;
+    }
+    IcoDfMember m;
+    ico_df_find_member(vfs, "object/none.p2o", &m); /* builds the index */
+    const int members = ico_df_index_members();
+    unsigned char *img = ico_arena_base() + BOX_IMAGE_AT;
+    const size_t room = sizeof(s_arena) - BOX_IMAGE_AT;
+    s_windStages = 0;
+    memset(&s_wind[WIND_STAGES], 0, sizeof(s_wind[WIND_STAGES]));
+    snprintf(s_wind[WIND_STAGES].stage, sizeof(s_wind[WIND_STAGES].stage), "(more)");
+    long models = 0, tooBig = 0;
+    int ordinal = 0;
+    for (int i = 0; i < members; i++) {
+        const char *name = ico_df_member_name(i);
+        const size_t len = name ? strlen(name) : 0;
+        if (len < 4 || name[len - 4] != '.' || (name[len - 3] | 0x20) != 'p' ||
+            name[len - 2] != '2' || (name[len - 1] | 0x20) != 'o' || ico_df_member(i, &m) != 0) {
+            continue;
+        }
+        if (ordinal++ % BOX_SLICES != slice) {
+            continue;
+        }
+        if (m.size > room) {
+            tooBig++;
+            continue;
+        }
+        if (ico_df_read_member(vfs, &m, img) != 0) {
+            CHECK(0, "winding: %s from the disc", name);
+            continue;
+        }
+        char nm[32];
+        const char *base = strrchr(name, '/');
+        snprintf(nm, sizeof(nm), "%s", base ? base + 1 : name);
+        const size_t heapAt = s_heapAt;
+        PObjModel *pm = AllocPObj(img, nm, 0);
+        windModel(pm, img, img + m.size, windStage(name));
+        models++;
+        PObj_FreeImageTables();
+        s_heapAt = heapAt;
+    }
+    ico_vfs_unmount(vfs);
+    free(s_windEdges);
+    s_windEdges = NULL;
+    s_windEdgeCount = s_windEdgeCap = 0;
+    WindTally sum;
+    memset(&sum, 0, sizeof(sum));
+    for (int i = 0; i <= WIND_STAGES; i++) {
+        const WindTally *t = &s_wind[i];
+        if (i < WIND_STAGES && i >= s_windStages) {
+            continue;
+        }
+        sum.litTris += t->litTris;
+        for (int c = 0; c < 4; c++) {
+            sum.cls[c] += t->cls[c];
+            sum.strips[c] += t->strips[c];
+        }
+        sum.triA += t->triA;
+        sum.triB += t->triB;
+        sum.prelitParts += t->prelitParts;
+        sum.edges += t->edges;
+        sum.consistent += t->consistent;
+        sum.litParts += t->litParts;
+        sum.litEdges += t->litEdges;
+        sum.litConsistent += t->litConsistent;
+        sum.markTris += t->markTris;
+        sum.markAgree += t->markAgree;
+        char head[48];
+        snprintf(head, sizeof(head), "winding stage %s", t->stage);
+        if (t->litTris || t->prelitParts || t->litParts) {
+            windLine(head, t);
+        }
+    }
+    printf("winding: %ld lit triangles, A %.2f %%, B %.2f %%, C %.2f %%; %ld prelit parts, %.2f "
+           "%% edges consistent (slice %d of %d: %ld models, %ld too big)\n",
+           sum.litTris, windPct(sum.cls[0], sum.litTris), windPct(sum.cls[1], sum.litTris),
+           windPct(sum.cls[2], sum.litTris), sum.prelitParts, windPct(sum.consistent, sum.edges),
+           slice + 1, BOX_SLICES, models, tooBig);
+    windLine("winding slice", &sum);
+    CHECK(models > 100 / BOX_SLICES && sum.litTris + sum.edges > 0 && tooBig == 0,
+          "winding: the slice's %ld models measured (%ld lit triangles, %ld shared edges, %ld "
+          "models not loaded)",
+          models, sum.litTris, sum.edges, tooBig);
+    /* the EE's table (the region rule's facing, every program) is the
+       normals' verdict on every triangle that has one */
+    CHECK(sum.markTris > 0 && sum.markAgree == sum.markTris,
+          "winding: the EE's facing marks agree with the normals on %ld of %ld non-degenerate "
+          "triangles",
+          sum.markAgree, sum.markTris);
+}
+
 static void setup(void)
 {
     gif_HostSetTex0Resolver(texResolve);
@@ -3512,6 +3967,369 @@ static void joinedStripChecks(void)
     rd_destroy_vu_mesh(copy);
 }
 
+/* ------------------------------------------------- the winding marks */
+/* rd_mesh.c markWinding and rd__mesh_set_facing (ICO_VU_MARK_FLIP): a
+ * triangle k-2, k-1, k is marked when cross(b - a, c - a) of its positions
+ * points away from the sum of its three normals, triangle by triangle, from
+ * the EE's table (RdVuMeshDesc.facing: Packet.c, every program) or, without
+ * one, from a lit or skinned stream's own normals; a prelit stream without
+ * a table has no marks (RdMeshRec.facingFrom NONE: no side bands).
+ *   - prelit, no table: two strips in one batch (vertices 0..4, 5..8): no
+ *     kick marked, facingFrom NONE (no parity rule: the disc's strips start
+ *     on either phase)
+ *   - prelit, a table: the same strips, bits at 3, 4, 7 (and 5, 6, which
+ *     no kick ends at): kicks 3, 4, 7 marked, 2 and 8 not, facingFrom
+ *     TABLE; rd__mesh_facing_bits gives the kicks' bits back (5 and 6
+ *     clear); a table of another vertex count is refused (marks kept)
+ *   - lit, wound consistently: a flat zig-zag in z = 0, every normal +z:
+ *     the triangles at k - s = 2 and 4 face -z as kicked (marked), 3 and
+ *     5 face +z (not), facingFrom NORMALS; then a morph
+ *     (rd_update_vu_mesh) with every normal turned keeps the creation's
+ *     marks
+ *   - lit, mixed: the same corners, vertices 4 and 5's normals -5 z: the
+ *     sums at kicks 4 and 5 turn (-3 z, -9 z), so kicks 2 and 5 are
+ *     marked, 3 and 4 not
+ *   - lit with a table that says the reverse of its normals: the table's
+ *     marks (TABLE)
+ *   - the EE's builder (rd_vu_facing_begin, _vertex, _attach): the
+ *     zig-zag's six vertices with +z normals give bits 2 and 4; attach
+ *     keeps them under the desc's hash and hands them to the desc; a
+ *     second desc of the same stream after a fresh begin (nothing built)
+ *     finds them; attach returns the desc's hash (rd_vu_mesh_desc_hash's)
+ *     and keeps it in the desc, and the mesh's record and a replacement's
+ *     take it (the stream hashed once); a build with a vertex without a
+ *     normal keeps nothing; a
+ *     second, different table under the same hash leaves the hash none
+ *   - why a mesh has no facing (RdMeshRec.facingWhy, the 10 s line's
+ *     reasons): a prelit stream without a table NO_TABLE; a prelit stream
+ *     built again with no strip records and no table kept for it (a save
+ *     state in a fresh run) counted as a miss (rd__vu_facing_misses, its
+ *     log line) and NO_TABLE; a prelit model pack replacement REPLACED; a
+ *     copy of a marked mesh with another index list COPY; a lit stream's
+ *     own marks and a table none
+ *   - a copy (rd__vu_mesh_copy_marks) takes the marks' source with them
+ *   - no other mark is made on any of them (nothing joined, hidden or
+ *     overlapping) */
+
+/* the FLIP mark of kick k in m's list: 1, 0, -1 no such triangle */
+static int flipAt(const RdMeshRec *m, uint32_t k)
+{
+    for (uint32_t i = 0; i + 2 < m->indexCount; i += 3) {
+        if ((m->index[i] & ICO_VU_INDEX_MASK) >> 2 == k) {
+            return (rd__mesh_kick_mark(m, k) & ICO_VU_MARK_FLIP) != 0u;
+        }
+    }
+    return -1;
+}
+
+/* no mark but FLIP on any kick of m */
+static int onlyFlips(const RdMeshRec *m)
+{
+    for (uint32_t k = 0; k < m->vertexCount; k++) {
+        if ((rd__mesh_kick_mark(m, k) & ~ICO_VU_MARK_FLIP) != 0u) {
+            return 0;
+        }
+    }
+    return 1;
+}
+
+/* a lit mesh of one strip: six corners of a zig-zag in z = 0, normal z of
+   corner k nz[k] (x, y 0); qw receives the creation stream (1 + 6 * 4 qw) */
+static RdMesh windingLit(const float nz[6], float (*qw)[4])
+{
+    static const float kZig[6][2] = {{0, 0}, {0, 1}, {1, 0}, {1, 1}, {2, 0}, {2, 1}};
+    memset(qw, 0, sizeof(float) * 4 * (1 + 6 * 4));
+    const uint32_t tag = 0x8000u | 6u;
+    memcpy(&qw[0][0], &tag, 4);
+    for (int k = 0; k < 6; k++) {
+        float (*v)[4] = qw + 1 + k * 4; /* pos, normal, ST, colour */
+        v[0][0] = kZig[k][0];
+        v[0][1] = kZig[k][1];
+        v[0][3] = 1.0f;
+        v[1][2] = nz[k];
+        v[1][3] = 1.0f;
+        v[2][2] = 1.0f; /* ST: (s, t, 1, strip flag) */
+        v[2][3] = k == 0 ? 0.0f : 1.0f;
+        v[3][0] = v[3][1] = v[3][2] = 100.0f;
+        v[3][3] = 127.0f;
+    }
+    const RdVuBatchDesc bd = {0, 0, 0};
+    RdVuMeshDesc md;
+    memset(&md, 0, sizeof(md));
+    md.qw = (const float (*)[4])qw;
+    md.qwCount = 1 + 6 * 4;
+    md.qwPerVertex = RD_VU_QW_LIT;
+    md.batchCount = 1;
+    md.batches = &bd;
+    md.materialCount = 1;
+    md.debugName = "winding";
+    const RdMesh m = rd_create_vu_mesh(&md);
+    CHECK(m.id != 0, "winding marks: rd_create_vu_mesh (lit)");
+    return m;
+}
+
+/* a prelit mesh of joinMesh's strips with a facing table (NULL: none) */
+static RdMesh windingPrelit(const float (*xy)[2], const uint8_t *start, int n,
+                            const uint8_t *facing, uint32_t facingCount)
+{
+    float qw[1 + 16 * 3][4];
+    memset(qw, 0, sizeof(qw));
+    const uint32_t tag = 0x8000u | (uint32_t)n;
+    memcpy(&qw[0][0], &tag, 4);
+    for (int k = 0; k < n; k++) {
+        qw[1 + k * 3][0] = xy[k][0];
+        qw[1 + k * 3][1] = xy[k][1];
+        qw[1 + k * 3][3] = 1.0f;
+        qw[2 + k * 3][2] = 1.0f;
+        qw[2 + k * 3][3] = start[k] ? 0.0f : 1.0f;
+        qw[3 + k * 3][0] = qw[3 + k * 3][1] = qw[3 + k * 3][2] = 100.0f;
+        qw[3 + k * 3][3] = 127.0f;
+    }
+    const RdVuBatchDesc bd = {0, 0, 0};
+    RdVuMeshDesc md;
+    memset(&md, 0, sizeof(md));
+    md.qw = (const float (*)[4])qw;
+    md.qwCount = (uint32_t)(1 + n * 3);
+    md.qwPerVertex = RD_VU_QW_PRELIT;
+    md.batchCount = 1;
+    md.batches = &bd;
+    md.materialCount = 1;
+    md.debugName = "winding prelit";
+    md.facing = facing;
+    md.facingCount = facingCount;
+    const RdMesh m = rd_create_vu_mesh(&md);
+    CHECK(m.id != 0, "winding marks: rd_create_vu_mesh (prelit)");
+    return m;
+}
+
+static void windingMarkChecks(void)
+{
+    /* prelit: two strips, far apart (nothing joined) */
+    static const float kTwo[9][2] = {{0, 0},   {1, 0},   {0, 1},   {1, 1},  {0, 2},
+                                     {50, 50}, {51, 50}, {50, 51}, {51, 51}};
+    static const uint8_t kTwoStart[9] = {1, 0, 0, 0, 0, 1, 0, 0, 0};
+    const RdMesh two = windingPrelit(kTwo, kTwoStart, 9, NULL, 0);
+    const RdMeshRec *t = rd__mesh_rec(two.id);
+    CHECK(t && flipAt(t, 2) == 0 && flipAt(t, 3) == 0 && flipAt(t, 4) == 0 && flipAt(t, 7) == 0 &&
+              flipAt(t, 8) == 0 && flipAt(t, 5) == -1 && flipAt(t, 6) == -1 && onlyFlips(t) &&
+              t->facingFrom == RD_MESH_FACING_NONE,
+          "winding marks: a prelit stream without a table has no marks and no facing (%d %d %d, "
+          "%d %d; from %d)",
+          t ? flipAt(t, 2) : -2, t ? flipAt(t, 3) : -2, t ? flipAt(t, 4) : -2,
+          t ? flipAt(t, 7) : -2, t ? flipAt(t, 8) : -2, t ? (int)t->facingFrom : -1);
+    CHECK(t && t->facingWhy == RD_VU_NOFACE_NO_TABLE,
+          "winding marks: a prelit stream without a table: why %d (want no table)",
+          t ? (int)t->facingWhy : -1);
+    rd_destroy_vu_mesh(two);
+
+    /* prelit with a table: bits 3, 4, 5, 6, 7 */
+    const uint8_t kBits[2] = {0xF8u, 0x00u};
+    const RdMesh tab = windingPrelit(kTwo, kTwoStart, 9, kBits, 9);
+    RdMeshRec *tb = rd__mesh_rec(tab.id);
+    uint8_t back[2] = {0xFFu, 0xFFu};
+    CHECK(tb && flipAt(tb, 2) == 0 && flipAt(tb, 3) == 1 && flipAt(tb, 4) == 1 &&
+              flipAt(tb, 7) == 1 && flipAt(tb, 8) == 0 && onlyFlips(tb) &&
+              tb->facingFrom == RD_MESH_FACING_TABLE && rd__mesh_facing_bits(tb, back, 2) &&
+              back[0] == 0x98u && back[1] == 0x00u,
+          "winding marks: a prelit stream takes the EE's table on its kicks (%d %d %d %d %d; "
+          "from %d; bits back %02x %02x)",
+          tb ? flipAt(tb, 2) : -2, tb ? flipAt(tb, 3) : -2, tb ? flipAt(tb, 4) : -2,
+          tb ? flipAt(tb, 7) : -2, tb ? flipAt(tb, 8) : -2, tb ? (int)tb->facingFrom : -1, back[0],
+          back[1]);
+    if (tb) {
+        const uint8_t none[2] = {0, 0};
+        CHECK(!rd__mesh_set_facing(tb, none, 8) && flipAt(tb, 3) == 1 &&
+                  tb->facingFrom == RD_MESH_FACING_TABLE,
+              "winding marks: a table of another vertex count is refused, the marks kept");
+        /* a copy takes the marks and their source */
+        const RdMesh cp = windingPrelit(kTwo, kTwoStart, 9, NULL, 0);
+        RdMeshRec *c = rd__mesh_rec(cp.id);
+        CHECK(c && rd__vu_mesh_copy_marks(c, tb) && flipAt(c, 3) == 1 && flipAt(c, 8) == 0 &&
+                  c->facingFrom == RD_MESH_FACING_TABLE && c->facingWhy == 0,
+              "winding marks: a copy takes its source's marks and their source");
+        rd_destroy_vu_mesh(cp);
+        /* a copy with another index list (the first strip alone) keeps no
+         * marks: no facing, why COPY */
+        const RdMesh cp5 = windingPrelit(kTwo, kTwoStart, 5, NULL, 0);
+        RdMeshRec *c5 = rd__mesh_rec(cp5.id);
+        CHECK(c5 && !rd__vu_mesh_copy_marks(c5, tb) && c5->facingFrom == RD_MESH_FACING_NONE &&
+                  c5->facingWhy == RD_VU_NOFACE_COPY,
+              "winding marks: a copy of another index list has no facing, why %d (want copy)",
+              c5 ? (int)c5->facingWhy : -1);
+        rd_destroy_vu_mesh(cp5);
+    }
+    rd_destroy_vu_mesh(tab);
+
+    /* lit, wound consistently */
+    static float qw[1 + 6 * 4][4];
+    static const float kUp[6] = {1, 1, 1, 1, 1, 1};
+    const RdMesh lit = windingLit(kUp, qw);
+    RdMeshRec *l = rd__mesh_rec(lit.id);
+    CHECK(l && flipAt(l, 2) == 1 && flipAt(l, 3) == 0 && flipAt(l, 4) == 1 && flipAt(l, 5) == 0 &&
+              onlyFlips(l) && l->facingFrom == RD_MESH_FACING_NORMALS && l->facingWhy == 0,
+          "winding marks: a consistently wound lit strip is marked at k - s = 2 and 4 (%d %d %d "
+          "%d; from %d)",
+          l ? flipAt(l, 2) : -2, l ? flipAt(l, 3) : -2, l ? flipAt(l, 4) : -2,
+          l ? flipAt(l, 5) : -2, l ? (int)l->facingFrom : -1);
+    if (l) {
+        /* the morph: every normal turned, the marks the creation's */
+        for (int k = 0; k < 6; k++) {
+            qw[1 + k * 4 + 1][2] = -1.0f;
+        }
+        CHECK(rd_update_vu_mesh(lit, (const float (*)[4])qw) && flipAt(l, 2) == 1 &&
+                  flipAt(l, 3) == 0 && flipAt(l, 4) == 1 && flipAt(l, 5) == 0,
+              "winding marks: a morph keeps the creation's marks");
+        /* a table saying the reverse wins over the normals */
+        const uint8_t rev[1] = {0x28u}; /* kicks 3 and 5 */
+        CHECK(rd__mesh_set_facing(l, rev, 6) && flipAt(l, 2) == 0 && flipAt(l, 3) == 1 &&
+                  flipAt(l, 4) == 0 && flipAt(l, 5) == 1 && l->facingFrom == RD_MESH_FACING_TABLE,
+              "winding marks: the EE's table replaces a lit stream's own marks");
+    }
+    rd_destroy_vu_mesh(lit);
+
+    /* lit, mixed */
+    static const float kMixed[6] = {1, 1, 1, 1, -5, -5};
+    const RdMesh mixed = windingLit(kMixed, qw);
+    const RdMeshRec *x = rd__mesh_rec(mixed.id);
+    CHECK(x && flipAt(x, 2) == 1 && flipAt(x, 3) == 0 && flipAt(x, 4) == 0 && flipAt(x, 5) == 1 &&
+              onlyFlips(x),
+          "winding marks: a lit strip of mixed normals is marked triangle by triangle (%d %d %d "
+          "%d)",
+          x ? flipAt(x, 2) : -2, x ? flipAt(x, 3) : -2, x ? flipAt(x, 4) : -2,
+          x ? flipAt(x, 5) : -2);
+    rd_destroy_vu_mesh(mixed);
+
+    /* the EE's builder over the zig-zag (one strip, normals +z), a prelit
+     * stream of its six vertices as the packet */
+    static const float kZig[6][2] = {{0, 0}, {0, 1}, {1, 0}, {1, 1}, {2, 0}, {2, 1}};
+    static const uint8_t kZigStart[6] = {1, 0, 0, 0, 0, 0};
+    const float up[4] = {0, 0, 1, 1};
+    float pos[6][4];
+    for (int k = 0; k < 6; k++) {
+        pos[k][0] = kZig[k][0];
+        pos[k][1] = kZig[k][1];
+        pos[k][2] = 0.0f;
+        pos[k][3] = 1.0f;
+    }
+    float zq[1 + 6 * 3][4];
+    memset(zq, 0, sizeof(zq));
+    const uint32_t ztag = 0x8000u | 6u;
+    memcpy(&zq[0][0], &ztag, 4);
+    for (int k = 0; k < 6; k++) {
+        memcpy(zq[1 + k * 3], pos[k], sizeof(pos[k]));
+        zq[2 + k * 3][2] = 1.0f;
+        zq[2 + k * 3][3] = kZigStart[k] ? 0.0f : 1.0f;
+        zq[3 + k * 3][3] = 127.0f;
+    }
+    const RdVuBatchDesc zb = {0, 0, 0};
+    RdVuMeshDesc zd;
+    memset(&zd, 0, sizeof(zd));
+    zd.qw = (const float (*)[4])zq;
+    zd.qwCount = 1 + 6 * 3;
+    zd.qwPerVertex = RD_VU_QW_PRELIT;
+    zd.batchCount = 1;
+    zd.batches = &zb;
+    zd.materialCount = 1;
+    zd.debugName = "winding builder";
+    rd_vu_facing_begin();
+    for (int k = 0; k < 6; k++) {
+        rd_vu_facing_vertex(k == 0, pos[k], up);
+    }
+    const uint64_t zh = rd_vu_facing_attach(&zd);
+    /* the stream hashed once: the attach's hash is the desc's identity,
+     * kept in the desc for the pack's lookup and the mesh's record */
+    CHECK(zh != 0 && zh == zd.hash && zh == rd_vu_mesh_desc_hash(&zd, NULL, NULL),
+          "winding marks: the attach returns the desc's hash and keeps it in the desc");
+    CHECK(zd.facing && zd.facingCount == 6 && zd.facing[0] == 0x14u,
+          "winding marks: the EE's builder marks k - s = 2 and 4 of a +z zig-zag (%02x, %u)",
+          zd.facing ? zd.facing[0] : 0xEEu, zd.facingCount);
+    RdVuMeshDesc again = zd;
+    again.facing = NULL;
+    again.facingCount = 0;
+    rd_vu_facing_begin(); /* nothing built: the kept table */
+    rd_vu_facing_attach(&again);
+    CHECK(again.facing && again.facingCount == 6 && again.facing[0] == 0x14u,
+          "winding marks: a stream built again finds the table kept under its hash");
+    const RdMesh zm = rd_create_vu_mesh(&again);
+    const RdMeshRec *z = rd__mesh_rec(zm.id);
+    CHECK(z && again.hash == zh && z->hash == zh,
+          "winding marks: the mesh's record takes the attach's hash");
+    CHECK(z && flipAt(z, 2) == 1 && flipAt(z, 3) == 0 && flipAt(z, 4) == 1 && flipAt(z, 5) == 0 &&
+              z->facingFrom == RD_MESH_FACING_TABLE,
+          "winding marks: a prelit mesh from the EE's table is marked as the lit one");
+    rd_destroy_vu_mesh(zm);
+    /* a vertex without a normal: nothing kept for a new stream */
+    zq[1][2] = 0.25f; /* another stream (hash) */
+    RdVuMeshDesc vd = zd;
+    vd.facing = NULL;
+    vd.facingCount = 0;
+    rd_vu_facing_begin();
+    for (int k = 0; k < 6; k++) {
+        rd_vu_facing_vertex(k == 0, pos[k], k == 3 ? NULL : up);
+    }
+    rd_vu_facing_attach(&vd);
+    CHECK(vd.facing == NULL, "winding marks: a strip with a vertex without a normal: no table");
+    /* the same stream (zq as first) with another table: the hash has none */
+    zq[1][2] = 0.0f;
+    const float down[4] = {0, 0, -1, 1};
+    RdVuMeshDesc cd = zd;
+    cd.facing = NULL;
+    cd.facingCount = 0;
+    rd_vu_facing_begin();
+    for (int k = 0; k < 6; k++) {
+        rd_vu_facing_vertex(k == 0, pos[k], down);
+    }
+    rd_vu_facing_attach(&cd);
+    CHECK(cd.facing == NULL,
+          "winding marks: two different tables under one stream's hash leave it none");
+    /* a prelit stream built again with no strip records written and no
+     * table kept for it (a save state loaded into a fresh run): a miss,
+     * logged and counted, and the mesh's why NO_TABLE */
+    zq[1][2] = 0.5f; /* a stream no table was kept for */
+    RdVuMeshDesc sd = zd;
+    sd.facing = NULL;
+    sd.facingCount = 0;
+    const uint32_t missBefore = rd__vu_facing_misses();
+    rd_vu_facing_begin(); /* nothing built */
+    rd_vu_facing_attach(&sd);
+    CHECK(sd.facing == NULL && rd__vu_facing_misses() == missBefore + 1u,
+          "winding marks: a prelit stream rebuilt without its strip records is a miss (%u -> %u)",
+          missBefore, rd__vu_facing_misses());
+    const RdMesh sm = rd_create_vu_mesh(&sd);
+    const RdMeshRec *s = rd__mesh_rec(sm.id);
+    CHECK(s && s->facingFrom == RD_MESH_FACING_NONE && s->facingWhy == RD_VU_NOFACE_NO_TABLE,
+          "winding marks: the rebuilt prelit mesh has no facing, why %d (want no table)",
+          s ? (int)s->facingWhy : -1);
+    rd_destroy_vu_mesh(sm);
+    /* the first stream again, whose hash two tables were kept under (the
+     * conflict above): no table, counted (its line was the conflict's) */
+    zq[1][2] = 0.0f;
+    RdVuMeshDesc kd = zd;
+    kd.facing = NULL;
+    kd.facingCount = 0;
+    rd_vu_facing_begin();
+    rd_vu_facing_attach(&kd);
+    CHECK(kd.facing == NULL && rd__vu_facing_misses() == missBefore + 2u,
+          "winding marks: a stream whose table is void (a conflict) is counted once more (%u)",
+          rd__vu_facing_misses());
+    /* a prelit model pack replacement: no normals, no table: REPLACED */
+    const RdVuReplacementBatch rb = {0, 6};
+    RdVuReplacement rep;
+    memset(&rep, 0, sizeof(rep));
+    rep.qw = (const float (*)[4]) & zq[1];
+    rep.vertexCount = 6;
+    rep.qwPerVertex = RD_VU_QW_PRELIT;
+    rep.batches = &rb;
+    rep.batchCount = 1;
+    const RdMesh rm = rd_create_vu_mesh_replacement(&zd, &rep, "winding replacement");
+    const RdMeshRec *r = rd__mesh_rec(rm.id);
+    CHECK(r && r->replaced && r->facingFrom == RD_MESH_FACING_NONE &&
+              r->facingWhy == RD_VU_NOFACE_REPLACED && r->hash == zh,
+          "winding marks: a prelit replacement has no facing, why %d (want replaced)",
+          r ? (int)r->facingWhy : -1);
+    rd_destroy_vu_mesh(rm);
+}
+
 static void recordingChecks(void)
 {
     CHECK(packetA() && packetA()->next == NULL, "one packet for the prelit model");
@@ -3543,19 +4361,30 @@ static void recordingChecks(void)
     modelPackChecks();
     visRuleChecks();
     joinedStripChecks();
+    windingMarkChecks();
 }
 
 /* the cases in the order main() runs them (ico_shard.h); the weights are seconds of a whole
    run */
 static const IcoShardCase k_cases[] = {
-    {"recording", 1},    {"strip_disc", 1},       {"box_disc_0", 14}, {"box_disc_1", 14},
-    {"box_disc_2", 15},  {"box_disc_3", 15},      {"mesh_gen", 1},    {"gpu_prims", 1},
-    {"stretch_same", 1}, {"closing_original", 1}, {"chain", 1},       {"stretch_enhanced", 1},
-    {"photo_veil", 1},   {"photo_reel", 1},
+    {"recording", 1},        {"strip_disc", 1},       {"box_disc_0", 14},
+    {"box_disc_1", 14},      {"box_disc_2", 15},      {"box_disc_3", 15},
+    {"winding_disc_0", 14},  {"winding_disc_1", 14},  {"winding_disc_2", 15},
+    {"winding_disc_3", 15},  {"mesh_gen", 1},         {"gpu_prims", 1},
+    {"stretch_same", 1},     {"closing_original", 1}, {"chain", 1},
+    {"stretch_enhanced", 1}, {"photo_veil", 1},       {"photo_reel", 1},
 };
 
 int main(int argc, char **argv)
 {
+    /* the PS2's region rule ([dev] region_rule = ps2): this test's
+       pictures and counts are its drops' (the camera rule's are vu1's,
+       rd_native's and rd_region_camera_ab's) */
+#ifdef _WIN32
+    _putenv_s("ICO_RD_REGION_RULE", "ps2");
+#else
+    setenv("ICO_RD_REGION_RULE", "ps2", 1);
+#endif
     if (ico_shard_start(argc, argv, k_cases, ICO_SHARD_COUNT(k_cases))) {
         return ico_shard_exit();
     }
@@ -3578,6 +4407,13 @@ int main(int argc, char **argv)
     for (int q = 0; q < BOX_SLICES; q++) {
         if (ico_shard_take(boxCases[q])) {
             boxDiscChecks(argc > 1 ? argv[1] : NULL, q);
+        }
+    }
+    static const char *const windCases[BOX_SLICES] = {"winding_disc_0", "winding_disc_1",
+                                                      "winding_disc_2", "winding_disc_3"};
+    for (int q = 0; q < BOX_SLICES; q++) {
+        if (ico_shard_take(windCases[q])) {
+            windingDiscChecks(argc > 1 ? argv[1] : NULL, q);
         }
     }
     if (ico_shard_take("mesh_gen")) {

@@ -12,7 +12,9 @@
 # to a later version (port/platform/state_syms.h).
 # The unstripped libmain.so, the link map (ico_pc.map) and libmain.syms.gz
 # are staged under dist/stage/android/ with VERSION.txt, for turning crash
-# offsets into function names (llvm-symbolizer). Quiet; the log is
+# offsets into function names (llvm-symbolizer), and carry.txt, the save
+# states' carry-over guard's report (tools/state_carry_check.py: the package
+# fails when a state of this library could not carry over to a later one). Quiet; the log is
 # build-host/pkg-android-<label>.log. Safe to re-run. Builds only: it never
 # runs the game.
 #
@@ -122,22 +124,100 @@ cd "$root"
 # port's variables), gzip-compressed and added to the APK stored (not
 # deflated again), so the program reads it straight out of the APK file with
 # a descriptor (host_android.c ico_android_open_symbols): a report reads it
-# when it is written, save states at the first save, load or listing
+# when it is written, save states at the first save, load or listing.
+# Two more kinds of line for the save states' table, which the crash reader
+# passes over: the library's allocated output sections from its section
+# headers ("section <address> <size> <ELF flags> <name>": the code range is
+# where the X sections are, whatever the segments say; the library has one
+# read and execute segment holding .rodata with .text, -Wl,--no-rosegment
+# below API 30, issue 217), and a fifth column on a local data symbol whose
+# name is not unique: its source file, from the symbol table's FILE entries
+# (lld writes each object's locals after its FILE symbol), so the table
+# names it "<file>:<name>"
 llvm_nm="$ANDROID_NDK_ROOT/toolchains/llvm/prebuilt/linux-x86_64/bin/llvm-nm"
+llvm_readelf="$ANDROID_NDK_ROOT/toolchains/llvm/prebuilt/linux-x86_64/bin/llvm-readelf"
 [[ -x "$llvm_nm" ]] || fail "no llvm-nm in the NDK ($llvm_nm)"
+[[ -x "$llvm_readelf" ]] || fail "no llvm-readelf in the NDK ($llvm_readelf)"
 symdir="$root/build-host/tmp/android-$label-syms"
 rm -rf "$symdir"
 mkdir -p "$symdir"
 "$llvm_nm" -n --defined-only "$so" > "$symdir/nm.txt" 2>>"$log" || fail "llvm-nm $so"
 "$llvm_nm" -n -S --defined-only "$so" > "$symdir/nm-sized.txt" 2>>"$log" || fail "llvm-nm -S $so"
+"$llvm_readelf" -S -W "$so" > "$symdir/sections.txt" 2>>"$log" || fail "llvm-readelf -S $so"
+"$llvm_readelf" -s -W "$so" > "$symdir/symtab.txt" 2>>"$log" || fail "llvm-readelf -s $so"
 awk 'NF == 3 && $2 ~ /^[TtWw]$/' "$symdir/nm.txt" > "$symdir/libmain.syms"
-awk 'NF == 4 && $3 ~ /^[DdBbRrVv]$/' "$symdir/nm-sized.txt" >> "$symdir/libmain.syms"
+awk 'NF == 4 && $3 ~ /^[DdBbRrVv]$/' "$symdir/nm-sized.txt" > "$symdir/data.txt"
+# the data lines, a repeated local name with its file
+awk 'FNR == NR {
+        if ($0 ~ /^Symbol table /) { insym = index($0, ".symtab") > 0; next }
+        if (!insym || NF < 8) next
+        if ($4 == "FILE") { cur = $8; next }
+        if ($5 == "LOCAL" && $4 != "SECTION" && cur != "") {
+            v = $2; sub(/^0+/, "", v); file[v SUBSEP $8] = cur
+        }
+        next
+     }
+     { n++; line[n] = $0; nm[n] = $4; v = $1; sub(/^0+/, "", v); key[n] = v SUBSEP $4; cnt[$4]++ }
+     END {
+        for (i = 1; i <= n; i++) {
+            if (cnt[nm[i]] > 1 && (key[i] in file)) {
+                split(line[i], f, " ")
+                print f[1], f[2], f[3], f[4], file[key[i]]
+            } else {
+                print line[i]
+            }
+        }
+     }' "$symdir/symtab.txt" "$symdir/data.txt" >> "$symdir/libmain.syms"
+# the compiler's private objects in .data.rel.ro (switch tables, aggregate
+# initialisers, compound literals), which nm cannot name, from the link map
+python3 -I "$wt/tools/android_syms_lines.py" relro "$map" >> "$symdir/libmain.syms" 2>>"$log" ||
+    fail "tools/android_syms_lines.py relro $map"
+# the allocated sections but thread-local storage (its addresses are offsets)
+awk 'sub(/^ *\[ *[0-9]+\] */, "") && $7 ~ /A/ && $7 !~ /T/ && $3 ~ /^[0-9a-f]+$/ &&
+     $5 ~ /^[0-9a-f]+$/ && $5 !~ /^0+$/ { print "section", $3, $5, $7, $1 }' \
+    "$symdir/sections.txt" >> "$symdir/libmain.syms"
 grep -q ' [DdBb] systemStatus$' "$symdir/libmain.syms" ||
     fail "libmain.syms lacks the game's data symbols (systemStatus)"
 grep -q ' T ico_diag_init$' "$symdir/libmain.syms" ||
     fail "libmain.syms lacks ico_diag_init (the symbol lines' anchor)"
+grep -q '^section [0-9a-f]* [0-9a-f]* [A-Z]*X[A-Z]* \.text$' "$symdir/libmain.syms" ||
+    fail "libmain.syms lacks the .text section line (the save states' code range)"
+grep -q '^section [0-9a-f]* [0-9a-f]* A[A-Z]* \.rodata$' "$symdir/libmain.syms" ||
+    fail "libmain.syms lacks the .rodata section line"
+# the game's data sections hold the game's objects only: a save state copies
+# them whole by offset, and their layout hash covers every item in them
+python3 -I "$wt/tools/android_syms_lines.py" gamesec "$map" "$wt" >>"$log" 2>&1 ||
+    fail "tools/android_syms_lines.py gamesec: a port object holds bytes in the game's data sections (the log names it)"
+# a state that cannot resume where it was saved continues from the checkpoint
+# it holds, by its own record of where the game keeps it (port/save/state_checkpoint.h):
+# those globals must lie in the game's data sections, and the table of the
+# released builds before such records must be whole
+python3 -I "$wt/tools/state_checkpoint_table.py" guard "$so" >>"$log" 2>&1 ||
+    fail "tools/state_checkpoint_table.py guard: a checkpoint global is outside the game's data, or the table lost a release (the log names it)"
+# a writable data name that repeats could never be told apart in a save state
+python3 -I "$wt/tools/android_syms_lines.py" check "$symdir/libmain.syms" >>"$log" 2>&1 ||
+    fail "tools/android_syms_lines.py check: writable data names repeat in libmain.so (the log names them)"
 gzip -9 -n -c "$symdir/libmain.syms" > "$symdir/libmain.syms.gz"
-echo "package_android: libmain.syms: $(wc -l < "$symdir/libmain.syms") symbols, $(wc -c < "$symdir/libmain.syms.gz") bytes gzipped" >>"$log"
+echo "package_android: libmain.syms: $(wc -l < "$symdir/libmain.syms") lines ($(grep -c '^section ' "$symdir/libmain.syms") sections, $(awk 'NF == 5 && $1 != "section"' "$symdir/libmain.syms" | wc -l) data symbols with their file), $(wc -c < "$symdir/libmain.syms.gz") bytes gzipped" >>"$log"
+# save states carry over (issue 217): every initialised pointer of the game's
+# data in this library must be one the save can name with this symbol table,
+# or every state the package saves is pinned to it. The guard runs the
+# tree's own save code (port/platform/state_xbuild.c, built with the host
+# compiler) over the library as the loader maps it (tools/state_carry_check.py;
+# docs/port/PLATFORM.md "The carry-over guard"); its report is staged.
+run python3 -I "$wt/tools/state_carry_check.py" check --binary "$so" --syms "$symdir/libmain.syms.gz" \
+    --workdir "$symdir/carry" --cc "${CC:-cc}" --report "$symdir/carry.txt"
+# the earlier Android versions' states (the legacy tables, port/state_legacy)
+# resume exactly only under their layout hash: a package of another one fails
+python3 -I "$wt/tools/android_syms_lines.py" layout "$symdir/carry.txt" "$wt" >>"$log" 2>&1 ||
+    fail "tools/android_syms_lines.py layout: the game data layout hash is not the legacy tables' (the log says which and what to do)"
+# the previous release's states resume exactly only where every game function
+# that can hold a paused frame hashes as it did there: one that hashes apart
+# while its source did not change fails the package (v0.11.16-rc8's
+# subBirdBrainMain: a linker patch the code hash counted as code)
+python3 -I "$wt/tools/state_legacy_table.py" gate --so "$so" --syms "$symdir/libmain.syms.gz" \
+    --map "$map" --git "$wt" >>"$log" 2>&1 ||
+    fail "tools/state_legacy_table.py gate: game functions hash apart from the last release's with no change to their source (the log names them and says what to do)"
 withsyms="$root/build-host/tmp/android-$label-syms.apk"
 cp "$unsigned" "$withsyms"
 run python3 - "$withsyms" "$symdir/libmain.syms.gz" <<'PY'
@@ -162,6 +242,16 @@ ICO_KS_PASS="$pw" run "$bt/apksigner" sign --ks "$ks" --ks-key-alias upload \
 unset pw
 rm -f "$apk.idsig"
 
+# the legacy tables in the signed APK by the names the game asks for
+# (state_legacy.c), with the repository's bytes: v0.11.9-rc5 shipped "syms"
+# for "syms.gz" (the packaging un-gzips a .gz asset)
+# a release candidate is a label ending in -rc and its number, the one rule
+# android/app/build.gradle uses for the tables it puts in (==~ /.*-rc[0-9]+/)
+legacy_rc=
+if [[ "$label" =~ -rc[0-9]+$ ]]; then legacy_rc=--rc; fi
+python3 -I "$wt/tools/state_legacy_table.py" apkcheck "$apk" $legacy_rc >>"$log" 2>&1 ||
+    fail "tools/state_legacy_table.py apkcheck: the APK's legacy tables are not the repository's (the log names the file)"
+
 "$bt/apksigner" verify --verbose --print-certs "$apk" >>"$log" 2>&1 ||
     fail "apksigner verify"
 run "$bt/zipalign" -c -P 16 -v 4 "$apk"
@@ -181,8 +271,9 @@ echo "package_android: signer: $certs" >>"$log"
 commit8="${commit:0:8}"
 date_str="$(date +%Y-%m-%d)"
 mkdir -p "$stage"
-rm -f "$stage"/libmain.so "$stage"/ico_pc.map "$stage"/libmain.syms.gz "$stage"/VERSION.txt
+rm -f "$stage"/libmain.so "$stage"/ico_pc.map "$stage"/libmain.syms.gz "$stage"/VERSION.txt "$stage"/carry.txt
 cp "$so" "$stage/libmain.so"
+cp "$symdir/carry.txt" "$stage/carry.txt"
 cp "$map" "$stage/ico_pc.map"
 cp "$symdir/libmain.syms.gz" "$stage/libmain.syms.gz"
 printf 'ico-pc %s\nbuilt %s\ncommit %s\n' "$label" "$date_str" "$commit" > "$stage/VERSION.txt"

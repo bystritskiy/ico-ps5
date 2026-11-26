@@ -1,6 +1,6 @@
 # ICO for PS5
 
-An unofficial native PS5 port of [nathanialf/ico-pc](https://github.com/nathanialf/ico-pc), based on v0.10.0. The game runs from your own PlayStation 2 disc data. The port includes DualSense support and the bob-ttz and cobra838 Russian translations.
+An unofficial native PS5 port of [nathanialf/ico-pc](https://github.com/nathanialf/ico-pc), based on v0.11.16. The game runs from your own PlayStation 2 disc data. The port includes DualSense support and the bob-ttz and cobra838 Russian translations.
 
 **Install** the ZIP from [Releases](https://github.com/bystritskiy/ico-ps5/releases) by extracting its `PPSA99031` folder under `/data/homebrew/`. For the European disc, put your image at `/data/ico/PPSA99031/Ico_PAL.iso`, then launch ICO. Allow about 1 GB for the first import. Existing players can keep their imported archive, settings and memory cards in that same data directory.
 
@@ -71,7 +71,7 @@ the PS2's unless you choose Original. The mouse camera starts on.
 | Windows 10 or 11, 64-bit, with a graphics card from NVIDIA, AMD or Intel | `-win.zip` (or `-win-portable.zip`) | The main test machine. Draws with Vulkan, or Direct3D 12 or OpenGL if you choose it in Options > Graphics ([how](docs/OPTIONS.md#choosing-the-renderer)). A Direct3D 11 choice is there too but has not been tried on any computer. |
 | Linux PC, 64-bit x86: Debian 13, Ubuntu 24.04 or newer | `-linux-x86_64.AppImage`, or `-linux.tar.gz` (or `-linux-portable.tar.gz`) | Built and checked by the automatic tests for every release. Draws with Vulkan, or OpenGL if your graphics driver has no Vulkan ([how](docs/OPTIONS.md#choosing-the-renderer)); OpenGL has only been checked on a software renderer. |
 | Steam Deck | `-linux-x86_64.AppImage` or `-linux.tar.gz` | Supported; [Steam Deck tips](docs/TROUBLESHOOTING.md#steam-deck). |
-| Linux handheld or board, 64-bit ARM: Debian 13, Ubuntu 24.04 or newer | `-linux-aarch64.AppImage`, or `-linux-arm64.tar.gz` (or `-linux-arm64-portable.tar.gz`) | Built for every release. |
+| Linux handheld or board, 64-bit ARM: Debian 13, Ubuntu 24.04 or newer, with a Vulkan graphics driver | `-linux-aarch64.AppImage`, or `-linux-arm64.tar.gz` (or `-linux-arm64-portable.tar.gz`) | Built for every release. The graphics driver must offer Vulkan 1.1; a device whose driver offers only OpenGL ES (many Mali handhelds, such as the RK3326 family) cannot run the game. |
 | Android phone or tablet, 64-bit, Android 8 or newer with Vulkan 1.0 graphics (usually 2017 or newer) | `-android.apk` | Supported. It can be slower than on a PC. Graphics driver packages need Android 9 or newer. [The Android guide](docs/ANDROID.md). |
 | iPhone, iOS 15 or newer, through [LiveContainer](https://github.com/LiveContainer/LiveContainer) | `-ios-unsigned.ipa` | The maintainer has no Apple device, so these builds are not tested here; problem reports are welcome. |
 | Apple-silicon Mac, macOS 12 or newer | `-macos-arm64.dmg` (or `-macos-arm64.zip`) | Not tested by the maintainer either. The first time, right-click **ICO** and choose **Open** ([how](#mac)). |
@@ -140,8 +140,9 @@ Deck tips](docs/TROUBLESHOOTING.md#steam-deck).
 
 On a 64-bit ARM Linux handheld or board, download the file whose name ends
 in `-linux-aarch64.AppImage` (or `-linux-arm64.tar.gz`) instead and follow
-the same steps. It also needs a fairly new system: Debian 13, Ubuntu 24.04
-or newer.
+the same steps. It also needs a fairly new system (Debian 13, Ubuntu 24.04
+or newer) and a graphics driver with Vulkan 1.1 or later: the game does not
+draw with OpenGL ES, which is all that many ARM handhelds offer.
 
 ### Android
 
@@ -250,8 +251,8 @@ whole game; the differences are the original releases' own:
   Players (a second controller for Yorda) and Hold type are there on every
   disc, though those three discs' own game has neither. Hold type starts on the
   disc's own way (on those three discs, press R1 once to take Yorda's
-  hand and again to let go). The June 2001 demo has no Credits under
-  Extras, since its disc does not hold them.
+  hand and again to let go). The June 2001 demo has no Credits or
+  Unused content under Extras, since its disc does not hold them.
   [More in Options](docs/OPTIONS.md).
 - **The port's own menus** (Options, the extras, photo mode) can be shown in
   English, French, German, Italian, Spanish, Japanese, Korean or Traditional
@@ -287,6 +288,10 @@ the other: see [Can I play more than one disc?](docs/FAQ.md#can-i-play-more-than
   Extras > Export textures** saves the game's own pictures to start from.
 - **Can I turn off the blur or the glow?** Yes, in **Options > Effects**.
   [What each one does](docs/OPTIONS.md#effects).
+- **Does it have FSR or DLSS?** FSR 1.0 and FSR 3.1 (AMD's open upscalers) are in
+  **Options > Picture > Upscaling**, off by default. DLSS and XeSS are not, because
+  the port ships only open-source code.
+  [The answer](docs/FAQ.md#what-are-fsr-10-and-fsr-31-why-is-there-no-dlss-or-xess).
 - **Does Lossless Scaling work?** It should, with **Options > Display >
   Window mode** at **Borderless** or **Windowed**; Windowed is known to
   work. [How to set it up](docs/TROUBLESHOOTING.md#a-program-that-adds-frames-or-scales-the-game-lossless-scaling-does-not-work).
@@ -340,7 +345,8 @@ error messages and what to try first.
 
 The title screen has an **Options** line and a **Quit to desktop** line
 (**Quit game** on a phone); starting a New Game shows one more screen, with
-**Mirror mode** and **New Game+** ([more about them](docs/OPTIONS.md#starting-a-new-game));
+the difficulty and its **Customize** pages, where **Mirror mode** and
+**New Game+** are ([more about them](docs/OPTIONS.md#starting-a-new-game));
 the language and 50/60 Hz questions the European PS2 disc asks at first
 start live in Options instead, and the language can change in the middle of
 a game; the language list also has Russian and Brazilian Portuguese,
@@ -379,6 +385,7 @@ with Igor Chagas's Brazilian Portuguese ones (with corrections by cobra838). To 
 - braito4, for the Apple-silicon macOS app.
 - neetgon, for the second player's gamepad.
 - KClough, for the arm64 Linux build.
+- MesaBlack, for the Xbox, Nintendo and Wii Classic Controller button pictures.
 
 ### Special thanks
 

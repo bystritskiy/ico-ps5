@@ -10,6 +10,10 @@
  * screen), and photo mode's help panel is laid out in every language. */
 #include "settings_fixture.h"
 
+#include "pad_glyphs.h"
+#include "touch.h"
+#include "touch_ui.h"
+
 /* model_viewer.c's characters calls for the viewer's panel
    (Ico on screen; the model itself needs the game) */
 static int renderCharsEnter(void)
@@ -194,6 +198,21 @@ static void makeSheets(void)
 unsigned int tex_HostTextureId(int idx)
 {
     return idx == 1 ? s_sheet[0].id : idx == 2 || idx == 3 ? s_sheet[1].id : 0u;
+}
+
+/* seki/src/Texture.c's slot table, for the touch overlay's sheet check
+   (touch_ui.c sheetLoaded): no slot here, so the touch overlay draws the
+   disc's pictures nowhere and the button pictures' art (a set in force)
+   wherever a zone has a picture */
+char *tex_GetTextureName(int idx)
+{
+    (void)idx;
+    return NULL;
+}
+
+int tex_GetTextureNum(void)
+{
+    return 0;
 }
 
 static RdTex sheetResolve(unsigned long long tex0, int list)
@@ -388,6 +407,13 @@ static int isSheet(uint32_t tex)
     return tex != 0 && (tex == s_sheet[0].id || tex == s_sheet[1].id);
 }
 
+/* a texture of the button pictures' atlases (pad_glyphs.c names them) */
+static int isArtTex(uint32_t tex)
+{
+    const RdTexRec *t = tex ? rd__tex_rec(tex) : NULL;
+    return t != NULL && strncmp(t->name, "ui pad glyphs", 13) == 0;
+}
+
 /* an icon's word, "" for a picture */
 static const char *iconWord(const UiHudIcon *ic)
 {
@@ -526,6 +552,13 @@ static void testPhotoPanel(void)
     ui__photo_hud_build(&set, 1, 0, "t", "f");
     CHECK(set.item[9].icon[0].glyph == -1 && strcmp(iconWord(&set.item[9].icon[0]), "Cross") == 0,
           "Cross without its PAL rectangle: the word (%s)", iconWord(&set.item[9].icon[0]));
+    /* a set of button pictures in force: the picture (the art) all the same */
+    pad_glyphs_set_style(ICO_PAD_GLYPHS_XBOX);
+    ui__photo_hud_build(&set, 1, 0, "t", "f");
+    CHECK(set.item[9].icon[0].glyph == LT_GLYPH_CROSS,
+          "Cross without its PAL rectangle, Xbox in force: the picture (%d)",
+          set.item[9].icon[0].glyph);
+    pad_glyphs_set_style(ICO_PAD_GLYPHS_PLAYSTATION);
     texProperty[182].texU--;
 
     /* the keys: W A S D for the stick, the first of "Tab, Backquote" */
@@ -586,6 +619,10 @@ static void testPhotoPanel(void)
     ctx.box.h = 1080;
     ctx.boxScale = 1080.0f / 448.0f;
     ui__set_overlay_sink(panelSink);
+    /* the disc's pictures' boxes on the pad (output pixels: x0, y0, x1, y1):
+       a sheet's quad is its picture's box exactly (photo_ui.c hudGlyph) */
+    float psBox[7][4];
+    int psN = 0;
     for (int keys = 0; keys < 2; keys++) {
         if (keys) {
             ico_input_note_press(ICO_SRC_KEY, 4);
@@ -615,11 +652,88 @@ static void testPhotoPanel(void)
             const float m = sheet ? 0.0f : textOver;
             out += x < x0 - m || x > x1 + m || y < y0 - m || y > y1 + m;
             pictures += sheet;
+            if (!keys && sheet && i + 1 < s_pn && s_ptex[i + 1] == s_ptex[i] && psN < 7) {
+                psBox[psN][0] = x;
+                psBox[psN][1] = y;
+                psBox[psN][2] = (float)s_pv[i + 1].x / 16.0f;
+                psBox[psN][3] = (float)s_pv[i + 1].y / 16.0f;
+                psN++;
+                pictures++;
+                i++;
+                const float x2 = (float)s_pv[i].x / 16.0f, y2 = (float)s_pv[i].y / 16.0f;
+                out += x2 < x0 || x2 > x1 || y2 < y0 || y2 > y1;
+            }
         }
         CHECK(out == 0, "%s: %d vertices outside the panel", keys ? "keys" : "pad", out);
         CHECK(pictures == (keys ? 0 : 2 * 7), "%s: %d picture vertices (%d)", keys ? "keys" : "pad",
               pictures, keys ? 0 : 2 * 7);
     }
+    /* the pad with Xbox: the seven pictures from the button pictures'
+       atlas (none from the sheets), on the panel, each the art's aspect
+       (on the output's square pixels), each centred on one of the disc
+       pictures' boxes within half an output pixel, inside it (the panel's
+       gaps kept); the faces one height and the shoulders one height (the
+       group's one scale: every Xbox piece is a capital, so one scale is
+       one height), and in each group some picture filling its box's width
+       or height (as large as fits) */
+    ico_input_note_press(ICO_SRC_PAD, 0);
+    pad_glyphs_set_style(ICO_PAD_GLYPHS_XBOX);
+    s_pn = 0;
+    ui_photo_draw_overlay(&ctx);
+    {
+        int sheets = 0, art = 0, shape = 0, placed = 0, used[7] = {0};
+        /* per group (by the box's width: the faces' boxes are narrower):
+           the box width, the least and most height, a picture filling */
+        float grpW[2] = {0, 0}, grpLo[2] = {1e9f, 1e9f}, grpHi[2] = {0, 0};
+        int grpFill[2] = {0, 0}, grpN[2] = {0, 0};
+        CHECK(psN == 7, "the pad's seven disc pictures' boxes (%d)", psN);
+        for (uint32_t i = 2; i + 1 < s_pn; i++) {
+            sheets += isSheet(s_ptex[i]);
+            if (isArtTex(s_ptex[i]) && s_ptex[i + 1] == s_ptex[i]) {
+                const float dw = (float)(s_pv[i + 1].x - s_pv[i].x);
+                const float dh = (float)(s_pv[i + 1].y - s_pv[i].y);
+                const float du = s_pv[i + 1].s - s_pv[i].s, dv = s_pv[i + 1].t - s_pv[i].t;
+                /* the quad's shape on screen is the cell's */
+                shape += dh > 0.0f && dv > 0.0f && fabsf(dw / dh - du / dv) <= 0.06f * (du / dv);
+                const float cx = (float)(s_pv[i].x + s_pv[i + 1].x) / 32.0f;
+                const float cy = (float)(s_pv[i].y + s_pv[i + 1].y) / 32.0f;
+                for (int k = 0; k < psN; k++) {
+                    const float *bx = psBox[k];
+                    const float bw = bx[2] - bx[0], bh = bx[3] - bx[1];
+                    if (used[k] || fabsf(cx - (bx[0] + bx[2]) * 0.5f) > 0.5f ||
+                        fabsf(cy - (bx[1] + bx[3]) * 0.5f) > 0.5f) {
+                        continue;
+                    }
+                    used[k] = 1;
+                    const int inside = dw / 16.0f <= bw + 0.5f && dh / 16.0f <= bh + 0.5f;
+                    CHECK(inside,
+                          "pad with Xbox: the picture %.1f x %.1f inside the box %.1f x %.1f",
+                          (double)(dw / 16.0f), (double)(dh / 16.0f), (double)bw, (double)bh);
+                    int gi = grpN[0] && fabsf(bw - grpW[0]) > 0.5f ? 1 : 0;
+                    grpW[gi] = bw;
+                    grpN[gi]++;
+                    grpLo[gi] = fminf(grpLo[gi], dh / 16.0f);
+                    grpHi[gi] = fmaxf(grpHi[gi], dh / 16.0f);
+                    grpFill[gi] |= fabsf(dh / 16.0f - bh) <= 1.0f || fabsf(dw / 16.0f - bw) <= 1.0f;
+                    placed++;
+                    break;
+                }
+                art += 2;
+                i++;
+            }
+        }
+        for (int gi = 0; gi < 2; gi++) {
+            CHECK(grpN[gi] > 0 && grpHi[gi] - grpLo[gi] <= 1.0f && grpFill[gi],
+                  "pad with Xbox: the %d pictures in %.1f-wide boxes %.1f .. %.1f tall, one "
+                  "filling its box %d",
+                  grpN[gi], (double)grpW[gi], (double)grpLo[gi], (double)grpHi[gi], grpFill[gi]);
+        }
+        CHECK(sheets == 0 && art == 2 * 7 && shape == 7 && placed == 7,
+              "pad with Xbox: %d sheet vertices (0), %d art vertices (%d), %d of the art's shape, "
+              "%d centred on a disc picture's box",
+              sheets, art, 2 * 7, shape, placed);
+    }
+    pad_glyphs_set_style(ICO_PAD_GLYPHS_PLAYSTATION);
     ui__set_overlay_sink(NULL);
 
     /* the snapshots, the panel on the output as the window draws it (the
@@ -634,6 +748,436 @@ static void testPhotoPanel(void)
     rd_set_present_overlay(prev, prevUser);
     ico_photo_reset();
     stage_no = 0;
+}
+
+/* ------------------------------------------------ the button pictures */
+
+typedef struct ArtQuad {
+    RdScreenVtx v[2];
+    uint32_t tex;
+} ArtQuad;
+
+static ArtQuad s_artQ[32];
+static int s_artN;
+
+static void collectArt(void *user, int list, uint32_t index, const RdCmd *c, const RdStateBlock *st)
+{
+    (void)user;
+    (void)list;
+    (void)index;
+    if (c->type != RDC_SCREEN || !st->ds.texEnabled || !isArtTex(st->tex) || c->u[1] != 2 ||
+        s_artN >= 32) {
+        return;
+    }
+    const RdFrame *f = rd__last_frame();
+    memcpy(s_artQ[s_artN].v, f->payload + c->u[0], sizeof(s_artQ[0].v));
+    s_artQ[s_artN].tex = st->tex;
+    s_artN++;
+}
+
+/* the last frame's sprites from the atlases */
+static int artQuads(void)
+{
+    const RdFrame *f = rd__last_frame();
+    s_artN = 0;
+    if (f) {
+        RdStateBlock st = f->startState;
+        rd__walk(f, 0, &st, collectArt, NULL);
+    }
+    return s_artN;
+}
+
+/* GS 12.4 (the 512 x 512 frame) to the grid and to SCENE pixels at 1x */
+static float artGridX(int32_t x16)
+{
+    return UI_GRID_CX + ((float)x16 - 32768.0f) * 640.0f / (16.0f * 512.0f);
+}
+
+static float artGridY(int32_t y16)
+{
+    return UI_GRID_CY + ((float)y16 - 32768.0f) * 224.0f / (8.0f * 512.0f);
+}
+
+static float artPix(int32_t v16)
+{
+    return (float)v16 / 16.0f - 1792.0f;
+}
+
+/* The model viewer's prompt lines (ui_hint.c: seven glyph rows among the
+   words) at 1x over the fixture's PAL tables: with PlayStation the glyph
+   rows draw the stand-in sheets; with Xbox, Nintendo and Wii Classic each
+   shown glyph row is one sprite from an atlas inside its disc box, the
+   pixels there are not the stand-in sheet's, and where the art's texel and
+   its neighbours are one opaque colour the SCENE pixel is that texel
+   MODULATEd by the sprite's colour (0x7F: ~reductionCol) over the
+   background at alpha 127 of 128.  settings_pad_glyphs_<set>.png. */
+static void testArtPixels(void)
+{
+    const size_t n = (size_t)512 * 512 * 4;
+    uint8_t *ps = malloc(n), *px = malloc(n);
+    uint32_t w = 0, h = 0;
+    if (!ps || !px) {
+        CHECK(0, "the button pictures' buffers");
+        free(ps);
+        free(px);
+        return;
+    }
+    pad_glyphs_set_style(ICO_PAD_GLYPHS_PLAYSTATION);
+    const int first = LT_GAME_PROPERTY_COUNT + lt_ext_prop_count();
+    const int vl = viewerLayout();
+    const int last = LT_GAME_PROPERTY_COUNT + lt_ext_prop_count();
+    lt_switch_layout(vl);
+    CHECK(settle(vl, 60), "the viewer's prompts at 1x");
+    frame(0);
+    int glyphRows = 0;
+    for (int i = first; i < last; i++) {
+        glyphRows += lt_ext_is_glyph_row(lt_ext_prop(i)) && !lt_ext_prop(i)->defaultMask;
+    }
+    CHECK(glyphRows == 7, "the viewer's prompt lines show 7 button glyphs (%d)", glyphRows);
+    CHECK(artQuads() == 0, "PlayStation: no sprite from an atlas (%d)", s_artN);
+    snap("settings_pad_glyphs_playstation.png");
+    if (!rd__read_target(rd_target(RD_TARGET_SCENE), ps, n, &w, &h) || w != 512 || h != 512) {
+        CHECK(0, "SCENE readback (PlayStation)");
+    }
+    static const int kStyles[] = {ICO_PAD_GLYPHS_XBOX, ICO_PAD_GLYPHS_NINTENDO,
+                                  ICO_PAD_GLYPHS_WII_CLASSIC};
+    static const char *const kPng[] = {"settings_pad_glyphs_xbox.png",
+                                       "settings_pad_glyphs_nintendo.png",
+                                       "settings_pad_glyphs_wii_classic.png"};
+    int flatAll = 0;
+    for (size_t si = 0; si < sizeof(kStyles) / sizeof(kStyles[0]); si++) {
+        const char *name = pad_glyphs_style_name(kStyles[si]);
+        pad_glyphs_set_style(kStyles[si]);
+        CHECK(pad_glyphs_active(), "%s in force", name);
+        frame(0);
+        frame(0);
+        const int quads = artQuads();
+        CHECK(quads == glyphRows, "%s: %d sprites from an atlas (%d)", name, quads, glyphRows);
+        snap(kPng[si]);
+        if (!rd__read_target(rd_target(RD_TARGET_SCENE), px, n, &w, &h) || w != 512 || h != 512) {
+            CHECK(0, "SCENE readback (%s)", name);
+            continue;
+        }
+        int checked = 0, worst = 0;
+        for (int q = 0; q < quads; q++) {
+            const RdScreenVtx *v = s_artQ[q].v;
+            const RdTexRec *tr = rd__tex_rec(s_artQ[q].tex);
+            /* inside a shown glyph row's disc box (display_texture's:
+               dispX + 1/4, dispW - 1 wide; 2 dispY + 1/2, dispH - 2 high) */
+            const float gx0 = artGridX(v[0].x), gx1 = artGridX(v[1].x);
+            const float gy0 = artGridY(v[0].y), gy1 = artGridY(v[1].y);
+            int inBox = 0, centred = 0;
+            for (int i = first; i < last; i++) {
+                const LtProperty *e = lt_ext_prop(i);
+                if (!lt_ext_is_glyph_row(e) || e->defaultMask) {
+                    continue;
+                }
+                const float bx = (float)e->dispX + 0.25f, by = 2.0f * (float)e->dispY + 0.5f;
+                const float bw = (float)(e->dispW - 1), bh = (float)(e->dispH - 2);
+                const int in = gx0 >= bx - 0.1f && gx1 <= bx + bw + 0.1f && gy0 >= by - 0.1f &&
+                               gy1 <= by + bh + 0.1f;
+                inBox += in;
+                /* the ink centred on the box: a tenth of a unit, under
+                   half a SCENE pixel (1.25 x units, 0.875 y units a pixel) */
+                centred += in && fabsf((gx0 + gx1) * 0.5f - (bx + bw * 0.5f)) < 0.1f &&
+                           fabsf((gy0 + gy1) * 0.5f - (by + bh * 0.5f)) < 0.1f;
+            }
+            CHECK(inBox == 1 && centred == 1,
+                  "%s: sprite %d (%.1f,%.1f-%.1f,%.1f) inside one glyph row's box, centred on it",
+                  name, q, (double)gx0, (double)gy0, (double)gx1, (double)gy1);
+            const float X0 = artPix(v[0].x), X1 = artPix(v[1].x);
+            const float Y0 = artPix(v[0].y), Y1 = artPix(v[1].y);
+            const float u0 = v[0].s / 16.0f, t0 = v[0].t / 16.0f;
+            const float u1 = v[1].s / 16.0f, t1 = v[1].t / 16.0f;
+            int area = 0, differ = 0;
+            for (int y = (int)ceilf(Y0); y + 1 <= (int)floorf(Y1) && y < 512; y++) {
+                for (int x = (int)ceilf(X0); x + 1 <= (int)floorf(X1) && x < 512; x++) {
+                    if (x < 0 || y < 0) {
+                        continue;
+                    }
+                    const uint8_t *a = &ps[((size_t)y * 512 + (size_t)x) * 4];
+                    const uint8_t *b = &px[((size_t)y * 512 + (size_t)x) * 4];
+                    area++;
+                    differ += memcmp(a, b, 3) != 0;
+                }
+            }
+            /* the art's colour arrives: the cell's brightest flat opaque
+               texel (3 x 3 of one colour: the letter's fill) is some pixel
+               of the sprite, MODULATE (t * 0x7F) >> 7 blended at 127 / 128
+               (at most 2 off).  One pixel a sprite, not every flat one: the
+               sprite is drawn smaller than its cell (the atlas's size
+               bucket), so a pixel beside an edge mixes texels the 3 x 3
+               does not hold (merge check 1: 46 such pixels, up to 45 off) */
+            if (tr && tr->pixels && tr->format == RD_TEXEL_RGBA8) {
+                const uint8_t *fill = NULL;
+                int fillSum = -1;
+                for (int ty = (int)floorf(t0) + 1; ty + 1 < (int)ceilf(t1) && ty + 1 < (int)tr->h;
+                     ty++) {
+                    for (int tx = (int)floorf(u0) + 1;
+                         tx + 1 < (int)ceilf(u1) && tx + 1 < (int)tr->w; tx++) {
+                        const uint8_t *c = &tr->pixels[((size_t)ty * tr->w + (size_t)tx) * 4];
+                        int flat = tx >= 1 && ty >= 1 && c[3] == 0x80;
+                        for (int dy = -1; flat && dy <= 1; dy++) {
+                            for (int dx = -1; flat && dx <= 1; dx++) {
+                                flat = memcmp(c,
+                                              &tr->pixels[((size_t)(ty + dy) * tr->w +
+                                                           (size_t)(tx + dx)) *
+                                                          4],
+                                              4) == 0;
+                            }
+                        }
+                        if (flat && c[0] + c[1] + c[2] > fillSum) {
+                            fillSum = c[0] + c[1] + c[2];
+                            fill = c;
+                        }
+                    }
+                }
+                if (fill && fillSum > 0) {
+                    int best = 255;
+                    for (int y = (int)ceilf(Y0); y + 1 <= (int)floorf(Y1) && y < 512; y++) {
+                        for (int x = (int)ceilf(X0); x + 1 <= (int)floorf(X1) && x < 512; x++) {
+                            if (x < 0 || y < 0) {
+                                continue;
+                            }
+                            const uint8_t *b = &px[((size_t)y * 512 + (size_t)x) * 4];
+                            int d = 0;
+                            for (int ch = 0; ch < 3; ch++) {
+                                const int e = abs((int)b[ch] - ((fill[ch] * 0x7F) >> 7));
+                                d = e > d ? e : d;
+                            }
+                            best = d < best ? d : best;
+                        }
+                    }
+                    worst = best > worst ? best : worst;
+                    checked++;
+                }
+            }
+            CHECK(area > 0 && differ * 8 >= area,
+                  "%s: sprite %d: %d of %d pixels differ from the stand-in sheet's", name, q,
+                  differ, area);
+        }
+        CHECK(worst <= 4,
+              "%s: %d sprites show their fill colour, the worst %d off the texel times the colour",
+              name, checked, worst);
+        flatAll += checked;
+        printf("settings_render: %s: %d art sprites, %d with their fill colour checked, worst %d\n",
+               name, quads, checked, worst);
+    }
+    CHECK(flatAll >= 15, "the three sets: %d sprites' fill colours checked", flatAll);
+    pad_glyphs_set_style(ICO_PAD_GLYPHS_PLAYSTATION);
+    frame(0);
+    free(ps);
+    free(px);
+}
+
+/* the touch overlay (touch_ui.c) on a 1920 x 1080 output: the default
+   medium layout, fully shown */
+static float s_touchK = 1.0f; /* every button scaled by this about its centre */
+
+/* the picture a touch zone shows (touch_ui.c glyphOf) */
+static int glyphOfZone(int z)
+{
+    switch (z) {
+    case ICO_TOUCH_B_CROSS:
+        return LT_GLYPH_CROSS;
+    case ICO_TOUCH_B_CIRCLE:
+        return LT_GLYPH_CIRCLE;
+    case ICO_TOUCH_B_SQUARE:
+        return LT_GLYPH_SQUARE;
+    case ICO_TOUCH_B_TRIANGLE:
+        return LT_GLYPH_TRIANGLE;
+    case ICO_TOUCH_B_L1:
+        return LT_GLYPH_L1;
+    case ICO_TOUCH_B_R1:
+        return LT_GLYPH_R1;
+    case ICO_TOUCH_B_L2:
+        return LT_GLYPH_L2;
+    default:
+        return LT_GLYPH_R2;
+    }
+}
+
+static int touchSource(IcoTouchOverlay *out)
+{
+    IcoTouchInsets none = {0.0f, 0.0f, 0.0f, 0.0f};
+    memset(out, 0, sizeof(*out));
+    out->layout = ico_touch_layout(1920, 1080, none, ICO_TOUCH_MEDIUM);
+    out->opacity = 1.0f;
+    for (int z = 0; z < ICO_TOUCH_BUTTONS; z++) {
+        IcoTouchRect *r = &out->layout.button[z].rect;
+        r->x += r->w * (1.0f - s_touchK) * 0.5f;
+        r->y += r->h * (1.0f - s_touchK) * 0.5f;
+        r->w *= s_touchK;
+        r->h *= s_touchK;
+    }
+    return 1;
+}
+
+static void touchOverlay(const RdOverlayCtx *ctx, void *user)
+{
+    (void)user;
+    ui_touch_draw_overlay(ctx);
+}
+
+/* With PlayStation and no disc sheet in a slot the touch overlay draws no
+   picture (the words); with Xbox the eight zones that have a picture take
+   the art (ui__touch_art_zones), and the presented pixels on Cross differ.
+   settings_touch_playstation_1080.png, settings_touch_xbox_1080.png. */
+static void testTouchArt(void)
+{
+    const uint32_t W = 1920, H = 1080;
+    uint8_t *a = malloc((size_t)W * H * 4), *b = malloc((size_t)W * H * 4);
+    uint32_t ow = 0, oh = 0;
+    void *prevUser = NULL;
+    RdOverlayFn prev = rd_get_present_overlay(&prevUser);
+    if (!a || !b) {
+        CHECK(0, "the touch overlay's buffers");
+        free(a);
+        free(b);
+        return;
+    }
+    ui_touch_set_source(touchSource);
+    rd_set_present_overlay(touchOverlay, NULL);
+    pad_glyphs_set_style(ICO_PAD_GLYPHS_PLAYSTATION);
+    snap1080("settings_touch_playstation");
+    CHECK(ui__touch_art_zones() == 0, "PlayStation: no zone with the art (%#x)",
+          ui__touch_art_zones());
+    int okA = rd_read_presented(a, &ow, &oh) && ow == W && oh == H;
+    pad_glyphs_set_style(ICO_PAD_GLYPHS_XBOX);
+    snap1080("settings_touch_xbox");
+    IcoTouchOverlay o;
+    touchSource(&o);
+    unsigned want = 0;
+    static const int kZones[] = {ICO_TOUCH_B_CROSS,    ICO_TOUCH_B_CIRCLE, ICO_TOUCH_B_SQUARE,
+                                 ICO_TOUCH_B_TRIANGLE, ICO_TOUCH_B_L1,     ICO_TOUCH_B_R1,
+                                 ICO_TOUCH_B_L2,       ICO_TOUCH_B_R2};
+    for (size_t i = 0; i < sizeof(kZones) / sizeof(kZones[0]); i++) {
+        const IcoTouchButton *bt = &o.layout.button[kZones[i]];
+        want |= bt->rect.w > 0.0f && bt->rect.h > 0.0f && bt->alpha > 0.0f ? 1u << kZones[i] : 0u;
+    }
+    CHECK(want != 0 && ui__touch_art_zones() == want,
+          "Xbox: the zones with a picture take the art (%#x, %#x)", ui__touch_art_zones(), want);
+    /* each picture wholly inside its button and centred on it within half
+       an output pixel (the layout is the output's size: layout pixels are
+       output pixels): a round button's corners inside the circle of
+       UI_TOUCH_ART_ROUND of its radius (and a pixel inside the ring, th
+       the unit's 0.4, at least 2), a key's inside UI_TOUCH_ART_KEY_W x
+       UI_TOUCH_ART_KEY_H of it (and inside its frame); as large as fits
+       for its group: the four faces one height and the three shoulder
+       keys one height (every Xbox piece a capital), and each group's
+       tightest picture at its limit within a pixel.  Then every button at
+       0.5 and 2 times its size: every picture 0.5 and 2 times as large,
+       within a pixel.  For each of the three sets (the group's scale read
+       as the height over the piece's own, pad_glyphs_height, so the Wii
+       Classic's short letters count too). */
+    float th = o.layout.unit * 0.4f;
+    th = th < 2.0f ? 2.0f : th;
+    float size1[ICO_TOUCH_BUTTONS][2];
+    static const int kSets[] = {ICO_PAD_GLYPHS_XBOX, ICO_PAD_GLYPHS_NINTENDO,
+                                ICO_PAD_GLYPHS_WII_CLASSIC};
+    for (int pass = 0; pass < 9; pass++) {
+        static const float kK[3] = {1.0f, 0.5f, 2.0f};
+        const int style = kSets[pass / 3];
+        s_touchK = kK[pass % 3];
+        pad_glyphs_set_style(style);
+        if (pass > 0) {
+            frame(0);
+        }
+        touchSource(&o);
+        float lo[2] = {1e9f, 1e9f}, hi[2] = {0, 0};
+        int atLimit[2] = {0, 0};
+        for (size_t i = 0; i < sizeof(kZones) / sizeof(kZones[0]); i++) {
+            const int z = kZones[i];
+            const IcoTouchButton *bt = &o.layout.button[z];
+            float q[4];
+            if (!((want >> z) & 1u)) {
+                continue;
+            }
+            if (!ui__touch_art_quad(z, q)) {
+                CHECK(0, "%s at %.1fx: zone %d's art quad", pad_glyphs_style_name(style),
+                      (double)s_touchK, z);
+                continue;
+            }
+            const float cx = bt->rect.x + bt->rect.w * 0.5f, cy = bt->rect.y + bt->rect.h * 0.5f;
+            const float w = q[2] - q[0], h = q[3] - q[1];
+            int inside, limit;
+            if (bt->round) {
+                const float r = bt->rect.w * 0.5f;
+                const float R = fminf(UI_TOUCH_ART_ROUND * r, r - th - 1.0f);
+                const float half = 0.5f * hypotf(w, h);
+                inside = half <= R + 0.5f;
+                limit = fabsf(half - R) <= 1.0f;
+            } else {
+                const float bw =
+                    fminf(UI_TOUCH_ART_KEY_W * bt->rect.w, bt->rect.w - 2.0f * th - 2.0f);
+                const float bh =
+                    fminf(UI_TOUCH_ART_KEY_H * bt->rect.h, bt->rect.h - 2.0f * th - 2.0f);
+                inside = w <= bw + 0.5f && h <= bh + 0.5f;
+                limit = fabsf(w - bw) <= 1.0f || fabsf(h - bh) <= 1.0f;
+            }
+            CHECK(fabsf((q[0] + q[2]) * 0.5f - cx) <= 0.5f &&
+                      fabsf((q[1] + q[3]) * 0.5f - cy) <= 0.5f && inside,
+                  "%s at %.1fx: zone %d's art %.1f,%.1f-%.1f,%.1f inside and centred on the %s "
+                  "%.1f,%.1f %.1fx%.1f",
+                  pad_glyphs_style_name(style), (double)s_touchK, z, (double)q[0], (double)q[1],
+                  (double)q[2], (double)q[3], bt->round ? "circle" : "key", (double)bt->rect.x,
+                  (double)bt->rect.y, (double)bt->rect.w, (double)bt->rect.h);
+            /* the groups: the four round faces, the three shoulder keys
+               (R1, a round shoulder, is a button of its own size) */
+            const int gi = z == ICO_TOUCH_B_R1 ? -1
+                                               : (z == ICO_TOUCH_B_L1 || z == ICO_TOUCH_B_L2 ||
+                                                  z == ICO_TOUCH_B_R2);
+            /* the group's one scale: the height over the piece's own */
+            const float L = h / pad_glyphs_height(style, glyphOfZone(z));
+            if (gi >= 0) {
+                lo[gi] = fminf(lo[gi], L);
+                hi[gi] = fmaxf(hi[gi], L);
+                atLimit[gi] |= limit;
+            }
+            if (pass % 3 == 0) {
+                size1[z][0] = w;
+                size1[z][1] = h;
+            } else {
+                CHECK(fabsf(w - s_touchK * size1[z][0]) <= 1.0f &&
+                          fabsf(h - s_touchK * size1[z][1]) <= 1.0f,
+                      "%s: zone %d's art %.1f x %.1f at %.1fx (%.1f x %.1f at 1x)",
+                      pad_glyphs_style_name(style), z, (double)w, (double)h, (double)s_touchK,
+                      (double)size1[z][0], (double)size1[z][1]);
+            }
+        }
+        for (int gi = 0; gi < 2; gi++) {
+            CHECK(hi[gi] > 0.0f && hi[gi] - lo[gi] <= 1.0f && atLimit[gi],
+                  "%s at %.1fx: the %s' scale %.1f .. %.1f, one at its button's limit %d",
+                  pad_glyphs_style_name(style), (double)s_touchK,
+                  gi ? "shoulder keys' pictures" : "faces' pictures", (double)lo[gi],
+                  (double)hi[gi], atLimit[gi]);
+        }
+    }
+    /* back at 1x with Xbox, presented again for the pixel check below */
+    s_touchK = 1.0f;
+    pad_glyphs_set_style(ICO_PAD_GLYPHS_XBOX);
+    touchSource(&o);
+    frame(0);
+    int okB = rd_read_presented(b, &ow, &oh) && ow == W && oh == H;
+    CHECK(okA && okB, "the touch overlay's presented outputs");
+    if (okA && okB) {
+        const IcoTouchRect *r = &o.layout.button[ICO_TOUCH_B_CROSS].rect;
+        int differ = 0;
+        for (int y = (int)(r->y + r->h * 0.3f); y < (int)(r->y + r->h * 0.7f); y++) {
+            for (int x = (int)(r->x + r->w * 0.3f); x < (int)(r->x + r->w * 0.7f); x++) {
+                if (x >= 0 && y >= 0 && x < (int)W && y < (int)H) {
+                    const size_t k = ((size_t)y * W + (size_t)x) * 4;
+                    differ += memcmp(&a[k], &b[k], 3) != 0;
+                }
+            }
+        }
+        CHECK(differ > 0, "Xbox: Cross's middle differs from PlayStation's (%d pixels)", differ);
+    }
+    pad_glyphs_set_style(ICO_PAD_GLYPHS_PLAYSTATION);
+    rd_set_present_overlay(prev, prevUser);
+    ui_touch_set_source(NULL);
+    free(a);
+    free(b);
 }
 
 static int render(void)
@@ -752,8 +1296,8 @@ static int render(void)
         press(0x40);
         const int ctlL = ui_settings_page_layout(UI_PAGE_CONTROLS);
         CHECK(settle(ctlL, 60), "Controls (touch)");
-        int cl[16];
-        const int cn = ui_settings_page_rows(UI_PAGE_CONTROLS, cl, NULL, NULL, 16);
+        int cl[24];
+        const int cn = ui_settings_page_rows(UI_PAGE_CONTROLS, cl, NULL, NULL, 24);
         for (int i = 0; i < cn; i++) {
             if (lt_ext_prop(cl[i])->right == ui_settings_page_layout(UI_PAGE_TOUCH)) {
                 lt_ext_layout(ctlL)->curItem = cl[i];
@@ -776,6 +1320,28 @@ static int render(void)
         CHECK(settle(mainL, 60), "back to the menu from Controls (touch)");
         ui_settings_set_touch_query(NULL);
     }
+    /* Gameplay -> Chains and Cutscenes (its two links before Back), each
+       with the cursor on its first row */
+    {
+        static const struct {
+            UiSettingsPage page;
+            const char *name;
+        } sub[] = {{UI_PAGE_CHAINS, "settings_gameplay_chains.png"},
+                   {UI_PAGE_CUTSCENES, "settings_gameplay_cutscenes.png"}};
+
+        for (unsigned i = 0; i < sizeof(sub) / sizeof(sub[0]); i++) {
+            int gameL = -1;
+            openGameplayPage(mainL, sub[i].page, &gameL);
+            for (int k = 0; k < 30; k++) {
+                frame(0);
+            }
+            snap(sub[i].name);
+            press(0x10);
+            CHECK(settle(gameL, 60), "back to Gameplay from %s", sub[i].name);
+            press(0x10);
+            CHECK(settle(mainL, 60), "back to the menu from Gameplay (%s)", sub[i].name);
+        }
+    }
     /* Controls -> Remap, then a capture in progress */
     lt_ext_layout(mainL)->curItem = mainLink(UI_PAGE_CONTROLS);
     press(0x40);
@@ -793,23 +1359,57 @@ static int render(void)
     press(0x40);
     frame(0);
     snap("settings_remap_capture.png");
-    /* the New Game screen, the cursor on Mirror mode's On, New Game+
-       Off lit; then the cursor on New Game+ (its note), Mirror mode On lit */
+    /* the New Game screen, the cursor on Difficulty (Normal, its note),
+       then Hard; then Customize, the cursor on New Game+ (its note, in
+       English and French) and its Shadows, Combat and Rules pages, back to
+       the screen */
+    gFlagGameClear = 0;
     int ml = ui_new_game_screen_enter();
     lt_switch_layout(ml);
     CHECK(settle(ml, 60), "the New Game screen");
-    press(0x2000);
     frame(0);
     snap("settings_new_game_screen.png");
+    press(0x2000);
+    frame(0);
+    snap("settings_new_game_screen_hard.png");
     press(0x4000);
-    frame(0);
-    snap("settings_new_game_screen_ngp.png");
-    NonLinearCameraMove = 3; /* French: the longest note */
-    frame(0);
-    frame(0);
-    snap("settings_new_game_screen_ngp_fr.png");
-    NonLinearCameraMove = 2;
-    frame(0);
+    press(0x40); /* Customize */
+    {
+        const int custL = ui_settings_page_layout(UI_PAGE_CUSTOMIZE);
+        CHECK(settle(custL, 60), "Customize from the New Game screen (%d)", current_layout_id);
+        frame(0);
+        snap("settings_customize.png");
+        lt_ext_layout(custL)->curItem = ui_settings_row_of(UI_PAGE_CUSTOMIZE, UI_OPT_NEWGAME_PLUS);
+        frame(0);
+        frame(0);
+        snap("settings_customize_ngp.png");
+        NonLinearCameraMove = 3; /* French: the longest note */
+        frame(0);
+        frame(0);
+        snap("settings_customize_ngp_fr.png");
+        NonLinearCameraMove = 2;
+        frame(0);
+
+        static const struct {
+            UiSettingsPage page;
+            const char *name;
+        } cust[] = {{UI_PAGE_SHADOWS, "settings_customize_shadows.png"},
+                    {UI_PAGE_COMBAT, "settings_customize_combat.png"},
+                    {UI_PAGE_RULES, "settings_customize_rules.png"}};
+
+        for (unsigned i = 0; i < sizeof(cust) / sizeof(cust[0]); i++) {
+            openLink(custL, UI_PAGE_CUSTOMIZE, cust[i].page);
+            for (int k = 0; k < 30; k++) {
+                frame(0);
+            }
+            snap(cust[i].name);
+            press(0x10);
+            CHECK(settle(custL, 60), "back to Customize from %s", cust[i].name);
+        }
+        press(0x10);
+        CHECK(settle(ml, 60), "Customize: back to the New Game screen");
+    }
+    ico_difficulty_reset();
     /* the quit confirmation, the cursor on Yes */
     int ql = ui_quit_screen_layout();
     lt_switch_layout(ql);
@@ -833,6 +1433,8 @@ static int render(void)
         lt_ext_prop(opt)->defaultMask = lt_ext_prop(quit)->defaultMask = 1;
         ui_settings_title_mask(1);
     }
+    /* the button pictures in the viewer's prompt lines at 1x */
+    testArtPixels();
     /* the Settings and Display screens at Enhanced 4x, full height, the
        atlas at a 960-line output's scale (settings_main_4x.png,
        settings_display_4x.png) */
@@ -981,12 +1583,54 @@ static int render(void)
             press(0x10);
             CHECK(settle(mainL, 60), "back to the menu from %s at 1080p", pg[i].name);
         }
+        /* Gameplay's two pages at 1080p, through Gameplay */
+        {
+            static const struct {
+                UiSettingsPage page;
+                const char *name;
+            } sub[] = {{UI_PAGE_CHAINS, "settings_gameplay_chains"},
+                       {UI_PAGE_CUTSCENES, "settings_gameplay_cutscenes"}};
+
+            for (unsigned i = 0; i < sizeof(sub) / sizeof(sub[0]); i++) {
+                int gameL = -1;
+                openGameplayPage(mainL, sub[i].page, &gameL);
+                for (int k = 0; k < 30; k++) {
+                    frame(0);
+                }
+                snap1080(sub[i].name);
+                press(0x10);
+                CHECK(settle(gameL, 60), "back to Gameplay from %s at 1080p", sub[i].name);
+                press(0x10);
+                CHECK(settle(mainL, 60), "back to the menu from Gameplay (%s) at 1080p",
+                      sub[i].name);
+            }
+        }
         int mir = ui_new_game_screen_enter();
         lt_switch_layout(mir);
         CHECK(settle(mir, 60), "the New Game screen at 1080p");
         snap1080("settings_new_game_screen");
+        /* Customize on New Game+, then Customize > Rules (the dimmed
+           Knock-downs count at Normal) */
         press(0x4000);
-        snap1080("settings_new_game_screen_ngp");
+        press(0x40);
+        {
+            const int custL = ui_settings_page_layout(UI_PAGE_CUSTOMIZE);
+            CHECK(settle(custL, 60), "Customize at 1080p");
+            lt_ext_layout(custL)->curItem =
+                ui_settings_row_of(UI_PAGE_CUSTOMIZE, UI_OPT_NEWGAME_PLUS);
+            frame(0);
+            frame(0);
+            snap1080("settings_customize_ngp");
+            openLink(custL, UI_PAGE_CUSTOMIZE, UI_PAGE_RULES);
+            for (int k = 0; k < 30; k++) {
+                frame(0);
+            }
+            snap1080("settings_customize_rules");
+            press(0x10);
+            CHECK(settle(custL, 60), "back to Customize at 1080p");
+            press(0x10);
+            CHECK(settle(mir, 60), "back to the New Game screen at 1080p");
+        }
         /* the pause menu with the journey's lines on its right (a
            stage running, an assist on, New Game+ on), then in French (the
            longest labels) */
@@ -1065,6 +1709,7 @@ static int render(void)
         CHECK(settle(14, 60), "the save screen at 1080p");
         snap1080("settings_save_preview");
         testPhotoPanel();
+        testTouchArt();
         s_reduce = 0;
     }
     CHECK(gif_HostUndecodedTotal() == 0, "%u undecoded writes", gif_HostUndecodedTotal());

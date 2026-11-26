@@ -52,6 +52,13 @@ _SHADER = (
     "by port/rhi/test/shaders/gen_shaders.sh (DXC)."
 )
 
+_SHADER_SCOPE = (
+    "compiled shader bytecode of two shaders written for the Vulkan buffer "
+    "barrier tests (a fragment shader reading a StructuredBuffer and its "
+    "input-less vertex shader), their HLSL source and the DXC command in the "
+    "header's comment (port/rhi/test/rhi_vk_ps_storage.h)."
+)
+
 # (path, array name) -> reason. Every entry is reviewed; see
 # tools/check_no_rom.sh rule 5 and docs/LEGAL.md.
 EXEMPT = {
@@ -115,6 +122,10 @@ EXEMPT = {
     ("port/render/test/rd_fog_test.c", "kColT4"): _PORT
     + "the GS PSMT4 column layout (which nibble each of 32 x 4 pixels is), "
     "the reference swizzle the test checks the port's against.",
+    ("port/render/rd_fixture.c", "s_k"): _PORT
+    + "SHA-256's 64 round constants (FIPS 180-4 section 4.2.2: the first 32 "
+    "bits of the fractional parts of the cube roots of the first 64 primes), "
+    "the fixtures' expansion pin; a published standard's constants.",
     ("port/rhi/test/shaders/rhi_test_dxil.h", "dxil_vs_main"): _PORT
     + _SHADER,
     ("port/rhi/test/shaders/rhi_test_dxil.h", "dxil_ps_dual"): _PORT
@@ -135,6 +146,12 @@ EXEMPT = {
     ("port/rhi/test/shaders/rhi_test_spv.h", "spv_ps_rov"): _PORT + _SHADER,
     ("port/rhi/test/shaders/rhi_test_dxil.h", "dxil_ps_subpass"): _PORT + _SHADER,
     ("port/rhi/test/shaders/rhi_test_spv.h", "spv_ps_subpass"): _PORT + _SHADER,
+    ("port/rhi/test/shaders/rhi_test_dxil.h", "dxil_vs_store"): _PORT + _SHADER,
+    ("port/rhi/test/shaders/rhi_test_spv.h", "spv_vs_store"): _PORT + _SHADER,
+    ("port/rhi/test/shaders/rhi_test_dxil.h", "dxil_cs_store"): _PORT + _SHADER,
+    ("port/rhi/test/shaders/rhi_test_spv.h", "spv_cs_store"): _PORT + _SHADER,
+    ("port/rhi/test/rhi_vk_ps_storage.h", "spv_ps_storage"): _PORT + _SHADER_SCOPE,
+    ("port/rhi/test/rhi_vk_ps_storage.h", "spv_vs_tri"): _PORT + _SHADER_SCOPE,
 }
 
 INT_TYPE = (

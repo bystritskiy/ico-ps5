@@ -38,4 +38,24 @@ void rhi_test_log(const char *fmt, ...)
  * passed), 1 (a mismatch or error) or 77 (no device, or accept said no). */
 int rhi_test_run_cells(const RhiTestConfig *cfg);
 
+/* The vertex shaders' stores (rhi_test_stores.c: RhiLimits.vertexStores,
+ * RHI_BIND_STORAGE_BUFFER_RW, RhiPipelineDesc.noRaster and the store
+ * bracket): brings the backend up and down itself.  Returns 0 (the points'
+ * words read back), 1 (a mismatch, an error, or a bracket taken where no
+ * stores are reported) or 77 (no device, or no vertex stores: the bracket
+ * refused). */
+int rhi_test_vertex_stores(const RhiTestConfig *cfg);
+
+/* The compute shaders' stores (rhi_test_compute.c: RhiLimits.computeStores,
+ * RhiPipelineDesc.compute, rhi_cmd_dispatch and the compute bracket; with
+ * vertex stores too, the bind-point rule): brings the backend up and down
+ * itself.  Returns 0 (the words read back), 1 (a mismatch, an error, or a
+ * bracket taken or a dispatch counted where no compute stores are
+ * reported) or 77 (no device, or no compute stores: the bracket refused). */
+int rhi_test_compute_stores(const RhiTestConfig *cfg);
+
+/* The native-handle surface of rhi_native.h on the running backend
+ * (rhi_test_native.c); needs the device up.  Returns the failure count. */
+int rhi_test_native_surface(const char *label);
+
 #endif /* PORT_RHI_TEST_RHI_TEST_COMMON_H */

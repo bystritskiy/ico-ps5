@@ -149,9 +149,10 @@
  * before the sprite, A = S + a' (A - S), never through P: no light is
  * recycled and nothing runs to white or dark at any k.  feedback then makes
  * no DISPLAY head copy (the sprite does not read DISPLAY), and rd_present
- * hands rd_blur_smooth.c each present (rd__blur_smooth_arm) with k: the
- * present clock's tick over its step on the timer path, the presents the
- * tick before counted under the vsync lock.
+ * hands rd_blur_smooth.c each present (rd__blur_smooth_arm) with the
+ * present clock's time since the present before and its tick on the timer
+ * path (a' from time), k the presents the tick before counted under the
+ * vsync lock (rd_present_clock.c).
  */
 #include <math.h>
 #include <stddef.h>
@@ -159,9 +160,15 @@
 #include <stdlib.h>
 #include <string.h>
 #include "rd_camera_blend.h"
+#include "rd_inames.h"
 #include "rd_internal.h"
+#include "rd_layer.h"
 #include "rd_mesh.h"
+#include "rd_upscale.h"
+#include "rd_velocity.h"
+#include "rd_vu_skin_check.h"
 #include "xxh3.h"
+#include "rd_cpu_phase.h"
 
 /* ------------------------------------------------------------ the result */
 
@@ -4209,12 +4216,16 @@ static RdMeshRec *scratchFor(const RdMeshRec *c, const float (*stream)[4])
         if (c->batchCount) {
             memcpy(m->batches, c->batches, (size_t)c->batchCount * sizeof(RdVuBatchRec));
         }
+        if (c->name[0]) { /* a reused scratch takes the name of the mesh it copies now */
+            memcpy(m->name, c->name, sizeof(m->name));
+        }
     } else {
         if (m) {
             rd_destroy_vu_mesh((RdMesh){*id});
         }
-        *id = rd__vu_mesh_create_raw(stream, c->vertexCount, c->qwPerVertex, c->index,
-                                     c->indexCount, c->batches, c->batchCount, "interp");
+        *id =
+            rd__vu_mesh_create_raw(stream, c->vertexCount, c->qwPerVertex, c->index, c->indexCount,
+                                   c->batches, c->batchCount, c->name[0] ? c->name : "interp");
         m = rd__mesh_rec(*id);
         if (!m) {
             *id = 0;
@@ -5711,17 +5722,18 @@ bool rd__interp_copy_at(int l, uint32_t at, uint32_t from, uint32_t to, uint32_t
  * frame.)  For the motion blur, the same for DISPLAY when the frame reads it (the
  * motion blur's old frame, the file header): DISPLAY into DISPLAY_HELD at the
  * first present's head, back at the later ones', so every present draws the
- * tick's FIX over the previous tick's picture.  Under Motion blur: Smooth
+ * tick's FIX over the previous tick's picture (under the display layer,
+ * PRE_DISPLAY into PRE_HELD: rd_layer.h).  Under Motion blur: Smooth
  * (rd__blur_smooth_active) the sprite reads its accumulator instead and
  * DISPLAY is left alone (FEED128's copies as ever). */
 static void feedback(int firstOfTick)
 {
     const uint32_t feed = rd_target(RD_TARGET_FEED128).id;
     const uint32_t held = rd_target(RD_TARGET_FEED_HELD).id;
-    const uint32_t disp = rd_target(RD_TARGET_DISPLAY).id;
-    const uint32_t dispHeld = rd_target(RD_TARGET_DISPLAY_HELD).id;
+    uint32_t disp = rd_target(RD_TARGET_DISPLAY).id;
+    uint32_t dispHeld = rd_target(RD_TARGET_DISPLAY_HELD).id;
     const int head = rd__first_list((int)s_out.keep);
-    int fed = 0, read = 0;
+    int fed = 0, read = 0, early = 0;
     RdStateBlock st = s_out.startState;
     for (int l = head; l < RD_LIST_COUNT; l++) {
         const RdCmdList *cl = &s_out.lists[l];
@@ -5731,8 +5743,22 @@ static void feedback(int firstOfTick)
                 continue;
             }
             fed |= feed && writesTarget(c, &st, feed);
-            read |= disp && readsTarget(c, &st, disp);
+            const int r = disp && readsTarget(c, &st, disp);
+            read |= r;
+            early |= r && l < 11;
         }
+    }
+    /* the display layer (rd_layer.h): lists 0-10 read PRE_DISPLAY, the
+     * reduction of the scene before the upscale, for DISPLAY; it is held
+     * (a later present only when the tick's first held it) */
+    static int preTick;
+    uint32_t pre, preHeld;
+    const int usePre =
+        early && rd__layer_feedback_ids(&pre, &preHeld, false) && (firstOfTick || preTick);
+    preTick = firstOfTick ? usePre : preTick;
+    if (usePre) {
+        disp = pre;
+        dispHeld = preHeld;
     }
     if (fed && held) {
         headCopy(head, firstOfTick ? feed : held, firstOfTick ? held : feed, feed);
@@ -5832,6 +5858,7 @@ const RdFrame *rd__interp_frame(const RdFrame *prev, const RdFrame *cur, float a
 {
     RdInterpStats st;
     memset(&st, 0, sizeof(st));
+    rd_cpu_start(); /* the phases (rd_cpu_phase.c) */
     if (!cur || !copyFrame(cur)) {
         if (stats) {
             *stats = st;
@@ -5845,6 +5872,7 @@ const RdFrame *rd__interp_frame(const RdFrame *prev, const RdFrame *cur, float a
             st.keyed += isKeyedDraw(&s_out.lists[l].cmds[i]);
         }
     }
+    rd_cpu_mark(RD_CPU_I_COPY);
     s_scratchUsed = 0;
     s_scratchBytes = 0;
     s_doneCount = 0;
@@ -5864,6 +5892,7 @@ const RdFrame *rd__interp_frame(const RdFrame *prev, const RdFrame *cur, float a
     if (blend) {
         (void)indexCur(); /* false: the ordinal pairing for every key */
     }
+    rd_cpu_mark(RD_CPU_I_INDEX);
     s_cam.on = 0;
     s_camOff = t < 1.0f ? RD_CAM_OFF_NONE : RD_CAM_OFF_ALPHA1;
     s_worldPrevRaw = s_worldCurRaw = 0;
@@ -5907,7 +5936,8 @@ const RdFrame *rd__interp_frame(const RdFrame *prev, const RdFrame *cur, float a
                 memcpy(s_out.vu.invView, s_cam.itf, sizeof(s_cam.itf));
             }
         }
-        RdStateBlock rs = s_out.startState; /* the state each draw replays under */
+        rd__inames_first(firstOfTick, &s_out); /* names counted once a frame */
+        RdStateBlock rs = s_out.startState;    /* the state each draw replays under */
         for (int l = 0; l < RD_LIST_COUNT; l++) {
             for (uint32_t i = 0; i < s_out.lists[l].count; i++) {
                 RdCmd *c = &s_out.lists[l].cmds[i];
@@ -5916,6 +5946,7 @@ const RdFrame *rd__interp_frame(const RdFrame *prev, const RdFrame *cur, float a
                 }
                 if (!isKeyedDraw(c)) {
                     camCurDraw(c); /* unkeyed, cur's through the blended camera */
+                    rd__inames_note(c, RD_INAME_UNKEYED);
                     continue;
                 }
                 const RdCmd *pc = matchOf(prev, c, l, i);
@@ -5924,6 +5955,7 @@ const RdFrame *rd__interp_frame(const RdFrame *prev, const RdFrame *cur, float a
                     const int why = pc ? RD_UNMATCHED_PAYLOAD : s_unWhy;
                     st.missing++;
                     st.unmatchedWhy[why < RD_UNMATCHED_COUNT ? why : 0]++;
+                    rd__inames_note(c, RD_INAME_UNMATCHED);
                     camCurDraw(c);
                     if (!pc && isProjected(c)) {
                         umCurOnly((uint32_t)l, i); /* faded in, or from half way */
@@ -5937,6 +5969,7 @@ const RdFrame *rd__interp_frame(const RdFrame *prev, const RdFrame *cur, float a
                 int r;
                 s_rotated = 0;
                 s_shifted = 0;
+                rd__inames_step(prev, pc, op, c, cur->number, firstOfTick); /* before the blend */
                 switch (c->type) {
                 case RDC_SCREEN:
                     r = blendScreen(op, prev, pc, c, t);
@@ -5982,6 +6015,9 @@ const RdFrame *rd__interp_frame(const RdFrame *prev, const RdFrame *cur, float a
                 if (r == R_MISMATCH) {
                     st.why[s_why < RD_MISMATCH_COUNT ? s_why : 0]++;
                 }
+                if (r == R_MISMATCH || r == R_JUMP) {
+                    rd__inames_note(c, r == R_JUMP ? RD_INAME_JUMPED : RD_INAME_MISMATCHED);
+                }
                 if (r == R_LERP && s_rotated && (c->type == RDC_MESH || c->type == RDC_SKINNED)) {
                     st.rotated++;
                     st.turned += s_drawTurn > 10.0;
@@ -5989,6 +6025,7 @@ const RdFrame *rd__interp_frame(const RdFrame *prev, const RdFrame *cur, float a
                     st.longWay += (uint32_t)s_drawLong;
                     st.turnSnap += (uint32_t)s_drawSnap;
                     if (s_drawSnap) {
+                        rd__inames_note(c, RD_INAME_TURN);
                         st.turnWhy[s_drawSnapWhy < RD_TURN_WHY_COUNT ? s_drawSnapWhy : 0]++;
                         if (s_track) {
                             snapNote(c, l, s_drawSnapWhy, s_drawTurn);
@@ -6013,6 +6050,7 @@ const RdFrame *rd__interp_frame(const RdFrame *prev, const RdFrame *cur, float a
             }
         }
     }
+    rd_cpu_mark(RD_CPU_I_BLEND);
     /* the other mesh draws (unkeyed, unmatched, snapped) take cur's
      * stream when the live one has moved on */
     uint32_t next = 0;
@@ -6029,9 +6067,11 @@ const RdFrame *rd__interp_frame(const RdFrame *prev, const RdFrame *cur, float a
             st.morph += morphDraw(c, NULL, NULL, cur, 1.0f);
         }
     }
+    rd_cpu_mark(RD_CPU_I_MORPH);
     if (blend) {
         unmatchedPass(prev, cur, t); /* inserts commands, so after the passes above */
     }
+    rd_cpu_mark(RD_CPU_I_UNMATCHED);
     st.turnFull = s_turnFull;
     st.prevKept = s_umPrevKept;
     st.prevHeld = s_umPrevHeld;
@@ -6058,10 +6098,16 @@ const RdFrame *rd__interp_frame(const RdFrame *prev, const RdFrame *cur, float a
      * between a tick's first present and the later ones */
     s_hashOk = !(blend && s_cam.on && !s_cam.still) && !g_rd.settings.motionBlurSmooth;
     s_hash = s_hashOk ? outHash() : 0;
+    rd_cpu_mark_hash(s_hashOk);
     feedback(firstOfTick);
     /* the glow kept from the tick's first present (rd_glow_hold.c): after
      * the hash too, which the held glow leaves exact */
     (void)rd__glow_hold(&s_out, firstOfTick);
+    if (firstOfTick && (st.snap == RD_SNAP_CAMERA || st.snap == RD_SNAP_WALL)) {
+        rd__velocity_forget_as(RD_UPSCALE_RESET_CAMERA); /* the upscaler's history too */
+    }
+    rd__velocity_attach(&s_out, 0); /* VuPrevCB: the last present's (rd_velocity.h) */
+    rd_cpu_mark(RD_CPU_I_REST);
     if (stats) {
         *stats = st;
     }
@@ -6118,24 +6164,6 @@ static struct {
      * (Motion blur: Smooth's k under the vsync lock, rd_present) */
     uint32_t tickPresents, lastTickPresents;
 } s_pres;
-
-/* the present clock's last tick and step (rd_present_clock_alpha): Motion
- * blur: Smooth's k on the timer path */
-static double s_clockTickMs, s_clockStepMs;
-
-/* the presents a tick for Motion blur: Smooth (rd_blur_smooth.c), at a
- * tick's first present: the clock's tick over its step when the clock ran
- * for this present (raw a number), else the presents the tick before
- * counted (the vsync lock); 0 before either is known (the first tick) */
-static uint32_t presentsPerTick(double raw)
-{
-    if (!isnan(raw) && s_clockTickMs > 0.0 && s_clockStepMs > 0.0) {
-        const double k = floor(s_clockTickMs / s_clockStepMs + 0.5);
-        return k < 1.0 ? 1u
-                       : (k > (double)RD_BLUR_SMOOTH_K_MAX ? RD_BLUR_SMOOTH_K_MAX : (uint32_t)k);
-    }
-    return s_pres.lastTickPresents;
-}
 
 #define RD_INTERP_LOG_FRAMES 250
 
@@ -6209,6 +6237,7 @@ static void presentLog(void)
             (unsigned long long)s_pres.lerped, (unsigned long long)s_pres.missing,
             (unsigned long long)s_pres.mismatch, (unsigned long long)s_pres.jump,
             (unsigned long long)s_pres.morph);
+    rd__inames_log(s_pres.frames, s_pres.presents); /* the draws by name (rd_inames.h) */
     /* a separate line, so the line above keeps its form */
     const uint32_t flapping = flapReport();
     rd__log(
@@ -6355,6 +6384,7 @@ static void presentLog(void)
     rd__aura_box_block();    /* the aura's read in two passes, when it drew or fell back */
     rd__reshow_block();      /* the still re-present's */
     rd__glow_hold_block();   /* the glow held between ticks */
+    rd__vu_skin_block();     /* the skin check's counts, when it ran */
     const uint32_t number = s_pres.number;
     const uint32_t tickPresents = s_pres.tickPresents, lastTickPresents = s_pres.lastTickPresents;
     memset(&s_pres, 0, sizeof(s_pres));
@@ -6362,10 +6392,6 @@ static void presentLog(void)
     s_pres.tickPresents = tickPresents;
     s_pres.lastTickPresents = lastTickPresents;
 }
-
-/* rd__present_clock_raw: the last rd_present_clock_alpha's value before its
- * clamp, NAN once rd_present has taken it */
-static double s_clockRaw = NAN;
 
 static void presentReset(void)
 {
@@ -6519,7 +6545,8 @@ bool rd_present(float alpha)
      * ICO_RD_S2_LEGACY=1 the window replaces the clock's alpha by the
      * measured one after the clock ran, and the bin still follows the
      * clock's value */
-    const double raw = rd__thread_clock_raw(); /* the poster's, on the render thread */
+    double gap[2];                            /* and its time since the present before, its tick */
+    const double raw = rd__thread_clock(gap); /* the poster's, on the render thread */
     /* the tick's first present keeps the feedback passes' inputs (FEED128,
      * and DISPLAY for the motion blur), the later ones start from them
      * again (feedback) */
@@ -6531,7 +6558,7 @@ bool rd_present(float alpha)
         s_pres.tickPresents = 0;
     }
     s_pres.tickPresents++;
-    const uint32_t k = first ? presentsPerTick(raw) : 0u;
+    const uint32_t k = first ? rd__present_clock_k(raw, s_pres.lastTickPresents) : 0u;
     {
         const int bin = rd__alpha_bin(alpha, raw);
         s_pres.alphaBins[bin]++;
@@ -6543,9 +6570,10 @@ bool rd_present(float alpha)
     if (cur->keep) {
         /* a keep frame draws lists 11..12 over DISPLAY: once; the other
          * presents show DISPLAY again (an empty keep frame) */
-        rd__blur_smooth_arm(first, k);                   /* a keep frame draws no motion blur */
+        rd__blur_smooth_arm(first, k, gap[0], gap[1]);   /* a keep frame draws no motion blur */
         blendedDumpTake(NULL, true, cur->number, alpha); /* the tick's own picture */
         if (first) {
+            rd__velocity_keep(cur); /* the next picture begins a new history */
             return rd__replay_frame_async(cur, 1, true);
         }
         static RdFrame empty;
@@ -6565,7 +6593,7 @@ bool rd_present(float alpha)
         blendedDumpTake(NULL, false, cur->number, alpha);
         return false;
     }
-    rd__blur_smooth_arm(first, k); /* Motion blur: Smooth's present */
+    rd__blur_smooth_arm(first, k, gap[0], gap[1]); /* Motion blur: Smooth's present */
     const bool ok = rd__present_blended(f, first, true);
     /* F12's blended frame: after the present, so the dump's write is not
      * in the picture's time; s_out stays the frame drawn until the next
@@ -6574,7 +6602,7 @@ bool rd_present(float alpha)
     return ok;
 }
 
-/* ---------------------------------------------------------- present clock */
+/* ------------------------------- the alpha bins (the clock: rd_present_clock.c) */
 
 int rd__alpha_bin(float alpha, double raw)
 {
@@ -6589,58 +6617,4 @@ int rd__alpha_bin(float alpha, double raw)
     }
     const int k = (int)(alpha * 10.0f);
     return RD_ALPHA_BIN_TENTH0 + (k < 0 ? 0 : (k > 9 ? 9 : k));
-}
-
-double rd__present_clock_raw(void)
-{
-    return s_clockRaw;
-}
-
-double rd__present_clock_raw_take(void)
-{
-    const double r = s_clockRaw;
-    s_clockRaw = NAN;
-    return r;
-}
-
-float rd_present_clock_alpha(RdPresentClock *c, double nowMs, double tickAtMs, double tickMs,
-                             double nominalMs)
-{
-    s_clockRaw = NAN;
-    if (!(tickMs > 0.0)) {
-        return 0.0f;
-    }
-    const double step = c->stepMs > 0.0 ? c->stepMs : (nominalMs > 0.0 ? nominalMs : 0.0);
-    const double since = nowMs - c->lastMs;
-    bool reset = c->presents == 0 || since < 0.0 || !(step > 0.0) || since > 4.0 * step;
-    if (!reset) {
-        /* the running mean of the intervals, a sixteenth of the difference a
-         * present */
-        c->stepMs = step + (since - step) / 16.0;
-        const double predicted = c->clockMs + c->stepMs;
-        const double err = nowMs - predicted;
-        if (fabs(err) > 0.5 * tickMs) {
-            reset = true;
-        } else {
-            c->clockMs = predicted + err / 8.0;
-        }
-    }
-    if (reset) {
-        c->clockMs = nowMs;
-        if (c->presents != 0 && since > 0.0 && (!(step > 0.0) || since <= 4.0 * step)) {
-            c->stepMs = since; /* the first interval, when nothing nominal was given */
-        } else if (!(c->stepMs > 0.0)) {
-            c->stepMs = nominalMs > 0.0 ? nominalMs : 0.0;
-        }
-        c->presents = 0;
-        c->resets++;
-    }
-    c->presents++;
-    c->lastMs = nowMs;
-    s_clockTickMs = tickMs; /* Motion blur: Smooth's presents a tick */
-    s_clockStepMs = c->stepMs;
-    double a = (c->clockMs - tickAtMs) / tickMs;
-    s_clockRaw = a; /* before the clamp: the alpha histogram's "clamped from below" */
-    a = a < 0.0 ? 0.0 : (a > 0.999 ? 0.999 : a);
-    return (float)a;
 }

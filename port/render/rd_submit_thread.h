@@ -3,9 +3,13 @@
  *
  * The render thread (rd_thread.h) makes a picture handed over to it: the
  * interpolation, the fence wait, the acquire, the uploads and the walk,
- * then the list's end, its submit and the present.  With the submit thread
- * the last three leave it: the replay's end (rd__submit_frame) keeps the
- * list open (rd__submit_defer) and the job's end posts it here
+ * then the lists' ends, their submits and the present (a presenting
+ * picture has two lists, its scene's and the present's pass's own, so only
+ * the second waits for the window's image: rd_submit.c).  With the submit
+ * thread the submits and the present leave it: the replay's end
+ * (rd__submit_frame) ends the scene's list before it begins the
+ * present's, keeps the last list open (rd__submit_defer) and the job's
+ * end posts both here
  * (rd__submit_post_pending), so the render thread is free for the next
  * picture as soon as its walk ends, and the game thread's next present
  * waits for that much only (the drain of rd_present_post).
@@ -62,8 +66,127 @@
  *                   before anything of picture N+1; only N+1's acquire may
  *                   come before N's present (the swapchain's lock orders
  *                   the two calls; vk_swapchain.c).
+ *   the GPU's end first
+ *                   (issue 179; the device table's PRESENT_FREE, the row
+ *                   android: every Android device; with the slots apart
+ *                   only) a job of a picture Frame rate Original handed
+ *                   over (rd_thread.h rd__thread_original_job) may wait
+ *                   after its submit for its work to end on the GPU
+ *                   (rhi_wait_submitted), outside the swapchain's lock,
+ *                   and present after it.  On the Mali-G52 the driver's
+ *                   present returns at the end of GPU work (the picture
+ *                   before's, v0.11.12's log), and with the lock held
+ *                   through that call the game's gate counted the picture
+ *                   before as busy and skipped the next frame whenever a
+ *                   picture's GPU time passed the tick.  On a driver
+ *                   whose present returns early (the owner's Pixel,
+ *                   PowerVR: 0.8 ms calls with the GPU work still running)
+ *                   the wait would only add the GPU's remaining time
+ *                   before every present.  So the verdict is the device's,
+ *                   taken at run time: the first Original presents are
+ *                   made without the wait and the driver's call of each
+ *                   is timed, nothing else done before or around it.  A
+ *                   call under 2 ms is not counted and costs nothing (a
+ *                   driver whose present returns early does not decide:
+ *                   the rule stays off; the counts start again every
+ *                   RD_GPU_FIRST_LATE timed presents without a verdict).  After a call of 2 ms or more the
+ *                   submit thread makes one unbounded wait for the
+ *                   previous present job's submission (rhi_last_submitted
+ *                   after its submits, rhi_wait_value_ns), never for the
+ *                   picture's own (that wait would leave the next present
+ *                   nothing of the picture before to wait for): back
+ *                   within 1 ms, the picture before had ended by the
+ *                   call's return, so the call lasted to the end of GPU
+ *                   work (issue 179's Mali-G52, its reporter's log line
+ *                   562: 140.3 ms, back at the picture before's signal);
+ *                   blocked 1 ms or more, early; failed, unknown (its
+ *                   result kept for the 10 s line).  The classes:
+ *                   rd_submit_queue.h rd__sq_gf_class.  At
+ *                   RD_GPU_FIRST_SAMPLES counted the rule is on where
+ *                   RD_GPU_FIRST_NEED or more returned at the end of GPU
+ *                   work, else off, with one line; after it no wait is
+ *                   made again.  The timeline counter's instant read
+ *                   (rhi_submitted_finished: no sample was ever counted
+ *                   on the Mali-G52 with it as the input) is made only
+ *                   after the wait, for the first 8 samples' lines, and
+ *                   only logged.  Taken anew at every start of the thread
+ *                   (a renderer switch, a new device) and where the
+ *                   present mode changed since (a FIFO present waits for
+ *                   the display, not the GPU).  With the rule on, while
+ *                   the job is in that wait with no job behind it
+ *                   (rd_thread_submit_gpu_wait_alone) the gate does not
+ *                   count it (rd_thread.c rd__thread_picture_busy) and the
+ *                   hand-over does not wait for it (rd__replay_frame_post):
+ *                   the next picture's interpolation, fence wait, acquire
+ *                   (beside the pending present: vk_swapchain.c, the
+ *                   swapchain having images to spare), uploads and walk
+ *                   run meanwhile, and its job is posted behind this one,
+ *                   so its submit follows this present: the GPU never holds
+ *                   two pictures (the queue's order, the slots' rule below).
+ *                   The render thread's slot ahead then waits for this job
+ *                   (the picture before's slot), so at most one picture is
+ *                   recorded ahead.  A call that is not a slot call still
+ *                   waits for the whole job through the call guard (a
+ *                   texture made or retired, a pipeline made, a readback;
+ *                   the game thread's calls).  The other frame rates are
+ *                   untouched (their pacing reads the job's times as they
+ *                   are).
+ *   ahead           (issue 179, v0.11.13's log: with the rule above the
+ *                   GPU sat idle before every picture, 6-12 ms in play,
+ *                   from the picture's GPU end to the next one's submit:
+ *                   the wake-up, the present, the finish, the next one's
+ *                   end and submit; at GPU times near the 40 ms tick the
+ *                   chain passed the tick and pictures were skipped as
+ *                   busy) with the verdict on the next picture is not
+ *                   kept behind the picture before's present: every job
+ *                   posted is ended and submitted at once (its submission
+ *                   value kept, rhi_last_submitted), beside the picture
+ *                   before's wait, which a thread of its own makes (the
+ *                   waiter: rhi_wait_value_ns for the held job's value,
+ *                   nothing else); when it returns this thread presents
+ *                   the held job, finishes it, holds the next and arms
+ *                   the waiter for it.  This thread keeps every queue
+ *                   call (ends, submits, presents); the waiter's call needs
+ *                   no lock against them (vkWaitSemaphores, vk_cmd.c "Frame
+ *                   slots": the recording thread's fence waits already run
+ *                   beside the submits) and writes only the wait's own
+ *                   progress pair, which this thread no longer writes while
+ *                   the order runs.  Two jobs at most (RD_SUBMIT_DEPTH, the
+ *                   two frame slots): the render thread's next picture waits
+ *                   for its slot's picture two before as always.  The gate
+ *                   (rd_thread.c rd__thread_picture_busy) no longer counts
+ *                   the submit thread's work as busy, and the hand-over only
+ *                   reaps (rd_thread_submit_ahead_now).  The present-call
+ *                   guard: of the last RD_AHEAD_GUARD_WINDOW long present
+ *                   calls made with a later picture submitted,
+ *                   RD_AHEAD_GUARD_LONG that waited for the later picture's
+ *                   GPU work (rd_submit_queue.h rd__sq_guard_class: found
+ *                   ended by the call's return or within 1.0 ms of it, the
+ *                   call begun with it running and covering half its GPU
+ *                   span; a slow call while it ran on is not counted; a
+ *                   failed read or wait is) put the run back on one picture
+ *                   at a time, with one line; so do a failed
+ *                   wait, a job whose submits moved the submission number
+ *                   by fewer than its submits and a lost device, each found
+ *                   before what follows it (the jobs already submitted
+ *                   finish as the one-at-a-time order's: their wait, then
+ *                   their present); off so, it stays off for the rest of
+ *                   the process, a restart of this thread included (a
+ *                   Graphics API switch).  A start after one that lost the
+ *                   device or hung its driver (the loss ladder,
+ *                   ICO_LOSS_ROW) or that the watchdog ended keeps one at a
+ *                   time; so does every start of the version after a run
+ *                   that ended so, or crashed, with the order in effect
+ *                   (port/platform/ahead_mark.h: rd_thread_submit_ahead_prev
+ *                   names either).  A job submitted behind the picture
+ *                   before has its present time counted from that
+ *                   picture's GPU end (rd__sq_present_from).
+ *                   Undecided or off, nothing of it runs (no waiter, no
+ *                   call made in another order).
  *   the depth       at most RD_SUBMIT_DEPTH jobs queued and running
- *                   (rd_submit_queue.h); with the rule above there is one.
+ *                   (rd_submit_queue.h); with the rule above there is one,
+ *                   with the GPU's end first two (the job in its wait and
+ *                   the next picture's), ahead two submitted.
  *   the times       a job's submit and present times go into its replay's
  *                   perf record (rd__perf_submit_times) when a thread that
  *                   waited for it takes them: the window's replays line
@@ -129,6 +252,126 @@ void rd_thread_submit_reap(void);
 uint64_t rd_thread_submit_drain(void);
 /* A job is queued or running (the window's heartbeat: no lock) */
 bool rd_thread_submit_unfinished(void);
+/* The tests' seam (rd_tex_test): fn() on the submit thread inside every
+ * job, after its submit and before its present call, while the job is
+ * still unfinished (rd_thread_submit_unfinished true): a driver's present
+ * that blocks, held as long as fn does, also where the job has no present
+ * (the tests' offscreen output has no swapchain); NULL: none */
+void rd__submit_test_hook(void (*fn)(void));
+/* The GPU's end first (above) is wanted for this run (the device table's
+ * choice at the start, the frame slots apart); its verdict from the first
+ * presents: RD_GPU_FIRST_UNDECIDED while sampling, _ON, _OFF (also where
+ * it is not wanted).  RD_GPU_FIRST_SAMPLES counted samples, on at
+ * RD_GPU_FIRST_NEED or more at the work's end: 16 is about 0.7 s of the
+ * Mali-G52's Original pictures (22 a second in its v0.11.11 log) and
+ * enough that a stray sample cannot turn it; 14 of 16 (seven in eight)
+ * keeps a driver that waits for the GPU only now and then (a mixed
+ * driver) off, where the wait would cost most presents time they did not
+ * spend before */
+#define RD_GPU_FIRST_SAMPLES 16u
+#define RD_GPU_FIRST_NEED 14u
+/* the samples' lines one by one (counted and unknown ones), the first this
+ * many of the run; the counts' window: this many timed Original presents
+ * without a verdict start them again (its line for the first window, once
+ * a run and present mode) */
+#define RD_GPU_FIRST_LINES 8u
+#define RD_GPU_FIRST_LATE 256u
+
+enum { RD_GPU_FIRST_UNDECIDED = -1, RD_GPU_FIRST_OFF = 0, RD_GPU_FIRST_ON = 1 };
+
+bool rd_thread_submit_gpu_first(void);
+int rd_thread_submit_gpu_first_verdict(void);
+/* The submit thread's running job waits for its picture's GPU end before
+ * its present, and no job is queued behind it (any thread, no lock; the
+ * game's gate and the hand-over, rd_thread.c) */
+bool rd_thread_submit_gpu_wait_alone(void);
+/* The ahead order (above) in effect: the submit thread took its last job in
+ * it and it is not off (any thread, no lock: the gate and the hand-over,
+ * rd_thread.c) */
+bool rd_thread_submit_ahead_now(void);
+/* Why the ahead order is off for this run (NULL: not off, or the GPU's end
+ * first not wanted; a static string: the 10 s line) */
+const char *rd_thread_submit_ahead_off_why(void);
+/* The window, before the render thread's host starts the submit thread:
+ * why the previous run's end or the install's mark holds the ahead order
+ * off for this start ("the previous run was ended by the watchdog", the
+ * mark's block until the version changes; NULL or "": none); kept for the
+ * later starts of the run */
+void rd_thread_submit_ahead_prev(const char *why);
+/* The window: fn() called on the submit thread as the ahead order first
+ * takes effect in a start of the thread (its first job in that order, with
+ * its line; port/platform/ahead_mark.h writes the install's "in effect"
+ * mark there, once a process); NULL none */
+void rd_thread_submit_ahead_mark_fn(void (*fn)(void));
+
+/* The tests' seams (rd_tex_test): a faked GPU and driver on the submit
+ * thread (NULL: none).  submitted() after a job's submit (its work begins);
+ * waitEnd() inside the GPU's end first's wait (returns at the faked end);
+ * present() where the driver's present call is, every job (it may wait for
+ * the faked end: a driver whose present waits for the GPU); sampleWait()
+ * the verdict's wait after a long present, in place of the backend's
+ * (rhi_wait_value_ns): returns at the faked end of the picture before's
+ * work, true (a job counts as presenting while present is set).  Any
+ * member may be NULL: sampleWait NULL, the samples wait on the real
+ * backend's submissions; prevFinished() the read of the picture before
+ * just before the present call, in place of the backend's
+ * (rhi_submitted_finished): 1 finished by the faked clock, 0 running, -1
+ * a failed read.  The rule wanted (1) or not (0) at the next
+ * start (2: wanted with the verdict on from the start, no samples), -1
+ * the device table's.  The jobs that made the wait, ever.  The
+ * verdict's tally since the thread's start (or a present mode change):
+ * the Original presents timed, of them short (under 2 ms), counted, of
+ * those waited, unknown; the samples' waits made; the long calls with the
+ * picture before already finished; the reads of it that failed. */
+typedef struct RdSubmitTestGpu {
+    void (*submitted)(void);
+    void (*waitEnd)(void);
+    void (*present)(void);
+    bool (*sampleWait)(void);
+    int (*prevFinished)(void);
+    /* the ahead order's waiter, before its backend wait for the held job's
+       submission `value` (rhi_last_submitted after that job's submits):
+       returns at the faked end of that job's work */
+    void (*waitValue)(uint64_t value);
+    /* the present-call guard's reads of the later picture's submission
+       `value`, just before and just after the call, in place of the
+       backend's (rhi_submitted_finished): 1 its faked work ended, 0
+       running, -1 a failed read */
+    int (*laterFinished)(uint64_t value);
+} RdSubmitTestGpu;
+
+/* The ahead order's counts ever (the tests' read): the waiter's waits, the
+ * presents made with a later picture submitted, the jobs submitted in the
+ * order and of them those submitted before the picture before's GPU end,
+ * the times it was turned off; off: its reason at the last start or since
+ * (RD_AHEAD_OFF_*, rd_submit_queue.h; kept after the thread ends) */
+/* (and the guard's long calls by class, rd_submit_queue.h RD_GD_*:
+ * counted as waiting for the later picture, slow while it ran on, begun
+ * with it ended, too brief for it, a read or wait failed) */
+typedef struct RdAheadTally {
+    uint64_t waits, presents, submits, early, offs;
+    uint64_t guardWaited, guardSlow, guardDone, guardBrief, guardFailed;
+    int off;
+} RdAheadTally;
+
+void rd__submit_ahead_tally(RdAheadTally *out);
+/* The tests' choice at the next start: 0 the ahead order held off
+ * (RD_AHEAD_OFF_TEST: one picture at a time with the verdict on), -1 none */
+void rd__submit_test_ahead(int force);
+/* The tests' fresh run: the order's off for the run (kept across the
+ * thread's restarts in a process) cleared, as at a new process */
+void rd__submit_test_ahead_fresh(void);
+
+typedef struct RdGpuFirstTally {
+    unsigned timed, shortCalls, counted, waited, unknown, waits, prevDone, readFailed;
+} RdGpuFirstTally;
+
+void rd__submit_test_gpu(const RdSubmitTestGpu *fake);
+void rd__submit_test_gpu_first(int force);
+void rd__submit_gpu_first_tally(RdGpuFirstTally *out);
+uint64_t rd__submit_gpu_first_waits(void);
+/* of those, the backend's waits that returned true (rhi_wait_submitted) */
+uint64_t rd__submit_gpu_first_waited(void);
 /* The longest present call of the jobs finished since the last take, ns
  * (0: none; render_thread.c's present estimate, pace_rt_further_hold) */
 uint64_t rd_thread_submit_take_present_ns(void);
@@ -143,11 +386,16 @@ void rd_thread_submit_block_take(RdSubmitBlock *out);
  * sample a job, cpu_place.h), for the 10 s line; empty with no thread */
 void rd_thread_submit_take_cores(CpuPlaceHist *out);
 
-/* The render thread, rd__submit_frame before the reads end: the list kept
- * open for the submit thread (true), else false and the caller ends,
- * submits and presents it as before.  present: an image was acquired for
- * the replay */
-bool rd__submit_defer(RhiCommandList cl, bool present);
+/* The render thread, rd__submit_frame before the reads end: the lists
+ * kept for the submit thread (true), else false and the caller ends,
+ * submits and presents them as before.  cl the scene's list (left open
+ * when it is the only one, else ended), cl2 the present's own (left open;
+ * 0: none); present: an image was acquired for the replay */
+bool rd__submit_defer(RhiCommandList cl, RhiCommandList cl2, bool present);
+/* A job's ends and submits, in order (rd_submit_queue.h rd__sq_tail_steps:
+ * cl, then cl2), without its present: the submit thread's tail and
+ * rd__submit_frame's own path */
+void rd__submit_lists(const RdSubmitJob *j);
 /* The render thread, a job's end (rd_thread.c runTramp): the list kept,
  * posted */
 void rd__submit_post_pending(void);

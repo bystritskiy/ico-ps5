@@ -333,6 +333,87 @@ static void test_save(void)
     CHECK(text != NULL && strstr(text, "classic_menu_text = true\n") != NULL &&
           strstr(text, "port_font = \"arimo\"\n") != NULL);
     free(text);
+    /* [video] effect_water_sharp, retired in v0.11.7, true or false: one
+       "is not used; ignored" line a load and nothing else said of it, kept
+       by a save exactly as it was (never rewritten or deleted) */
+    for (int sharp = 0; sharp < 2; sharp++) {
+        char log[ICO_PATH_MAX];
+        const char *const line =
+            sharp ? "effect_water_sharp = true\n" : "effect_water_sharp = false\n";
+        char body[160];
+        int saved;
+        char *got;
+
+        snprintf(body, sizeof(body), "version = 1\n[video]\n%seffect_fog = true\n", line);
+        write_file(toml, body);
+        ico_config_reset(toml, "no-such.ini");
+        path_in(log, "retired_water.log");
+        fflush(stderr);
+        saved = dup(2);
+        CHECK(saved >= 0 && freopen(log, "w", stderr) != NULL);
+        CHECK(ico_config_get_bool("video.effect_fog", 0) == 1);
+        fflush(stderr);
+        dup2(saved, 2);
+        close(saved);
+        clearerr(stderr);
+        got = read_file(log);
+        CHECK(got != NULL &&
+              strstr(got, "config: video.effect_water_sharp is not used; ignored\n") != NULL);
+        {
+            /* the key is named once, in that line alone */
+            const char *first = got != NULL ? strstr(got, "effect_water_sharp") : NULL;
+            CHECK(first != NULL && strstr(first + 1, "effect_water_sharp") == NULL);
+        }
+        free(got);
+        remove(log);
+        ico_config_set_bool("video.effect_fog", 0);
+        CHECK(ico_config_save() == 0);
+        text = read_file(toml);
+        CHECK(text != NULL && strstr(text, line) != NULL &&
+              strstr(text, "effect_fog = false\n") != NULL);
+        free(text);
+    }
+    /* the fifteen gameplay keys retired in v0.11.3 (each save's difficulty
+       record holds them, port/game/difficulty.h): still read (a save's
+       one-time carry-over), kept by a save, the file never rewritten */
+    write_file(toml, "version = 1\n[gameplay]\nyorda_safe = true\npit_time = 8\n"
+                     "[variants]\none_hit = true\naggression = \"bold_quick\"\n");
+    ico_config_reset(toml, "no-such.ini");
+    {
+        /* the load's log: one line naming them as kept for old saves, not
+           "is not used; ignored" (they are read for the carry-over) */
+        char log[ICO_PATH_MAX];
+        int saved;
+        char *got;
+
+        path_in(log, "retired.log");
+        fflush(stderr);
+        saved = dup(2);
+        CHECK(saved >= 0 && freopen(log, "w", stderr) != NULL);
+        CHECK(ico_config_get_bool("gameplay.yorda_safe", 0) == 1);
+        fflush(stderr);
+        dup2(saved, 2);
+        close(saved);
+        clearerr(stderr);
+        got = read_file(log);
+        CHECK(got != NULL &&
+              strstr(got, "config: gameplay.yorda_safe, gameplay.pit_time, variants.one_hit, "
+                          "variants.aggression: kept for saves made before v0.11.3: they give "
+                          "such a save its difficulty the first time it is loaded\n") != NULL &&
+              strstr(got, "is not used") == NULL);
+        free(got);
+        remove(log);
+    }
+    CHECK(ico_config_get_bool("gameplay.yorda_safe", 0) == 1);
+    CHECK(ico_config_get_int("gameplay.pit_time", 0) == 8);
+    CHECK_STR(ico_config_get_string("variants.aggression", "?"), "bold_quick");
+    ico_config_set_string("game.language", "de");
+    CHECK(ico_config_save() == 0);
+    text = read_file(toml);
+    CHECK(text != NULL && strstr(text, "yorda_safe = true\n") != NULL &&
+          strstr(text, "pit_time = 8\n") != NULL && strstr(text, "one_hit = true\n") != NULL &&
+          strstr(text, "aggression = \"bold_quick\"\n") != NULL);
+    free(text);
     /* a failed save leaves the old file alone */
     {
         char *a = read_file(toml);
@@ -366,7 +447,14 @@ static void test_precedence(void)
     CHECK(ico_config_get_float("audio.volume", 1.0) == 0.5); /* no ini key for it */
     CHECK_STR(ico_config_get_string("paths.iso", "x"), "from-toml.iso");
     CHECK(ico_config_get_int("dev.dump_every", 0) == 0); /* default */
-    CHECK(ico_config_get_bool("dev.trace", 1) == 1);     /* default */
+    /* [dev] slow_scene_dump_ms (window_host.c slow_scene_check): 40 unset,
+       the value from the toml, 0 kept as 0 (off) */
+    CHECK(ico_config_get_float("dev.slow_scene_dump_ms", 40.0) == 40.0);
+    ico_config_set_float("dev.slow_scene_dump_ms", 55.5);
+    CHECK(ico_config_get_float("dev.slow_scene_dump_ms", 40.0) == 55.5);
+    ico_config_set_float("dev.slow_scene_dump_ms", 0.0);
+    CHECK(ico_config_get_float("dev.slow_scene_dump_ms", 40.0) == 0.0);
+    CHECK(ico_config_get_bool("dev.trace", 1) == 1); /* default */
     /* a set value is written to the toml layer; the ini still overrides it */
     ico_config_set_int("dev.ticks", 77);
     CHECK(ico_config_get_int("dev.ticks", -1) == 5);
@@ -454,6 +542,13 @@ static void test_first_run(void)
     /* Motion blur strength (issue 181): 100, the game's own */
     CHECK(ico_config_get_int("video.effect_motion_blur_strength", 0) == 100);
     CHECK(text != NULL && strstr(text, "effect_motion_blur_strength = 100\n") != NULL);
+    /* the colour adjustment (issue 190): 50, the game's own picture */
+    CHECK(ico_config_get_int("video.gamma", 0) == 50);
+    CHECK(ico_config_get_int("video.brightness", 0) == 50);
+    CHECK(ico_config_get_int("video.contrast", 0) == 50);
+    CHECK(ico_config_get_int("video.saturation", 0) == 50);
+    CHECK(text != NULL && strstr(text, "\ngamma = 50\n") != NULL &&
+          strstr(text, "\nsaturation = 50\n") != NULL);
     /* the glow's way between frames: Original, written with the file */
     CHECK_STR(ico_config_get_string("video.effect_glow_mode", "?"), "original");
     CHECK(text != NULL && strstr(text, "effect_glow_mode = \"original\"") != NULL);
@@ -461,12 +556,24 @@ static void test_first_run(void)
     /* the Frame rate counter: Off, written with the file */
     CHECK(ico_config_get_bool("video.show_fps", 1) == 0);
     CHECK(text != NULL && strstr(text, "show_fps = false") != NULL);
+    /* Button pictures: auto, written with the file under [input] */
+    CHECK_STR(ico_config_get_string("input.button_pictures", "?"), "auto");
+    CHECK(text != NULL && strstr(text, "\n[input]\n") != NULL &&
+          strstr(text, "\nbutton_pictures = \"auto\"\n") != NULL);
     /* Downsampling: off, written with the file */
     CHECK_STR(ico_config_get_string("video.downsample", "?"), "off");
     CHECK(text != NULL && strstr(text, "downsample = \"off\"") != NULL);
+    /* Upscaling: off, Sharpness 80, written with the file */
+    CHECK_STR(ico_config_get_string("video.upscaling", "?"), "off");
+    CHECK(ico_config_get_int("video.upscaling_sharpness", 0) == 80);
+    CHECK_STR(ico_config_get_string("video.upscaling_quality", "?"), "native");
+    CHECK(text != NULL && strstr(text, "upscaling = \"off\"") != NULL &&
+          strstr(text, "\nupscaling_sharpness = 80\n") != NULL);
     CHECK(ico_config_get_bool("video.effect_cinematic_bars", 0) == 1);
-    /* Water reflections: Original (the PS2's size) by default */
-    CHECK(ico_config_get_bool("video.effect_water_sharp", 1) == 0);
+    /* no Water reflections key (retired in v0.11.7: the reflections take
+       the scene's scale always) */
+    CHECK(ico_config_get_string("video.effect_water_sharp", NULL) == NULL);
+    CHECK(text != NULL && strstr(text, "water") == NULL);
     /* no Glow size key: the glow is drawn at the PS2's size at every resolution */
     CHECK(strcmp(ico_config_get_string("video.effect_glow_size", "none"), "none") == 0);
     CHECK(ico_config_get_bool("video.effects_depth", 0) == 1);
@@ -488,24 +595,57 @@ static void test_first_run(void)
     CHECK(text != NULL && strstr(text, "second_memory_card = false") != NULL);
     CHECK_STR(ico_config_get_string("gameplay.hold_type", "?"), "disc"); /* the disc's own */
     CHECK(text != NULL && strstr(text, "hold_type = \"disc\"") != NULL);
-    CHECK_STR(ico_config_get_string("gameplay.pit_time", "?"), "original");
-    CHECK(text != NULL && strstr(text, "pit_time = \"original\"") != NULL);
-    CHECK_STR(ico_config_get_string("gameplay.shadow_speed", "?"), "original");
-    CHECK(text != NULL && strstr(text, "shadow_speed = \"original\"") != NULL);
+    /* Zoom type, Hold: the game's own zoom on every disc */
+    CHECK_STR(ico_config_get_string("gameplay.zoom_type", "?"), "hold");
+    CHECK(text != NULL && strstr(text, "zoom_type = \"hold\"") != NULL);
+    /* Camera reset, off: the game as shipped on every disc */
+    CHECK_STR(ico_config_get_string("gameplay.camera_reset", "?"), "off");
+    CHECK(text != NULL && strstr(text, "camera_reset = \"off\"") != NULL);
+    /* Look at Yorda, off: the game as shipped on every disc */
+    CHECK_STR(ico_config_get_string("gameplay.yorda_look", "?"), "off");
+    CHECK(text != NULL && strstr(text, "yorda_look = \"off\"") != NULL);
+    /* the difficulty rows are each save's (port/game/difficulty.h): the first
+       run writes none of their retired keys */
+    CHECK(ico_config_get_string("gameplay.pit_time", NULL) == NULL);
+    CHECK(ico_config_get_string("gameplay.shadow_speed", NULL) == NULL);
+    CHECK(ico_config_get_string("gameplay.shadows_together", NULL) == NULL);
+    CHECK(ico_config_get_string("gameplay.yorda_trips", NULL) == NULL);
+    CHECK(ico_config_get_string("gameplay.yorda_safe", NULL) == NULL);
+    CHECK(text != NULL && strstr(text, "pit_time") == NULL &&
+          strstr(text, "shadow_speed") == NULL && strstr(text, "shadows_together") == NULL &&
+          strstr(text, "yorda_trips") == NULL && strstr(text, "yorda_safe") == NULL);
     CHECK(ico_config_get_string("gameplay.hold_type_chosen", NULL) == NULL); /* not chosen */
-    /* the game variants: every line the game as shipped; the barrier's
-       number is left out (the disc's own) */
-    CHECK_STR(ico_config_get_string("variants.shade_toughness", "?"), "original");
-    CHECK(ico_config_get_bool("variants.one_hit", 1) == 0);
-    CHECK(ico_config_get_bool("variants.never_dodge", 1) == 0);
-    CHECK_STR(ico_config_get_string("variants.aggression", "?"), "own");
-    CHECK(ico_config_get_bool("variants.no_hints", 1) == 0);
-    CHECK(ico_config_get_string("variants.barrier_hits", NULL) == NULL);
+    /* the game variants that stay in config: every line the game as shipped;
+       the ten that are difficulty rows are not written */
     CHECK(ico_config_get_bool("variants.no_cutscene_look", 1) == 0);
     CHECK(ico_config_get_bool("variants.ignore_cutscene_cameras", 1) == 0);
+    {
+        static const char *const kGone[] = {
+            "variants.shade_toughness", "variants.one_hit",     "variants.never_dodge",
+            "variants.aggression",      "variants.no_hints",    "variants.barrier_hits",
+            "variants.auto_guard",      "variants.attack_turn", "variants.shadows_wait_down",
+            "variants.peaceful_shadows"};
+        for (size_t i = 0; i < sizeof(kGone) / sizeof(kGone[0]); i++) {
+            CHECK(ico_config_get_string(kGone[i], NULL) == NULL);
+            CHECK(text != NULL && strstr(text, strchr(kGone[i], '.') + 1) == NULL);
+        }
+    }
+    /* the chain rows: the game's own 4 and 4 */
+    CHECK(ico_config_get_int("variants.chain_swing_speed", 0) == 4);
+    CHECK(ico_config_get_int("variants.chain_swing_damping", 0) == 4);
+    CHECK(text != NULL && strstr(text, "chain_swing_speed = 4") != NULL &&
+          strstr(text, "chain_swing_damping = 4") != NULL);
+    /* the weapon rows: Original, the game as shipped */
+    CHECK_STR(ico_config_get_string("variants.sword_colour", "?"), "original");
+    CHECK_STR(ico_config_get_string("variants.weapon", "?"), "original");
+    CHECK(text != NULL && strstr(text, "sword_colour = \"original\"") != NULL &&
+          strstr(text, "weapon = \"original\"") != NULL);
     CHECK(text != NULL && strstr(text, "\n[variants]\n") != NULL &&
-          strstr(text, "shade_toughness = \"original\"") != NULL &&
-          strstr(text, "aggression = \"own\"") != NULL && strstr(text, "\nbarrier_hits") == NULL);
+          strstr(text, "no_cutscene_look = false") != NULL);
+    /* Developer > Free movement, off */
+    CHECK(ico_config_get_bool("developer.free_movement", 1) == 0);
+    CHECK(text != NULL && strstr(text, "\n[developer]\n") != NULL &&
+          strstr(text, "free_movement = false") != NULL);
     CHECK_STR(ico_config_get_string("paths.iso", "?"), "");
     /* photo mode's keys */
     CHECK(ico_config_get_float("photo.stick_speed", 0.0) == 1.0);

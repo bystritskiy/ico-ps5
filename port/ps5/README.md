@@ -1,7 +1,7 @@
 # ICO на PS5
 
 Нативный перенос `nathanialf/ico-pc`, upstream
-`v0.10.0` (`e99d01813489d23f2a46264ca037b9ccf6899174`).
+`v0.11.16` (`7164bbdf4e0d8c0d8f01d473f466ac982c0bd4e9`).
 Игровой C-код компилируется для x86-64 PS5; PS2-эмулятор, BIOS и JIT не нужны.
 Проект неофициальный и не связан с Sony Interactive Entertainment и Team Ico;
 игра в пакет не входит, нужен образ своего диска.

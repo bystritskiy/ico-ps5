@@ -90,6 +90,18 @@ respective owners.
   allowed.)
 - Any code believed to derive from leaked source.
 
+Files the program writes on the player's machine from the player's own disc are derived files and
+are never committed or shipped: the extracted data, texture and model exports, and the application
+icon (`<user folder>/icon/`, the title lettering's "I" cut out of two captured frames of the running
+game; `docs/port/APP_ICON.md`). The repository holds the code that makes
+them, not the images.
+
+The controller button pictures under `port/assets/buttons/` are the one
+exception to "no images": they are a contributor's own drawings (letters
+only, no logos, nothing from the disc), credited in
+`port/assets/buttons/CREDIT.txt`. Xbox, Nintendo, Nintendo Switch, Wii and
+Wii U are trademarks of their owners.
+
 `.gitignore` and `tools/check_no_rom.sh` (run by the pre-commit hook) make it
 harder to commit such material by accident. They do not replace care. If you
 suspect a file in this repository breaks these rules, open an issue tagged
@@ -193,7 +205,7 @@ The table of enemy kinds that `enemy.c` reads (the decompilation's member
 the decision of the project owner on 2026-10-24, as it is on the
 decompilation's main branch (its `docs/LEGAL.md` has the same exception).
 The port offers the North American disc's enemy tuning as a play variant on
-every disc (Options > Extras > Game variants), which needs that table
+every disc (Shadow toughness, a row of the New Game screen's Customize pages), which needs that table
 without the North American disc. The table holds only numbers, one row per
 enemy kind: the model and particle ids, the life, the scale, the dodge range
 and the attribute bits. It holds no names, text or layouts, and it is written

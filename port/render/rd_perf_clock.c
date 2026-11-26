@@ -1,0 +1,359 @@
+/*
+ * port/render/rd_perf_clock.c
+ *
+ * A replay's GPU clock against the CPU's (rd_perf_clock.h).
+ */
+#include "rd_perf_clock.h"
+
+#include <stdarg.h>
+#include <stdio.h>
+#include <string.h>
+
+/* the first of the recording order (from k on) whose index is in set, -1 none */
+static int firstIn(const RdPerfClockIn *in, const uint32_t *set, bool want)
+{
+    for (uint32_t k = 0; k < in->orderN; k++) {
+        const uint32_t i = in->order[k];
+        if (rhi_ts_has(in->clk->recorded, i) && rhi_ts_has(set, i) == want) {
+            return (int)i;
+        }
+    }
+    return -1;
+}
+
+/* the last of the recording order whose index is in set, -1 none */
+static int lastIn(const RdPerfClockIn *in, const uint32_t *set)
+{
+    int last = -1;
+    for (uint32_t k = 0; k < in->orderN; k++) {
+        const uint32_t i = in->order[k];
+        if (rhi_ts_has(in->clk->recorded, i) && rhi_ts_has(set, i)) {
+            last = (int)i;
+        }
+    }
+    return last;
+}
+
+void rd_perf_clock_judge(const RdPerfClockIn *in, RdPerfClockVerdict *v)
+{
+    memset(v, 0, sizeof(*v));
+    v->firstMissing = -1;
+    v->lastWritten = -1;
+    const RhiTimestampClock *c = in->clk;
+    if (c == NULL) {
+        return;
+    }
+    uint64_t first = 0, last = 0;
+    bool haveFirst = false;
+    for (uint32_t k = 0; k < in->orderN; k++) {
+        const uint32_t i = in->order[k];
+        if (!rhi_ts_has(c->recorded, i)) {
+            continue; /* the backend recorded none there */
+        }
+        v->recorded++;
+        const bool got = rhi_ts_has(c->available, i) && i < in->n && in->ts[i] != 0;
+        if (!got) {
+            if (c->submits > 0) {
+                /* (a slot whose lists were never submitted wrote none) */
+                v->missing++;
+                if (v->firstMissing < 0) {
+                    v->firstMissing = (int)i;
+                }
+            }
+            continue;
+        }
+        v->lastWritten = (int)i;
+        if (!haveFirst) {
+            first = in->ts[i];
+            haveFirst = true;
+        }
+        if (in->ts[i] > last) {
+            last = in->ts[i];
+        }
+    }
+    if (c->waitBeginNs != 0 && c->waitEndNs >= c->waitBeginNs) {
+        v->waitMs = (double)(c->waitEndNs - c->waitBeginNs) / 1e6;
+    }
+    if (c->lastSubmitNs != 0 && c->waitBeginNs >= c->lastSubmitNs &&
+        c->waitEndNs >= c->waitBeginNs) {
+        /* a wait under 0.05 ms found the work finished: the time to the
+           wait's start bounds the GPU's end */
+        v->doneValid = v->waitMs >= 0.05 ? 1 : 2;
+        v->doneMs =
+            (double)((v->doneValid == 1 ? c->waitEndNs : c->waitBeginNs) - c->lastSubmitNs) / 1e6;
+    }
+    v->ranTwice = c->again;
+    if (haveFirst) {
+        v->counterMs = (double)first / 1e6;
+        if (c->calibrated && c->gpuNs >= last && c->firstSubmitNs != 0) {
+            /* stamp t at cpuNs - (gpuNs - t) on the CPU's clock */
+            const double startCpu = (double)c->cpuNs - (double)(c->gpuNs - first);
+            v->lateMs = (startCpu - (double)c->firstSubmitNs) / 1e6;
+            v->lateValid = 1;
+        } else if (v->waitMs > 0.0 && c->firstSubmitNs != 0 && last >= first) {
+            /* the wait returned about when the last stamp was written */
+            const double startCpu = (double)c->waitEndNs - (double)(last - first);
+            v->lateMs = (startCpu - (double)c->firstSubmitNs) / 1e6;
+            v->lateValid = 2;
+        }
+    }
+    /* a long wait with no trace is the single submission wait's (the polled
+       one traces every wait past RHI_TS_TRACE_AFTER_MS): its line says when
+       the replay ended and where it began, from the wait's own return */
+    v->stall = v->waitMs >= RD_PERF_CLOCK_WAIT_MS || v->ranTwice || v->missing > 0;
+    v->report = v->stall || in->backNs != 0;
+}
+
+uint32_t rd_perf_clock_due(RdPerfClockLines *l, const RdPerfClockVerdict *v)
+{
+    if (!v->report) {
+        return 0;
+    }
+    if (v->stall) {
+        const uint32_t k = ++l->stalls;
+        return k <= RD_PERF_CLOCK_STALL_FIRST || k % RD_PERF_CLOCK_STALL_EVERY == 0u ? k : 0u;
+    }
+    const uint32_t k = ++l->restarts;
+    return k <= RD_PERF_CLOCK_RESTART_FIRST || k % RD_PERF_CLOCK_RESTART_EVERY == 0u ? k : 0u;
+}
+
+typedef struct Out {
+    char *buf;
+    size_t n, at;
+    int total;
+} Out;
+
+static void put(Out *o, const char *fmt, ...)
+{
+    va_list ap;
+    va_start(ap, fmt);
+    char *dst = o->at < o->n ? o->buf + o->at : NULL;
+    const size_t room = o->at < o->n ? o->n - o->at : 0;
+    const int w = vsnprintf(dst, room, fmt, ap);
+    va_end(ap);
+    if (w > 0) {
+        o->total += w;
+        o->at += (size_t)w;
+    }
+}
+
+static void name(const RdPerfClockIn *in, int index, char *buf, size_t n)
+{
+    if (index < 0) {
+        snprintf(buf, n, "none");
+    } else if (in->name != NULL) {
+        in->name((uint32_t)index, in->user, buf, n);
+    } else {
+        snprintf(buf, n, "stamp %d", index);
+    }
+}
+
+static const char *finishedWords(uint8_t f)
+{
+    return f == 2   ? "all of its submissions finished"
+           : f == 1 ? "its first submission finished, not its last"
+                    : "none of its submissions finished";
+}
+
+int rd_perf_clock_text(const RdPerfClockIn *in, const RdPerfClockVerdict *v, char *buf, size_t n)
+{
+    Out o = {buf, n, 0, 0};
+    if (n > 0) {
+        buf[0] = '\0';
+    }
+    const RhiTimestampClock *c = in->clk;
+    if (c == NULL) {
+        return 0;
+    }
+    char nm[192];
+    put(&o, "GPU clock: replay %u: ", in->replay);
+    if (v->lateValid == 1) {
+        put(&o,
+            "its first stamp %.1f ms after its first submit (the calibrated clocks, within "
+            "%.1f us)",
+            v->lateMs, (double)c->deviationNs / 1e3);
+    } else if (v->lateValid == 2) {
+        put(&o, "its first stamp about %.1f ms after its first submit (from its wait's end)",
+            v->lateMs);
+    } else {
+        put(&o, "its first stamp not placed on the CPU's clock (%s)",
+            c->calibrated ? "the counter restarted after it" : "no calibrated clocks, no wait");
+    }
+    put(&o, ", the counter at %.1f ms then", v->counterMs);
+    if (in->backNs != 0) {
+        put(&o, " (it went back %.1f ms since the replay before: a restart)",
+            (double)in->backNs / 1e6);
+    }
+    put(&o, "; %u submissions", c->submits);
+    if (v->waitMs <= 0.0) {
+        put(&o, "; its work had finished when the CPU came to wait for it");
+    } else {
+        const double gap = c->lastSubmitNs && c->waitBeginNs >= c->lastSubmitNs
+                               ? (double)(c->waitBeginNs - c->lastSubmitNs) / 1e6
+                               : -1.0;
+        put(&o, "; waited %.1f ms for it", v->waitMs);
+        if (gap >= 0.0) {
+            put(&o, " from %.1f ms after its last submit", gap);
+        }
+        if (c->traceN == 0 && v->waitMs >= (double)RHI_TS_TRACE_AFTER_MS) {
+            /* the single wait: nothing of the slot read while it ran */
+            put(&o, " (no trace: the single submission wait reads nothing of its work while it "
+                    "runs)");
+            if (v->doneValid == 1) {
+                put(&o, "; its work done about %.1f ms after its last submit (the wait's end)",
+                    v->doneMs);
+            }
+        } else if (c->traceN == 0) {
+            put(&o, " (no trace: the wait did not pass %u ms)", (unsigned)RHI_TS_TRACE_AFTER_MS);
+        } else {
+            const RhiTsTracePoint *p0 = &c->trace[0];
+            put(&o, ": at +%.1f ms %u of %u written", (double)p0->atUs / 1e3, (unsigned)p0->avail,
+                v->recorded);
+            if (p0->stale) {
+                put(&o, " (the previous use's: its reset had not run, the GPU had not begun it)");
+            } else {
+                name(in, lastIn(in, p0->bits), nm, sizeof nm);
+                put(&o, " (the last: %s)", nm);
+            }
+            put(&o, ", %s", finishedWords(p0->finished));
+            if (c->stillUs > 0) {
+                put(&o, "; nothing changed for %.1f ms from +%.1f ms with %u written%s",
+                    (double)c->stillUs / 1e3, (double)c->stillFromUs / 1e3, c->stillAvail,
+                    c->stillStale ? " (the previous use's)" : "");
+            }
+            if (c->again) {
+                put(&o,
+                    "; its written stamps fell from %u at +%.1f ms: its queries were reset again, "
+                    "its first list ran a second time (a reset and replay of the work in flight)",
+                    c->againFrom, (double)c->againAtUs / 1e3);
+            }
+            put(&o, "; points");
+            const uint32_t show =
+                c->traceN < RD_PERF_CLOCK_POINTS ? c->traceN : RD_PERF_CLOCK_POINTS;
+            for (uint32_t k = 0; k < show; k++) {
+                const RhiTsTracePoint *p = &c->trace[k];
+                put(&o, " %u%s@+%.1f", (unsigned)p->avail, p->stale ? "s" : "",
+                    (double)p->atUs / 1e3);
+            }
+            if (c->traceN > show || c->traceMore) {
+                put(&o, " (%u more)", (unsigned)(c->traceN - show + c->traceMore));
+            }
+        }
+    }
+    if (v->missing > 0) {
+        name(in, v->firstMissing, nm, sizeof nm);
+        put(&o,
+            "; %u of %u recorded stamps came back unwritten after its work was signalled "
+            "finished (the first: %s",
+            v->missing, v->recorded, nm);
+        const int firstGot = firstIn(in, c->available, true);
+        if (firstGot < 0) {
+            put(&o, "): none written");
+        } else {
+            name(in, v->lastWritten, nm, sizeof nm);
+            put(&o, "; the last written: %s)", nm);
+        }
+    } else {
+        put(&o, "; all %u recorded stamps written", v->recorded);
+    }
+    if (c->listsUnsubmitted > 0) {
+        /* recorded counts the submitted lists' stamps alone (vk_cmd.c
+           vkr_collect_timestamps), so these are not among the unwritten */
+        put(&o, "; %u of the slot's lists with stamps were recorded and not submitted (left out)",
+            c->listsUnsubmitted);
+    }
+    return o.total;
+}
+
+int rd_perf_reset_sign(unsigned missing, bool ranTwice, uint64_t backNs, int idle)
+{
+    if (missing != 0) {
+        return RD_RESET_HANG;
+    }
+    if (ranTwice) {
+        return RD_RESET_TWICE;
+    }
+    if (backNs != 0) {
+        return idle == 1 ? RD_RESET_IDLE : RD_RESET_RESTART;
+    }
+    return RD_RESET_NONE;
+}
+
+bool rd_perf_reset_counted(int sign)
+{
+    return sign == RD_RESET_HANG || sign == RD_RESET_TWICE || sign == RD_RESET_RESTART;
+}
+
+int rd_perf_idle(const RdPerfIdleIn *in, double *idleMs)
+{
+    *idleMs = 0.0;
+    if (in->prevAdjacent && in->prevEndMs > 0.0 && in->firstSubmitMs > 0.0) {
+        if (in->firstSubmitMs > in->prevEndMs) {
+            /* submitted after the replay before had ended (its exact end,
+               or a bound it ended at or before): nothing queued between */
+            *idleMs = in->firstSubmitMs - in->prevEndMs;
+            return 1;
+        }
+        if (in->prevExact) {
+            return 0; /* queued while the replay before still ran */
+        }
+    }
+    if (in->noted) {
+        *idleMs = -1.0;
+        return 1;
+    }
+    return 0;
+}
+
+uint32_t rd_perf_subs_judge(const RdPerfClockIn *in, const RdPerfClockVerdict *v,
+                            const RdPerfSubMap *map, bool named, RdPerfSub *out, uint32_t cap)
+{
+    const RhiTimestampClock *c = in->clk;
+    if (c == NULL) {
+        return 0;
+    }
+    const uint32_t n = c->subN < cap ? c->subN : cap;
+    uint32_t hung = 0;
+    for (uint32_t k = 0; k < n; k++) {
+        const RhiTsSubmit *s = &c->sub[k];
+        RdPerfSub *o = &out[k];
+        memset(o, 0, sizeof(*o));
+        o->submitMs = c->firstSubmitNs != 0 && s->submitNs >= c->firstSubmitNs
+                          ? (float)((double)(s->submitNs - c->firstSubmitNs) / 1e6)
+                          : 0.0f;
+        o->lists = s->lists;
+        o->present = s->present;
+        o->listLo = o->listHi = -1;
+        if (!named) {
+            continue;
+        }
+        o->named = 1;
+        for (uint32_t w = 0; w < RHI_TIMESTAMP_WORDS; w++) {
+            uint32_t bits = s->stamps[w] & c->recorded[w];
+            while (bits) {
+                const uint32_t b = (uint32_t)__builtin_ctz(bits);
+                bits &= bits - 1u;
+                const uint32_t i = w * 32u + b;
+                o->stamps++;
+                const bool got = rhi_ts_has(c->available, i) && i < in->n && in->ts[i] != 0;
+                if (!got) {
+                    o->missing++;
+                }
+                if (i >= map->list0 && i < map->list0 + map->lists) {
+                    const int l = (int)(i - map->list0);
+                    o->listLo = (int8_t)(o->listLo < 0 || l < o->listLo ? l : o->listLo);
+                    o->listHi = (int8_t)(l > o->listHi ? l : o->listHi);
+                } else if (i >= map->pass0) {
+                    o->pieces++;
+                } else if (i == map->present0 || i == map->present1) {
+                    o->presentStamps = 1;
+                }
+            }
+        }
+        if (hung == 0 && v != NULL && v->firstMissing >= 0 &&
+            rhi_ts_has(s->stamps, (uint32_t)v->firstMissing)) {
+            hung = k + 1u;
+        }
+    }
+    return hung;
+}

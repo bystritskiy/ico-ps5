@@ -147,6 +147,37 @@ chmod 755 "$stage/tools/mc_import"
 # (port/platform/symmap.h)
 [[ -f "$b/ico_pc.map" ]] || fail "$preset did not produce ico_pc.map"
 cp "$b/ico_pc.map" "$stage/ico_pc.map"
+# the game's data sections hold the game's objects only (save states copy them
+# whole by offset; tools/android_syms_lines.py reads GNU ld's map too)
+python3 -I "$wt/tools/android_syms_lines.py" gamesec "$b/ico_pc.map" "$wt" >>"$log" 2>&1 ||
+    fail "tools/android_syms_lines.py gamesec: a port object holds bytes in the game's data sections (the log names it)"
+# the checkpoint globals a state names lie in the game's data sections, the
+# released builds' table is whole (port/save/state_checkpoint.h)
+python3 -I "$wt/tools/state_checkpoint_table.py" guard "$b/ico_pc.map" >>"$log" 2>&1 ||
+    fail "tools/state_checkpoint_table.py guard: a checkpoint global is outside the game's data, or the table lost a release (the log names it)"
+# save states carry over (issue 217): the guard's verdict on the staged
+# program (tools/state_carry_check.py; docs/port/PLATFORM.md "The carry-over
+# guard"). The x86-64 program is linked at a fixed address below 4 GB, where
+# a state never carries over by design (status 3, logged, accepted there
+# only). The arm64 program is position-independent: it is judged with the
+# current rules like the Windows and Android programs and fails the package
+# when one of its game data's initialised pointers has no name (status 1;
+# v0.11.8's arm64 program carries under these rules: every one of its 659
+# targets named), and its game data layout hash goes through the same gate
+# (port/state_legacy/layout.txt layout-linux-arm64).
+carry_report="$root/build-host/tmp/linux-$label-carry.txt"
+set +e
+python3 -I "$wt/tools/state_carry_check.py" check --binary "$stage/ico_pc" --syms "$stage/ico_pc.map" \
+    --workdir "$root/build-host/tmp/linux-$label-carry" --cc "${CC:-cc}" --report "$carry_report" >>"$log" 2>&1
+carry=$?
+set -e
+if [[ "$arch" == x64 ]]; then
+    [[ $carry -eq 0 || $carry -eq 3 ]] || fail "tools/state_carry_check.py: status $carry"
+else
+    [[ $carry -eq 0 ]] || fail "tools/state_carry_check.py: status $carry (the arm64 program's states would not carry over; the log lists why)"
+    python3 -I "$wt/tools/android_syms_lines.py" layout "$carry_report" "$wt" linux-arm64 >>"$log" 2>&1 ||
+        fail "tools/android_syms_lines.py layout: the arm64 Linux game data layout hash is not the recorded one (the log says which and what to do)"
+fi
 sdl="$root/tools/toolchain/deps/sdl3/linux-$arch/lib"
 cp -L "$sdl/libSDL3.so.0" "$stage/libSDL3.so.0"
 chmod 755 "$stage/libSDL3.so.0"
@@ -260,9 +291,9 @@ for f in README.md LICENSE NOTICES.txt THIRD_PARTY.md VERSION.txt; do
     cp -a "$stage/$f" "$doc/$f" || fail "stage: no $f"
 done
 cp -a "$stage/docs" "$doc/docs"
-cp "$wt/tools/appimage/ico-pc.desktop" "$appdir/ico-pc.desktop"
-cp "$wt/tools/appimage/ico-pc.svg" "$appdir/ico-pc.svg"
-ln -s ico-pc.svg "$appdir/.DirIcon"
+cp "$wt/tools/appimage/com.defnf.icopc.desktop" "$appdir/com.defnf.icopc.desktop"
+cp "$wt/tools/appimage/com.defnf.icopc.svg" "$appdir/com.defnf.icopc.svg"
+ln -s com.defnf.icopc.svg "$appdir/.DirIcon"
 ln -s usr/bin/ico_pc "$appdir/AppRun"
 rm -f "$appimage" "$appimage.sha256"
 run env ARCH="$appimage_arch" SOURCE_DATE_EPOCH="$(git log -1 --format=%ct "$commit")" \
@@ -280,7 +311,7 @@ mkdir -p "$chk"
 sq="$chk/squashfs-root"
 want_list="$chk/want.txt"
 {
-    printf '%s\n' .DirIcon AppRun ico-pc.desktop ico-pc.svg \
+    printf '%s\n' .DirIcon AppRun com.defnf.icopc.desktop com.defnf.icopc.svg \
         usr/bin/ico_pc usr/bin/ico_pc.map usr/bin/libSDL3.so.0 usr/bin/mc_import
     for f in README.md LICENSE NOTICES.txt THIRD_PARTY.md VERSION.txt; do
         echo "usr/share/doc/ico-pc/$f"
@@ -292,7 +323,7 @@ if ! diff -u "$want_list" "$chk/got.txt" >>"$log" 2>&1; then
     fail "the AppImage's files are not the expected list (the diff is in the log)"
 fi
 [[ "$(readlink "$sq/AppRun")" == usr/bin/ico_pc ]] || fail "the AppImage's AppRun is not a link to usr/bin/ico_pc"
-[[ "$(readlink "$sq/.DirIcon")" == ico-pc.svg ]] || fail "the AppImage's .DirIcon is not a link to ico-pc.svg"
+[[ "$(readlink "$sq/.DirIcon")" == com.defnf.icopc.svg ]] || fail "the AppImage's .DirIcon is not a link to com.defnf.icopc.svg"
 [[ -x "$sq/usr/bin/ico_pc" ]] || fail "the AppImage's ico_pc is not executable"
 cmp -s "$sq/usr/bin/ico_pc" "$stage/ico_pc" || fail "the AppImage's ico_pc differs from the stage's"
 check_program_elf "$sq/usr/bin/ico_pc"

@@ -1,0 +1,509 @@
+/* rd_glass.c: the content's speed on the glass (rd_glass.h): the pairs, the
+ * join of pictures and display times by id, the 10 s sums and the line.
+ * No RHI call here (rd_glass_live.c reads the display's times). */
+#include "rd_glass.h"
+
+#include <math.h>
+#include <stdarg.h>
+#include <stdio.h>
+#include <string.h>
+#ifdef _WIN32
+#define WIN32_LEAN_AND_MEAN
+#include <windows.h> /* SwitchToThread */
+#else
+/* POSIX (glibc, bionic, macOS): declared here, as <sched.h> hides it under
+   the build's strict C standard without a feature macro */
+int sched_yield(void);
+#endif
+
+#include "rd_pace_even.h"
+#include "rd_pace_rules.h"
+#include "rd_pace_screen.h"
+
+_Static_assert(RD_GLASS_RULES == 1 + RD_RULE_COUNT, "the drawn measure and one a rule");
+_Static_assert(sizeof(((RdGlassPic *)0)->alpha) / sizeof(float) == RD_RULE_COUNT,
+               "a picture's alpha for every rule");
+
+#define DEFAULT_TICK_MS 33.3667
+
+/* ------------------------------------------------------------- the pair */
+
+static void statAdd(RdGlassStat *s, double r)
+{
+    const double u = floor(r * RD_GLASS_UNITS + 0.5);
+    const int64_t v = u > 1.0e8 ? 100000000 : (u < -1.0e8 ? -100000000 : (int64_t)u);
+    s->n++;
+    s->sum += v;
+    s->sum2 += (uint64_t)(v * v);
+    s->above125 += r > 1.25 ? 1u : 0u;
+    s->above15 += r > 1.5 ? 1u : 0u;
+    s->below075 += r < 0.75 ? 1u : 0u;
+}
+
+/* a picture's alpha by measure m (0 the drawn, 1 + rule); under 0 when not
+   computed */
+static double alphaOf(const RdGlassPic *p, int m)
+{
+    return m == RD_GLASS_DRAWN ? (double)p->drawn : (double)p->alpha[m - 1];
+}
+
+bool rd_glass_pair(RdGlassWindow *w, const RdGlassPic *a, uint64_t aNs, const RdGlassPic *b,
+                   uint64_t bNs, uint64_t refreshNs)
+{
+    const int64_t df = (int64_t)b->frame - (int64_t)a->frame;
+    const double gap = (double)(int64_t)(bNs - aNs) / 1e6;
+    if (df < 0 || df > RD_GLASS_FRAME_JUMP || !(gap > 0.0) || gap > RD_GLASS_GAP_MAX_MS) {
+        return false;
+    }
+    int cls = RD_GLASS_CLASSES; /* not known */
+    if (refreshNs != 0) {
+        const double k = floor(gap / ((double)refreshNs / 1e6) + 0.5);
+        cls = k >= (double)(RD_GLASS_CLASSES - 1) ? RD_GLASS_CLASSES - 1 : (int)k;
+        w->gaps[cls]++;
+        w->refreshNs = refreshNs;
+    }
+    w->pairs++;
+    w->drawnRule = b->rule;
+    const double dh = b->handMs > 0.0 && a->handMs > 0.0 ? b->handMs - a->handMs : 0.0;
+    const double de = b->gpuEndMs > 0.0 && a->gpuEndMs > 0.0 && a->gpuExact && b->gpuExact
+                          ? b->gpuEndMs - a->gpuEndMs
+                          : 0.0;
+    /* the content's step in the newer picture's tick (the measured gap
+       between frame closes, which moves frame to frame): the frames between
+       and the alphas, never each picture's frame number times its own tick
+       (v0.11.6: 6000 frames times a tick 0.1 ms longer read as a 600 ms
+       step, the deviations of 84-1040 in issue 123's stall blocks) */
+    const double tick = b->tickMs > 0.0 ? b->tickMs : a->tickMs > 0.0 ? a->tickMs : DEFAULT_TICK_MS;
+    for (int m = 0; m < RD_GLASS_RULES; m++) {
+        const double aa = alphaOf(a, m), ab = alphaOf(b, m);
+        if (aa < 0.0 || ab < 0.0) {
+            continue;
+        }
+        const double step = ((double)df + ab - aa) * tick;
+        statAdd(&w->glass[m][RD_GLASS_CLASSES], step / gap);
+        if (cls < RD_GLASS_CLASSES) {
+            statAdd(&w->glass[m][cls], step / gap);
+        }
+        if (dh > 0.0) {
+            statAdd(&w->hand[m], step / dh);
+        }
+        if (de > 0.0) {
+            statAdd(&w->gpu[m], step / de);
+        }
+    }
+    return true;
+}
+
+/* ------------------------------------------------------------- the join */
+
+#define JOIN 128u
+
+static struct {
+    uint32_t id;
+    bool pic, time;
+    RdGlassPic p;
+    uint64_t ns, refreshNs, earliestNs, marginNs;
+} s_slot[JOIN];
+
+static struct {
+    bool have;
+    RdGlassPic p;
+    uint64_t ns;
+} s_last;
+
+/* the 10 s sums: the collecting thread adds, the window's thread takes.
+   The collecting thread (the one that replays: a frame's thread) never
+   waits: it tries the flag once, and where the window's thread holds it
+   (its take: one copy of the sums and a clear, every 10 s) the picture's
+   sums go into s_pend, its own, merged into s_sum at its next try that
+   holds the flag.  So no frame can wait on the window's thread, however
+   long that thread is preempted inside the take; the window's thread waits
+   at most the collector's few adds (it yields while it waits) */
+static RdGlassWindow s_sum;
+static RdGlassWindow s_pend; /* the collecting thread's alone */
+static bool s_pendAny;
+static int s_spin;
+
+static void statMerge(RdGlassStat *a, const RdGlassStat *b)
+{
+    a->n += b->n;
+    a->sum2 += b->sum2;
+    a->above125 += b->above125;
+    a->above15 += b->above15;
+    a->below075 += b->below075;
+    a->sum += b->sum;
+}
+
+void rd_glass_merge(RdGlassWindow *into, const RdGlassWindow *from)
+{
+    into->pictures += from->pictures;
+    into->shown += from->shown;
+    into->unseen += from->unseen;
+    if (from->pairs) {
+        into->drawnRule = from->drawnRule;
+    }
+    into->pairs += from->pairs;
+    for (int c = 0; c < RD_GLASS_CLASSES; c++) {
+        into->gaps[c] += from->gaps[c];
+    }
+    if (from->refreshNs) {
+        into->refreshNs = from->refreshNs;
+    }
+    for (int m = 0; m < RD_GLASS_RULES; m++) {
+        for (int c = 0; c <= RD_GLASS_CLASSES; c++) {
+            statMerge(&into->glass[m][c], &from->glass[m][c]);
+        }
+        statMerge(&into->hand[m], &from->hand[m]);
+        statMerge(&into->gpu[m], &from->gpu[m]);
+    }
+    into->scored += from->scored;
+    into->hit += from->hit;
+    into->late += from->late;
+    into->early += from->early;
+    into->further += from->further;
+    into->figuresN += from->figuresN;
+    into->marginN += from->marginN;
+    into->marginWild += from->marginWild;
+    into->earlyN += from->earlyN;
+    into->marginSumUs += from->marginSumUs;
+    into->earlySumUs += from->earlySumUs;
+    into->wildSumMs += from->wildSumMs;
+}
+
+/* the collecting thread's sums for this picture: s_sum with the flag held
+   (s_pend merged in first), else s_pend; *held for addEnd */
+static RdGlassWindow *addBegin(bool *held)
+{
+    *held = !__atomic_exchange_n(&s_spin, 1, __ATOMIC_ACQUIRE);
+    if (!*held) {
+        s_pendAny = true;
+        return &s_pend;
+    }
+    if (s_pendAny) {
+        rd_glass_merge(&s_sum, &s_pend);
+        memset(&s_pend, 0, sizeof(s_pend));
+        s_pendAny = false;
+    }
+    return &s_sum;
+}
+
+static void addEnd(bool held)
+{
+    if (held) {
+        __atomic_store_n(&s_spin, 0, __ATOMIC_RELEASE);
+    }
+}
+
+/* the window's thread (and the tests' reset): waits for the collector's
+   adds, yielding */
+static void lockTake(void)
+{
+    while (__atomic_exchange_n(&s_spin, 1, __ATOMIC_ACQUIRE)) {
+#ifdef _WIN32
+        (void)SwitchToThread();
+#else
+        (void)sched_yield();
+#endif
+    }
+}
+
+static void unlockTake(void)
+{
+    __atomic_store_n(&s_spin, 0, __ATOMIC_RELEASE);
+}
+
+/* a slot with both in: paired with the shown picture before; the screen's
+   prediction scored and the picture sent to its model */
+static void done(uint32_t i)
+{
+    const RdGlassPic *p = &s_slot[i].p;
+    const double actualMs = (double)s_slot[i].ns / 1e6;
+    const double refMs = (double)s_slot[i].refreshNs / 1e6;
+    if (p->screenEndMs > 0.0) {
+        const RdPaceScreenSample smp = {p->screenEndMs, actualMs, refMs,
+                                        p->gpuExact ? p->gpuEndMs : 0.0};
+        rd_pace_screen_seen(&smp);
+    }
+    bool held;
+    RdGlassWindow *w = addBegin(&held);
+    if (p->screenAtMs > 0.0 && refMs > 0.0) {
+        const int k = rd_pace_screen_score(p->screenAtMs, actualMs, refMs);
+        w->scored++;
+        w->hit += k == 0 ? 1u : 0u;
+        w->late += k == 1 ? 1u : 0u;
+        w->early += k == -1 ? 1u : 0u;
+        w->further += k > 1 || k < -1 ? 1u : 0u;
+    }
+    if (s_slot[i].marginNs != 0 || s_slot[i].earliestNs != 0) {
+        w->figuresN++;
+        /* the unsigned field read signed: a margin below 0 wraps */
+        const int64_t mg = (int64_t)s_slot[i].marginNs;
+        if (mg >= -RD_GLASS_MARGIN_MAX_NS && mg <= RD_GLASS_MARGIN_MAX_NS) {
+            w->marginN++;
+            w->marginSumUs += mg / 1000;
+        } else {
+            w->marginWild++;
+            w->wildSumMs += (double)mg / 1e6;
+        }
+        if (s_slot[i].earliestNs != 0 && s_slot[i].earliestNs < s_slot[i].ns &&
+            2u * (s_slot[i].ns - s_slot[i].earliestNs) >= s_slot[i].refreshNs) {
+            w->earlyN++;
+            w->earlySumUs += (int64_t)((s_slot[i].ns - s_slot[i].earliestNs) / 1000u);
+        }
+    }
+    w->shown++;
+    if (s_last.have && s_slot[i].id > s_last.p.id) {
+        w->unseen += s_slot[i].id - s_last.p.id - 1u;
+        (void)rd_glass_pair(w, &s_last.p, s_last.ns, &s_slot[i].p, s_slot[i].ns,
+                            s_slot[i].refreshNs);
+    }
+    addEnd(held);
+    s_last.have = true;
+    s_last.p = s_slot[i].p;
+    s_last.ns = s_slot[i].ns;
+    s_slot[i].pic = s_slot[i].time = false;
+}
+
+static uint32_t slotOf(uint32_t id)
+{
+    const uint32_t i = id % JOIN;
+    if (s_slot[i].id != id) {
+        s_slot[i].id = id;
+        s_slot[i].pic = s_slot[i].time = false;
+    }
+    return i;
+}
+
+void rd_glass_join(const RdGlassPic *p)
+{
+    if (p->id == 0) {
+        return;
+    }
+    bool held;
+    addBegin(&held)->pictures++;
+    addEnd(held);
+    const uint32_t i = slotOf(p->id);
+    s_slot[i].p = *p;
+    s_slot[i].pic = true;
+    if (s_slot[i].time) {
+        done(i);
+    }
+}
+
+void rd_glass_time(uint32_t id, uint64_t actualNs, uint64_t refreshNs, uint64_t earliestNs,
+                   uint64_t marginNs)
+{
+    if (id == 0) {
+        return;
+    }
+    const uint32_t i = slotOf(id);
+    s_slot[i].ns = actualNs;
+    s_slot[i].refreshNs = refreshNs;
+    s_slot[i].earliestNs = earliestNs;
+    s_slot[i].marginNs = marginNs;
+    s_slot[i].time = true;
+    if (s_slot[i].pic) {
+        done(i);
+    }
+}
+
+void rd_glass_take(RdGlassWindow *w)
+{
+    lockTake();
+    *w = s_sum;
+    memset(&s_sum, 0, sizeof(s_sum));
+    unlockTake();
+}
+
+void rd_glass_reset(void)
+{
+    memset(s_slot, 0, sizeof(s_slot));
+    memset(&s_last, 0, sizeof(s_last));
+    lockTake();
+    memset(&s_sum, 0, sizeof(s_sum));
+    memset(&s_pend, 0, sizeof(s_pend));
+    s_pendAny = false;
+    unlockTake();
+}
+
+/* ------------------------------------------------------------- the line */
+
+typedef struct Out {
+    char *buf;
+    size_t n, at;
+} Out;
+
+static void put(Out *o, const char *fmt, ...)
+{
+    va_list ap;
+    va_start(ap, fmt);
+    char *dst = o->at < o->n ? o->buf + o->at : NULL;
+    const size_t room = o->at < o->n ? o->n - o->at : 0;
+    const int wr = vsnprintf(dst, room, fmt, ap);
+    va_end(ap);
+    if (wr > 0) {
+        o->at += (size_t)wr;
+    }
+}
+
+static double mean(const RdGlassStat *s)
+{
+    return s->n ? (double)s->sum / (double)s->n / RD_GLASS_UNITS : 0.0;
+}
+
+static double dev(const RdGlassStat *s)
+{
+    if (!s->n) {
+        return 0.0;
+    }
+    const double m = (double)s->sum / (double)s->n;
+    const double v = (double)s->sum2 / (double)s->n - m * m;
+    return v > 0.0 ? sqrt(v) / RD_GLASS_UNITS : 0.0;
+}
+
+static double share(uint64_t k, uint64_t n)
+{
+    return n ? 100.0 * (double)k / (double)n : 0.0;
+}
+
+static const char *ruleName(int r)
+{
+    switch (r) {
+    case RD_RULE_HAND:
+        return "the hand-over";
+    case RD_RULE_GPU:
+        return "the GPU's predicted end";
+    case RD_RULE_TIMER:
+        return "the own timer";
+    case RD_RULE_SCREEN:
+        return "the screen's predicted refresh";
+    default:
+        return "the present clock";
+    }
+}
+
+static void measure(Out *o, const RdGlassWindow *w, int m)
+{
+    const RdGlassStat *all = &w->glass[m][RD_GLASS_CLASSES];
+    put(&o[0],
+        "mean %.2f (deviation %.3f), above 1.25 %.1f %%, above 1.5 %.1f %%, below 0.75 %.1f %%",
+        mean(all), dev(all), share(all->above125, all->n), share(all->above15, all->n),
+        share(all->below075, all->n));
+    if (w->refreshNs != 0) {
+        static const char *const kCls[RD_GLASS_CLASSES] = {
+            "under half a refresh", "1 refresh", "2 refreshes", "3 refreshes", "4 or more"};
+        put(&o[0], "; by the display's gap:");
+        int first = 1;
+        for (int c = 0; c < RD_GLASS_CLASSES; c++) {
+            if (w->glass[m][c].n) {
+                put(&o[0], "%s %s %.2f (%.3f)", first ? "" : ",", kCls[c], mean(&w->glass[m][c]),
+                    dev(&w->glass[m][c]));
+                first = 0;
+            }
+        }
+    }
+    put(&o[0],
+        "; against the hand-overs %.2f (%.3f) over %llu, against the GPU's ends %.2f (%.3f) "
+        "over %llu",
+        mean(&w->hand[m]), dev(&w->hand[m]), (unsigned long long)w->hand[m].n, mean(&w->gpu[m]),
+        dev(&w->gpu[m]), (unsigned long long)w->gpu[m].n);
+}
+
+bool rd_glass_format(const RdGlassWindow *w, char *out, size_t size)
+{
+    if (size == 0) {
+        return false;
+    }
+    out[0] = '\0';
+    if (w->pictures == 0) {
+        return false;
+    }
+    Out o = {out, size, 0};
+    put(&o,
+        "on the glass in 10 s: %llu pictures with a display id, %llu shown with the display's "
+        "time, %llu presented with no time back (replaced before shown, or not reported), %llu "
+        "pairs",
+        (unsigned long long)w->pictures, (unsigned long long)w->shown,
+        (unsigned long long)w->unseen, (unsigned long long)w->pairs);
+    if (w->refreshNs != 0) {
+        put(&o,
+            "; the display's gaps by refreshes of %.2f ms: under half %u, 1 %u, 2 %u, 3 %u, 4 or "
+            "more %u",
+            (double)w->refreshNs / 1e6, w->gaps[0], w->gaps[1], w->gaps[2], w->gaps[3], w->gaps[4]);
+    } else {
+        put(&o, "; the display's refresh not known");
+    }
+    if (w->pairs == 0) {
+        return true;
+    }
+    put(&o,
+        "; the content's speed on the glass (its step over the display's gap, 1.00 real "
+        "time), drawn (%s): ",
+        ruleName(w->drawnRule));
+    measure(&o, w, RD_GLASS_DRAWN);
+    for (int r = 0; r < RD_RULE_COUNT; r++) {
+        if (w->glass[1 + r][RD_GLASS_CLASSES].n) {
+            put(&o, "; by %s%s: ", ruleName(r), r == w->drawnRule ? " (drawn)" : " (not drawn)");
+            measure(&o, w, 1 + r);
+        }
+    }
+    if (w->figuresN) {
+        put(&o, "; the display's own figures over %llu shown: ", (unsigned long long)w->figuresN);
+        if (w->marginN) {
+            put(&o, "present margin %.2f ms on average",
+                (double)w->marginSumUs / 1000.0 / (double)w->marginN);
+            if (w->marginWild) {
+                put(&o, " over %llu", (unsigned long long)w->marginN);
+            }
+        }
+        if (w->marginWild) {
+            put(&o,
+                "%spresent margin over a second either way %llu (%.0f ms on average: not a "
+                "margin, no desired time was asked)",
+                w->marginN ? ", " : "", (unsigned long long)w->marginWild,
+                w->wildSumMs / (double)w->marginWild);
+        }
+        put(&o, ", earliest present half a refresh or more before the time shown %llu",
+            (unsigned long long)w->earlyN);
+        if (w->earlyN) {
+            put(&o, " (by %.2f ms on average)", (double)w->earlySumUs / 1000.0 / (double)w->earlyN);
+        }
+    }
+    return true;
+}
+
+void rd_glass_line(void)
+{
+    static RdGlassWindow w;
+    static RdPaceScreenWindow sw;
+    static RdPaceEvenWindow ew;
+    static char line[6144];
+#ifndef __ANDROID__
+    /* VK_GOOGLE_display_timing is enabled on Android alone (vk_glass.c):
+       said once, so a desktop or Mac log answers why the line is absent */
+    static bool s_said;
+    if (!s_said) {
+        s_said = true;
+        fprintf(stderr, "window: on the glass: not on this platform (the display's own times "
+                        "are read on Android alone, for the screen's rule)\n");
+    }
+#endif
+    rd_glass_take(&w);
+    rd_pace_screen_take(&sw);
+    rd_pace_even_take_window(&ew);
+    const bool any = rd_glass_format(&w, line, sizeof line);
+    if (!any) {
+        /* no picture with a display id (no VK_GOOGLE_display_timing): the
+           screen's rule's fall-backs alone, where it ran */
+        (void)snprintf(line, sizeof line, "on the glass in 10 s: no picture with a display id");
+    }
+    size_t at = strlen(line);
+    const bool screen = rd_pace_screen_format(&sw, w.scored, w.hit, w.late, w.early, w.further,
+                                              line + at, sizeof line - at);
+    at = strlen(line);
+    /* the even cadence's clause (rd_pace_even.h: only where it ran) */
+    const bool even = rd_pace_even_format(&ew, line + at, sizeof line - at);
+    if (screen || even || any) {
+        fprintf(stderr, "window: %s\n", line);
+    }
+}

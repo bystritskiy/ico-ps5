@@ -5,25 +5,220 @@
  * window's start (window_pipe_finish.h).
  */
 #include "window_pipe_finish.h"
+#ifdef __ANDROID__
+#include "android/gpu_sysfs_android.h"
+#endif
 
 #include <stdio.h>
+#include <stdlib.h>
+#include <string.h>
+#include <SDL3/SDL_filesystem.h>
+#include <SDL3/SDL_time.h>
+#include "attempt_ledger.h"
 #include "diag_host.h"
+#include "host_config.h"
+#include "last_run.h"
 #include "memory_floor.h"
+#include "pipe_resume.h"
 #include "rd.h"
+#include "rd_early_plan.h"
+#include "rd_made_outside.h"
+#include "rd_vu_rec_early.h"
 #include "rhi.h"
+#include "set_size.h"
+
+/* this start resumed the set (window_pipe_floor_retry), and the stop it
+   resumed after (its count steps the next stop's) */
+static int s_resumed;
+static IcoPipeResume s_prevStop;
+
+/* The stop's place for the next start (issue 123): appended to this
+   start's stop line in the activity file when the stop is one the next
+   start follows (the system's signal, or the free-memory floor on
+   Qualcomm's own driver), with its memory numbers in the log */
+static void resume_note_stop(void)
+{
+    RdPipelineSetStop st;
+    IcoPipeResume r;
+    SDL_Time now;
+    SDL_DateTime dt;
+    char part[128], mem[160];
+
+    if (!rd_pipeline_set_stop(&st)) {
+        return;
+    }
+    memset(&r, 0, sizeof(r));
+    r.at = st.at;
+    r.total = st.total;
+    r.batch = st.batch;
+    r.stops = ico_pipe_resume_stops(s_resumed, &s_prevStop);
+    if (SDL_GetCurrentTime(&now) && SDL_TimeToDateTime(now, &dt, true)) {
+        const int put = snprintf(r.date, sizeof(r.date), "%04d-%02d-%02d %02d:%02d", dt.year,
+                                 dt.month, dt.day, dt.hour, dt.minute);
+        (void)put;
+    }
+    (void)ico_pipe_resume_part(part, sizeof(part), &r);
+    ico_diag_memory_text(mem, sizeof(mem));
+    if (!ico_diag_startup_set_resume_part(part)) {
+        /* for this start only (the careful set's own budget, or the floor
+           on another driver): the next start makes the set again */
+        fprintf(stderr,
+                "window: pipelines: the start-up set stopped at pipeline %u of %u (batches of "
+                "%u; %s) %s; the next start makes the whole set again\n",
+                st.at + 1u, st.total, st.batch, mem[0] ? mem : "memory unknown", st.why);
+        return;
+    }
+    fprintf(stderr,
+            "window: pipelines: the start-up set stopped for memory at pipeline %u of %u "
+            "(batches of %u, stop %u in a row): %s; %s; the rest is made as the game needs it, "
+            "and the next start resumes at pipeline %u in batches of %u\n",
+            st.at + 1u, st.total, st.batch, r.stops, mem[0] ? mem : "memory unknown", st.why,
+            st.at + 1u, ico_pipe_resume_batch(st.batch));
+}
+
+/* Issue 215 (set_size.h): the start-up set sized by the device's own memory
+   fall.  The memory as the set's floor reads it (diag_host.c
+   memory_floor_stop: MemAvailable against the floor of memory_floor.h with
+   [dev] pipeline_memory_floor_mb as ICO_PIPELINE_MEMORY_FLOOR_MB): 0 with
+   the figures, else -1 with why the rule is off */
+static int size_memory(long *freeMb, long *totalMb, long *floorMb, const char **offWhy)
+{
+#ifdef __ANDROID__
+    long availKb, totalKb;
+    long setting = ico_memory_floor_setting(getenv("ICO_PIPELINE_MEMORY_FLOOR_MB"));
+    if (setting == -2) {
+        setting = -1; /* not a number: the default, as the set reads it */
+    }
+    if (setting == 0) {
+        *offWhy = "the free-memory floor is off ([dev] pipeline_memory_floor_mb = 0)";
+        return -1;
+    }
+    if (ico_diag_device_memory(&availKb, &totalKb) != 0) {
+        *offWhy = "the device's free memory could not be read";
+        return -1;
+    }
+    *freeMb = availKb / 1024;
+    *totalMb = totalKb / 1024;
+    *floorMb = ico_memory_floor_mb(*totalMb, setting, ico_diag_memory_floor_driver());
+    if (*floorMb <= 0) {
+        *offWhy = "no free-memory floor on this device";
+        return -1;
+    }
+    return 0;
+#else
+    (void)freeMb;
+    (void)totalMb;
+    (void)floorMb;
+    *offWhy = "no free-memory floor on this system (Android's only)";
+    return -1;
+#endif
+}
+
+/* Issue 215 (set_size.h's GPU room): what the kernel's GPU driver holds for
+   this process, where it says (Qualcomm's KGSL, readable): 1 with the
+   figure, else 0 with why */
+static int size_gpu(long *gpuMb, char *offWhy, size_t size)
+{
+#ifdef __ANDROID__
+    const int e = gpu_sysfs_android_proc_kernel_mb(gpuMb);
+    if (e == 0) {
+        return 1;
+    }
+    snprintf(offWhy, size,
+             "this process's figure in the kernel's GPU driver is not readable, errno %d", e);
+    return 0;
+#else
+    (void)gpuMb;
+    snprintf(offWhy, size, "the kernel's GPU driver gives no figure on this system");
+    return 0;
+#endif
+}
+
+/* the set's measurement (32 KB of samples: static) */
+static SetSizeRun s_size;
+
+/* rd.h RdSetSizeFn: before each batch of the start-up set */
+static unsigned size_ask(const RdSetSizeAsk *a, char *why, size_t size)
+{
+    const long mb = 1024L * 1024L;
+    const long recMb = (long)((a->needRecordBytes + (uint64_t)mb - 1u) / (uint64_t)mb);
+    const long arenaMb = (long)((a->needArenaBytes + (uint64_t)mb - 1u) / (uint64_t)mb);
+    const long recMadeMb = (long)((a->madeRecordBytes + (uint64_t)mb - 1u) / (uint64_t)mb);
+    const long arenaMadeMb = (long)((a->madeArenaBytes + (uint64_t)mb - 1u) / (uint64_t)mb);
+    long freeMb = -1, totalMb = -1, floorMb = -1;
+    const char *offWhy = NULL;
+    const int have = size_memory(&freeMb, &totalMb, &floorMb, &offWhy) == 0;
+    static char line[SET_SIZE_LINE_MAX];
+    char words[SET_SIZE_WORDS_MAX];
+    SetSizeAsk q;
+    unsigned was, mask;
+    long gpuMb = 0;
+    char gpuWhy[96];
+    const int gpuRead = have ? size_gpu(&gpuMb, gpuWhy, sizeof gpuWhy) : 0;
+
+    if (a->begin) {
+        set_size_begin(&s_size, have ? freeMb : -1, have ? floorMb : 0);
+        (void)set_size_rule_text(line, sizeof line, s_size.active, offWhy, a->left[0] + a->left[1],
+                                 freeMb, floorMb, recMb, arenaMb, recMadeMb, arenaMadeMb);
+        ico_diag_log("%s", line);
+        if (s_size.active) {
+            (void)set_size_gpu_text(line, sizeof line, gpuRead, gpuMb, gpuWhy);
+            ico_diag_log("%s", line);
+        }
+        set_size_publish(s_size.active, floorMb, freeMb, "");
+    }
+    if (!s_size.active) {
+        return 0u;
+    }
+    memset(&q, 0, sizeof q);
+    q.freeMb = have ? freeMb : -1;
+    q.made[0] = a->made[0];
+    q.made[1] = a->made[1];
+    q.left[0] = a->left[0];
+    q.left[1] = a->left[1];
+    q.next = a->next;
+    q.needMb = recMb + arenaMb;
+    q.place = a->place;
+    q.total = a->total;
+    q.gpuRead = gpuRead;
+    q.gpuMb = gpuMb;
+    was = s_size.stopped | s_size.said;
+    mask = set_size_ask(&s_size, &q, line, sizeof line, why, size);
+    if (line[0] != '\0') {
+        ico_diag_log("%s", line);
+    }
+    /* the decision in last-run.txt's phase (when it changes) and the first
+       picture's line */
+    (void)set_size_words(&s_size, words, sizeof words);
+    if ((s_size.stopped | s_size.said) != was) {
+        last_run_set_size_words(words);
+    }
+    set_size_publish(1, s_size.floorMb, s_size.lowMb, words);
+    return mask;
+}
 
 void window_pipe_floor_driver(void)
 {
     const RhiLimits *l = rhi_limits();
+    long freeMb, totalMb, floorMb;
+    const char *offWhy = NULL;
 
-    ico_diag_set_memory_floor_driver(l != NULL ? l->vendorId : 0u,
+    ico_diag_set_memory_floor_driver(l != NULL ? l->vendorId : 0u, l != NULL ? l->driverId : 0u,
                                      l != NULL ? l->driverText : NULL);
+    ico_diag_set_pipe_compiler_serial(l != NULL ? l->serialPipelines : NULL);
+    /* issue 215: the set sized by the device's memory fall, where a floor
+       applies (the ledger's row; the rule's own line at the set's start) */
+    rd_set_set_size_fn(size_ask);
+    ico_attempt_decide_set_size(size_memory(&freeMb, &totalMb, &floorMb, &offWhy) == 0);
 }
 
 void window_pipe_finish_start(void)
 {
     const int driver = ico_diag_memory_floor_driver();
 
+    if (rd_pipelines_lazy_on()) {
+        resume_note_stop();
+    }
     if (!rd_pipelines_lazy_on() || !ico_diag_floor_stopped()) {
         return;
     }
@@ -36,4 +231,200 @@ void window_pipe_finish_start(void)
         return;
     }
     (void)rd_pipelines_background_start(ico_diag_background_memory);
+}
+
+/* window_pipe_early's memory function (rd_vu_rec_early.h RdEarlyMemoryFn) */
+static int early_memory(long *availMb, long *floorMb, char *why, size_t size)
+{
+    char w[128];
+
+    if (ico_diag_background_memory(w, sizeof w) == 2) {
+        snprintf(why, size, "%s", w);
+        return RD_EARLY_MEM_SIGNAL;
+    }
+#ifdef __ANDROID__
+    {
+        long avail_kb, total_kb, total;
+        /* the floor as the start-up set reads it (diag_host.c
+           floor_setting_read: a value that is not a number is the
+           default, its line said there) */
+        long setting = ico_memory_floor_setting(getenv("ICO_PIPELINE_MEMORY_FLOOR_MB"));
+        if (setting == -2) {
+            setting = -1;
+        }
+        if (ico_diag_device_memory(&avail_kb, &total_kb) != 0) {
+            snprintf(why, size, "the device's memory could not be read");
+            return RD_EARLY_MEM_UNKNOWN;
+        }
+        *availMb = avail_kb / 1024;
+        total = total_kb / 1024;
+        *floorMb = ico_memory_floor_mb(total, setting, ico_diag_memory_floor_driver());
+        snprintf(why, size, "%ld MB available of %ld MB, floor %ld MB (%s)", *availMb, total,
+                 *floorMb, setting == 0 ? "the floor off" : "the start-up set's floor");
+        return *availMb < *floorMb ? RD_EARLY_MEM_FLOOR : RD_EARLY_MEM_OK;
+    }
+#else
+    (void)availMb;
+    (void)floorMb;
+    (void)size;
+    return RD_EARLY_MEM_UNKNOWN;
+#endif
+}
+
+void window_pipe_early(void)
+{
+    rd_vu_record_prepare(early_memory);
+}
+
+/* the skin check's run counts for logs/last-run.txt and the report (issue
+   217: last_run_skin.h); the heartbeat's thread too: relaxed atomics only */
+static void skin_source(LastRunSkin *out)
+{
+    RdSkinRunCounts c;
+    rd_vu_skin_run_counts(&c);
+    out->on = c.on;
+    out->phone = c.phone;
+    out->checks = (unsigned long long)c.checks;
+    out->box = (unsigned long long)c.boxDrawn;
+    out->twins = (unsigned long long)c.twinsDrawn;
+    out->begun = (unsigned long long)c.pipesBegun;
+}
+
+void window_pipe_skin_check(int pipePolicy)
+{
+    const int driver = ico_diag_memory_floor_driver();
+    char why[200];
+    char logs[ICO_PATH_MAX];
+
+    /* the first 3D pictures' allocations before the game runs */
+    window_pipe_early();
+
+    /* the check's capture on failure (issue 123): its sidecar beside the
+       log, so the share menu and the frame dump's zip take it */
+    rd_set_vu_skin_capture_dir(ico_host_logs_dir(logs, sizeof logs) == 0 ? logs : NULL);
+
+    if (driver != ICO_MEMORY_FLOOR_DRIVER_OTHER &&
+        (ico_diag_floor_stopped() || pipePolicy == ICO_DIAG_PIPESET_LAZY_LOW_MEMORY)) {
+        snprintf(why, sizeof why,
+                 "the start-up set %s for memory on %s; issue 161: that driver's compiler ran the "
+                 "device out of memory",
+                 pipePolicy == ICO_DIAG_PIPESET_LAZY_LOW_MEMORY ? "of the last start stopped"
+                                                                : "stopped",
+                 ico_memory_floor_driver_words(driver));
+        rd_vu_skin_background(ico_diag_background_memory, why);
+    } else {
+        rd_vu_skin_background(ico_diag_background_memory, NULL);
+    }
+    last_run_set_skin_source(skin_source);
+    /* the fog self-test's block names each self-test in last-run.txt's
+       phase (issue 215; before rd_fog_selftest, window_host.c) */
+    rd_set_selftest_fn(last_run_selftest_name);
+    /* the start-up's own work done: what is made from here outside the key
+       cache is play's, named (rd_made_outside.h) */
+    rd_made_outside_watch();
+}
+
+/* the cache file's size in bytes, -1 when there is none */
+static long long cache_file_bytes(const char *path)
+{
+    SDL_PathInfo info;
+
+    if (path == NULL || path[0] == '\0' || !SDL_GetPathInfo(path, &info) ||
+        info.type != SDL_PATHTYPE_FILE) {
+        return -1;
+    }
+    return (long long)info.size;
+}
+
+int window_pipe_floor_retry(int pipePolicy)
+{
+    const char *line = ico_diag_startup_prev_low_memory_line();
+    const int loaded = rhi_pipeline_cache_loaded() ? 1 : 0;
+    /* the player's [dev] pipeline_set = "careful" stays on the resumed
+       start (ico_diag_startup_pipeline_set returns the low-memory policy
+       before it reads the setting) */
+    const int careful = ico_pipe_resume_careful(getenv("ICO_PIPELINE_SET"));
+    char where[160];
+    unsigned at = 0, batch = 0;
+
+    s_resumed = 0;
+    memset(&s_prevStop, 0, sizeof(s_prevStop));
+    if (pipePolicy != ICO_DIAG_PIPESET_LAZY_LOW_MEMORY) {
+        return pipePolicy;
+    }
+    /* issue 123: the set resumed where the last start's stopped for memory,
+       in half its batches (at least 4), the memory asked between batches as
+       in any set; before v0.11.2 such a stop turned the set off for every
+       later start of the version, and with the pipeline cache empty (another
+       driver's file) each new pipeline was compiled inside a picture's
+       walk (a 1.4 s freeze for 29 of them) */
+    if (ico_pipe_resume_parse(line, &s_prevStop)) {
+        at = s_prevStop.at;
+        batch = ico_pipe_resume_batch(s_prevStop.batch);
+        snprintf(where, sizeof(where), "at pipeline %u of %u after the low-memory stop of %s",
+                 at + 1u, s_prevStop.total,
+                 s_prevStop.date[0] ? s_prevStop.date : "an unknown date");
+    } else {
+        /* a line without the place (written by an older version): from the
+           first, in half the set's batches */
+        snprintf(where, sizeof(where),
+                 "at pipeline 1 after the low-memory stop of an earlier start (its line names "
+                 "no place)");
+    }
+    /* the pipelines before the place made after the rest, whatever the
+       cache: a stop of a resumed set (itself from a place) leaves keys
+       before its own place that no start made, and a key the cache holds
+       is made from it in a moment (rd.h rd_set_pipeline_resume's
+       skipBefore stays for a caller that knows the whole head is cached) */
+    rd_set_pipeline_resume(at, batch, false);
+    ico_diag_startup_resume();
+    s_resumed = 1;
+    {
+        char b[32];
+
+        if (batch > 0) {
+            snprintf(b, sizeof(b), "batches of %u", batch);
+        } else {
+            snprintf(b, sizeof(b), "batches of half the set's");
+        }
+        fprintf(stderr,
+                "window: start-up set: resumed %s (%s, stop %u in a row; %s; %s; the pipeline "
+                "cache file %lld bytes, loaded by the renderer: %s): %s\n",
+                where, b, s_prevStop.stops ? s_prevStop.stops : 1u,
+                at == 0 ? "the whole set"
+                        : "the pipelines before it made after the rest, from the pipeline cache "
+                          "where it holds them",
+                careful ? "the careful set kept ([dev] pipeline_set = \"careful\")"
+                        : "the set's policy as for any start",
+                cache_file_bytes(ico_diag_pipeline_cache_path()), loaded ? "yes" : "no",
+                line[0] ? line : "no stop line");
+    }
+    return careful ? ICO_DIAG_PIPESET_CAREFUL_SETTING : ICO_DIAG_PIPESET_FULL;
+}
+
+void window_pipe_lazy_why(char *why, size_t size, int pipePolicy, int relaunch, int saved)
+{
+    if (relaunch) {
+        snprintf(why, size, "(a restart after a graphics driver crash)");
+    } else if (pipePolicy == ICO_DIAG_PIPESET_LAZY_SETTING) {
+        snprintf(why, size, "by the settings ([dev] pipeline_set = \"lazy\")");
+    } else if (pipePolicy == ICO_DIAG_PIPESET_LAZY_ONCE) {
+        snprintf(why, size,
+                 "(the previous start ended while preparing them in the careful set; for this "
+                 "start only)");
+    } else if (pipePolicy == ICO_DIAG_PIPESET_LAZY_NOW && saved) {
+        snprintf(why, size,
+                 "(the previous start ended while preparing them; [dev] pipeline_set = \"lazy\" "
+                 "from now on)");
+    } else if (pipePolicy == ICO_DIAG_PIPESET_LAZY_NOW) {
+        snprintf(why, size,
+                 "(the previous start ended while preparing them; [dev] pipeline_set = \"lazy\" "
+                 "could not be written, so for this start only)");
+    } else if (pipePolicy == ICO_DIAG_PIPESET_LAZY_LOW_MEMORY) {
+        /* not reached since issue 123's resume (window_pipe_floor_retry
+           makes such a start the set resumed), kept for the words */
+        snprintf(why, size, "(the previous start's set stopped when the system ran low on memory)");
+    } else {
+        snprintf(why, size, "(the last run made them that way)");
+    }
 }

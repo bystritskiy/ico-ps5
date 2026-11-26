@@ -1,7 +1,7 @@
 /* rd_fog_selftest_test.c: the fog's self-test and probe (rd_fog_path.c).
  *
  *   rd_fog_selftest test/rd_fog_selftest_test <path> [<w> <h> [<scale> [<aa> [<texels w> <texels h>
- *                                               [<out w> <out h>]]]]]
+ *                                               [<out w> <out h> [<aspect>]]]]]]
  *
  * <texels w> <texels h> a scene of exactly that many texels (scale 0), as
  * the window's size gives; <aa> an RdAntiAlias value (default 0, off); with an MSAA count the device
@@ -13,14 +13,17 @@
  * Enhanced window resolution in that output at 16:9, Full pixel on: SCENE
  * the window's exact pixels, the frame's exact width and a guard texel a
  * side (RdTargetRec.ox, RD_FULL_PIXEL_GUARD; rd_fog_selftest_fullpixel*:
- * 688 x 448 in 1920 x 1080).
+ * 688 x 448 in 1920 x 1080).  <aspect> (default 16:9): the display aspect, so
+ * a frame is cropped (624 wide at 1.6: exact 614.40) or exact (2048 at 48:9).
  *
  * On a Vulkan device (77 without one), at a wide scene (16:9, scale 2,
  * Full pixel) so the self-test runs on a SCENE whose texels are not its GS
  * pixels:
  *   1. rd_fog_selftest picks <path> (inplace on lavapipe; buffer when
  *      ICO_RD_FOG_SABOTAGE=inplace,copy makes the other two read 0) and
- *      says it passed;
+ *      says it passed; its first run names each self-test to the window's
+ *      hook (rd_set_selftest_fn, issue 215: logs/last-run.txt's phase) in
+ *      order, the twelve names word for word;
  *   2. a frame recorded through the renderer's own calls (not the game's
  *      fog code) draws the self-test's grid, cell n at GS Z (n << 16) |
  *      0x8000, and fogs it: the first fogged replay records the probe, the
@@ -54,6 +57,15 @@ static int failures;
     } while (0)
 
 #define CELLS 16
+
+/* the names rd_fog_selftest hands the hook, each followed by '|' */
+static char s_names[1024];
+
+static void name_hook(const char *name)
+{
+    const size_t n = strlen(s_names);
+    snprintf(s_names + n, sizeof(s_names) - n, "%s|", name);
+}
 
 /* the self-test's tables (rd_fog_path.c stLut, stCellColor) */
 static void lutOf(int i, uint8_t out[4])
@@ -209,10 +221,11 @@ int main(int argc, char **argv)
     const uint32_t sceneH = argc > 7 ? (uint32_t)atoi(argv[7]) : 0;
     const uint32_t outW = argc > 9 ? (uint32_t)atoi(argv[8]) : 0;
     const uint32_t outH = argc > 9 ? (uint32_t)atoi(argv[9]) : 0;
+    const float aspect = argc > 10 ? (float)atof(argv[10]) : 16.0f / 9.0f;
     RdSettings st;
     memset(&st, 0, sizeof(st));
     st.preset = RD_PRESET_ENHANCED;
-    st.aspect = 16.0f / 9.0f;
+    st.aspect = aspect;
     st.sceneScale = sceneW || outW ? 0.0f : scale;
     st.sceneWidth = sceneW;
     st.sceneHeight = sceneH;
@@ -238,8 +251,17 @@ int main(int argc, char **argv)
         return 77;
     }
 
-    /* 1. the self-test */
+    /* 1. the self-test, each of its first run's tests named first */
+    rd_set_selftest_fn(name_hook);
     const bool passed = rd_fog_selftest();
+    rd_set_selftest_fn(NULL);
+    CHECK(strcmp(s_names, "DATE|the effects' local read|the shadow count|the volumes' stencil "
+                          "entry|the shadow composites' entry|the crack fill's swap and the "
+                          "present's turn|the fog's depth path|the local read's timing (the "
+                          "depth path again when it is off)|the shadow count under MSAA|the "
+                          "stencil outside the shadow window|the shadow tiles|the start after "
+                          "the self-tests|") == 0,
+          "the self-tests' names: %s", s_names);
     printf("  self-test %s, path %s\n", passed ? "passed" : "failed",
            rd__fog_path_name(g_rd.fogPath));
     CHECK(passed, "the self-test passed");

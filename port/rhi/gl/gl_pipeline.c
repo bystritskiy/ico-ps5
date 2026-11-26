@@ -324,6 +324,7 @@ static RhiPipeline gl_pipe_create(const RhiPipelineDesc *d, float *ms)
     p->depthFormat = d->depthFormat;
     p->samples = d->samples > 1u ? d->samples : 1u;
     p->dstRead = d->dstRead;
+    p->noRaster = d->noRaster;
     /* as Vulkan's (vk_pipeline.c): depth dynamic only with a depth target,
      * blend only on a pipeline with one colour target */
     if ((d->dynamic & RHI_DYN_DEPTH) && g_gl.limits.dynamicDepth &&
@@ -351,6 +352,7 @@ static RhiPipeline gl_pipe_create(const RhiPipelineDesc *d, float *ms)
 
 RhiPipeline rhi_create_pipeline(const RhiPipelineDesc *d)
 {
+    gl_start_screen_end(); /* the shaders made: the renderer's screens from here on */
     return gl_pipe_create(d, NULL);
 }
 
@@ -361,6 +363,7 @@ uint32_t rhi_create_pipelines(const RhiPipelineDesc *descs, uint32_t n, RhiPipel
                               RhiPipelineBatch *batch)
 {
     uint32_t made = 0;
+    gl_start_screen_end(); /* the shaders made: the renderer's screens from here on */
     if (batch) {
         batch->threads = 1;
     }

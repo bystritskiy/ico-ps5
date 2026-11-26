@@ -26,6 +26,24 @@ forces the two-pass form on any device (`port/render/rd_core.c` (`rd_init`)). Wh
 read is available these paths give way to it (next section), and where the device orders the
 colour read the key keeps none of them ([GS state as data](#gs-state-as-data)).
 
+**The blend constant for the two passes (measured, not built).** For a FIX lerp (ALPHA
+0x64) and mode 3 (0x29) the factor is known on the CPU, so one draw with `RHI_BF_CONSTANT` /
+`RHI_BF_ONE_MINUS_CONSTANT` (the constant FIX/128 after the clamp, `rhi_cmd_set_blend_constant`,
+always dynamic on Vulkan) and the shader's alpha left as As (blend ONE/ZERO on alpha) could replace
+the two passes where the mask has both RGB and A: the colour pass's `SRC_ALPHA` / `ONE_MINUS_SRC_ALPHA`
+(lerp) or `ONE` / `SRC_ALPHA` (mode 3) with c0.a the same float, and the alpha pass's As. Not with
+PABE (its factor is per pixel), not under Z GREATER with Z write and A in the mask (the alpha pass
+there admits the stored Z's fragments, the logged deviation, which one draw would not reproduce),
+and nothing to gain where the mask lacks A or RGB (one pass already); whether a driver's constant
+and its shader-output alpha give the same bytes is a device's question (a blend self-test cell).
+The count first: in issue 179's four dumps and the Pixel's three, no draw takes it. Every FIX lerp
+there has FIX 0x80 (the cut-scene bars), which the alpha plan's factor-one rule already draws as one
+unblended pass, and mode 3 does not occur; over the corpus the only other FIX lerps are the motion
+blur's post sprite (FIX 0x20 to 0x27, one a picture while the game draws its motion blur, none in
+those dumps) and two deja-veil sheets in one scene. So it is not built:
+new pipelines in every no-dual start-up set and a self-test at every start for no draw of the
+reporter's pictures.
+
 **The AFAIL split.** An alpha-tested draw whose failing fragments write something other than its
 passing ones is two draws: the passing fragments with the draw's Z write and mask, then the failing
 ones under AFAIL (FB_ONLY: no Z; ZB_ONLY: no colour; RGB_ONLY: no Z, no alpha), the shader keeping
@@ -64,7 +82,7 @@ draws only what that outcome needs, byte for byte what the planned passes write
 after the plan by `port/render/rd_replay_vu.c` (`vuDraw`, the range once a command in `doVuDraw`)
 and `port/render/rd_replay.c` (`doScreen`), before the exact blend's and the two-pass blend's
 expansions; a mesh's vertex span is kept while its stream's serial holds, `meshSpanMemo`,
-[RENDER.md](RENDER.md#performance-notes)). The rules, each a fact of the GS's integer arithmetic and
+[RENDER.md](RENDER_PERF.md#performance-notes)). The rules, each a fact of the GS's integer arithmetic and
 of the fixed-function path:
 
 | rule | condition over the range lo..hi | the plan | why the bytes are the same |
@@ -143,6 +161,11 @@ workers' own times (`RhiPipelineBatch.ms`): `pipelines: the slowest: <s> s <key>
 slowest compiles) and `pipelines: compile time by vertex shader: <entry> <s> s, ...` (summed over
 the threads, the largest first) (`port/render/rd.h` (`rd_precreate_pipelines`,
 `RdPipelineProgressFn`, `rd_precreate_longest_ms`); `port/render/rd_pipeline.c` (`preTimesLog`)).
+On a PowerVR B-Series driver the batches compile on one thread
+and every module and pipeline creation, the background finisher's and a first use's included,
+takes one lock (`RhiLimits.serialPipelines`, `rhi_vk: pipelines: one at a time (PowerVR B-Series:
+the driver's compiler is not thread-safe)`; issue 188; [RHI.md](RHI.md#the-interface), **One
+compile at a time**), so the line reads `compiled on 1 thread`.
 At start the renderer logs the embedded modules' count and the largest, `shaders: <n> modules,
 largest <entry> <words> words`: a driver's compile time grows with a module's size, which
 `spirv_check` holds to a budget ([SHADERS.md](SHADERS.md#the-envelope); `port/render/rd_replay.c`).
@@ -262,7 +285,8 @@ kick's own `0x00`; the kick drawn under the cut's DrawCB gives its marked pixels
 `VuVSOut.r.w` or the no-planes twin's negative plane), so its colour is Cs and its alpha, mask,
 PABE and FBA the pixel's own: what the kick's own pass stores, byte for byte.
 
-**The device rule.** Vulkan with `RhiLimits.rasterOrderAttachment` and local read: never on
+**The device rule.** Vulkan with `RhiLimits.rasterOrderAttachment` and local read (the device
+table's `ATTACHMENT_READ_OFF` and `UBER_AUTO`, [DEVICE_TABLE.md](DEVICE_TABLE.md)): never on
 Qualcomm's own driver (issue 89), on PowerVR (no rasterization order: `rhi_vk: destination read:
 interlock no, rasterization-order attachment read no; local read yes`) or under MoltenVK; Mali
 (`VK_ARM_rasterization_order_attachment_access`) and Turnip have it; lavapipe has it, which the
@@ -296,6 +320,8 @@ The box blit with the effects depth (two keys, one per output format, `rd__prese
 
 The present's box average (`aa_reduce_ps`, one RGBA8 key, `rd_present.c` (`reduceInto`)) is in the set on every device: supersampling, a scaled scene with more texels than the box has pixels on both axes and Downsampling all draw it ([DISPLAY.md](DISPLAY.md)) (`rd_present`'s `checkReduceKey`).
 
+FSR 1.0's two passes (`fsr1_easu_ps`, `fsr1_rcas_ps` behind `blit_vs`, one RGBA8 key each, `rd_fsr1.c`) are in the set on every device that has both modules (OpenGL without their GLSL leaves them out), whatever the Upscaling row says, so turning it on makes no pipeline at run time; they count in the CRT family, the other present-stage filter ([DISPLAY.md](DISPLAY.md#fsr-10-upscaling)) (`rd_present`'s `checkFsr1`).
+
 The window builds the reachable set with `rd_precreate_pipelines` before the first frame, behind the
 start-up screen, unless one of the rules below skips it (`port/platform/window_host.c`
 (`ico_window_open`)). Without the set the window calls `rd_pipelines_lazy(why)` instead, which logs
@@ -323,7 +349,8 @@ start-up activity file then says `set: careful`, so an end inside the careful se
 start lazy rather than careful again. When the budget stops the set (`rd_pipelines_lazy_on`), the
 rest of the run is recorded as a lazy run's for that start only
 (`ico_diag_startup_activity_budget_stop`); when the system's low-memory signal stopped it, as a lazy
-run whose next start makes no set ([PLATFORM.md](PLATFORM.md#diagnostics)). Sprite planes last,
+run whose next start resumes the set where it stopped ([Stop and resume](#stop-and-resume);
+[PLATFORM.md](PLATFORM.md#diagnostics)). Sprite planes last,
 `[dev] pipeline_skip` (byte-identical): [WORK_BUFFERS.md](WORK_BUFFERS.md#without-the-sprite-planes).
 
 With the set made, a pipeline a draw needs later is a key the set did not hold, made on the thread
@@ -380,7 +407,7 @@ step (the `slow step` line's `texture decodes`) and the replay's texture and mes
 | the previous start, of any version, ended without a word in the foreground while a pipeline of its careful set was being made (its activity file says `set: careful`), the first such end in a row: this start only, nothing written (after a full set's end the next start is careful instead, above; [PLATFORM.md](PLATFORM.md#diagnostics)) | `(the previous start ended while preparing them in the careful set; for this start only)` |
 | such an end, whatever the set, the second in a row: the setting is written once the device is made ([PLATFORM.md](PLATFORM.md#diagnostics)) | `(the previous start ended while preparing them; [dev] pipeline_set = "lazy" from now on)` |
 | the last run, of the same version, ran without the set and ended, or exited from it | `(the last run made them that way)` |
-| the same, its set having stopped at the system's low-memory signal (its activity file's `set: stopped at the system's low-memory signal`) | `(the previous start's set stopped when the system ran low on memory)` |
+| the same, its set having stopped at the system's low-memory signal (its activity file's `set: stopped at the system's low-memory signal`): not reached, the window resumes the set instead ([Stop and resume](#stop-and-resume)) | `(the previous start's set stopped when the system ran low on memory)` |
 | the crash order's `lazy` step | `(a restart after a graphics driver crash)` |
 
 **The set against the pool.** The set's size depends on the device's profile and the scale: 446
@@ -389,7 +416,7 @@ tile-based profile ([The device profile](RENDER.md#the-device-profile)) adds the
 fx plan's 31 (`rd_fx_plan.c` (`rd__fx_enumerate`): under six depth states the alpha-only key, three
 `fx_frame_ps` keys and, with local read, one `fx_local_ps` key, and the alpha-only key once more with
 the depth attached under Z ALWAYS without Z write, for cleanUpFB's first sprite in the fog's pass) and,
-with the pre-pass off, the eleven program entries under every Z test, Z write and blend
+with the pre-pass off (by the settings or after a failed self-test), the eleven program entries under every Z test, Z write and blend
 (`rd_mesh.c` (`enumerateVuDraws`)); without dynamic state those fields stay in every key; and at a
 fractional Enhanced scale every `vu_ps` key has its `vu_np_ps` twin (`rd_pixel_plan.c`
 (`rd__vu_pixel_fs_enum`)). All four together give the largest set a device meets, 1153 keys on an
@@ -400,23 +427,48 @@ cache and so the RHI's pool: `rd_state_test` `testTilerSet` counts the tile prof
 and layout stand-ins where the test has no device), the pre-pass off, at 2x (977 keys) and at
 2.8125 x 2.41071 (1153), each under `RD_PIPELINE_REACHABLE_MAX` and inside `RHI_PIPELINE_POOL_MAX`
 less `RHI_PIPELINE_POOL_HEADROOM`; `rd_pixel_test` `testPipelines` counts the same configuration on
-a device with both blends (1153, and 1260 with the two-pass fallback). On a tile-based GPU the
+a device with both blends (1153, and 1260 with the two-pass fallback), and the same configuration
+with the pre-pass on, the default on a tile-based GPU (issue 179): the main shaders'
+and the fifteen point keys in place of the program entries', so fewer keys and a smaller VU family
+(the test prints both sets' totals and VU and VU point families and checks the pre-pass's is the
+smaller; the Mali-G52 log of issue 179, pre-pass off, has VU 242). On a tile-based GPU the
 aura's read in two passes (`port/render/rd_aura_box.c` (`rd__aura_box_keys`), `[dev] aura_box`)
 adds two fx keys while it is on, `fx_aura_rows_ps` into the RGBA16_UINT ROWBOX and
 `fx_aura_sum_ps` (the aura sprite's own key, Z ALWAYS, no depth, mask whole): 1155 on that
 Adreno 710; the tests' counts keep it off (no device, or a desktop device whose profile leaves it
 off). The set's first line names it against the pool (`rd_precreate_pipelines`):
 
-    rd: pipelines: the start-up set's 1153 keys (pool 4160: the cache's 4096 and 64 for the pipelines made outside it; 0 already made)
+    rd: pipelines: the start-up set's 1153 keys (pool 4192: the cache's 4096 and 96 for the pipelines made outside it; 0 already made)
 
 and the next line splits the set by family (`port/render/rd_pipeline.c` (`rd__pipe_key_family`), by what
 a key holds, not by the enumerator that listed it: a DATE twin of a VU or screen key counts as DATE,
 the water's states as 2D):
 
-    rd: pipelines: the start-up set by family: 2D <n>, VU <n>, VU point <n>, shadow <n>, fog <n>, CRT <n>, fx <n>, DATE <n>
+    rd: pipelines: the start-up set by family: 2D <n>, VU <n>, VU point <n>, shadow <n>, fog <n>, CRT <n>, fx <n>, DATE <n>; font_sheet_ps: the menus' text at <s>x in the set|baked (not in the set), the overlay's at <o>x in the set|baked (not in the set)[ ([dev] sheet_shader)]
 
 (a key is in one family, the first that holds of DATE, VU point, VU,
-shadow, fog, CRT, fx, 2D). `rd_state_test` `testTilerSet` asserts the families sum to the set's
+shadow, fog, CRT, fx, 2D).
+
+**The sheet shader's keys.** `font_sheet_ps` (the menus' text above the bake's scales, 70k words
+with its two-pass twin `font_sheet_ps_nodual`) is in the set only where a strip of a scale the bake
+does not take can be drawn (`port/render/rd_tex.c` (`rd__sheet_shader_in_scene`,
+`rd__sheet_shader_in_overlay`); issue 188: a PowerVR B-Series driver did not return from compiling
+it, on a phone whose menus are baked): the frame's 8 text keys when the menus' scale
+(`rd__sheet_scale_for` of the scene's texels a GS line, `port/ui/menu_font.c` (`mfScale`)'s
+rounding: 2.11 is 2, 2.41 is 3) is not baked (`rd__sheet_bake_scale`: 1, and 2 on the tile-based
+classes), the overlay's 4 when the output's height / 448 (the overlay's box is at most the output's
+height) is not, and all of them with `[dev] sheet_shader`; `font_sheet_baked_ps`'s 10 stay in every
+set. The family line's last part says which way each went, with the scales. A scale reached later
+(Apply's resolution: the display change's set, `rd__display_pipelines`; a larger window: first use)
+makes the key then. At 1080 output lines the overlay's popups draw at 3x, so a 1080p phone keeps
+the overlay's 4 keys while its menus at Resolution Auto (2x) are baked. `rd_state_test`
+`testSheetSet` asserts the counts on a tile-based and a desktop profile at 1x, 2x and 3x and at
+448, 720, 1008 and 1080 output lines, and the line's words. The blend self-test, which the window runs before the set behind the start-up
+screen, draws its glyph through `font_sheet_baked_ps` unless `font_sheet_ps` is what it checks
+([RENDER.md](RENDER.md#destination-reads-and-blend-paths), **The blend self-test**), so no start
+compiles `font_sheet_ps` where the set leaves it out. A creation that does not return before the
+game starts ends the run after 10 s, 60 s on a driver whose compiles run one at a time, the time
+held while the process grows ([PLATFORM.md](PLATFORM.md#diagnostics), **The pipeline limit**). `rd_state_test` `testTilerSet` asserts the families sum to the set's
 count and to the count without local read, and prints them for each mode.
 `rd_replay_tool --keys` compares the set with what a replay asks for: the keys the replay names
 (`rd__pipeline_gather`, rounds as the loss bisect's `bisectPipelines`), one line each with its
@@ -431,12 +483,12 @@ caller of `mc_SetMicroCode`, so the programs that draw there cannot be read from
 and with the vertex pre-pass the drawing keys carry `vu_main_vs` and `RD_PROG_PRELIT` whatever the
 program (`port/render/rd_mesh.c` (`enumerateVuDraws`)), so a key cannot say "specular only". A
 fold to the specular entries could be made only with the pre-pass off. `rd_replay_tool --keys` lists the VU keys with a DATE state a dump asks for.
-The summary line's renderer part ends with ` (pool 4160, cache 4096)` after the set's words
+The summary line's renderer part ends with ` (pool 4192, cache 4096)` after the set's words
 (`rd_summary_text`). A creation that fails, in the set or at first use, is logged with the key, when
 it was asked for and why, the first 8 and then every 100th with the count so far
 (`port/render/rd_pipeline.c` (`keepPipeline`, `failReason`)):
 
-    rd: pipeline creation failed on first use in list 0 (program 0 blend 4 vs 4 fs 5 fmt 1/8): the RHI's pipeline pool is full (4160 of 4160 alive); draws with this key are skipped (1 failed so far)
+    rd: pipeline creation failed on first use in list 0 (program 0 blend 4 vs 4 fs 5 fmt 1/8): the RHI's pipeline pool is full (4192 of 4192 alive); draws with this key are skipped (1 failed so far)
 
 `in the start-up set` or `in a replay's gathered keys` in place of `on first use in list 0`; the
 reason is the RHI's, read from `RhiStats` around the creation (`pipelinePoolFull`,
@@ -485,7 +537,9 @@ the rest made on first use`. A batch in flight is not cut short: the careful bat
 pipelines on one thread. The same function also says yes once the device's available memory is
 under the free-memory floor: on Qualcomm's own driver 17 % of its memory and at most 2048 MB on a
 device of more than 8 GB (issue 161's guard against that driver's compiler), on any other driver
-the set's need with a margin, at most 512 MB above 8 GB (`port/platform/memory_floor.h`;
+the set's need with a margin, at most 512 MB above 8 GB (`port/platform/memory_floor.h`; the
+driver's class is the device table's `MEMORY_FLOOR_CLASS`, rows `qualcomm-text` and
+`vendor-unknown`, [DEVICE_TABLE.md](DEVICE_TABLE.md);
 [WORK_BUFFERS.md](WORK_BUFFERS.md#without-the-sprite-planes) has the figures). A phone with much
 memory reports little of it available while it runs well (1823 to 2647 MB of 15552 MB on a PowerVR
 DXT-48-1536): a plain 17 % (2643 MB) stopped that phone's set after 33 of 1193 keys, so the title
@@ -493,7 +547,7 @@ waited 13.6 s for the pipelines made on first use, and the 2048 MB cap stopped i
 MB (a 2.2 s freeze in play). A stop at the floor on another driver than Qualcomm's own is for that
 start only, and the rest is finished in the background (next section).
 
-The table's row (`port/rhi/vk/vk_device.c` `kVuPlainOnly`; the fallback rule of the next section
+The table's row (the device table's `adreno-740-qualcomm`, [DEVICE_TABLE.md](DEVICE_TABLE.md); the fallback rule of the next section
 stays on the same device):
 
 | device | match | reason |
@@ -512,7 +566,12 @@ start the system ends or a device that freezes keeps every batch before it and t
 compiles only the rest, and the batch's line goes to the log and to the activity file as a
 `compiled: ` line ([PLATFORM.md](PLATFORM.md#diagnostics)): `rd: pipelines: compiled lazy batch 3,
 pipelines 41-57 of this run (compiler E031.41.03.47): 17 pipelines 0.02-0.61 s, mean 0.14 s, over
-1.8 s; memory 210 MB (most 214 MB), pipeline cache 3104 KB; slowest 0.61 s <key> (<modules>)`. In
+1.8 s; memory 210 MB (most 214 MB), pipeline cache 3104 KB; slowest 0.61 s <key> (<modules>); by
+family vu 12, program 5; 15 of them in the start-up set` (issue 123: the batch's keys by family,
+`rd__pipe_key_family`, and how many of them `rd__enumerate_reachable` holds, the set taken at the
+run's first creation on first use and each key made the way the draw's was, under the pass in
+force: those a resumed set made before play would have made; one outside it is a key only a
+frame's walk reaches). In
 such a run each first-use pipeline's note goes to the disc before its compile (fsync,
 `act_sync_note`), so a freeze inside one still names it. The cache's size at the start is logged
 twice: by the backend (`rhi_vk: pipeline cache: <n> bytes from <path>`, or `rhi_vk: pipeline
@@ -540,8 +599,170 @@ pipelines: compiled 2D batch 193-224 of 527 (compiler ...): 32 pipelines 0.02-0.
 resident memory and its peak (`rd_set_memory_fn`, `ico_diag_process_memory`; `memory unknown`
 where the system does not say), the cache's size `rhi_pipeline_cache_size` (Vulkan's data size, 0
 on Direct3D 12) on a phone or a tablet, on the lazy path and on a device of the table (`pipeline
-cache 3104 KB`), `not measured` in a desktop's set (the paragraph above). A start the system ended shows whether the memory grew with the batches, and the
+cache 3104 KB`), `not measured` in a desktop's set (the paragraph above). On the batches the rule of [where the memory is](PLATFORM_DIAGNOSTICS.md#where-the-memory-is) picks (Linux and Android, issue 215), the log's line also carries the system's memory before the times (`; system: free 5059 MB (-2190 since the set began), file cache ..., GPU ..., the rest ... MB, swap used ... MB`; `rd_set_memory_clause_fn`, `mem_watch_batch_clause`), not the activity file's copy. A start the system ended shows whether the memory grew with the batches, and the
 next start logs the last one again as `ico_pc: the previous run's last finished batch: <line>`.
+
+#### Stop and resume
+
+Issue 123 (Adreno 740 on Qualcomm's driver 512.676.1, the log of 2026-11-09): a start's set stopped at the
+free-memory floor, and from then on every start of the version made no set (the stopped start's
+activity file line was copied into each lazy start's own file); with the pipeline cache file
+refused (written under another driver, [RHI.md](RHI.md#vulkan)), the first scene compiled 29
+pipelines inside one picture's walk (`slow replay 1391.9 ms ... walk 1359.6 ms, 29 pipelines
+created`; the game step late by 1409 ms). The floor's one retry (`memory_floor.h`
+`ico_memory_floor_retry`) needed a cache file the renderer had loaded, which that one was not.
+
+A stop the next start follows (the system's low-memory signal, or the floor on
+Qualcomm's own driver) records where it stopped. The stopped start's window
+(`window_pipe_finish.c` `window_pipe_finish_start`, after `ico_diag_startup_activity_budget_stop`)
+asks the renderer (`rd_pipeline_set_stop`: the first key not made in the set's own order, the set's
+size, the batch it was made in, the stop's words) and appends to the activity file's stop line
+(`ico_diag_startup_set_resume_part`, `port/platform/pipe_resume.h`; the file's place counts from 0,
+the log lines' from 1):
+
+    set: stopped at the system's low-memory signal (1890 MB available of 11453 MB, floor 1947 MB); resume at pipeline 312 of 1196, batches of 8, stop 1, 2026-11-09 20:45
+
+with one log line holding the memory numbers and the place:
+
+    window: pipelines: the start-up set stopped for memory at pipeline 313 of 1196 (batches of 8, stop 1 in a row): memory 271 MB (most 284 MB); device 1890 MB available of 11453 MB; (memory budget: ...); the rest is made as the game needs it, and the next start resumes at pipeline 313 in batches of 4
+
+The rest of that start is made on first use, as before (the one start that ran out of memory inside
+its own set). The next start of the version (`ICO_DIAG_PIPESET_LAZY_LOW_MEMORY`) does not go lazy:
+`window_pipe_floor_retry` reads the line (`ico_pipe_resume_parse`), clears it from this start's
+file (`ico_diag_startup_resume`) and resumes the set there (`rd_set_pipeline_resume`) in batches of
+half the stopped start's (`ico_pipe_resume_batch`: the careful set's 8 becomes 4, the default 32
+becomes 16, then 8, then 4; never under 4), the memory asked between batches as in any set (before
+each pipeline under the careful policy). The resumed set's policy is the full set's
+(`ICO_DIAG_PIPESET_FULL`), the careful one on a device of the table, and the careful one when the
+player set `[dev] pipeline_set = "careful"` (`ICO_DIAG_PIPESET_CAREFUL_SETTING`,
+`ico_pipe_resume_careful`: `ico_diag_startup_pipeline_set` answers the low-memory policy before it
+reads that setting, and the setting meant for a phone short of memory stays on exactly this start;
+the resumed line says `the careful set kept ([dev] pipeline_set = "careful")` or `the set's policy
+as for any start`). The pipelines before the place are made after the rest
+(the set from the place to its end, then from its first key to the place; the screen counts the
+whole set), from the pipeline cache where it holds them (a moment each): a resumed set that stops
+leaves keys before its own place that no start made, so the window does not leave the head to
+first use even with the cache loaded (`rd_set_pipeline_resume`'s `skipBefore`, which does and
+counts the rest only, stays for a caller that knows the head is cached; `rd_set_resume_test`). A line without the place (written
+before the place was recorded) resumes from the first key in half the set's batches. Lines:
+
+    window: start-up set: resumed at pipeline 313 of 1196 after the low-memory stop of 2026-11-09 20:45 (batches of 4, stop 1 in a row; the pipelines before it made after the rest, from the pipeline cache where it holds them; the set's policy as for any start; the pipeline cache file 1201581 bytes, loaded by the renderer: no): set: stopped at ...
+    rd: pipelines: the start-up set resumes at pipeline 313 of 1196 after an earlier start's stop for memory, in batches of 4 (the set's own 8); the pipelines before it are made after the rest
+
+A resumed set that finishes deletes the activity file (the next start makes the whole set); one
+that stops again writes its own line with `stop 2` and its own place, and the next start halves the
+batch again. A careful set's own growth budget or slow batch, and the floor on another driver than
+Qualcomm's own, stay for that start only (`ico_diag_startup_set_resume_part` answers 0, the line
+says `the next start makes the whole set again`). An end inside a creation of a resumed set counts
+towards the ends' rule as any set's: the resumed start's file holds no stop line
+(`ico_diag_startup_resume` clears it), so the first such end makes the next start careful for that
+start only (`CAREFUL_ONCE`), or lazy for that start (`LAZY_ONCE`) when the resumed set was careful
+(its file's `set: careful`: the device table or `[dev] pipeline_set = "careful"`); a second end in a
+row writes `[dev] pipeline_set = "lazy"` (`LAZY_NOW`). The shader
+modules stay made for the whole run (a first-use creation or a display change needs any of them),
+so the set does not release them between batches.
+
+**Compiling ahead of the walk.** A pipeline's key is made inside the walk, from the replay's state
+as each command changes it (`r->st`), the pass's target format and sample count (`beginPass`,
+`g_rd.passSamples`), the alpha plan from the draw's data, and the VU draw's program, merge and fuse
+choices (`rd_replay_vu.c`); a frame's lists at the hand-over hold the commands, not the keys, and
+the only way to name the keys without the walk is a replay that names them (`rd__pipeline_gather`,
+the loss bisect's and `rd_replay_tool --keys`' rounds), which draws nothing and would cost a second
+walk a picture. The Vulkan command list binds a `VkPipeline` as it records, so a draw cannot wait
+for a compile queued on another thread without a deferred bind. So no request queue fed at the
+hand-over: the set made before play (resumed after a stop) is what keeps the compiles out of the
+walk, and the background finisher (next section) where the floor allows. The lazy batch line's
+`N of them in the start-up set` says how many of a walk's compiles the set would have made.
+
+#### Sized by the memory fall
+
+Issue 215 (the Retroid Pocket 6, Adreno 740 on Qualcomm's driver 512.676.53) and issue 123 (the
+Adreno 740 tablet, 512.676.1): on Qualcomm's own driver the device's free memory falls with every
+pipeline made and does not come back during the run (about 24 MB a VU pipeline and 11-19 MB a 2D
+one on the handheld, even from the cache; about 14 MB a VU one and nothing for the 2D ones on the
+tablet). A set that runs to the floor, and a next start that resumes it, leave play below the
+floor on every start. So each start sizes its own set from what it measures (`port/platform/set_size.h`;
+the window's `window_pipe_finish.c` reads the memory and asks; `rd.h` `rd_set_set_size_fn`):
+
+- **Measure.** Before each batch the window reads the free memory (`MemAvailable`, as the floor
+  does). The fall over the batch since the last read, divided by its pipelines, is one sample of
+  the batch's family: 2D (every pipeline without a VU vertex shader) or VU; a batch of both
+  families is not counted. A family's figure is the median of its samples, trusted after 3
+  batches (`SET_SIZE_MIN_BATCHES`: the median of three outvotes one batch another process moved).
+- **Predict.** A family's rest = its pipelines not made yet x its figure, rounded to the MB. The
+  headroom = free memory now - the floor - play's known need. Play's known need is what the
+  renderer allocates for play after the set and before its first 3D picture, not made yet: the VU
+  pre-pass's record at the run's need (`rd_early_start_rows` rows x their bytes over every frame
+  slot, where the pre-pass is on and the record holds fewer rows) and the mesh arena's first chunk
+  (`RD_MESH_CHUNK`, 32 MB, where not made yet) (`rd_vu_rec_early.h` `rd_set_size_need`,
+  `rd_early_plan.h` `rd_early_set_need`). Where they are made before the set's first read (the VU
+  pre-pass self-test makes the record, on a PowerVR phone with the compute record at 1024 rows,
+  128 MB, with the chunk), the need is 0 and the start line names them as made already: counting them again would
+  take them out of the free figure twice. The scene
+  and work targets are made before the set at the play size (the self-tests draw on them), so they
+  are already out of the free figure; the textures have no bound in bytes in the code (the
+  texture cache holds up to 1024 entries of any size), so the floor stays their guard, as for the
+  pipelines play makes itself.
+- **Decide.** The family of the next pipeline first, then the other: a family whose rest, added to
+  the rests kept so far, exceeds the headroom stops now; its keys are skipped for the rest of the
+  set and made on first use (a family not trusted yet is measured first; a stopped family stays
+  stopped). A family whose figure is 0 or below costs nothing and is never stopped, so on a
+  device whose free memory does not fall with pipelines nothing changes. When every family with
+  keys left is stopped the set stops at once; a set that went on with one family stopped stops at
+  its end as if at its first skipped key. Either way the rest is made on first use through the
+  lazy path (`rd_pipelines_lazy`: its batches, cache writes and lines), never in the background.
+- **For this start only.** The stop is the set's own, not a low-memory stop: no resume record is
+  kept (`ico_diag_startup_set_resume_part` answers 0; the line says `the next start makes the whole
+  set again`), so the next start measures again from its first pipeline. A start that resumes an
+  earlier low-memory stop measures the same way in the resumed order, and its rule stop clears that
+  record. The floor and the system's signal stay as they are: a family that fits can still meet
+  the floor, which then stops the set and records the place for the next start as before.
+- **Off** without a floor: on every system but Android, with `[dev] pipeline_memory_floor_mb = 0`,
+  or when the free memory cannot be read (the start line says which).
+
+The order of the set is unchanged (2D, then VU, then the careful set's sprite planes builds): the
+first scene's own keys are not known before its walk (a frame's lists hold commands, not keys:
+"Compiling ahead of the walk" above), and the pipeline cache file's contents are opaque to the
+renderer, so a cheap reorder by what play needs first is not available.
+
+The two devices' logs under the rule (every figure from their logs, the decisions from the rule;
+not measured on a device):
+
+- The handheld, a start from its first pipeline (7249 MB free, floor 1915 MB, need 32 MB, batches
+  of 8): after 3 2D batches at 15 MB a pipeline the 2D rest (418 x 15 = 6270 MB) does not fit in
+  4942 MB: 2D stops at pipeline 25; the VU batches are measured next (24 MB a pipeline: 218 x 24 =
+  5232 MB against 4366 MB) and stop at pipeline 358. 48 pipelines made, free about 6300 MB at the
+  set's end, against 1911 MB at the floor. Its first start after the release before's stop resumes
+  at that stop's place (VU first, batches of 4): VU stops after 12, the sprite planes builds (2D)
+  after 3, about 15 made.
+- The tablet (3751 MB, floor 1947 MB, 3x): the 2D head (340) shows no fall and goes on; VU stops
+  after 3 batches (218 x 14 = 3052 MB against about 1512 MB); the sprite planes builds go on. About
+  472 made (24 of them VU), free about 3490 MB at the set's end, against 1942 MB at the floor.
+  About 104 more VU pipelines than before move to first use; its log's VU compiles took
+  0.00-0.01 s from the cache and 0.15-0.23 s for one the cache missed, and play's own first-use
+  batches 0.00-0.15 s a pipeline.
+
+The driver's own figure (issue 215's third start): after a restart the handheld had so
+much free memory that VU's rest fit above the floor; the set ran to about 227 pipelines, the
+kernel's GPU driver held 4387 MB for the process (about 20-24 MB a pipeline on driver 512.676.53)
+and the device went down in the self-tests after the set. The starts that held 698 MB (51
+pipelines) and 1116 MB (65) got through. So where the kernel's driver says what this process holds
+(`/sys/class/kgsl/kgsl/proc/<pid>/kernel`, readable), a family's rest is weighed against the
+smaller of the free memory's room and `SET_SIZE_GPU_LIMIT_MB` (1024 MB) less that figure; a stop
+by it is the same stop (the rest made on first use, for this start only). Not readable (the issue
+123 tablet): the free memory's room alone. The start says which:
+`the start-up set's size by the driver's GPU memory: on (this process holds <g> MB, the limit 1024 MB)`
+or `off (<why>)`; a decision line then carries `the driver holds <g> MB of GPU memory for this
+process, the limit 1024 MB leaves <r> MB` (`, the smaller: it decides` where it is), and
+last-run.txt's phase says `start-up set sized by the driver's GPU memory: ...` where that room
+stopped a family.
+
+Lines: the start's `the start-up set's size by the device's memory fall: on (...)` or `off (...)`,
+one line at each family's first trusted figure and at each stop, the renderer's count at the set's
+end, the first picture's free memory, and the 10 s line's first-use count
+([PLATFORM_DIAGNOSTICS.md](PLATFORM_DIAGNOSTICS.md#the-start-up-sets-size)). Tests: `set_size`
+(the decision's table, both devices' starts word for word, no floor, no fall, noise), `diag` (a set
+the rule stopped is not resumed by the next start, which stops at the same place).
 
 ### The background finisher
 
@@ -644,14 +865,18 @@ program entry's key is made from is decided once a run, at `rd_init` (`port/rend
 
 - the extended build `vu_X_vs` elsewhere;
 - the plain build `vu_X_plain_vs` (`port/shaders/vu_common.hlsli`, `ICO_VU_PLAIN`: no card test, no
-  tick cameras) on a device of the table (`RhiLimits.vuFallbackPlain`, `kVuPlainOnly` in
-  `port/rhi/vk/vk_device.c`), under Turnip (issue 163, [SHADERS.md](SHADERS.md#the-variants)), with `[dev] vu_set = plain` (`ICO_RD_VU_SET=plain`, `ICO_RD_VU_PLAIN=1`) or `rd_set_vu_plain_only`; only the
+  tick cameras) on a device of the table (`RhiLimits.vuFallbackPlain`, the device table's
+  `adreno-740-qualcomm` row), under Turnip (issue 163, [SHADERS.md](SHADERS.md#the-variants)), with `[dev] vu_set = plain` (`ICO_RD_VU_SET=plain`, `ICO_RD_VU_PLAIN=1`) or `rd_set_vu_plain_only`; only the
   ten mesh entries have it (the particles' `vu_particle_vs` is one build), and its modules are made
   only then. `[dev] vu_set = extended` (`ICO_RD_VU_EXTENDED=1`) gives the extended build whatever the others say.
 
 The program entries' keys are in the start-up set only with the pre-pass off (then every VU draw is
 the old way: the eleven entries with the legacy pixel shaders, 16 keys each, 176); with it they are
-made on first use, by the fallback alone. The set at Original 4:3 with the fixed-function blend and
+made on first use, by the fallback alone, and the record path's modules (the main shaders' keys,
+the ten pre-pass keys and the five stage keys) are in the set instead (`rd_mesh.c`
+(`rd__enumerate_reachable_vu`)). The pre-pass is on on every device the settings and the colour
+bytes allow, tile-based GPUs included, unless its start-up self-test fails, so the
+set is made after the self-test's verdict. The set at Original 4:3 with the fixed-function blend and
 every state static is the 2D keys, `vu_main_vs`'s 32 and `vu_particle_main_vs`'s 32 (TEST Z
 GEQUAL and Z ALWAYS, Z write on and off, four blends, `vu_ps` and `vu_texa_ps`; the particles' keys
 carry `RD_PROG_PARTICLE`, the meshes' `RD_PROG_PRELIT`), the ten pre-pass keys and the five stage
@@ -661,7 +886,19 @@ the particles' stage): the 2D part + 32 + 32 + 10 + 5, 446 with a 2D part of 367
 with dynamic depth and blend to 2 each, the point keys staying 15 (`rd_state_test`
 `testEnumerationPrepass`, `testDynamicNormalise` print each set with its 2D part).
 
-The table:
+Issue 123's ladder ([VU_SKIN_CHECK.md](VU_SKIN_CHECK.md#the-ladder)) changes no key: under `[dev]
+vu_bones = ring` the three cluster entries' keys are made from their ring builds
+(`vu_skin*_ring_plain_vs`) in place of the plain variants, the same keys and cache. With the
+pre-pass on, its batch builds (the default) read every entry's bones through the ring already,
+so the record path's keys and modules are the same with the key or without. With the pre-pass's
+batches off under `vu_bones = ring`, the skinned commands stay out of the record (its one-an-entry
+entries read VuBoneCB) and draw through their entries' ring builds: those keys are not in the
+start-up set there and are made on first use, a compile each the first time a skinned key is met.
+The skin check's twins of a record draw go through the entry's ring build in the box check's form
+(the twin C table, `RD_VU_SKIN_RING_PIPES`, compiled in the background): no start-up key either.
+
+The table (the device table's row `adreno-740-qualcomm`, its `VU_FALLBACK_PLAIN`;
+[DEVICE_TABLE.md](DEVICE_TABLE.md)):
 
 | device | match | reason |
 | --- | --- | --- |
@@ -704,7 +941,9 @@ shaders read a corner's and its triangle's record back and keep only what differ
 record stages, `vu_pre_out`, `vu_rec_vertex`, `vu_rec_planes`); `port/shaders/vu_tri.hlsl`,
 `port/shaders/vu_particle.hlsl`). The meshes (`RDC_MESH`, `RDC_SKINNED`), the grids (`RDC_GRID`)
 and the particles (`RDC_PARTICLES`: a sprite's verdict and planes, six invocations a sprite) take
-it.
+it. A command the visibility test left out of the replay (an `RDC_NOP` of the shadow frame,
+[RENDER.md](RENDER_PERF.md#culling)) has no entry, no record rows and no draw: the pre-pass walks the
+frame the replay walks.
 
 **The vertex record.** Twelve 32-bit words a vertex, in three planes of `RGBA32_UINT` texels, one
 texel a vertex (`shader_consts.h` (`ICO_VU_REC_*`)):
@@ -720,6 +959,23 @@ computed. GS X and Y are not stored: the readers take them from `p` as `vu_divid
 `vu_ftoi4(p.x)`, a multiply by 16 (exact) and a truncation. A vertex's texel is its plane's
 `base + v`, 1024 texels a row (`ICO_VU_REC_W`); `VuVtx` carries the clip-space flags (`clipf`)
 instead of the clip-space position, which only `vu_clipw` read.
+
+**The velocity's second record.** While the temporal upscaler's switch is on
+([RENDER.md](RENDER.md#velocity)), a mesh, skinned or grid command of list 0 drawn into SCENE with
+its depth writes on and carrying a VuPrevCB takes twice its vertices' texels in pass V: its own
+record at `base` and a second one at `prevBase = base + count`, drawn by the same pre-pass entry
+and pipeline (one more item of the same batch, or one more draw) with the VuPrevCB's VU memory,
+bones and grid stream (`rd_replay_vu.c` (`vuVelClone`, `vuVelSource`)). Only the second record's
+plane 0, the previous homogeneous position, is read (by `vu_velocity_main_vs`, at `vu_rec.x + v +
+vu_mark.w`, the velocity draw's VuCB carrying `prevBase - base` in `mark.w`); planes 1 and 2 of it
+are written and never read. So the record keeps its three planes (`ICO_VU_REC_PLANES` 3), the ten
+pre-pass entries and their batch builds are unchanged, and no pipeline key has a velocity bit: the
+plan's fourth plane under `ICO_VU_VELOCITY=1` builds was not needed (plane 0 already is the
+position before the divide). The velocity pass's one pipeline (`vu_velocity_main_vs`,
+`velocity_ps`, RGBA16F, D32F_S8 read-only, depth EQUAL, no write, no blend, every state static) is
+made by `rd_velocity.c` (`rd__velocity_pipeline`) at the first replay with the switch on, outside
+the key cache and the start-up set (`rd_blur_smooth.c`'s pattern): with the switch off it is never
+made, and the reachable set is unchanged. With the switch off no command takes a second record.
 
 **The triangle record.** A record slot is one texel index in each of the three planes; a
 triangle of kick `k` owns slot A at `vu_tri.x + k` and slot B at `vu_tri.y + k`, and under the
@@ -746,7 +1002,14 @@ a corner has a clip flag (the scissor mode's cut triangles), bit 6 the card test
 later bias applies (`vu_later_out`'s condition under the mark), bit 9 the content table hides it
 (`VU_TRI_HIDE`), bits 10..11 the anchor (`vu_plane_anchor`), bit 12 every corner has its GS
 position, bit 13 no corner's X or Y changed by clip mode none's 16-bit wrap, bit 14 a sprite the
-port draws. A tick's verdict is `vu_tick_shown`'s (0 not shown, 1 through the card test, 2
+port draws, bit 15 a drop of the triangle is drawn beside the picture (`VU_TF_BESIDE`, the region
+rule's side bands: the draw has them, the frame is wider than the picture and the triangle faces
+the eye, set where the verdict up to the ticks is a drop, not the card test: a card keeps the drop
+beside the picture; [VU1_PROGRAMS.md](VU1_PROGRAMS.md#the-region-rule),
+step 7), bit 16 a drop of the triangle the camera rule draws (`VU_TF_CAMERA`: the draw has
+`ICO_VU_CAMERA` and the triangle faces the eye or the draw is two-sided, `vu_drop_fate`; set where
+the verdict up to the ticks is a drop, which under the camera rule is every final drop: it has no
+card test; [VU1_PROGRAMS.md](VU1_PROGRAMS.md#the-camera-rule)). A tick's verdict is `vu_tick_shown`'s (0 not shown, 1 through the card test, 2
 drawn). The values a plane word holds are those `vu_attr_planes` and `vu_plane_out` (a sprite:
 `vu_attr_planes_at`) compute; the anchor's colour is a whole number 0..255 a channel, so its bytes
 carry it exactly. Each stage takes whole halves of the gradient basis (`vu_grad_basis`): a lane
@@ -776,7 +1039,9 @@ A, 1 slot B), all with `vu_pre_ps`, which writes the three targets; the textures
 and pass V's rows of each plane are copied into the frame slot's record buffer, plane after plane
 (`rhi_cmd_copy_texture_to_buffer`, which makes the copy visible to the shaders that read the
 buffer: [RHI.md](RHI.md#the-interface)). Pass T (the same textures back to `RENDER_TARGET`, load
-don't care: pass V's rows are in the buffer already) reads the vertex records from the buffer and
+don't care: pass V's rows are in the buffer already; its render area its own rows from row `rowsV`,
+`RhiRenderPassDesc.area`, so a tile-based GPU neither loads nor stores pass V's rows again, which it
+would write back as don't-care contents nobody reads) reads the vertex records from the buffer and
 draws, a mesh or grid command, a point a kick through `vu_tri_rule_pre_vs` (slot A), under the
 tick cameras two through `vu_tri_tick_pre_vs` with the colour masks R and G (`vu_tri.w` 0 and 1:
 slot C's x and y, each written without reading the other), and `vu_tri_planes_pre_vs` (slot B);
@@ -784,7 +1049,14 @@ its rows are copied after pass V's. A frame slot has its own buffer, so a replay
 what the GPU may still read for the previous one; the textures are shared, ordered by their
 barriers. Both grow by powers of two, from 16 rows (16,384 slots) to 1,024, every slot's buffer at
 once, logged as `rd: VU pre-pass: the
-record holds 32768 slots (32 rows, 1536 KB a frame slot)`; group 1 binds the record at t4 (to the
+record holds 32768 slots (32 rows, 1536 KB a frame slot)` (48 KB a row in each frame slot's buffer
+and as much in the three shared textures; a scene of 100,000 vertices and 150,000 to 230,000
+triangle slots, issue 179's boat scene, takes 256 or 512 rows, 12 to 24 MB a frame slot; the
+1,024-row cap is 48 MB a slot). The game's window makes the record at start-up, after
+the self-tests and the start-up set, as large as half the free memory above the free-memory floor
+allows (1,024 rows where the system does not say how much is free; RENDER.md
+[Made at start-up](RENDER.md#made-at-start-up)), so play grows it only past that (`...; grown in
+play past the N rows made at start-up)`); group 1 binds the record at t4 (to the
 vertex and the pixel side), and a 256-byte buffer before there is one (the slot's upload ring when
 even that could not be made, logged once: no shader reads t4 then). A record that cannot be made
 draws that replay the old way and is asked for once more at the next replay; a second failure in
@@ -804,8 +1076,111 @@ shaders' keys are the ones named. The pass ring holds the passes as `VU pre-pass
 the record (1024xR)` and `VU triangle pre-pass, N triangle slots into the record (1024xR)`
 (`RD_PASSK_VU_PRE`, `RD_PASSK_VU_TRI`), the loss bisect's window numbers them passes 1 and 2, and
 the per-pass timing has a pre-pass piece for each ([The pass ring](RENDER.md#the-pass-ring), [The per-pass
-timing](RENDER.md#the-per-pass-timing); `port/render/rd_replay_vu.c` (`vuPrepassRun`, `vuSource`,
+timing](RENDER_PERF.md#the-per-pass-timing); `port/render/rd_replay_vu.c` (`vuPrepassRun`, `vuSource`,
 `vuPreRange`, `vuPreRecord`, `recEnsure`)).
+
+**The record's three writes.** What is written above into three render targets and copied is, on a
+device with vertex stores (`RhiLimits.vertexStores`: Vulkan's `vertexPipelineStoresAndAtomics`,
+enabled where offered), stored by the pre-pass's vertex shaders themselves into the frame slot's
+record buffer (`port/render/rd_vu_record.c`, `rd_vu_record.h`; issue 179: on a Mali-G52 the
+record's 48 bytes a pixel and its six texture-to-buffer copies a replay were 34 ms of the boat
+scene's 130). The store builds of the fourteen entries and their batch builds
+(`vu_X_store_pre_vs`, `vu_X_batch_store_pre_vs`; `ICO_VU_REC_STORES`, `vu_common.hlsli`
+(`vu_rec_store`, `vu_rec_lane_store`)) write slot `t`'s planes at `t`, `rows * 1024 + t` and
+`2 * rows * 1024 + t` of the buffer bound writable at u6 (`RWStructuredBuffer<uint4>`), the layout
+the copies give, held to `t < vu_rec.y` as the targets' viewport held a point, and return a
+position outside the clip volume; pass T's stages read the vertex records through the same
+binding. The tick stage stores its one lane (x for tick 0, y for tick 1, by `vu_tri.w`) as one
+32-bit store in a branch, never the whole texel: the two tick draws of a triangle run in one pass
+with no barrier between them, as the colour masks R and G wrote one channel each. The pipelines
+have no fragment shader and no rasterization (`RhiPipelineDesc.noRaster`; group 1 is
+`g_rdRec.layoutVuPre`: t0, b1, b2, b3, t5 and u6, no t4). Where `RhiLimits.storePassTarget` says so
+(Vulkan on the Intel driver row, or with the subpass read on) they name one colour target, the
+throwaway one their passes begin on; everywhere else (phones included: issues 179 and 211) none,
+and the passes begin without an attachment, as before the Intel crash's fix (`rd: VU pre-pass: the
+store passes begin without an attachment ...`). The target (`port/render/rd_vu_rec_sink.h`: 1024 x 1 texels of `R8_UNORM`, loaded and
+stored `DONT_CARE`, its write mask 0, never written or read: no fragment runs), so no render pass
+begins without an attachment, the shape the Intel `vkCmdBeginRendering` crash reports share
+([RHI.md](RHI.md#vulkan), **Render passes**); two such targets, taken in turn, so neither of a
+replay's two store passes begins on a target the other wrote (that pending attachment write made
+the second pass's begin hold the vertex stages behind colour output: [RHI.md](RHI.md#buffer-barriers-scopes)),
+made at the first store pass (`rd: VU pre-pass: the store passes begin on two throwaway 1024x1 R8
+targets taken in turn ...`; when they could not be made it is said once and the stores are
+turned off for the run before the replay's record, `rd__vu_record_fall_back` to the compute
+dispatches or the targets, since a pass without them would not match its pipelines, which name
+one: `rd: VU pre-pass: the store passes' two throwaway 1024x1 R8 targets could not be made: the
+stores off for the run ...`; `ICO_RD_VU_REC_SINK_FAIL=1` refuses them for the tests), and each pass is 1024 x 1 inside the store bracket
+(`rhi_cmd_buffer_store_begin` before it,
+`rhi_cmd_buffer_store_end` after: [RHI.md](RHI.md#the-interface)), so a replay has no record
+texture, no layout transition and no copy. The draws of a record pass write disjoint slots
+(`vuPrepassRun`'s slots: pass V's commands each at its own `vuPreVSlots`, pass T's slots A, B and C
+each at its own `vuPreTSlots`, the two tick draws different 32-bit lanes of slot C; pass T reads
+only pass V's slots, which the bracket between the passes orders), which the memory model does not
+order, so a release run draws them all in one pass with no barrier between them. Only under the
+validation layer (`RhiLimits.validationLayer`, Vulkan's `ICO_VK_VALIDATION` or the debug layers:
+the lavapipe synchronisation-validation tests) is each draw after the first a pass of its own, the
+bracket's end and begin between them (one barrier: `recDrawGap`): each draw binds the whole buffer
+at u6 and synchronisation validation takes a descriptor's whole range as what a draw writes, so it
+cannot see the ranges are disjoint and two draws in one pass would be a write-after-write hazard
+to it; the start then logs `rd: VU record: each record store draw in a pass of its own (the
+validation layer is loaded: ...)`. On a tiler each such barrier serialises the vertex work, which
+is why a release run has none (the per-replay line's `passes` and `barriers` count them)
+(`vuRecPassBegin`, `vuRecPassEnd`: the copies' muted
+semantic is unchanged, the loss bisect's window leaves the draws out and the self-test's STALE
+sabotage stores replays 2 to 4 into a sink buffer of the record's size, `recStoreBuffer`). The
+records are the same bits either way, so every picture is the same (the A/B tests `rd_vurecord_ab`,
+`rd_pixel_stores` / `rd_pixel_targets`).
+
+The third write is for a device whose vertex shaders cannot store: the same fourteen entries and
+batch builds as **compute dispatches** (`vu_X_compute_pre_cs`, `vu_X_batch_compute_pre_cs`;
+`ICO_VU_REC_COMPUTE`, which implies `ICO_VU_REC_STORES`, `vu_common.hlsli` `VU_PRE_CS`; issue 179:
+the Mali-G52 MC2 under driver r32p1 offers no `vertexPipelineStoresAndAtomics`, so the stores
+never engaged there and the targets stayed, 14.6 of its 64 ms GPU a picture). Invocation `t.x` of a dispatch of 64-wide
+groups is the point `SV_VertexID` `t.x` of the store build's draw, its count `aux0.z` of the
+dispatch's DrawCB (`vuStageDraw` writes a DrawCB of its own, `preBatchDraw` sets it beside the
+batch table), and the spare invocations of the last group return before the entry's own search
+(a batch build clamps a point past its table to the last entry, whose slots a spare invocation
+would otherwise store again); the stores are the store builds' (`vu_rec_store`,
+`vu_rec_lane_store`), the same words at the same places, so every reader is unchanged. The record's
+passes are the compute bracket (`rhi_cmd_buffer_compute_begin` / `_end`, [RHI.md](RHI.md#compute-dispatch-the-vu-record))
+and no render pass: a replay has two render passes fewer than under the stores and the same
+barriers (the bracket's halves where the store bracket's were); under the validation layer each
+dispatch after a pass's first gets the bracket's end and begin before it (`recDrawGap`), as the
+stores' draws get a pass of their own. The pipelines are compute pipelines
+(`RhiPipelineDesc.compute`) of group 0 (FrameCB) and `g_rdRec.layoutVuPre` (every slot visible to
+the vertex and compute stages, so one layout serves both kinds); a compute key is the stores' key
+with `fs` `RD_FS_VU_PRE_CS` (no module: the key's mark, so the stores' and the compute's
+pipelines are different cache entries across a fallback). `rd__vu_prepass`'s `draws` count the
+dispatches (`vuPreDraws`); `RhiStats.dispatches` counts them for the backend (`rd_replay_tool
+--stats`: `..., N copies, N dispatches; ...`).
+
+`[dev] vu_record` (`ICO_RD_VU_RECORD`, [CONFIG.md](CONFIG.md#ico-pcini)) = `auto` (the default:
+the stores wherever the device has vertex stores, else the compute dispatches wherever it has
+compute stores (`RhiLimits.computeStores`: Vulkan where the graphics queue takes compute work),
+else the targets, on every device: Vulkan in this release, so the desktop and lavapipe runs take
+the paths the phones take), `targets`, `stores` (where the vertex shaders cannot store: auto's next
+rung, with `[dev] vu_record = stores not taken` in the words) or `compute` (where the device has
+no compute stores: the targets, `[dev] vu_record = compute not taken`); D3D12 and OpenGL report
+neither yet and Direct3D 11 never stores from its vertex shaders, so they keep the targets. The
+start line names the write (`...; the record stored by the vertex shaders into the frame slot's
+record buffer: no render targets, no copies (...)`; `the record stored by compute dispatches into
+the frame slot's record buffer: no render targets, no copies (no vertex stores: <why>; [dev]
+vu_record = targets keeps the render targets)`; or `the record drawn into 3 RGBA32_UINT render
+targets and copied into the frame slot's record buffer (no vertex stores: <why>; no compute stores:
+<why>)`), as do the Vulkan device line (`compute record stores: offered (queue compute yes, vertex
+stores no)`), the self-test's verdict (`... ms, record compute`), the summary (`VU pre-pass on
+(self-test: ok; record compute)`), the display change's derived line (`VU pre-pass on (record
+compute)`), the window's 10 s VU line (`; record compute`), `rd_replay_tool --stats` (`stats: VU
+record compute: ...`) and the pass ring (`... into the record (1024xR) (compute)`). Without a
+device's colour-target bound to meet, the stores and the compute dispatches also take the pre-pass
+to an Apple A9 or A10 GPU under MoltenVK where the targets' 48 bytes a pixel did not fit (below).
+
+`[dev] vu_prepass_min = N` (`ICO_RD_VU_PREPASS_MIN`, default 0: never) skips the pre-pass for a
+frame whose record would hold fewer than N vertex and triangle slots: every VU command of it draws
+the old way, the same picture (the self-test's frames are never skipped). The record's fixed cost
+(two passes, their barriers, and under the targets six copies) is worth it only past some
+thousands of vertices on a vertex-bound GPU; the window's 10 s VU line counts the skips (`;
+pre-pass skipped N frames under M slots`) (`rd_vu_record.c` (`rd__vu_record_skip`)).
 
 **The record stages.** `vu_tri_rule_pre_vs` reads the three corners (`vu_rec_vertex`) and the
 kick's marks and evaluates, by the program's clip mode (`vu_rec.w`), the region rule as
@@ -828,18 +1203,22 @@ stage's.
 `vu_tri_planes_pre_vs` evaluates `vu_plane_tri`, `vu_attr_planes` and `vu_plane_out` again for
 slot B's words. `vu_particle_pre_vs` evaluates `vu_particle` and `vu_particle_vs`'s drop and
 planes. Every stage is a point draw of the pre-pass entries' shape (three `RGBA32_UINT` targets,
-48 bytes a pixel, no depth, no blend).
+48 bytes a pixel, no depth, no blend; under the stores the store build of the stage, without
+rasterization, its words stored into the buffer).
 
 **The main shaders.** `vu_main_vs` serves every mesh program at index value `kick * 4 + corner`:
 it reads its corner's vertex record (three loads), slot A's first texel (one: the flags) and,
 where the blended verdict is `VU_RULE_DROP` under the tick cameras, slot C (one); resolves the rule as
 `vu_region_rule`'s tail and `vu_rule_card` do (a tick that drew the triangle clips it, one that
-sent it to the card test sends it there, the card test's verdict decides `VU_RULE_STRIP`), applies
-the scissor draw's `ICO_VU_CUT_ONLY` / `ICO_VU_KICK_ONLY` to the stored corner code, chooses the
+sent it to the card test sends it there, the card test's verdict decides `VU_RULE_STRIP`, a final
+drop with `VU_TF_CAMERA` is drawn clipped over the whole frame (the camera rule), a final
+drop with `VU_TF_BESIDE` under a draw without `ICO_VU_NO_BESIDE` is drawn clipped beside the
+picture with `VuVSOut.plane.y` 1, the side bands' discard's mark), applies the scissor draw's `ICO_VU_CUT_ONLY` / `ICO_VU_KICK_ONLY` to the stored corner code, chooses the
 position value by value as `vu_triangle_out_pos` does (`vu_corner_position`: the GS position, the
 cut position of `vu_corner_cut_position`, clip mode none's wrapped one), culls past the chain plane and takes its corner's
 distance (`vu_plane_distance`, one stream load), and adds the later bias from the three corners'
-records where the flag says (`vu_later_bias`). The program's choices come from VuCB as for the
+records where the flag says (`vu_later_bias`: each corner's GS X, Y and Z, plane 1 of its vertex
+record; the corner's own from the record it read already, so two loads). The program's choices come from VuCB as for the
 stages: `vu_rec.w` holds the clip mode the program uses (normal_c takes VuCB's, normal_l's code
 32/36 the scissor mode or the region test, codes 34 and 38, the cluster and the grids the region
 test), whether the chain clip plane and the later mark apply (normal_c and normal_l) and whether
@@ -848,10 +1227,17 @@ region test's bounds (the cluster's VU memory 0 and 1, the others 0 and (4094, 4
 16777214)) (`vuTriRule`). Its output is the programs' entries' `VuVSOut`: the position, the
 colour, S, T, Q and the plane distance, interpolated in screen space, and, where the triangle's
 planes hold (`exact` and the exact viewport, as `vu_attr_planes` makes them), the planes as flat
-varyings: the five other plane texels of slots A and B read once a vertex (`vu_rec_planes`: slot
-A's anchor RGBA bytes and `r`, `x1`, `y1`, slot B's `a1`, `x0`, `y0`), the words the stages wrote,
-bit for bit. A flat varying stays in the tile on a tile-based GPU; a read by the triangle in every
-pixel (six buffer loads a fragment) would cost the fill-heavy scenes most. `vu_particle_main_vs`
+varyings: the five other plane texels of slots A and B read at the triangle's first corner
+(`vu_rec_planes`: slot A's anchor RGBA bytes and `r`, `x1`, `y1`, slot B's `a1`, `x0`, `y0`), the
+words the stages wrote, bit for bit ([Flat outputs at the provoking
+corner](#flat-outputs-at-the-provoking-corner)). Reading them in the pixel shader instead (one flat
+triangle index, six buffer loads a fragment) was left out on the premise that a flat varying stays
+in the tile on a tile-based GPU; that premise is unmeasured, and on a Mali GPU (Bifrost and later,
+index-driven vertex shading) every varying is written to memory by the vertex stage and read
+back by the fragment stage: about 530 bytes a triangle for the ten vec4s, roughly 40 MB a picture
+in issue 179's stage 42 (an inference from the varyings' sizes and the reporter's log's triangle
+counts; no Arm documentation is quoted here and no Mali counter measured it).
+`vu_particle_main_vs`
 draws sprite `vid / 6` from `vu_particle` with slot A's verdict and the sprite's planes the same
 way. `vu_ps` and `vu_texa_ps` take `VuVSOut` from either the main shaders or the programs' own
 entries and evaluate the planes (`vu_pixel_attrs`); at a fractional scale `vu_np_ps` reads its
@@ -863,7 +1249,11 @@ pipelines.
 `vu_particle_main_vs` with `vu_ps` and `vu_texa_ps` under the VU states, the ten pre-pass keys
 (`rd__vu_pre_key`: the program's `vu_X_pre_vs` with `vu_pre_ps`, three `RGBA32_UINT` targets, no
 depth, points, no blend) and the five record stage keys (`rd__vu_stage_key`: the rule, the tick
-stage under the masks R and G, the planes and the sprite stage); the program entries' keys (with
+stage under the masks R and G, the planes and the sprite stage); under the stores the same fifteen
+keys with `colorFmt` UNKNOWN (the pipeline the store build, no fragment shader,
+`noRaster`, the throwaway `R8_UNORM` target with a write mask of 0 where it is wanted, else no target; the tick stage's two masks stay two keys of the same pipeline, its lane chosen by
+`vu_tri.w`), so both writes' pipelines can stand in the cache across the self-test's fallback
+(`rd_pipeline.c` (`rd__vu_pre_key`)); the program entries' keys (with
 the same `vu_ps`, `vu_texa_ps`) are made only for a command drawn the old way.
 `[dev] vu_prepass = false` (`ICO_RD_VU_PREPASS=0`, [CONFIG.md](CONFIG.md#ico-pcini)) draws every
 VU command the old way, for an A/B on a device.
@@ -872,9 +1262,12 @@ VU command the old way, for an A/B on a device.
 point lists, a colour write mask of one channel, vertex and pixel shaders reading a read-only
 storage buffer (as the stream already is), and buffer copies (a texture into a buffer: on
 Direct3D 11, which has no such copy, the backend's own compute shader, [RHI.md](RHI.md#direct3d-11)).
-No compute in the renderer (the RHI has none), no
-storage writes from a vertex shader (`vertexPipelineStoresAndAtomics`, which the port never
-enables and phones' drivers do not all offer), no vertex texture fetch (`tools/check_spirv.py`'s
+One compute use in the renderer (the record's dispatches, above, where the vertex shaders cannot
+store), storage writes from a vertex shader only where the
+device offers them (`vertexPipelineStoresAndAtomics`, enabled where offered and used for the
+record's stores, above; phones' drivers do not all offer it, and a device without it takes the
+compute dispatches, logged on the Vulkan backend's start as `no vertexPipelineStoresAndAtomics:
+...` and `compute record stores: offered (...)`), no vertex texture fetch (`tools/check_spirv.py`'s
 vertex-shader opcode set holds no image instruction). `RGBA32_UINT` is a colour attachment and a
 sampled format on every Vulkan device (the specification's required format support) and a render
 target on Direct3D 12 and Direct3D 11 at feature level 11_0; three targets are inside every device's colour
@@ -882,18 +1275,41 @@ attachments (at least 4 in Vulkan, 8 on Direct3D 12). The one bound the record m
 a pixel's colour targets may take 32 bytes together on Apple A9 and A10 GPUs, 64 on A11 to A13 and
 128 from A14 and M1 (Metal Feature Set Tables, "Maximum implicit image block size, per pixel, per
 sample, when using multiple color render targets"); the record's 48 bytes do not fit the first,
-so under MoltenVK on an A9 or A10 the pre-pass is off (`RhiLimits.colorBytesPerPixel`;
+so under MoltenVK on an A9 or A10 with the targets the pre-pass is off (the stores have no such
+bound) (`RhiLimits.colorBytesPerPixel`;
 `port/rhi/rhi_driver_version.c` (`rhi_metal_color_bytes`), from the Metal device's name) and the
 log says so once. An Apple GPU name the table does not read is taken as unbounded (the families it
 names only grow), logged as `rd: VU pre-pass: the Apple GPU "<name>" is not one the colour-target
 table names: ...`; a pipeline Metal then refuses, or a wrong picture, is the start-up self-test's
-to catch (below). At start the renderer logs `rd: VU pre-pass: on: each mesh and grid vertex and
+to catch (below). A tile-based GPU takes the pre-pass as any other device (issue
+179: a Mali-G52 drew its boat scene with 9 vertex shader invocations a triangle without it, vertex
+bound). Reading the record's passes, copies, barriers and reads, and running them under
+synchronisation validation, finds no rule broken; a PowerVR phone's pictures that shook between two
+ticks through the record are the device-side fault the self-test's four replays across both frame
+slots (below) are made to see: a record read stale or across two pictures fails it and the device
+draws the old way. At start the renderer logs `rd: VU pre-pass: on: each mesh and grid vertex and
 triangle and each sprite evaluated once before the lists (two passes), 48 bytes a record slot in 3
-RGBA32_UINT targets, two slots a triangle (three under the tick cameras); [dev] vu_prepass = false
-draws the old way`, or `rd: VU pre-pass: off by the settings ([dev] vu_prepass = false,
+planes, two slots a triangle (three under the tick cameras); [dev] vu_prepass = false
+draws the old way; its draws ...; the record <the write>` (above), or `rd: VU pre-pass: off by the settings ([dev] vu_prepass = false,
 ICO_RD_VU_PREPASS=0): ...` or `off on this device (its colour targets hold 32 bytes a pixel
 together, the record 48: an Apple A9 or A10 GPU): ...` (`port/render/rd_replay_vu.c`
 (`rd__vu_prepass_init`)).
+
+One device draws without it by the device table (its `adreno-740-qualcomm` row's `VU_PREPASS_OFF`,
+[DEVICE_TABLE.md](DEVICE_TABLE.md), `RhiLimits.vuPrepassOff`; NULL on every other device and backend): the Adreno
+740 under Qualcomm's own driver (issue 123: the first build to run the pre-pass there drew a
+full-screen noise picture in its first scene and the GPU then hung on driver 512.676.1; the
+record path's modules are built once for every device, with the card test and the tick cameras the
+plain set keeps from that compiler, [SHADERS.md](SHADERS.md)). Turnip on the same GPU keeps the
+pre-pass (the row matches Qualcomm's driver only). The start line there is `rd: VU pre-pass: off
+by the device table (Adreno 740 on Qualcomm's driver, issue 123; [dev] vu_prepass = true draws
+with it anyway): ...`, the summary `VU pre-pass off by the device table (...) (self-test not
+run)`. `[dev] vu_prepass = true` written in `config.toml` (exported as `ICO_RD_VU_PREPASS=on`;
+the default, never written, exports nothing) passes the table for an A/B, and the on line then
+ends `; [dev] vu_prepass = true over the device table (<reason>)`; it never passes the
+colour-target bound above, a restart's step without the pre-pass or the self-test.
+`ICO_VK_FAKE_NO_PREPASS=1` gives any device the column's reason (the ctests
+`rd_vuprepass_selftest_devtable` and `_devtable_on`).
 
 **The self-test.** The pre-passes' pipelines are shapes no other draw of the port has (vertex
 shaders writing `PointSize` into a point list, flat `uint4` varyings into three `RGBA32_UINT`
@@ -903,7 +1319,7 @@ make one would leave every VU pipeline to be made on first use (the start-up set
 shaders' keys, not the programs'), and one that miscompiles them would draw the scenery wrong with
 no error. `rd_vuprepass_selftest` checks it on the device at start, after the blend's self-test
 and before the start-up set (`port/platform/window_host.c`; in a run without the set, after
-`rd_pipelines_lazy`): a frame of its own, never recorded, on SCENE at its real size and scale
+`rd_pipelines_lazy`): a frame of its own, built four times and never recorded, on SCENE at its real size and scale
 without MSAA, draws three meshes made for it (`rd_create_vu_mesh`: a prelit strip through normal_c
 code 32, a lit one through normal_l code 32 and a skinned one through cluster code 20 with two
 bones, 12 vertices and 8 triangles each, overlapping at other depths, Z GEQUAL with Z write,
@@ -911,40 +1327,1093 @@ untextured) with `vu1_test`'s scene in VU memory, the prelit mesh again through 
 between two ticks' (one vertex of each triangle behind the blended camera's eye, every triangle
 inside at tick 1's camera, so each is drawn clipped through the tick stage, in front of the
 others; left out where the fallback is the plain variant, which has no tick cameras) and four
-particles, once with the pre-passes off (the programs' entries, the
-reference) and once with them on, and reads the block back after each. Their pipelines are made
+particles. Replay k of the four is moved: every mesh 0.25 model units (2 GS pixels) a replay to the
+right and the blended camera's x' and y' offsets 0.25 a replay, so each replay's records differ from
+the one before. The four are replayed with the pre-passes off (the programs' entries, the
+references), then the four with them on back to back as a run draws its pictures, each in the
+next frame slot (the record's buffer is one a slot, so they alternate between both); the block is
+copied out after each replay and read back after the four. A record that a replay did not write,
+read before its copy landed or read from the other slot draws an earlier picture, which one replay
+of one frame could not show. Their pipelines are made
 first on the worker threads the start-up set uses, named by two replays that draw nothing
 (`rd__pipeline_gather`, `rd__pipeline_create_gathered`, as the loss bisect makes its own): the
 programs' entries are not in the start-up set with the pre-pass on, and on a cold driver cache a
 PowerVR DXT-48-1536 compiles an extended VU program entry in about 1.3 to 3.4 s (its start-up
 batches in a log), so in parallel the self-test costs about the slowest one, and next to nothing
-once the pipeline cache holds them. It passes when the replay with the pre-passes drew every
+once the pipeline cache holds them. It passes when every replay with the pre-passes drew every
 command through them (`RdPerfRecord.vuPrePasses` 2, `vuPreDraws` 16, 11 without the tick copy,
-`vuPreSprites` 4, `vuPreFallbacks` 0) and the two blocks are equal byte for byte. A difference, a
+`vuPreSprites` 4, `vuPreFallbacks` 0) and each replay's block equals its own reference's byte for
+byte. A difference, a
 pipeline the pre-passes could not make or a device error turns the pre-pass off for the run, so
 the start-up set made next holds the programs' keys:
 
 ```
-rd: VU pre-pass: on (self-test: prelit, lit, skin, the tick cameras and particles byte for byte, 48 vertices and 4 sprites in 16 pre-pass draws (2 passes, 90 triangle slots), <n> of <m> pixels drawn) on SCENE <w>x<h> at <tw>x<th> texels in <t> ms
-rd: VU pre-pass: off (self-test: the pictures differ: <n> of <m> bytes, the first at texel <x>,<y>: <r>,<g>,<b>,<a> want <r>,<g>,<b>,<a>) on SCENE ...
-rd: VU pre-pass: off (self-test: a pipeline could not be made (<p> passes, <d> of <w> pre-pass draws, <s> sprites, <f> draws the old way)) on SCENE ...
-rd: VU pre-pass: off (self-test: the device failed in the replay with the pre-pass) on SCENE ...
+rd: VU pre-pass: on (self-test: prelit, lit, skin, the tick cameras and particles byte for byte over 4 replays in both frame slots, 48 vertices and 4 sprites in 16 pre-pass draws (2 passes, 90 triangle slots), <n> of <m> pixels drawn) on SCENE <w>x<h> at <tw>x<th> texels in <t> ms, record stores
+rd: VU pre-pass: off (self-test: the pictures differ: in replay <k> of 4 (frame slot <s>), <n> of <m> bytes, the first at texel <x>,<y>: <r>,<g>,<b>,<a> want <r>,<g>,<b>,<a>) on SCENE ...
+rd: VU pre-pass: off (self-test: a pipeline could not be made (replay <k> of 4: <p> passes, <d> of <w> pre-pass draws, <s> sprites, <f> draws the old way)) on SCENE ...
+rd: VU pre-pass: off (self-test: the device failed in the replays with the pre-pass) on SCENE ...
+```
+
+The test judges the record's write the run starts with (above) and falls back one rung at a time
+(`rd__vu_record_fall_back`: the stores, the compute dispatches where offered, the targets, then
+the pre-pass off): a failure of the stores or the compute dispatches is logged with its own reason
+and first differing texel and the test runs again one rung down, whose verdict then decides; the
+verdict line ends with the write it judged and the rungs that failed:
+
+```
+rd: VU pre-pass: the record stored by the vertex shaders failed the self-test (the pictures differ: in replay <k> of 4 ...) in <t> ms: the self-test again one rung down
+rd: VU record: stored by compute dispatches into the frame slot's record buffer: no render targets, no copies (the stores off: they failed the start-up self-test)
+rd: VU pre-pass: the record stored by compute dispatches failed the self-test (...) in <t> ms: the self-test again one rung down
+rd: VU record: drawn into 3 RGBA32_UINT render targets and copied into the frame slot's record buffer (the compute off: they failed the start-up self-test)
+rd: VU pre-pass: on (self-test: ...) on SCENE <w>x<h> at <tw>x<th> texels in <t> ms, record targets, the stores and compute failed the self-test
 ```
 
 A start whose pre-pass is already off (the settings, the device, the host's
 `rd_set_vu_prepass_off`: a restart step or an end in its compile) runs nothing and logs `rd: VU
-pre-pass: off (self-test not run)`; a frame it could not build, or one in which neither replay
+pre-pass: off (self-test not run)`; a frame it could not build, or one in which neither replay of a pair
 drew the meshes, leaves the pre-pass on (`on (self-test not run: ...)`, `on (self-test
-inconclusive: ...)`). The summary line carries the verdict (`VU pre-pass on (self-test: ok)`, `VU
-pre-pass off (self-test: <reason>)`, [PLATFORM.md](PLATFORM.md#the-summary-line)). A crash in one
+inconclusive: ...)`). The summary line carries the verdict (`VU pre-pass on (self-test: ok; record stores)`, `VU
+pre-pass off (self-test: <reason>)`, [PLATFORM.md](PLATFORM_DIAGNOSTICS.md#the-summary-line)). A crash in one
 of its pipelines is noted as the start-up set's would be and takes the crash order's `noprepass`
 step; a start that ended without a word in one of the pre-pass's pipelines or batches makes the
 next start draw without it, and the second such end in a row writes `[dev] vu_prepass = false`; a
 device loss in a run drawing with it takes the loss order's `lossnoprepass` step first
-([PLATFORM.md](PLATFORM.md#diagnostics)) (`port/render/rd_vuprepass_selftest.c`;
+([PLATFORM.md](PLATFORM.md#diagnostics)); under the record stores each of the three takes a rung
+before it ([the record stores' restart rung](#the-record-stores-restart-rung)) (`port/render/rd_vuprepass_selftest.c`;
 `port/render/rd.h` (`rd_vuprepass_selftest`); `ICO_RD_VU_PREPASS_SABOTAGE=1` draws the first
 command's vertex records a texel off, `=tri` its triangles' slot A a slot off, `=ticks` the tick
-stage's tick 1 at tick 0's camera, [TESTING.md](TESTING.md#environment-switches)).
+stage's tick 1 at tick 0's camera, each in every replay, `=stale` the record's copies left out from
+the second replay on (under the stores: those replays' records stored into a sink buffer), which only the replays after the first can catch (a self-test of one replay
+passes it); [TESTING.md](TESTING.md#environment-switches)).
+
+#### Flat outputs at the provoking corner
+
+`VuVSOut`'s seven flat varyings (`a0`, `a1`, `x0`, `x1`, `y0`, `y1`, `r`: `nointerpolation` in the
+HLSL, `flat` in the GLSL SPIRV-Cross writes, constant interpolation in DXBC) reach the pixel
+shader from the triangle's provoking vertex alone, and that is its first vertex on every backend
+the port has: Vulkan's default (the port never chains `VK_EXT_provoking_vertex`; MoltenVK follows
+Metal, whose flat attributes take the first vertex), Direct3D 11 and 12 (always the first), and
+OpenGL by `glProvokingVertex(GL_FIRST_VERTEX_CONVENTION)` (`port/rhi/gl/gl_device.c`
+(`gl_defaults`), set once on the context; [RHI.md](RHI.md)). Every list a main shader draws is a
+triangle list whose triangles are `kick * 4 + 0`, `+ 1`, `+ 2` in that order (`rd_mesh.c`
+(`batchIndices`, the meshes, their tiled sheets and replacements), `rd_replay_vu.c` (the grids'
+lists, `vuRunWrite`: the merge's raised values keep the order); no strip, fan or restart), so
+the first vertex is corner 0. `vu_main_vs` therefore reads the planes at corner 0 alone
+(`ICO_VU_FLAT0`, `port/shaders/vu_tri.hlsl`): corners 1 and 2 leave the flat outputs as
+`vu_out_init` made them and skip the five loads; the position, the depth and every interpolated
+output (colour, S, T, Q, the plane distance and the side-band mark) are computed as before at
+every corner, statement for statement. The later bias reads the corner's own vertex from `me`
+(the same record texels, so the same words), the other two in branches of their own: two loads
+for its three. `vu_fused_out`'s `r.w` stays at every corner (no load). Record loads an
+invocation (the record, `vu_ring`, the stream), corner 0 / corners 1 and 2 (before: every corner
+the first figure):
+
+| draw | before | now |
+| --- | --- | --- |
+| alone, planes held (exact, exact viewport) | 9 | 9 / 4 |
+| alone, no planes (clipped, or no exact viewport) | 4 | 4 / 4 |
+| under the tick cameras, the blended verdict a drop | + 1 (slot C) | + 1 |
+| chain plane (normal_c, normal_l, `vu_batch.z`) | + 1 (stream) | + 1 |
+| later bias (`VU_TF_LATER`) | + 3 (plane 1 of each corner) | + 2 |
+| merged (`vu_merge_main_vs`) | + 10 (the table's count, four search steps, the draw's row, its `vu_draw`, `vu_batch`, `vu_rec`, `vu_tri`) | + 10 |
+
+(The SPIR-V's own loads: 13 record loads and 1 stream load in `vu_main_vs`, 10 ring loads more in
+`vu_merge_main_vs`, with the compiler having dropped the later bias's unused planes 0 and 2 and
+the merge's unused `vu_strip`, `vu_mark`, `vu_lo` and `vu_hi`.) The merge's search and constants
+feed the position at every corner and no address in it is read twice, so they stay. A plain mesh
+triangle with its planes drops from 27 loads to 17. A future backend with the last vertex as its
+provoking one (OpenGL ES without `GL_EXT_provoking_vertex`) would need its own build of the corner
+test (a define naming that backend's corner), never a setting. The start line: `rd: VU flat
+outputs: provoking corner only (9 loads a corner-0 invocation, 4 at the others: ...)`
+(`port/render/rd_vu_flat0.c`); the tests' `ICO_RD_VU_FLAT0=0` draws through the twins built with
+`ICO_VU_FLAT0=0` (`vu_all_main_vs`, `vu_merge_all_main_vs`: the shader before the change) and says `rd: VU
+flat outputs: every corner (...)`; `rd_vu_flat0_ab` holds the two to the same bytes
+([TESTING_PROGRAMS_RENDER.md](TESTING_PROGRAMS_RENDER.md)). The start-up self-tests are unaffected
+by construction: the pre-pass self-test (`rd_vuprepass_selftest.c`) compares the main shaders'
+pictures with the programs' entries', which compute the planes at every corner, and the rasteriser
+takes corner 0's in both; the skin check counts samples covered (the position alone); the blend
+self-test draws no VU program.
+
+#### The drop verdict first
+
+A triangle the game drops (hidden, the region rule's drop that the tick cameras, card, camera and
+beside rules keep, the other scissor pass's triangle, every corner past the chain plane) leaves
+every corner of it at `VU_CULLED`, outside `x <= w`: it draws nothing. With the verdict after the
+corner's record (three loads), as the twins below still draw, `vu_main_vs` returns early only on
+the hidden flag and every other dropped triangle runs the whole shader three times (the later
+bias's two or three loads, the chain plane's stream qword, the position's arithmetic). Now the
+verdict comes first (`ICO_VU_EARLY`, `port/shaders/vu_tri.hlsl`): slot A, and slot C under the
+tick cameras where the blended camera's verdict is a drop, through `vu_tri_verdict`, the helper
+the index compaction's `vu_keep_position` takes its `culled` from too, so the two cannot disagree;
+a culled triangle returns `vu_out_init()` (`VU_CULLED` itself) without its corner's record. Record
+loads of a culled triangle's invocation: 1 (slot A), + 1 (slot C) under the tick cameras, + 10
+under the merge; before: 4 (the corner's three and slot A; a hidden triangle stopped there), + 1
+under the tick cameras, + 1 under the chain plane, + 2 under the later bias, + 5 at corner 0 where
+a triangle past the chain plane held its planes, + 10 under the merge. A drawn
+triangle's invocation reads what it read before (the table above), the same words in the same
+statements. Exact by construction: the same verdict on the same words, and both positions are
+outside the clip volume past the same plane (`x = 2`, `w = 1`; only `z` could differ, by the
+later bias), so no fragment, sample, depth or stencil either way. On the Mali-G52 (the index
+compaction off there) a dropped triangle's three invocations each stop after slot A; where the
+compaction runs, its filler (the dropped triangle's corner 1, three times) stops there too. The
+merge's prologue (the table's search and the draw's constants) still runs: the verdict reads
+`vu_tri`, `vu_rec.w`, `vu_draw.z` and `vu_batch.z`, which the prologue loads, so no ordering
+before it is exact; in the builds without the merge they are constants already. Every build of the
+shader takes it: `vu_main_vs`, `vu_merge_main_vs` and `vu_velocity_main_vs` (which calls it for
+the position), on every record path (the render targets, the vertex stores and the compute
+record all leave the same record words; the shader reads them the same way). The tests' twins
+(`vu_all_main_vs`, `vu_merge_all_main_vs`, `ICO_VU_FLAT0=0 ICO_VU_EARLY=0`) are the shader before
+both changes, so `rd_vu_flat0_ab` holds the shipped build to the bytes of the shader before on
+every fixture of `lists/vu_flat0.txt`, merged and one draw a command, under the corpus, Mali and
+Pixel profiles; `rd_vu_compact_ab`'s drop counts (`lists/vu_compact_counts.txt`, D: 4612 of list
+0's 12192 triangles on `fx-mali-frame`, 8196 of 19185 on `fx-mali-slow541`) are the triangles the
+same helper culls, so they show the early return ran there and the verdict did not move. No new
+log line: the start line of the flat outputs names the twins as before. The start-up self-tests
+cover it at the play record's size: the pre-pass self-test draws through `vu_main_vs` (merged
+where the merge is on) and compares every replay with the programs' entries byte for byte; its
+`=ticks` sabotage drops the ticks copy, which then takes the early return. Every build of the
+shader changes, so the pipeline cache's name changes and the cache is made again once on the
+first start (`pipelines-<key>.vkcache`, `port/render/rd_cache_name.h`; [RHI.md](RHI.md#vulkan)).
+
+#### Shared vertices for clip mode none
+
+Every draw through the record names a corner by `kick * 4 + corner`, so no index value repeats and
+the GPU runs `vu_main_vs` three times a triangle. Under clip mode none (`vu_rec.w`'s mode
+`ICO_VU_CLIP_NONE`: the prelit program at code 34, `vuTriRule` in `port/render/rd_replay_vu.c`)
+what the shader writes at value `k * 4 + c`, besides the flat outputs, depends on the vertex
+`k - 2 + c` alone: its position (the vertex's own wrap test in `vu_corner_position`), colour, STQ
+and the side band's mark 0. The triangle's verdict can only cull it (the hidden flag, or every
+corner past the chain plane) or move its depth (the later bias). So a prelit mesh gets a second index list
+(`RdMeshRec.indexShared`, `port/render/rd_vu_share.c` `rd__vu_share_build`). The list is made
+once, at the first replay that draws the mesh by a candidate command (a prelit mesh command at
+code 34 without a chain plane: `rd__vu_share_consider`, run over the replay's commands before
+its mesh uploads). Lit and skinned meshes, prelit meshes drawn only in other modes, and the
+interpolation's scratch meshes never get one. The
+list has the same triangles in the same order, and each place's value is replaced by one canonical
+value of the same vertex: `(v + 2) * 4 + 0` where the triangle `v + 2` is in the batch (the vertex
+provoking its own triangle), else the value of the first triangle of the batch that has the vertex
+as a corner. Every value is one the original list holds, so the span is the same or narrower (issue
+95's sizing and the 16/32-bit limits are unchanged). A triangle's first value stays its own, so
+its provoking vertex, and with it the planes (the flat outputs), is the same invocation as before.
+The GPU reuses an invocation where a value repeats within a draw: a strip's middle vertices are
+shaded once instead of three times.
+
+The list is made only where its form allows it:
+- the batches lie back to back in index order, each a whole number of triangles, their vertex
+  ranges in order and apart;
+- every triangle is `k * 4 + 0, + 1, + 2` with its corners in its batch's vertices;
+- no kick appears twice;
+- the mesh is not a sheet of the content table;
+- at least one value is shared.
+
+The device copy and the ring hold it right after the original (`rd__mesh_index_bytes`,
+`rd__mesh_write_indices`), so the original's offset, which everything else reads, is unchanged.
+A list made for a mesh whose device copy lacks it marks the copy for upload again. The ring's
+estimate (`rd__estimate_ring`) counts each mesh by `rd__mesh_ring_bytes`, which counts the shared
+list wherever the upload may write it (one made, or one this replay's consideration will make),
+so the estimate covers the writes by construction. The hide and later marks are made at the
+mesh's creation and never change; the build records, per batch, whether a kick carries one, so a
+draw checks its batches, not its triangles.
+
+A draw takes the shared list only when nothing can make a corner's output depend on its triangle
+(`rd__vu_share_draw`, at `doVuDraw`'s mesh draw):
+- a mesh command, not skinned, a grid or particles;
+- recorded by the pre-pass and drawn by the main shader;
+- rule mode none;
+- no chain plane (`vu_batch.z` 0);
+- no batch of its range with a kick marked `ICO_VU_MARK_HIDE` or `ICO_VU_MARK_LATER`;
+- not a probe draw;
+- its range the batches' own.
+
+`vuDraw` keeps the original list where the index compaction draws its own list or the draw falls
+back to a program's own entry. Every other draw is the same list and the same GPU draw as before.
+The merge reads the shared values through the same CPU pointer (`vuRunWrite` raises them as it
+raises any list), and the velocity pass draws the same list (`vu_velocity_main_vs` reads its corner
+from the value). No shader changes, so the OpenGL, Direct3D 11 and Direct3D 12 twins and MSAA
+draw the same values: Vulkan's first-vertex mode, Direct3D's first vertex and OpenGL's
+`GL_FIRST_VERTEX_CONVENTION` all take the flat outputs from the first value. On issue 179's boat
+scene (stage 42, the reporter's slow-scene capture of 2026-11-19) it admits 60 of 87 code 34 draws: 24,921
+triangles, 11,502 vertex invocations saved of their 74,763. The dock's meshes are mostly short
+strips, so the saving is about a sixth, not two thirds. Counted in the 10 s VU line
+(`; shared vertices: T triangles, S vertex invocations saved (P % of the draws')`, `rd_vu_share_text`,
+then `; shared vertices kept (triangles a picture): form a, chain b, marks c, other d, entry e,
+region f, no verdict g`: the mesh draws' triangles kept on the original list by reason, `region`
+a rule mode other than none and `no verdict` a draw the pre-pass did not record, with `off o,`
+first where the tests' switch below keeps every original list)
+and in `rd_replay_tool --stats` (`stats: VU shared vertices on: ...`, with the draws kept on the
+original list by reason, `rule mode not none` and `not recorded` among them). The tests' switch `ICO_RD_VU_SHARE=0` keeps every original list
+([TESTING.md](TESTING.md#environment-switches)). `rd_vu_share_ab` and `rd_vu_share_gl` hold every
+target of `lists/vu_share.txt` byte for byte between the two, merged and one draw a command, under
+the corpus and Mali profiles. `rd_vu_share` checks the lists, the exclusions and the counts on
+synthetic meshes.
+
+#### The zero-area cull
+
+A triangle whose closed edges hold no sample point of its target draws nothing: no fragment, no
+depth, no stencil. The rule stage's zero builds (`port/shaders/vu_tri.hlsl` with `ICO_VU_ZERO=1`:
+`vu_tri_rule_zero_pre_vs` and its batch, store and compute builds, the vertex shader id
+`RD_VS_VU_TRI_RULE_ZERO`) mark such a triangle `VU_TF_HIDDEN | VU_TF_ZERO` in its slot A, and every
+reader of the slot culls it as a hidden triangle (`vu_tri_verdict`: the early return of [The drop
+verdict first](#the-drop-verdict-first), the index compaction's filler). No vertex feeding
+changes; a culling entry's draws take the mesh's original index list (below). `port/render/rd_vu_zero.c`, `rd_vu_zero_run.c` and `rd_vu_zero_selftest.c` hold
+the CPU's side (`rd_vu_zero.h` says it all), `port/platform/vu_zero_mark.c` the install's mark.
+
+Nothing of it reaches a device that does not try it:
+- Every module of the build without the cull is the same module byte for byte (`ICO_VU_ZERO` 0
+  leaves `vu_tri.hlsl`'s statements as they were). The zero builds have names of their own, are
+  left out of the start's modules (`rd__gpu_init`, the record's and the batches' sets, the shader
+  plan) and of the pipeline cache file's name, so a device keeps the cache it had.
+- The renderer makes one zero build, the one its record mode and batches take, and its one
+  pipeline, only when it tries the cull: in the start-up self-test, before the start-up set, never
+  inside a picture. The record buffers are copyable only while the self-test reads them back
+  (made again at the self-test's small size before and after it, before the play record is made).
+
+The test, exact by construction:
+- The sample points are the target's texel centres. The exact viewport (`rd__frame_group_ex`,
+  `setViewport`) puts them on the GS's 1/16 grid at a whole-number scale: in sixteenths of a
+  texel, `U = gx * sx + kx` and `V = gy * sy + ky` are multiples of 16 there. The CPU works the
+  offsets out from the target, its scale, the Full pixel crop, the field's half line and the
+  viewport's power of two (`rd_vu_zero_word`); the zero build's draw gets them in `vu_tri.w`. While
+  the cull is on every entry's rule stage takes the zero build (an entry without a word skips the
+  test), so the pre-pass's batches, draws and dispatches are the ones it had; the one pipeline more
+  is the draw pattern tables' only change (`mali`, `desktop`: `pipelines` + 1).
+- The test runs where every corner is drawn at its GS position: clip mode none without the wrap,
+  the region rule's exact verdict, the scissor mode's code 1, the exact viewport, the GS grid
+  (not `ICO_RD_VU_OFFGRID`), no jitter.
+- The triangle is grown by 2 sixteenths of a texel each way (`ICO_VU_ZERO_GROW`): more than a
+  GPU's sub-pixel snap moves a corner (at least 4 bits on every API) plus the viewport's float
+  steps. The closed, grown triangle holds every point the GPU's own triangle can cover under any
+  fill rule. A triangle of no area is tested by its grown box alone; a box of more than 4 sample
+  points a side is kept untested.
+- Integers only, every product exact, within the vertex-shader envelope (no loop: the 16 points
+  are written out; signed tests as `>=` and `==`).
+
+An entry gets a word only where every reader of its slots is a draw on its own target,
+single-sampled: not with an MSAA setting, not on WORK2 (the lamps' pass there may be
+multisampled), not a skinned entry (the skin check's twins), not one the velocity pass reads, not
+a probe; and only where the mapping is proven (a whole-number scale from 1 to 15, no jitter, the
+GS grid). Its draws keep the mesh's original list: a value of the shared vertices' list is drawn
+for other triangles too (counted, `shared lists given up`). A draw of a marked entry in a
+multisampled pass all the same turns the cull off for the run and writes "failed".
+
+The ways back, each logged, none written to the settings:
+- The install's mark (`logs/vu-zero-mark.txt`, `port/platform/vu_zero_mark.h`), each word with
+  the version that was running: "trying" is written and synced before the zero build is made,
+  "counting" when the self-test passed, "on" after 250 pictures drawn with the cull, "failed" when
+  the zero build could not be made, the self-test refused it or a culling draw met a multisampled
+  pass. A refusal by the settings (no
+  lattice for SCENE: MSAA, a scale that is not a whole number, jitter, the vertices off the grid)
+  comes first and writes nothing: the cull is not tried in that run and a later run whose settings
+  allow it tries. The next start classes the previous run's end from its `last-run-previous.txt`
+  (clean, a crash, a device loss, a GPU hang, the watchdog; `clean, after: <end>` is that end) and,
+  where it wrote none, Android's exit record for that run. With "trying" every end but a clean close
+  keeps the cull off; with "counting" or "on" only a crash (ours, or Android's `REASON_CRASH` /
+  `REASON_CRASH_NATIVE`), an ANR, a signal other than SIGKILL, a device loss, a GPU hang or the
+  watchdog does; a close from the recent apps list, Force stop, a kill by the system, an update, the
+  app ending itself, a clean close or no evidence at all (no exit record: Android before 11, a desktop `kill -9`) do not,
+  and the cull runs its self-test again; "failed" keeps it off. An end while the discard-free
+  twins' mark said "trying" is theirs and does not block the cull at "counting" or "on" (each mark
+  blocks only its own subject, [PLATFORM_DIAGNOSTICS.md](PLATFORM_DIAGNOSTICS.md)). Off means `blocked <the version in
+  the mark>`, handed to the renderer as `ICO_VU_ZERO_BLOCK` while that version runs: an update
+  tries again. One line each start that had a mark: `ico_pc: the previous run: zero-area cull:
+  ...`.
+- The start-up self-test, after the pre-pass passed its own: a mesh of cases at SCENE's own
+  sample points (inside a cell in both windings, a corner on a point, an edge through one, no area
+  between points and through one, a big one, one within the margin, a sliver too wide, the
+  target's left and top edges) drawn at codes 34 and 32. The GPU's flag of every triangle slot must
+  equal the CPU's answer, the culled count the CPU's from the corners it placed, and the picture
+  with the cull the picture without it byte for byte. Anything else, the zero build missing, an
+  answer not read back or a device error: off for the run (still off when the renderer is made
+  again in the process), the mark "failed", the module and its pipeline released and the record
+  buffers made again as without it.
+  `rd: VU zero-area cull: on (self-test: C of S triangle slots culled as the CPU answers, code
+  34 and code 32, pictures byte for byte; lattice 0x11100) on SCENE 688x512 at 688x512 texels in
+  T ms`, or `off for the run (self-test: <reason>)`; then `rd: VU zero-area cull: on|off, N modules
+  of it made, P of its pipelines alive`.
+- A start after one that lost the graphics device or whose driver hung: off for this start, on
+  every device (`ICO_LOSS_ROW`; on a phone that start draws without the VU pre-pass anyway). A
+  watchdog end turns off the cull alone (the mark above), never the pre-pass.
+- No record is read back in play: once the self-test passed, nothing new runs on the GPU but the
+  zero build where the build without it ran.
+
+The 10 s VU line's clause (`rd_vu_zero_text`): `; zero-area cull: D draws a picture culling, T
+triangles in culling draws (how many it removed is not measured); refused a picture: velocity a,
+...; shared lists given up a picture: g`, or `; zero-area cull held|off (why)`: T counts the
+triangles the culling draws carry, not the ones the cull removed. `rd_replay_tool --stats`: `stats: VU zero-area cull on|held|off
+(why): C of S triangle slots culled over P pictures checked, M differ; D draws culling (T
+triangles, G shared lists given up); refused: ...; zero-area modules made N`. The tests' switches:
+`ICO_RD_VU_ZERO` and `ICO_RD_VU_ZERO_SABOTAGE` ([TESTING.md](TESTING.md#environment-switches)).
+Whether a GPU spends time on triangles that cover no sample point depends on its tiler, which no
+test here measures: the device measures it itself, below.
+
+#### The zero-area cull timed in play
+
+The cull is exact, but its cost is the device's: its rule-stage build is larger than the build
+without it, and a culling entry's draws give up the shared vertices' list. Once the cull is on
+(its self-test passed, its mark allows it), the game times it once a session, early in play, and
+keeps the faster arm for the whole session (`port/render/rd_ab.c` the judge, pure;
+`rd_ab_run.c` the renderer's side; `rd_ab.h` and `rd_ab_run.h` say it all). The judge takes
+subjects: the cull is the first (`RD_AB_ZERO`), the discard-free twins' proven classes the
+second (`RD_AB_NODISCARD`, [below](#the-discard-free-twins)), the fast pixel build the third
+(`RD_AB_FASTPS`), the twins' camera rule class the fourth (`RD_AB_ND_CAMERA`, below); one is on
+trial at a time, the others at their verdict (or with it, before their own). The registry has
+room for five (`RD_AB_SUBJECTS`); a subject is one row of `rd_ab_run.c` `k_subj` (its name, its
+ledger row, whether it may be tried) and its value in `rd_ab_run.h`.
+
+- **Two arms, both paths the device already runs.** With the cull (the arm "on", the default) or
+  without it ("off"): a replay at the off arm gives no entry a lattice word (refused for the
+  `trial`, counted in the 10 s VU line's refusals) and its rule stage takes the build without the
+  cull for every entry, so its draws keep the shared vertices' list. Nothing new reaches the
+  GPU: the build without the cull and its pipeline are the ones the pre-pass ran before the cull's
+  self-test, and the picture is the same on both arms (the cull is exact; `rd_ab_zero_ab` shows it
+  byte for byte).
+- **The arm is chosen when the replay's record starts** (`rd__perf_begin`) and kept in the
+  record (`RdPerfRecord` `abTrial`, `abSeq`, `abStage`, `abOff`, `abUsed`), so its GPU span, read
+  back frames later (`rd__perf_collect_gpu`), is judged as the arm it was recorded with however
+  many pictures are in flight.
+- **One verdict a subject a run, timed in scenery.** A trial starts after 2 s of game scenery in a
+  stage (the scene ledger's stage switch gives the stage; the scenery's start, past the fade and
+  the stage's first pictures, starts the 2 s), once the subject had work in that stage (the cull: a
+  target with a lattice word) and only while it has no verdict this run, the subject with the
+  fewest trials begun this run first (the registered order among equals), so a subject with no
+  trial yet goes before the retry of one that had one; at most 12 trials a run, a trial the
+  scenery ended not counted.
+  Scenery is the window's layout kind (`port/platform/window_scene.h` `SceneKind`, the perf scene
+  line's words): `play` or `scene` (a cutscene's layout; a movie, also `scene`, has no work for
+  either subject), passed by `window_perf_rank_step` through `rd_ab_scenery` into the pure judge
+  (`rd_ab_set_scenery`); the title, the logo (`other`), the pause and options menus and the memory
+  card's pages never time. The boot logo and title's stage (`region.h` `stage_title`, the stage
+  the perf lines name `logo`) never times whatever its layout (`rd_ab_scenery_of`): with Skip the
+  opening on it sits on the scene layout for about 2 s, and issue 179's report showed the cull
+  timed there. When the scenery ends during a trial (a menu, a movie, back to the title) the trial
+  ends with no verdict, whatever its pairs, and no mark for the stage; the subject is timed again
+  2 s into the next stretch of scenery (the same stage too) while trials are left. Such a trial
+  does not count toward the 12, so pauses during trials never use the cap up and keep the
+  subjects registered last untimed; what bounds the retries is the 2 s of unbroken scenery each
+  one waits for again, one trial at a time, so a stretch of play or a cutscene starts at most one.
+  The subject's own trial count (the stats line, the ledger's `trials run`) still counts it. On a new game the first timed stage is the opening's cutscene (stage
+  41, `scene (op2)` in issue 179's report, about 46 s long), so the answer is in before the boat
+  (stage 42); on a loaded save it is the save's stage once it plays (stage 11 `play (st04a ...)`
+  in the owner's Pixel log). The twins have work only in some scenery: their one trial is
+  the first scenery stage where they have work, which may come later than the cull's.
+  Its replays, keep frames left out, alternate with, without, without, with (a drift of the
+  content cancels).
+- **A pair** is the trial's replays 2k and 2k+1, both read back with GPU times, both with the
+  cull's work, their pre-pass vertices and VU triangles within 10 % of each other; a pair with a
+  span over twice the trial's running median (the last 64 spans, the stage's own before the trial
+  included, at least 8) is dropped and counted: the boat scene's stalls run at about half the
+  rate of the stretches between. Its measure is `ln` of the scene's GPU work over the work with
+  the cull, against the same without it. The scene's GPU work is the record's span less the
+  present's pass and the display wait before it (`rd_ab_scene_ms`: `gpuMs - gpuDisplayWaitMs -
+  gpuPresentMs`): on a Mali the wait for the window's image shows inside the present pass, so a
+  picture that finishes sooner would wait longer there and the saving would vanish from the whole
+  span. Both arms write the same stamps (the arm changes the pre-pass and the lists' draws, never
+  which stamps a replay writes), so the measure is the same quantity on either; a replay with no
+  scene work left is not measured.
+- **The verdict**: at 8 pairs all one way with the median at least 2 % that way (the early
+  verdict: a clear difference costs at most 8 pictures on the worse arm); else at 32 pairs, on when
+  the median pair is 2 % or more cheaper with the cull and 22 of the 32 are cheaper with it, off
+  otherwise (no difference: off, the path without the cull). It is the run's one answer: every
+  stage after it takes that arm and the subject is never timed again in the session. Before it,
+  the subject runs with it. No verdict: fewer than 16 pairs after 600 trial replays (no more
+  trials in that stage), or the stage ended or the subject was turned off before a verdict: not
+  an answer, so the subject is timed again in the next stage of scenery while trials are left;
+  with 16 to 31 pairs at either end, the verdict on those pairs (22 of 32 scaled).
+- **The cost of a trial** is bounded: at most 300 replays without the cull (half of 600), eight
+  with a clear difference. A picture at the off arm is not one drawn with the cull for the mark's
+  count, and a verdict "off" writes nothing to the mark.
+- **The ways back**: the cull's own self-test and mark, and in play its one fault (a culling
+  entry's draw in a multisampled pass, `rd__vu_zero_fault_msaa`; nothing is read back in play),
+  still decide whether it is used at all, and a cull that is held, blocked or off is never put on trial. A device lost
+  at a replay's start, or a record with the GPU's own sign of a reset (`rd_perf_clock.h`: a hang
+  the driver came back from), stops every trial and leaves every subject at its off arm for the
+  run, logged once. A hang or watchdog end ends the run; the next start's loss ladder and the
+  mark take it from there.
+- **A renderer made again** (a Graphics API switch, the one path that makes it again: `rd_resume`
+  from `ico_window_reopen`; `rd__ab_renderer` from `rd__vu_prepass_init`, the second renderer of
+  the process on; Android's background does not make it again): a trial running ends
+  unjudged, every verdict is forgotten (another backend or device is another answer), each subject
+  is timed once more by the same rule, and a record the earlier renderer drew is not measured (the
+  record's `abEpoch`). The trials already run still count toward the 12. Logged: `A/B: the
+  renderer was made again (a Graphics API switch): every verdict forgotten, each attempt with it
+  until it is timed once again on this renderer`.
+
+The rate requirement (`rd_ab` test, a GPU-bound stream at a 40 ms tick, 60 s; pictures of 33,
+37.5, 48 and 60 ms; the cull saving or costing 3, 5 or 10 %; one stage, four stages of one
+effect, and four stages whose effect changes sign each stage), restated for one verdict a run:
+the rule's target is the arm the two fixed-arm runs show faster in the first stage (where both
+present alike there, the arm the judge chose), kept for every stage. The judge's pictures are at
+least the target's less the pictures its undecided time cost (its pictures on the other arm
+before the verdict and in the trial, at the two controls' rates), less 1; after the verdict the
+same as the target's over the same span, within 1; and, for the streams of one sign, at least
+the worse fixed arm's. A stream that flips sign makes the two fixed arms all but equal over the
+60 s, and the rule keeps the first stage's faster arm everywhere, which there can be the worse
+fixed arm less its own trial (48 ms, +10 % first: 1245 against the fixed arms' 1250 and 1262);
+the target bound holds it. The bound is not a constant: a cull that costs 10 % at 48 ms gives up
+5 pictures, all of them in the first timed stage.
+
+The lines (`rd: ` before each):
+- At the start, after the cull's own line: `A/B: the in-play judge; may try: zero-area cull; each
+  attempt timed once a run, in the first stage of play or a cutscene (not the title, the logo, a
+  menu or a movie) where it has work, 2.0 s into it, ...` with every constant, or `not tried (off
+  here): zero-area cull`.
+- One a trial: `A/B: zero-area cull, stage 42: 32 pairs, with it 1.62 ms, without 1.55 ms of
+  the scene's GPU work (the present and its display wait left out) a thousand vertices and
+  triangles (the median pair 4.3 % dearer with it, 25 of 32 cheaper without), 3 dropped by a
+  long picture, 0 by unequal work: off for the rest of the run, every stage` (`8 pairs (all one
+  way: the early verdict)` for the early one), or `A/B: zero-area cull, stage 42: no verdict (600
+  replays, 11 pairs; 30 dropped by a long picture, 4 by unequal work, 120 replays not measured):
+  with it until it is timed again in another stage` (`the stage ended`, `the attempt was turned
+  off`: `... in the next stage of play`; `the scenery ended`: `... in the next stretch of play or
+  a cutscene`).
+- `A/B: every trial stopped for the run (the graphics device was lost): each attempt at its off
+  arm from here (zero-area cull)`; `A/B: 12 trials run, the most a run: an attempt not timed yet
+  stays with it`.
+- The attempt ledger's row, the run's totals in every block: `the zero-area cull timed in play on
+  N verdicts with it so far (M without it; T trials run)` (one verdict a run, so N and M are 0 or 1
+  but after a renderer made again); the window's compare line counts the
+  block's pictures drawn at an off arm: `(K keep frames; J without an attempt, timed)`.
+- `rd_replay_tool --stats`: `stats: A/B (the judge|on|off|alt): zero-area cull: N replays with it,
+  M without (T trials, S stages on, F off)`.
+
+The tests' switches ([TESTING.md](TESTING.md#environment-switches)): `ICO_RD_AB` (`on` every
+replay with the cull, `off` every replay without it, `alt` every replay with, without, without,
+with from the first, no trial; unset the judge) and `ICO_RD_AB_FAKE_LOSS`. The replay tool has no
+stage, so without `ICO_RD_AB` it runs no trial and draws as before.
+
+#### The discard-free twins
+
+On a device without dual-source blending every VU pass draws through `vu_ps_nodual` or
+`vu_texa_ps_nodual` (the two-pass blend, above), and both hold `discard`: the clip plane's, the
+side bands', DATE's and the alpha test's (`vu_common.hlsli` `vu_pixel_tests`, `vu_pixel`,
+`vu_pixel_texa`). Arm's published guidance for its GPUs says a fragment shader that may discard
+updates the depth late and loses the hidden-pixel kill; whether that costs anything on issue 179's
+Mali-G52 is not known, so the twins are timed in play as the cull is and kept only where they are
+faster. Under the floor rule below (clip mode none alone), 2 % and 6 % of the triangles of lists
+0-2 in that phone's two boat captures are in passes a twin may serve. Where the device's clipper
+check (below) measured clean, the camera rule's passes of the forms the check draws (prelit code
+32 and 36) take one too: at most 63 % and 73 % there (step 0 on the two captures; the skinned code
+24 passes, 24 % and 17 %, the lit code 32 ones, 3 %, and the lit grids are not drawn by the check
+and keep the floor). The captures do not show which draws are mirrored or seen between two ticks,
+which are refused too, so both are upper bounds. On any device, without the clipper check, a pass
+of those forms whose draw the CPU proves wholly in front of the eye takes one too (below,
+"Proven in front of the eye"): in the two captures 8 and 10 such draws, 22 % and 14 % of the
+class's triangles, 3.5 % and 6.1 % of lists 0-2's shaded fragments as the depth test's
+rejected ones (OVERDRAW's measurement; the floor's 1.1 % and 1.8 % besides).
+`port/render/rd_nodiscard.h` says it all.
+
+- **The twins** `vu_ps_nodual_nd` and `vu_texa_ps_nodual_nd` are the same entries built with
+  `ICO_VU_NODISCARD=1`: no discard, every other statement the same
+  ([SHADERS.md](SHADERS.md#the-families)). The key carries them as a second bit of
+  `RdPipelineKey.nodual` (`RD_NODUAL_NODISCARD`, with `RD_NODUAL_ON`): the key's size and every
+  key without the bit are unchanged; `pipelineDesc` takes the twin's module (`rd__nd_module`) for
+  the bit.
+- **Eligible, at the draw's key** (`rd_nd_eligible`, `rd_replay_vu.c` `vuDraw` after its
+  pipelines are found; refusing when unsure): a vu_ps or vu_texa_ps pass through its *_nodual
+  build with no destination read; no chain plane (`ICO_DF_PLANE`); no DATE (the snapshot's
+  `ICO_DF_DATE`, nor the stencil bit's); no side band (the draw has `ICO_VU_NO_BESIDE`, or is clip
+  mode none, or particles; under `[dev] region_rule = ps2` on a frame wider than 4:3 almost nothing
+  is eligible); the alpha test off in the pass (DrawCB mode.z bit 8 clear: the test off in the
+  state, ATST ALWAYS, the AFAIL merge's one draw, or the alpha plan's proof); not particles; and
+  clip mode none (code 34) on every device; or a form the check draws and compares
+  (`rd_nd_checked_form`, a positive list: the prelit program at code 32 or 36, under the camera
+  rule with a facing table (`ICO_VU_CAMERA`), one-sided, not mirrored, not photo mode's free
+  camera, not seen through the ticks' cameras) whose draw the CPU proved wholly in front of the
+  eye (on every device, counted apart as "proven in front of the eye") or, without that proof,
+  once the device's clipper check measured clean (counted apart as "by the clipper check");
+  else `box` for that form (no proof, no clean verdict), `clipped` for every other form, or
+  `form` for every other form on a clean device (lit, skinned, grids, drops kept, two-sided,
+  mirrored, free camera, ticks). At draw time three more reasons are counted: `not made yet` (the twin's pipeline),
+  `timed without them` (the judge's off arm) and `entry not tested` (the entry's own self-test case
+  drew nothing through it).
+- **Proven in front of the eye** (`rd_vis.c` `rd__vis_gs_proof`, `rd__vis_mesh_gs_proof`; asked
+  in `rd_replay_vu.c` per prelit mesh draw of a clip mode other than none while the twins are on).
+  The culler's box of the mesh's whole stream (every vertex any of its draws reads, kept per
+  stream version) goes through the draw's own matrix (VU memory 16..19; w = 1, or under code 36
+  the stream's pos.w range and 1): h is linear in the position, so the 8 (or 16) corners' extremes
+  bound every vertex. The proof holds when every vertex keeps its GS position (`vu_gs_ok`): w above
+  0 by twice the float tolerance (RD_VIS_TOL, 2^-18, of the sum of the absolute products, as the
+  culler's planes), h.z at least its tolerance over 0 (GS Z not negative, so no cut at GS Z 0),
+  and |h.xyz| / w below 2^26 (half of where ftoi4 saturates). w > 0 alone is not enough: a corner
+  below GS Z 0 is cut at the depth plane, where an edge along a view ray gives Mesa the same 0 / 0
+  with every w above 0. With every corner at its GS position each triangle is drawn at w 1 with a
+  depth in 0..1 (`vu_triangle_out_pos`: `vu_vtx_position`, or `vu_corner_cut_position` returning
+  it for a corner that has one), the case of clip mode none's proof below, so a twin draws what
+  the *_nodual build draws on any device, whatever the clipper check measured. Anything not
+  finite, an empty box, no mesh record or a skinned, grid or particle draw: no proof.
+- **Why clip mode none.** The *_nodual build discards a pixel in the picture's columns whose band
+  flag is not below 0.5, a NaN included (added for Mesa's clipper: its noperspective factor at a
+  corner it adds behind the eye comes from the corners' divided x or y and is not finite where
+  they coincide). The vertex stage writes the flag as the literal 0.0 or 1.0 at every corner, so a
+  non-finite flag can only come from a clipper's arithmetic; what a phone's clipper does across
+  w = 0 is not known and is not assumed. A clip mode none corner is always a GS position: w = 1
+  and a depth in 0..1 (`vu_tri_verdict`, `vu_corner_position`, `vu_gs_position`,
+  `gs_z_to_depth`'s clamp), so no clip against the depth range and every corner equal in w: any
+  clipper's factor for an edge crossing a side of the frame is finite and a flag of 0 stays 0, so
+  the *_nodual build's band test cannot fire and a twin writes what it writes. Every other clip
+  mode can hand the GPU corners at or behind the eye (the camera rule's clipped drops, code 36's
+  flagged corners): no proof covers them, so they take a twin only on the clipper check's
+  measurement (below); without a check (the tests' `=1`, a `not clean` device) they are refused.
+- **The clipper check: measured on the device, not assumed.** After the code 34 cases pass, the
+  self-test draws 13 camera rule cases whose triangles cross the eye plane (an edge nearly on the
+  centre view ray; on view rays with the divided x alike and the divided y alike; nearly on an
+  off-centre one; a corner at w = 0, at w = -0.001 and at w = -1290, the dock's depth; two corners
+  behind; every w above 0 clipped at GS Z 0, with and without an edge nearly on a view ray; a
+  corner saturated in X; a sliver; a large triangle across the frame), each at code 32 and code 36
+  in both windings, untextured
+  (vu_ps_nodual_nd) and textured under TEXA (vu_texa_ps_nodual_nd), each a frame of its own with
+  a depth probe after it (a code 34 quad at GS Z 0, Z write off: a depth the twin wrote and the
+  build did not shows in the colour), through the twins and without them. The corners are sized
+  to the frame at run time: each by its screen direction, a fraction of the frame's half-size, and
+  its depth (`caseCorners`). A triangle with an edge on a view ray has its plane through the eye
+  and draws nothing on any device; one with an edge near one draws a sliver as wide as the offset
+  (a quarter of the half-size). Every frame runs whatever an earlier one found, and each case logs
+  a line: the texels it should cover (`expectedTexels`: the vertex stage's clip at GS Z 0 and
+  projection, an estimate), the texels each of its four frames drew through the ordinary entry
+  against the probe alone, the texels code 32 drew without the probe and without the facing table
+  against the clear, and the texels each frame differs by with the twins. A frame that drew
+  nothing tests nothing: `not clean (drew nothing (not tested): case N at 32, 32t, ...)`, every
+  such frame named. Only a frame whose case drew counts its passes, and each entry must have drawn
+  a case's own pass through its twin (the depth probe, code 34, does not count). All drawn and
+  byte for byte: `clean`, and the camera rule's passes (no plane, no DATE,
+  `ICO_VU_NO_BESIDE`, the alpha test off, not particles) take a twin too, counted apart. Any difference: `not
+  clean`, the first differing case logged, clip mode none alone; not a fault (the mark is not
+  `failed`), the verdict kept on the mark's second line and said at the next start. It is evidence
+  for these corners, not a proof for every triangle: geometry the cases miss, other states (MSAA,
+  other targets), a driver's size thresholds and anything time-dependent are not covered, and the
+  in-play judge and the mark stay the way back; a wrong pixel would show as specks on geometry that
+  crosses the camera's plane, which neither the judge (time only) nor the mark (crashes and losses
+  only) sees. What is known: lavapipe is `not clean`. Its clipper makes the band flag NaN on
+  triangles crossing the eye plane with no side band: case 2 (an edge on a view ray, x / w
+  alike) and case 5 (a corner at w = 0) lose texels through the ordinary entry (case 5 all of
+  them) that the twins draw; the other eleven cases are byte for byte. At such a texel the
+  twin's other noperspective varyings (`col`, `stq`) come from the same factor and are NaN too
+  (a triangle with a corner behind the eye has no attribute planes, so `vu_pixel_attrs` takes the
+  interpolated ones): by the shader the twin writes a colour made from NaN (0 under Vulkan's
+  NaN-to-UNORM conversion, or what a clamp makes of it) at the triangle's depth (the position is
+  clipped by the plane distances, not that factor). That is inferred, not measured: the check
+  logs both entries' RGBA at each differing case's first texel (`the clipper check, case K at F,
+  the first differing texel X,Y: the ordinary entry R G B A, the twins R G B A`), which shows it.
+  Either way it is not the triangle's picture, where the ordinary entry leaves a hole; so on a `not clean` device the camera rule's class stays off.
+  `rd_nodiscard_clean`'s four fixtures hold no such triangle: with the verdict taken as clean
+  their camera rule draws through the twins are byte for byte. History: the check said `clean`
+  on lavapipe until the second review's run 3 because no case had drawn a triangle crossing the
+  eye plane. An earlier case set in model units had five cases covering no pixel; the next set's
+  first case (an edge 0.25 model units off the centre view ray) drew nothing at 912 x 512 where
+  the CPU expected about 47 texels. The cause was the check's own set-up, not the GPU: its
+  prelit meshes had no facing table, so their draws kept the PS2's drops (`rd_replay_vu.c`
+  `vuDropMode`, `RD_DROPS_KEPT`), and a triangle with a corner behind the eye that reaches the
+  picture was dropped by the region rule (`vu_region_rule_cut`) before any clipper saw it; its
+  "code 36" frames were drawn under the region test, not the scissor. Every triangle with a
+  corner at w <= 0 drew nothing, every one wholly in front drew (the second review's run 2). The
+  check's meshes now carry a facing table (`rd__mesh_set_facing`, none against its normals, as the
+  disc's prelit parts do) and code 36 is the scissor; the frame without the probe uses a copy
+  without the table, so the log shows the drop. `ICO_RD_VU_NODISCARD_TRACE=1` (its tests) adds
+  per case the draw as the replay set it up, the culler's reasons and the rule stage computed on
+  the CPU. A frame is `not tested` only when neither entry drew it (the ordinary entry can lose
+  a whole case to the NaN). Code 32's expected texels are the uncut triangle where every corner
+  passes the region test (it does not test Z: `EXACT`, drawn at the GS positions as the PS2 draws
+  it, cases 9 and 10), code 36's are cut at GS Z 0 (the scissor flags it). The check's positive
+  controls show it says `not clean` when a case differs (`ICO_RD_VU_NODISCARD_SABOTAGE=clipper`)
+  and when a case draws nothing (`=empty`). The floor's two cases through a twin (plain,
+  textured) are shown to draw the same way: the frame without each must differ.
+  The check's pipelines: every frame's keys are gathered in one gathering around all 52 frames
+  and made on the workers before the measured replays (`rd__pipeline_gather(true)` empties the
+  gathered list, so a gathering per frame would make only the last frame's keys). On a device
+  with every state in the pipeline keys (no dynamic depth or blend state: every Android GPU, the
+  issue 179 reporter's Mali-G52) code 36's cut pass (ABE forced on) and the probe (Z write off)
+  have twin keys of their own; when only the last frame's keys were made, those frames drew
+  through the ordinary build on both sides, compared a build with itself, and the missing
+  pipeline was reported as `not clean (case 1 at 36: no pipeline of its twin)`. A measured frame
+  whose pass still finds its twin's pipeline not made has the twins' queue made and waited for
+  (`rd__pipeline_twin_tick(true)`, the twins on for the self-test's frames) and is drawn once
+  more. Still without it, the frame compared nothing: it is left out of every count (drawn
+  through the twins, differing, the class's draws), logged on its own line, and with no
+  difference or undrawn frame measured elsewhere the verdict is `not checked`: no verdict, clip
+  mode none alone (as for `not clean`), nothing kept on the mark's second line, nothing written
+  as failed, the check run again at the next start. A difference or an undrawn frame measured
+  elsewhere still makes it `not clean`, the unchecked frames named after. A twin's pipeline the
+  device could not make during the check turns the twins off for the run, as in play. The
+  cost line counts the twin pipelines the check made and the frames drawn again, so a log shows
+  the twins were really drawn. `ICO_RD_VU_NODISCARD_SABOTAGE=unmade` (every twin the check's
+  frames ask for taken as not made) shows the third outcome.
+- **Never waited for.** A pass whose twin's pipeline is not made draws through its *_nodual build
+  and asks for the twin (`rd_pipeline.c` `rd__pipeline_twin`: queued once). Between pictures
+  (`rd__pipe_finish_tick`, the background finisher's slot) the queue's next batch is begun on the
+  workers at low priority and taken once its compiles have ended; none is begun while the
+  finisher's hold is in force (a late game step, a slow picture) or while the finisher runs, and
+  one background set is in flight at a time. A backend without background creation makes the batch
+  there, between pictures. The tests' `ICO_RD_VU_NODISCARD=1` makes the whole queue at the next
+  replay's start, a batch at a time, and waits (play: one batch between pictures).
+- **The ways back** (each logged, none written to the settings):
+  - the install's mark `logs/nodiscard-mark.txt` (`port/platform/nodiscard_mark.h`), the cull's
+    stages and table: `trying` written and synced before the two modules are made, `counting` when
+    the self-test's floor cases passed (before the clipper check, which never writes `failed`),
+    `on` after 250 pictures drawn with a twin, `failed` when a module could not be made or the
+    self-test refused them; a bad end while trying (any end but
+    a clean close), counting or on (a crash, an ANR, a signal other than 9, a device loss, a GPU
+    hang, the watchdog) keeps them off until the version changes, except an end while the cull's
+    mark said "trying" (the cull's: each mark blocks only its own subject);
+  - the start-up self-test (`rd_nodiscard_selftest.c`, after the cull's on the pre-pass that
+    passed): a plain code 34 mesh and a textured one under TEXA 7F/81 AEM with a linear filter
+    (given vu_ps_nodual_nd and vu_texa_ps_nodual_nd), one under an alpha test that can fail, the
+    textured one under the same test, one under a chain plane and a code 32 mesh under the camera
+    rule with a corner of each triangle behind the eye (all refused: the clipper is not measured
+    yet), and a prelit code 32 strip under the camera rule with a facing table, wholly in front of
+    the eye and past the region test's right edge (drawn clipped at its GS positions), which must
+    take its twin by the proof alone (`proven in front of the eye`, before any clipper verdict); each entry's twin is used in play only if its own case drew through it here (`entry not
+    tested` otherwise, logged `discard-free twins: vu_texa_ps_nodual_nd drew nothing in the
+    self-test: not used in play`); the side band and DATE, which the camera rule's frame cannot
+    draw, are checked on the rule itself. Drawn with the twins and without: the pictures byte for
+    byte, a pass through a twin counted, the pass in front of the eye through its twin by the
+    proof, the alpha, plane and eye-plane cases refused, no twin
+    pipeline missing, else off for the run with the modules and pipelines released and the mark
+    `failed`; then the clipper check (above). Either way every
+    pipeline the self-test made is released after it (`rd__pipeline_forget_since`): the run's set is
+    the one it had before (the draw pattern gate's counts unchanged), and the twins' pipelines are
+    made in the background as play asks for them;
+  - the loss ladder (`ICO_LOSS_ROW`): off for this start; a twin pipeline the background could not
+    make: off for the run, the mark unchanged (nothing written on the render thread);
+  - the in-play judge (`RD_AB_NODISCARD`, the second subject): its off arm is the *_nodual build,
+    the path the device ran before; once judged off for the run, every stage draws without the
+    twins. A replay is timed
+    for the twins only when every eligible pass of it had its twin made (one "not made yet" takes
+    the replay out, `rd_nd_use_counts`), so no trial starts and no pair counts while a stage's twin
+    pipelines are still being made, and no verdict rests on a partial share.
+  - **The background set's bounds:** at most 8 pipelines a batch on at most 4 workers at low
+    priority, one batch in flight (the finisher's or the twins'), none begun under the finisher's
+    hold (a late game step, a slow picture) or while the finisher runs; the free-memory floor is
+    not asked. Its cost goes in the 10 s clause: `; their pipelines made in the background: P in B
+    batches, M ms from begin to taken`.
+  Until the self-test passes nothing of the twins exists on the device, and on a device with
+  dual-source blending they are never tried (`rd__nd_applicable`), also where the blend's
+  self-test fell back to the two-pass blend there (`rd_blend_selftest.c`): every shader and
+  pipeline is the build's without them.
+
+The lines (`rd: ` before each):
+- `discard-free twins: trying them: vu_ps_nodual_nd and vu_texa_ps_nodual_nd made (2 modules;
+  ...)`, then `discard-free twins: on (self-test: 3 passes through them (1 proven
+  in front of the eye), 2 through vu_ps_nodual_nd and 1 through vu_texa_ps_nodual_nd, the alpha test's, the clip plane's and the
+  eye-plane crossing's refused (2, 1 and 1), the side band and DATE refused by the rule, pictures
+  byte for byte; its N pipelines released) on SCENE WxH at TWxTH texels in T ms` or `discard-free twins: off for the run (self-test: <why>; its N pipelines released)
+  ...`, then the start line `discard-free twins: on|held|off, N modules of them made, P of their
+  pipelines alive`; `off on this install (...)`, `off for this start (the loss ladder: ...)`,
+  `off for the run (self-test not run: not applicable here: the device blends with two outputs,
+  ...)` or `(... not applicable here: the device has dual-source blending (the two-pass blend is
+  its fallback): the twins are for a device without it)`.
+- `discard-free twins: the clipper check: clean (13 cases crossing the eye plane at codes 32 and
+  36, untextured and textured under TEXA, N passes through both twins, the colours byte for byte,
+  a depth written by one entry and not the other shown through the probe): the camera rule's
+  passes take them too`, or `... not clean (case 1 differs
+  at 32, the first at texel X,Y): clip mode none alone takes them (a property of this device,
+  not a fault: nothing written as failed)` (`not clean (drew nothing (not tested): case 1 at 32,
+  32t, 36, 36t; case 4 at 36)` when frames drew nothing through either entry, the differing
+  cases after it; `not clean (no
+  case of its frames drew through vu_texa_ps_nodual_nd)` when an entry drew none); before it one
+  line a case, `discard-free twins: the clipper check, case K of 13 (<name>) on SCENE WxH at
+  TWxTH texels: expected about E32 texels at code 32 and E36 at code 36; drawn D32, D32t, D36,
+  D36t through the ordinary entry and T32, T32t, T36, T36t through the twins (codes 32, 32
+  textured, 36, 36 textured, against the probe alone), B without the probe or a facing table
+  (code 32, against the clear); differing with the twins F32, F32t, F36, F36t`; on lavapipe
+  `not clean (case 2 differs at 32, 32t, 36, 36t, the first at texel X,Y; case 5 differs at ...)`;
+  under `ICO_RD_VU_NODISCARD_CLIPPER=clean` the verdict taken as clean with what was measured:
+  `clean (ICO_RD_VU_NODISCARD_CLIPPER; measured not clean: ...)`). After the case lines, its
+  cost: `discard-free twins: the clipper check's cost: N replays (52 frames gathered, each
+  through the twins and without them, each case's without the probe, the probe's and the clear's
+  alone) on SCENE WxH at TWxTH texels in T ms; M twin pipelines made for it, R frames drawn
+  again once the twins' queue was made, U of them still without a twin's pipeline (not
+  checked)`; a frame still without one, `discard-free twins: the clipper check, case K at F: not
+  checked (N passes found no pipeline of their twin after the twins' queue was made and the
+  frame drawn again): the frame compares nothing` (its case line ends `; not checked at F, ...
+  (no twin's pipeline)`), and when nothing else was measured the verdict `discard-free twins:
+  the clipper check: not checked (no pipeline of their twin after a retry: case K at F, ...):
+  clip mode none alone takes them (no verdict: nothing kept on the mark, nothing written as
+  failed; the check runs again at the next start)`; the whole self-test's time is on the `on
+  (self-test: ...) ... in T ms` line. The queued twin keys of the self-test's frames are
+  forgotten at its end (`rd__pipeline_twin_forget_queued`).
+- The 10 s VU line's clause: `; discard-free twins: D draws a picture through them (P proven by
+  clip mode none, F proven in front of the eye, C by the clipper check (clean|not clean|not
+  checked)) (R refused a picture: plane p, DATE d, band b, alpha a, clipped c, form f, box x, not
+  made yet u, timed without them t, entry not tested e)`, then `; their
+  pipelines made in the background: P in B batches, M ms from begin to taken` in a block that took
+  a batch (`, some failed`); nothing while held or off from the start, `; discard-free twins off (why)` once they were on.
+- `discard-free twins: 250 pictures drawn with them since their self-test: their mark says on`;
+  `discard-free twins: off for the run: a twin's pipeline (program P blend B vs V fs F) could not
+  be made in the background (...) (the mark is not changed: a background compile that failed once
+  is this run's; the next start tests them again)`.
+- The judge's lines and the attempt ledger's row `the discard-free twins timed in play` as the
+  cull's (above); at the next start `the previous run: discard-free twins: ...`.
+- **The camera rule class is timed on its own.** The judge's twins subject (`RD_AB_NODISCARD`)
+  times the proven classes alone (clip mode none, proven in front of the eye); the passes taken on
+  the device's clean clipper check (`RD_ND_BY_CLIPPER`, the bulk of the boat and the cage) are a
+  subject of their own (`RD_AB_ND_CAMERA`, `discard-free twins, camera rule`): its "used" bit is
+  set only by those passes (`rd__nd_pass`, its own `RdNdUse`), its off arm and its verdict turn
+  only that class to the `*_nodual` builds, and the twins' verdict turns only the proven classes.
+  So a verdict taken where one class has little work does not decide for the other. It may be
+  tried where the twins may and the clipper check was clean (`rd__nd_triable` and
+  `rd__nd_class_on`), first in the first stage of scenery where those passes drew; its way back
+  after a bad end is the twins' own mark, which keeps every class of them off. The 10 s clause's
+  `timed without them t` adds `(c of them the camera rule's)` when that class's off arm ran; the
+  attempt ledger's row `the discard-free twins' camera rule class timed in play on N verdicts
+  with them so far (M without them; T trials run)`; the judge's lines `A/B: discard-free twins,
+  camera rule, stage 42: ...`.
+- `rd_replay_tool --stats`: `stats: discard-free twins on|held|off (why): N draws through them (P
+  proven by clip mode none, F proven in front of the eye, C by the clipper check (verdict));
+  refused: plane p, DATE d, band b, alpha a, clipped c, form f, box x, not made yet u, timed without them t, entry not tested e; M modules of them made, P of their pipelines alive` (with `(not applicable here: ...)` on a device
+  with dual-source blending). The self-test's own draws (the floor's and the clipper check's) are
+  not counted: the hold's end puts the counts back (`rd__nd_hold_end`).
+
+The tests' switches ([TESTING.md](TESTING.md#environment-switches)): `ICO_RD_VU_NODISCARD`,
+`ICO_RD_VU_NODISCARD_SABOTAGE` and `ICO_RD_VU_NODISCARD_CLIPPER`. What they gain on a phone is
+measured there alone.
+
+#### The fast pixel build
+
+On a device without dual-source blending every VU pass of the vu_ps entry draws through one
+program, `vu_ps_nodual`, which tests the DrawCB's words at every pixel: the texture function,
+TEXA, the GS levels, the nearest filter, DATE, the clip plane and the alpha test. In issue 179's
+two boat captures one form holds 98.1 % and 99.6 % of the shaded fragments of lists 0-2 and
+98.5-100 % of list 5's: textured, MODULATE with TCC, an RGBA32 texel, no GS levels, no nearest
+filter, no DATE, no clip plane, no alpha test in the pass, no Full pixel crop. The fast pixel
+build is `vu_ps` with those words held as constants: Arm's Mali Offline Compiler (v2026.5.0,
+Mali-G52 r1p0) gives it 31 work registers (full occupancy) against `vu_ps_nodual`'s 54 (half
+occupancy) and a longest path of 3.53 arithmetic cycles against 15.87, the varying unit's 3.50
+against 3.88. What that buys on the phone is not known, so it is timed in play as the cull and the
+twins are and kept only where it is faster. `port/render/rd_fastps.h` says it all.
+
+- **The builds** `vu_ps_nodual_fast` (`ICO_NO_DUAL=1 ICO_VU_FAST=1`) and
+  `vu_ps_nodual_fast_nd` (the same with `ICO_VU_NODISCARD=1`): under `ICO_VU_FAST`
+  (`common.hlsli`) g_mode.x reads TEXTURED and TCC set and DECAL, DATE, DATM, DATE_DST, PLANE,
+  GS_LOD, NEAREST and GS_BILINEAR_GRID clear, every other bit as the DrawCB has it (FBA, PABE,
+  FIX, PREMUL, C1_DST and the two-pass blend's bits among them); g_mode.y, z, w and g_scale.z read
+  0 ([SHADERS.md](SHADERS.md#the-families)). The key carries them as a third bit of
+  `RdPipelineKey.nodual` (`RD_NODUAL_FAST`, with `RD_NODUAL_ON`; with `RD_NODUAL_NODISCARD` too
+  for the discard-free form); `pipelineDesc` takes `rd__fps_module`.
+- **Eligible, at the draw's DrawCB** (`rd_fps_eligible`, `rd_replay_vu.c` `vuDraw` where each
+  pass's DrawCB is filled, the run's and the draw's own path; not the skin check's draws): a
+  vu_ps pass through `vu_ps_nodual` or through the discard-free twin the twins' own rule gave it,
+  no destination read; mode.x's held bits at their values (refused as `texture`, `levels`, `DATE`
+  or `plane`), the texel RGBA32 (mode.y >> 8 = 0, else `texel`), the alpha test off in the pass
+  (mode.z bit 8 clear, else `alpha`), no crop (scale.z = 0, else `crop`). There every value the
+  build reads is the DrawCB's own: TEXA's mode is then never read, and with the test's bit clear
+  `gs_alpha_discard` returns false whatever the rest of mode.z and AREF hold. So it writes what
+  `vu_ps_nodual` writes, the same statements on the same values with the branches it never takes
+  folded away. `rd_fastps` checks the CPU's held bits against the shader's own lines.
+- **Not discard-free:** the side band's discard stays, so `vu_ps_nodual_fast` discards exactly
+  where `vu_ps_nodual` does (a NaN band flag included) and keeps its late depth update; no clip
+  mode or clipper condition is needed for it. The band's flag is an interpolated input, and a
+  clipper may make it NaN at a corner it adds behind the eye
+  ([the discard-free twins](#the-discard-free-twins)), so the discard cannot be dropped for every
+  pass of the set: `vu_ps_nodual_fast_nd` is given only to a pass the twins' own rule already gave
+  `vu_ps_nodual_nd`, whose proof it leaves untouched.
+- **Never waited for:** its pipelines go through the twins' background queue
+  (`rd__pipeline_twin`, `rd__pipeline_twin_tick`): a pass whose fast pipeline is not made yet draws
+  through its ordinary build.
+- **The ways back** (each logged, none in the settings): the install's mark
+  (`logs/fastps-mark.txt`, [PLATFORM_DIAGNOSTICS.md](PLATFORM_DIAGNOSTICS.md)); the start-up
+  self-test after the twins' (`rd_fastps_selftest.c`: eleven code 34 meshes, the set's forms
+  (opaque, the two-pass lerp's two passes, the additive and FIX premultiplied forms, FBA) and the
+  cases the CPU must refuse (DECAL, untextured twice, nearest, a kept alpha test, a clip plane),
+  then a depth probe at GS Z 0 with Z write off, drawn with the build and without it with the
+  twins held off and, where they are on, held on: every pair byte for byte, at least six passes
+  through each module that was tested, every refusal refused, no pipeline missing, the frame
+  without its opaque case different; else off for the run, released, the mark `failed`; a
+  module whose pair was not drawn is not used in play); the loss ladder; a fast pipeline the
+  background could not make (off for the run); the judge times only replays whose every eligible
+  pass had its fast pipeline; the in-play judge's third subject, "fast pixel build", one verdict
+  a run, tried after the cull and the twins (their order unchanged), the 2 % rule unchanged.
+- **Lines:** `rd: fast pixel build: on (self-test: 6 passes through vu_ps_nodual_fast and 6 through
+  vu_ps_nodual_fast_nd, the texture's, the nearest filter's, the alpha test's and the clip plane's
+  refused (4, 1, 1 and 1), the colours and the depth (through the probe) byte for byte; its N
+  pipelines released) on SCENE ...`, the start line `rd: fast pixel build: on, 2 modules of it
+  made, 0 of its pipelines alive`, the 10 s VU line's clause `; fast pixel build: P passes a picture
+  through it, T triangles (R refused a picture: texture t, texel x, levels l, DATE d, plane p,
+  alpha a, crop c, not made yet u, timed without it t, module not tested m)`, the judge's
+  `A/B: fast pixel build, stage N: ...` and the attempt ledger's row `the fast pixel build timed
+  in play`. A replay in which any pass drew through a build only because a pipeline was not made yet
+  (the twins' or the fast build's: on the twins' off arm a pass asks for the ON|FAST key play had
+  not asked for) is timed for no subject, on either arm (`rd_ab.c` `rd_ab_use_note`,
+  `rd__ab_unmade`); `rd_replay_tool --stats`: `stats: fast pixel build on (ICO_RD_VU_FASTPS=1): N passes
+  through it, T triangles; refused: ...`.
+- **Not built:** a dual-source form (`vu_ps_fast`): the same define and proof, but its key has no
+  bit to carry it (`RdPipelineKey.nodual` is 0 there and every user reads it as a truth value), so
+  it needs a key field and a dual-source self-test; one more SPIR-V, DXIL and GLSL entry. Left for a
+  later release.
+
+#### The one-pass blend
+
+On a device without dual-source blending a (Cs - Cd) As + Cd VU draw whose mask has RGB and A is
+two passes ([RENDER.md](RENDER.md#destination-reads-and-blend-paths), `rd_pipeline.c` `rd__expand_no_dual`): a colour pass
+whose c0.a is the factor As/128, then an alpha pass writing As/255 with blending off. Issue 179's
+Mali-G52 draws most of its scenery that way: in the cage scene 31k of 46k triangles twice. The
+one-pass blend draws a proven pair once. `port/render/rd_onepass.h` says it all.
+
+- **The form:** the colour pass also writes A, its alpha blended as c0.a times the blend constant's
+  alpha 128/255 and nothing of Ad (`blendState`: `srcAlpha = RHI_BF_CONSTANT`; `rd__op_bind` sets
+  the constant at bind): (As/128) (128/255) = As/255, the alpha pass's byte, for every As 0..128
+  under round-to-nearest at any blender precision of 8 bits or more (`rd_op_alpha_model`, the unit
+  test's table). Vulkan does not pin the blender's rounding (14 of 78 directed-rounding models
+  differ), so the device's own check decides. The key carries it as a fourth bit of
+  `RdPipelineKey.nodual` (`RD_NODUAL_ONEPASS`, with `RD_NODUAL_ON`, composing with the twins'
+  and the fast build's bits; `rd_fps_eligible` takes such a key as the colour pass's own); the
+  same module, the blend state alone differs. Only the taken pair's colour pass changes its key;
+  every other pass, and every pair while nothing is in use, keeps today's key and bytes.
+- **Proven per pair** (`rd_op_why`, `rd_replay_vu.c` `vuDraw` right after the plan): the LERP with
+  the As factor (not FIX), no PABE, no FBA, the alpha plan's largest As at most 128, not Z GREATER
+  with Z write, an RGBA8 UNORM target, no destination read, single-sampled.
+- **Two classes:** the plain class (a draw that is not code 36's) and the cut class (a code 36 cut
+  or kick drawn apart). A fused code 36 pair cannot go to one pass: the kick's pixel carries the
+  factor 1.0 in the one output the blender reads and its stored alpha would need a second value,
+  so no fused one-pass form exists. Where the cut class is in use a code 36 command whose cut pair
+  goes to one pass is not fused (`rd__op_unfuse` in `vuFuseVerdict`): the cut draws once in one
+  pass and the kick under its own state, the draws the fusion stands for. That unfused path is
+  the leading suspect of the stretched triangles the reporter's phone drew when the form was
+  first shipped (its self-test never drew a code 36 pair), so the device check measures each
+  class on its own arm. Only the plain class is ever put in use (below); the cut class, and with
+  it the unfuse, runs only under the tests' `ICO_RD_ONEPASS=full`.
+- **The device check** (`rd_onepass_selftest.c`, after the fast build's self-test, on SCENE with
+  the VU record at the size play makes it at start-up, the twins and the fast build held in their
+  run states so the keys drawn are play's): the twins' clipper check's 13 cases (triangles across
+  and near the eye plane) as frames of their own, each at code 32 and 34 (ABE on), 36 with the
+  state's ABE off (fused where the device fuses: the reporter's pattern), all three untextured and
+  textured (RGBA32, MODULATE, TCC), and 36 with ABE on, every corner's alpha 9 to 127, then a
+  depth probe at GS Z 0 with Z write off. Each frame drawn today (REF) and under the arms that
+  change something on it: A one pass on the plain class; B code 36 unfused with its two passes
+  kept (the suspect alone); C both classes and the unfuse; each compared with REF byte for byte.
+  A positive control (the constant 127/255) must differ where an arm took a pair. Every frame's
+  and arm's pipelines are gathered in one gathering first; a replay that found a pipeline not made
+  is drawn again once the background queue is made, and one still without it, or one whose replay
+  or read failed without a device loss, compares nothing ("not checked"), never a verdict. A frame
+  is compared whenever either form drew: nothing through today's two passes and something through
+  the arm is a difference (the shape of the stretched slivers); nothing through either is the same
+  where the case covers no texel by design (an edge on a view ray) and "not tested" where it should
+  have drawn. In use: the plain class where A passed, and there only for a draw whose every corner
+  reaches the rasteriser at w = 1 (`rd_op_safe_draw`: clip mode none, a code 36 kick drawn apart,
+  a prelit mesh the CPU proved wholly in front of the eye; never particles; refused as "not proven
+  in front of the eye"). The cut class is never used, and B and C are logged measurements only: a
+  corner at w <= 0 goes to the GPU's clipper, whose new vertices take their noperspective colour in
+  window coordinates, where a corner behind the eye projects through it, so As extrapolates past
+  its corners and can pass 128 where the alpha plan says it cannot; the carry then stores 128 where
+  the alpha pass stores As. Lavapipe measured it: arm C differed at case 7 (a corner at w = -1290),
+  code 36 untextured, alpha 129 against 128, from corners of at most 127. A device check of 13
+  cases cannot prove such pixels absent in play.
+  Only arms not checked, a failed read or a frame that could not be built: no verdict, the mark
+  removed, the check again at the next start; a device loss is measured (`failed`).
+- **Never waited for:** its pipelines go through the twins' background queue: a pair whose
+  one-pass pipeline is not made yet is drawn in two passes, and (with the cut class, the tests'
+  `=full` only) a code 36 command is unfused only once the cut's one-pass pipeline and the kick's
+  own are made. With the device's dynamic blend
+  state the bit folds into the colour pass's own pipeline (`rd__key_dynamic_normalise`), its blend
+  state and constant set at each bind.
+- **The ways back** (each logged, none in the settings): the check (per arm, above); the install's
+  mark (`logs/onepass-mark.txt`, [PLATFORM_DIAGNOSTICS.md](PLATFORM_DIAGNOSTICS.md)): a bad end
+  while it was tried or in use keeps it off until the version changes; the loss ladder; a pipeline
+  of it the background could not make (off for the run); the in-play judge's fifth subject,
+  "one-pass blend" (`RD_AB_ONEPASS`): at its off arm every pair is drawn in two passes and code 36
+  fused as before, kept only where it is faster. A wrong picture in play is not detected: what the
+  check did not draw is not known to be right on the device.
+- **Lines:** a line a case `rd: one-pass blend: the check, case N of 13 (its name) on SCENE ...: 32
+  A P pairs, 0 texels differ; ...; 36 fused F, B unfused U, 0 texels differ, C unfused U, P pairs, 0
+  texels differ; 36t ...; 36a C P pairs, 0 texels differ`, per
+  arm `rd: one-pass blend: the check's arm C (...) over 13 cases: the same bytes (...)`, then
+  `rd: one-pass blend: on (check: in use: ...; arms A the same bytes, B the same bytes, C the same
+  bytes, D none) on SCENE ...`, the start line `rd: one-pass blend: on (...), P of its pipelines
+  alive`, the 10 s VU line's clause `; one-pass blend (outside code 36): P pairs a picture in one pass
+  (Q of code 36), T triangles, U code 36 commands unfused (R pairs kept two-pass a picture: alpha
+  above 128 a, ..., not made yet u, timed without it t)`, the judge's `A/B: one-pass blend, stage
+  N: ...` and the attempt ledger's row `the one-pass blend timed in play`; `rd_replay_tool
+  --stats`: `stats: one-pass blend on (...): N pairs in one pass of M (K of code 36), ...`.
+
+#### The index compaction
+
+Of list 0's mesh triangles a picture draws, a large share draws nothing: the game's own drops
+(`vu_main_vs` sends every corner to `VU_CULLED`) and triangles wholly past the target's edges or
+the depth range (the GPU's clipping discards them). On the Mali-G52's four dumps of issue 179 that
+is 27-54 % of list 0 (44.5 % in the 8-12 fps scene), on the Pixel's opening 38-82 %; each still
+costs `vu_main_vs` three invocations (a drop's stop after its slot A, [the drop verdict
+first](#the-drop-verdict-first); one outside the target's edges runs the whole shader). Under the compute record a third
+record pass, pass K, runs after pass T (`rd_replay_vu.c` `vuCompactPass`; `rd_vu_compact.c`,
+`rd_vu_compact.h`): one dispatch of `vu_tri_keep_compute_cs` (`vu_tri.hlsl` `vu_tri_keep_cs`) a
+mesh draw `doVuDraw` will make (a command's one draw, or a code 36 command's cut and kick draws of
+each batch with their own pass's rule), one invocation a triangle of the draw's index list. It
+evaluates each corner's position with `vu_main_vs`'s statements over the same record words
+(`vu_keep_position`: the verdict, `vu_corner_position`, the chain plane's cull, the later bias)
+and writes the list again, in its order and length, into the record buffer's fourth plane: a
+kept triangle as it was, one that draws nothing as its corner-1 value three times. The draw reads
+that list, the record buffer bound as its index buffer.
+
+- **drop**: all three corners left at `VU_CULLED` (hidden, the region rule's drop that the
+  camera, card and beside rules keep, the other scissor pass's triangle, every corner past the
+  chain plane). A `_dstrov` pass's own `VU_F_NO_BESIDE` (added at the draw) is not seen here:
+  such a triangle is kept.
+- **outside**: every corner past one plane of the bound target's clip-space box (its share of the
+  exact viewport, `g_misc.zw`, about the centre `g_vpo` less the jitter moves it to, two texels
+  out; the viewport and two GS pixels without the exact viewport) or of `0 <= z <= w`, by more
+  than 2^-10 of the corner's magnitude. No point of the triangle is inside, so the clipping leaves
+  no fragment, no sample, no depth, no stencil; the margins absorb any last-bit difference
+  between the compute's floats and the draw's.
+- Nothing else is left out: no zero-area class (the rasteriser's fill rule would decide it), no
+  back faces (the GS draws both).
+
+The filler (corner 1 three times) is that corner's position again, past the plane its triangle is
+past, so it is clipped too; it costs one vertex invocation where the GPU reuses an index within a
+triangle (index-driven vertex shading on Mali), three where it does not (as before). The count of
+every draw stays known on the CPU: no indirect draw, no read-back before a draw, no new wait (the
+compute bracket's end makes the plane visible to the index fetch: the record buffer carries
+`RHI_BUF_INDEX` where the compaction may run). The draw merge keeps its runs: each planned draw's
+values are raised by a raise fixed in the plan (the ranges one after the other in the walk's
+order), a run joins the next planned draw whose list follows its own in the plane and whose
+values lie past its own, and the table's `w` is that raise (`vu_merge_entry` subtracts it); without
+the merge's builds the values are not raised. The skin check's draws, the loss bisect's window,
+the grids and the particles read their own lists. Each workgroup of 64 stores its counts (drop,
+outside, kept, list 0 or not) in a texel after the lists; a copy reads them back when the frame
+slot comes round (`window: index compaction: ...` every block, the attempt ledger's row, the
+draws' invocation figures after the compaction).
+
+Where: the compute record only. The vertex stores and the render targets: not applicable (their
+record passes are draws; a compute pass after them would bring the compute record's work to a
+device that does not take it). By class: `RD_VU_COMPACT_ARM_DEFAULT` (the Mali-G52: Arm's vendor id under Vulkan and `Mali-G52` in the Vulkan device name, issue 179's `Mali-G52 MC2`, 1, with its own form and its own test, [below](#the-mali-g52s-form); the reporter's phone drew a black picture from its first 3D picture on with the form above, every picture's GPU work stopping after list 0's start, the first index buffer the GPU wrote on that device; lavapipe draws the reporter's dumps the same with it on and off, and a bounds audit of the record and the index lists found nothing out of range, so the cause is not proven, [ANDROID_DIAGNOSTICS.md](ANDROID_DIAGNOSTICS.md#the-picture-health-report-issue-179)), `RD_VU_COMPACT_DEFAULT` (the PowerVR D-Series DXT-48-1536, whose compute record the PowerVR rule ships, 1); every other device on the compute record (another Mali, PanVK, a PowerVR without vertex stores, a `[dev] vu_record = "compute"`) is off by default (`measured on the Mali-G52 only`). The Mali-G52's class and both defines are the device table's rows `mali-g52` and `powervr-dxt-48-1536` (`port/rhi/rhi_device_table.h`, [DEVICE_TABLE.md](DEVICE_TABLE.md)). It
+is a new kind of GPU work on that driver (an extra compute output read by the vertex input stage),
+so it runs only where the start-up self-test passes (a self-test that never ran, such as one with no SCENE target, keeps it off; the tests' `ICO_RD_VU_COMPACT=1` alone runs it untested): the record's test runs with it and with a copy
+of the prelit mesh past the target's right edge (merged with the ticks copy), at the play record's
+size (the start-up need, `rd_early_start_rows`: the record made then and kept for play), with the
+draws' lists placed from the fourth plane's middle (large first indices, as a busy picture's last
+draws have), the frames moved every replay; and the test's own pictures' stamps are read: one
+recorded stamp unwritten after its work was signalled finished, or a clock restart with work
+queued (`rd_health.h`), fails it (the Mali-G52's play came back black while a test at 16 rows and
+60 vertices passed). A failure runs the
+test again without it, and a pass then refuses it for the run (`refused by its self-test`). The
+tests' switch `ICO_RD_VU_COMPACT=0|1`; `ICO_RD_VU_COMPACT_SABOTAGE=1` writes every triangle as a
+filler. The fourth plane is one more plane of the record (16 bytes a row's texel): on the Mali at
+512 rows, 8 MB a frame slot; it is allocated only where the compaction is to be tried and given up (the record made again without it) when the self-test refuses it or does not run. `rd_vu_compact_ab` compares every target with it on and off (its `mali` profile in the Mali-G52's form).
+
+##### The Mali-G52's form
+
+Three ways the form above can draw black on that phone and not on lavapipe are ranked in the
+investigation behind it, none proven: the driver takes a draw's vertex range from its index list
+before pass K has written it (a scan on the CPU at record or submit time, or on the GPU before the
+compute's barrier), the draws read a stale list at the play's scale, or the shader compiler turns
+the keep stage's one-lane stores into wider read-modify-writes that lose writes. On the Mali-G52's
+class (`rd__vu_compact_cpu_lists`) the CPU first writes every planned draw's whole list, raised,
+into the fourth plane (`rd__vu_compact_lists_first`, after the plan and before pass K), and pass K
+stores only the fillers (`g_aux1.w` bit 1); the record buffer is made in host-visible memory
+(`RHI_MEM_UPLOAD`, from the form's own test on: the record's test before it keeps device memory,
+where a record that falls back to the render targets takes texture copies). Under each of the
+three: a list read before pass K is the whole list, whose range covers every value pass K writes;
+a filler store that is lost or lands late leaves its triangle as the CPU wrote it, the picture
+without the compaction (a triangle mixed from both has only its own three corners, all past the
+same plane or culled: no fragment either way). The stores themselves were already whole 32-bit
+words, one invocation a word (race-free by the memory model); in this form a kept triangle is not
+stored at all, and whatever a widened store could leave behind is one of the two values the CPU's
+check accepts. The cost is on the CPU: the lists' bytes a picture (4 a value, 12 a triangle
+planned, code 36's cut and kick lists each), shown with the time it took in the window's line
+(`; the lists written by the CPU first (the Mali-G52's form): B KB and T ms a picture over C
+pictures`). A buffer that cannot be mapped leaves every draw on its own list for that picture.
+
+It is tried by its own start-up test (`rd_vu_compact_selftest.c`), run after the record's test
+passed with the compute record; the record's test then runs without the compaction. The record is
+made again at the play's size (`rd_early_start_rows`) and kept for play. Its frame: four commands
+of one prelit mesh of 64 strips of 128 vertices (8064 triangles, index values to 32768) on SCENE,
+at the centre (every triangle kept), across the target's right edge (both classes in the same
+workgroups), wholly right of it (every one outside) and past the GS region's 4095 (every one the
+region rule's drop). Drawn twice without the compaction (one picture in each frame slot), then six
+times with it back to back over both frame slots, the lists moved 1237 values a replay (never a
+whole texel, so no replay's lists sit where the replay before left them; the first in each slot
+over plane memory nothing wrote). After pass K each replay's lists and counts are copied back
+(`rd__vu_compact_check_copy`) and checked on the CPU (`rd_vu_cmp_check`): every triangle as the CPU
+wrote it or the filler, each workgroup's fillers its own count of left-out triangles, every
+triangle of the centre kept and of the two copies past the edge left out. Each picture with it
+must equal the one without byte for byte, and every recorded stamp of the test's pictures must be
+written (the sign the phone's black pictures carried, `rd_health.h`). A pass turns it on for the run; anything else
+leaves it off with the arm that failed and the cause it points at:
+
+    rd: VU index compaction: its own start-up test passed (the Mali-G52's form: 6 replays in both frame slots on the record at 512 rows, 4 draws of 8064 triangles a replay, the lists from value 1048576 moved 1237 values a replay; the lists read back: 193536 triangles read back: 72576 as the CPU wrote them, 120960 fillers where the GPU counted 120960 left out (replay 1 left out: the centre 0, across the edge 4032, past the edge 8064, past the region 8064); the pictures byte for byte with it off, 24318 of 286720 pixels drawn; no stamp of the test's 8 pictures unwritten) on SCENE 640x448 at 640x448 texels in 412.0 ms
+    rd: VU index compaction: refused by its own start-up test (the lists: ...; 3 mixed (a filler store lost in part); 3 filler writes missing (an unwritten filler leaves its triangle as it was) in replay 2 of 6 (frame slot 1), draw 3 (past the edge), the first at triangle 517: the keep stage's stores lost, the report's third cause (...)) ...: off for the run, its mark says failed
+    rd: VU index compaction: not checked by its own start-up test (...): off for the run, nothing written as failed, tried again at the next start
+
+The arms and what each points at: values neither the CPU's nor a filler (a stale or lost list, or
+the CPU's lists not seen by the GPU: the second cause), fillers missing or mixed (the stores lost:
+the third cause, the picture still right), the lists right and the pictures not, or a stamp
+unwritten (the draws not drawing the lists they were given: the first or second cause). Its mark
+(`port/platform/compact_mark.c`, `logs/compact-mark.txt`, the zero-area cull's stages: `trying`
+synced before the first replay with it, `counting` on a pass, `on` after `RD_VU_CMP_PROBATION`
+(250) pictures drawn with it whose recorded stamps all came back, `failed` on a refusal, removed
+when not checked) keeps it off on the install after a bad end while it was tried or on; the step
+runs before the other attempts' marks and reads theirs as the previous run left them (an end while
+one of them was trying is theirs), and their steps read its stage the same way
+(`compact_mark_stage_read`: its test can run after theirs wrote their marks, when a graphics API
+switch runs the start-up self-tests again). Only a lost device in its replays with it is a
+measured failure; a replay, a read or a build that fails without one, or a failure of the
+references drawn without it, is "not checked". The loss ladder's start without the pre-pass leaves
+it off too.
+
+In play (`rd__vu_compact_play_health`, called from the picture-health report's
+`rd__health_note` for every collected record with VU draws outside the self-tests): a picture
+whose recorded stamps came back unwritten after its work was signalled finished, the sign the
+phone's black pictures carried, while the form is on turns it off for the run at once (the plane
+dropped, the next picture without it) and writes its mark `failed`, so later starts leave it off
+until the version changes:
+
+    rd: VU index compaction: off for the run (in play: replay 812, frame 640, 16 of its recorded stamps unwritten after its work was signalled finished, the sign of ...): the next picture without it, every draw on its own index list; its mark says failed (off on this install until the version changes)
+
+The rate card holds it off for its frames (`rd__vu_compact_hold`; its vertex frame's triangles lie
+off the target and would all be fillers), its head line then ending `, the index compaction held
+off`. The tests' `ICO_RD_HEALTH_FAKE=play` reads every such record as that sign
+(`rd_vu_compact_play`). Tests' words:
+`ICO_RD_VU_COMPACT_SABOTAGE=lists` (the CPU's lists written one triangle off) and `=readback` (one filler of
+the test's read-back taken back to its corner 0); `ICO_COMPACT_BLOCK` as the mark exports it. `=unchecked` (its
+lists never copied back: not checked). Not judged in play by the A/B judge: a subject would have
+to swap the plan, the CPU's lists and the record's memory between pictures.
+
+#### The record stores' restart rung
+
+The record stored by the vertex shaders is new on every Vulkan device that offers
+`vertexPipelineStoresAndAtomics`: 28 store builds (`vu_X_store_pre_vs`, `vu_X_batch_store_pre_vs`)
+and a pipeline shape of its own (no rasterization, an attachment-less pass); the record by compute
+dispatches likewise on every other Vulkan device (28 compute builds, `vu_X_compute_pre_cs`,
+`vu_X_batch_compute_pre_cs`, and compute pipelines). The rung below covers both: a compute build
+counts as a store build (`startup_retry_note_has_vu_store` also matches `_compute_pre_cs`;
+`keyVsName` names the compute build a key with `fs` `RD_FS_VU_PRE_CS` dispatches through), and
+`storesWereOn` is the stores or the compute dispatches (`rd.h` `rd_vu_record_buffered`). The self-test turns a
+wrong picture to the render targets, but a driver crash, an end without a word or a device loss
+inside those pipelines would otherwise take the pre-pass's own steps and leave the device drawing
+without the pre-pass, possibly for good. So each of the three ladders tries the render targets'
+record first, the pre-pass kept (the way the Mali-G52 of issue 179 drew before the stores), and only a
+failure there gives the pre-pass up:
+
+- **A driver crash** whose note names a store build (`startup_retry_note_has_vu_store`:
+  `_store_pre_vs`; `port/render/rd_pipeline.c` (`keyVsName`) names the store build a key with no
+  colour format draws through, in every pipeline and batch note) takes the crash order's `targets`
+  step, after `cache` and before `noprepass`: the relaunch runs with `ICO_STARTUP_RETRY=targets:<backend>`,
+  `ico_ini_export` sets `ICO_RD_VU_RECORD=targets`, and the run logs `ico_pc: restarted after a
+  graphics driver crash while preparing the shaders: this run draws the 3D vertex pre-pass's record
+  into render targets (ICO_RD_VU_RECORD=targets) on the same graphics backend, the pre-pass kept`.
+  A crash in the targets' own pre-pass pipelines then takes `noprepass`.
+- **A device loss** in a run that drew with the pre-pass and the stores after its self-test
+  (`ico_diag_set_vu_record_stores`, `StartupRetryRun.storesWereOn`) takes the loss order's
+  `losstargets` step before `lossnoprepass` (`ICO_STARTUP_RETRY=losstargets:<backend>`, the same
+  `ICO_RD_VU_RECORD=targets`); a loss in that run, which draws with the targets, then takes
+  `lossnoprepass`.
+- **An end without a word** inside a store build's pipeline or batch counts in the pre-pass's row
+  as before, but the next start draws the record into render targets with the pre-pass kept
+  (`ico_diag_startup_vu_store`; the window sets `ICO_RD_VU_RECORD=targets` instead of
+  `rd_set_vu_prepass_off`), and the second such end in a row writes `[dev] vu_record = "targets"`
+  (`vu_record_persist`) instead of `[dev] vu_prepass = false`, which clears the row. The lines:
+  `ico_pc: the previous start ended while the graphics driver compiled the 3D vertex pre-pass's
+  record stores (<note>); this start only draws the record into render targets instead, the
+  pre-pass kept (ICO_RD_VU_RECORD=targets; nothing is written to <path>); if a start that compiles
+  them ends there again, [dev] vu_record = "targets" is written for good`, then `... this start and
+  every start after it draw the record into render targets, the pre-pass kept ([dev] vu_record =
+  "targets" in <path>); delete that line to try the stores again`. An end in the targets' own
+  pre-pass pipelines after it counts towards `[dev] vu_prepass = false` as before (the row it
+  starts is the pre-pass's).
+
+The renderer's pre-pass line then ends `the record drawn into 3 RGBA32_UINT render targets and
+copied into the frame slot's record buffer ([dev] vu_record = targets)` (the variable reads as the
+key there), and the 10 s line says `record targets` (`port/platform/startup_retry.h` (`startup_retry_note_has_vu_store`,
+`startup_retry_draws_targets`, `startup_retry_value_targets`); `port/platform/host_config.c`
+(`ico_dev_env_export_value`); `port/platform/diag_host.c` (`ico_diag_startup_vu_store`,
+`ico_diag_startup_end_persist`); ctests `startup_retry`, `host_config`, `diag`).
 
 **Why the picture is the same.** The pre-pass entry calls the program's vertex function, the same
 source with the same `precise` operations, so each recorded word is the value the old entry

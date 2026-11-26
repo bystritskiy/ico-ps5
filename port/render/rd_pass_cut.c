@@ -150,6 +150,7 @@
 #include <stdlib.h>
 #include <string.h>
 
+#include "rd_lamps.h" /* rd__lamps_lowres_ms */
 #include "rd_replay.h"
 
 static const char *const kEnv[RD_CUT_COUNT] = {"ICO_RD_CLEAR_CARRY", "ICO_RD_CLEAR_SKIP",
@@ -269,7 +270,8 @@ void rd__pass_cut_init(void)
         note(w, why);
     }
     s_cut.valid = s_cut.served = s_cut.dropOpen = s_cut.broken = false;
-    s_cut.nLazy = 0; /* a new context: the textures are new */
+    s_cut.nLazy = 0;        /* a new context: the textures are new */
+    rd__glow_light_reset(); /* and the glow light plan's lazy clears (rd_glow_light.c) */
     s_cut.carried = s_cut.armColor = s_cut.armDepth = 0;
     s_cut.fogReplay = s_cut.fogOrd = 0;
     s_cut.brokenSeen = 0;
@@ -279,6 +281,15 @@ void rd__pass_cut_init(void)
 
 bool rd__pass_cut_on(int which)
 {
+    /* the clear carry (exact by its own argument, on on the tile class)
+     * also wherever the lamps' 4-sample pass is in force (rd_lamps.h
+     * RD_LAMPS_LOWRESMS): WORK2's pending fill clear must reach the lamps'
+     * pass as its load op through the mask's and SCENE's border repeat's
+     * ends of the open pass, or the lamps' pass loads WORK2 and is drawn
+     * single-sampled (lavapipe's desktop class: every lamp so in round 12) */
+    if (which == RD_CUT_CARRY && rd__lamps_lowres_ms()) {
+        return true;
+    }
     return which >= 0 && which < RD_CUT_COUNT && s_cut.on[which];
 }
 
@@ -620,6 +631,7 @@ static void lazyRecord(RhiCommandList cl, int i)
 
 void rd__clear_skip_begin(void)
 {
+    rd__glow_light_lazy_begin(); /* the glow's buffers a light plan left (rd_glow_light.c) */
     for (int i = (int)s_cut.nLazy - 1; i >= 0; i--) {
         const RdTargetRec *t = rd__target_rec(s_cut.lazy[i].id);
         const int k = skipSlot(s_cut.lazy[i].id);
@@ -639,6 +651,7 @@ void rd__clear_skip_begin(void)
 
 void rd__clear_skip_readback(uint32_t id)
 {
+    rd__glow_light_readback(id); /* WORK2, its band or WORK3 a light plan left undrawn */
     const int i = lazyFind(id);
     if (i < 0) {
         return;

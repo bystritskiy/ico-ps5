@@ -73,7 +73,36 @@ typedef struct IcoRtPlan {
     uint64_t sinceNs, readsNs, pictureNs, presentNs;
     uint64_t cpuNs, interpNs, submitNs;
     bool submitOn;
+    /* The idle ask (pace_policy.h pace_rt_pipe_idle): the last picture's job
+       ended at endNs (SDL_GetTicksNS's clock; 0: none yet), byFence: by its
+       slot ahead's wait, which blocked (rd_thread_take_ahead_ns at least
+       ICO_RT_FENCE_WAIT_NS); slotAhead: the jobs end with the slot ahead
+       (rd_thread_slot_ahead_on) */
+    uint64_t endNs;
+    bool byFence, slotAhead;
 } IcoRtPlan;
+
+/* A slot ahead that waited this long (0.2 ms) or more blocked for the GPU:
+   one that found the slot free returns in microseconds */
+#define ICO_RT_FENCE_WAIT_NS 200000ull
+
+/* The idle ask (window_present.c, pace_policy.h pace_rt_fill): waits until the
+   render thread has finished every job handed over, or untilNs
+   (SDL_GetTicksNS's clock) passes.  True when it is idle by then; with no
+   thread at once true */
+bool ico_render_thread_wait_idle(uint64_t untilNs);
+/* The idle ask's events for the block's step rule line (pace_policy.h
+   PaceRtTraceSum): a wait for the render thread before an ask (waitNs, late:
+   not idle by the step's deadline), the pipe corrected at an ask (fixNs: how
+   far its ends moved, 0: not moved) */
+void ico_render_thread_note_fill(uint64_t waitNs, bool late);
+void ico_render_thread_note_fix(uint64_t fixNs);
+
+/* The threads that make a picture, for Android's performance hint session
+   (window_perf_hint.h): the render thread's and the submit thread's ids (0:
+   not running; -1: running, its id not known yet: a thread stores it at
+   its start, the submit thread at its first job).  The game thread's */
+void ico_render_thread_tids(long *render, long *submit);
 
 /* The game thread, once a step: the core it ran on, for the 10 s line's
    cores (cpu_place.h) */
@@ -105,14 +134,27 @@ void ico_render_thread_note_ask(const struct PaceRtAsk *q, const struct PaceRtTr
    typical time (the game's loading work, an isolated long step:
    pace_step_typ_note); act: what a miss of the pictures' did to the plan
    (pace_policy.h PaceStepAct: PACE_STEP_NONE for none, a miss then the
-   game's own) */
+   game's own); ev: what the step rule judged, began and ended at this
+   step (pace_policy.h PaceStepEvent: a miss two steps old counted toward
+   the back-off or an outlier one, with its picture's GPU time and the
+   typical; a back-off begun, ended by the pictures fitting or at its
+   limit) */
+struct PaceStepEvent;
 void ico_render_thread_note_step(uint64_t readWaitNs, bool missed, uint64_t missNs, bool backedOff,
                                  uint64_t planCloseNs, uint64_t planBetweenNs, uint64_t widenNs,
-                                 uint64_t closeMeanNs, uint64_t closeDevNs, bool leftOut, int act);
+                                 uint64_t closeMeanNs, uint64_t closeDevNs, bool leftOut, int act,
+                                 const struct PaceStepEvent *ev);
 
 /* The 10 s line (window_host.c window_pace_log): the game thread's mean
-   step and pump per call in ms, its own cost of closing a frame
-   (rd_frame_close_take), the slot waits it made (waits for the render
+   step and pump per call in ms, the step's mean CPU time (stepCpuMs,
+   cpu_place.h cpu_place_thread_cpu_ns: "step 38.4 ms (CPU 12.1 ms of it;
+   closing a frame ...", left out when 0: not known), its own cost of
+   closing a frame
+   (rd_frame_close_take; at Frame rate Original with its pictures,
+   rd_frame_post_text: "; its picture handed over in 0.6 ms (longest 14.2
+   ms; 3 waited for the picture before, 31.0 ms in all; 12 skipped: render
+   thread busy); presents waited inside the step: 0 (0.0 ms)" before the
+   parenthesis closes), the slot waits it made (waits for the render
    thread, split by whose: a new frame's present, a further present's, the
    rest) and the read waits, then the render thread's block with its CPU
    time a picture (pictureCpuMs: the window's replays line):
@@ -128,10 +170,72 @@ void ico_render_thread_note_step(uint64_t readWaitNs, bool missed, uint64_t miss
      late by the pictures: 280 (longest 9.6 ms); steps that missed their period: 0 (latest
      0.0 ms past it; 0 steps planned at the whole period after them)
    or "...; render thread: off (CPU 9.3 ms a picture on the game thread)" with no thread;
+   at the end, after the cores, the game, render and submit threads' time
+   on a core and waiting for one in the block (thread_stat.h: "; ran /
+   waited for a core: game 3.9 s / 0.4 s, render 2.1 s / 1.8 s, submit 0.0
+   s / 0.0 s"; once "schedstat not readable (EACCES)" where it is not; on
+   Linux and Android only);
    then, when the step rule was asked in the block, its sums (pace_policy.h
    pace_rt_trace_sum_text):
      window: step rule: in 10 s 1214 further presents asked of the rule, 581 held by a
-     step's period (575 the next step's start past its slack, by 6.1 ms on average; ...) */
-void ico_render_thread_block_line(double stepMs, double pictureCpuMs, double pumpMs);
+     step's period (575 the next step's start past its slack, by 6.1 ms on average; ...)
+   and last, when the process's threads or the cores they may run on changed
+   since it was last written (once at the start, after the game thread's
+   pin; cpu_place.h cpu_place_threads_format):
+     window: threads: 31; kept to cores 6-7: ico_pc (the game thread), ico-render; on 0-7:
+     ico-submit, mali-cmar-backend, mali-utility-wo, mali-mem-purge, ico-gpu-sysfs and 24 more */
+void ico_render_thread_block_line(double stepMs, double stepCpuMs, double pictureCpuMs,
+                                  double pumpMs);
+
+/* The log thread's once-a-second tick (Android, window_stall.c asks_tick):
+   the three threads' schedstat into cells and, every tenth, the thread
+   list, which the 10 s block then reads instead of the files */
+void ico_render_thread_tick(void);
+
+/* The keeper's requests (cpu_keep.h; Android, nothing elsewhere): the
+   game thread at each step says whether the game is in its play layout (a
+   3D scene begun asks the threads' cores again), and at the window's
+   focus gained; back from the background is asked by
+   ico_render_thread_unpark itself.  A bit set, no call to the system */
+void ico_render_thread_place_scene(bool play);
+void ico_render_thread_place_focus(void);
+/* The pins let go or taken again (pin_release.h; the game thread, at a
+   second's close in window_clock_trap.c): the wish is an atomic the
+   keeper's next tick reads (cpu_keep_release), so the threads move within
+   a second.  Nothing where the keeper is off */
+void ico_render_thread_pin_release(bool on);
+/* The keeper's rule in force: 0 off (not Android, [dev] big_cores = false,
+   or no core faster than the slowest), 1 the rule for three or more faster
+   cores (the pins may be let go), 2 the few-cores rule (its pins stand) */
+int ico_render_thread_pin_release_rule(void);
+/* The render thread's id (0 not running yet) */
+long ico_render_thread_render_tid(void);
+
+/* The pipeline set's span (window_host.c around rd_precreate_pipelines, at
+   the start and at a switch of the graphics API; the game thread): while
+   it runs under the few-cores rule its workers ("rhi-pipelines") keep
+   every core of the process (cpu_keep.h cpu_keep_set_cores) and the sweep
+   leaves them there; at its end one line, "window: pipeline set: ..."
+   (cpu_keep_set_text: the set's time, its workers' cores, the process's
+   CPU time over it, where later workers run), and the attempt ledger's
+   row (attempt_ledger.h ICO_ATT_PIPE_SET_CORES).  At a device's first
+   start the set runs before the cores' rule (place_init): the line says
+   so */
+void ico_render_thread_pipeline_set(bool on);
+
+/* What a stall coincided with (stall_coincide.h; window_stall.c): the
+   render thread's core at its last picture (-1 not known); the core waits
+   of the game, render, submit, SDL audio and system audio threads over the
+   log thread's last tick (about a second; -1 for one not read; false when
+   none was, *ageMs the oldest read's age); the threads named like the
+   graphics driver's (stall_coincide.h stall_driver_name: at most cap, the
+   first STALL_DRIVERS of the list) with their run and wait ms over the
+   last tick, the count; every such name of the first list that had one
+   ("" none yet), for the once line.  Android with the log thread's tick;
+   nothing elsewhere */
+int ico_render_thread_render_core(void);
+bool ico_render_thread_last_second(double waitMs[5], double *ageMs);
+int ico_render_thread_driver_threads(char names[][16], double *runMs, double *waitMs, int cap);
+size_t ico_render_thread_driver_names(char *out, size_t cap);
 
 #endif /* ICO_PLATFORM_RENDER_THREAD_H */

@@ -12,6 +12,9 @@
 #define VKR_FUNCTION_AVAILABLE(fn) ((fn) != NULL)
 #endif
 #include "../rhi.h"
+#include "../rhi_native.h"
+#include "../rhi_tile_rule.h"
+#include "../rhi_device_table.h"
 #include "vk_enums.h"
 #include <stdio.h>
 
@@ -60,6 +63,14 @@ typedef struct VkrBuffer {
     /* a device buffer made for vertex, index, uniform or storage reads
      * (rhi.h rhi_cmd_copy_texture_to_buffer's ordering) */
     bool shaderRead;
+    /* the Vulkan usage the buffer was made with: the stages that can ever
+     * reach it (vk_cmd.c vkr_buf_earlier_stages, vkr_buf_later_stages;
+     * binding a buffer as a vertex, index, uniform or storage buffer needs
+     * the usage bit) */
+    VkBufferUsageFlags vkUsage;
+    /* a copy has read or written it (any list, since its creation): the
+     * transfer stage joins the first scope of a later store bracket */
+    bool copied;
     /* hazard tracking (vk_cmd.c, "Hazards"): a copy's write or read not yet
      * behind a barrier, valid while hzEpoch is the recording list's */
     uint64_t hzEpoch;
@@ -81,6 +92,15 @@ typedef struct VkrTexture {
     uint32_t width, height, mips;
     uint32_t samples; /* 1, or the multisampled count (RhiTextureDesc.samples) */
     bool swapchain;
+    /* made with the storage-image usage (RHI_TEX_STORAGE granted:
+     * vk_resource.c; rhi_native.h RhiNativeTexture.storage) */
+    bool storage;
+    /* the subpass read's colour (g_vkr.subpassRead, vk_resource.c): an
+     * RGBA8_UNORM single-sampled render target that is not a swapchain
+     * image, made with the input-attachment usage; as an attachment it is
+     * in GENERAL (vkr_texture_layout), the one layout an input attachment
+     * and a colour attachment of one subpass can share */
+    bool subpassRead;
     /* hazard tracking (vk_cmd.c, "Hazards"): what touched the image since
      * its last barrier, valid while hzEpoch is the recording list's: the
      * mips a copy wrote, and an attachment write or read */
@@ -129,6 +149,11 @@ typedef struct VkrPipeline {
      * set layouts, no push constants; vk_cmd.c vkr_groups_disturbed) */
     uint32_t setLayoutIds[RHI_MAX_BIND_SLOTS];
     uint8_t dstRead; /* RhiDstRead (vk_cmd.c vkr_dst_order) */
+    /* GRAPHICS, or COMPUTE for a compute pipeline (RhiPipelineDesc.compute):
+     * the bind point of its vkCmdBindPipeline and descriptor sets (vk_cmd.c
+     * rhi_cmd_set_pipeline: a change of bind point binds every group again,
+     * descriptor sets being bound per bind point) */
+    VkPipelineBindPoint bindPoint;
     /* the RHI_DYN_* states the pipeline leaves dynamic (only where the
      * device has them: g_vkr.dynDepth, dynBlend), their values in the
      * description (a draw's until rhi_cmd_set_depth_state /
@@ -200,9 +225,12 @@ typedef enum VkrSyncKind { VKR_SYNC_TIMELINE, VKR_SYNC_FENCES } VkrSyncKind;
 /* The render passes of a device without dynamic rendering (core 1.3 or
  * VK_KHR_dynamic_rendering): classic VkRenderPass objects
  * (vk_renderpass.c, g_vkr.legacyPasses), and ICO_VK_FAKE_API=1.1 hides
- * VK_KHR_dynamic_rendering so its runs take them.  Set to 0, such a device
- * is unsuitable again (vkr_rate_device, "no dynamic rendering") and the
- * 1.1 profile keeps the extension. */
+ * VK_KHR_dynamic_rendering so its runs take them.  A device of the driver
+ * row (port/rhi/rhi_pass_row.h: Intel's Windows driver at Vulkan 1.3.215
+ * or older) takes them too, and ICO_VK_LEGACY_PASSES=1 any device.  Set to
+ * 0, such a device is unsuitable again (vkr_rate_device, "no dynamic
+ * rendering"), the row and the override are ignored, and the 1.1 profile
+ * keeps the extension. */
 #define VKR_LEGACY_PASSES 1
 
 /* One vkQueueSubmit through vkr_sync_submit: the command buffers (possibly
@@ -231,6 +259,9 @@ typedef struct VkrCmdList {
      * query pools through it, not through the current frame index, which
      * the recording thread may have moved on ("Frame slots" in vk_cmd.c) */
     uint8_t slot;
+    /* the timestamp indices this list wrote (rhi_cmd_write_timestamp): the
+     * slot's tsSubmitted takes them at its submit (rhi_submit) */
+    uint32_t tsWritten[RHI_TIMESTAMP_WORDS];
     /* draw-time state */
     VkrPipeline *pipeline;
     VkDescriptorSet groups[RHI_MAX_BIND_SLOTS];
@@ -239,6 +270,9 @@ typedef struct VkrCmdList {
     uint32_t offsets[RHI_MAX_BIND_SLOTS][RHI_MAX_DYNAMIC_OFFSETS];
     uint32_t groupDirty; /* bit per group */
     bool inPass;
+    /* between rhi_cmd_external_begin and _end (vk_cmd.c): the caller records
+     * into the native command buffer */
+    bool externalOpen;
     /* the open pass's render area (vk_cmd.c vkr_pass_area_fits, and
      * RhiRenderPassDesc.area inside it): offset areaX, areaY, extent areaW
      * x areaH; every scissor set inside the pass is cut to it */
@@ -246,6 +280,9 @@ typedef struct VkrCmdList {
     /* a draw, and a RHI_DST_READ_STORAGE draw, recorded in the open
      * render pass (vk_cmd.c vkr_dst_order) */
     bool drawnInPass, storageDrawn;
+    /* the open pass is a VkRenderPass of the subpass read (VkrPassDesc
+     * .subpassRead): rhi_cmd_local_read_barrier records its barrier */
+    bool passSubpassRead;
     /* the list's hazard-tracking epoch (g_vkr.hzEpoch when it began);
      * globalOrder: a global barrier before every pass and copy instead
      * (ICO_VK_GLOBAL_BARRIERS=1, or lists recorded interleaved) */
@@ -260,8 +297,11 @@ typedef struct VkrCmdList {
     /* the accesses a copy into a buffer shaders read must be made visible
      * to (rhi.h rhi_cmd_copy_texture_to_buffer), 0 for none: a memory
      * barrier from the transfer writes, issued with the pending image
-     * barriers */
+     * barriers; pendMemSrc the accesses it waits for beside the transfer
+     * writes (the vertex shaders' stores of rhi_cmd_buffer_store_begin /
+     * _end: VK_ACCESS_SHADER_WRITE_BIT), 0 for none */
     VkAccessFlags pendMemDst;
+    VkAccessFlags pendMemSrc;
     /* the dynamic depth and blend state (vk_cmd.c vkr_flush_dynamic):
      * dynValid the RHI_DYN_* groups whose values in dynHave the command
      * buffer holds (a bind of a pipeline with the group static clears its
@@ -275,6 +315,13 @@ typedef struct VkrCmdList {
      * (VK_NULL_HANDLE: none): its submit signals the present semaphore
      * (rhi_submit) */
     VkImage presentImage;
+    /* the swapchain image the list puts a barrier on or draws into
+     * (VK_NULL_HANDLE: none; every use of a swapchain image begins with a
+     * barrier out of UNDEFINED or PRESENT): its submit is the one that waits on the slot's
+     * acquire semaphore when the image is the slot's acquired one
+     * (rhi_submit), so a list that draws only off-screen targets never
+     * waits for the presentation engine */
+    VkImage swapImage;
     /* the occlusion query open in the list (rhi_cmd_begin_occlusion),
      * its index + 1; 0 for none */
     uint32_t occOpen;
@@ -297,6 +344,7 @@ typedef struct VkrCmdList {
     uint32_t ibId;
     uint64_t ibOff;
     bool ib32;
+    uint64_t ibBytes; /* the bound index buffer's bytes from ibOff (vk_range.c) */
     uint8_t stencilRef;
     float blendConst[4];
     uint8_t dynFresh;
@@ -304,7 +352,10 @@ typedef struct VkrCmdList {
 
 /* A frame slot's swapchain image (vk_swapchain.c): acquired, not yet
  * presented; waitPending: its acquire semaphore (the slot's acquireSem)
- * not yet waited on by a submit of the slot; signalled: renderDone[image]
+ * not yet waited on by a submit of the slot (the submit of the slot's
+ * first list that puts a barrier on the image, VkrCmdList.swapImage, or
+ * the present's empty batch when no list did; a list on other images
+ * leaves it pending); signalled: renderDone[image]
  * is signalled by the submit of the slot's list that moved the image to
  * PRESENT (rhi_submit), so rhi_present submits nothing before presenting;
  * seq: the acquire's number (VkrState.acqSeq), the present takes the
@@ -317,6 +368,10 @@ typedef struct VkrAcquire {
     bool acquired;
     bool waitPending;
     bool signalled;
+    /* the acquire passed the slot's acquireFence (the ahead form too): the
+     * present's list's submit asks it whether the image was free already
+     * (acquireReadyAtSubmit) */
+    bool fenced;
     uint32_t image;
     uint64_t seq;
 } VkrAcquire;
@@ -345,9 +400,23 @@ typedef struct VkrFrame {
     VkrGarbage *garbage;
     uint32_t garbageCount, garbageCap;
     VkSemaphore acquireSem; /* swapchain image acquire */
+    /* the fence the acquire signals beside acquireSem (issue 179: whether
+     * the display's image was free when the present's list was submitted);
+     * acquireFenceUsed: an acquire was given it and it was not reset since
+     * (the slot's recycle resets it once signalled; an acquire that finds
+     * it still used makes a fresh one) */
+    VkFence acquireFence;
+    bool acquireFenceUsed;
     /* the slot's GPU timestamps (rhi_cmd_write_timestamp) */
     VkQueryPool queryPool;
     uint32_t tsWritten[RHI_TIMESTAMP_WORDS]; /* the indices written since the slot was recycled */
+    /* of them, those of the lists submitted (a list recorded and never
+     * submitted wrote none on the GPU), and the lists with stamps recorded
+     * and submitted since the recycle (__atomic: rhi_submit may run on the
+     * submit thread); rhi_read_timestamp_clock's recorded and
+     * listsUnsubmitted */
+    uint32_t tsSubmitted[RHI_TIMESTAMP_WORDS];
+    uint32_t tsListsStamped, tsListsSubmitted;
     bool tsReset; /* the pool's reset is recorded in this slot's first list */
     /* the slot's occlusion queries (rhi_cmd_begin_occlusion): the pool made
      * at the first begin of the run, the indices begun since the slot was
@@ -355,6 +424,18 @@ typedef struct VkrFrame {
     VkQueryPool occPool;
     uint32_t occWritten[RHI_OCCLUSION_WORDS];
     bool occReset;
+    uint32_t occResetN; /* the queries that reset covered: 0 .. occResetN - 1 */
+    /* the slot's submissions since its recycle (vk_tsclock.c
+     * vkr_tsclock_note_submit: rhi_read_timestamp_clock's submit times;
+     * tsFirstValue the first one's number) and the lowest recorded stamp's
+     * value of its previous use (a polled result equal to it is stale) */
+    uint32_t tsSubmits;
+    uint64_t tsFirstSubmitNs, tsLastSubmitNs, tsFirstValue;
+    uint64_t tsPrevFirst;
+    /* the first RHI_TS_SUBMITS of them one by one (rhi.h RhiTsSubmit): the
+     * time, lists and present signal at vkr_tsclock_note_submit, the
+     * stamps or-ed in by rhi_submit (__atomic) once the list was sent */
+    RhiTsSubmit tsSub[RHI_TS_SUBMITS];
 } VkrFrame;
 
 /* A render pass as both paths take it (vk_cmd.c rhi_cmd_begin_render_pass
@@ -377,12 +458,21 @@ typedef struct VkrPassAttach {
     VkAttachmentLoadOp load, stencilLoad;
     VkAttachmentStoreOp store, stencilStore;
     VkClearValue clear;
+    /* a colour attachment's in-pass resolve (rhi.h RhiColorAttachment.resolve):
+     * the single-sampled texture, its view and layout; NULL none */
+    struct VkrTexture *resolveTex;
+    VkImageView resolveView;
+    VkImageLayout resolveLayout;
 } VkrPassAttach;
 
 typedef struct VkrPassDesc {
     uint32_t colorCount;
     VkrPassAttach color[RHI_MAX_COLOR_TARGETS];
     bool hasDepth, hasStencil, readOnlyDepth;
+    /* legacy path, the subpass read (vkr_subpass_class): colour 0 is also
+     * the subpass's input attachment 0, the render pass has the
+     * self-dependency (vk_renderpass.c vkr_rp_make) */
+    bool subpassRead;
     VkrPassAttach depth;
     uint32_t areaX, areaY, areaW, areaH;
     uint32_t fbW, fbH;
@@ -427,6 +517,29 @@ typedef struct VkrState {
      * rasterOrderAttachment): the features enabled */
     bool interlock;
     bool rasterOrder;
+    /* vertexPipelineStoresAndAtomics enabled (RhiLimits.vertexStores) */
+    bool vertexStores;
+    /* compute pipelines that store (RhiLimits.computeStores: the VU record's
+     * compute builds; vk_device.c vkr_compute_stores), and why not when
+     * false ("" when true); the compute stage then joins the buffer read
+     * stages of copies and brackets (vk_cmd.c vkr_buf_earlier_stages) */
+    bool computeStores;
+    /* a fragment shader module that declares a storage buffer was made
+     * (vk_resource.c rhi_create_shader, vk_spirv_scan.h; __atomic, a
+     * module may be made on a compile worker): from then on the first
+     * scope of a buffer barrier holds the fragment stage for a storage
+     * buffer's earlier reads (vk_cmd.c vkr_buf_earlier_stages) */
+    bool fragmentStorage;
+    /* Barriers whose first scope holds fragment-side stages and whose
+     * second holds a stage before them (vk_cmd.c vkr_hold_note): each
+     * makes every later vertex, compute and copy command, the next
+     * picture's too, wait for the fragment work recorded or submitted
+     * before it.  By kind (RHI_HOLD_KIND_VERTEX, RHI_HOLD_KIND_COPY: rhi.h
+     * RhiStats.holdSites) and site (RHI_HOLD_SITE_*), __atomic (a list's
+     * end may be on the submit thread); the totals are
+     * RhiStats.fragmentHolds */
+    uint64_t holdSite[2][8];
+    char computeStoresOff[96];
     /* the attachment read the device has but is not offered on (Qualcomm's
      * own driver, rhi_driver_is_qualcomm_proprietary; ICO_VK_FAKE_ADRENO=1
      * takes that branch, ICO_VK_ATTACHMENT_READ=1 offers it anyway): why,
@@ -440,6 +553,10 @@ typedef struct VkrState {
     bool moltenvk;
     bool fakeMoltenvk;
     char driverVersion[32];
+    /* driverProperties.driverName and the Mesa version of its driverInfo
+     * (vkr_driver_text), for RhiLimits.driverName and .mesa */
+    char driverName[VK_MAX_DRIVER_NAME_SIZE];
+    RhiMesaVersion mesa;
     /* the driver's own "Compiler Version: ..." line from its driverInfo
      * (Qualcomm's Adreno driver writes one), "" when it has none, for
      * RhiLimits.compilerVersion (vkr_driver_text) */
@@ -452,6 +569,10 @@ typedef struct VkrState {
      * careful column: "Adreno 740, issues 93 and 107"), "" otherwise, for
      * RhiLimits.carefulPipelines */
     char carefulPipelines[96];
+    /* why this device draws without the VU vertex pre-pass (the same
+     * table's noPrepass column: "Adreno 740 on Qualcomm's driver, issue
+     * 123"), "" otherwise, for RhiLimits.vuPrepassOff */
+    char noVuPrepass[96];
     /* the dynamic state (vk_device.c vkr_create_device; RhiLimits.dynamicDepth,
      * dynamicBlend): dynDepth the depth test, write and compare (Vulkan 1.3,
      * or VK_EXT_extended_dynamic_state's extendedDynamicState), dynBlend the
@@ -472,6 +593,24 @@ typedef struct VkrState {
      * destination-read draw after other draws of its pass (vk_cmd.c
      * vkr_dst_order) */
     bool localRead;
+    /* the subpass read (vk_device.c vkr_subpass_read_decide; RhiLimits
+     * .localReadSubpass): on the VkRenderPass path, a pass of one
+     * RGBA8_UNORM colour target and a depth target reads its colour as an
+     * input attachment of its own subpass (Vulkan 1.0 core).  localRead
+     * stays dynamic rendering's own; VKR_PASS_READ is either.  The counts
+     * since the device was made: passes begun with it, local-read
+     * barriers skipped in a pass without it, passes of its class whose
+     * colour is not one of its textures (none by construction) */
+    bool subpassRead;
+    uint32_t subpassPasses, subpassSkipped, subpassMisfit;
+    /* its decision (rhi_subpass_verdict.h, RhiLimits.subpassRoute ...):
+     * the route (VkRenderPass objects without local read), the read on for
+     * this start's probe, the decision's words, the verdict file and the
+     * device and driver's key in it */
+    bool subpassRoute, subpassProbe, subpassOffDefault;
+    char subpassWhy[256];
+    char subpassFile[1100];
+    char subpassKey[32];
     bool validationOn;
     bool storageBarriers;
     uint32_t validationErrors;
@@ -493,6 +632,11 @@ typedef struct VkrState {
      *                (vk_resource.c, the allocation table), so a faulting
      *                address names its resource. */
     bool robust, robust2, deviceFault, checkpoints, addressReport;
+    /* VK_EXT_pipeline_robustness enabled (robust access on and the device
+     * offers pipelineRobustness): a pipeline can turn the uniform-buffer
+     * robustness off (RhiPipelineDesc.uniformRobustOff; the skin check's
+     * variant, issue 163) */
+    bool pipeRobust;
     PFN_vkGetDeviceFaultInfoEXT getFaultInfo;
     PFN_vkCmdSetCheckpointNV cmdSetCheckpoint;
     PFN_vkGetQueueCheckpointDataNV getCheckpointData;
@@ -518,7 +662,20 @@ typedef struct VkrState {
      * wait in progress blocks on with its start (vkr_wait_value,
      * rhi_wait_idle); stored with __atomic by the submitting thread */
     uint64_t progSubmitted, progSubmitNs, progFinished, progWaitingFor, progWaitSinceNs;
+    /* the submit thread's wait before its present (rhi_wait_submitted), a
+     * pair of its own: the recording thread's fence waits beside it store
+     * the pair above, and rhi_gpu_progress gives the older of the two */
+    uint64_t progPresentFor, progPresentSinceNs;
+    /* when progFinished last moved (vkr_now_ns; 0: not since the device
+     * came up): rhi_gpu_progress's headNs */
+    uint64_t progFinishedNs;
     uint32_t progReplay, progFrame;
+    /* the last VKR_SUBMIT_HISTORY submissions' values and tags
+     * (replay << 32 | frame) as atomic words, and the count made: what
+     * rhi_gpu_progress reads from another thread (submits[] above is the
+     * loss report's, read after the submitting thread stopped) */
+    uint64_t progTagValue[VKR_SUBMIT_HISTORY], progTagTag[VKR_SUBMIT_HISTORY];
+    uint32_t progTagCount;
     /* render passes whose area exceeded an attachment (vk_cmd.c
      * vkr_pass_area_fits: logged once, clamped; vkr_test_pass_area_count) */
     uint32_t passAreaBad;
@@ -572,6 +729,27 @@ typedef struct VkrState {
      * (Vulkan 1.1, or VK_KHR_maintenance2 on a Vulkan 1.0 device: issue
      * 158; without it the view keeps the image's usages) */
     bool legacyPasses;
+    /* why legacyPasses is on where the device offers dynamic rendering
+     * (the driver row, rhi_pass_row.h, or the override [dev]
+     * legacy_passes / ICO_VK_LEGACY_PASSES), for the device line; NULL
+     * otherwise */
+    const char *legacyWhy;
+    /* the device is on Intel's driver row (rhi_pass_row.h), whatever the
+     * override made of the path (RhiLimits.storePassTarget) */
+    bool passRowHit;
+    /* legacyPasses is on by Qualcomm's row (rhi_pass_row.h, issue 123):
+     * RhiLimits.passObjectsRow gives its reason to the attempt's line */
+    bool passRowQcom;
+    /* the device table's choices for this device (vk_device_table.c,
+     * ../rhi_device_table.h: evaluated once at the pick with the tests'
+     * fakes, devFakes) */
+    const RhiDeviceChoices *devTable;
+    RhiDeviceFakes devFakes;
+    /* the crash report's breadcrumb (rhi_pass_crumb.h): the passes begun,
+     * and the last marker rhi_cmd_checkpoint was given (the renderer's
+     * pass ring sequence number), kept with the checkpoints off too */
+    uint64_t passSeq;
+    uint64_t lastMarker;
     bool driverProps;
     bool formatList;
     bool storeOpNone;
@@ -597,6 +775,12 @@ typedef struct VkrState {
     RhiFormat swapRhiFormat;
     VkColorSpaceKHR swapColorSpace;
     uint32_t swapWidth, swapHeight;
+    /* the quarter turns clockwise the images are made in (rhi_swapchain_
+     * rotation; vkr_prerotate_turns): 0 identity, else the surface's
+     * transform is the preTransform and the images are swapWidth x
+     * swapHeight turned (swapped at 1 and 3); swapWidth x swapHeight stay
+     * the window's own orientation, the size the renderer draws at */
+    uint32_t swapTurns;
     bool vsync;
     uint32_t swapImageCount;
     uint32_t swapTextures[VKR_MAX_SWAP_IMAGES];  /* texture ids */
@@ -606,6 +790,10 @@ typedef struct VkrState {
      * swapImageCount - swapMinImages is at least 1 (the spec's limit for an
      * acquire without a timeout; vk_swapchain.c vkr_acquire_ahead_ok) */
     uint32_t swapMinImages;
+    /* the images acquired and not yet presented (vk_swapchain.c: an
+     * acquire adds one, a present call takes one, the swapchain made again
+     * or released empties it), atomic: rhi_get_stats reads it on any thread */
+    uint32_t swapAcquired;
     /* the acquires' numbers (VkrAcquire.seq), under the swapchain's lock */
     uint64_t acqSeq;
     /* a present on the submit thread does not make the swapchain or the
@@ -613,9 +801,10 @@ typedef struct VkrState {
      * rhi_slot_guard_worker): what it found is kept here, under the
      * swapchain's lock, and done at the next acquire, with the submit
      * thread idle (vk_swapchain.c vkr_take_deferred).  VKR_DEFER_* bits;
-     * deferW/H the size the poll found (VKR_DEFER_POLL) */
+     * deferW/H and deferTurns the size and turn the poll found
+     * (VKR_DEFER_POLL) */
     uint32_t deferred;
-    uint32_t deferW, deferH;
+    uint32_t deferW, deferH, deferTurns;
     uint64_t deferredCount; /* ever, for the line */
 
     /* one-shot command pool for readback */
@@ -634,7 +823,10 @@ typedef struct VkrState {
     RhiStats stats;
 
     struct {
-        uint64_t barriers, submits, presents, presentNs;
+        uint64_t barriers, submits, presents, presentNs, fragmentHolds;
+        /* the present's list's submits that found the acquired image free
+         * (acquireFence signalled) and those that did not */
+        uint64_t acquireReady, acquireNotReady;
     } late;
 
     /* RhiLimits.slotOverlap's answer and why not, for the device line */
@@ -644,6 +836,18 @@ typedef struct VkrState {
     uint64_t timestampMask; /* the valid bits */
     uint64_t tsResult[RHI_MAX_TIMESTAMPS];
     uint32_t tsCount; /* of the slot rhi_wait_frame recycled last */
+    /* the recycled slot's clock (rhi_read_timestamp_clock, vk_tsclock.c):
+     * calibrated timestamps on (VK_KHR or VK_EXT_calibrated_timestamps,
+     * enabled at the device's creation with the CPU's time domain
+     * tsCalibCpuDomain), the entry point, the queue's valid bits; tsClock
+     * is filled by the slot's recycle (vkr_recycle_frame: its wait's trace,
+     * its stamps' bits, the calibrated pair) */
+    bool tsCalib;
+    const char *tsCalibExt;
+    uint32_t tsCalibCpuDomain;
+    PFN_vkGetCalibratedTimestampsKHR getCalibratedTimestamps;
+    uint32_t tsValidBits;
+    RhiTimestampClock tsClock;
     /* occlusion queries (rhi_cmd_begin_occlusion): the pools exist (made at
      * the first begin), the device counts precisely (occlusionQueryPrecise,
      * enabled), and the counts of the slot rhi_wait_frame recycled last
@@ -651,6 +855,9 @@ typedef struct VkrState {
      * an index not written) with 1 + the highest index written */
     bool occUsed;
     bool occBroken; /* the pools or the array could not be made: no more tries this run */
+    /* the queries each slot's first list resets (rhi_occlusion_prepare's
+     * count, RHI_MAX_OCCLUSION when a begin made the pools or went past it) */
+    uint32_t occRange;
     bool occPrecise;
     uint64_t *occResult;
     uint32_t occCount;
@@ -683,6 +890,19 @@ typedef struct VkrState {
 
     /* hazard tracking (vk_cmd.c, "Hazards") */
     bool globalBarriers; /* ICO_VK_GLOBAL_BARRIERS=1: a global barrier before every pass and copy */
+    /* the tile-based phones' rule and the loss ladder (rhi_tile_rule.h,
+     * vk_device.c vkr_tile_rule_apply, before the device is made): tile.wide
+     * the v0.11.2 barrier scopes (vk_cmd.c "Buffer barriers",
+     * vkr_open_barrier, rhi_end_commands) and RhiLimits.wideBarriers (the
+     * renderer's texture uploads before the VU pre-pass); tile.polled the
+     * recycle wait's 4 ms steps and the calibrated timestamps (vk_tsclock.c) */
+    RhiTileRule tile;
+    /* VK_EXT_memory_budget enabled (vk_device.c: where offered, not on a
+     * tile-based phone GPU): rhi_get_stats' videoMem* from the device-local
+     * heaps' budget and use, read at most four times a second (budgetAtNs,
+     * the last read; the sums atomic words: any thread asks) */
+    bool memBudget;
+    uint64_t budgetAtNs, budgetBytes, budgetUse;
     /* ICO_VK_DEPTH_ALWAYS=1: every depth test compares ALWAYS (the
      * occlusion measurement's run without the depth: what draws nothing
      * whatever the depth says; the picture is not the game's) */
@@ -717,6 +937,18 @@ typedef struct VkrState {
     const char *fakeLimits;
     bool fakeMinLimits;
     const char *lastLimit; /* vkr_test_last_limit (rhi_vk.h) */
+    /* external compute (rhi_native.h, vk_native.c): the answers of
+     * vkr_probe_compute at device creation.  queueCompute: the graphics
+     * queue's family also takes compute work, so RHI_STATE_STORAGE barriers
+     * include the compute stage (vk_cmd.c vkr_state_scope); computeFloat16:
+     * shaderFloat16 offered (enabled only with externalExts' set) */
+    RhiComputeCaps compute;
+    bool queueCompute;
+    bool computeFloat16;
+    /* the extensions the FidelityFX Vulkan backend acts on, enabled where
+     * listed on a 1.2 device in an ICO_FFX build (vkr_create_device), the
+     * set whole (RhiComputeCaps.externalExts) */
+    bool externalExts;
 } VkrState;
 
 extern VkrState g_vkr;
@@ -756,7 +988,7 @@ _Static_assert(((VKR_GEN_MASK + 1u) % RHI_FRAMES_IN_FLIGHT) == 0u,
  * acquire (vk_swapchain.c) */
 #define VKR_DEFER_REBUILD 1u      /* out of date (or suboptimal on the desktop) */
 #define VKR_DEFER_SIZE 2u         /* Android's suboptimal with another size */
-#define VKR_DEFER_POLL 4u         /* the poll found another size (deferW x deferH) */
+#define VKR_DEFER_POLL 4u         /* the poll found another size or turn (deferW x deferH) */
 #define VKR_DEFER_SURFACE_LOST 8u /* the surface went away */
 
 /* the late counters (VkrState.late) */
@@ -776,6 +1008,20 @@ void vkr_note_submit(const VkrFrame *f, uint64_t value, uint32_t lists, bool pre
  * watchdog (rhi_gpu_progress); a failed wait is logged and noted
  * (lostWaitValue) */
 void vkr_wait_value(uint64_t value);
+/* vkr_wait_value for a frame slot's last submission, the slot's stamps
+ * polled while the wait blocks (vk_tsclock.c vkr_tsclock_wait) */
+void vkr_wait_slot_value(VkrFrame *f, uint64_t value);
+/* vk_tsclock.c (rhi.h rhi_read_timestamp_clock): the device's choice
+ * before vkCreateDevice (the extension's name to enable, or NULL; hasKhr /
+ * hasExt: offered), its entry point after, a submission of the slot, the
+ * blocking wait with the poll, and the recycle's calibrated pair */
+const char *vkr_tsclock_pick(bool hasKhr, bool hasExt);
+void vkr_tsclock_init(uint32_t validBits);
+void vkr_tsclock_note_submit(VkrFrame *f, uint64_t value, uint32_t lists, bool present);
+/* the stamps a sent list recorded, into the slot's last noted submission */
+void vkr_tsclock_note_stamps(VkrFrame *f, const uint32_t *stamps);
+VkResult vkr_tsclock_wait(VkrFrame *f, uint64_t value);
+void vkr_tsclock_recycled(VkrFrame *f);
 
 /* vk_sync.c, the submission sync (VkrSyncKind):
  *   vkr_sync_init     the timeline semaphore or the fence ring of
@@ -796,6 +1042,20 @@ bool vkr_sync_init(void);
 bool vkr_sync_submit(const VkrSubmitDesc *d, uint64_t *outValue);
 bool vkr_sync_reached(uint64_t *out);
 VkResult vkr_sync_wait(uint64_t value);
+/* vkr_sync_wait within timeoutNs: VK_TIMEOUT when the number has not
+ * finished by then (vk_tsclock.c's poll) */
+VkResult vkr_sync_wait_for(uint64_t value, uint64_t timeoutNs);
+/* vk_range.c: an indexed draw's indices and a copy's regions against the
+ * resources they name (robust access does not cover them), logged when
+ * past them; the command is recorded as before */
+void vkr_range_index(const VkrCmdList *c, uint32_t firstIndex, uint32_t indexCount);
+void vkr_range_buffer(const VkrCmdList *c, const char *what, const VkrBuffer *b, uint64_t offset,
+                      uint64_t size);
+void vkr_range_image(const VkrCmdList *c, const char *what, const VkrTexture *t, uint32_t mip,
+                     RhiRect r);
+void vkr_range_rows(const VkrCmdList *c, const char *what, const VkrBuffer *b, uint64_t offset,
+                    uint32_t rowPitch, const VkrTexture *t, RhiRect r);
+uint32_t vkr_range_bad_count(void);
 void vkr_sync_destroy(void);
 const char *vkr_sync_name(void);
 /* vk_renderpass.c, the render passes (VkrPassDesc; the file's header has
@@ -824,6 +1084,44 @@ VkRenderPass vkr_renderpass_compat(uint32_t colorCount, const VkFormat *colorFor
                                    VkFormat depthFormat, VkSampleCountFlagBits samples);
 void vkr_framebuffer_forget_view(VkImageView view, bool now);
 void vkr_renderpass_shutdown(void);
+
+/* The subpass read (g_vkr.subpassRead; docs/port/RHI.md "The subpass
+ * read").  Pipelines and framebuffers are made against a render pass of
+ * their compatibility class, and two render passes are compatible only
+ * when their input attachment references and dependencies match too
+ * (Vulkan spec, "Render Pass Compatibility"), so the class decides, from
+ * what a pipeline knows (its formats and sample count): every pass of one
+ * RGBA8_UNORM colour target, single-sampled, with a depth target, names
+ * its colour as input attachment 0 and has the self-dependency, readable
+ * or not, and every RGBA8_UNORM render target is made for it
+ * (VkrTexture.subpassRead: the input-attachment usage, GENERAL as an
+ * attachment).  A swapchain image is never one: it is never drawn with a
+ * depth target.  VKR_PASS_READ: a pass's own attachments can be read in
+ * it, through either path */
+#define VKR_PASS_READ (g_vkr.localRead || g_vkr.subpassRead)
+
+static inline bool vkr_subpass_class(uint32_t colorCount, VkFormat color0,
+                                     VkSampleCountFlagBits samples, bool hasDepth)
+{
+    return g_vkr.subpassRead && colorCount == 1u && color0 == VK_FORMAT_R8G8B8A8_UNORM &&
+           samples == VK_SAMPLE_COUNT_1_BIT && hasDepth;
+}
+
+/* the layout of t in state s: the state map's (vkr_state_layout), but
+ * under the subpass read GENERAL for a readable colour and for a subpass
+ * read texture as a render target (an input attachment's reference must
+ * not be COLOR_ATTACHMENT_OPTIMAL, VUID-VkSubpassDescription-attachment-
+ * 06912, and one attachment's references share their layout,
+ * VUID-VkSubpassDescription-layout-02519) */
+static inline VkImageLayout vkr_texture_layout(RhiState s, const VkrTexture *t)
+{
+    if (g_vkr.subpassRead && !(t->aspects & VK_IMAGE_ASPECT_DEPTH_BIT) &&
+        (s == RHI_STATE_RENDER_TARGET_READ || (s == RHI_STATE_RENDER_TARGET && t->subpassRead))) {
+        return VK_IMAGE_LAYOUT_GENERAL;
+    }
+    return vkr_state_layout(s, t->rhiFormat);
+}
+
 /* vk_cmd.c: rhi_gpu_progress's values back to none (a new device) */
 void vkr_progress_reset(void);
 
@@ -862,6 +1160,31 @@ void vkr_release_all_objects(void);
  * saved to the file and destroyed before the device goes */
 void vkr_pipeline_cache_init(void);
 void vkr_pipeline_cache_shutdown(void);
+/* the path rhi_set_pipeline_cache_path kept ("" none): the subpass read's
+ * verdict file lives beside it (vk_device.c, rhi_subpass_verdict.h) */
+const char *vkr_pipeline_cache_path(void);
+/* vk_pipeline.c, issue 188: on a driver whose compiler is not thread-safe
+ * (rhi_driver_version.h rhi_driver_compiler_serial, RhiLimits.
+ * serialPipelines) one compile thread and one lock that
+ * vkCreateShaderModule and vkCreateGraphicsPipelines take (vkr_compile_lock,
+ * any thread; nothing where the rule does not hold).  vkr_compile_serial_init
+ * after the limits are filled (rhi_init; logs the line), _shutdown after the
+ * device is gone. */
+/* vk_device_table.c: the device table for the picked device
+ * (../rhi_device_table.h; after the driver text and the MoltenVK test,
+ * vk_device.c): driverText RhiLimits.driverText's, customDriver a driver
+ * the Android build loaded (rhi_set_vulkan_loader).  Evaluated once with the
+ * tests' fakes into g_vkr.devTable and g_vkr.devFakes (the call sites read
+ * them), its start-up lines logged, the rows' clause noted for the
+ * renderer's summary line */
+void vkr_device_table_start(const char *driverText, bool customDriver);
+void vkr_compile_serial_init(void);
+void vkr_compile_serial_shutdown(void);
+void vkr_compile_lock(void);
+/* the lock taken when free (true; always true where the rule does not
+ * hold), false while a compile holds it: the pipeline cache's reads */
+bool vkr_compile_trylock(void);
+void vkr_compile_unlock(void);
 /* vk_pipeline.c: the background sets' compiles (rhi.h RhiGpuProgress
  * bgPipesDone, bgPipesLeft); any thread */
 void vkr_pipe_background_progress(uint32_t *done, uint32_t *left);
@@ -896,6 +1219,17 @@ const char *vkr_present_mode_name(VkPresentModeKHR m);
  * offered, an RTX 3090 on Windows showed nothing usable in mailbox mode at
  * 120/144/240 and under the vsync lock. */
 bool vkr_present_wait_wanted(bool offered, const char *asked, bool canThread);
+/* vk_present_mode.c: the quarter turns clockwise (1, 2, 3) a swapchain is
+ * made with when the surface's current transform is ROTATE_90, 180 or 270
+ * (the system shows the surface turned: an Android phone held sideways),
+ * the transform among the supported ones and `on` ([dev] prerotate, not
+ * ICO_VK_PREROTATE=0); 0 (identity: the compositor turns each image) for
+ * any other transform (identity, the mirrored ones), with `on` false, or
+ * when a quarter turn's images (h x w for the current extent w x h) would
+ * pass the surface's maxW x maxH.  The swapchain's preTransform is then the
+ * current transform and its images the extent turned (vk_swapchain.c) */
+uint32_t vkr_prerotate_turns(uint32_t currentTransform, uint32_t supportedTransforms, uint32_t w,
+                             uint32_t h, uint32_t maxW, uint32_t maxH, bool on);
 
 /* vk_memory.c: the memory types an allocation of `kind` tries, in order,
  * into out[] (the count returned; distinct type indices of typeBits):
@@ -937,5 +1271,17 @@ void vkr_swapchain_destroy(void);
 void vkr_present_wait_shutdown(void);
 /* vkr_test_fake_present_wait's stand-in, NULL when it is off */
 PFN_vkWaitForPresentKHR vkr_present_wait_fake(void);
+/* the display's times of past presents read back (vk_glass.c, rhi.h
+ * rhi_present_glass): the extension added to the device's where offered on
+ * a window; its entry points after the device is made; forgotten before it
+ * goes; a present's VkPresentTimesInfoGOOGLE chained before next (returned:
+ * the chain's head; *id the present's id, 0 none); after the present (under
+ * the swapchain's lock), the past times read */
+void vkr_glass_device_exts(bool offered, bool surface, const char **exts, uint32_t *count);
+void vkr_glass_device_made(VkDevice dev);
+void vkr_glass_device_gone(void);
+const void *vkr_glass_chain(VkPresentTimesInfoGOOGLE *info, VkPresentTimeGOOGLE *t,
+                            const void *next, uint32_t *id);
+void vkr_glass_presented(VkSwapchainKHR sc, uint32_t id, bool shown);
 
 #endif /* PORT_RHI_VK_VK_INTERNAL_H */

@@ -66,7 +66,9 @@
 #include <stdio.h>
 #include <string.h>
 
+#include "rd_glow_blur.h"
 #include "rd_replay.h"
+#include "rd_upscale.h"
 
 /* rd__set_blur_border_repeat (rd_internal.h, tests): the strips drawn */
 static bool s_borderRepeat = true;
@@ -168,10 +170,33 @@ static int32_t columnTexel(const RdTargetRec *t, int32_t x)
     return v < 0.0 ? 0 : (v > (double)t->tw ? (int32_t)t->tw : (int32_t)v);
 }
 
+/* the blocks the last repeat copied (rd__scene_border_blocks): each
+ * texel x of a block took SCENE's texel x + off of its row */
+static RdBorderBlocks s_blocks;
+
+const RdBorderBlocks *rd__scene_border_blocks(void)
+{
+    return &s_blocks;
+}
+
+/* rd_hold.c: the held replay's repeat, due where the full replay's was (its
+ * fog is not drawn there): armed for this replay whatever the target */
+void rd__scene_border_rearm(void)
+{
+    s_armed = g_rd.replayCounter;
+}
+
+bool rd__scene_border_repeat_pending(void)
+{
+    return s_armed != 0 && s_armed == g_rd.replayCounter && s_blocks.replay != g_rd.replayCounter;
+}
+
 /* tmp's block [m, m + cw) (column 2's or W - 3's texels) copied to dst at
- * x, cut to dst's texels [d0, d1) */
+ * x, cut to dst's texels [d0, d1); base the SCENE column tmp's m holds.
+ * cl 0: counted (n) only.  Each block copied is recorded in s_blocks
+ * while it has room (s_blocks.over past it) */
 static void copyBlock(RhiCommandList cl, RhiTexture dst, int32_t x, int32_t d0, int32_t d1,
-                      int32_t m, int32_t cw, uint32_t th)
+                      int32_t m, int32_t cw, uint32_t th, int32_t base, uint32_t *n)
 {
     int32_t sx = m, w = cw;
     if (x < d0) {
@@ -182,8 +207,18 @@ static void copyBlock(RhiCommandList cl, RhiTexture dst, int32_t x, int32_t d0, 
     if (x + w > d1) {
         w = d1 - x;
     }
-    if (w > 0) {
-        rhi_cmd_copy_texture(cl, s_cols.tex, (RhiRect){sx, 0, w, th}, dst, x, 0);
+    if (w <= 0) {
+        return;
+    }
+    (*n)++;
+    if (!cl.id) {
+        return;
+    }
+    rhi_cmd_copy_texture(cl, s_cols.tex, (RhiRect){sx, 0, w, th}, dst, x, 0);
+    if (s_blocks.n < RD_BORDER_BLOCKS) {
+        s_blocks.b[s_blocks.n++] = (RdBorderBlock){x, w, base + (sx - m) - x};
+    } else {
+        s_blocks.over = true;
     }
 }
 
@@ -191,19 +226,22 @@ static void copyBlock(RhiCommandList cl, RhiTexture dst, int32_t x, int32_t d0, 
  * from the neighbour column outwards: right to left from d1 on the left
  * (the block's last texel next to column 2), left to right from d0 on the
  * right, the outermost copy cut at the edge.  At a whole scale that is the
- * column twice, texel for texel */
-static void fillFrom(RhiCommandList cl, RhiTexture dst, int32_t d0, int32_t d1, int32_t m,
-                     int32_t cw, uint32_t th, int right)
+ * column twice, texel for texel.  The blocks laid: their number (cl 0:
+ * nothing copied, the count alone) */
+static uint32_t fillFrom(RhiCommandList cl, RhiTexture dst, int32_t d0, int32_t d1, int32_t m,
+                         int32_t cw, uint32_t th, int right, int32_t base)
 {
+    uint32_t n = 0;
     if (right) {
         for (int32_t x = d0; x < d1; x += cw) {
-            copyBlock(cl, dst, x, d0, d1, m, cw, th);
+            copyBlock(cl, dst, x, d0, d1, m, cw, th, base, &n);
         }
     } else {
         for (int32_t x = d1 - cw; x + cw > d0; x -= cw) {
-            copyBlock(cl, dst, x, d0, d1, m, cw, th);
+            copyBlock(cl, dst, x, d0, d1, m, cw, th, base, &n);
         }
     }
+    return n;
 }
 
 /* SCENE's GS columns 0, 1 and W - 2, W - 1 made copies of columns 2 and
@@ -235,9 +273,24 @@ static void sceneRepeat(Replay *r)
     if (rd__win_muted()) {
         return;
     }
+    /* the open screen run and the VU merge's drawn first: the list loop did
+     * so before a post sprite; at a held glow's mask, an RDC_NOP
+     * (rd__scene_border_due), it did not.  Only where the repeat copies, so
+     * a frame without it records as before */
+    rd__replay_flush_run(r);
+    rd__fill11_border(r); /* a fill held for list 11's pass drawn first (rd_fill11.c) */
     const uint32_t th = t->th;
     if (!colsEnsure((uint32_t)(cwL + cwR), th, t->format)) {
         return;
+    }
+    /* a crack fill whose draw is held (rd_crack_fill.c, rd_late_pass.c)
+     * draws each block's texels again from its source column's: more
+     * blocks than s_blocks holds, and it is drawn now, before the copies */
+    const RhiCommandList none = {0};
+    const uint32_t nb = (left ? fillFrom(none, t->color, 0, a2, 0, cwL, th, 0, a2) : 0u) +
+                        (right ? fillFrom(none, t->color, aR, tw, cwL, cwR, th, 1, bR) : 0u);
+    if (nb > RD_BORDER_BLOCKS) {
+        rd__crack_fill_flush_held(r, RD_LATE_WHY_BORDER);
     }
     /* a pending clear of another target (the glow's WORK2 fill: the mask
      * after it is the post sprite this repeat comes before) stays pending
@@ -254,14 +307,21 @@ static void sceneRepeat(Replay *r)
     }
     rd__transition(cl, s_cols.tex, &s_cols.state, RHI_STATE_COPY_SRC);
     rd__transition(cl, t->color, &t->colorState, RHI_STATE_COPY_DST);
+    s_blocks.n = 0;
+    s_blocks.over = false;
     if (left) {
-        fillFrom(cl, t->color, 0, a2, 0, cwL, th, 0);
+        fillFrom(cl, t->color, 0, a2, 0, cwL, th, 0, a2);
     }
     if (right) {
-        fillFrom(cl, t->color, aR, tw, cwL, cwR, th, 1);
+        fillFrom(cl, t->color, aR, tw, cwL, cwR, th, 1, bR);
     }
     r->writeSerial++; /* SCENE's colour changed (DATE's snapshot reuse) */
     s_sceneRepeats++;
+    s_blocks.serial = s_sceneRepeats;
+    s_blocks.replay = g_rd.replayCounter;
+    s_blocks.tex = t->color.id;
+    s_blocks.x0 = left ? a2 : 0;
+    s_blocks.x1 = right ? aR : tw;
     static const char *const kWhere[] = {
         [RD_BORDER_CLOSED] = "the border closed on a wide frame: the glow reads them",
         [RD_BORDER_OPEN] = "the border open: the glow and the present read them",
@@ -292,6 +352,21 @@ static void sceneRepeatDue(Replay *r)
     const RdTexRec *tx = rd__tex_rec(r->st.tex);
     if (!tx || tx->kind != RD_TEXKIND_TARGET ||
         rd__target_rec(tx->target) != rd__target_rec(RD_TARGET_SCENE + 1u)) {
+        return;
+    }
+    s_armed = 0;
+    if (s_sceneRepeat) {
+        sceneRepeat(r);
+    }
+}
+
+/* rd_replay.h: the repeat due at a post sprite that read SCENE and is not
+ * drawn: the held glow's mask (rd_glow_hold.c rd__glow_hold_nop), so a held
+ * present repeats SCENE's columns where the chain drawn repeats them (before
+ * the glow's paste), not at the next sprite that reads SCENE (after it) */
+void rd__scene_border_due(Replay *r)
+{
+    if (!s_armed || s_armed != g_rd.replayCounter) {
         return;
     }
     s_armed = 0;
@@ -458,12 +533,27 @@ static void glowEdge(Replay *r, const RdFrame *f, const RdCmd *c)
  * is not textured and covers everything already. */
 static void blurPostSprite(Replay *r, const RdFrame *f, const RdCmd *c);
 
+static void postSprite(Replay *r, const RdFrame *f, const RdCmd *c);
+
+/* The reduction's textured sprite after the upscale point: SCENE's record
+ * lends UPSCALED's texture and texels for this draw (rd_upscale.h), so the
+ * sprite's UVs, its GS-texel arithmetic and its scissor are the reduction's
+ * at the display scale; nothing recorded changes */
+void rd__blur_post_sprite(Replay *r, const RdFrame *f, const RdCmd *c)
+{
+    const bool remap = c->b[0] == RD_POST_REDUCTION && rd__upscale_remap_begin(&r->st);
+    postSprite(r, f, c);
+    if (remap) {
+        rd__upscale_remap_end();
+    }
+}
+
 /* Options > Effects > Motion blur strength (rd_internal.h
  * rd__blur_strength_fix): the motion blur's sprite drawn with the lower FIX
  * in the state, which its pipeline key and DrawCB take (rd_replay.c
  * doBlurSpriteDraw) and Smooth's k-root reads (rd__blur_smooth_sprite); the
  * recorded FIX put back after it.  At 100 % the sprite is drawn as before */
-void rd__blur_post_sprite(Replay *r, const RdFrame *f, const RdCmd *c)
+static void postSprite(Replay *r, const RdFrame *f, const RdCmd *c)
 {
     const uint8_t fix = r->st.ds.blendFix;
     const uint8_t eff =
@@ -480,9 +570,24 @@ void rd__blur_post_sprite(Replay *r, const RdFrame *f, const RdCmd *c)
 
 static void blurPostSprite(Replay *r, const RdFrame *f, const RdCmd *c)
 {
-    sceneRepeatDue(r); /* SCENE's outer columns before the first read of it */
+    rd__glow_light_mark(r); /* the passes SCENE's repeat begins are not the glow's */
+    sceneRepeatDue(r);      /* SCENE's outer columns before the first read of it */
+    /* the reduction not drawn: the present reads SCENE (rd_present_scene.c;
+     * the open border's columns would be drawn after the textured sprite) */
+    if (rd__present_scene_skip(r, f, c, s_borderRepeat && !rd__frame_cropped())) {
+        return;
+    }
+    if (rd__glow_light_sprite(r, f, c)) {
+        return; /* the glow's light plan: not drawn, or drawn another way (rd_glow_light.c) */
+    }
+    if (rd__glow_fold_skip(r, f, c)) {
+        return; /* the glow's fill or mask: its reduction computes it (rd_glow_fold.c) */
+    }
     if (c->b[0] == RD_POST_MOTION_BLUR && rd__blur_smooth_sprite(r, f, c)) {
         return; /* Motion blur: Smooth (rd_blur_smooth.c) */
+    }
+    if (rd__glow_blur_chain(r, f, c)) {
+        return; /* the glow's blur pairs in two passes (rd_glow_blur.c) */
     }
     if (rd__replay_blur_fold(r, f, c)) {
         return; /* a pair folded into one pass (rd_replay_tiler.c) */
@@ -515,4 +620,14 @@ static void blurPostSprite(Replay *r, const RdFrame *f, const RdCmd *c)
     }
     memcpy(r->st.scissor, scissor, sizeof(scissor));
     r->st.ds.wrap = wrap;
+}
+
+/* the glow's light plan (rd_glow_light.c): sprite c drawn with its source's
+ * colour planned (rd_const_read.c), and its glow edge strip, as
+ * blurPostSprite's plain path draws them (no fold: the plan draws one pass
+ * of a pair) */
+void rd__blur_post_planned(Replay *r, const RdFrame *f, const RdCmd *c)
+{
+    rd__replay_blur_sprite_draw(r, f, c);
+    glowEdge(r, f, c);
 }

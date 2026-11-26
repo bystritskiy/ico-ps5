@@ -46,9 +46,9 @@
  *   gl_resource.c   buffers, textures, samplers, shaders, bind group
  *                   layouts, bind groups, readback_texture
  *   gl_swapchain.c  resize_swapchain, swapchain_format, swapchain_size,
- *                   surface_poll_restart, acquire_backbuffer, present,
- *                   present_shown, release_surface, recreate_surface,
- *                   present_mode_name, present_statistics
+ *                   swapchain_rotation, surface_poll_restart, acquire_backbuffer, present,
+ *                   present_shown, wait_present_room, release_surface,
+ *                   recreate_surface, present_mode_name, present_statistics
  *   gl_pipeline.c   create_pipeline, create_pipelines, destroy_pipeline
  *   gl_cmd.c        begin_commands, end_commands, submit, and every other
  *                   rhi_cmd_* entry point
@@ -64,6 +64,7 @@
 #include <stdio.h>
 #include "../d3d12/d3d12_plan.h" /* the handle pools and the bind group layout rules */
 #include "../rhi.h"
+#include "../rhi_native.h"
 #include "gl_loader.h"
 
 /* gl_glsl.c (port/rhi/gl/gl_glsl.h): the text of a table entry's deflated
@@ -140,6 +141,7 @@ typedef struct GlPipeline {
     RhiFormat depthFormat;
     uint32_t samples;
     RhiDstRead dstRead;
+    bool noRaster;    /* RhiPipelineDesc.noRaster: GL_RASTERIZER_DISCARD at the draw */
     uint32_t dynamic; /* RHI_DYN_* */
     uint32_t layoutCount;
     uint32_t layoutIds[RHI_MAX_BIND_SLOTS];
@@ -188,7 +190,7 @@ typedef struct GlBindGroup {
 } GlBindGroup;
 
 /* The binding point of an RHI slot of a type (the map above):
- * b -> b, storage buffer t -> 16 + t, sampled texture t -> unit 16 + t,
+ * b -> b, storage buffer t -> 16 + t (a written one, u: 16 + u), sampled texture t -> unit 16 + t,
  * storage texture u -> image unit u (the translation step takes the SPIR-V's 48 off). */
 static inline uint32_t gl_bind_point(RhiBindType type, uint32_t slot)
 {
@@ -197,6 +199,7 @@ static inline uint32_t gl_bind_point(RhiBindType type, uint32_t slot)
     case RHI_BIND_UNIFORM_BUFFER_DYNAMIC:
         return slot;
     case RHI_BIND_STORAGE_BUFFER:
+    case RHI_BIND_STORAGE_BUFFER_RW: /* u -> 16 + u (tools/spirv_to_glsl.py moves the SSBO there) */
         return GL_UNIT_STORAGE_BASE + slot;
     case RHI_BIND_STORAGE_TEXTURE:
         return GL_UNIT_IMAGE_BASE + slot;
@@ -317,6 +320,18 @@ typedef struct GlFrame {
 } GlFrame;
 
 /* --------------------------------------------------------------- device */
+/* gl_start_screen.c's state, cleared with g_gl at rhi_init: the set's
+ * shader in hand and its size (RhiShaderDesc.planIndex, planTotal), when
+ * the set began, the screens drawn, the last one's end and the slowest,
+ * whether the draws during a compile were turned off (a slow one), the
+ * set over (the first command list or pipeline), ICO_GL_START_SCREEN read
+ * and off */
+typedef struct GlStartScreen {
+    uint32_t index, total, drawn;
+    uint64_t startNs, lastNs, slowestNs;
+    bool noWaitDraws, ended, envRead, off;
+} GlStartScreen;
+
 typedef struct GlState {
     bool initialised;
     RhiLimits limits;
@@ -392,6 +407,28 @@ typedef struct GlState {
      * points, and the fence waits */
     RhiStats counts;
     uint64_t fenceWaits, fenceWaitNs;
+
+    /* the window's wait hooks (rhi.h RhiWaitHooks, RhiDeviceDesc.waits),
+     * copied at rhi_init; hasWaits false for the tests and tools */
+    RhiWaitHooks waits;
+    bool hasWaits;
+    /* a frame's fence not signalled within the limit (gl_wait_sync): the
+     * device counts as lost (rhi_device_lost), no wait is made again */
+    bool lost;
+    /* the shader compiles (gl_compile.c): the compile thread, NULL when the
+     * compiles run on the calling thread; KHR_parallel_shader_compile used
+     * there instead; a compile the driver stalled in (the device's start
+     * fails: every later compile returns none) and its name; the count and
+     * the longest */
+    struct GlCompiler *compiler;
+    bool parallelKhr;
+    bool compileStalled;
+    char stalledName[96];
+    uint32_t compiles;
+    uint64_t compileNs, compileLongestNs;
+    char compileLongestName[96];
+    /* the progress screen while the start-up set compiles (gl_start_screen.c) */
+    GlStartScreen screen;
 } GlState;
 
 extern GlState g_gl;
@@ -400,6 +437,17 @@ extern GlState g_gl;
     do {                                                                                           \
         fprintf(stderr, "rhi_gl: " __VA_ARGS__);                                                   \
         fputc('\n', stderr);                                                                       \
+    } while (0)
+
+/* GL_LOG written out at once: stderr is fully buffered on Windows
+ * (port/platform/host_config.c ico_host_redirect_output) and flushed by the
+ * host loop once a vsync, so a hang inside the driver (a context's start, a
+ * shader compile) would keep the line in the buffer; the start lines and
+ * the compile's lines go this way. */
+#define GL_LOG_DIRECT(...)                                                                         \
+    do {                                                                                           \
+        GL_LOG(__VA_ARGS__);                                                                       \
+        fflush(stderr);                                                                            \
     } while (0)
 
 /* A rate for repeated failure lines: true for the first 8 of a counter,
@@ -486,7 +534,36 @@ GLenum gl_compare(RhiCompare c);
 GLenum gl_stencil_op(RhiStencilOp op);
 
 /* gl_swapchain.c */
+/* gl_compile.c: the shader compiles.  gl_compile_init at the end of
+ * rhi_init (the device's context current, on the window): with the window's
+ * wait hooks a compile thread with a context of the same share group, else
+ * KHR_parallel_shader_compile where offered, else nothing (the calling
+ * thread compiles, as the tests and tools do); its line says which.
+ * gl_compile_shutdown in rhi_shutdown before the context goes (an
+ * abandoned thread is left as it is).  gl_compile_program makes a separable
+ * program of one stage from text (taken: freed here) and returns it (0
+ * none), *linked its link status and log its info log when not linked; a
+ * compile past the hooks' limit is abandoned (gl_compile.c) and every
+ * later call returns 0 at once. */
+void gl_compile_init(void);
+void gl_compile_shutdown(void);
+GLuint gl_compile_program(GLenum type, char *text, const char *name, GLint *linked, char *log,
+                          size_t logSize);
+
 bool gl_swapchain_create(uint32_t w, uint32_t h, bool vsync);
 void gl_swapchain_destroy(void);
+
+/* gl_start_screen.c: the progress screen while the start-up shader set
+ * compiles (the file's header says how and when).  gl_start_screen_shader
+ * before shader index of total of the set compiles (rhi_create_shader;
+ * index 0: not of the set, nothing); gl_start_screen_wait between the
+ * compile's wait slices (gl_compile.c); gl_start_screen_end at the device's
+ * first command list or pipeline (the set's line; no screen after it). */
+void gl_start_screen_shader(uint32_t index, uint32_t total);
+void gl_start_screen_wait(void);
+void gl_start_screen_end(void);
+/* gl_cmd.c: colour attachment 0's write mask opened through the command
+ * code's raster cache (the start screen's clears of framebuffer 0) */
+void gl_cmd_open_colour_mask(void);
 
 #endif /* PORT_RHI_GL_GL_INTERNAL_H */

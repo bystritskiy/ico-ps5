@@ -15,6 +15,7 @@
 #define PORT_RHI_RHI_BACKEND_H
 
 #include "rhi.h"
+#include "rhi_native.h"
 
 /* X(name): every entry point of rhi.h a backend implements, in the order of
  * RhiBackendTable. */
@@ -30,10 +31,17 @@
     X(resize_swapchain)                                                                            \
     X(swapchain_format)                                                                            \
     X(swapchain_size)                                                                              \
+    X(swapchain_rotation)                                                                          \
     X(surface_poll_restart)                                                                        \
     X(acquire_backbuffer)                                                                          \
     X(present)                                                                                     \
     X(present_shown)                                                                               \
+    X(present_split)                                                                               \
+    X(wait_present_room)                                                                           \
+    X(wait_submitted)                                                                              \
+    X(submitted_finished)                                                                          \
+    X(last_submitted)                                                                              \
+    X(wait_value_ns)                                                                               \
     X(release_surface)                                                                             \
     X(recreate_surface)                                                                            \
     X(create_buffer)                                                                               \
@@ -60,6 +68,7 @@
     X(submit)                                                                                      \
     X(wait_frame)                                                                                  \
     X(frame_slot)                                                                                  \
+    X(commands_left)                                                                               \
     X(wait_idle)                                                                                   \
     X(collect_garbage_now)                                                                         \
     X(cmd_barrier)                                                                                 \
@@ -83,6 +92,11 @@
     X(cmd_copy_buffer_to_texture)                                                                  \
     X(cmd_copy_texture)                                                                            \
     X(cmd_copy_texture_to_buffer)                                                                  \
+    X(cmd_buffer_store_begin)                                                                      \
+    X(cmd_buffer_store_end)                                                                        \
+    X(cmd_buffer_compute_begin)                                                                    \
+    X(cmd_buffer_compute_end)                                                                      \
+    X(cmd_dispatch)                                                                                \
     X(cmd_resolve_color)                                                                           \
     X(cmd_begin_label)                                                                             \
     X(cmd_end_label)                                                                               \
@@ -95,7 +109,9 @@
     X(cmd_write_timestamp)                                                                         \
     X(read_timestamps)                                                                             \
     X(read_timestamps_busy)                                                                        \
+    X(read_timestamp_clock)                                                                        \
     X(occlusion_supported)                                                                         \
+    X(occlusion_prepare)                                                                           \
     X(cmd_begin_occlusion)                                                                         \
     X(cmd_end_occlusion)                                                                           \
     X(read_occlusion)                                                                              \
@@ -103,12 +119,16 @@
     X(present_mailbox)                                                                             \
     X(present_fifo_fallback)                                                                       \
     X(present_fifo_fallback_on)                                                                    \
+    X(present_fifo_start)                                                                          \
     X(set_exclusive_fullscreen)                                                                    \
     X(present_mode_name)                                                                           \
     X(present_timing)                                                                              \
     X(present_timing_use)                                                                          \
     X(present_last_id)                                                                             \
     X(present_timing_next)                                                                         \
+    X(present_glass)                                                                               \
+    X(present_desire)                                                                              \
+    X(present_glass_use)                                                                           \
     X(present_statistics)                                                                          \
     X(set_pipeline_cache_path)                                                                     \
     X(pipeline_cache_loaded)                                                                       \
@@ -116,7 +136,13 @@
     X(pipeline_cache_size)                                                                         \
     X(set_vulkan_loader)                                                                           \
     X(injector_name)                                                                               \
-    X(overlay_name)
+    X(overlay_name)                                                                                \
+    X(native_device)                                                                               \
+    X(native_texture)                                                                              \
+    X(native_command_list)                                                                         \
+    X(cmd_external_begin)                                                                          \
+    X(cmd_external_end)                                                                            \
+    X(device_compute_caps)
 
 /* One function pointer per entry point, typed from rhi.h's declaration (in
  * a backend's sources rhi_##n pastes to the renamed function, which has the

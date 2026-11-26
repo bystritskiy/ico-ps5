@@ -3,6 +3,7 @@
 #include "present_fallback.h"
 #include <stdio.h>
 #include <string.h>
+#include "rhi_device_table.h" /* port/rhi: the driver tests' rows */
 
 IcoPresentFallbackMode ico_present_fallback_mode(const char *value)
 {
@@ -19,28 +20,84 @@ IcoPresentFallbackMode ico_present_fallback_mode(const char *value)
     return ICO_PRESENT_FALLBACK_AUTO;
 }
 
-/* word anywhere in s, any case (the driver texts' own spelling varies:
-   "turnip Mesa driver", "Mesa 25.1.0") */
-static int has_word(const char *s, const char *word)
+/* The driver tests are the device table's (port/rhi/rhi_device_table.c): each
+   predicate builds an identity of its arguments and reads its choice there.
+   FALLBACK_ELIGIBLE is off on the rows vendor-unknown (vendor 0) and
+   mesa-drivers (driver id 18, or "mesa" or "turnip" in the driver text);
+   FALLBACK_SWITCH is yes on the row qualcomm-text (vendor 0x5143 and
+   eligible); FIFO_FROM_START is the row qualcomm-text-android's (the same
+   test on an Android build).  They are the rules these functions held
+   before, and port/rhi/test/rhi_device_table_equiv_test.c compares the two
+   on every identity of its matrix. */
+static RhiDeviceId driver_id_of(unsigned vendorId, unsigned driverId, const char *driverText,
+                                int android)
 {
-    const size_t n = strlen(word);
+    RhiDeviceId id;
 
-    for (; s != NULL && *s != '\0'; s++) {
-        size_t i = 0;
-
-        while (i < n && s[i] != '\0' && (s[i] | 0x20) == (word[i] | 0x20)) {
-            i++;
-        }
-        if (i == n) {
-            return 1;
-        }
-    }
-    return 0;
+    memset(&id, 0, sizeof id);
+    id.os = (uint8_t)(android ? RHI_DT_ANDROID : RHI_DT_LINUX);
+    id.vendorId = vendorId;
+    id.driverId = driverId;
+    id.driverText = driverText;
+    return id;
 }
 
-int ico_present_fallback_driver_eligible(unsigned vendorId, const char *driverText)
+int ico_present_fallback_driver_eligible(unsigned vendorId, unsigned driverId,
+                                         const char *driverText)
 {
-    return vendorId != 0 && !has_word(driverText, "mesa") && !has_word(driverText, "turnip");
+    const RhiDeviceId id = driver_id_of(vendorId, driverId, driverText, 0);
+
+    return rhi_device_table_choice(&id, RHI_DC_FALLBACK_ELIGIBLE, NULL) != 0;
+}
+
+int ico_present_fallback_qualcomm_own(unsigned vendorId, unsigned driverId, const char *driverText)
+{
+    const RhiDeviceId id = driver_id_of(vendorId, driverId, driverText, 0);
+
+    return rhi_device_table_choice(&id, RHI_DC_FALLBACK_SWITCH, NULL) == RHI_DT_SWITCH_YES;
+}
+
+IcoPresentFallbackGate ico_present_fallback_gate(int vsync, int mailbox, int vulkan,
+                                                 unsigned vendorId, unsigned driverId,
+                                                 const char *driverText,
+                                                 IcoPresentFallbackMode mode)
+{
+    if (vsync || !mailbox || !vulkan ||
+        !ico_present_fallback_driver_eligible(vendorId, driverId, driverText) ||
+        mode == ICO_PRESENT_FALLBACK_FIFO) {
+        return ICO_PRESENT_FALLBACK_GATE_NO;
+    }
+    if (mode == ICO_PRESENT_FALLBACK_OFF) {
+        return ICO_PRESENT_FALLBACK_GATE_KEPT;
+    }
+    /* the switch was measured on Qualcomm's own driver only; on a Mali-G52 it
+       lengthened the blocks (issue 179) */
+    return ico_present_fallback_qualcomm_own(vendorId, driverId, driverText)
+               ? ICO_PRESENT_FALLBACK_GATE_YES
+               : ICO_PRESENT_FALLBACK_GATE_OTHER;
+}
+
+int ico_present_fallback_start_asked(IcoPresentFallbackMode mode, int android)
+{
+    return mode == ICO_PRESENT_FALLBACK_AUTO && android;
+}
+
+int ico_present_fallback_start(IcoPresentFallbackMode mode, int android, int vsync,
+                               unsigned vendorId, unsigned driverId, const char *driverText)
+{
+    /* the row is Android's: android 0 never matches it, as mode auto asks
+       on an Android build alone */
+    const RhiDeviceId id = driver_id_of(vendorId, driverId, driverText, android);
+
+    return ico_present_fallback_start_asked(mode, android) && !vsync &&
+           rhi_device_table_choice(&id, RHI_DC_FIFO_FROM_START, NULL) != 0;
+}
+
+void ico_present_fallback_start_line(char *out, size_t size)
+{
+    snprintf(out, size,
+             "window: present fifo (Qualcomm's own driver: FIFO from the start; [dev] "
+             "present_fallback = off keeps mailbox)");
 }
 
 /* the held blocks older than the window before nowNs leave */
@@ -109,10 +166,12 @@ int ico_present_fallback_note(IcoPresentFallback *f, unsigned long long nowNs, d
         record(f, nowNs);
         return ICO_PRESENT_FALLBACK_SWITCH;
     }
-    if (gate == ICO_PRESENT_FALLBACK_GATE_KEPT && !f->kept) {
+    if ((gate == ICO_PRESENT_FALLBACK_GATE_KEPT || gate == ICO_PRESENT_FALLBACK_GATE_OTHER) &&
+        !f->kept) {
         f->kept = 1;
         record(f, nowNs);
-        return ICO_PRESENT_FALLBACK_KEPT;
+        return gate == ICO_PRESENT_FALLBACK_GATE_KEPT ? ICO_PRESENT_FALLBACK_KEPT
+                                                      : ICO_PRESENT_FALLBACK_OTHER;
     }
     return 0;
 }
@@ -155,6 +214,21 @@ void ico_present_fallback_kept_line(const IcoPresentFallback *f, char *out, size
              f->n, ICO_PRESENT_FALLBACK_BLOCK_MS, f->takenSpanS);
 }
 
+void ico_present_fallback_other_line(const IcoPresentFallback *f, const char *adapter,
+                                     const char *driverText, char *out, size_t size)
+{
+    char drv[160];
+
+    first_line(driverText, drv, sizeof drv);
+    snprintf(out, size,
+             "window: present blocked %d times (%.0f-%.0f ms) in %.0f s on %s (%s) under "
+             "mailbox: mailbox kept (presents go FIFO by themselves only on Qualcomm's own "
+             "driver, where the blocks were measured; [dev] present_fallback = fifo asks for FIFO "
+             "here)",
+             f->n, f->takenMinMs, f->takenMaxMs, f->takenSpanS,
+             adapter != NULL ? adapter : "an unknown device", drv);
+}
+
 void ico_present_fallback_block_suffix(const IcoPresentFallback *f, unsigned long long nowNs,
                                        char *out, size_t size)
 {
@@ -180,12 +254,14 @@ void ico_present_fallback_block_suffix(const IcoPresentFallback *f, unsigned lon
 }
 
 void ico_present_fallback_mode_suffix(const IcoPresentFallback *f, IcoPresentFallbackMode mode,
-                                      int armed, char *out, size_t size)
+                                      int armed, int fifoStart, char *out, size_t size)
 {
     if (f != NULL && f->taken) {
         snprintf(out, size, ", FIFO fallback taken after %u blocks", f->takenBlocks);
     } else if (mode == ICO_PRESENT_FALLBACK_FIFO) {
         snprintf(out, size, ", FIFO fallback set by [dev] present_fallback=fifo");
+    } else if (fifoStart) {
+        snprintf(out, size, ", FIFO from the start (Qualcomm's own driver)");
     } else if (armed) {
         snprintf(out, size, ", FIFO fallback armed");
     } else {

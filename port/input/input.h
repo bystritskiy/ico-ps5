@@ -84,6 +84,18 @@ void ico_input_frame_for_port(int port, IcoPadFrame *out);
    bytes 20 and 21, active low. fumi/ios/pad.c reads the default table's
    buttons through it. */
 unsigned int ico_pad_menu_word(const void *libpad_buf);
+/* The menus' view of the left stick's x (the byte the game holds in
+   pad[0].ana[2], 0 left, 255 right). Mirror mode negates the frame's stick
+   x for the flipped 3D picture, but the menus are drawn unflipped
+   (port/render/rd_replay.c mirrorUi), so with the option on this gives the
+   reflection 255 - x back and the stick moves a menu's cursor the way it
+   was pushed; with it off, x unchanged. It follows the option, not the
+   frame's source, so a recording of a mirrored run (its frames as negated)
+   replays as it ran. The game's lt_analog2Pad (common/src/layout_texture.c),
+   the stick's d-pad emulation of every layout, reads the stick through it. */
+unsigned char ico_pad_menu_stick_x(unsigned char x);
+/* How many times ico_pad_menu_stick_x reflected x (the option on). */
+unsigned int ico_pad_menu_stick_x_reflected(void);
 
 /* Rumble. act = the 6 bytes scePadSetActDirect gets, align = the bytes
    scePadSetActAlign set (align[i] = the actuator data byte i drives: 0 the
@@ -98,7 +110,7 @@ void ico_input_rumble_get_for_port(int port, unsigned short *high_freq, unsigned
 /* --- bindings (bindings.c) ------------------------------------------------ */
 
 /* Targets: the sixteen buttons in ICO_PAD_* bit order, then the eight stick
-   directions. */
+   directions, then the hint action. */
 enum {
     ICO_T_L2,
     ICO_T_R2,
@@ -124,6 +136,9 @@ enum {
     ICO_T_RSTICK_DOWN,
     ICO_T_RSTICK_LEFT,
     ICO_T_RSTICK_RIGHT,
+    /* an action, not a pad button: Ask Yorda for a hint (port/game/ico_rows.h;
+       unbound by default, off the pad frame, shown on the discs with hints) */
+    ICO_T_HINT,
     ICO_T_COUNT
 };
 
@@ -234,6 +249,9 @@ typedef struct IcoBindings {
        (default medium), percent 10..100 (default 75; the Settings row
        steps 25, 50, 75, 100) */
     int touch_mode, touch_size, touch_opacity;
+    /* set by each ico_bindings_step: a source of ICO_T_HINT is held (the
+       gamepad's when gamepad is on, the keyboard's and the mouse's) */
+    int hint_down;
 } IcoBindings;
 
 /* The defaults, the same on every platform. */
@@ -288,6 +306,29 @@ void ico_input_note_press(int kind, int code);
    capture compares the sequence with the one it saw when it started. */
 unsigned int ico_input_last_press(int *kind, int *code);
 
+/* --- the kind of controller pressed last (pad_kind.c) ----------------------- */
+
+/* Whose button pictures fit the controller in use (port/ui/pad_glyphs.h, the
+   Button pictures option's Auto). */
+typedef enum IcoPadKind {
+    ICO_PAD_KIND_PLAYSTATION = 0,
+    ICO_PAD_KIND_XBOX,
+    ICO_PAD_KIND_NINTENDO
+} IcoPadKind;
+
+/* The kind of the gamepad whose button (or trigger, or stick past half) was
+   pressed last: Xbox for SDL's Xbox 360, Xbox One and Steam types, Nintendo
+   for the Switch Pro Controller and a pair of Joy-Cons; PlayStation for
+   every other type, and when the last press came from the keyboard, the
+   mouse or the touch screen; PlayStation before any press and in the
+   headless build (nothing reports there). */
+int ico_input_last_pad_kind(void);
+/* The device layer's report of a press (input_sdl.c): its kind (anything but
+   Xbox or Nintendo counts as PlayStation) and what pressed, for the log
+   line a change writes (first 8, then every 100th): "keyboard", "mouse",
+   "touch", or the gamepad's SDL type (pad_kind.h ico_pad_sdl_type_name). */
+void ico_input_note_pad_kind(int kind, const char *from);
+
 /* Bind target to one source of its kind: that device's row for target is
    replaced by the source alone, and the source is taken off every other
    target of the same device (one key, one action). When the source was on
@@ -324,8 +365,9 @@ void ico_bindings_clear(IcoBindings *b, int target);
 const char *ico_bindings_row_text(const IcoBindings *b, int kind, int target, char *buf,
                                   unsigned size);
 /* The config names of the touch overlay's settings by value ("off",
-   "auto", "always"; "small", "medium", "large"; bindings.c). */
-extern const char *const ico_touch_mode_names[3];
+   "auto", "always", "always_scenes"; "small", "medium", "large";
+   bindings.c). */
+extern const char *const ico_touch_mode_names[4];
 extern const char *const ico_touch_size_names[3];
 /* A mouse button's config name ("left", "right", "middle", "x1", "x2"). */
 const char *ico_mouse_name(int button);

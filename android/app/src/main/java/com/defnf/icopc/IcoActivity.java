@@ -3,6 +3,7 @@
 // libmain.so (the CMake target ico_pc), whose SDL_main SDL calls.
 package com.defnf.icopc;
 
+import android.app.ActivityManager;
 import android.content.ActivityNotFoundException;
 import android.content.ClipData;
 import android.content.ComponentName;
@@ -10,11 +11,14 @@ import android.content.Context;
 import android.content.Intent;
 import android.content.res.Configuration;
 import android.database.Cursor;
+import android.graphics.Bitmap;
+import android.graphics.BitmapFactory;
 import android.graphics.Rect;
 import android.net.Uri;
 import android.os.Build;
 import android.os.Bundle;
 import android.os.ParcelFileDescriptor;
+import android.os.PowerManager;
 import android.provider.OpenableColumns;
 import android.os.VibrationEffect;
 import android.os.Vibrator;
@@ -85,9 +89,378 @@ public class IcoActivity extends SDLActivity {
         }
     };
 
+    // The phone's thermal state and whether the screen is being recorded,
+    // for the log (issue 123: a throttled GPU or a recorder holding frames
+    // back looks like a stall). thermalHeadroom and thermalStatus answer
+    // the native side's asks (host_android.c ico_host_thermal, on SDL's
+    // main thread); the two listeners push every change (nativeThermalStatus
+    // from Android 10, nativeScreenRecording from Android 15). Every call is
+    // behind its API level, a missing native method is ignored, and a
+    // failure of any of it only means no words in the log. The listener
+    // fields are Objects so that this class loads on Android 8 without the
+    // newer classes.
+    private static native void nativeThermalStatus(int status);
+    private static native void nativeScreenRecording(int state);
+    private static PowerManager sPower;
+    private Object mThermalListener;
+    private Object mRecordingCallback;
+
+    private static PowerManager power() {
+        if (sPower == null && sInstance != null) {
+            sPower = (PowerManager) sInstance.getSystemService(Context.POWER_SERVICE);
+        }
+        return sPower;
+    }
+
+    // PowerManager.getThermalHeadroom(0): the forecast of the thermal
+    // state now, 1.0 the point where the system starts to throttle; NaN
+    // before Android 11, when the phone gives none, or when asked too often
+    public static float thermalHeadroom() {
+        try {
+            PowerManager pm = power();
+            if (Build.VERSION.SDK_INT >= 30 && pm != null) {
+                return pm.getThermalHeadroom(0);
+            }
+        } catch (RuntimeException e) {
+            // no answer is the answer
+        }
+        return Float.NaN;
+    }
+
+    // PowerManager.getCurrentThermalStatus: 0 (none) to 6 (shutdown), -1
+    // before Android 10 or when the phone gives none
+    public static int thermalStatus() {
+        try {
+            PowerManager pm = power();
+            if (Build.VERSION.SDK_INT >= 29 && pm != null) {
+                return pm.getCurrentThermalStatus();
+            }
+        } catch (RuntimeException e) {
+            // no answer is the answer
+        }
+        return -1;
+    }
+
+    // last-run.txt's summary (port/platform/last_run.h, issue 215) to
+    // ActivityManager.setProcessStateSummary (Android 11, API 30; at most
+    // 128 bytes), so the system's exit record of this process
+    // (ApplicationExitInfo.getProcessStateSummary) says where the run was
+    // even when the app's files are lost. Called from native code at each
+    // phase change (port/platform/android/last_run_android.c): null when
+    // the system took it, else why not.
+    public static String processStateSummary(byte[] state) {
+        if (Build.VERSION.SDK_INT < 30) {
+            return "Android " + Build.VERSION.RELEASE + " (API " + Build.VERSION.SDK_INT
+                    + ") has no process state summary (API 30)";
+        }
+        if (sInstance == null) {
+            return "no activity";
+        }
+        try {
+            ActivityManager am = (ActivityManager)
+                    sInstance.getSystemService(Context.ACTIVITY_SERVICE);
+            if (am == null) {
+                return "no ActivityManager";
+            }
+            am.setProcessStateSummary(state);
+            return null;
+        } catch (RuntimeException e) {
+            return "setProcessStateSummary: " + e;
+        }
+    }
+
+    // Android's exit records of this app's earlier processes (Android 11,
+    // API 30; port/platform/exit_info.h, issue 215), read once at the start
+    // from native code (port/platform/android/exit_info_android.c): the
+    // record text, one tab-separated line a fact or record (ExitRecords).
+    // The limits come from the native side.
+    public static String exitRecords(String logsDir, long lastSeenMs, int maxRecords,
+            int traceMaxBytes, int descMax) {
+        if (Build.VERSION.SDK_INT < 30) {
+            return "sdk\t" + Build.VERSION.SDK_INT + "\n";
+        }
+        if (sInstance == null) {
+            return "sdk\t" + Build.VERSION.SDK_INT + "\nwhy\tno activity\n";
+        }
+        return ExitRecords.read(sInstance, logsDir, lastSeenMs, maxRecords, traceMaxBytes,
+                descMax);
+    }
+
+    // The battery for the log (issue 179: whether a power limit slows the
+    // GPU), asked once a second from the log thread (host_android.c
+    // ico_android_battery, port/platform/power_read.h) only where
+    // /sys/class/power_supply cannot be read. Read only: BatteryManager's
+    // current (uA, Integer.MIN_VALUE where the phone gives none) and level,
+    // and the sticky battery broadcast's voltage (mV) and status
+    // (BatteryManager.BATTERY_STATUS_*); -1 for a value not given; null with
+    // no activity. registerReceiver with no receiver only returns the last
+    // broadcast.
+    public static int[] batteryState() {
+        if (sInstance == null) {
+            return null;
+        }
+        int[] out = {Integer.MIN_VALUE, -1, -1, -1};
+        try {
+            android.os.BatteryManager bm = (android.os.BatteryManager)
+                    sInstance.getSystemService(Context.BATTERY_SERVICE);
+            if (bm != null) {
+                out[0] = bm.getIntProperty(
+                        android.os.BatteryManager.BATTERY_PROPERTY_CURRENT_NOW);
+                int level = bm.getIntProperty(
+                        android.os.BatteryManager.BATTERY_PROPERTY_CAPACITY);
+                if (level >= 0 && level <= 100) {
+                    out[2] = level;
+                }
+            }
+        } catch (RuntimeException e) {
+            // no answer is the answer
+        }
+        try {
+            Intent i = sInstance.registerReceiver(null,
+                    new android.content.IntentFilter(Intent.ACTION_BATTERY_CHANGED));
+            if (i != null) {
+                out[1] = i.getIntExtra(android.os.BatteryManager.EXTRA_VOLTAGE, -1);
+                out[3] = i.getIntExtra(android.os.BatteryManager.EXTRA_STATUS, -1);
+                if (out[2] < 0) {
+                    int l = i.getIntExtra(android.os.BatteryManager.EXTRA_LEVEL, -1);
+                    int sc = i.getIntExtra(android.os.BatteryManager.EXTRA_SCALE, -1);
+                    if (l >= 0 && sc > 0) {
+                        out[2] = l * 100 / sc;
+                    }
+                }
+            }
+        } catch (RuntimeException e) {
+            // no answer is the answer
+        }
+        return out;
+    }
+
+    // GameManager.getGameMode: 0 unsupported, 1 standard, 2 performance, 3
+    // battery, 4 custom; -1 before Android 12 (API 31), -2 when the system
+    // gives none. Asked once at the window's open, for the performance
+    // hints' log line only (host_android.c ico_android_game_mode): the port
+    // changes nothing by it (res/xml/game_mode_config.xml says the game
+    // takes no downscaling or frame rate override).
+    public static int gameMode() {
+        if (Build.VERSION.SDK_INT < 31) {
+            return -1;
+        }
+        try {
+            if (sInstance != null) {
+                android.app.GameManager gm = (android.app.GameManager)
+                        sInstance.getSystemService(Context.GAME_SERVICE);
+                if (gm != null) {
+                    return gm.getGameMode();
+                }
+            }
+        } catch (RuntimeException | LinkageError e) {
+            // no answer is the answer
+        }
+        return -2;
+    }
+
+    // The display the activity is on, for the frame rate pin under Uncapped
+    // (host_android.c ico_android_display_modes, window_display_rate.c): the
+    // current mode's physical width and height, the display's refresh rate
+    // as SDL reads it (Display.getRefreshRate, which follows a frame rate
+    // override the system gives the app), then each supported mode's width,
+    // height and rate (Display.getSupportedModes); null before Android 11
+    // (Activity.getDisplay is API 30) or when the system gives none. Read
+    // only: nothing here asks for a mode.
+    public static float[] displayModes() {
+        if (Build.VERSION.SDK_INT < 30 || sInstance == null) {
+            return null;
+        }
+        try {
+            android.view.Display d = sInstance.getDisplay();
+            if (d == null) {
+                return null;
+            }
+            android.view.Display.Mode cur = d.getMode();
+            android.view.Display.Mode[] modes = d.getSupportedModes();
+            if (cur == null || modes == null) {
+                return null;
+            }
+            float[] out = new float[3 + 3 * modes.length];
+            out[0] = cur.getPhysicalWidth();
+            out[1] = cur.getPhysicalHeight();
+            out[2] = d.getRefreshRate();
+            for (int i = 0; i < modes.length; i++) {
+                out[3 + 3 * i] = modes[i].getPhysicalWidth();
+                out[4 + 3 * i] = modes[i].getPhysicalHeight();
+                out[5 + 3 * i] = modes[i].getRefreshRate();
+            }
+            return out;
+        } catch (RuntimeException | LinkageError e) {
+            // no answer is the answer
+        }
+        return null;
+    }
+
+    // The display's refresh rate to the native side at the start of each
+    // visible stretch and at every change of its rate or mode list
+    // (host_android.c nativeDisplayRate): SDL's Java side passes the rate
+    // only in SDLSurface.surfaceChanged, and a panel that switches rates
+    // (the frame rate pin's ask, or the system's own choice) does not
+    // resize the surface, so SDL's mode keeps the old rate; the game paces by
+    // the reported rate only under Uncapped (display_rate.h
+    // display_refresh_pick). A report equal to the last one sent is not
+    // sent (Arrays.equals), and the native side ignores one it already acted
+    // on (display_report_new). Android 11 and
+    // later (displayModes); the listener field is an Object, as the thermal
+    // listener's is, and any failure only means SDL's rate is used.
+    private static native void nativeDisplayRate(float hz, int modes);
+    private Object mDisplayListener;
+    private float[] mDisplaySent;
+
+    private void sendDisplay() {
+        float[] modes = displayModes();
+        if (modes == null || SDLActivity.mBrokenLibraries
+                || java.util.Arrays.equals(modes, mDisplaySent)) {
+            return;
+        }
+        mDisplaySent = modes;
+        try {
+            nativeDisplayRate(modes[2], java.util.Arrays.hashCode(modes));
+        } catch (UnsatisfiedLinkError e) {
+            // libmain.so without the method
+        }
+    }
+
+    private void startDisplayWatch() {
+        if (Build.VERSION.SDK_INT < 30 || mDisplayListener != null) {
+            return;
+        }
+        try {
+            android.hardware.display.DisplayManager dm = (android.hardware.display.DisplayManager)
+                    getSystemService(Context.DISPLAY_SERVICE);
+            if (dm != null) {
+                android.hardware.display.DisplayManager.DisplayListener l =
+                        new android.hardware.display.DisplayManager.DisplayListener() {
+                            @Override
+                            public void onDisplayAdded(int displayId) {
+                            }
+
+                            @Override
+                            public void onDisplayRemoved(int displayId) {
+                            }
+
+                            @Override
+                            public void onDisplayChanged(int displayId) {
+                                sendDisplay();
+                            }
+                        };
+                dm.registerDisplayListener(l,
+                        new android.os.Handler(android.os.Looper.getMainLooper()));
+                mDisplayListener = l;
+            }
+        } catch (RuntimeException | LinkageError e) {
+            mDisplayListener = null;
+        }
+        mDisplaySent = null;
+        sendDisplay();
+    }
+
+    private void stopDisplayWatch() {
+        if (mDisplayListener == null) {
+            return;
+        }
+        try {
+            android.hardware.display.DisplayManager dm = (android.hardware.display.DisplayManager)
+                    getSystemService(Context.DISPLAY_SERVICE);
+            if (dm != null) {
+                dm.unregisterDisplayListener(
+                        (android.hardware.display.DisplayManager.DisplayListener) mDisplayListener);
+            }
+        } catch (RuntimeException | LinkageError e) {
+            // already gone
+        }
+        mDisplayListener = null;
+    }
+
+    private void pushThermalStatus(int status) {
+        if (!SDLActivity.mBrokenLibraries) {
+            try {
+                nativeThermalStatus(status);
+            } catch (UnsatisfiedLinkError e) {
+                // libmain.so without the method
+            }
+        }
+    }
+
+    private void pushScreenRecording(int state) {
+        if (!SDLActivity.mBrokenLibraries) {
+            try {
+                nativeScreenRecording(state);
+            } catch (UnsatisfiedLinkError e) {
+                // libmain.so without the method
+            }
+        }
+    }
+
+    // while the activity is visible: the thermal status listener (Android
+    // 10) and the screen recording callback (Android 15, the
+    // DETECT_SCREEN_RECORDING permission in the manifest, a normal one;
+    // addScreenRecordingCallback answers with the state at registration)
+    private void startThermalWatch() {
+        if (Build.VERSION.SDK_INT >= 29 && mThermalListener == null) {
+            try {
+                PowerManager pm = power();
+                if (pm != null) {
+                    PowerManager.OnThermalStatusChangedListener l =
+                            status -> pushThermalStatus(status);
+                    pm.addThermalStatusListener(ContextCompat.getMainExecutor(this), l);
+                    mThermalListener = l;
+                }
+            } catch (RuntimeException | LinkageError e) {
+                mThermalListener = null;
+            }
+        }
+        if (Build.VERSION.SDK_INT >= 35 && mRecordingCallback == null) {
+            try {
+                java.util.function.Consumer<Integer> cb = state -> pushScreenRecording(state);
+                int state = getWindowManager().addScreenRecordingCallback(
+                        ContextCompat.getMainExecutor(this), cb);
+                mRecordingCallback = cb;
+                pushScreenRecording(state);
+            } catch (RuntimeException | LinkageError e) {
+                // no permission, or the system refuses: no recording words
+                mRecordingCallback = null;
+            }
+        }
+    }
+
+    @SuppressWarnings("unchecked")
+    private void stopThermalWatch() {
+        if (Build.VERSION.SDK_INT >= 29 && mThermalListener != null) {
+            try {
+                PowerManager pm = power();
+                if (pm != null) {
+                    pm.removeThermalStatusListener(
+                            (PowerManager.OnThermalStatusChangedListener) mThermalListener);
+                }
+            } catch (RuntimeException | LinkageError e) {
+                // already gone
+            }
+            mThermalListener = null;
+        }
+        if (Build.VERSION.SDK_INT >= 35 && mRecordingCallback != null) {
+            try {
+                getWindowManager().removeScreenRecordingCallback(
+                        (java.util.function.Consumer<Integer>) mRecordingCallback);
+            } catch (RuntimeException | LinkageError e) {
+                // already gone
+            }
+            mRecordingCallback = null;
+        }
+    }
+
     @Override
     protected void onStart() {
         super.onStart();
+        applyTaskIcon();
+        startThermalWatch();
+        startDisplayWatch();
         try {
             if (mLayoutTracker == null) {
                 mLayoutTracker = new WindowInfoTrackerCallbackAdapter(
@@ -107,6 +480,8 @@ public class IcoActivity extends SDLActivity {
 
     @Override
     protected void onStop() {
+        stopThermalWatch();
+        stopDisplayWatch();
         if (mLayoutTracker != null) {
             try {
                 mLayoutTracker.removeWindowLayoutInfoListener(mLayoutListener);
@@ -212,6 +587,52 @@ public class IcoActivity extends SDLActivity {
             sVibrator.vibrate(VibrationEffect.createOneShot(ms, Math.min(amplitude, 255)));
         } catch (RuntimeException e) {
             // no vibration is better than a crash
+        }
+    }
+
+    // The recents card's icon (host_android.c ico_android_task_icon, on SDL's
+    // main thread): the PNG the game made from the title's I
+    // (<files>/icon/ico-pc-<disc>.png), decoded, kept, and set as the task's
+    // icon on the UI thread.  null when it was started, else the reason,
+    // which the native side logs.  The launcher icon is a compiled resource
+    // and stays; some launchers ignore a task description's icon.
+    private static Bitmap sTaskIcon;
+
+    public static String setTaskIcon(String path) {
+        IcoActivity a = sInstance;
+        if (a == null) {
+            return "no activity";
+        }
+        // Straight alpha kept: the PNG's background is alpha 0, so the card's
+        // own colour shows round the letter (no RGB_565, no fill).
+        BitmapFactory.Options opts = new BitmapFactory.Options();
+        opts.inPreferredConfig = Bitmap.Config.ARGB_8888;
+        Bitmap bmp = BitmapFactory.decodeFile(path, opts);
+        if (bmp == null) {
+            return "the PNG could not be decoded";
+        }
+        if (!bmp.hasAlpha()) {
+            return "the PNG decoded without an alpha channel";
+        }
+        sTaskIcon = bmp;
+        a.runOnUiThread(() -> a.applyTaskIcon());
+        return null;
+    }
+
+    // A recreated activity resets its description, so onStart sets it again.
+    // The Bitmap constructor is deprecated from 33, but it is the only form
+    // that takes a run-time image (the int and Builder forms take a resource
+    // id).
+    @SuppressWarnings("deprecation")
+    private void applyTaskIcon() {
+        Bitmap bmp = sTaskIcon;
+        if (bmp == null) {
+            return;
+        }
+        try {
+            setTaskDescription(new ActivityManager.TaskDescription(getString(R.string.app_name), bmp));
+        } catch (RuntimeException e) {
+            // a plain card is better than a crash
         }
     }
 

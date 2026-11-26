@@ -23,17 +23,24 @@ onto a face button or the d-pad. Then the game follows your change in
 play, but the menus still use that face button or d-pad direction for its
 usual job, and the original button for its own.
 
+The menus, the game's prompts, photo mode and the touch screen buttons show
+pictures of the controller you used last: Xbox pictures for an Xbox
+controller, Nintendo pictures for a Switch Pro Controller or a pair of
+Joy-Cons, and the PlayStation ones otherwise. Options > Controls > Button
+pictures picks a set yourself (also the Wii Classic Controller's).
+[More about Button pictures](OPTIONS.md#controls).
+
 | PS2 button | Gamepad | Keyboard | Mouse |
 | --- | --- | --- | --- |
-| Cross (confirm, jump, call Yorda) | bottom face button (A on Xbox) | Space | left button |
+| Cross (confirm, jump) | bottom face button (A on Xbox) | Space | left button |
 | Circle (in menus, goes back like Triangle) | right face button | E | right button |
 | Square | left face button | Q | |
 | Triangle (back) | top face button | R | |
-| L1 / R1 (R1 holds Yorda's hand) | shoulder buttons | Tab or the ` key (left of 1) / F | middle button (R1) |
-| L2 / R2 | triggers | Z / X | |
-| L3 / R3 (press a stick in) | press a stick in | V / B | |
+| L1 / R1 (R1 calls Yorda and holds her hand; in Options > Picture they change a colour row by 10) | shoulder buttons | Tab or the ` key (left of 1) / F | middle button (R1) |
+| L2 / R2 (R2 zooms the camera in) | triggers | Z / X | |
+| L3 / R3 (press a stick in; L3 looks at Yorda with Look at Yorda on, R3 brings the camera back to Ico with Camera reset on) | press a stick in | V / B | |
 | Start / Select | start / back (or view) | Enter / Backspace | |
-| D-pad (menus) | d-pad | arrow keys | |
+| D-pad (menus) | d-pad (hold Left or Right on a slider row in Options to keep changing it) | arrow keys | |
 | Left stick (move) | left stick | W A S D (hold Left Shift to walk) | |
 | Right stick (look) | right stick | I J K L | move the mouse |
 
@@ -44,6 +51,47 @@ play the other way, choose **A (hold)** or **B (toggle)** under
 **Options > Controls > Hold type**, from the title screen or the pause
 menu; **Disc's own** goes back to the disc's way. It works the same with
 every way of playing.
+
+The camera zooms in while you keep R2 held, on every disc. To zoom with one
+press instead, choose **Toggle** under **Options > Controls > Zoom type**:
+press R2 once to zoom in and again to zoom out. The camera also zooms back
+out by itself when a cutscene takes over or the game zooms the camera
+itself, and when you go into another room. **Hold** is the game's own way.
+It shows from the title screen and the pause menu, and works the same with
+a controller, the keyboard and the touch screen, on whichever button the
+game's **Button configuration** gives the zoom.
+
+The right stick turns the camera to look around, and the camera drifts back
+to Ico slowly once you let go. To bring it back at once, turn on **Options >
+Controls > Camera reset** and press R3 (click the right stick in, or
+keyboard B): the camera is back on Ico straight away, and a zoom you turned
+on with Zoom type **Toggle** ends too. If you are still pushing the right
+stick, the camera stays on Ico until you let the stick go. R3 can be moved
+to any other key or button under **Remap controls**. It is off unless you
+turn it on, shows from the title screen and the pause menu, and works on
+every disc. The touch screen has no R3 button, so there it only works with a
+controller or keyboard. Save states load whichever way it is set.
+
+To see where Yorda is without calling her, set **Options > Controls > Look
+at Yorda** to **Hold** or **Toggle** and press L3 (click the left stick in,
+or keyboard V). Ico turns his head to her and the camera turns to show
+them both, the same look the game gives when you call her with R1, but Ico
+does not call her and she does not come. With **Hold** the look lasts while
+you keep L3 held; with **Toggle** one press starts it and the next ends it.
+A look started with Toggle also ends when a cutscene takes over, when you
+go into another room, when you take her hand, when you press R3 with
+Camera reset on and when you load a save state; calling her with R1,
+pausing and the menus leave it on. While you hold her hand
+L3 does nothing (she is beside you). When she is somewhere else in the
+castle the camera turns toward where she is, as it does when you press R1
+there. Where the game keeps the camera fixed when you call her, Ico still
+turns his head but the camera stays. It is off unless you turn it on, shows
+from the title screen and the pause menu, and works on every disc. L3 can
+be moved to any other key or button under **Remap controls**; the touch
+screen has no L3 button, so there it only works with a controller or
+keyboard. While **Free movement** (under [Developer mode](OPTIONS.md#developer-mode))
+or the debug menu's camera is on, L3 is theirs, so Look at Yorda waits
+until you turn them off.
 
 A few more keys on a computer:
 
@@ -76,6 +124,9 @@ Escape, Alt+Enter, F5, F6, F9, F11, F12 and Shift+F12 cannot be changed. Everyth
 **Options > Controls > Remap controls**. When you give a button or key to
 another action, the two actions swap. If the action you changed had no
 button on that device, the other action is left without one.
+On the discs that have hints, the last row, **Ask Yorda for a hint**, starts
+with no button or key: give it one and pressing it makes the hint that is
+waiting in the room play at once.
 The game's own **Button configuration** applies on top of your changes.
 
 ## The Japanese, Korean and Asian discs
@@ -314,7 +365,9 @@ pictures:
   finger on it, or, with **Hold type** on **B (toggle)** (the North
   American disc's and the 2001 previews' own way), tap it once to take her
   hand and tap it again to let go.
-- **R2** is in the top right corner.
+- **R2** is in the top right corner. It zooms the camera in while you hold
+  it, or, with **Zoom type** on **Toggle**, tap it once to zoom in and tap
+  it again to zoom out.
 - **Start and Select** are at the top in the middle.
 - **The look pad** is the rest of the upper right part of the screen.
   Slide a finger there to look around, as you would with the right stick.
@@ -342,7 +395,12 @@ only shows up on a device with a touch screen. The page has these rows:
 
 - **Touch controls:** Auto is the normal choice and works as described
   above. Always keeps the buttons on the screen all the time, and they
-  keep working with a gamepad connected. Off turns them off, but a phone
+  keep working with a gamepad connected. Always, Start only in scenes is
+  Always, except that during a scene or a movie only the Start button
+  stays on the screen, so the scene can be skipped; the other buttons
+  fade out and return when it ends. A Start you hid in the editor stays
+  hidden, and the hidden buttons still work if you touch where they are.
+  Off turns them off, but a phone
   does not offer Off: with no gamepad connected there would be no way to
   turn the buttons back on, so on a phone Off counts as Auto.
 - **Touch size:** Small, Medium or Large. Medium is about the size of a

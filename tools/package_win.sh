@@ -50,9 +50,25 @@ rc_flag="$(python3 -I "$wt/tools/check_rc_text.py" --cmake-flag "$label")" ||
     fail "tools/check_rc_text.py --cmake-flag"
 echo "package_win: $rc_flag" >>"$log"
 run cmake --preset "$p" -DICO_LINK_EXE=ON "-DICO_VERSION_LABEL=$label" "$rc_flag"
-run cmake --build "build-host/$p" --target ico_pc mc_import
-for f in ico_pc.exe ico_pc.map SDL3.dll port/save/mc_import.exe; do
+run cmake --build "build-host/$p" --target ico_pc mc_import ico_icon_stamp
+for f in ico_pc.exe ico_pc.map SDL3.dll port/save/mc_import.exe port/platform/ico_icon_stamp.exe; do
     [[ -f "build-host/$p/$f" ]] || fail "$p did not produce $f"
+done
+# the C++ runtime of the FidelityFX upscaler is linked in (-static): the program
+# may import no mingw runtime DLL, so none joins the zip
+imports="$("$wt/tools/toolchain/mingw-gcc/usr/bin/x86_64-w64-mingw32-objdump" -p "build-host/$p/ico_pc.exe" |
+    sed -n 's/^[[:space:]]*DLL Name: //p' | tr '\n' ' ')"
+echo "package_win: ico_pc.exe imports: $imports" >>"$log"
+for dll in libstdc++-6.dll libgcc_s_seh-1.dll libwinpthread-1.dll; do
+    [[ " $imports " != *" $dll "* ]] || fail "ico_pc.exe imports $dll (the C++ runtime must be linked statically)"
+done
+# the exe's icon helper (tools\ico_icon_stamp.exe) is C on the Windows API: no
+# mingw runtime DLL and no SDL3.dll either (the game starts it as it exits)
+stamp_imports="$("$wt/tools/toolchain/mingw-gcc/usr/bin/x86_64-w64-mingw32-objdump" -p "build-host/$p/port/platform/ico_icon_stamp.exe" |
+    sed -n 's/^[[:space:]]*DLL Name: //p' | tr '\n' ' ')"
+echo "package_win: ico_icon_stamp.exe imports: $stamp_imports" >>"$log"
+for dll in libstdc++-6.dll libgcc_s_seh-1.dll libwinpthread-1.dll SDL3.dll; do
+    [[ " $stamp_imports " != *" $dll "* ]] || fail "ico_icon_stamp.exe imports $dll"
 done
 # a release's program holds no rc row, an rc's does
 run python3 -I "$wt/tools/check_rc_text.py" --label "$label" "build-host/$p/ico_pc.exe"
@@ -74,10 +90,36 @@ cp "$b/ico_pc.exe" "$d/ico_pc_$a.exe"
 # report names its functions from it on the player's machine
 # (port/platform/symmap.h; the name is the program's with .map)
 cp "$b/ico_pc.map" "$d/ico_pc_$a.map"
+# the game's data sections hold the game's objects only (save states copy them
+# whole by offset; tools/android_syms_lines.py reads GNU ld's map too)
+python3 -I "$wt/tools/android_syms_lines.py" gamesec "$b/ico_pc.map" "$wt" >>"$log" 2>&1 ||
+    fail "tools/android_syms_lines.py gamesec: a port object holds bytes in the game's data sections (the log names it)"
+# the checkpoint globals a state names lie in the game's data sections, the
+# released builds' table is whole (port/save/state_checkpoint.h)
+python3 -I "$wt/tools/state_checkpoint_table.py" guard "$b/ico_pc.map" >>"$log" 2>&1 ||
+    fail "tools/state_checkpoint_table.py guard: a checkpoint global is outside the game's data, or the table lost a release (the log names it)"
+# save states carry over (issue 217): every initialised pointer of the game's
+# data in the program must be one the save can name with this map, or a
+# state carried to a later version keeps a stale address (Windows' fixed
+# base keeps such words as numbers). The tree's own save code judges the
+# staged program (tools/state_carry_check.py, built with the host compiler;
+# docs/port/PLATFORM.md "The carry-over guard"); the report goes to the log.
+run python3 -I "$wt/tools/state_carry_check.py" check --binary "$d/ico_pc_$a.exe" --syms "$d/ico_pc_$a.map" \
+    --workdir "$root/build-host/tmp/win-$label-carry" --cc "${CC:-cc}" \
+    --report "$root/build-host/tmp/win-$label-carry.txt"
+# the earlier versions' Windows states resume exactly only under their game
+# data layout hash (port/state_legacy/layout.txt layout-windows-x64): a
+# package of another one fails, as the Android package does; the map against
+# port/state_legacy/layout-windows-x64.txt names the cause in the log
+python3 -I "$wt/tools/android_syms_lines.py" layout "$root/build-host/tmp/win-$label-carry.txt" "$wt" windows-x64 \
+    "$d/ico_pc_$a.map" >>"$log" 2>&1 ||
+    fail "tools/android_syms_lines.py layout: the Windows game data layout hash is not the recorded one (the log says which and what to do)"
 cp "$b/SDL3.dll" "$d/SDL3.dll"
 # the save importer, in its own folder with the SDL3.dll it needs beside it
 rm -rf "$d/tools"; mkdir -p "$d/tools"
 cp "$b/port/save/mc_import.exe" "$b/SDL3.dll" "$d/tools/"
+# the exe's icon helper: the game starts it as it exits (port/platform/app_icon_exe.c)
+cp "$b/port/platform/ico_icon_stamp.exe" "$d/tools/"
 cat > "$d/tools/README.txt" <<'TXT'
 mc_import.exe copies ICO's save (of any of the discs) out
 of a PS2 memory card file or save archive into the game's save folder.
@@ -87,6 +129,11 @@ Add --to with the folder to copy into, then the file's name, for example:
   mc_import.exe --to "%APPDATA%\ico-pc\ico-pc\memcard" Mcd001.ps2
 The steps are in docs\PORTABLE_MODE.md, "Bring a PS2 save over".
 SDL3.dll is a library mc_import.exe needs beside it.
+
+ico_icon_stamp.exe gives the game's program file the icon the title
+screen made from your disc. The game starts it by itself as it closes;
+there is nothing to run. If you delete it, the game plays the same and
+its program file keeps the plain icon.
 TXT
 sed -i 's/$/\r/' "$d/tools/README.txt"
 # the make-portable script (stored with LF, CRLF in the package)
@@ -129,7 +176,7 @@ for variant in normal portable; do
     cp -a "$stage/docs" "$top/docs"
     cp -a "$stage/VERSION.txt" "$top/VERSION.txt"
     files=("ico_pc_$a.exe" "ico_pc_$a.map" SDL3.dll ico-pc.ini LICENSE.txt NOTICES.txt
-        tools/mc_import.exe tools/SDL3.dll tools/README.txt)
+        tools/mc_import.exe tools/SDL3.dll tools/ico_icon_stamp.exe tools/README.txt)
     for r in "${pkg_note_rels[@]}"; do files+=("$r/README.txt"); done
     [[ "$variant" == portable ]] || files+=(make_portable.cmd)
     for f in "${files[@]}"; do
@@ -149,6 +196,7 @@ for variant in normal portable; do
     done
     # developer files stay out of the player zips
     pkg_assert_zip_has "$out" "ico-pc-$label/$a/ico_pc_$a.map" || fail "the $variant zip lacks $a/ico_pc_$a.map"
+    pkg_assert_zip_has "$out" "ico-pc-$label/$a/tools/ico_icon_stamp.exe" || fail "the $variant zip lacks $a/tools/ico_icon_stamp.exe"
     for n in "$a/tools/rhi_d3d12_test.exe" "$a/tools/rd_replay_tool.exe" \
         "$a/tools/compare_backends.cmd" "$a/tools/compare_png.ps1"; do
         pkg_assert_zip_lacks "$out" "ico-pc-$label/$n" || fail "the $variant zip has $n"

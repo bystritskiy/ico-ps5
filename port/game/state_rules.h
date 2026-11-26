@@ -16,6 +16,7 @@
 
 #include "state.h"
 #include "state_file.h"
+#include "sched.h" /* IcoSchedImage: a state's fibers section, parsed */
 
 /* What the conditions look at, sampled by state_host.c at the host loop's
    quiescent point (plan "Save"). */
@@ -34,6 +35,8 @@ typedef struct IcoStateConds {
     int photo;        /* ico_photo_active() */
     int credits;      /* ico_credits_active() */
     int gallery;      /* gallery_playing() >= 0 */
+    int unused;       /* ico_unused_active(): a test room of Extras > Unused content */
+    int locked;       /* ico_difficulty_states_locked(): the journey in force has Permadeath on */
 } IcoStateConds;
 
 /* 1 when the game shows the pause menu, or a port page (Options, Save
@@ -45,10 +48,11 @@ int ico_state_on_pause_menu(const IcoStateConds *c);
    conditions sampled now, ico_state_on_pause_menu's answer. */
 int ico_state_can_save_here(void);
 
-/* ICO_STATE_OK, or the first refusal in this order: OFF, NOT_PAUSED (a
-   save only: ico_state_on_pause_menu), STAGE_SWITCH, CARD_BUSY,
-   DISC_BUSY, MOVIE, PHOTO (photo mode, the credits or the music gallery;
-   *what, when not NULL, names which). */
+/* ICO_STATE_OK, or the first refusal in this order: OFF, PERMADEATH (a
+   save or a load while the journey in force has Permadeath on, before
+   anything else is looked at), NOT_PAUSED (a save only: ico_state_on_pause_menu), STAGE_SWITCH,
+   CARD_BUSY, DISC_BUSY, MOVIE, PHOTO (photo mode, the credits, the music
+   gallery or a test room; *what, when not NULL, names which). */
 IcoStateResult ico_state_conditions(const IcoStateConds *c, int saving, const char **what);
 
 /* The log's words for a result: "not paused", "settings differ", ... ("ok"
@@ -67,6 +71,17 @@ int ico_state_slot_path(char *out, size_t size, const char *dir, int slot, const
    slots. */
 void ico_state_list_dir(const char *dir, const IcoStateHeader *now,
                         IcoStateSlotInfo out[ICO_STATE_SLOTS]);
+
+/* The load's line for a state whose settings are not this run's (it loads
+   under this run's: a state is never refused for a setting): "state: slot
+   N was saved with other settings (key=saved (now cur), ...): it loads
+   under this run's" into out (size bytes, cut, NUL-terminated), every
+   difference ico_state_keys_diff names (state_file.h: a key a later version
+   added at its default, a retired key and a key unset on one side and at
+   its default's text on the other are none).  The count of differences;
+   0 and out "" when there is none. */
+int ico_state_settings_line(int slot, const char *saved_keys, const char *now_keys, char *out,
+                            size_t size);
 
 /* A [dev] key's value: "<tick>:<slot>" (state_save_at, state_load_at;
    slot 1..ICO_STATE_SLOTS) or "<tick>" (state_hash_at, slot NULL).  0 with
@@ -124,5 +139,37 @@ typedef enum IcoStateShotStep {
 } IcoStateShotStep;
 
 IcoStateShotStep ico_state_shot_step(int *last, int layout, int layout_play, int layout_pause);
+
+/* 1 when the "difficulty.record" block (port/game/difficulty.h
+   IcoDifficulty, n bytes at off in a state's reg section of reg_n bytes)
+   is a record of this format with Permadeath on: such a state is refused
+   (ICO_STATE_PERMADEATH) whatever journey is in force.  0 for a block of
+   another size, outside the section, or of another record version. */
+int ico_state_record_permadeath(const unsigned char *reg, uint64_t reg_n, uint64_t off, uint64_t n);
+
+/* A state's fibers section: a count (the first 16 bytes), then per fiber
+   one record, its control block and its stack bytes, each padded to 16.
+   The sizes are a file's 32-bit fields: the padding is worked out in 64
+   bits (a size near 4 GB no longer wraps to 0 and passes the bound). */
+typedef struct IcoStateFiberRec {
+    uint64_t slot_base;
+    uint32_t slot, ctrl_bytes, stack_off, stack_bytes;
+} IcoStateFiberRec;
+
+#define ICO_STATE_PAD16(n) (((uint64_t)(n) + 15u) & ~(uint64_t)15u)
+/* The fibers section p (n bytes) and the scheduler's tables into img, its
+   fibers' pointers into p: 0, or -1 when the section does not hold what it
+   says (a count outside 0..ICO_SCHED_MAX_THREADS, a record or its bytes
+   past the end); img->n_fibers is then 0. */
+int ico_state_fibers_parse(const void *p, uint64_t n, const void *tables, uint64_t tables_n,
+                           IcoSchedImage *img);
+
+/* Whether a load that continues from a state's checkpoint may start now:
+   on the pause menu (or a port page over it) or on the title, the two
+   places the game's own card load and End Game run from.  In active play
+   (F9 during a scripted event, a fall, a game over) the game's load of an
+   image is no step the game ever takes; the exact load replaces all of the
+   memory and may run there, this one replaces the save image only. */
+int ico_state_checkpoint_may_start(const IcoStateConds *c);
 
 #endif /* ICO_GAME_STATE_RULES_H */

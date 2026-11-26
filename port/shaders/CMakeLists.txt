@@ -17,6 +17,13 @@ ico_add_shader(blit_vs blit.hlsl blit_vs vertex)
 ico_add_shader(blit_ps blit.hlsl blit_ps fragment)
 # the present's box blit with the scene's depth (rd_present.c)
 ico_add_shader(blit_depth_ps blit.hlsl blit_depth_ps fragment)
+# the same two with the colour adjustment (tone.hlsli; rd_present.c, a
+# Picture tone row not 50)
+ico_add_shader(blit_tone_ps blit.hlsl blit_tone_ps fragment)
+ico_add_shader(blit_depth_tone_ps blit.hlsl blit_depth_tone_ps fragment)
+# the present from SCENE: the box blit reading SCENE through the reduction's
+# steps, and DISPLAY drawn from SCENE on demand (port/render/rd_present_scene.c)
+ico_add_shader(blit_scene_ps blit.hlsl blit_scene_ps fragment)
 # the shadow count box-reduced to the GS size (rd_replay.c doShadowResolve)
 ico_add_shader(box_reduce_ps blit.hlsl box_reduce_ps fragment)
 # supersampling: DISPLAY box-averaged to the present box (rd_present.c)
@@ -27,6 +34,9 @@ ico_add_shader(aa_reduce_ps blit.hlsl aa_reduce_ps fragment)
 # epoch; docs/port/MSAA.md)
 ico_add_shader(depth_resolve_ps blit.hlsl depth_resolve_ps fragment)
 ico_add_shader(depth_upsample_ps blit.hlsl depth_upsample_ps fragment)
+# the lamps' WORK2 depth at the GS frame's size above 1x (port/render/rd_lamps.c RD_LAMPS_LOWRES)
+ico_add_shader(depth_down_ps blit.hlsl depth_down_ps fragment)
+ico_add_shader(depth_down_ms_ps blit.hlsl depth_down_ms_ps fragment)
 ico_add_shader(msaa_resolve_ps blit.hlsl msaa_resolve_ps fragment)
 # tests only, rd__camera_probe
 ico_add_shader(camera_probe_ps blit.hlsl camera_probe_ps fragment)
@@ -80,6 +90,15 @@ foreach(_v prelit:prelit lit:lit lit_spec:lit reflect:lit skin:skin skin_spec:sk
     string(REGEX REPLACE ".*:" "" _f "${_v}")
     ico_add_shader(vu_${_e}_plain_vs vu_${_f}.hlsl vu_${_e}_vs vertex DEFINES ICO_VU_PLAIN=1)
 endforeach()
+# the cluster entries' plain variants with the bones read through the ring
+# (ICO_VU_BONES_RING, vu_common.hlsli: t5 from VuCB's mark lane instead of
+# VuBoneCB at b3): issue 123's ladder, made only under [dev] vu_bones = ring
+# (rd_pipeline.c rd__vu_policy_init) and by the skin check's ring-read probe
+# and twin (rd_vu_bones.c); docs/port/VU_SKIN_CHECK.md "The ladder"
+foreach(_e skin skin_spec skin_debug)
+    ico_add_shader(vu_${_e}_ring_plain_vs vu_skin.hlsl vu_${_e}_vs vertex
+                   DEFINES ICO_VU_PLAIN=1 ICO_VU_BONES_RING=1)
+endforeach()
 # the FMV picture (port/render/rd_video.c)
 ico_add_shader(yuv_vs yuv.hlsl yuv_vs vertex)
 ico_add_shader(yuv_ps yuv.hlsl yuv_ps fragment)
@@ -101,6 +120,11 @@ ico_add_shader(crt_vs crt.hlsl crt_vs vertex)
 ico_add_shader(crt_bloom_ps crt.hlsl crt_bloom_ps fragment)
 ico_add_shader(crt_blur_ps crt.hlsl crt_blur_ps fragment)
 ico_add_shader(crt_ps crt.hlsl crt_ps fragment)
+# AMD FidelityFX Super Resolution 1.0 at the present (port/render/rd_fsr1.c;
+# Options > Picture > Upscaling): EASU then RCAS, behind blit_vs. HLSL 2018:
+# the vendored headers (port/third_party/fsr1) use the vector ?:
+ico_add_shader(fsr1_easu_ps fsr1.hlsl fsr1_easu_ps fragment HLSL2018)
+ico_add_shader(fsr1_rcas_ps fsr1.hlsl fsr1_rcas_ps fragment HLSL2018)
 # tests only: the probe output of vu1_test (VU_F_PROBE)
 ico_add_shader(vu_probe_ps vu_prelit.hlsl vu_probe_ps fragment)
 # the entries that call gs_dual_out, without the second output,
@@ -119,6 +143,27 @@ ico_add_shader(font_sheet_baked_ps font.hlsl font_sheet_baked_ps fragment DEFINE
                SUFFIX _nodual)
 ico_add_shader(vu_ps vu_prelit.hlsl vu_ps fragment DEFINES ICO_NO_DUAL=1 SUFFIX _nodual)
 ico_add_shader(vu_texa_ps vu_prelit.hlsl vu_texa_ps fragment DEFINES ICO_NO_DUAL=1 SUFFIX _nodual)
+# the same two with no discard at all (ICO_VU_NODISCARD: the clip plane's,
+# the side bands', DATE's and the alpha test's left out), for the passes the
+# renderer proved none of those can fire for (port/render/rd_nodiscard.h:
+# made only once the discard-free twins are tried, on a device without
+# dual-source blending)
+ico_add_shader(vu_ps vu_prelit.hlsl vu_ps fragment DEFINES ICO_NO_DUAL=1 ICO_VU_NODISCARD=1
+               SUFFIX _nodual_nd)
+ico_add_shader(vu_texa_ps vu_prelit.hlsl vu_texa_ps fragment DEFINES ICO_NO_DUAL=1
+               ICO_VU_NODISCARD=1 SUFFIX _nodual_nd)
+# vu_ps_nodual's fast-set build (ICO_VU_FAST: textured, MODULATE with TCC,
+# RGBA32, no GS levels, nearest, DATE, clip plane or alpha test held as
+# constants, common.hlsli), for the passes whose DrawCB holds exactly those
+# (port/render/rd_fastps.h: made only once the build is tried, on a device
+# without dual-source blending); the side band's discard kept
+ico_add_shader(vu_ps vu_prelit.hlsl vu_ps fragment DEFINES ICO_NO_DUAL=1 ICO_VU_FAST=1
+               SUFFIX _nodual_fast)
+# and its discard-free form (ICO_VU_NODISCARD too), for a pass that took the
+# discard-free twin under that twin's own rule (port/render/rd_nodiscard.h)
+# and whose DrawCB is in the fast set
+ico_add_shader(vu_ps vu_prelit.hlsl vu_ps fragment DEFINES ICO_NO_DUAL=1 ICO_VU_FAST=1
+               ICO_VU_NODISCARD=1 SUFFIX _nodual_fast_nd)
 
 # the same entries computing the GS blend from the destination (the exact
 # blend, port/render/rd_dst_read.c): _dstrov reads and writes the target
@@ -161,6 +206,13 @@ ico_add_shader(vu_tri_tick_pre_vs vu_tri.hlsl vu_tri_tick_pre_vs vertex)
 ico_add_shader(vu_tri_planes_pre_vs vu_tri.hlsl vu_tri_planes_pre_vs vertex)
 ico_add_shader(vu_particle_main_vs vu_particle.hlsl vu_particle_main_vs vertex)
 ico_add_shader(vu_particle_pre_vs vu_particle.hlsl vu_particle_pre_vs vertex)
+# The velocity pass (vu_velocity_main_vs, velocity_ps)
+# a mesh or grid draw of list 0 again from the record with its motion
+# between the two records of its vertices, into VELOCITY (docs/port/RENDER.md,
+# "Velocity"; rd_replay_vu.c vuVelPass; made by rd_velocity.c only while the
+# temporal upscaler's switch is on: no id in the tables)
+ico_add_shader(vu_velocity_main_vs vu_velocity.hlsl vu_velocity_main_vs vertex)
+ico_add_shader(velocity_ps vu_velocity.hlsl velocity_ps fragment)
 # The pre-pass's batch builds (vu_X_batch_pre_vs)
 # the ten pre-pass entries and the four record stages read their VuCB and
 # VuBoneCB from the upload ring at t5 (ICO_VU_PRE_BATCH, vu_common.hlsli
@@ -175,6 +227,68 @@ foreach(_v prelit:prelit lit:lit lit_spec:lit reflect:lit skin:skin skin_spec:sk
     ico_add_shader(vu_${_e}_batch_pre_vs vu_${_f}.hlsl vu_${_e}_pre_vs vertex
                    DEFINES ICO_VU_PRE_BATCH=1)
 endforeach()
+# The record's store builds (vu_X_store_pre_vs, vu_X_batch_store_pre_vs)
+# the same fourteen entries and their batch builds writing the record into
+# the frame slot's record buffer from the vertex shader (ICO_VU_REC_STORES,
+# vu_common.hlsli vu_rec_store: RWStructuredBuffer u6, a position outside
+# the clip volume), drawn by pipelines without rasterization and without a
+# fragment shader in a pass without attachments, wherever the device has
+# vertex stores (RhiLimits.vertexStores; port/render/rd_vu_record.c, [dev]
+# vu_record = targets keeps vu_pre_ps and the three RGBA32_UINT targets)
+foreach(_v prelit:prelit lit:lit lit_spec:lit reflect:lit skin:skin skin_spec:skin skin_debug:skin
+        grid:grid grid_lit:grid grid_spec:grid tri_rule:tri tri_tick:tri tri_planes:tri
+        particle:particle)
+    string(REGEX REPLACE ":.*" "" _e "${_v}")
+    string(REGEX REPLACE ".*:" "" _f "${_v}")
+    ico_add_shader(vu_${_e}_store_pre_vs vu_${_f}.hlsl vu_${_e}_pre_vs vertex
+                   DEFINES ICO_VU_REC_STORES=1)
+    ico_add_shader(vu_${_e}_batch_store_pre_vs vu_${_f}.hlsl vu_${_e}_pre_vs vertex
+                   DEFINES ICO_VU_PRE_BATCH=1 ICO_VU_REC_STORES=1)
+endforeach()
+# The record's compute builds (vu_X_compute_pre_cs, vu_X_batch_compute_pre_cs)
+# the same fourteen entries and their batch builds as compute entries
+# (ICO_VU_REC_COMPUTE, vu_common.hlsli VU_PRE_CS: one invocation a point, 64
+# to a group, the count in the DrawCB's aux0.z), storing the record words as
+# the store builds do, dispatched where the vertex shaders cannot store and
+# the device takes compute work (RhiLimits.computeStores; the Mali-G52 of
+# issue 179; port/render/rd_vu_record.c, [dev] vu_record = compute). No
+# GLSL (tools/spirv_to_glsl.py writes none for a compute module: OpenGL has
+# no compute dispatches in this release)
+foreach(_v prelit:prelit lit:lit lit_spec:lit reflect:lit skin:skin skin_spec:skin skin_debug:skin
+        grid:grid grid_lit:grid grid_spec:grid tri_rule:tri tri_tick:tri tri_planes:tri
+        particle:particle)
+    string(REGEX REPLACE ":.*" "" _e "${_v}")
+    string(REGEX REPLACE ".*:" "" _f "${_v}")
+    ico_add_shader(vu_${_e}_compute_pre_cs vu_${_f}.hlsl vu_${_e}_pre_cs compute
+                   DEFINES ICO_VU_REC_COMPUTE=1)
+    ico_add_shader(vu_${_e}_batch_compute_pre_cs vu_${_f}.hlsl vu_${_e}_pre_cs compute
+                   DEFINES ICO_VU_PRE_BATCH=1 ICO_VU_REC_COMPUTE=1)
+endforeach()
+# The zero-area cull's rule stage (vu_tri.hlsl with ICO_VU_ZERO=1;
+# port/render/rd_vu_zero.h, docs/port/PIPELINES.md "The zero-area cull"): the
+# rule stage's six builds again with the test, under names of their own, so
+# every module above is the build without the cull byte for byte; the
+# renderer makes the one its record and batches take only once it tries the
+# cull (rd_vu_zero_run.c), never at its start
+ico_add_shader(vu_tri_rule_zero_pre_vs vu_tri.hlsl vu_tri_rule_pre_vs vertex DEFINES ICO_VU_ZERO=1)
+ico_add_shader(vu_tri_rule_zero_batch_pre_vs vu_tri.hlsl vu_tri_rule_pre_vs vertex
+               DEFINES ICO_VU_ZERO=1 ICO_VU_PRE_BATCH=1)
+ico_add_shader(vu_tri_rule_zero_store_pre_vs vu_tri.hlsl vu_tri_rule_pre_vs vertex
+               DEFINES ICO_VU_ZERO=1 ICO_VU_REC_STORES=1)
+ico_add_shader(vu_tri_rule_zero_batch_store_pre_vs vu_tri.hlsl vu_tri_rule_pre_vs vertex
+               DEFINES ICO_VU_ZERO=1 ICO_VU_PRE_BATCH=1 ICO_VU_REC_STORES=1)
+ico_add_shader(vu_tri_rule_zero_compute_pre_cs vu_tri.hlsl vu_tri_rule_pre_cs compute
+               DEFINES ICO_VU_ZERO=1 ICO_VU_REC_COMPUTE=1)
+ico_add_shader(vu_tri_rule_zero_batch_compute_pre_cs vu_tri.hlsl vu_tri_rule_pre_cs compute
+               DEFINES ICO_VU_ZERO=1 ICO_VU_PRE_BATCH=1 ICO_VU_REC_COMPUTE=1)
+# The index compaction's keep stage (vu_tri.hlsl vu_tri_keep_cs; port/render/
+# rd_vu_compact.c, docs/port/PIPELINES.md "The index compaction"): after the
+# compute record's pass T, a draw's index list written again into the
+# record's fourth plane with each triangle that provably draws nothing as a
+# clipped filler, one invocation a triangle; compute alone (no GLSL, as the
+# record's compute builds)
+ico_add_shader(vu_tri_keep_compute_cs vu_tri.hlsl vu_tri_keep_cs compute
+               DEFINES ICO_VU_REC_COMPUTE=1)
 # The draw merge's builds (vu_X_merge_vs, vu_X_merge_plain_vs, vu_merge_main_vs)
 # the mesh and grid programs' entries (both variants) and vu_main_vs read
 # every draw's VuCB and VuBoneCB from the upload ring at t5 through the run's
@@ -190,6 +304,18 @@ foreach(_v prelit:prelit lit:lit lit_spec:lit reflect:lit grid:grid grid_lit:gri
                    DEFINES ICO_VU_MERGE=1 ICO_VU_PLAIN=1)
 endforeach()
 ico_add_shader(vu_merge_main_vs vu_tri.hlsl vu_main_vs vertex DEFINES ICO_VU_MERGE=1)
+# The main shader's twins before its flat outputs moved to the provoking
+# corner and before its drop verdict came first (vu_all_main_vs,
+# vu_merge_all_main_vs)
+# vu_main_vs and vu_merge_main_vs with ICO_VU_FLAT0=0 (vu_tri.hlsl): every
+# corner computing the planes, as before v0.11.6, and ICO_VU_EARLY=0: a
+# culled triangle's corners computed in full, as before v0.11.12; made only
+# under the tests' ICO_RD_VU_FLAT0=0 (port/render/rd_vu_flat0.c, the A/B
+# rd_vu_flat0_ab); no id in the tables
+ico_add_shader(vu_all_main_vs vu_tri.hlsl vu_main_vs vertex
+               DEFINES ICO_VU_FLAT0=0 ICO_VU_EARLY=0)
+ico_add_shader(vu_merge_all_main_vs vu_tri.hlsl vu_main_vs vertex
+               DEFINES ICO_VU_MERGE=1 ICO_VU_FLAT0=0 ICO_VU_EARLY=0)
 # The 2D plane builds (sprite_*_ps_planes and their twins)
 # the screen-prim triangles with their planes (rd_screen_planes.c): the
 # planes build of sprite.hlsl (ICO_SPRITE_PLANES), whose SpriteVSOut and
@@ -223,6 +349,26 @@ ico_add_shader(fog_lut_local_ps fog_lut.hlsl fog_lut_ps fragment
 ico_add_shader(date_clear_ps sprite.hlsl date_clear_ps fragment)
 ico_add_shader(date_stencil_ps sprite.hlsl date_stencil_ps fragment DEFINES ICO_DATE_STENCIL=1)
 ico_add_shader(fx_blur2_ps fx_sprite.hlsl fx_blur2_ps fragment)
+# two staticBlur pairs in one pass (port/render/rd_replay_tiler.c, the lamps' RD_LAMPS_FOLD4):
+# Vulkan only in use (rd_replay.c makes the module on Vulkan alone), its DXIL and GLSL plain
+# builds, never used
+ico_add_shader(fx_blur4_ps fx_sprite.hlsl fx_blur4_ps fragment)
+# The glow's blur chain in two passes (port/render/rd_glow_blur.c, the lamps' RD_LAMPS_GLOWBLUR):
+# a few hardware-bilinear taps a texel across, then down, behind fx_rect_vs; used on every
+# backend where it is asked for
+ico_add_shader(fx_glowblur_ps fx_glowblur.hlsl fx_glowblur_ps fragment)
+# The shadow's levels above 1x (port/render/rd_shadowres.c): the game's level step at every texel of a
+# level at the scene's scale, and one axis of the tent its magnification supplied, behind
+# blit_vs; made only once a scene above 1x draws a shadow, on every backend
+ico_add_shader(shadowres_step_ps shadowres.hlsl shadowres_step_ps fragment)
+ico_add_shader(shadowres_tent_ps shadowres.hlsl shadowres_tent_ps fragment)
+ico_add_shader(shadowres_tent2_ps shadowres.hlsl shadowres_tent2_ps fragment)
+# the first level's step reading the count from the depth-stencil's stencil
+# through the count's table (SHADOWRES_FROM_STENCIL: no full-size count pass;
+# rd_shadowres.c "The count from the stencil"), the same bytes; on every
+# backend with the stencil view
+ico_add_shader(shadowres_step_stencil_ps shadowres.hlsl shadowres_step_ps fragment
+               DEFINES SHADOWRES_FROM_STENCIL=1)
 # Motion blur: Smooth's accumulator (port/render/rd_blur_smooth.c): its step
 # and its resolve into the RGBA8 target the motion blur's sprite reads, behind
 # blit_vs; used on both backends
@@ -241,6 +387,17 @@ ico_add_shader(crack_fill1_ps blit.hlsl crack_fill_ps fragment DEFINES CRACK_REA
 # shadowCountOne: the stencil view and the count's table, box_reduce_ps's
 # average above 1x), behind blit_vs; used on every backend with the view
 ico_add_shader(shadow_count_ps blit.hlsl shadow_count_ps fragment)
+# the same read a texel a load, with no gather in the module
+# (SHADOW_COUNT_LOAD): Direct3D's stencil view takes no gather
+# (RhiLimits.stencilGather), and the loads in force elsewhere
+# (rd_shadow_one.c); the same bytes
+ico_add_shader(shadow_count_load_ps blit.hlsl shadow_count_ps fragment DEFINES SHADOW_COUNT_LOAD=1)
+# The shadow tiles (port/render/rd_shadow_tile.c): a shadow level's tile mask
+# (integer loads of the level's alpha) and the composite's dead tiles marked
+# in the stencil's bit 7 from it, behind blit_vs; made on Vulkan alone (the
+# path needs DATE through the stencil bit)
+ico_add_shader(shadow_tile_mask_ps blit.hlsl shadow_tile_mask_ps fragment)
+ico_add_shader(shadow_tile_mark_ps blit.hlsl shadow_tile_mark_ps fragment)
 # The blur sprite's UINT-view build (fx_sprite_u_ps)
 # fx_sprite_ps reading its textures through their RGBA8_UINT views
 # (RHI_TEX_UINT_VIEW; rd_replay.c doBlurSpriteDraw)
@@ -269,7 +426,18 @@ ico_add_shader(vu_texa_np_ps vu_prelit.hlsl vu_texa_ps fragment DEFINES ICO_VU_N
 ico_add_shader(vu_texa_np_ps vu_prelit.hlsl vu_texa_ps fragment DEFINES ICO_VU_NO_PLANES=1
                ICO_NO_DUAL=1 SUFFIX _nodual)
 ico_add_shader(fx_frame_ps fx_sprite.hlsl fx_sprite_ps fragment DEFINES ICO_FX_FRAME=1)
+# fx_frame_ps for the glow's paste alone (ICO_FX_PASTE: the words the paste never changes held as
+# constants, the branches it never takes left out; port/render/rd_paste_spec.c, behind its
+# start-up self-test against fx_frame_ps): Vulkan only in use (rd_paste_spec.c makes the module
+# on Vulkan alone), its DXIL and GLSL plain builds, never used
+ico_add_shader(fx_paste_ps fx_sprite.hlsl fx_sprite_ps fragment DEFINES ICO_FX_FRAME=1
+               ICO_FX_PASTE=1)
 ico_add_shader(fx_local_ps fx_sprite.hlsl fx_sprite_ps fragment DEFINES ICO_FX_DST_LOCAL=1)
+# sprite_ps for the shadow composites and levels alone (ICO_SPRITE_COMP: the flags they draw with
+# held as constants, every other branch left out; port/render/rd_comp_spec.c, behind its start-up
+# self-test against sprite_ps): Vulkan only in use (rd_comp_spec.c makes the module on Vulkan
+# alone), its DXIL and GLSL plain builds, never used
+ico_add_shader(sprite_comp_ps sprite.hlsl sprite_comp_ps fragment DEFINES ICO_SPRITE_COMP=1)
 
 # the table of every entry above, the fences included (ico_shaders_library reads
 # the manifest where it is called: it must come after every ico_add_shader)

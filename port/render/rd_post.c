@@ -75,6 +75,8 @@
  */
 #include <string.h>
 #include "rd_internal.h"
+#include "rd_icon_hold.h"   /* the icon pass's post effects */
+#include "rd_ledger_live.h" /* the scene ledger: the effects by ticks on */
 #include "../core/region.h" /* the running disc's reduction crop */
 
 /* The RdKey the next post sprites carry, so the presenter
@@ -253,6 +255,14 @@ static void postReduction(const RdPostParams *p)
     /* FBA 0, ALPHA 0x8000000048, FRAME FBP 0 (FBMSK 0), XYOFFSET centred on
      * W x H/2, SCISSOR W x H/2, TEST 0x30000, ZBUF mask on */
     rd_color_mask(0);
+    /* the upscale point (rd_upscale.h): a temporal upscaler takes SCENE
+     * here, the post chain done, and this reduction reads its output; a
+     * marker with no state, nothing at replay without one (dump version 17) */
+    RdCmd *up = rd__push(RDC_UPSCALE_POINT);
+    if (up) {
+        up->u[0] = src.id;
+        up->u[1] = dst.id;
+    }
     rd_set_target(dst, (RdTarget){0}, (uint32_t)W, (uint32_t)(H / 2), 0);
     rd_fba(0);
     rd_blend(RD_BLEND_CS_AS_ADD_CD, 0x80, 0); /* PRIM 0x106 / 0x116: no ABE */
@@ -632,6 +642,20 @@ void rd_post(RdPostKind kind, const RdPostParams *params)
         memset(&zero, 0, sizeof(zero));
         params = &zero;
     }
+    if (rd_icon_pass_on() && rd__icon_pass_drops_post((int)kind)) {
+        /* the title's icon pass draws the letter alone: the fog, the glow
+         * and the blurs are not recorded (the register writes the game
+         * makes around them are; rd.h rd_set_icon_pass).  The fog matters
+         * most: the pass's depth is the cleared far plane wherever the
+         * letter is not, so the fog's table entry 0 (DFDBCD on the title,
+         * about 0.86 over the clear) through the reduction's tint (149,
+         * 142, 139) covered both pictures alike, and the matte made it a
+         * whole-frame icon of (255, 247, 227) at alpha 215: B - A = 255 x
+         * 0.14 x 1.11 = 40 on green, the largest channel */
+        rd__icon_pass_drop(RD_ICON_DROP_POST);
+        return;
+    }
+    rd__ledger_post((int)kind, params);
     switch (kind) {
     case RD_POST_REDUCTION:
         postReduction(params);

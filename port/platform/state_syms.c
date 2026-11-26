@@ -17,13 +17,16 @@
 
 /* --- the items the file names --------------------------------------------------- */
 
-enum { IT_SYM = 0, IT_SEC = 1 };
+/* a symbol, an input section, an output section (IT_OSEC: never a unit or
+   a data item; the table's sections) */
+enum { IT_SYM = 0, IT_SEC = 1, IT_OSEC = 2 };
 
 typedef struct Item {
     uint64_t addr, size; /* the file's address; size when sized */
     uint32_t name;       /* offset in Build.str */
     uint32_t seq;        /* the file's order */
     uint8_t kind, sized;
+    uint8_t code; /* IT_OSEC: holds code */
 } Item;
 
 typedef struct Build {
@@ -91,6 +94,7 @@ static void item_add(Build *b, int kind, uint64_t addr, uint64_t size, int sized
     e->size = size;
     e->sized = (uint8_t)(sized != 0);
     e->kind = (uint8_t)kind;
+    e->code = 0;
     e->seq = (uint32_t)b->n;
     if (name2 != NULL) {
         /* an input section: "<object>:<section>" */
@@ -107,6 +111,21 @@ static void item_add(Build *b, int kind, uint64_t addr, uint64_t size, int sized
     }
     if (!b->failed) {
         b->n++;
+    }
+}
+
+/* an output section (IT_OSEC) */
+static void osec_add(Build *b, uint64_t addr, uint64_t size, const char *name, size_t name_n,
+                     int code)
+{
+    const size_t n0 = b->n;
+
+    if (size == 0) {
+        return;
+    }
+    item_add(b, IT_OSEC, addr, size, 1, name, name_n, NULL, 0);
+    if (b->n > n0) {
+        b->it[n0].code = (uint8_t)(code != 0);
     }
 }
 
@@ -197,6 +216,13 @@ static int tok_is(const char *s, size_t n, const char *w)
     return strlen(w) == n && memcmp(s, w, n) == 0;
 }
 
+/* the output sections that hold code (symmap.c's rule for the maps) */
+static int code_section(const char *s, size_t n)
+{
+    return tok_is(s, n, ".text") || (n > 6 && memcmp(s, ".text.", 6) == 0) ||
+           tok_is(s, n, ".init") || tok_is(s, n, ".fini") || (n >= 4 && memcmp(s, ".plt", 4) == 0);
+}
+
 /* "libico_game.a(main.c.o)" -> "main.c.o"; "dir/x.dir/rd_blur.c.o" ->
    "rd_blur.c.o" (symmap.c's obj_name) */
 static void obj_base(const char *s, size_t n, const char **out, size_t *out_n)
@@ -228,7 +254,9 @@ typedef struct ParseState {
     int lld;
     size_t lld_in_col, lld_sym_col;
     int discarded;
-    char pending[256];
+    int in_map;            /* a GNU map past "Linker script and memory map" */
+    char pending[256];     /* an input section's name, its numbers to come */
+    char pending_out[256]; /* an output section's name, its numbers to come */
 } ParseState;
 
 static void parse_line(Build *b, ParseState *st, const char *line, const char *end)
@@ -236,7 +264,12 @@ static void parse_line(Build *b, ParseState *st, const char *line, const char *e
     Tok t;
     uint64_t a, s;
     const int lead = line < end && (line[0] == ' ' || line[0] == '\t');
+    char out_name[sizeof st->pending_out];
 
+    /* an output section's long name is followed by its numbers on the next
+       line only */
+    memcpy(out_name, st->pending_out, sizeof out_name);
+    st->pending_out[0] = '\0';
     tokenize(line, end, &t);
     if (t.count == 0) {
         st->pending[0] = '\0';
@@ -267,6 +300,9 @@ static void parse_line(Build *b, ParseState *st, const char *line, const char *e
                 obj_base(t.s[4], (size_t)(q - t.s[4]), &o, &on);
                 item_add(b, IT_SEC, a, s, 1, o, on, q + 2, (size_t)(t.s[4] + t.n[4] - 1 - (q + 2)));
             }
+        } else if (t.count == 5) {
+            /* an output section */
+            osec_add(b, a, s, t.s[4], t.n[4], code_section(t.s[4], t.n[4]));
         }
         return;
     }
@@ -286,21 +322,47 @@ static void parse_line(Build *b, ParseState *st, const char *line, const char *e
         if (t.count >= 3 && tok_is(t.s[0], t.n[0], "Discarded") &&
             tok_is(t.s[1], t.n[1], "input")) {
             st->discarded = 1;
-        } else if ((t.count >= 2 && tok_is(t.s[0], t.n[0], "Memory") &&
-                    tok_is(t.s[1], t.n[1], "Configuration")) ||
-                   (t.count >= 3 && tok_is(t.s[0], t.n[0], "Linker") &&
-                    tok_is(t.s[1], t.n[1], "script"))) {
+            st->in_map = 0;
+        } else if (t.count >= 2 && tok_is(t.s[0], t.n[0], "Memory") &&
+                   tok_is(t.s[1], t.n[1], "Configuration")) {
             st->discarded = 0;
+            st->in_map = 0;
+        } else if (t.count >= 3 && tok_is(t.s[0], t.n[0], "Linker") &&
+                   tok_is(t.s[1], t.n[1], "script")) {
+            st->discarded = 0;
+            st->in_map = 1;
+        } else if (t.count == 5 && tok_is(t.s[0], t.n[0], "section") &&
+                   hexnum(t.s[1], t.n[1], 0, &a) && hexnum(t.s[2], t.n[2], 0, &s)) {
+            /* tools/package_android.sh: "section <address> <size> <ELF flags>
+               <name>" */
+            osec_add(b, a, s, t.s[4], t.n[4], memchr(t.s[3], 'X', t.n[3]) != NULL);
         } else if (t.count == 3 && t.n[1] == 1 && hexnum(t.s[0], t.n[0], 0, &a) &&
                    nm_type(t.s[1][0])) {
             item_add(b, IT_SYM, a, 0, 0, t.s[2], t.n[2], NULL, 0);
         } else if (t.count == 4 && t.n[2] == 1 && hexnum(t.s[0], t.n[0], 0, &a) &&
                    hexnum(t.s[1], t.n[1], 0, &s) && nm_type(t.s[2][0])) {
             item_add(b, IT_SYM, a, s, 1, t.s[3], t.n[3], NULL, 0);
+        } else if (t.count == 5 && t.n[2] == 1 && hexnum(t.s[0], t.n[0], 0, &a) &&
+                   hexnum(t.s[1], t.n[1], 0, &s) && nm_type(t.s[2][0])) {
+            /* a local of a repeated name with its source file: "<file>:<name>" */
+            item_add(b, IT_SYM, a, s, 1, t.s[4], t.n[4], t.s[3], t.n[3]);
+        } else if (st->in_map && t.count == 3 && hexnum(t.s[1], t.n[1], 1, &a) &&
+                   hexnum(t.s[2], t.n[2], 1, &s)) {
+            /* a GNU map's output section: "<name>  0xADDR  0xSIZE" */
+            osec_add(b, a, s, t.s[0], t.n[0], code_section(t.s[0], t.n[0]));
+        } else if (st->in_map && t.count == 1 && !hexnum(t.s[0], t.n[0], 1, &a)) {
+            snprintf(st->pending_out, sizeof st->pending_out, "%.*s", (int)t.n[0], t.s[0]);
         }
         return;
     }
     if (st->discarded || t.s[0][0] == '*') {
+        st->pending[0] = '\0';
+        return;
+    }
+    if (out_name[0] != '\0' && t.count == 2 && hexnum(t.s[0], t.n[0], 1, &a) &&
+        hexnum(t.s[1], t.n[1], 1, &s)) {
+        /* a long output section name's numbers */
+        osec_add(b, a, s, out_name, strlen(out_name), code_section(out_name, strlen(out_name)));
         st->pending[0] = '\0';
         return;
     }
@@ -751,8 +813,17 @@ static int build_layout(IcoSymTab *t, const Lists *l)
         int r = 0;
         uint64_t end, size;
         const char *nm = t->str + p->name;
-        const size_t need = strlen(nm) + 80;
+        size_t need;
 
+        /* a symbol's own name: an nm table's "<file>:<name>" (a repeated
+           local's file column, tools/package_android.sh) depends on whether
+           another symbol anywhere in the library shares the name, which a
+           change outside the game can decide; its offset already tells two
+           namesakes apart */
+        if (p->kind == IT_SYM && strrchr(nm, ':') != NULL) {
+            nm = strrchr(nm, ':') + 1;
+        }
+        need = strlen(nm) + 80;
         (void)in_game(e, p->at, &r);
         end = e->game_hi[r];
         if (p->sized) {
@@ -790,6 +861,97 @@ static int build_layout(IcoSymTab *t, const Lists *l)
     t->n_layout = l->n_game;
     t->layout_hash = xxh3_64(txt, len);
     free(txt);
+    t->game_start = (uint64_t *)malloc((l->n_game ? l->n_game : 1) * sizeof *t->game_start);
+    if (t->game_start == NULL) {
+        return -1;
+    }
+    for (i = 0; i < l->n_game; i++) {
+        if (l->game[i].kind == IT_SYM) {
+            t->game_start[t->n_game_start++] = l->game[i].at; /* sorted: l->game is */
+        }
+    }
+    return 0;
+}
+
+static int sec_cmp(const void *a, const void *b)
+{
+    const IcoSymSec *x = (const IcoSymSec *)a, *y = (const IcoSymSec *)b;
+
+    if (x->start != y->start) {
+        return x->start < y->start ? -1 : 1;
+    }
+    return x->size < y->size ? -1 : x->size > y->size;
+}
+
+/* The output sections where they lie now, and the code range: the span of
+   the code sections inside the caller's text range, or that range itself
+   when the file names none there.  0, or -1 (no memory). */
+static int build_sections(IcoSymTab *t, const Build *b, const IcoSymTabEnv *env)
+{
+    size_t i, n = 0;
+
+    t->code_lo = env->text_lo;
+    t->code_hi = env->text_hi;
+    t->code_from = 0;
+    for (i = 0; i < b->n; i++) {
+        n += b->it[i].kind == IT_OSEC;
+    }
+    if (n == 0) {
+        return 0;
+    }
+    t->sec = (IcoSymSec *)calloc(n, sizeof *t->sec);
+    if (t->sec == NULL) {
+        return -1;
+    }
+    for (i = 0; i < b->n; i++) {
+        const Item *it = &b->it[i];
+        const uint64_t at = it->addr + (uint64_t)t->bias;
+        IcoSymSec *q;
+
+        if (it->kind != IT_OSEC || at < env->image_lo || at >= env->image_hi) {
+            continue;
+        }
+        q = &t->sec[t->n_sec++];
+        q->start = at;
+        q->size = it->size;
+        q->name = it->name;
+        q->code = it->code;
+    }
+    if (t->n_sec > 1) {
+        qsort(t->sec, t->n_sec, sizeof *t->sec, sec_cmp);
+    }
+    {
+        uint64_t lo = 0, hi = 0;
+
+        for (i = 0; i < t->n_sec; i++) {
+            const IcoSymSec *q = &t->sec[i];
+            uint64_t a = q->start, z = q->start + q->size;
+
+            if (!q->code) {
+                continue;
+            }
+            if (a < env->text_lo) {
+                a = env->text_lo;
+            }
+            if (z > env->text_hi) {
+                z = env->text_hi;
+            }
+            if (z <= a) {
+                continue;
+            }
+            if (hi == 0 || a < lo) {
+                lo = a;
+            }
+            if (z > hi) {
+                hi = z;
+            }
+        }
+        if (hi > lo) {
+            t->code_lo = lo;
+            t->code_hi = hi;
+            t->code_from = 1;
+        }
+    }
     return 0;
 }
 
@@ -854,6 +1016,13 @@ IcoSymTab *ico_symtab_parse(const char *text, size_t n, const IcoSymTabEnv *env,
         say(why, why_n, "the symbol file is another build's");
         goto fail;
     }
+    /* the code range: the file's code sections (state_syms.h) */
+    if (build_sections(t, &b, env) != 0) {
+        say(why, why_n, "no memory for the table");
+        goto fail;
+    }
+    t->env.text_lo = t->code_lo;
+    t->env.text_hi = t->code_hi;
     /* each item where it lies now, by kind and place */
     for (i = 0; i < b.n; i++) {
         const Item *it = &b.it[i];
@@ -861,10 +1030,11 @@ IcoSymTab *ico_symtab_parse(const char *text, size_t n, const IcoSymTabEnv *env,
         Pos *q;
         int r;
 
-        if (at < env->image_lo || at >= env->image_hi || (it->kind == IT_SEC && it->size == 0)) {
+        if (it->kind == IT_OSEC || at < env->image_lo || at >= env->image_hi ||
+            (it->kind == IT_SEC && it->size == 0)) {
             continue;
         }
-        if (at >= env->text_lo && at < env->text_hi) {
+        if (at >= t->code_lo && at < t->code_hi) {
             q = it->kind == IT_SYM ? list_push(&l.code, &l.n_code, &caps[0])
                                    : list_push(&l.code_sec, &l.n_code_sec, &caps[1]);
         } else if (in_game(env, at, &r)) {
@@ -924,6 +1094,8 @@ void ico_symtab_free(IcoSymTab *t)
     }
     free(t->unit);
     free(t->data);
+    free(t->sec);
+    free(t->game_start);
     free(t->str);
     free(t->unit_by_name);
     free(t->data_by_name);
@@ -1014,6 +1186,104 @@ const IcoSymData *ico_symtab_data_at(const IcoSymTab *t, uint64_t addr)
     return NULL;
 }
 
+const IcoSymSec *ico_symtab_section_at(const IcoSymTab *t, uint64_t addr)
+{
+    size_t lo = 0, hi;
+
+    if (t == NULL) {
+        return NULL;
+    }
+    hi = t->n_sec;
+    while (lo < hi) {
+        const size_t mid = lo + (hi - lo) / 2;
+
+        if (t->sec[mid].start <= addr) {
+            lo = mid + 1;
+        } else {
+            hi = mid;
+        }
+    }
+    if (lo > 0 && addr - t->sec[lo - 1].start < t->sec[lo - 1].size) {
+        return &t->sec[lo - 1];
+    }
+    return NULL;
+}
+
+static int in_sorted(const uint64_t *v, size_t n, uint64_t x)
+{
+    size_t lo = 0, hi = n;
+
+    while (lo < hi) {
+        const size_t mid = lo + (hi - lo) / 2;
+
+        if (v[mid] < x) {
+            lo = mid + 1;
+        } else {
+            hi = mid;
+        }
+    }
+    return lo < n && v[lo] == x;
+}
+
+int ico_symtab_starts_at(const IcoSymTab *t, uint64_t addr)
+{
+    const IcoSymUnit *u;
+    const IcoSymData *d;
+
+    if (t == NULL) {
+        return 0;
+    }
+    u = ico_symtab_unit_at(t, addr);
+    d = ico_symtab_data_at(t, addr);
+    return (u != NULL && u->start == addr) || (d != NULL && d->start == addr) ||
+           in_sorted(t->game_start, t->n_game_start, addr);
+}
+
+const char *ico_symtab_nearest(const IcoSymTab *t, uint64_t addr, uint64_t *off)
+{
+    const char *name = NULL;
+    uint64_t best = 0;
+    size_t lo = 0, hi;
+
+    *off = 0;
+    if (t == NULL) {
+        return NULL;
+    }
+    hi = t->n_unit;
+    while (lo < hi) {
+        const size_t mid = lo + (hi - lo) / 2;
+
+        if (t->unit[mid].start <= addr) {
+            lo = mid + 1;
+        } else {
+            hi = mid;
+        }
+    }
+    if (lo > 0) {
+        best = t->unit[lo - 1].start;
+        name = ico_symtab_name(t, t->unit[lo - 1].name);
+    }
+    lo = 0;
+    hi = t->n_data;
+    while (lo < hi) {
+        const size_t mid = lo + (hi - lo) / 2;
+
+        if (t->data[mid].start <= addr) {
+            lo = mid + 1;
+        } else {
+            hi = mid;
+        }
+    }
+    if (lo > 0 && (name == NULL || t->data[lo - 1].start > best)) {
+        best = t->data[lo - 1].start;
+        name = ico_symtab_name(t, t->data[lo - 1].name);
+    }
+    if (name != NULL) {
+        *off = addr - best;
+    }
+    return name;
+}
+
 static long find_named(const uint32_t *idx, size_t n, const void *base, size_t stride,
                        size_t hash_off, size_t name_off, size_t ord_off, const char *str,
                        uint64_t hash, const char *name, uint32_t ordinal)
@@ -1081,13 +1351,44 @@ const IcoSymData *ico_symtab_data_named(const IcoSymTab *t, uint64_t name_hash, 
     return i >= 0 ? &t->data[i] : NULL;
 }
 
+/* the program's code range, for an erratum patch site's stub (code_hash.h
+   IcoA64Text): the table's text range, read in place */
+static void unit_text(const IcoSymTab *t, IcoA64Text *tx)
+{
+    tx->bytes = (const void *)(uintptr_t)t->env.text_lo;
+    tx->lo = t->env.text_lo;
+    tx->hi = t->env.text_hi;
+}
+
+uint64_t ico_symtab_unit_hash_rules(IcoSymTab *t, const IcoSymUnit *cu, int rules)
+{
+    IcoSymUnit *u = &t->unit[cu - t->unit];
+    IcoA64Text tx;
+
+    if (rules == ICO_CODE_HASH_RULES) {
+        return ico_symtab_unit_hash(t, cu);
+    }
+    if (u->hashed1 != rules) {
+        unit_text(t, &tx);
+        u->code_hash1 =
+            ico_code_hash_text(rules, t->env.arch, (const void *)(uintptr_t)u->start,
+                               (size_t)u->size, u->start, t->env.image_lo, t->env.image_hi, &tx);
+        u->hashed1 = (uint8_t)rules;
+    }
+    return u->code_hash1;
+}
+
 uint64_t ico_symtab_unit_hash(IcoSymTab *t, const IcoSymUnit *cu)
 {
     IcoSymUnit *u = &t->unit[cu - t->unit];
 
     if (!u->hashed) {
-        u->code_hash = ico_code_hash(t->env.arch, (const void *)(uintptr_t)u->start,
-                                     (size_t)u->size, u->start, t->env.image_lo, t->env.image_hi);
+        IcoA64Text tx;
+
+        unit_text(t, &tx);
+        u->code_hash =
+            ico_code_hash_text(ICO_CODE_HASH_RULES, t->env.arch, (const void *)(uintptr_t)u->start,
+                               (size_t)u->size, u->start, t->env.image_lo, t->env.image_hi, &tx);
         u->hashed = 1;
     }
     return u->code_hash;

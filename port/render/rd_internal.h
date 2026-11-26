@@ -57,6 +57,7 @@
 #include <string.h>
 #include "rd.h"
 #include "rhi.h"
+#include "rd_submit_queue.h"
 #include "rd_thread.h"
 #include "rd_camera_blend.h"
 #include "../include/ico_frame.h"
@@ -129,6 +130,7 @@ typedef enum RdCmdType {
      * RD_OTEXT_OP: a post pass after text (b[1] RdPostKind), u[1] offset of
      * an RdTextOp, u[2] its size.  Keyed */
     RDC_OVERLAY_TEXT,
+    RDC_UPSCALE_POINT, /* u[0] src, u[1] dst: no state (rd_upscale.h) */
     RDC_COUNT
 } RdCmdType;
 
@@ -190,7 +192,7 @@ _Static_assert(sizeof(RdTextOp) == 12, "RdTextOp is dumped as raw bytes");
 /* Whether a command is a state delta (rd__apply_state) rather than an action. */
 static inline int rd__cmd_is_state(uint8_t type)
 {
-    return type <= RDC_STATE_LAST || type == RDC_AA1;
+    return type <= RDC_STATE_LAST || type == RDC_AA1 || type == RDC_UPSCALE_POINT;
 }
 
 /* RDC_SHADOW_STRIP's b[0]. */
@@ -208,8 +210,12 @@ uint32_t rd__shadow_disc_step(void);
 /* The stencil bit DATE's stencil path keeps the destination alpha's MSB in
  * (rd_replay_tiler.c rd__replay_date_take; RD_STENCIL_DATE_*): the count writes bits
  * 0-5 only (RD_SHADOW_STENCIL_MASK) and its resolve reads no other, so bit
- * 6 is free; bit 7 is unused. */
+ * 6 is free; bit 7 marks the shadow tiles' dead tiles inside a composite's
+ * own pass (RD_TILE_STENCIL_BIT, rd_shadow_tile.c). */
 #define RD_DATE_STENCIL_BIT 0x40u
+/* the shadow tiles' mark of a dead tile (rd_shadow_tile.c): bit 7, which
+ * nothing else reads or writes */
+#define RD_TILE_STENCIL_BIT 0x80u
 /* ICO_RD_DATE_SABOTAGE=1 (a test's switch, read once): DATE's setup writes 0
  * into the bit where the alpha's MSB is 1, so the self-test's failure path
  * runs (rd_replay_tiler.c rd__replay_date_take; rd_date_selftest.c). */
@@ -361,9 +367,21 @@ typedef struct RdFrame {
      * for the draws marked RD_VU_TICK_CAMERAS (IcoVuCB.ticks) */
     uint32_t hasTickCams;
     float tickCams[2][16];
+    /* not dumped: the game paused when the frame closed (rd_end_frame,
+     * rd_set_paused_source; the paused scene's hold, rd_hold.h) */
+    uint32_t paused;
 } RdFrame;
 
 void rd__frame_reset(RdFrame *f);
+/* A picture of the ring frame f's number was handed to a replay (rd_thread.c
+ * noteSent): the loss keep copies only such a frame (rd_loss_pick.h
+ * rd_loss_keep_needed).  Kept beside the ring, one atomic word a slot, not
+ * in RdFrame: frames are copied whole by value (rd_interp.c, rd_hold.c, the
+ * replay's own copies) on the render thread while the game thread marks a
+ * frame, and a field in them would be read by those copies beside that
+ * store.  false for a frame outside the ring; _clear at rd__frame_reset */
+bool rd__frame_sent(const RdFrame *f);
+void rd__frame_sent_clear(const RdFrame *f);
 void rd__frame_free(RdFrame *f);
 /* Appends size bytes (8-aligned) to the payload; returns the offset. */
 uint32_t rd__frame_payload(RdFrame *f, const void *data, uint32_t size);
@@ -446,9 +464,8 @@ typedef struct RdTargetRec {
     /* a render-to-texture block rd_block_target made (rd_water.c: the
      * reflections of puddle.c and pool.c, the queen barrier's copy of the
      * frame, the dark volume's scene-sized block): one that is not
-     * scene-sized takes the scene's scale under Water reflections: Sharp
-     * (RdSettings.waterSharp, rd__target_scale_of); 1 also in a dump's
-     * keep word (rd_dump.c) */
+     * scene-sized takes the scene's scale too (rd__target_scale_of; its GS
+     * size under g_rd.waterPs2); 1 also in a dump's keep word (rd_dump.c) */
     uint8_t block;
 } RdTargetRec;
 
@@ -805,13 +822,11 @@ int rd__sheet_bake_rect(const uint8_t *cov, uint32_t w, uint32_t h, const uint8_
                         int32_t x, int32_t y, int32_t rw, int32_t rh, uint8_t *out, size_t pitch);
 /* rd__sheet_bake_scaled_rect: the texels font_sheet_ps makes above 1x
  * (font.hlsl sheet_scaled: the texel's own coverage from the top half, the
- * rim levels of the sheet texels q0 and q0 + 1 around its centre from
- * texel q s of the bottom half, blended bilinearly, sheet_texel_scaled at
- * the threshold of the sheet texel it lies in) for the texels [x, x + rw) x
- * [y, y + rh) (any integers, both halves' rows) of a w x h sheet texture tex
- * of strip scale scale (2 or 4; 0 for any other, nothing written), in
- * integers: the shader's lerps by odd 4ths and 8ths are exact floats, so
- * these are its values.  rd__sheet_bake_texels: t's texels by its scale.
+ * rim level of the sheet texel q it lies in from texel q s of the bottom
+ * half, magnified as blocks, sheet_texel_scaled at that sheet texel's
+ * threshold) for the texels [x, x + rw) x [y, y + rh) (any integers, both
+ * halves' rows) of a w x h sheet texture tex of strip scale scale (2 or 4;
+ * 0 for any other, nothing written), in integers: the shader's values.  rd__sheet_bake_texels: t's texels by its scale.
  * rd__sheet_bake_grow: t's changed rectangle (*rx, *ry, *rw, *rh, in the
  * texture's texels) turned into the device rectangle of every baked texel
  * that reads a changed one, clipped to the dw x dh device texture. */
@@ -826,6 +841,18 @@ void rd__sheet_bake_grow(const RdTexRec *t, uint32_t dw, uint32_t dh, uint32_t *
  * marked for upload again (its RHI texture is made in the other layout at
  * the next replay) */
 void rd__set_sheet_shader(bool on);
+/* g_rd.profile.sheetBake2x for tests, the sheets' pages made again (as
+ * rd__set_sheet_shader does) */
+void rd__set_sheet_bake_2x(bool on);
+/* Whether font_sheet_ps can draw (rd_tex.c, issue 188): the menus at the
+ * scene's scale, the overlay at the output's height / 448, through
+ * rd__sheet_scale_for (menu_font.c mfScale's rounding) and
+ * rd__sheet_bake_scale, or [dev] sheet_shader; the start-up and overlay
+ * sets hold its keys only then.  rd__sheet_set_words: the set line's words */
+uint32_t rd__sheet_scale_for(float k);
+bool rd__sheet_shader_in_scene(void);
+bool rd__sheet_shader_in_overlay(void);
+void rd__sheet_set_words(char *out, size_t size);
 
 /* --------------------------------------------------------------- meshes
  * rd_mesh.c.  A VU mesh keeps its vertex stream (the
@@ -853,6 +880,12 @@ typedef struct RdMeshRec {
     uint32_t qwPerVertex, batchCount, srcQw;
     float (*stream)[4]; /* vertexCount * qwPerVertex quadwords */
     uint32_t *index;    /* the list the device draws, dense (ICO_VU_INDEX) */
+    /* the same triangles with shared vertices and each batch's distinct
+     * values and mark flag (rd_vu_share.h; NULL: none), after index on the
+     * device; shareTried: built (or found impossible) at the first upload of
+     * a replay that draws it as a candidate, once */
+    uint32_t *indexShared, *shareUnique;
+    uint8_t shareTried;
     /* The triangles' marks, a byte a kick (shader_consts.h ICO_VU_MARK_*;
      * markCount bytes, NULL when no triangle has one): ICO_VU_MARK_LATER
      * on each triangle that overlaps an earlier triangle of the mesh in
@@ -864,6 +897,15 @@ typedef struct RdMeshRec {
      * vu_common.hlsli vu_kick_marks) */
     uint8_t *kickMark;
     uint32_t markCount;
+    /* Where the triangles' ICO_VU_MARK_FLIP came from (RD_MESH_FACING_*,
+     * rd_mesh.c markWinding): none (the region rule's side bands are off
+     * for the mesh's draws: ICO_VU_NO_BESIDE), the stream's normals (lit
+     * and skinned) or the EE's table (rd_mesh.h RdVuMeshDesc.facing,
+     * Packet.c, every program: the p2o strip records' normals) */
+    uint8_t facingFrom;
+    /* why facingFrom is none (RD_VU_NOFACE_*, rd.h; 0 otherwise): the 10 s
+     * line counts the draws without side bands by it */
+    uint8_t facingWhy;
     uint32_t indexCount;
     RdVuBatchRec *batches;
     uint32_t lastUsed;   /* g_rd.frameCounter of the last draw recorded */
@@ -997,6 +1039,38 @@ uint64_t rd__mesh_join_part(RdMeshRec *const *ms, uint32_t n, uint64_t sig);
  * without the packet's ordinal) and joined with rd__mesh_join_part */
 void rd__join_parts(const RdFrame *f, int keep);
 
+/* RdMeshRec.facingFrom: where a mesh's winding marks (ICO_VU_MARK_FLIP)
+ * came from.  The disc's strips do not wind by a parity convention (the
+ * strip-start phase is about 3 to 1 across the disc and per strip:
+ * rd_mesh_test's winding cases, docs/port/VU1_PROGRAMS.md "The winding
+ * mark"), so a mark comes from normals or not at all: the EE's table
+ * computed from the p2o strip records' normals when the packet is built
+ * (every program, prelit included: Packet.c), else a lit or skinned
+ * stream's own normals, else none */
+enum { RD_MESH_FACING_NONE = 0, RD_MESH_FACING_NORMALS = 1, RD_MESH_FACING_TABLE = 2 };
+
+/* rd_mesh.c: m's winding marks from the EE's table bits (bit v of
+ * bits[v >> 3], LSB first: the triangle kicked at vertex v winds against
+ * its normals) over count vertices, which must be m's own vertex count:
+ * every FLIP mark cleared and set again from the table, facingFrom
+ * RD_MESH_FACING_TABLE (gpuDirty when a device copy holds the old marks).
+ * false (nothing changed) when count is not m's vertex count, m is not a
+ * strip mesh (prelit, lit or skinned) or memory runs out */
+bool rd__mesh_set_facing(RdMeshRec *m, const uint8_t *bits, uint32_t count);
+/* rd_mesh.c: the prelit packets rd_vu_facing_attach saw built again without
+ * strip records and without a table kept for their stream (a save state
+ * loaded into a fresh run, a morphed stream; its "VU facing: mesh ... built
+ * again without its strip records" line, the first 8 then every 100th) */
+uint32_t rd__vu_facing_misses(void);
+/* The table rd__mesh_set_facing takes, back from m's marks (bit v set
+ * when kick v carries ICO_VU_MARK_FLIP; the dump's writer: rd_dump.c) into
+ * out[(m->vertexCount + 7) / 8]; false when m's marks are not the table's */
+bool rd__mesh_facing_bits(const RdMeshRec *m, uint8_t *out, uint32_t bytes);
+/* The EE's facing table being built (rd_mesh.h rd_vu_facing_vertex): vertex
+ * v's bit, -1 when the build holds no such vertex or is void (the tests:
+ * rd_mesh_test's winding cases) */
+int rd__vu_facing_bit(uint32_t v);
+
 /* The marks of the triangle of kick k (ICO_VU_MARK_*; 0 past the bytes) */
 static inline uint32_t rd__mesh_kick_mark(const RdMeshRec *m, uint32_t k)
 {
@@ -1094,10 +1168,27 @@ uint32_t rd__vu_sheet_end(const RdMeshRec *m, uint32_t end, bool extended);
  * region rule, vu_common.hlsli vu_region_rule): the Enhanced preset, a frame
  * wider than 4:3 or a scene scale above 1 (rd_replay.c) */
 bool rd__vu_extended(void);
-/* Whether the device's driver is Mesa's Turnip: its text (RhiLimits.driverText,
- * "turnip Mesa driver" or "Turnip Mesa 26.3.0") has the word in any case;
- * Qualcomm's own driver does not (rd_profile.c) */
+/* Whether the camera decides what the VU draws ([dev] region_rule = camera,
+ * the default; ICO_RD_REGION_RULE): a triangle the PS2's region rule drops
+ * is drawn, clipped, when it faces the eye, in every preset and state
+ * (ICO_VU_CAMERA, rd_replay_vu.c vuSource; docs/port/VU1_PROGRAMS.md "The
+ * region rule").  False under region_rule = ps2: the PS2's drops (with the
+ * side bands).  Read once a run (rd_pipeline.c) */
+bool rd__region_camera(void);
+/* Whether the device's driver is Mesa's Turnip: the driver id 18, or its text
+ * (RhiLimits.driverText, "turnip Mesa driver" or "Turnip Mesa 26.3.0") has
+ * the word in any case; Qualcomm's own driver does not (the device table's
+ * Turnip test: rd_device_rows.c) */
 bool rd__driver_is_turnip(const RhiLimits *lim);
+/* The profile line's Turnip note: "; turnip: Mesa 25.3.0-devel" (the Mesa
+ * version RhiLimits.mesa holds, from the driver's driverInfo) or "; turnip:
+ * Mesa version not named by the driver"; "" for any other driver */
+void rd__turnip_note(const RhiLimits *lim, char *out, size_t n);
+/* The number of shaders rd__gpu_init's loops hand to rhi_create_shader
+ * (the vertex entries, the fragment entries with their _nodual and
+ * destination-read twins; dstStorage and dstAttach as it decides them),
+ * for rhi_plan_shaders: the progress screens' count (rd_shader_plan.c) */
+uint32_t rd__shader_plan(const RhiLimits *lim, bool dstStorage, bool dstAttach);
 /* A vertex shader's embedded name (RD_VS_*; rd_replay.c s_vsNames) */
 const char *rd__vs_name(uint8_t vs);
 /* A fragment shader's embedded name (RD_FS_*; rd_replay.c s_fsNames) */
@@ -1192,6 +1283,24 @@ typedef struct RdProfile {
      * off on the immediate-mode ones (no key: the same picture;
      * ICO_RD_SHADOW_MERGE=0|1 is the tests' way) */
     bool shadowMerge;
+    /* strips of scale 2 baked on the CPU (rd_tex.c rd__sheet_bake_scale): on
+     * on the tile-based classes (the phone's text shader costs a tile-based
+     * GPU 40 ms and more a picture of menu text), off on the others, whose
+     * font_sheet_ps draws the 2x coverage at no cost one sees, where a bake
+     * is a 4 to 18 MB upload on the render thread whenever new text appears
+     * (issue 126).  No [dev] key: [dev] sheet_shader turns every bake off;
+     * rd__set_sheet_bake_2x is the tests' */
+    bool sheetBake2x;
+    /* the glow's mask computed inside its reduction (rd_glow_fold.c): on by
+     * default on the immediate-mode classes, where the mask's full-frame
+     * pass costs more than the mask's arithmetic in the reduction; off on
+     * the tile-based ones, where the pass is cheap (its tiles never leave
+     * the chip until their store) and the folded reduction, a small pass
+     * running the mask for about 70 taps a texel, cost the PowerVR phone
+     * 8 ms more a glow picture than the two draws (v0.10.1 to v0.10.2-rc4,
+     * glow WORK0 10.4-11.4 ms against 2.3-3.3 ms in v0.10.0).  [dev]
+     * glow_fold = true|false (ICO_RD_GLOW_FOLD=1|0) sets it either way */
+    bool glowFold;
     /* rd_profile.c: the device class's name for the lines; per flag
      * (RD_PROFILE_*) whether a [dev] key set it and whether a self-test
      * turned it off (rd__profile_self_test_off) */
@@ -1207,7 +1316,7 @@ typedef struct RdProfile {
     bool localProbe;
     uint16_t probeOff;
     char localWords[96];
-    char text[640]; /* the summary's words, as in force */
+    char text[768]; /* the summary's words, as in force */
 } RdProfile;
 
 /* RdProfile's flags, for its marks (devSet, selfTestOff) */
@@ -1224,6 +1333,7 @@ enum {
     RD_PROFILE_VU_PLANES = 1u << 9,
     RD_PROFILE_SHADOW_ONE = 1u << 10,
     RD_PROFILE_SHADOW_BSPLINE = 1u << 11,
+    RD_PROFILE_GLOW_FOLD = 1u << 12,
 };
 
 /* fills g_rd.profile from the device (rd_profile.c); called by rd_init after
@@ -1330,6 +1440,10 @@ typedef enum RdVsId {
     RD_VS_VU_TRI_TICK_PRE,   /* vu_tri_tick_pre_vs: one tick camera's test a triangle */
     RD_VS_VU_TRI_PLANES_PRE, /* vu_tri_planes_pre_vs: the colour planes a triangle */
     RD_VS_VU_PARTICLE_PRE,   /* vu_particle_pre_vs: one point a sprite: verdict and planes */
+    /* vu_tri_rule_zero_pre_vs: the rule stage with the zero-area test
+     * (rd_vu_zero.h): never made at the start (rd__gpu_init, the record's
+     * and the batches' sets leave it out), only once the cull is tried */
+    RD_VS_VU_TRI_RULE_ZERO,
     RD_VS_COUNT
 } RdVsId;
 
@@ -1362,6 +1476,14 @@ static inline bool rd__vs_is_vu_pre(uint8_t vs)
 static inline bool rd__vs_is_vu_stage(uint8_t vs)
 {
     return vs >= RD_VS_VU_TRI_RULE_PRE && vs <= RD_VS_VU_PARTICLE_PRE;
+}
+
+/* the zero-area cull's rule stage (rd_vu_zero.h): a record stage as the
+   pipelines see it (rd_pipeline.c), outside rd__vs_is_vu_stage so no set
+   made at the start holds it */
+static inline bool rd__vs_is_vu_zero(uint8_t vs)
+{
+    return vs == RD_VS_VU_TRI_RULE_ZERO;
 }
 
 /* the record path's two drawing vertex shaders (vu_main_vs,
@@ -1425,6 +1547,10 @@ typedef enum RdFsId {
     /* vu_pre_ps: the vertex pre-pass's records into its three RGBA32_UINT
      * targets (rd_replay_vu.c rd__vu_prepass) */
     RD_FS_VU_PRE,
+    /* blit_tone_ps, blit_depth_tone_ps: the box blit with the colour
+     * adjustment (rd_tone.h rd__tone_active) */
+    RD_FS_BLIT_TONE,
+    RD_FS_BLIT_DEPTH_TONE,
     /* From RD_FS_OPTIONAL_FIRST on a module missing from the table leaves
      * its id empty (as the vertex ids from RD_VS_OPTIONAL_FIRST) */
     RD_FS_SPRITE_PLANES,      /* sprite_ps_planes: the screen-prim triangles' plane build */
@@ -1475,7 +1601,31 @@ typedef enum RdFsId {
      * build); keys rd__aura_box_keys, in the fx family */
     RD_FS_FX_AURA_ROWS,
     RD_FS_FX_AURA_SUM,
-    RD_FS_COUNT
+    /* shadow_count_load_ps: shadow_count_ps with the loads alone, no gather
+     * in the module (SHADOW_COUNT_LOAD): where the stencil view takes no
+     * gather (RhiLimits.stencilGather) or the loads are in force
+     * (g_rd.shadowLoad); key rd__shadow_count_key */
+    RD_FS_SHADOW_COUNT_LOAD,
+    /* FSR 1.0's EASU and RCAS behind blit_vs (rd_fsr1.c, fsr1.hlsl) */
+    RD_FS_FSR1_EASU,
+    RD_FS_FSR1_RCAS,
+    RD_FS_VU_PRE_CS, /* the VU record's compute keys, no module (rd_vu_record.h) */
+    RD_FS_BLIT_SCENE,
+    /* the shadow tiles (rd_shadow_tile.c, blit.hlsl): a level's tile mask
+     * and the dead tiles' mark in the stencil's bit 7, behind blit_vs */
+    RD_FS_SHADOW_TILE_MASK,
+    RD_FS_SHADOW_TILE_MARK,
+    RD_FS_FX_BLUR4, /* fx_blur4_ps: two staticBlur pairs in one pass (rd_lamps.h RD_LAMPS_FOLD4) */
+    RD_FS_DEPTH_DOWN, /* depth_down_ps: SCENE's depth at the GS size (rd_lamps.h RD_LAMPS_LOWRES) */
+    RD_FS_DEPTH_DOWN_MS, /* depth_down_ms_ps: the same per sample (RD_LAMPS_LOWRESMS) */
+    RD_FS_FX_GLOWBLUR,   /* fx_glowblur_ps: the glow blur in two passes (rd_glow_blur.h) */
+    RD_FS_COUNT,
+    /* past the count: entries rd__gpu_init's loop and its name table leave
+     * alone, made, named and destroyed by their own file (g_rd.fs and its
+     * twins' arrays hold RD_FS_SLOTS) */
+    RD_FS_FX_PASTE = RD_FS_COUNT, /* fx_paste_ps: the glow's paste (rd_paste_spec.h) */
+    RD_FS_SPRITE_COMP, /* sprite_comp_ps: the shadow composites and levels (rd_comp_spec.h) */
+    RD_FS_SLOTS
 } RdFsId;
 
 #define RD_FS_OPTIONAL_FIRST RD_FS_SPRITE_PLANES
@@ -1772,9 +1922,10 @@ int rd__texa_per_texel(const RdStateBlock *s);
 int rd__gs_filter_int(const RdStateBlock *s);
 RdPipeKeyInt rd__post_key(RdVsId vs, RdFsId fs, RhiFormat colorFmt);
 /* The present's box blit with the effects depth: blit_vs and
- * blit_depth_ps into colorFmt (the headless output's RGBA8, the swapchain's
- * BGRA8) and an RHI_FMT_D32F depth target, Z written, test ALWAYS. */
-RdPipeKeyInt rd__present_depth_key(RhiFormat colorFmt);
+ * blit_depth_ps (blit_depth_tone_ps with tone) into colorFmt (the headless
+ * output's RGBA8, the swapchain's BGRA8) and an RHI_FMT_D32F depth target,
+ * Z written, test ALWAYS. */
+RdPipeKeyInt rd__present_depth_key(RhiFormat colorFmt, bool tone);
 /* The pipeline for k, created on first use.  0 without a device. */
 RhiPipeline rd__get_pipeline(const RdPipeKeyInt *k);
 /* The same, not noted on the pass ring's newest entry
@@ -1967,10 +2118,18 @@ bool rd__vu_policy_init(const RhiLimits *lim);
  * any of them back to the extended set (overridden, the reason it overrode
  * kept in why).  kind and why are the start line's words ("plain set" and
  * "(Turnip driver: ...)"), brief the summary's reason ("Turnip driver, issue
- * 163"); both empty for the extended set without a reason. */
+ * 163"); both empty for the extended set without a reason.  noBeside: the
+ * plain set is the device's (a device-table row or Turnip), where it hides a
+ * stray vertex the extended set's clipped triangles showed (issue 163), so
+ * the region rule's side bands, which draw the dropped front-facing
+ * triangles clipped beside the 4:3 picture, and the camera rule, which
+ * draws them clipped over the whole frame, stay off too (rd_replay_vu.c
+ * vuDropMode); false for the [dev] and lost-start reasons and when
+ * overridden. */
 typedef struct RdVuSetChoice {
     bool plain;
     bool overridden;
+    bool noBeside;
     const char *kind;
     const char *brief;
     char why[160];
@@ -2211,13 +2370,62 @@ bool rd__fog_edge_may_be_due(void);
  * fades_fold = false (ICO_RD_FADES_FOLD=0, the A/B) or after a reduction
  * did not take a planned fold */
 bool rd__fades_fold_on(void);
+/* The glow's mask folded into its reduction (rd_glow_fold.c; rd_replay.h
+ * has the replay's hooks).
+ * rd__glow_fold_on     [dev] glow_fold (ICO_RD_GLOW_FOLD=1 on, 0 off; not
+ *                      set: the profile's default, RdProfile.glowFold (off
+ *                      on the tile-based classes), where the renderer has
+ *                      an output, off where its caller reads the targets),
+ *                      false after a frame
+ *                      read WORK2 before its fill or a reduction did not
+ *                      take a planned fold
+ * rd__glow_fold_force  the tests: 1 on, 0 off, -1 the switch's (and the
+ *                      fold on again after a refusal that turned it off)
+ * rd__glow_fold_plan   frame f's chain as the scan reads it (the walk of
+ *                      rd__store_plan_scan, here over a frame of its own):
+ *                      NULL with out->on, "" without a glow, else why not
+ *                      (*why RD_GLOW_FOLD_WHY_*); no device needed
+ * rd__glow_fold_readback  rd_replay.c rd__read_target: a read of WORK2
+ *                      after a folded replay is logged (it is not the mask)
+ * RdGlowFoldPlan       the chain's three commands (by the store plan's
+ *                      ordinals and pointers) and fx_glow_mask's words that
+ *                      the scan knows: the fill (R | G << 8 | B << 16 | A <<
+ *                      24 with FBA's MSB), the mask's rect (x0 | x1 << 16,
+ *                      y0 | y1 << 16), u0 - x0 | (v0 - y0) << 16, its alpha
+ *                      test (A | AREF << 8 | ATST << 16 | ATE << 20 | AFAIL
+ *                      << 24), its flags (RD_FXF_TCC, LINEAR, CLAMP_S,
+ *                      CLAMP_T, FBA) and TEX0 size */
+#define RD_GLOW_FOLD_WORDS 9
+
+typedef struct RdGlowFoldPlan {
+    bool on;
+    uint32_t fillOrd, maskOrd, reductionOrd;
+    const RdCmd *fillCmd, *maskCmd, *reductionCmd;
+    uint32_t fill, rectX, rectY, duv, test, flags;
+    float texW, texH;
+    /* 1: something drew on WORK2 between the fill and the mask (the sun's
+     * fans): the fill and those are drawn, only the mask is not, and the
+     * reduction reads WORK2 where the mask keeps a texel */
+    int maskOnly;
+} RdGlowFoldPlan;
+
+bool rd__glow_fold_on(void);
+void rd__glow_fold_force(int on);
+const char *rd__glow_fold_plan(const RdFrame *f, int keep, RdGlowFoldPlan *out, uint32_t *why);
+void rd__glow_fold_readback(uint32_t id);
 
 /* rd_vuprepass_selftest's sabotage (ICO_RD_VU_PREPASS_SABOTAGE), while the
  * mode is not RD_VU_SABOTAGE_OFF: VERTEX the first mesh or grid command's
  * vertex records drawn one texel past where the main shader reads them,
  * TRI its triangles' slot A one slot past, TICKS every tick stage's tick 1
- * tested at tick 0's camera */
-enum { RD_VU_SABOTAGE_OFF, RD_VU_SABOTAGE_VERTEX, RD_VU_SABOTAGE_TRI, RD_VU_SABOTAGE_TICKS };
+ * tested at tick 0's camera, STALE the record's copies left out */
+enum {
+    RD_VU_SABOTAGE_OFF,
+    RD_VU_SABOTAGE_VERTEX,
+    RD_VU_SABOTAGE_TRI,
+    RD_VU_SABOTAGE_TICKS,
+    RD_VU_SABOTAGE_STALE
+};
 
 void rd__vu_prepass_sabotage(int mode);
 RdPipeKeyInt rd__vu_pre_key(uint8_t preVs);
@@ -2280,6 +2488,16 @@ RdPipeKeyInt rd__shadow_reduce_key(void); /* box_reduce_ps: the count at the GS 
  * shadow_count_ps behind blit_vs into an RGBA8 target of the GS size, no
  * depth attachment, the stencil read through its view (RHI_ASPECT_STENCIL) */
 RdPipeKeyInt rd__shadow_count_key(void);
+/* Whether the one draw reads the stencil a texel a load: the self-test's
+ * choice (g_rd.shadowLoad) or a backend whose stencil view takes no
+ * gather (RhiLimits.stencilGather false: Direct3D), where the gathers'
+ * module is never bound (shadow_count_load_ps; rd_shadow_one.c) */
+bool rd__shadow_count_loads(void);
+/* The line naming how the count after an MSAA epoch reads the stencil
+ * (rd_shadow_one.c; rd_msaa.c at the close, rd__shadow_one_draw):
+ * one 1 the one draw, 0 the seven stencil-tested draws; samples the
+ * epoch's count.  Reported once a form and count. */
+void rd__shadow_msaa_note(int one, uint32_t samples);
 /* The table shadow_count_ps reads the count's bytes from: texel m (0..63)
  * the RGBA the seven draws write for a stencil whose bits 0-5 hold m:
  * RGB 4 m, A 0x80 where m != 0, else 0; under the step 8 RGB 8 (m mod 32),
@@ -2577,6 +2795,9 @@ enum { RD_BORDER_CLOSED = 0, RD_BORDER_OPEN, RD_BORDER_CROPPED, RD_BORDER_WINDOW
 int rd__scene_border_state(const RdTargetRec *scene);
 void rd__set_scene_border_repeat(bool on);
 uint64_t rd__scene_border_repeat_count(void);
+/* the fog asked for SCENE's border repeat this replay and it has not run
+ * yet (rd_blur_border.c): it falls before the next sprite that samples SCENE */
+bool rd__scene_border_repeat_pending(void);
 void rd__scene_border_free(void);
 
 /* True for the kinds drawn by the GS sprite model (rd__blur_post_sprite): the
@@ -2587,393 +2808,7 @@ static inline bool rd__is_blur_kind(uint32_t kind)
     return kind == RD_POST_REDUCTION || (kind >= RD_POST_MOTION_BLUR && kind <= RD_POST_EYE_BLUR);
 }
 
-/* --------------------------------------------------------- interpolation
- * rd_interp.c.  rd__interp_frame builds, into a frame it owns, the current
- * frame cur with every keyed draw's data blended from its match in prev by
- * alpha (0 = prev's data, 1 = cur's), and the feedback passes held at the
- * tick: a frame that writes FEED128 copies it into FEED_HELD at its head
- * when firstOfTick, and back from FEED_HELD otherwise, and a
- * frame that reads DISPLAY (the motion blur's old frame) does the same with
- * DISPLAY and DISPLAY_HELD, so every present of a tick starts from the same
- * FEED128 and DISPLAY and draws the recorded FIX.  prev NULL, or a
- * frame-level snap (rd__interp_snap), copies cur's data.  The result is
- * valid until the next call; it owns no temporary targets (cur's are
- * used). */
-enum {
-    RD_SNAP_NONE = 0, /* interpolated */
-    RD_SNAP_NO_PREV,  /* no previous frame, or it is not closed */
-    RD_SNAP_GAP,      /* frame numbers not consecutive (a frame was discarded) */
-    RD_SNAP_KEEP,     /* either frame is a keep (fbKeep) frame */
-    RD_SNAP_CUT,      /* rd_camera_cut during cur (RdCamera.cut) */
-    RD_SNAP_CAMERA,   /* the camera turned or moved further than a cut threshold */
-    RD_SNAP_FADE,     /* either frame fully faded (the fade edge) */
-    RD_SNAP_HISTORY,  /* targets recreated after prev (display options changed) */
-    RD_SNAP_SIZE,     /* the scene size differs */
-    RD_SNAP_WALL,     /* the eye's path from prev to cur crossed the stage
-                       * (rd_camera_cut_wall, RdCamera.cut RD_CAMERA_CUT_WALL) */
-    RD_SNAP_COUNT
-};
-
-/* What made a matched keyed draw snap as mismatched */
-enum {
-    RD_MISMATCH_SIZE = 0, /* payload too short for its header, vertex or primitive count */
-    RD_MISMATCH_MESH,     /* the mesh ids are of different layouts (sameMesh) */
-    RD_MISMATCH_STATE,    /* program, code or clip mode (b[0..2]) */
-    RD_MISMATCH_HEADER,   /* batch range, bones, stream, layout (RdVuPayload) */
-    RD_MISMATCH_TOPOLOGY, /* a shadow volume's triangle counts */
-    RD_MISMATCH_COUNT
-};
-
-/* Why a keyed draw of cur stayed unmatched (RdInterpStats.unmatchedWhy) */
-enum {
-    RD_UNMATCHED_ABSENT = 0, /* the previous frame has no draw of its key, type and list */
-    RD_UNMATCHED_FEWER,      /* the previous frame drew the key fewer times, every one paired */
-    RD_UNMATCHED_UNPLACED,   /* left by the pairing by place while a previous draw stayed free */
-    RD_UNMATCHED_PAYLOAD,    /* its payload is out of the frame's range */
-    RD_UNMATCHED_COUNT
-};
-
-/* Why a frame that blended (no snap, alpha below 1) had no blended camera
- * (rd_interp.c camSetup; RdInterpStats.camOffWhy) */
-enum {
-    RD_CAM_OFF_NONE = 0,    /* the blended camera on, or the frame not blended (a snap) */
-    RD_CAM_OFF_ALPHA_RANGE, /* alpha below 0 or NaN (rd__interp_frame passes neither) */
-    RD_CAM_OFF_ALPHA1,      /* alpha 1: nothing blends, the tick's own picture */
-    RD_CAM_OFF_NO_CAMERA,   /* a frame without a camera (RdFrame.hasCamera) */
-    RD_CAM_OFF_LEGACY,      /* ICO_RD_S2_LEGACY=1 (rd__s2_legacy) */
-    RD_CAM_OFF_FAILED,      /* a view not invertible, or the blend refused (not affine, a mirror) */
-    RD_CAM_OFF_COUNT
-};
-
-/* Why a turn over RD_INTERP_TURN_SNAP kept the tick's pose (rd_interp.c
- * rotation continuity; RdInterpStats.turnWhy, the 10 s summary) */
-enum {
-    RD_TURN_WHY_NONE = 0, /* no memory of the draw: never blended under the snap, or the
-                             table full when it was */
-    RD_TURN_WHY_OLD,      /* its last memory ended more than RD_INTERP_TURN_GAP ticks before */
-    RD_TURN_WHY_POSE,     /* a memory within the gap whose turn does not carry to the pose */
-    RD_TURN_WHY_FAR,      /* a memory, the turn further than RD_INTERP_TURN_KEEP from it */
-    RD_TURN_WHY_LONG,     /* a memory the long way continues, over RD_INTERP_TURN_LONG */
-    RD_TURN_WHY_COUNT
-};
-
-typedef struct RdInterpStats {
-    uint32_t snap;     /* RD_SNAP_* of the frame */
-    uint32_t keyed;    /* keyed draws in cur */
-    uint32_t lerped;   /* blended */
-    uint32_t missing;  /* no match in prev (snapped) */
-    uint32_t mismatch; /* count, topology or mesh differs (snapped) */
-    uint32_t jump;     /* moved further than the teleport threshold (snapped) */
-    uint32_t morph;    /* mesh draws given a kept or blended vertex stream */
-    /* why the mismatched draws snapped (RD_MISMATCH_*), and the mesh
-     * draws whose model matrices or bones blended as rotations */
-    uint32_t why[RD_MISMATCH_COUNT];
-    uint32_t rotated;
-    uint32_t turned; /* of them, turning more than 10 degrees in the tick */
-    float maxTurn;   /* the largest turn of a model or bone in the tick, degrees */
-    /* of them, those with a model or bone turned the long way to continue
-     * its turn of the tick before (rotation continuity), and those with one
-     * kept at the tick's pose for a turn over RD_INTERP_TURN_SNAP that
-     * continued none */
-    uint32_t longWay;
-    uint32_t turnSnap;
-    /* the snapped ones by why (RD_TURN_WHY_*, the draw's first snapped
-     * model or bone), and the turns not remembered for want of room */
-    uint32_t turnWhy[RD_TURN_WHY_COUNT];
-    uint32_t turnFull;
-    uint32_t shifted; /* shadow volumes blended with cur's triangles moved by the volume's
-                         shift: a topology change, or a prism in one tick only */
-    /* VU draws drawn through the rigidly blended camera (matched and
-     * not), and of the not-blended ones (unmatched, mismatched, jumped,
-     * unkeyed) those re-based */
-    uint32_t rebased;
-    uint32_t rebasedCur;
-    /* lit draws whose previous tick's lights were put in the slots of the
-     * current tick's lights they pair with by direction; draws of a key
-     * drawn several times paired by their place in the world instead of
-     * their order (unpaired new instances included); grids sampling a
-     * target whose screen-space STs blended */
-    uint32_t lightPaired;
-    uint32_t placed;
-    uint32_t gridSt;
-    /* grids whose STs pool.c's formula (rd.h rd_grid_screen_st) computed
-     * through the blended camera instead */
-    uint32_t gridStCamera;
-    /* the unmatched draws (missing) by RD_UNMATCHED_*; draws of a key drawn
-     * several times paired with a free draw of another place (not the
-     * nearest of each other) and so drawn as the tick's (counted in jump) */
-    uint32_t unmatchedWhy[RD_UNMATCHED_COUNT];
-    uint32_t apart;
-    /* VU draws of the previous frame alone, their object and part not drawn
-     * in the current frame's list and outside its camera's picture: drawn
-     * through the blended camera (kept), or not drawn because they could
-     * not be placed, their state reached or their block re-based (held) */
-    uint32_t prevKept;
-    uint32_t prevHeld;
-    /* draws projected on the CPU by their tick's camera (RD_SCREEN_FRAME_CAMERA,
-     * RD_SHADOW_FRAME_CAMERA) taken through the world onto the blended camera;
-     * of them, the screen draws whose S / Q and T / Q moved with their
-     * vertices (RD_SCREEN_ST_SHIFT: the ripples) */
-    uint32_t reprojected;
-    uint32_t stShifted;
-    /* The still draws (rd_interp.c stillDraw): blended parts of the world
-     * whose object did not move between the ticks while the camera did,
-     * each drawn from the tick's block through the blended camera
-     * (camCurDraw's block); stillReRounded, of them those whose element-wise
-     * blend of camera and model rows (qw 4..27) was not that block in bits
-     * (what the blend would have drawn, before the turn).  curWorld: the
-     * parts of the world (normal programs, placed through the view) drawn as
-     * the tick's through the blended camera (unmatched, snapped or unkeyed)
-     * in a frame that blended others.  tickCams: the VU draws marked
-     * RD_VU_TICK_CAMERAS */
-    uint32_t stillDraws;
-    uint32_t stillReRounded;
-    uint32_t curWorld;
-    uint32_t tickCams;
-    /* The mixed picture: in a frame that blended without a blended camera
-     * (camOffWhy, RD_CAM_OFF_*), the parts of the world (normal programs'
-     * mesh draws placed through the view) that were matched and so drawn
-     * from both ticks' blocks blended element by element (at alpha 0 the
-     * tick before's block as recorded), worldPrevRaw, and those drawn as
-     * the tick's alone (unmatched, snapped or unkeyed: camCurDraw with no
-     * camera to re-base them on, the tick's block as recorded),
-     * worldCurRaw.  With both above 0 the two kinds stand a tick of camera
-     * motion apart in one picture; mixed is then the smaller of the two
-     * (the pieces in the minority), 0 otherwise.  Whether such pieces
-     * touch is not computed: mixed counts pieces that may open a wedge,
-     * not wedges. */
-    uint32_t worldPrevRaw;
-    uint32_t worldCurRaw;
-    uint32_t mixed;
-    uint32_t camOffWhy;
-    /* VU draws blended whose two payloads differ in size: a card section
-     * (rd_mesh.h RdVuCards) at one tick only, the clip mode having changed
-     * between REGION and SCISSOR (rd_interp.c blendVu) */
-    uint32_t sizeTailBlended;
-    /* screen prims of one tick each, faded otherwise (rd_interp.c
-     * alphaFades), paired because cur's is prev's in every byte but the
-     * key: the same list, command, vertices and state (a layout change
-     * that redraws the same full-frame bars under the new layout's keys,
-     * issue 139); cur's is drawn whole and prev's not, so the picture
-     * under them never shows through a cross-fade (rd_interp.c pairSame) */
-    uint32_t screenPaired;
-} RdInterpStats;
-
-/* Rotation-aware blending of an affine 4 x 4 (column-major, w row 0 0 0
- * 1): the 3 x 3 polar-decomposed into a rotation (slerped) and a stretch
- * (lerped); the image of pivot (x, y, z; NULL: the origin) lerped, so the
- * blended matrix turns about it.  False (o untouched) when either matrix
- * is not affine, is singular, or the two have opposite handedness.
- * rd_camera_blend.h rdcb_blend_affine, the turn kept for rd_interp.c. */
-bool rd__blend_affine(const double *p, const double *c, double t, const double *pivot, double *o);
-/* ICO_RD_S2_LEGACY=1 in the environment (a developer A/B switch, read
- * once) turns off the finer blending: rotation-aware blends, the blended
- * camera, the shadow prisms' alignment and the looser state match (the
- * window also takes alpha from the measured present time).  The VU
- * positions are on the 12.4 grid whatever it says. */
-bool rd__s2_legacy(void);
-/* ICO_RD_VU_OFFGRID=1 in the environment (a developer switch,
- * read once) brings back unquantised VU X and Y (FrameCB g_z.w) with
- * the Enhanced preset on a scaled target: smoother slow motion, but the
- * seams between meshes and against the GIF path open. */
-bool rd__vu_off_grid(void);
-
-int rd__interp_snap(const RdFrame *prev, const RdFrame *cur);
-/* The CPU-projected draws' re-projection onto the blended camera (on by
- * default; rd_interp.c): off, they blend in screen space (the
- * tests' and the replay tool's before/after switch). */
-void rd__interp_set_reproject(bool on);
-/* The present clock's alpha before its clamp to [0, 0.999]
- * (rd_present_clock_alpha's (clock - tickAtMs) / tickMs), as its last call
- * computed it; NAN when that call returned before computing one or
- * rd_present has taken it since (each rd_present takes the value the clock
- * noted for it, so a present the clock did not time, the vsync lock's,
- * finds none).  For the alpha histogram and the tests. */
-double rd__present_clock_raw(void);
-/* The same value taken: NAN after it (rd_thread.c rd_present_post, which
- * hands it to the render thread's rd_present) */
-double rd__present_clock_raw_take(void);
-/* F12's blended dump is armed (rd_dump_blended_arm): the present that
- * takes it waits for its end (rd_thread.c) */
-bool rd__blended_dump_armed(void);
-
-/* The bins of the alpha histogram (rd_interp.c, the 10 s summary): alpha 0
- * split by the clock's raw value (below 0: clamped from below; anything
- * else, none included: exactly 0), the tenths of 0 < alpha < 0.999, the
- * clock's top 0.999 and 1 (the vsync lock's last slot).  rd__alpha_bin
- * the bin of a present at alpha (already clamped to [0, 1]) whose clock
- * value was raw (NAN: none) */
-enum {
-    RD_ALPHA_BIN_CLAMPED = 0,
-    RD_ALPHA_BIN_ZERO,
-    RD_ALPHA_BIN_TENTH0,
-    RD_ALPHA_BIN_TOP = RD_ALPHA_BIN_TENTH0 + 10,
-    RD_ALPHA_BIN_ONE,
-    RD_ALPHA_BIN_COUNT
-};
-
-int rd__alpha_bin(float alpha, double raw);
-/* One vertex's ST by the RdGridSt formula kind (rd.h; pool.c's statements in
- * double precision): m the grid's model to GS screen (VU qw 16..19), eye the
- * camera's eye in the world (REFLECT), sx and sy the command's f[0] and
- * f[1], pos the vertex and h its wave height (its ST's w).  False (out
- * untouched) for kind NONE or an unknown one, a vertex at w 0 or a result
- * that is not finite. */
-bool rd__grid_screen_st(uint8_t kind, const float (*m)[4], const double eye[3], float sx, float sy,
-                        const float pos[4], float h, float out[2]);
-/* rd_last_present_info's record for rd_end_frame's present of f
- * (interpolation off; rd_present_info.c) */
-void rd__note_frame_present(const RdFrame *f);
-/* rd_last_present_info's record (rd_present_info.c): a present of cur at
- * alpha (rd_present's, after its clamp), firstOfTick whether it is the
- * tick's first; and the record forgotten (rd_present's reset) */
-void rd__present_info_note(const RdFrame *cur, uint32_t firstOfTick, float alpha);
-void rd__present_info_reset(void);
-const RdFrame *rd__interp_frame(const RdFrame *prev, const RdFrame *cur, float alpha,
-                                int firstOfTick, RdInterpStats *stats);
-void rd__interp_shutdown(void);
-
-/* Still re-present (rd_interp.c): a between-tick picture that would be the
- * bytes of the tick's last rendered one is shown again (the empty keep
- * frame's replay, no passes) instead of rendered.  rd__interp_frame hashes
- * the frame it builds (rd__interp_frame_hash: ok false when the camera moved,
- * Smooth is on or the switch is off); rd__present_blended replays rf, or
- * shows the picture again when rd__reshow_why says RD_RESHOW_SHOWN.
- * [dev] still_represent = false (ICO_RD_STILL_REPRESENT=0) renders every
- * present. */
-enum {
-    RD_RESHOW_SHOWN = 0, /* the same bytes: shown again */
-    RD_RESHOW_OFF,       /* the switch is off, or Smooth's trail, a video, no device */
-    RD_RESHOW_MOVING,    /* no hash: the camera moved */
-    RD_RESHOW_FIRST,     /* a tick's first present */
-    RD_RESHOW_STALE,     /* no picture of this tick before, or another replay since */
-    RD_RESHOW_DIFF,      /* the frame's hash differs from the last rendered one's */
-    RD_RESHOW_STATE,     /* settings, targets or textures changed since */
-    RD_RESHOW_COUNT
-};
-
-typedef struct RdReshowIn {
-    bool enabled, smooth, video, hashOk, first, haveRef, stateSame;
-    uint32_t number, refNumber;
-    uint64_t hash, refHash, replay, refReplay;
-} RdReshowIn;
-
-int rd__reshow_why(const RdReshowIn *in);
-uint64_t rd__interp_frame_hash(bool *ok);
-bool rd__present_blended(const RdFrame *rf, int first, bool present);
-void rd__reshow_block(void);        /* the 10 s summary's line (rd_interp.c presentLog) */
-uint64_t rd__reshow_count(int why); /* presents counted so far in this block, per RD_RESHOW_* */
-void rd__overlay_reshow_text(const RdFrame *f); /* rd_present.c: lay the deferred text out from f */
-void rd__perf_reshown(void); /* rd_perf.c: the next replay is a re-shown present */
-
-/* The glow held between ticks (rd_glow_hold.c): a tick's first present
- * copies the glow its chain drew (WORK3) into WORK3_HELD, and its later
- * presents skip the chain (the mask into WORK2, the reduction into WORK0,
- * the blur and the eye blur) and paste the copy.  rd__glow_hold edits f
- * (rd__interp_frame's frame, after the hash) and says what it did, one of
- * RD_GLOW_*; [dev] glow_redraw = true (ICO_RD_GLOW_REDRAW=1) and Glow between
- * frames: Smooth (RdSettings.glowSmooth) draw the chain at every present; an
- * explicit ICO_RD_GLOW_REDRAW wins over the row. */
-enum {
-    RD_GLOW_HELD = 0, /* a later present: the chain skipped, the tick's glow pasted */
-    RD_GLOW_FIRST,    /* a tick's first present: drawn, and kept */
-    RD_GLOW_NONE,     /* the frame draws no glow */
-    RD_GLOW_DEV,      /* a later present, the switch on: drawn */
-    RD_GLOW_SMOOTH,   /* a later present, Glow between frames: Smooth: drawn */
-    RD_GLOW_NO_COPY,  /* a later present without this tick's copy: drawn */
-    RD_GLOW_READ,     /* a later present whose other draws read the chain's buffers: drawn */
-    RD_GLOW_COUNT
-};
-
-int rd__glow_hold(RdFrame *f, int firstOfTick);
-const char *rd__glow_hold_text(int why); /* "glow held", "glow redrawn (...)", ... */
-int rd__glow_hold_last(void);            /* the last rd__glow_hold's RD_GLOW_* */
-void rd__glow_hold_block(void);          /* the 10 s summary's line (rd_interp.c presentLog) */
-uint64_t rd__glow_hold_count(int why);   /* presents counted in this block, per RD_GLOW_* */
-void rd__perf_glow_held(void);           /* rd_perf.c: the next replay pastes the held glow */
-/* rd_interp.c, for rd_glow_hold.c: whether c under st writes or samples the
- * target id; an RDC_COPY of all of from into to (sizeOf's size) inserted at
- * index at of list l of the frame rd__interp_frame builds */
-int rd__interp_writes(const RdCmd *c, const RdStateBlock *st, uint32_t id);
-int rd__interp_reads(const RdCmd *c, const RdStateBlock *st, uint32_t id);
-bool rd__interp_copy_at(int l, uint32_t at, uint32_t from, uint32_t to, uint32_t sizeOf);
-
-/* rd_present.c's capture (rd.h rd_capture_presented): whether one is armed;
- * captureRecord (rd_present.c) copies the output into the capture texture
- * (from rd__present_record, before the overlay); rd__capture_finish reads it
- * back and writes the PNG (after the submit). */
-bool rd__capture_armed(void);
-void rd__capture_finish(void);
-/* A capture this present's list copied, or a state picture it dropped: its
- * finish (rd__capture_finish) has work, so the submit waits for it
- * (rd_submit.c) */
-bool rd__capture_pending(void);
-/* The thresholds (world units are the game's centimetres) */
-#define RD_INTERP_JUMP_WORLD 300.0f  /* an object's or bone's origin, per tick */
-#define RD_INTERP_JUMP_SCREEN 256.0f /* GS pixels: screen prims, shadows, grids, particles */
-/* RD_INTERP_CAMERA_MOVE and RD_INTERP_CAMERA_TURN, the camera's step and
- * turn per tick past which the pictures snap: rd_camera_blend.h, which the
- * game's cull shares */
-/* A model matrix or bone turning further than this in a tick (3600
- * degrees a second at 30 Hz) is a flip, not a motion: it keeps the tick's,
- * unless it continues the turn the same draw (or bone) made in the tick
- * before (rd_interp.c rotation continuity): a turn within
- * RD_INTERP_TURN_KEEP of that one (the distance between the two turns'
- * rotation vectors) blends the way that continues it, the short way or the
- * long way (a wheel turning 190 degrees a tick turns on forward instead of
- * back 170), up to RD_INTERP_TURN_LONG degrees */
-#define RD_INTERP_TURN_SNAP 120.0 /* degrees, per tick */
-#define RD_INTERP_TURN_KEEP 60.0  /* degrees */
-#define RD_INTERP_TURN_LONG 300.0 /* degrees, per tick */
-/* A remembered turn also serves a turn that would snap when it ended up to
- * this many ticks before the pair's first (about a quarter second at 30
- * Hz): a pair not blended between (a dropped present, a cut, a fade, a
- * discarded frame) or a draw not drawn for a few ticks keeps its wheel
- * turning on, when the draw's pose is where the turn carried on that many
- * ticks puts it (within RD_INTERP_TURN_KEEP) */
-#define RD_INTERP_TURN_GAP 8u /* ticks */
-/* In the alignment of two ticks' shadow prisms, a prism left unmatched
- * costs as much as a pair whose top caps lie this far apart (rms, GS pixels)
- * once the volume's shift is taken out; a pair further apart than sqrt(2)
- * times this is cheaper as two unmatched prisms */
-#define RD_INTERP_PRISM_GAP 32.0
-
-/* fx_sprite_ps's DrawCB.mode[0] flags (FXF_* in port/shaders/fx_sprite.hlsl) */
-enum {
-    RD_FXF_TEXTURED = 1,
-    RD_FXF_TFX_SHIFT = 1, /* bits 1..2: TEX0.TFX */
-    RD_FXF_TCC = 8,
-    RD_FXF_LINEAR = 16, /* TEX1.MMAG (the sprites' LOD is K = 0) */
-    RD_FXF_CLAMP_S = 32,
-    RD_FXF_CLAMP_T = 64,
-    RD_FXF_ABE = 128,
-    RD_FXF_PABE = 256,
-    RD_FXF_FBA = 512,
-    RD_FXF_DATE = 1024,
-    RD_FXF_DATM = 2048,
-    RD_FXF_DST = 4096, /* t2 holds the destination as it was before the sprite */
-    /* above 1x: the resampling kernels, the steps in DrawCB.scale[3]
-     * (rd_replay.c doBlurSpriteDraw); never set when every target involved
-     * is at scale 1 */
-    RD_FXF_ABOVE1X = 8192,
-    /* fx_frame_ps (rd_fx_plan.c): only the alpha computed, RGB 0 by
-     * construction (the glow's mask); the result premultiplied for the
-     * fixed-function ONE, ONE blender (RD_BP_PREMUL_ADD) */
-    RD_FXF_ALPHA_ONLY = 16384,
-    RD_FXF_OUT_PREMUL = 32768,
-    /* the reduction at scale 1: the fades fold's steps on its taps
-     * (rd_fades_fold.c, fx_sprite.hlsl fx_fold4) */
-    RD_FXF_FOLD = 65536
-};
-
-/* The steps at which fx_sprite_ps leaves the GS's own filter above 1x, in
- * 1/32 t1 texel per bound texel (common.hlsli GS_RS_BOX_MIN32 and
- * GS_RS_BSPLINE_MAX32): the box above 2 texels, the B-spline (bilinear
- * only) below half a texel; the packed steps (DrawCB.scale[3]) hold up to
- * RD_FX_STEP_MAX each */
-#define RD_FX_BOX_MIN32 64
-#define RD_FX_BSPLINE_MAX32 16
-#define RD_FX_STEP_MAX 4095
+#include "rd_internal_interp.h" /* the interpolation (rd_interp.c) */
 
 /* ------------------------------------------------------------- context */
 #define RD_SAMPLER_COUNT 16 /* mag x min x wrapS x wrapT */
@@ -3029,7 +2864,7 @@ typedef struct RdContext {
     RhiBindGroupLayout layoutFrame, layoutDraw, layoutTex, layoutInt;
     RhiBindGroupLayout layoutVu; /* t0 stream, b1 DrawCB, b2 VuCB, b3 VuBoneCB, t4 record,
                                     t5 the ring */
-    RhiShader vs[RD_VS_COUNT], fs[RD_FS_COUNT];
+    RhiShader vs[RD_VS_COUNT], fs[RD_FS_SLOTS];
     RdProfile profile; /* rd__profile_init */
     /* the fallback's program entries (rd__vu_policy_init; docs/port/RENDER.md
      * "The fallback entries"): vsPlain the ten mesh entries' plain variants
@@ -3043,6 +2878,14 @@ typedef struct RdContext {
     bool vuFallbackPlain;
     char vuPlainWhy[160];
     const char *vuPlainBrief; /* the summary's reason (RdVuSetChoice.brief) */
+    /* the side bands and the camera rule off for every VU draw (the PS2's
+     * drops): the device's plain set is in force (RdVuSetChoice.noBeside, issue 163; rd_replay_vu.c vuDropMode,
+     * the profile line's "side bands:" words) */
+    bool vuNoBeside;
+    /* the cluster entries' bones through t5 (issue 123's ladder, [dev]
+     * vu_bones = ring; vsPlain[RD_VS_VU_SKIN..DEBUG] the ring builds,
+     * rd__vu_policy_init; IcoVuCB.mark[3] their index, vuSource) */
+    bool vuBonesRing;
     /* the dynamic state in force (rd__vu_policy_init from
      * RhiLimits.dynamicDepth / dynamicBlend; rd__key_dynamic_normalise,
      * rd__set_pipeline) */
@@ -3099,7 +2942,7 @@ typedef struct RdContext {
     /* the *_nodual twins of the gs_dual_out entries (0 for the
      * others), and whether the two-pass blend is in force (no dualSrcBlend,
      * ICO_RD_NO_DUAL or rd_set_no_dual) */
-    RhiShader fsNoDual[RD_FS_COUNT];
+    RhiShader fsNoDual[RD_FS_SLOTS];
     bool noDual;
     /* 1x sheet text through font_sheet_ps instead of the CPU bake
      * (ICO_RD_SHEET_SHADER=1, rd_core.c rd_init; rd__set_sheet_shader for
@@ -3111,7 +2954,7 @@ typedef struct RdContext {
      * target as a storage texture or an input attachment) */
     uint8_t dstMode;
     uint8_t dstModes;
-    RhiShader fsDstRov[RD_FS_COUNT], fsDstAtt[RD_FS_COUNT];
+    RhiShader fsDstRov[RD_FS_SLOTS], fsDstAtt[RD_FS_SLOTS];
     RhiBindGroupLayout layoutDstStorage, layoutDstAttach;
     /* GS state as shader data (rd_uber.c): in force with the attachment
      * read (rd__uber_on: dstMode RD_BLEND_EXACT_ATTACHMENT), set by
@@ -3201,6 +3044,12 @@ typedef struct RdContext {
      * ICO_RD_PASS_MERGE=1 turns it on; rd_core.c rd_init): off by default,
      * used only under the storage mode */
     bool passMerge;
+    /* ICO_RD_WATER_SCALE=0 (the tests' switch, docs/port/TESTING.md;
+     * rd_core.c rd_init; the replay tool's --water-ps2): the blocks
+     * rd_block_target made that are not scene-sized at their GS size, the
+     * PS2's (v0.11.6's Water reflections: Original); false, the default,
+     * they take the scene's scale (rd__target_scale_of) */
+    bool waterPs2;
     /* the supersampling factor in force (rd__apply_display): 1, 2 or 4,
      * already in sceneReqSx/Sy; rd_scene_scale_lowered divides it out */
     float ssaa;
@@ -3491,7 +3340,9 @@ enum {
     RD_PERF_TS_LISTS = 1, /* the uploads and the VU vertex pre-pass done, list 0 starts */
     RD_PERF_TS_LIST0 = 2, /* + l: list l done */
     RD_PERF_TS_PRESENT = RD_PERF_TS_LIST0 + RD_LIST_COUNT, /* the present blits done */
-    RD_PERF_TS_PREPASS, /* the uploads done, the VU vertex pre-pass starts */
+    RD_PERF_TS_PREPASS,       /* the uploads done, the VU vertex pre-pass starts */
+    RD_PERF_TS_PRESENT_BEGIN, /* the present's own list starts (rd_submit.c) */
+    RD_PERF_TS_LATE,          /* the pre-pass done, rd_upload_late.h's start */
     RD_PERF_TS_COUNT
 };
 
@@ -3528,7 +3379,12 @@ void rd__perf_end(void);
  * the record still being made or the one pending in its frame slot;
  * nothing once that record was queued.  On the thread that waited for the
  * submit thread, the render thread idle or the caller */
-void rd__perf_submit_times(uint32_t replay, double submitMs, double presentMs);
+void rd__perf_submit_times(const RdSubmitJob *j);
+/* The calling thread's present just made, timed apart (rhi.h
+ * rhi_present_split) into j's present fields (rd_submit_queue.h
+ * RdSubmitJob.presentSplit ...), presentEndMs now; presented false: the
+ * fields zeroed (nothing was presented) */
+void rd__present_split_take(RdSubmitJob *j, bool presented);
 void rd__perf_stamp(RhiCommandList cl, uint32_t index);
 /* the walk's end (the vertex pre-pass and the lists recorded, the present
  * recorded): the slow walk line counts the pipelines and creations from
@@ -3655,6 +3511,34 @@ void rd__present_finish(void);
  * submit thread's job presents it (rd_submit_thread.c) */
 bool rd__present_will_show(void);
 void rd__present_shutdown(void);
+/* rd_prerotate.c: the present into a swapchain made in the surface's own
+ * turn (rhi_swapchain_rotation; docs/port/DISPLAY.md "The turned
+ * swapchain").  rd__prerotate_turns: the quarter turns clockwise (0 to 3)
+ * the backbuffer's images are in now (headless: the tests' twin under
+ * ICO_VK_FAKE_TRANSFORM).  rd__prerotate_target: the texture (w x h, fmt;
+ * made or remade on a change) the present's passes draw into in the
+ * backbuffer's place while the images are turned; false: none.
+ * rd__prerotate_record: src (w x h) turned into dst (the swapchain image,
+ * the turned size) in one pass, src left in RHI_STATE_SHADER_READ, dst in
+ * RHI_STATE_RENDER_TARGET.  The twin: rd__prerotate_twin draws the headless
+ * picture turned into a texture of its own; rd_read_presented then reads it
+ * back turned back (rd__prerotate_twin_read, while rd__prerotate_twin_
+ * pending: from that present to the next acquire, rd__prerotate_twin_clear).
+ * rd__prerotate_blank: no target made after an acquire: the image (w x h
+ * turned) cleared and left in RHI_STATE_PRESENT, to be presented */
+uint32_t rd__prerotate_turns(void);
+bool rd__prerotate_target(uint32_t w, uint32_t h, RhiFormat fmt, RhiTexture *tex, RhiState **state);
+void rd__prerotate_record(RhiCommandList cl, RhiTexture src, RhiState *srcState, uint32_t w,
+                          uint32_t h, RhiTexture dst, RhiState *dstState, RhiFormat dstFmt,
+                          uint32_t turns);
+void rd__prerotate_twin(RhiCommandList cl, RhiTexture src, RhiState *srcState, uint32_t w,
+                        uint32_t h, uint32_t turns);
+void rd__prerotate_blank(RhiCommandList cl, RhiTexture image, RhiState *state, uint32_t w,
+                         uint32_t h, uint32_t turns);
+void rd__prerotate_twin_clear(void);
+bool rd__prerotate_twin_pending(void);
+bool rd__prerotate_twin_read(void *dst, size_t dstSize, uint32_t w, uint32_t h);
+void rd__prerotate_shutdown(void);
 
 /* A uniform block in the ring and the group that reads it: the
  * group is its layout's one group of the replay (a dynamic uniform slot),
@@ -4051,11 +3935,13 @@ uint32_t rd__enumerate_reachable_date(RdPipeKeyInt *out, uint32_t max, uint32_t 
 bool rd__date_stencil_pass(RdDrawPass *p);
 
 /* A DATE draw's own stencil mode (not a setup's): the bit's tests TEST0 and
- * TEST1, and the PRIM.AA1 pairs' TEST0_SET and TEST1_CLR (rd.h) */
+ * TEST1, and the PRIM.AA1 pairs' TEST0_SET and TEST1_CLR, and the shadow
+ * tiles' TEST0_T and TEST1_T (rd.h) */
 static inline bool rd__date_draw_stencil(uint8_t m)
 {
     return m == RD_STENCIL_DATE_TEST0 || m == RD_STENCIL_DATE_TEST1 ||
-           m == RD_STENCIL_DATE_TEST0_SET || m == RD_STENCIL_DATE_TEST1_CLR;
+           m == RD_STENCIL_DATE_TEST0_SET || m == RD_STENCIL_DATE_TEST1_CLR ||
+           m == RD_STENCIL_DATE_TEST0_T || m == RD_STENCIL_DATE_TEST1_T;
 }
 
 /* the fold's key of a staticBlur pair (fx_blur2_ps over colorFmt, no depth;
@@ -4147,6 +4033,8 @@ const RdFrame *rd__last_frame(void);
  * the log's prefix; the length written */
 size_t rd__cull_drop_line(const RdFrame *f, char *line, size_t cap);
 const RdFrame *rd__prev_frame(void);
+/* the retained closed frame (last or before it) numbered n, else NULL */
+const RdFrame *rd__retained_frame(uint32_t number);
 /* Reads a target's colour (RGBA8, tightly packed, w * h * 4 bytes). */
 bool rd__read_target(RdTarget t, void *dst, size_t dstSize, uint32_t *w, uint32_t *h);
 /* The depth buffer of a target with one, as floats (w * h,
@@ -4197,12 +4085,12 @@ bool rd__read_texture(RdTex t, void *dst, size_t dstSize, uint32_t *w, uint32_t 
  * an older dump is "pal", RdDumpInfo.region); 13 RD_TARGET_WORK3_HELD, a
  * 19th fixed target (the glow held between ticks); 14 RdFrame.hasTickCams
  * and tickCams after the meshes (a blended present's frame, rd.h
- * rd_dump_blended_arm).
+ * rd_dump_blended_arm); 17 RDC_UPSCALE_POINT.
  * rd__dump_frame writes this version; rd__load_frame reads 3 to it, and a
  * dump before 10 loads as the 4:3 frame (aspect 4/3, wExact 512, cullW 512).
  * A dump holds the picture as drawn at its width: a replay can crop it to a
  * narrower aspect, never widen it (rd_replay_tool). */
-#define RD_DUMP_VERSION 14u
+#define RD_DUMP_VERSION 17u
 #define RD_DUMP_REGION_BYTES 8
 bool rd__dump_frame(const RdFrame *f, const char *path);
 bool rd__load_frame(const char *path, RdFrame *out);
@@ -4248,7 +4136,7 @@ typedef struct RdCameraScope {
 
 void rd__water_frame_reset(const RdFrame *f);
 /* The F12 log line's summary of f's render-to-texture blocks (issue 106):
- * the Water reflections option, SCENE's scale, each block a draw of f wrote
+ * the blocks' scale rule, SCENE's scale, each block a draw of f wrote
  * or read (GS size, texels and scale, depth, the draws into it, the draws
  * reading it with their DATE, AFAIL and blend), the DATE draws by target,
  * and the draws sampling a texture-pack replacement (blank in a dump).  At
@@ -4287,15 +4175,15 @@ uint32_t rd__wrap_pipeline_count(void);
  * under Smooth").  The motion blur's sprite reads, instead of the DISPLAY
  * the tick started from, an RGBA16F accumulator of the scenes of every
  * present, A = S + a' (A - S), resolved into an RGBA8 scene-class temporary
- * target, with the sprite's FIX spread over the tick's presents:
- * FIX' = clamp(round(128 (FIX / 128)^(1 / k)), FIX, 127).
+ * target, with FIX' = clamp(round(128 (FIX / 128)^(dt / tick)), FIX, 127),
+ * dt the time since the present before in [tick / 64, tick], or tick / k.
  * rd__blur_smooth_arm      the presenters, before a replay that presents
  *                          (rd_interp.c rd_present, rd_core.c replayOnHost;
  *                          the replay tool before its own): a tick's first
- *                          present, and k the presents a tick (1..64); a
- *                          replay not armed (a self-test, a dump's, --time)
- *                          draws the sprite as Original and leaves the
- *                          accumulator alone
+ *                          present, k the presents a tick (1..64), dt and
+ *                          tick (tickMs 0: FIX' from k); a replay not armed
+ *                          (a self-test, a dump's, --time) draws the sprite
+ *                          as Original and leaves the accumulator alone
  * rd__blur_smooth_replay_end  rd__replay_frame after every replay: an armed
  *                          replay that is not a keep frame's and drew no
  *                          motion blur sprite (the game's alpha 0, the
@@ -4309,6 +4197,7 @@ uint32_t rd__wrap_pipeline_count(void);
  *                          Original); why is logged when it held one
  * rd__blur_smooth_shutdown the above and the two pipelines (rd__gpu_shutdown)
  * rd__blur_smooth_fix      FIX' of FIX over k presents (pure)
+ * rd__blur_smooth_fix_dt   the same at dt (pure; = fix(k) at tick / k)
  * rd__blur_smooth_block    the 10 s summary's line (rd_interp.c presentLog),
  *                          logged when the block drew a Smooth sprite or
  *                          restarted, then the block's counts start again
@@ -4318,14 +4207,15 @@ uint32_t rd__wrap_pipeline_count(void);
  *                          restarts, the sprites drawn as Original while
  *                          Smooth was set (tests)
  * k (rd_interp.c rd_present): the present clock's tick over its step
- * (rd_present_clock_alpha) on the timer path, the presents the tick before
+ * (rd__present_clock_k) on the timer path, the presents the tick before
  * counted under the vsync lock, 1 for the first tick */
-void rd__blur_smooth_arm(int firstOfTick, uint32_t presentsPerTick);
+void rd__blur_smooth_arm(int firstOfTick, uint32_t presentsPerTick, double sinceMs, double tickMs);
 void rd__blur_smooth_replay_end(int keep);
 bool rd__blur_smooth_active(void);
 void rd__blur_smooth_free(const char *why);
 void rd__blur_smooth_shutdown(void);
 uint8_t rd__blur_smooth_fix(uint32_t fix, uint32_t presentsPerTick);
+uint8_t rd__blur_smooth_fix_dt(uint32_t fix, double dtMs, double tickMs);
 void rd__blur_smooth_block(void);
 void rd__blur_smooth_sizes(uint32_t acc[2], uint32_t res[2]);
 void rd__blur_smooth_counts(uint64_t *drawn, uint64_t *restarts, uint64_t *original);

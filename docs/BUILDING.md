@@ -42,10 +42,10 @@ and fills `tools/toolchain/` (gitignored, about 1.6 GB):
 | directory | what | from |
 | --- | --- | --- |
 | `llvm-mingw/` | clang 23, lld and the mingw-w64 UCRT runtime for x86-64 Windows; the same clang targets Linux | [llvm-mingw](https://github.com/mstorsjo/llvm-mingw) release 20260922, `ucrt-ubuntu-22.04-x86_64`, SHA-256 pinned (not fetched on an arm64 host unless `SKIP_LLVM_MINGW=0`, which takes the pinned `-aarch64` build) |
-| `mingw-gcc/` | mingw-w64 gcc 14 and binutils for x86-64 Windows (x86-64 hosts only) | Debian 13 `gcc-mingw-w64-*-win32` 14.2.0-19+27+b1, `binutils-mingw-w64-*` 2.44-3+12+b1, `mingw-w64-*-dev` 12.0.0-5, SHA-256 pinned |
+| `mingw-gcc/` | mingw-w64 gcc 14, g++ and binutils for x86-64 Windows (x86-64 hosts only) | Debian 13 `gcc-mingw-w64-*-win32` and `g++-mingw-w64-x86-64-win32` 14.2.0-19+27+b1, `binutils-mingw-w64-*` 2.44-3+12+b1, `mingw-w64-*-dev` 12.0.0-5, SHA-256 pinned |
 | `cmake/` | CMake 4.4.4 (`cmake`, `ctest`) | [Kitware's release](https://github.com/Kitware/CMake/releases/tag/v4.4.4) `cmake-4.4.4-linux-x86_64.tar.gz` (`-linux-aarch64` on an arm64 host), SHA-256 pinned |
 | `ccache/` | ccache 4.11.3, the compiler launcher every preset names (`tools/toolchain/ccache/bin/ccache`) | [ccache's release](https://github.com/ccache/ccache/releases/tag/v4.11.3) `ccache-4.11.3-linux-x86_64.tar.xz`, SHA-256 pinned (no arm64 build exists: that host builds without it; `SKIP_CCACHE=1` skips it elsewhere) |
-| `deps/` | SDL3, volk, the Vulkan headers, the validation layer, DXC, SPIRV-Cross, libmpeg2, libchdr and the AppImage tools (`deps/appimage/<x86_64\|aarch64>/`: appimagetool unpacked, and the AppImage runtime) | `tools/fetch_deps.sh`, which `fetch_toolchain.sh` runs last ([`THIRD_PARTY.md`](THIRD_PARTY.md)) |
+| `deps/` | SDL3, volk, the Vulkan headers, the validation layer, DXC, SPIRV-Cross, libmpeg2, libchdr, the FidelityFX SDK with glslang (`deps/fidelityfx/<tag>/`, x86-64 hosts, [below](#fidelityfx-upscaler-fsr-31)) and the AppImage tools (`deps/appimage/<x86_64\|aarch64>/`: appimagetool unpacked, and the AppImage runtime) | `tools/fetch_deps.sh`, which `fetch_toolchain.sh` runs last ([`THIRD_PARTY.md`](THIRD_PARTY.md)) |
 
 The pins the fetch scripts share (the SDL3 version and its SHA-256,
 `DEB_SNAPSHOT`, and the `fetch_deb` helper that downloads a Debian package
@@ -282,7 +282,7 @@ $CMAKE/cmake --preset win-x64
 $CMAKE/cmake --build --preset win-x64 --target all tests   # the test programs are built, not run
 ```
 
-The test presets are `linux-x64`, `linux-arm64`, `asan`, `fptrap` and `linux-x64-clang`
+The test presets are `linux-x64`, `linux-arm64`, `asan`, `linux-x64-asan`, `fptrap` and `linux-x64-clang`
 (`CMakePresets.json`, `testPresets`); a build preset's targets are `all` unless it names others, so
 `--target all tests` is what builds the test programs.
 
@@ -296,6 +296,7 @@ how several configurations of one preset live side by side under
 | `linux-x64` | Linux x86-64, headless by default | host `gcc` |
 | `win-x64` | Windows x64, window build | `mingw-gcc` x86-64 |
 | `asan` | Linux x86-64, `-fsanitize=address,undefined`, `-O1` | host `gcc` |
+| `linux-x64-asan` | `asan` as CI's asan suite configures it: the program linked (`ICO_LINK_EXE`), `-fno-sanitize-recover=undefined` (from `ICO_SANITIZE`, as every sanitizer build); its build preset builds `all` and `tests` | `gcc-14` |
 | `fptrap` | `linux-x64` with float divide-by-zero and invalid unmasked in the simulation | host `gcc` |
 | `linux-x64-clang`, `win-x64-clang` | the same two targets, headless | llvm-mingw clang 23 (the host glibc for Linux) |
 | `linux-arm64` | Linux arm64 (aarch64), built on an arm64 host ([below](#linux-arm64)); window build, `ICO_LINK_EXE=ON`, no Direct3D 12, no Direct3D 11 and no DXIL shaders | host `gcc` |
@@ -326,6 +327,7 @@ and macOS).
 | `ICO_SHADERS_GLSL` | `ON` with `ICO_RHI_OPENGL` when `tools/fetch_deps.sh` fetched SPIRV-Cross, else `OFF` | also translates the shaders to GLSL 4.30 with SPIRV-Cross for the OpenGL backend (`ICO_SPIRV_CROSS` names another executable; `SKIP_SPIRV_CROSS=1` skips the fetch). With `ICO_RHI_OPENGL` on and this off, the configure step warns: the OpenGL backend is built but has no shaders and cannot draw |
 | `ICO_VERSION_LABEL` | empty | with `ICO_LINK_EXE`: the package label (`vX.Y.Z` or `vX.Y.Z-rcN`). Its numbers go into the Windows version information and the Apple bundles' Info.plist; the label itself, written to `generated/ico_version.h`, is shown in the log header and on the Settings menu's Main page, and is empty (nothing shown) when it does not parse as a version (`CMakeLists.txt`, `ICO_VERSION_LABEL_C`). The package scripts and `android/app/build.gradle` pass it; a build without it has an all-zero version |
 | `ICO_STATE_FIXED_IMAGE` | `ON` in `linux-x64`, `linux-x64-clang`, `win-x64`, `win-x64-clang` (and `asan`, `fptrap`, which inherit `linux-x64`); `OFF` otherwise | links the programs at a fixed image address ([Fixed image](#fixed-image)); `ICO_STATE_FIXED_IMAGE=1` in every source |
+| `ICO_FFX` | `ON` in `linux-x64` (and `asan`, `linux-x64-asan`, `fptrap`, which inherit it) and `win-x64`; `OFF` otherwise | builds the FidelityFX FSR 3.1 upscaler from the fetched SDK source: `ico_ffx_sc`, the Vulkan permutation headers, `ico_ffx_upscaler` (linked into the renderer, so into the program: Options > Picture > Upscaling: FSR 3.1) and `ffx_link_test` ([FidelityFX upscaler](#fidelityfx-upscaler-fsr-31)). `ICO_FFX_DIR` and `ICO_FFX_GLSLANG` name another SDK install or glslangValidator |
 | `ICO_RC_TOOLS` | `OFF` | the release candidates' own tooling, for rc packages alone ([Release candidate tools](#release-candidate-tools)); `ON` defines `ICO_RC_TOOLS=1` for every source, and a non-empty `ICO_VERSION_LABEL` that does not end in `-rcN` is refused |
 | `ICO_BASE_ELF` | `baserom/pal/baseelf.elf` | the base ELF the data loader's reference tests read; without it they are not built |
 | `ICO_BASE_ELF_JPN` | `baserom/jpn/baseelf.elf` | the Japanese disc's base ELF (SCPS-11003), for the same tests on that disc |
@@ -350,6 +352,26 @@ matters little for an offline game; `-DICO_STATE_FIXED_IMAGE=OFF` turns it back 
 states then move the code pointers as Android and the Apple builds always do
 ([port/PLATFORM.md](port/PLATFORM.md#fibers)). The same reason pins the game's memory arena and
 the game threads' stacks at fixed addresses when the system has them free.
+
+### Apple image base
+
+Apple's linker puts a 64-bit program's `__TEXT` just above the 4 GB `__PAGEZERO`, at 0x100000000,
+and the kernel slides it by up to 80 MB in every run (arm64 programs are always position
+independent). Every address of the program then has the upper half 1, and in a later run a save
+state's scan cannot tell them from the game's own pairs of 32-bit numbers, an EE offset or a float
+next to the integer 1 (issue 218; [port/PLATFORM.md](port/PLATFORM.md#relocation)). Neither Apple program can be
+linked out of that range. Linking the macOS program's `__TEXT` alone at a high address
+(`-Wl,-segaddr,__TEXT,0x2A1D60000000`) fails: the other segments stay low and the code cannot reach
+them ("ADRP out of range", CI run 44165235932); `-image_base` is ignored for a position-independent
+program and `-pagezero_size` is held to 4 GB with chained fixups (ld64's `Options.cpp`). So on macOS,
+as on iOS, a state resumes exactly within a run and continues from its checkpoint in a later one.
+`tools/macho_image_check.py show PROGRAM` prints a program's segments, the linker's version and the
+chained fixups' pointer format, and `check` judges a base, for the day a whole image can be placed
+high. The iOS program keeps the default: the kernel maps a program only below
+0x458000000 on the largest devices (XNU's `ARM64_MAX_OFFSET_DEVICE_LARGE`; the shared cache fills
+0x180000000 to 0x300000000), and the linker ignores `-pagezero_size` for iOS, so no base reaches
+the bound; its save states resume exactly within one run and continue from their checkpoint in a
+later one ([port/SAVES.md](port/SAVES.md)).
 
 ### Game data sections
 
@@ -413,7 +435,8 @@ stay the gate on `main`.
   from the compiler itself (`dxc -MF` depfile), so editing one header
   rebuilds only the shaders that include it.
 - **Packages.** `tools/package_win.sh` and `tools/package_linux.sh` build
-  `ico_pc mc_import`; the
+  `ico_pc mc_import` (and `package_win.sh` the exe's icon helper `ico_icon_stamp`, a Windows-only
+  target); the
   Android package goes through Gradle, which builds `ico_pc` and the three
   libadrenotools hook libraries (`main_hook`, `hook_impl`, `file_redirect_hook`).
 
@@ -426,6 +449,96 @@ ships no Linux sanitizer runtimes, so the `asan` preset is GCC either way.
 Windows builds target mingw (gcc or llvm-mingw), never MSVC (clang-cl or a `*-windows-msvc`
 triple): the presets and toolchain files are the GNU ABI ones (`CMakePresets.json`,
 `cmake/toolchains/`), and only those are built and tested in CI.
+
+## FidelityFX upscaler (FSR 3.1)
+
+The temporal upscaler is AMD's FidelityFX SDK built from source (MIT; tag `v1.1.4`, FSR 3.1.4;
+[THIRD_PARTY.md](THIRD_PARTY.md) has the pins and why this release), never the SDK's prebuilt
+Windows DLLs. Only the upscaler is built: ffx-api, the FSR 3.1 component, the SDK's shared code and
+its Vulkan backend; not frame generation, optical flow or the other effects (the release has no
+FSR 4). `port/rhi/ffx/CMakeLists.txt` holds the build and says why each piece is there.
+
+**The fetch.** `tools/fetch_deps.sh` (section 10, x86-64 hosts; `SKIP_FFX=1` skips it) fetches the
+tag with git, checks the commit and the SHA-256 of its `git archive`, installs the source subset
+the port compiles into `tools/toolchain/deps/fidelityfx/v1.1.4/src/` and applies
+`tools/ffx/patches/*.patch` in name order:
+
+| patch | what |
+| --- | --- |
+| `0001-shader-compiler-posix.patch` | the shader compiler (`FidelityFX_SC`) on Linux: its Windows-only headers, path calls (`PathAllocCanonicalize`, `CreateDirectoryW`, `_wfopen_s`) and `wmain` get POSIX equivalents, its DXC/FXC compilers (Windows COM) are left out off Windows, glslang's output is split into lines once the process has exited (a pipe read could split a line) |
+| `0002-runtime-gcc-clang.patch` | the library under gcc and clang, and three faults found running it on lavapipe: `ffx_api.h`'s entry points without `__declspec(dllexport)` (`FFX_API_STATIC`), the `FidelityFx/` include spelling (Linux file names are case-sensitive), the message callback called outside Windows, a `ui64` literal, `ffx_api_vk.h` usable from C; the FSR 3.1 context's opaque size doubled outside Windows (4-byte `wchar_t` makes the private context 837848 bytes, past the 512 KiB default) and aligned to 16 bytes (ffx-api embeds it at a 4-byte offset; gcc's vector copies fault there); the Vulkan backend's scratch arrays started on 32-byte boundaries (its `alignas(32)` effect contexts were packed at 4-byte offsets); and a device-local memory type that is also host-visible accepted when the device has no other (unified-memory GPUs and lavapipe: the backend refused every texture) |
+| `0003-vk-depth-stencil-barrier-luma-history.patch` | two Vulkan faults the upscale dispatch shows under the validation layer (`ffx_link_test`): the backend's image barriers on a depth/stencil input (the port's `D32_SFLOAT_S8_UINT` scene depth, read through its depth aspect) named the depth aspect alone, which Vulkan forbids without `separateDepthStencilLayouts` (`VUID-VkImageMemoryBarrier-image-03320`): they name the stencil aspect too, the views keep the depth aspect; and the GLSL declared the luma history storage image `rgba8` while the context makes it `R16G16B16A16_FLOAT` (the layer: "loads or stores ... produce undefined values"): declared `rgba16f`, as the HLSL's untyped `RWTexture2D<float4>` reads it |
+| `0004-vk-fp32-default.patch` | the port's full-precision default (issue 203): `GetDeviceCapabilitiesVK` reports fp16 only when `ICO_RD_FSR3_FP16` is `1` or `on` (`[dev] fsr3_fp16 = on`, [CONFIG.md](port/CONFIG.md)), so by default the upscaler builds every pass's fp32 permutation on every device |
+
+The SDK's own files are never edited by hand: a change is a new patch (made with `git diff` in a
+copy of the installed tree, `-p1` paths from the tree's root) or a line in
+`port/rhi/ffx/ico_ffx_compat.h`, the header forced into every SDK source for the MSVC library
+names (`wcscpy_s`, `strcpy_s`, `sprintf_s`, `_countof`) and the C and C++ headers the SDK
+expects `<Windows.h>` to include. The install's stamp carries the patches' SHA-256, so a changed patch re-installs the
+tree. The same section builds glslang (`vulkan-sdk-1.4.363.0`, with SPIRV-Tools for its `-Os`)
+at `-j2` into `deps/fidelityfx/v1.1.4/glslang/bin/glslangValidator`, about 15 minutes once.
+
+**The build** (`ICO_FFX=ON`): `ico_ffx_sc` is compiled for the build host (an ExternalProject
+with the host's compilers when the preset cross-compiles); it runs glslang on the ten FSR 3.1
+passes in upstream's 64 option permutations and four variants (wave32/wave64, 32/16-bit), drops
+duplicate modules and writes the permutation headers into the build directory's
+`port/rhi/ffx/vk/`: 200 headers, 160 unique SPIR-V modules, 3.3 MB of SPIR-V as 17.7 MB of C
+text, in about a minute at `-j2`. `ico_ffx_upscaler` compiles them into the static library;
+volk's function pointers stand in for the few Vulkan entry points the backend calls by name, and
+on Linux its users link the C++ runtime statically (`tools/package_linux.sh` allows no
+`libstdc++.so.6`). `ffx_link_test` creates the backend and an upscale context on the first Vulkan
+1.2 device (lavapipe here) and skips (77) when there is none. On this container (gcc 14, lavapipe)
+it passes, with the validation layer and synchronisation validation on and under the sanitizers:
+the context takes 32.3 MB of GPU memory at 640x480 to 1280x960. The library's code and data are
+3.3 MB (the SPIR-V nearly all of it); the test program, stripped, is 4.3 MB with the static C++
+runtime, and needs only `libc`, `libm` and the loader.
+
+The device the backend is given must have every extension the backend reads enabled when the device
+lists it: it decides from the device's extension list, not from what was enabled. Those are
+`VK_KHR_shader_float16_int8` (with `shaderFloat16`), `VK_EXT_subgroup_size_control`,
+`VK_KHR_synchronization2`, `VK_EXT_descriptor_indexing`, `VK_KHR_dedicated_allocation` with
+`VK_KHR_get_memory_requirements2` (left off, the backend calls a NULL
+`vkGetBufferMemoryRequirements2KHR`), `VK_AMD_buffer_marker` and `VK_AMD_device_coherent_memory`;
+`ffx_link_test.c` is the reference, and the port's device does it in an `ICO_FFX` build
+(`port/rhi/vk/vk_device.c`; [RHI.md](port/RHI.md#native-handles-for-external-compute)).
+`ffx_link_test` also runs the upscale dispatch with the textures the port hands it (an RGBA8 colour,
+the `D32_SFLOAT_S8_UINT` scene depth through its depth aspect, an RGBA16F motion, 640x480 into an
+RGBA8 storage image at 960x720) and fails on any validation error or warning: with patch 0003, none.
+
+**The link into the program.** `port/render/CMakeLists.txt` links `ico_ffx_upscaler` into
+`ico_render` when `ICO_FFX` is on (with `ICO_FFX=1` for `rd_fsr3.c`), so the program (`ico_pc`,
+Linux and Windows) and every test and tool that links the renderer carry FSR 3.1; the library stays
+`EXCLUDE_FROM_ALL` and is built because they need it (a build that links none, such as a target of
+its own, does not run the shader compiler). Its C++ is linked into those C programs with the static
+C++ runtime on Linux (the library's interface link options) and by the Windows program's `-static`;
+its calls to the Vulkan entry points are volk's pointers, defined once by `ico_rhi_vulkan`'s
+`volk.c`. Without `ICO_FFX` `port/render/rd_fsr3.c` compiles its "not in this build" answer alone and
+the Upscaling row shows FSR 3.1 as "(off: not available)" ([DISPLAY.md](port/DISPLAY.md#fsr-31-upscaling)).
+
+**When the shader compiler fails on a host.** Its output names the shader, the permutation and
+glslang's message. Check `deps/fidelityfx/v1.1.4/glslang/bin/glslangValidator --version` runs
+(else re-run `tools/fetch_deps.sh`), then run the failing command from `ninja -v` by hand in the
+build directory; `-debugcmdline` prints the arguments it parsed. A host where it cannot be made to
+work builds with `-DICO_FFX=OFF`: the FSR 3.1 row is then not offered, and nothing else changes.
+
+**Windows (Vulkan only).** `win-x64` builds it with `ICO_FFX=ON`: the library is compiled by the
+mingw-w64 g++ that `tools/fetch_toolchain.sh` unpacks into `tools/toolchain/mingw-gcc` (Debian
+`g++-mingw-w64-x86-64-win32` 14.2.0-19+27+b1, the revision of the gcc beside it; the stamp ends in
+`/g++`, so a tree unpacked without it fetches again, and CI's toolchain cache key, which hashes the
+script, rebuilds). `cmake/toolchains/mingw-gcc-common.cmake` sets `CMAKE_CXX_COMPILER` when the g++
+is there; without it `ICO_FFX=ON` stops at configure with the command to run. The shader compiler
+is a build-host tool: `ico_ffx_sc` is an ExternalProject built with the host's gcc and g++ (found by
+`find_program`; `ICO_FFX_HOST_CC` and `ICO_FFX_HOST_CXX` name others, no toolchain file), and it
+runs on Linux during the cross build, so the permutation headers are the host build's, and the glslang
+it drives is the Linux `glslangValidator` of the deps tree. The program links `-static`, which takes
+libstdc++ and libgcc in; `tools/package_win.sh` fails when `ico_pc.exe` imports `libstdc++-6.dll`,
+`libgcc_s_seh-1.dll` or `libwinpthread-1.dll`, so no DLL joins the zip. `ffx_link_test` is not built
+for Windows (the Vulkan loader there is the player's; the cross build proves the compile and the
+link). The llvm-mingw presets (`win-x64-clang`) keep `ICO_FFX=OFF`.
+
+**Direct3D 12.** Not built: the SDK makes its Direct3D 12 permutations (DXIL) with DXC through
+Windows COM, which the POSIX shader compiler leaves out; llvm-mingw's clang++ compiles the Vulkan
+sources (checked with `-fsyntax-only` only).
 
 ## How the game is compiled
 
@@ -463,8 +576,6 @@ which passes ([port/TESTING.md](port/TESTING.md#the-framework)): the disc (`vfs_
   match the pack's files against the disc's textures. No pack file is ever committed.
 - `ICO_BASE_ELF` adds the data loader's reference tests
   ([Appendix](#appendix-maintainers-the-base-elf)).
-- `ICO_FOG_DUMP` (cache variable, default `dist/dumps/frame-20261009-083248-v13836.rddump`) is a
-  player dump with the depth fog for `rd_fog_depth_copy_dump` (skipped without it).
 - `ICO_BOOT_DUMP_DIR` (cache variable, default empty) is a start-up's frame dumps for
   `rd_boot_present`; `ICO_BOOT_DUMP_OLD` (default `OFF`) says they come from a build whose frames 118
   to 120 draw stage 1 (`port/render/CMakeLists.txt`).
@@ -501,32 +612,98 @@ captures and `rd_replay_tool` are in [port/TESTING.md](port/TESTING.md), every t
 
 ## Continuous integration
 
-`.github/workflows/ios.yml` (the "Apple packages" workflow) runs when a release is published, or
-by hand (`workflow_dispatch`) with a `tag` input naming an existing release
-(`gh workflow run ios.yml -f tag=<tag>`); never for a push or a pull request. On `macos-15` it
-builds the tag's source with `tools/package_ios.sh <tag>` (the tag must be `vX.Y.Z`), building the
-pinned DXC from source on a cache miss, and a second job on Ubuntu attaches
-`ico-pc-<tag>-ios-unsigned.ipa` to that release (`--clobber`, so a re-run replaces it). An
-independent pair of jobs does the same for the macOS app with `tools/package_macos.sh <tag>`,
-attaching `ico-pc-<tag>-macos-arm64.zip` and `.dmg` (the app is ad-hoc signed, not notarized; its
-link map stays in the run's artifact for 30 days). The workflow reads the repository only; the
-upload jobs alone may write to it. No secret, signing identity or game data is used.
+The Apple builds are one reusable workflow, `.github/workflows/apple-build.yml`
+(`workflow_call`, input `platform`: `macos` or `ios`), called from two places, so the steps exist
+once. On `macos-15` it checks out the source (the Japanese sources as `EUC-JP-MS`, [Checking out on
+a Mac](#checking-out-on-a-mac)), restores two caches, builds the pinned host DXC from source when
+its cache misses ([Apple Vulkan renderer](#apple-vulkan-renderer-moltenvk)), runs
+`tools/package_macos.sh` or `tools/package_ios.sh` (with the version label when one is given) and
+fails unless every package file exists: the macOS zip, dmg and link map, or the IPA and its link
+map. It writes nothing to the repository or a release.
 
-`.github/workflows/ci.yml` runs on every push to main, every pull request and
-every pushed `v*` tag (which also packages for arm64, see
-[Packages](#packages)): two Linux
-jobs (`ubuntu-24.04`), the `linux-arm64` job (`ubuntu-24.04-arm`) and the
-`android` job side by side, then the `windows` job (`windows-2022`) after `linux`, no secrets, no
-disc image. `linux` runs the steps
-below in order; `extra` is a matrix of three runners, each with the same host
-packages, venv and (restored, never saved) toolchain cache, that builds one
-more preset; `linux-arm64` and `android` are described after the table.
+| cache | key | holds |
+| --- | --- | --- |
+| host DXC | `apple-dxc-macos15-arm64-<tag>-<commit>`, the DXC pin alone, shared by both platforms | `tools/toolchain/deps/dxc-build/{bin,lib}` |
+| MoltenVK and SDL3 | `apple-deps-<platform>-macos15-arm64-<hash>`, the hash of `tools/fetch_moltenvk.sh` and `tools/fetch_common.sh` | `tools/toolchain/deps/moltenvk/<platform>`, `tools/toolchain/deps/sdl3/<platform>-arm64` |
+
+GitHub lets a run restore the caches of its own branch or tag and of main; a release's run cannot
+save into main's, a cache no run has read for 7 days is dropped, and the least recently read ones
+go first when the repository's caches pass 10 GB ([GitHub's cache
+rules](https://docs.github.com/en/actions/reference/workflows-and-actions/dependency-caching)).
+So main's pushes save the Apple caches and keep them read, and a release's run, on its tag,
+restores them. A cold host DXC build is 16 to 18 minutes of a job (measured on the release runs
+that missed the cache); a warm job is estimated at 4 to 5 minutes in all (the packaging step alone
+measured about 3.5 minutes).
+
+`ci.yml`'s `apple` job calls it for `macos` and `ios` (a matrix of two jobs, `fail-fast` off) on
+every push to main and every pull request, beside the other jobs, with no
+label and nothing kept: an Apple compile, link or packaging error fails main's run before a release
+is made. No test runs on the Mac.
+
+`.github/workflows/ios.yml` (the "Apple packages" workflow) calls it three ways:
+
+- **A published release.** `build-ios` and `build-macos` build the release's tag with the tag as
+  the label (it must be `vX.Y.Z`) and keep the files as the run's artifacts
+  (`ico-pc-ios-<run number>`, `ico-pc-macos-<run number>`, 30 days); `publish-ios` on Ubuntu then
+  attaches `ico-pc-<tag>-ios-unsigned.ipa` to that release and `publish-macos` attaches
+  `ico-pc-<tag>-macos-arm64.zip` and `.dmg` (`--clobber`, so a re-run replaces them; the app is
+  ad-hoc signed, not notarized; the link maps stay in the artifacts). Each platform is its own
+  pair of jobs, so a failure of one never touches the other's files.
+- **By hand for a release** (`gh workflow run ios.yml -R nathanialf/ico-pc -f tag=<tag>`): the
+  same, for an existing release whose run failed or did not start.
+- **A check, no release** (`check_only`): builds the dispatched branch for both platforms and
+  keeps the packages as the run's artifacts; nothing is attached and no release is needed. `tag`
+  is optional there and only labels the files (`vX.Y.Z` or `vX.Y.Z-rcN`). The branch must be on
+  GitHub; pushing a branch other than main starts no workflow (`ci.yml` runs for main, pull
+  requests and tags alone), so this is the way to see a branch's Apple builds before it reaches
+  main:
+
+  ```sh
+  git push origin <branch>
+  gh workflow run ios.yml -R nathanialf/ico-pc --ref <branch> -f check_only=true
+  gh run list -R nathanialf/ico-pc -w "Apple packages" -L 1
+  gh run download <run id> -R nathanialf/ico-pc
+  ```
+
+  A dispatched run uses the workflow file of the ref it is dispatched on (`--ref`, [the gh
+  manual](https://cli.github.com/manual/gh_workflow_run)), and GitHub only dispatches a workflow
+  whose file is also on the default branch: `ios.yml` is there, so a branch carrying this
+  version of it can be checked before main has it.
+
+The two publish jobs alone may write to the repository (`contents: write`). No secret, signing
+identity or game data is used.
+
+`tools/apple_precheck.py` is the early look on a Linux host, before a push: it compiles the Vulkan
+backend's sources (`port/rhi/CMakeLists.txt`'s list) the way the Apple builds do, linked to
+MoltenVK (`ICO_RHI_MOLTENVK`: every `vk*` entry point a declared function, not a pointer), with the
+host's clang, the vendored Vulkan headers and the port's warnings as errors, and fails on what only
+the Apple builds see there (a function compared with `NULL`, assigned, or tested as a pointer).
+`--symbols-against <tag>` also lists the entry points the backend now calls directly that the
+tag's tree did not, each one MoltenVK must export for the Apple link. It needs no Apple SDK and
+covers neither Apple's own clang, nor code under `__APPLE__` or `ICO_IOS`, nor the link: the
+`apple` jobs are the gate.
+
+`.github/workflows/ci.yml` runs on every push to main and every pull request.
+`tools/ci_watch.sh <full sha>` follows a commit's run from a terminal: a line for every job that starts, ends or fails, and the failed jobs re-run up to twice once the run has completed. A pushed `v*` tag runs the `linux-arm64` job alone, which builds without its
+tests and packages for arm64 (see [Packages](#packages)): main's run on the
+same commit is the gate, and a release is cut only after it is green. On main
+and pull requests: the `linux` job (`ubuntu-24.04`), the `tests` matrix
+of sixteen `ubuntu-24.04` runners (five suites in 2 to 6 shards each), the `extra` job, the
+`linux-arm64` job, the `linux-arm64-filtered` job (two shards) and the `linux-arm64-fixtures` job
+(four shards) on `ubuntu-24.04-arm`, the
+`android` job and the two `apple` jobs on `macos-15` (above) side by side, then the `windows` job
+(`windows-2022`) after `linux`, no secrets, no disc image. `linux` runs the
+hygiene checks and the `win-x64` cross build below in order. Each `tests`
+runner builds one preset and runs one shard of its `ctest` suite; `extra`
+cross-builds `win-x64-clang`. Both have `linux`'s host packages and venv and
+the (restored, never saved) toolchain cache; `linux-arm64` and `android` are
+described after the table.
 
 | step | what |
 | --- | --- |
-| host packages, venv | gcc 14 (the runner's default gcc 13 also configures, since `cmake/IcoFlags.cmake` drops warning flags a compiler does not know), the X11, ALSA, PulseAudio and PipeWire (`libpipewire-0.3-dev`, `libspa-0.2-dev`) headers SDL3 builds against, lavapipe (`mesa-vulkan-drivers`, `libvulkan1`) so the render tests run on a CPU Vulkan device, the GL headers (`libgl-dev`, `libglx-dev`, `libegl-dev`) and llvmpipe (`libgl1-mesa-dri`, `libgl1`, `libegl1`) so the OpenGL tests run on a CPU OpenGL device, `tools/requirements.txt` |
+| host packages, venv | `.github/actions/host-packages` runs `tools/ci_host_packages.sh <x64\|arm64\|android>` in every Linux job: the downloaded package files and the package index they were installed with are cached between runs (the cache's key ends in a hash of the file names, so only a run that downloaded an updated package saves a new entry), and the first try installs from them without the network (two runners of run 44480916957 could not use Ubuntu's servers at all); where that does not install, the index update and the downloads are tried three times under their own time limits (45 s and 100 s), the second and third try on other mirrors (where the runner's list names Ubuntu's EC2 mirror, which trickles, the main archive is the first try and the runner's own list the last), each cached package file is checked against the index's SHA-256 before it is installed (a file that does not match is removed and fetched again), and the unpack runs once after them; the step's limit is 12 minutes. The runner's mirror was slow enough on 2026-11-18 that a plain install ran past that limit in six of eleven runs. The packages: gcc 14 (the runner's default gcc 13 also configures, since `cmake/IcoFlags.cmake` drops warning flags a compiler does not know), the X11, ALSA, PulseAudio and PipeWire (`libpipewire-0.3-dev`, `libspa-0.2-dev`) headers SDL3 builds against, lavapipe (`mesa-vulkan-drivers`, `libvulkan1`) so the render tests run on a CPU Vulkan device, the GL headers (`libgl-dev`, `libglx-dev`, `libegl-dev`) and llvmpipe (`libgl1-mesa-dri`, `libgl1`, `libegl1`) so the OpenGL tests run on a CPU OpenGL device, `tools/requirements.txt` |
 | cache and `tools/fetch_toolchain.sh` | `tools/toolchain/` is cached on the hash of `fetch_toolchain.sh`, `fetch_deps.sh`, `fetch_common.sh` and `fetch_android.sh`, restored and saved as separate steps so a cold fetch is saved even when a later step fails |
-| ccache | `~/.cache/ccache` is restored before the builds and saved after them (also when a build fails), keyed by the job or preset and the same four scripts' hash, with the commit as the last part so every run saves its entries, each capped at 5 GiB (`CCACHE_MAXSIZE` in the workflow's `env`; `tools/fetch_toolchain.sh` sets the same cap for a local ccache); the `linux-arm64` job has no ccache |
+| ccache | `~/.cache/ccache` is restored before the builds and saved after them (also when a build fails), keyed by the job or suite and the same four scripts' hash, with the commit as the last part so every run saves its entries, each capped at 5 GiB (`CCACHE_MAXSIZE` in the workflow's `env`; `tools/fetch_toolchain.sh` sets the same cap for a local ccache); a suite's shard 1 saves its cache, the other shards only restore it, and a suite with no entry of its own yet starts from `linux`'s; the three arm64 job kinds link the runner's own ccache (a host package there) at `tools/toolchain/ccache/bin/ccache` and share one cache that the `linux-arm64` job saves. The steps that download (the venv's pip, the toolchain fetch, the Android build tools) have limits of 10, 45 and 30 minutes, and every `curl` of the fetch scripts gives up on a server silent for 20 s or under 20 kB/s for 30 s and tries again, five times (`CURL_LIMITS`, `tools/fetch_common.sh`) |
 | `tools/check_no_rom.sh` | the IP scan over every tracked file |
 | `tools/format.sh --check` | clang-format over the tracked C |
 | `tools/strip_host_gates.py --check` | no `ICO_HOST` conditional in `ico2/` or `sce/` |
@@ -534,14 +711,28 @@ more preset; `linux-arm64` and `android` are described after the table.
 | `tools/stack_overread_audit.py` (`--selftest`, then the tree) | no game code in `ico2/` that relies on the PS2's stack layout: a matrix or vector call that reads or writes past the local it is given, or a local that is only written; checked exceptions are in `tools/stack_overread_allow.txt` |
 | `tools/struct_cast_audit.py` (`--selftest`, then the tree) | no fixed array, buffer or smaller record in `ico2/` cast to a struct whose host size is larger (records holding pointers are wider on the host than the [EE](port/ARCHITECTURE.md#terms)'s 4-byte pointers: `ClipWork` is 0xF0 bytes, not 0xC0), sized by compiling the file with the host compiler; checked exceptions are in `tools/struct_cast_allow.txt` |
 | `tools/check_call_types.py` | no call through a function-pointer cast that passes fewer arguments than the function it reaches reads, and no `extern` in an `ico2/` `.c` file that differs from its definition in parameter count, integer width or return width; checked exceptions are in `tools/check_call_types_allow.txt` |
+| `tools/ci_shard.py --selftest` | the shard split runs every test once, keeps a fixture's tests together, gives the same split twice, estimates a shard at `--parallel 4`, and the selection switches and the cost guard work |
 | `gen_data_desc.py`, `gen_layout_asserts.py`, `gen_sources.py` with `--check` | the generated files are fresh |
-| `linux-x64` headless | configure with `-DICO_LINK_EXE=ON`, build `all tests` (the targets `all` and `tests`), `ctest` |
-| `linux-x64` window | `-DICO_HEADLESS=OFF -DICO_LINK_EXE=ON` into `build-host/linux-x64-window`, build, `ctest` |
-| `linux-x64-clang` | build, `ctest` |
 | `win-x64` | cross-compile the window build; `ico_pc.exe` and `SDL3.dll` must exist; the tests are built, and the renderer's Direct3D 11 set with `SDL3.dll` is uploaded as the artifact `win-x64-warp-tests` (`tools/ci_d3d11_warp.sh stage`) for the `windows` job |
-| `extra`: `asan` | AddressSanitizer + UBSan (Debug, `-O1`), headless with `-DICO_LINK_EXE=ON`, build, `ctest` |
-| `extra`: `fptrap` | float divide-by-zero and invalid trap, headless with `-DICO_LINK_EXE=ON`, build, `ctest` |
+| `tests`: `linux-x64`, 4 shards | headless, configure with `-DICO_LINK_EXE=ON`, build `all tests` (the targets `all` and `tests`), `ctest` on the shard's tests; shard 1 also builds `shaders_d3d11_check` |
+| `tests`: `linux-x64-window`, 2 shards | `-DICO_HEADLESS=OFF -DICO_LINK_EXE=ON` into `build-host/linux-x64-window`, build, `ctest` on the shard's tests (without the tests that replay the committed fixtures) |
+| `tests`: `linux-x64-clang`, 2 shards | build, `ctest` on the shard's tests (without the tests that replay the committed fixtures) |
+| `tests`: `asan`, 6 shards | AddressSanitizer + UBSan (Debug, `-O1`), headless with `-DICO_LINK_EXE=ON`, build, `ctest` on the shard's tests |
+| `tests`: `fptrap`, 2 shards | float divide-by-zero and invalid trap, headless with `-DICO_LINK_EXE=ON`, build, `ctest` on the shard's tests (without the tests that replay the committed fixtures) |
 | `extra`: `win-x64-clang` | cross-compile the window build (`-DICO_HEADLESS=OFF`) with llvm-mingw clang; `ico_pc.exe` and `SDL3.dll` must exist |
+
+A shard's tests: `ctest --show-only=json-v1` lists the build's tests, `tools/ci_shard.py check`
+fails the job when a test has no line in the suite's own table `tools/ci_costs/<suite>.txt` (or a
+test that replays the committed fixtures has 0 s there; `tools/ci_costs_update.py` adds the
+lines), `tools/ci_shard.py split` divides the tests into the suite's N shards by those seconds
+(heaviest first to the shard whose estimated time at `--parallel 4` grows least; tests that share
+a fixture, such as `rd_pixel` and the `rd_replay_tool` tests that read its dump, in one shard; the
+matrix line's `fixture_tests` says whether the tests that replay the committed fixtures run: `run`
+in `linux-x64` and `asan`, `skip` in the window, clang and fptrap suites; the workflow's
+`ICO_CI_EXCLUDE` names tests left out of every suite, today `rd_lamps_lowres_ab`) and writes the shard's `CTestCostData.txt` so ctest starts the costliest first,
+and `ctest --tests-from-file` runs this shard's part at `--parallel 4`. A `tests` job's timeout is
+120 minutes ([TESTING.md](port/TESTING.md#the-ci-shards) has the estimates, the tables' refresh
+and the guard).
 
 The `windows` job (`windows-2022`) starts when `linux` has finished: it downloads
 `win-x64-warp-tests`, tries to add the Direct3D 11 debug layer (Windows' optional feature
@@ -561,12 +752,17 @@ that compare filtered pixels with a tolerance of 1 or 2 (`rd_pixel`,
 `rd_replay_tool` and `rd_replay_tool_list`, which need `rd_pixel`'s dump):
 lavapipe on an arm64 host filters a step differently from lavapipe on
 x86-64 and misses them by an LSB or two. A second step runs those tests
-alone and does not gate (`continue-on-error`), so their output is still in
-the log. The rest gate as on `linux`: `fog_lut` runs natively,
+alone, in the `linux-arm64-filtered` job (two shards of `ci_shard.py split --include`, the
+cost table `tools/ci_costs/linux-arm64.txt`, a build on each), and does not gate
+(`continue-on-error`), so their output is still in the log. The tests that replay the committed
+fixtures are left out of the `linux-arm64` job too (`ci_shard.py split --fixture-tests skip`) and
+run gating in the `linux-arm64-fixtures` job (four shards of `--fixture-tests only` without the
+filtered-pixel names, a build on
+each, never for a dispatched package), so the `linux-arm64` job itself (build, the gating tests,
+or on a release tag the package in their place) stays about 25 minutes before the packaging. The rest gate as on `linux`: `fog_lut` runs natively,
 `fog_lut_arm64` skips (it looks for an x86-64 NDK and qemu), and the tests
-that need the disc or saved frames skip (`fmv_fields`, `rd_boot_present`,
-`rd_fog_depth_copy_dump`) or run only their synthetic part (`shadow_spawn`,
-`sndn2`, `fmv`).
+that need the disc or saved frames skip (`fmv_fields`, `rd_boot_present`) or
+run only their synthetic part (`shadow_spawn`, `sndn2`, `fmv`).
 
 The `android` job (90 minutes at most) builds the debug APK and checks its
 structure; the game is not run:
@@ -580,7 +776,7 @@ structure; the game is not run:
 | `tools/check_no_rom.sh` | the IP scan |
 | `./gradlew --no-daemon assembleDebug -PicoLabel=ci` | the debug APK |
 | `tools/check_android_flags.sh` | the game's semantics options reach the NDK clang for every `ico2/` and `port/` source; no game unit writes an object it declares const (`tools/check_const_writes.py`: clang deletes such stores where gcc keeps them; the `const_write_audit` test runs it on native clang builds); no game or `port/math` object holds a fused multiply-add; no object stores onto its stack protector's guard (`tools/check_stack_guard.py`: only the Android build has `-fstack-protector-strong`, so a write past a local array ends the run on a phone alone) |
-| APK checks | `lib/arm64-v8a/libmain.so`, `libSDL3.so`, `assets/VERSION.txt` and `assets/NOTICES.txt` are in the APK; `libSDL3.so` and exactly three libadrenotools hook libraries (`libmain_hook.so`, `libhook_impl.so`, `libfile_redirect_hook.so`) are there; every `LOAD` segment of every library has alignment `0x4000` (`llvm-readelf -lW`); `zipalign -c -P 16 -v 4`; `aapt2 dump badging` shows `minSdkVersion:'26'` and `targetSdkVersion:'35'`; the manifest (`aapt2 dump xmltree`) has `resizeableActivity` true, a theme, `extractNativeLibs` true and a `configChanges` list that includes `density`; `libmain.so` exports `SDL_main` (`llvm-nm -D`); `strings libmain.so` finds no `DXBC` |
+| APK checks | `lib/arm64-v8a/libmain.so`, `libSDL3.so`, `assets/VERSION.txt` and `assets/NOTICES.txt` are in the APK; `assets/state_legacy/index.txt` is there with every release table `port/state_legacy/index.txt` lists and no release candidate's (the earlier releases' legacy tables, `port/state_legacy/README.md`; a release candidate's table goes only into an APK whose label ends in `-rcN`); `libSDL3.so` and exactly three libadrenotools hook libraries (`libmain_hook.so`, `libhook_impl.so`, `libfile_redirect_hook.so`) are there; every `LOAD` segment of every library has alignment `0x4000` (`llvm-readelf -lW`); `zipalign -c -P 16 -v 4`; `aapt2 dump badging` shows `minSdkVersion:'26'` and `targetSdkVersion:'35'`; the manifest (`aapt2 dump xmltree`) has `resizeableActivity` true, a theme, `extractNativeLibs` true and a `configChanges` list that includes `density`; `libmain.so` exports `SDL_main` (`llvm-nm -D`); `strings libmain.so` finds no `DXBC` |
 | artifact `ico-pc-android-debug` | the APK, the unstripped `libmain.so` and `ico_pc.map`, kept 14 days |
 
 Run the same steps locally before pushing.
@@ -604,7 +800,8 @@ Build and deployment > Source: **GitHub Actions**), a one-time setting.
 clean worktree (`dist/ico-pc-<label>-win.zip`, `dist/ico-pc-<label>-linux.tar.gz`, and the
 AppImage below). Neither contains
 game data; both carry the README, the player guides, the licence files and the save importer
-(`x64/tools/mc_import.exe` with its `SDL3.dll` and a short `README.txt`), and a make-portable script
+(`x64/tools/mc_import.exe` with its `SDL3.dll` and a short `README.txt`; the Windows zips also
+`x64/tools/ico_icon_stamp.exe`, below), and a make-portable script
 (`x64/make_portable.cmd` in the zip, `make_portable.sh` in the tar; the sources are
 `tools/portable/`). Each script also writes a second archive from the same stage, the portable
 download: `dist/ico-pc-<label>-win-portable.zip` and `dist/ico-pc-<label>-linux-portable.tar.gz`. It
@@ -616,13 +813,20 @@ hold no developer programs: no `rhi_d3d12_test`, `rd_replay_tool` or `compare_ba
 (developer programs in a download make browsers and Windows flag it; the scripts assert their
 absence). The link map ships beside the program in both archives (`x64/ico_pc_x64.map`,
 `ico_pc.map`; the scripts assert it is there): a crash or watchdog report names its functions from
-it on the player's machine ([PLATFORM.md](port/PLATFORM.md#the-symbol-lines)). It stays in
-`dist/stage` too, and `tools/package_win.sh` builds only `ico_pc` and `mc_import`. The
+it on the player's machine ([PLATFORM.md](port/PLATFORM_DIAGNOSTICS.md#the-symbol-lines)). It stays in
+`dist/stage` too, and `tools/package_win.sh` builds only `ico_pc`, `mc_import` and `ico_icon_stamp`. The
 Windows program carries version information (company, product, file version `x.y.z.N`: N is the
 release candidate's number for a label `vX.Y.Z-rcN`, 0 for `vX.Y.Z`; `ico_version_from_label` in
 `cmake/IcoVersion.cmake`), from `-DICO_VERSION_LABEL=<label>` which `package_win.sh` passes
 (`port/platform/win/ico_pc.rc`; a build without the label has an all-zero version). It has no icon
-and no signature. `ico_pc.manifest` has no `dpiAwareness`: SDL3 sets the process's DPI awareness
+and no signature as built: the game's icon is made from the player's disc at run time
+(`docs/port/APP_ICON.md`) and set on the window, so there is nothing to put in a resource at build
+time. The exe's own icon comes later, on the player's machine: `x64/tools/ico_icon_stamp.exe`
+(`tools/ico_icon_stamp.c`, CMake target `ico_icon_stamp`, built on Windows only: C on the Windows
+API, a program with no window, no SDL3.dll and no mingw runtime DLL, which `package_win.sh` checks
+in its imports) is started by the game as it exits and writes the captured `.ico` into the exe's
+icon resources ([APP_ICON.md](port/APP_ICON.md#the-exes-icon)). The package's exe is the unstamped
+one; `check_rc_text.py` reads it at package time, before any stamp. `ico_pc.manifest` has no `dpiAwareness`: SDL3 sets the process's DPI awareness
 itself when the window system starts. `tools/package_linux.sh` packages for the host's architecture:
 on an arm64 host it builds `linux-arm64` into `dist/ico-pc-<label>-linux-arm64.tar.gz` (stage
 `dist/stage/linux-arm64/`, log `build-host/pkg-linux-arm64-<label>.log`) and the portable
@@ -637,7 +841,7 @@ Last, from the same stage, `tools/package_linux.sh` writes the AppImage,
 `.sha256` beside it, written by the script on both architectures. The AppDir is `AppRun` (a link to
 `usr/bin/ico_pc`), `usr/bin/` with `ico_pc`, `ico_pc.map`, `libSDL3.so.0` and `mc_import`,
 `usr/share/doc/ico-pc/` with the README, the guides, `LICENSE`, `NOTICES.txt`, `THIRD_PARTY.md`
-and `VERSION.txt`, and `ico-pc.desktop`, `ico-pc.svg` and `.DirIcon` (a link to the icon) from
+and `VERSION.txt`, and `com.defnf.icopc.desktop`, `com.defnf.icopc.svg` and `.DirIcon` (a link to the icon) from
 `tools/appimage/`; no `ico-pc.ini`, folder notes or make-portable script, because the program
 keeps all of those beside the AppImage file ([PLATFORM.md](port/PLATFORM.md#folders-ico-pcini-and-the-user-folder)).
 appimagetool runs unpacked from `tools/toolchain/deps/appimage/<arch>/squashfs-root` with its own
@@ -706,8 +910,20 @@ screen) and `zipalign -c -P 16 -v 4`. Before the alignment it adds
 `assets/libmain.syms.gz` to the APK, stored: `llvm-nm -n --defined-only` of the unstripped
 `libmain.so`, its code symbols (`T`, `t`, `W`, `w`), gzip-compressed, from which a crash or
 watchdog report names its functions on the phone
-([PLATFORM.md](port/PLATFORM.md#the-symbol-lines)); the signed APK is checked to hold it stored. The
-unstripped `libmain.so`, `ico_pc.map`, `libmain.syms.gz` and `VERSION.txt` are left in
+([PLATFORM.md](port/PLATFORM_DIAGNOSTICS.md#the-symbol-lines)), then its data symbols with their
+sizes (a local whose name is not unique with its source file in a fifth column, from
+`llvm-readelf -s`'s FILE entries) and its allocated sections from `llvm-readelf -S`
+(`section <address> <size> <flags> <name>`; the package fails without the `.text` and `.rodata`
+lines) and the compiler's private `.data.rel.ro` objects from `ico_pc.map`
+(`tools/android_syms_lines.py relro`), which the save states' table reads; the package fails when
+two writable data symbols share a name (`tools/android_syms_lines.py check`: a save state could not
+tell them apart)
+([PLATFORM.md](port/PLATFORM.md#across-versions)); the signed APK is checked to hold it stored.
+Before the APK takes the table, `tools/state_carry_check.py` judges the library with it and the
+package fails unless every initialised pointer of the game's data is one a save state can name
+([PLATFORM.md](port/PLATFORM.md#the-carry-over-guard); `package_win.sh` runs it on the staged
+program and map, `package_linux.sh` logs it). The unstripped `libmain.so`, `ico_pc.map`,
+`libmain.syms.gz`, `VERSION.txt` and the guard's report `carry.txt` are left in
 `dist/stage/android/`.
 
 The signing key is never in the repository. The script reads it from
@@ -738,20 +954,52 @@ Linux arm64 archives, each with its portable twin, the x86-64 and aarch64 AppIma
 and the aarch64 AppImage come from CI, above), and the APK. The `.sha256` files are for checking
 the copies before the upload and are not attached. Publishing the release starts the Apple packages workflow, which attaches three more: the IPA
 and the macOS zip and dmg ([Continuous integration](#continuous-integration); run it by hand with
-`gh workflow run ios.yml -f tag=<tag>` when the release event does not start it):
+`gh workflow run ios.yml -R nathanialf/ico-pc -f tag=<tag>` when the release event does not start
+it). The release is made only once main's run is green with its two Apple jobs among the green
+ones (the `apple` matrix, `macos` and `ios`): they build and package what the release's Apple run
+will, so an Apple error is never first seen after the release is published:
 
 ```sh
 gh release create <tag> dist/ico-pc-<tag>-win.zip dist/ico-pc-<tag>-win-portable.zip dist/ico-pc-<tag>-linux.tar.gz dist/ico-pc-<tag>-linux-portable.tar.gz dist/ico-pc-<tag>-linux-arm64.tar.gz dist/ico-pc-<tag>-linux-arm64-portable.tar.gz dist/ico-pc-<tag>-linux-x86_64.AppImage dist/ico-pc-<tag>-linux-aarch64.AppImage dist/ico-pc-<tag>-android.apk
 ```
 
+After publishing, check that the release's Apple packages run went green and that the IPA and the
+macOS zip and dmg are on the release:
+
+```sh
+gh run list -R nathanialf/ico-pc -w "Apple packages" -L 1
+gh release view <tag> -R nathanialf/ico-pc --json assets -q '.assets[].name'
+```
+
 ## Release candidate tools
 
 A release candidate (a label ending in `-rcN`) carries tooling a release never does. Today that is
-one row: on Android, Settings > Main > **Share a bug report**, directly below Save a picture for a
-bug report, which opens the system's share menu with `logs/ico-pc.log`, `logs/ico-pc-previous.log`,
-the newest `dumps/*.zip` and `dumps/*-present.png` and the newest `logs/report-*.zip`, each when it
-is there (`port/platform/share_report.c`; a phone's files folder cannot be reached without a
-computer). The gate is mechanical at every step:
+three things, all on Android alone:
+
+- Settings > Main > **Share a bug report**, directly below Save a picture for a bug report, which
+  opens the system's share menu with `logs/ico-pc.log`, `logs/ico-pc-previous.log`, every
+  `dumps/*.zip` written or changed since the run began (the newest four, oldest first; the newest
+  zip of any run when this one has none), the newest `dumps/*-present.png` and the newest
+  `logs/report-*.zip`, each when it is there (`port/platform/share_report.c`
+  `ico_share_report_collect_run`; a phone's files folder cannot be reached without a computer).
+- **The opening's frames, saved by themselves.** The game's opening (stage 1 with the disc's scene
+  layout in front, menu screen 55 on the European disc) plays for about 80 s before the title and
+  cannot be paused, so no picture can be asked for there. The rc build takes the bug-report
+  picture's dump itself at up to three moments a run, read from the glow's light plan of each
+  replay: the first LAMPS picture after 60 in a row, the first WHOLE picture after 20 in a row (the
+  sun's fans), and the first DARK picture after 60 in a row counted from the first dump
+  (`port/platform/capture_trigger.c` decides, `window_capture.c` takes it; the lines and the cost
+  are in [ANDROID_DIAGNOSTICS.md](port/ANDROID_DIAGNOSTICS.md#the-openings-frames-in-a-release-candidate)).
+  Share a bug report then sends all of them.
+- **The bench** (off unless the build's `WINDOW_BENCH_DEFAULT` is 1, a variant's define): four
+  frames of the opening and a paused picture kept and drawn again and again at the title or the
+  pause with parts of them left out, to rank what each part of a picture costs on the phone
+  (`port/platform/window_bench.c`, `bench_plan.c`, `port/render/rd_bench_run.c`,
+  `port/render/rd_bench.c`; the lines, the variants and the time in
+  [ANDROID_DIAGNOSTICS.md](port/ANDROID_DIAGNOSTICS.md#the-bench-in-a-release-candidate)). Share a
+  bug report sends its `logs/bench-*.csv`.
+
+The gate is mechanical at every step:
 
 - The switch is CMake's `ICO_RC_TOOLS` (default `OFF`) and Gradle's `icoRcTools` (default `false`;
   it passes `-DICO_RC_TOOLS` to the native build, sets `BuildConfig.RC_TOOLS` and enables the
@@ -765,15 +1013,26 @@ computer). The gate is mechanical at every step:
 - After the build, each script runs `tools/check_rc_text.py --label <label>` on what it built (the
   Linux and Windows program, the unsigned APK with every entry inflated, the macOS and iOS
   executables): for a release label the row's English text, "Share a bug report", must be absent
-  (UTF-8 and UTF-16), for an rc label present; the script fails otherwise. CI's debug APK is
+  (UTF-8 and UTF-16), and so must the bench's line marks `window: bench: ` and `bench: frame `;
+  for an rc label the row's text must be present; the script fails otherwise. CI's debug APK is
   checked the same way with the label `ci`.
 - In the sources, the row, its strings in all seven tables, the host's handler and the JNI call are
   inside `#if ICO_RC_TOOLS` (`port/ui/settings.h` and `strings.h` default it to 0);
-  `ui_settings_set_share_report_handler` exists in every build and keeps nothing at 0.
+  `ui_settings_set_share_report_handler` exists in every build and keeps nothing at 0. The
+  opening's capture is all inside `#if ICO_RC_TOOLS && defined(__ANDROID__)` (`window_capture.c`
+  and `.h`, and each of its calls in `window_host.c`), and `CMakeLists.txt` adds
+  `window_capture.c` and `capture_trigger.c` to the program inside `if(ICO_RC_TOOLS AND ANDROID)`
+  alone; its start line holds the row's text, so the binary check covers it too. The bench the
+  same: `window_bench.c` and `.h` and its calls in `window_host.c` inside that `#if`,
+  `window_bench.c`, `bench_plan.c` and `rd_bench_run.c` added inside that `if()` (`rd_bench.c` is in
+  the renderer's library, which a release program links only for what it calls: nothing of it).
 - ctests: `rc_tools_gate` (the checker's own cases, and the scripts, `CMakeLists.txt`,
   `build.gradle` and the manifest using it), `rc_tools_binary` (this build's `ico_pc` holds the text
   exactly when `ICO_RC_TOOLS` is on), `settings_extra` (`testShareReport`: at 0 the Main page has
-  its sixteen rows and no string is the row's text) and `share_report` (the files picked).
+  its sixteen rows and no string is the row's text), `share_report` (the files picked) and
+  `capture_trigger` (the capture's moments), `bench_plan`, `rd_bench` and `rd_bench_ab` (the
+  bench); `rc_tools_gate` also scans the capture's and the bench's sources and CMake lines for
+  anything outside the rc conditions.
 
 The other settings tests pin the Main page's sixteen rows of the default build; ctest is run on a
 build with `ICO_RC_TOOLS` off.

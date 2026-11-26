@@ -93,7 +93,19 @@
 #include <stdlib.h>
 #include <string.h>
 #include "rd_internal.h"
+#include "rd_device_rows.h" /* rd__device_value */
+#include "rd_diag_notes.h"  /* the display line once more at the width's first change */
+#include "rd_shot_late.h"
 #include "rd_submit.h"
+#include "rd_fsr1.h"
+#include "rd_upscale_temporal.h"
+#include "rd_tone.h"
+#include "rd_upscale.h"
+#include "rd_upscale_capture.h"
+#include "rd_fsr3.h"
+#include "rd_icon_hold.h"
+#include "rd_present_scene.h"
+#include "rd_turn_fold.h"
 #include "shader_consts.h"
 
 typedef struct RdPresentPreset {
@@ -388,6 +400,14 @@ bool rd__apply_display(void)
         w = gw;
         h = gh;
     }
+    /* A temporal upscaler (rd_upscale.h): the size so far is the display's
+     * (DISPLAY, DISPLAY_HELD, UPSCALED); the scene-class targets take it
+     * over the upscaler's ratio below (sx, sy), with no supersampling or
+     * MSAA (rd__aa_mode) and no Downsampling.  Off: nothing changes.
+     * Upscaling = FSR 3.1 is one source of it (rd__upscale_follow; its
+     * ratio settles below, once the display scale is known) */
+    rd__upscale_follow(st, rd__crt_on(), 0.0f);
+    const bool temporal = rd__upscale_wanted();
     /* supersampling (RdSettings.antiAlias, rd__aa_mode: never under the
      * Original preset): the scene at 2 or 4 times the Resolution row's
      * size, before the GPU's limit below (and the halving fallback after
@@ -406,8 +426,8 @@ bool rd__apply_display(void)
      * measured against it: perPx is the scale (the smaller axis of a
      * fixed size), 4x + SSAA2 adds nothing, 2x + SSAA4 draws 4x, 1x +
      * SSAA2 draws 2x, and one reduce, the downsample, does both */
-    const bool down =
-        st->downsample && !rd__crt_on() && (scale > 0.0f || (st->sceneWidth && st->sceneHeight));
+    const bool down = st->downsample && !rd__crt_on() && !temporal &&
+                      (scale > 0.0f || (st->sceneWidth && st->sceneHeight));
     if (ssaa > 1.0f && down) {
         perPx = scale > 0.0f ? scale : (w / gw < h / gh ? w / gw : h / gh);
         const float need = ceilf(ssaa / perPx - 1e-4f);
@@ -438,7 +458,7 @@ bool rd__apply_display(void)
     /* from the GS size up to the GPU's largest render target, both axes scaled
      * together so the shape is kept (16384 where there is no device) */
     float lim = g_rd.hasDevice ? (float)rhi_limits()->maxRenderTargetSize : 16384.0f;
-    if (g_rd.hasDevice && rhi_limits()->tiler && lim > 4096.0f) {
+    if (g_rd.hasDevice && rd__device_value(RHI_DC_SCENE_CAP_4096) && lim > 4096.0f) {
         lim = 4096.0f; /* phones share memory with the system: a big scene could
                           get the app killed before the allocation reports failure */
     }
@@ -453,7 +473,7 @@ bool rd__apply_display(void)
     /* MSAA on a tile-based GPU: the multisampled scene pair (4 + 8 bytes a
      * sample) shares the phone's memory, so the scale halves (both axes, not
      * below the GS size) until the pair fits RD_MSAA_TILER_BUDGET */
-    if (g_rd.hasDevice && rhi_limits()->tiler && rd_aa_samples(aaMode) > 1u) {
+    if (g_rd.hasDevice && rd__device_value(RHI_DC_MSAA_BUDGET) && rd_aa_samples(aaMode) > 1u) {
         const double per = 12.0 * (double)rd_aa_samples(aaMode);
         while ((double)w * (double)h * per > (double)RD_MSAA_TILER_BUDGET && w > gw * 1.5f &&
                h > gh * 1.5f) {
@@ -461,8 +481,16 @@ bool rd__apply_display(void)
             h *= 0.5f;
         }
     }
-    const float sx = w / gw < 1.0f ? 1.0f : w / gw;
-    const float sy = h / gh < 1.0f ? 1.0f : h / gh;
+    /* the display scale; the scene's (the render scale) is it, but under a
+     * temporal upscaler, which draws the scene at it over its ratio (not
+     * below 1x, Auto's step its cap: rd__upscale_render_scale) */
+    const float dsx = w / gw < 1.0f ? 1.0f : w / gw;
+    const float dsy = h / gh < 1.0f ? 1.0f : h / gh;
+    float sx = dsx, sy = dsy;
+    if (temporal) {
+        rd__upscale_follow(st, rd__crt_on(), dsy); /* FSR 3.1's ratio at this display scale */
+        rd__upscale_render_scale(dsx, dsy, rd__upscale_ratio(), st->upscaleRenderCap, &sx, &sy);
+    }
     uint8_t filter = st->filterUpgrade <= RD_FILTER_UPGRADE_ANISOTROPIC ? st->filterUpgrade : 0;
     if (g_rd.hasDevice && !rhi_limits()->textureMips) {
         filter = 0;
@@ -473,12 +501,51 @@ bool rd__apply_display(void)
      * allocation fallback (createNamedTargets) settled on, so an unrelated
      * change does not recreate the targets just to fail the same way again */
     const bool changed = sx != g_rd.sceneReqSx || sy != g_rd.sceneReqSy ||
-                         full != g_rd.fullHeight || cropWe != g_rd.frameCropWe;
+                         full != g_rd.fullHeight || cropWe != g_rd.frameCropWe ||
+                         rd__upscale_split_differs(temporal, dsx, dsy);
     /* one line when what the options give differs from what was in force:
      * this runs on a settings change or a resize (rd_begin_frame's
      * settingsPending) and at init, never per frame */
-    if (changed || aspect != g_rd.outAspect || filter != g_rd.filterUpgrade ||
-        vs != g_rd.vsyncApplied || down != g_rd.downsample) {
+    /* Upscaling: FSR 1.0 (rd_fsr1.c), never at the "window" resolution (the
+     * branch above that takes the box's size) */
+    char fsrNote[256];
+    const bool windowRes = !(scale > 0.0f) && !(st->sceneWidth && st->sceneHeight) &&
+                           st->preset == RD_PRESET_ENHANCED && st->outputWidth && st->outputHeight;
+    bool fsrChanged = rd__fsr1_apply(st, windowRes, fsrNote, sizeof(fsrNote));
+    {
+        /* FSR 3.1's words (rd_upscale_temporal.c) follow, when it is asked
+         * for; in force, the sizes and the FidelityFX build (rd_fsr3.c; the
+         * GPU memory once a context of these sizes was made, else the
+         * context's own line at the first picture says it) */
+        char detail[144] = "";
+        if (temporal && rd__upscale_by_fsr3()) {
+            const RdFsr3Stats *fs = rd__fsr3_stats();
+            const float fw = cropWe > 0.0f ? cropWe : gw;
+            const uint32_t rw = (uint32_t)floor((double)(fw * sx) + 0.5);
+            const uint32_t rh = (uint32_t)floor((double)(gh * sy) + 0.5);
+            const uint32_t dw = (uint32_t)floor((double)(fw * dsx) + 0.5);
+            const uint32_t dh = (uint32_t)floor((double)(gh * dsy) + 0.5);
+            char mem[48];
+            if (fs->made && fs->renderW == rw && fs->renderH == rh && fs->displayW == dw &&
+                fs->displayH == dh) {
+                snprintf(mem, sizeof(mem), "GPU memory %.1f MB", fs->memoryMb);
+            } else {
+                snprintf(mem, sizeof(mem), "GPU memory on the context's line");
+            }
+            snprintf(detail, sizeof(detail), ", render %ux%u -> display %ux%u, FFX %s, %s", rw, rh,
+                     dw, dh, fs->version[0] ? fs->version : "3.1.4", mem);
+        }
+        const size_t used = strlen(fsrNote);
+        fsrChanged |= rd__upscale_temporal_apply(st, rd__crt_on(), down, dsy, detail,
+                                                 fsrNote + used, sizeof(fsrNote) - used);
+    }
+    /* the line also once when the frame's width first changes alone
+     * (rd_reset_scene: issue 179's log named 512 while its passes were 688
+     * wide) */
+    static RdWidthNote s_widthNote;
+    const bool logging = changed || aspect != g_rd.outAspect || filter != g_rd.filterUpgrade ||
+                         vs != g_rd.vsyncApplied || down != g_rd.downsample || fsrChanged;
+    if (rd_width_note(&s_widthNote, (uint32_t)gw, logging)) {
         char ssaaNote[96] = "";
         if (ssaaAsked > 1.0f && ssaa > 1.0f && ssaa < ssaaAsked) {
             snprintf(ssaaNote, sizeof(ssaaNote), " (at %gx: the resolution has %.2f texels %s)",
@@ -494,16 +561,32 @@ bool rd__apply_display(void)
          * (rd__fog_aa_reconcile) and logs "msaa: off" when the device cannot */
         /* the frame as the options give it (issue 129: a phone whose width
          * is a whole number of GS pixels shows the border's columns) */
-        char frameNote[160];
+        char frameNote[224];
         frameWords(frameNote, sizeof(frameNote), (uint32_t)gw, wexactFor(aspect));
-        rd__log("display: scene %gx%g (%.0fx%.0f)%s, aspect %.3f, filter %u, %s height, "
-                "full pixel %s, vsync %s%s%s%s%s, %s",
+        {
+            const size_t at = strlen(frameNote);
+            (void)rd_width_note_text(&s_widthNote, logging, frameNote + at, sizeof(frameNote) - at);
+        }
+        /* under a temporal upscaler the two scales (rd_upscale.h) */
+        char upNote[160] = "";
+        if (temporal) {
+            const float dispW = (cropWe > 0.0f ? cropWe : gw) * dsx;
+            snprintf(upNote, sizeof(upNote),
+                     " (render scale %gx%g), display %.0fx%.0f (scale %gx%g; upscaler ratio %.2f "
+                     "asked, %.2f in force%s)",
+                     (double)sx, (double)sy, floor((double)dispW + 0.5),
+                     floor((double)(gh * dsy) + 0.5), (double)dsx, (double)dsy,
+                     (double)rd__upscale_ratio(), (double)(dsy / sy),
+                     st->upscaleRenderCap > 0.0f ? ", under Auto's cap" : "");
+        }
+        rd__log("display: scene %gx%g (%.0fx%.0f)%s%s, aspect %.3f, filter %u, %s height, "
+                "full pixel %s, vsync %s%s%s%s%s%s, %s",
                 (double)sx, (double)sy, floor((double)sceneW + 0.5), floor((double)(gh * sy) + 0.5),
-                crtLock ? " (CRT: 1x)" : "", (double)aspect, (unsigned)filter,
+                upNote, crtLock ? " (CRT: 1x)" : "", (double)aspect, (unsigned)filter,
                 full ? "full" : "half", st->fullPixel ? "on" : "off", st->vsync ? "on" : "off",
                 aaMode == RD_AA_OFF ? "" : rd__aa_label(aaMode),
                 rd_aa_samples(aaMode) > 1u ? " (asked)" : "", ssaaNote,
-                down && (sx > 1.0f || sy > 1.0f) ? ", downsampled to original size" : "",
+                down && (sx > 1.0f || sy > 1.0f) ? ", downsampled to original size" : "", fsrNote,
                 frameNote);
     }
     if (changed) {
@@ -513,6 +596,7 @@ bool rd__apply_display(void)
         g_rd.sceneSx = sx;
         g_rd.sceneSy = sy;
         g_rd.sceneFellBack = false;
+        rd__upscale_split_set(temporal, dsx, dsy);
     }
     g_rd.ssaa = ssaa;
     g_rd.downsample = down;
@@ -547,11 +631,54 @@ static uint32_t s_outW, s_outH;
 
 static bool s_window;
 
+/* the swapchain's turn (rd_prerotate.c; rhi_swapchain_rotation): with a
+ * window and s_turns, the present draws into s_pic (the window's size and
+ * orientation) and turns it into the backbuffer last; headless, a turn is
+ * the tests' twin (ICO_VK_FAKE_TRANSFORM), drawn after the picture */
+static uint32_t s_turns;
+static RhiTexture s_pic;
+static RhiState *s_picState;
+/* the swapchain image acquired, the texture before the turn not made: the
+ * present clears the image and presents it (rd__prerotate_blank), never
+ * leaving an acquired image unpresented */
+static bool s_turnFailed;
+/* this present's box blit drew the turned image itself (rd_turn_fold.h):
+ * no turn pass at its end */
+static bool s_folded;
+
 static bool presentAcquire(void);
+
+/* the texture the present's passes draw into, and its state */
+static RhiTexture outTex(void)
+{
+    return !s_window ? g_rd.presentOut : s_turns ? s_pic : s_backbuffer;
+}
+
+static RhiState *outStateOf(void)
+{
+    return !s_window ? &g_rd.presentOutState : s_turns ? s_picState : &s_backbufferState;
+}
+
+/* the present's end: the picture turned into the backbuffer and the
+ * backbuffer ready for the display (with a window), or the twin of a turned
+ * swapchain drawn (headless, under ICO_VK_FAKE_TRANSFORM) */
+static void outFinish(RhiCommandList cl)
+{
+    if (s_window) {
+        if (s_turns && !s_folded) {
+            rd__prerotate_record(cl, s_pic, s_picState, s_outW, s_outH, s_backbuffer,
+                                 &s_backbufferState, s_outFormat, s_turns);
+        }
+        rd__transition(cl, s_backbuffer, &s_backbufferState, RHI_STATE_PRESENT);
+    } else if (s_turns && !s_folded) {
+        rd__prerotate_twin(cl, g_rd.presentOut, &g_rd.presentOutState, s_outW, s_outH, s_turns);
+    }
+}
 
 bool rd__present_acquire(void)
 {
     rd__thread_phase(RD_READ_ACQUIRE); /* the read waits' split (rd_thread.h) */
+    rd__room_ahead_take();             /* the display's wait made ahead, or inside (rd_thread.h) */
     const bool ok = presentAcquire();
     rd__thread_phase(RD_READ_UPLOAD);
     return ok;
@@ -562,6 +689,9 @@ static bool presentAcquire(void)
     rd__submit_drain_acquire(); /* the last picture's present reads what this sets (rd_submit.h) */
     s_backbuffer = (RhiTexture){0};
     s_window = rhi_swapchain_format() != RHI_FMT_UNKNOWN;
+    s_turns = 0;
+    s_turnFailed = false;
+    rd__prerotate_twin_clear(); /* rd_read_presented reads the twin of this present only */
     if (s_window) {
         s_backbuffer = rhi_acquire_backbuffer();
         if (!s_backbuffer.id) {
@@ -577,6 +707,14 @@ static bool presentAcquire(void)
         s_outFormat = rhi_swapchain_format();
         s_outW = g_rd.settings.outputWidth;
         s_outH = g_rd.settings.outputHeight;
+        /* a swapchain in the surface's turn: the picture at the window's
+         * size first (rd_prerotate.c); none made, the image is presented
+         * blank (it is the turned size, which no pass here draws at) */
+        s_turns = rd__prerotate_turns();
+        if (s_turns && !rd__prerotate_target(s_outW, s_outH, s_outFormat, &s_pic, &s_picState)) {
+            s_turnFailed = true;
+            return true;
+        }
         return s_outW && s_outH;
     }
     const uint32_t w = g_rd.settings.outputWidth, h = g_rd.settings.outputHeight;
@@ -597,6 +735,7 @@ static bool presentAcquire(void)
     s_outFormat = RHI_FMT_RGBA8_UNORM;
     s_outW = w;
     s_outH = h;
+    s_turns = rd__prerotate_turns(); /* the twin's (ICO_VK_FAKE_TRANSFORM), else 0 */
     return g_rd.presentOut.id != 0;
 }
 
@@ -624,14 +763,29 @@ static bool snapWindow(uint32_t sw, float crop, uint32_t boxW, float *u0, float 
     return false;
 }
 
+/* the box blit from SCENE (rd_present_scene.c): src is SCENE's texture, sw
+ * x sh DISPLAY's texels, blit_scene_ps with the owed DISPLAY's DrawCB words;
+ * set by rd__present_record around that one call */
+static bool s_blitScene;
+
+/* the box blit drawn turned (rd_turn_fold.h): the quarter turns into the
+ * image and the upright picture's size (box and sc are the picture's);
+ * set by rd__present_record and rd__present_blit_turned around that one
+ * call, 0 every other blit */
+static uint32_t s_blitTurns, s_blitPicW, s_blitPicH;
+
 /* src (sw x sh) into box of dst in a pass of its own, crop texels left out
  * at each side of src (sourceCrop; 0: all of it); keepOpen leaves the pass
  * open for the caller to draw more into dst and end it.  sc: the scissor
  * inside the box (the border mask, rd__border_mask: the cleared black
- * stays in the bands, the picture keeps the box's scale), NULL the box */
+ * stays in the bands, the picture keeps the box's scale), NULL the box.
+ * tone: through the colour adjustment (blit_tone_ps, DrawCB.param
+ * rd__tone_params; rd_tone.h), only the box blit's own call; the line
+ * doubling and rd__present_blit copy */
 static void blit(RhiCommandList cl, RhiTexture src, uint32_t sw, uint32_t sh, RhiTexture dst,
                  RhiFormat dstFmt, uint32_t dw, uint32_t dh, RhiLoadOp load, const RhiRect *box,
-                 const RhiRect *sc, RdFilter filter, int mirror, float crop, bool keepOpen)
+                 const RhiRect *sc, RdFilter filter, int mirror, float crop, bool keepOpen,
+                 bool tone)
 {
     RhiRenderPassDesc p;
     memset(&p, 0, sizeof(p));
@@ -641,10 +795,19 @@ static void blit(RhiCommandList cl, RhiTexture src, uint32_t sw, uint32_t sh, Rh
     p.width = dw;
     p.height = dh;
     rhi_cmd_begin_render_pass(cl, &p);
-    RhiViewport vp = {(float)box->x, (float)box->y, (float)box->w, (float)box->h, 0.0f, 1.0f};
+    /* turned: the viewport and the scissor the box's and sc's in the image
+     * (whole pixels, rd__turn_rect), blit_vs turning its source position
+     * by aux1.w as the turn pass does */
+    const RhiRect vbox =
+        s_blitTurns ? rd__turn_rect(s_blitTurns, s_blitPicW, s_blitPicH, *box) : *box;
+    const RhiRect vsc = s_blitTurns
+                            ? rd__turn_rect(s_blitTurns, s_blitPicW, s_blitPicH, sc ? *sc : *box)
+                            : (sc ? *sc : *box);
+    RhiViewport vp = {(float)vbox.x, (float)vbox.y, (float)vbox.w, (float)vbox.h, 0.0f, 1.0f};
     rhi_cmd_set_viewport(cl, &vp);
-    rhi_cmd_set_scissor(cl, sc ? sc : box);
-    RdPipeKeyInt k = rd__post_key(RD_VS_BLIT, RD_FS_BLIT, dstFmt);
+    rhi_cmd_set_scissor(cl, &vsc);
+    RdPipeKeyInt k = rd__post_key(
+        RD_VS_BLIT, s_blitScene ? RD_FS_BLIT_SCENE : (tone ? RD_FS_BLIT_TONE : RD_FS_BLIT), dstFmt);
     RhiPipeline pipe = rd__get_pipeline(&k);
     if (pipe.id) {
         IcoDrawCB cb;
@@ -653,6 +816,12 @@ static void blit(RhiCommandList cl, RhiTexture src, uint32_t sw, uint32_t sh, Rh
             cb.col[i] = 0x80; /* modulate by 1.0: identity */
         }
         cb.mode[0] = ICO_DF_TEXTURED | ICO_DF_TCC_RGBA;
+        if (s_blitScene) {
+            rd__present_scene_cb(&cb, tone); /* SCENE through the reduction's steps */
+        }
+        if (tone) {
+            rd__tone_params(cb.param);
+        }
         /* mirrored: the source rectangle right to left (blit_vs interpolates
          * u0 + t (u1 - u0)): u = sw (1 - t), exact at the box's pixel
          * centres when the scale is a power of two.  A crop narrows it by
@@ -666,6 +835,7 @@ static void blit(RhiCommandList cl, RhiTexture src, uint32_t sw, uint32_t sh, Rh
         cb.tex[1] = (float)sh;
         cb.tex[2] = 1.0f / (float)sw;
         cb.tex[3] = 1.0f / (float)sh;
+        cb.aux1[3] = s_blitTurns; /* blit_vs: the source read at the turned position */
         rd__set_pipeline(cl, pipe, &k);
         rd__bind_uniform(cl, 0, rd__frame_group(dw, dh, 0.0f, 0.0f));
         rd__bind_uniform(cl, 1, rd__draw_group(&cb));
@@ -678,11 +848,25 @@ static void blit(RhiCommandList cl, RhiTexture src, uint32_t sw, uint32_t sh, Rh
     }
 }
 
+void rd__present_blit_turned(RhiCommandList cl, RhiTexture src, uint32_t sw, uint32_t sh,
+                             RhiTexture dst, RhiFormat fmt, uint32_t w, uint32_t h,
+                             const RhiRect *box, const RhiRect *sc, int filter, int mirror,
+                             uint32_t turns)
+{
+    const uint32_t dw = (turns & 1u) ? h : w, dh = (turns & 1u) ? w : h;
+    s_blitTurns = turns;
+    s_blitPicW = w;
+    s_blitPicH = h;
+    blit(cl, src, sw, sh, dst, fmt, dw, dh, RHI_LOAD_CLEAR, box, sc, (RdFilter)filter, mirror, 0.0f,
+         false, false);
+    s_blitTurns = 0;
+}
+
 void rd__present_blit(RhiCommandList cl, RhiTexture src, uint32_t sw, uint32_t sh, RhiTexture dst,
                       RhiFormat dstFmt, uint32_t dw, uint32_t dh, RhiLoadOp load,
                       const RhiRect *box, RdFilter filter, int mirror, float crop)
 {
-    blit(cl, src, sw, sh, dst, dstFmt, dw, dh, load, box, NULL, filter, mirror, crop, false);
+    blit(cl, src, sw, sh, dst, dstFmt, dw, dh, load, box, NULL, filter, mirror, crop, false, false);
 }
 
 /* ------------------------------------------------------ the supersampling
@@ -788,26 +972,36 @@ static bool reduceInto(RhiCommandList cl, ReduceTex *t, const char *name, uint32
     return true;
 }
 
-/* the reduce into s_reduce; false (nothing recorded) when it does not apply
- * or cannot run.  On true *src, *sw, *sh are the reduced texture's */
-static bool reduceRecord(RhiCommandList cl, RhiTexture *src, uint32_t *sw, uint32_t *sh,
-                         const RhiRect *box, float crop)
+/* whether the reduce applies to a source sw x sh into box (reduceRecord;
+ * the present from SCENE asks it too: rd__present_scene_present_why) */
+static bool reduceApplies(uint32_t sw, uint32_t sh, const RhiRect *box, float crop)
 {
     if (box->w == 0 || box->h == 0) {
         return false;
     }
     /* without anti-aliasing at scale 1: the plain box blit, byte for byte
      * as before (the Original preset, every 1x present) */
-    if (rd__aa_mode() == RD_AA_OFF && g_rd.sceneSx == 1.0f && g_rd.sceneSy == 1.0f) {
+    float dx, dy;
+    rd__display_scale(&dx, &dy); /* DISPLAY's (rd_upscale.h): the scene's, but under an upscaler */
+    if (rd__aa_mode() == RD_AA_OFF && dx == 1.0f && dy == 1.0f) {
         return false;
     }
-    const float ew = (float)*sw - 2.0f * (crop > 0.0f ? crop : 0.0f);
+    const float ew = (float)sw - 2.0f * (crop > 0.0f ? crop : 0.0f);
     float su0, su1;
-    if (snapWindow(*sw, crop, box->w, &su0, &su1)) {
+    if (snapWindow(sw, crop, box->w, &su0, &su1)) {
         return false; /* a texel a pixel: the box blit's whole-texel window */
     }
-    if (!(ew > (float)box->w && (float)*sh > (float)box->h)) {
-        return false; /* one texel a pixel or fewer on an axis: the plain box blit */
+    /* one texel a pixel or fewer on an axis: the plain box blit */
+    return ew > (float)box->w && (float)sh > (float)box->h;
+}
+
+/* the reduce into s_reduce; false (nothing recorded) when it does not apply
+ * or cannot run.  On true *src, *sw, *sh are the reduced texture's */
+static bool reduceRecord(RhiCommandList cl, RhiTexture *src, uint32_t *sw, uint32_t *sh,
+                         const RhiRect *box, float crop)
+{
+    if (!reduceApplies(*sw, *sh, box, crop)) {
+        return false;
     }
     const uint32_t w0 = *sw, h0 = *sh;
     if (!reduceInto(cl, &s_reduce, "rd present reduce", 0u, src, sw, sh, crop, box->w, box->h)) {
@@ -953,7 +1147,7 @@ static void depthShutdown(void)
  * run, and the plain blit draws the box */
 static bool depthBlit(RhiCommandList cl, RhiTexture src, uint32_t sw, uint32_t sh, RhiTexture dst,
                       RhiFormat dstFmt, uint32_t dw, uint32_t dh, const RhiRect *box,
-                      const RhiRect *sc, RdFilter filter, int mirror, float crop)
+                      const RhiRect *sc, RdFilter filter, int mirror, float crop, bool tone)
 {
     RdTargetRec *ts = rd__target_rec(RD_TARGET_SCENE + 1);
     if (!ts || !ts->withDepth || !ts->depth.id || ts->depthState == RHI_STATE_UNDEFINED) {
@@ -972,7 +1166,7 @@ static bool depthBlit(RhiCommandList cl, RhiTexture src, uint32_t sw, uint32_t s
         s_depth.outW = dw;
         s_depth.outH = dh;
     }
-    const RdPipeKeyInt k = rd__present_depth_key(dstFmt);
+    const RdPipeKeyInt k = rd__present_depth_key(dstFmt, tone);
     const RhiPipeline pipe = rd__get_pipeline(&k);
     if (!s_depth.out.id || !pipe.id) {
         if (!s_depth.failLogged) {
@@ -1006,13 +1200,17 @@ static bool depthBlit(RhiCommandList cl, RhiTexture src, uint32_t sw, uint32_t s
     /* blit()'s scissor: the border mask's bands keep the cleared black and
      * the far depth of the bars */
     rhi_cmd_set_scissor(cl, sc ? sc : box);
-    /* blit()'s constants, so the colour is blit_ps's bytes */
+    /* blit()'s constants, so the colour is blit_ps's bytes (blit_tone_ps's
+     * with tone) */
     IcoDrawCB cb;
     memset(&cb, 0, sizeof(cb));
     for (int i = 0; i < 4; i++) {
         cb.col[i] = 0x80;
     }
     cb.mode[0] = ICO_DF_TEXTURED | ICO_DF_TCC_RGBA;
+    if (tone) {
+        rd__tone_params(cb.param);
+    }
     float u0, u1;
     snapWindow(sw, crop, box->w, &u0, &u1);
     cb.uvRect[0] = mirror ? u1 : u0;
@@ -1898,6 +2096,21 @@ static struct {
     void *user;
 } s_shot;
 
+/* rd_shot_late.h: the state picture copied into a readback buffer by the
+ * present's list and read at its slot's recycle (Vulkan) */
+static struct {
+    RhiBuffer buf;
+    uint64_t size;
+    int pending;         /* copied, not yet read */
+    uint32_t slot;       /* the frame slot of the present that copied it */
+    uint32_t w, h;       /* the box copied (rows w * 4 bytes apart) */
+    RhiRect box;         /* in the output */
+    uint32_t outW, outH; /* the output then */
+    RhiFormat fmt;       /* the output's format */
+    double t0;           /* its recording, rd__now_ms */
+    uint32_t recycles;   /* recycles of other slots since */
+} s_late;
+
 /* the shot's lines (one a pause): the first 8, then every 100th */
 static bool shotLogNow(void)
 {
@@ -1930,6 +2143,10 @@ bool rd_capture_shot(RdShotFn fn, void *user)
     if (s_shot.armed) {
         s_shot.armed = 0;
         shotHand(NULL, 0, 0); /* replaced before a present took it */
+    }
+    if (s_late.pending) {
+        s_late.pending = 0;
+        shotHand(NULL, 0, 0); /* replaced before its slot came round (rd_shot_late.h) */
     }
     s_shot.fn = fn;
     s_shot.user = user;
@@ -1990,8 +2207,9 @@ void rd_capture_shot_cancel(void)
 {
     (void)rd_thread_drain();
     shotDoneForget(); /* an answer not taken goes too */
-    if (s_shot.armed) {
+    if (s_shot.armed || s_late.pending) {
         s_shot.armed = 0;
+        s_late.pending = 0; /* a copy not yet read is not read (rd_shot_late.h) */
         s_shot.fn = NULL;
         s_shot.user = NULL;
     }
@@ -2081,7 +2299,10 @@ bool rd__capture_armed(void)
 
 bool rd__capture_pending(void)
 {
-    return s_cap.copied != 0 || s_shot.copied != 0 || s_shot.dropped != 0;
+    /* the upscaler's pictures copied (rd_upscale_capture.h): their picture's
+     * submit stays here, where rd__capture_finish writes them */
+    return s_cap.copied != 0 || s_shot.copied != 0 || s_shot.dropped != 0 ||
+           rd__upscale_capture_copied();
 }
 
 int rd_capture_result(char *path, uint32_t pathSize)
@@ -2124,10 +2345,129 @@ static void shotTake(const RhiRect *box)
  * ended before the copy and a pass that loads the output is opened after
  * it, for the overlay to draw in.  box: the presentation box (the shot's
  * crop) */
+/* the state picture alone, on Vulkan, none pending: the box into the
+ * readback buffer in this list, read at the slot's recycle (rd_shot_late.h);
+ * false: the old path */
+static bool shotLateOn(void)
+{
+    /* the tile-based GPUs (the device table's SHOT_LATE, the row tiler: the
+       phones, issue 179); ICO_RD_SHOT_LATE=1 or 0 forces it either way (the
+       tests) */
+    const char *env = getenv("ICO_RD_SHOT_LATE");
+    if (env != NULL && (env[0] == '0' || env[0] == '1')) {
+        return env[0] == '1';
+    }
+    return rd__device_value(RHI_DC_SHOT_LATE) != 0;
+}
+
+static bool shotLateRecord(RhiCommandList cl, RhiTexture out, RhiState *outState, bool inPass)
+{
+    if (s_cap.armed || !s_shot.copied || s_late.pending || rhi_backend() != RHI_BACKEND_VULKAN ||
+        !shotLateOn() ||
+        (s_outFormat != RHI_FMT_RGBA8_UNORM && s_outFormat != RHI_FMT_BGRA8_UNORM)) {
+        return false;
+    }
+    const RhiRect b = s_shot.box;
+    const uint64_t need = (uint64_t)b.w * b.h * 4u;
+    if (need == 0) {
+        return false;
+    }
+    if (s_late.buf.id && s_late.size < need) {
+        rhi_destroy_buffer(s_late.buf);
+        s_late.buf = (RhiBuffer){0};
+    }
+    if (!s_late.buf.id) {
+        s_late.buf = rhi_create_buffer(&(RhiBufferDesc){need, RHI_BUF_COPY_DST | RHI_BUF_READBACK,
+                                                        RHI_MEM_READBACK, "rd state picture"});
+        s_late.size = s_late.buf.id ? need : 0;
+        if (!s_late.buf.id) {
+            return false;
+        }
+    }
+    if (inPass) {
+        rhi_cmd_end_render_pass(cl);
+    }
+    rd__transition(cl, out, outState, RHI_STATE_COPY_SRC);
+    rhi_cmd_copy_texture_to_buffer(cl, out, RHI_ASPECT_COLOR, b, s_late.buf, 0, b.w * 4u);
+    rd__transition(cl, out, outState, RHI_STATE_RENDER_TARGET);
+    if (inPass) {
+        RhiRenderPassDesc p;
+        memset(&p, 0, sizeof(p));
+        p.color[0].texture = out;
+        p.color[0].load = RHI_LOAD_LOAD;
+        p.colorCount = 1;
+        p.width = s_outW;
+        p.height = s_outH;
+        rhi_cmd_begin_render_pass(cl, &p);
+    }
+    s_shot.copied = 0;
+    s_late.pending = 1;
+    s_late.slot = rhi_frame_slot();
+    s_late.w = b.w;
+    s_late.h = b.h;
+    s_late.box = b;
+    s_late.outW = s_outW;
+    s_late.outH = s_outH;
+    s_late.fmt = s_outFormat;
+    s_late.t0 = rd__now_ms();
+    s_late.recycles = 0;
+    return true;
+}
+
+void rd__shot_late_collect(uint32_t slot)
+{
+    if (!s_late.pending) {
+        return;
+    }
+    if (slot != s_late.slot) {
+        s_late.recycles++;
+        return;
+    }
+    s_late.pending = 0;
+    const size_t n = (size_t)s_late.w * s_late.h * 4u;
+    const double c0 = rd__now_ms(); /* the copy out of the readback, on this thread */
+    const uint8_t *src = s_late.buf.id ? rhi_map_buffer(s_late.buf) : NULL;
+    uint8_t *crop = src ? malloc(n) : NULL;
+    if (crop) {
+        memcpy(crop, src, n);
+        const bool bgra = s_late.fmt == RHI_FMT_BGRA8_UNORM;
+        for (size_t i = 0; i < n; i += 4) {
+            if (bgra) {
+                const uint8_t t = crop[i];
+                crop[i] = crop[i + 2];
+                crop[i + 2] = t;
+            }
+            crop[i + 3] = 255; /* opaque, as the old crop */
+        }
+        /* the buffer serves one picture a pause: let go now (its destroy
+           waits for the frames in flight, rhi.h), made again at the next
+           pause, so its size is not held through play (issue 123) */
+        const uint64_t kb = s_late.size / 1024u;
+        rhi_destroy_buffer(s_late.buf);
+        s_late.buf = (RhiBuffer){0};
+        s_late.size = 0;
+        if (shotLogNow()) {
+            rd__log("state picture: %ux%u from the %ux%u output (the box at %d,%d), read at its "
+                    "slot's recycle %u pictures later, no wait (%.1f ms after its present); the "
+                    "copy out of the readback %.1f ms on the replaying thread, its %llu KB buffer "
+                    "let go",
+                    s_late.w, s_late.h, s_late.outW, s_late.outH, s_late.box.x, s_late.box.y,
+                    s_late.recycles + 1u, rd__now_ms() - s_late.t0, rd__now_ms() - c0,
+                    (unsigned long long)kb);
+        }
+    } else {
+        rd__log("state picture: not taken: its readback could not be read");
+    }
+    shotHand(crop, crop ? s_late.w : 0, crop ? s_late.h : 0);
+}
+
 static void captureRecord(RhiCommandList cl, RhiTexture out, RhiState *outState, bool inPass,
                           const RhiRect *box)
 {
     shotTake(box);
+    if (shotLateRecord(cl, out, outState, inPass)) {
+        return; /* read at the slot's recycle, no wait (rd_shot_late.h) */
+    }
     if (!s_cap.armed && !s_shot.copied) {
         return;
     }
@@ -2180,6 +2520,9 @@ static void captureRecord(RhiCommandList cl, RhiTexture out, RhiState *outState,
 
 void rd__capture_finish(void)
 {
+    /* the upscaler's pictures F12 asked for (rd_upscale_capture.h): written
+     * before this present's picture, so the bug-report zip finds them */
+    (void)rd__upscale_capture_finish();
     if (s_shot.dropped) {
         s_shot.dropped = 0;
         if (shotLogNow()) {
@@ -2283,16 +2626,51 @@ static void blankRecord(RhiCommandList cl, RhiTexture out, RhiState *outState)
     RhiRect box;
     outputBox(s_outW, s_outH, &box);
     overlayRecord(cl, out, &box, false, false);
-    if (s_window) {
-        rd__transition(cl, out, outState, RHI_STATE_PRESENT);
+    outFinish(cl);
+}
+
+/* The present's own reasons to read DISPLAY itself, beside the box blit's
+ * one sample (rd_present_scene.h; 0 none): the steps of rd__present_record
+ * below that read DISPLAY first or instead */
+int rd__present_scene_present_why(void)
+{
+    if (rd__crt_on()) {
+        return RD_PS_WHY_CRT;
     }
+    if (g_rd.downsample) {
+        return RD_PS_WHY_DOWNSAMPLE;
+    }
+    if (s_present.lineDouble && !g_rd.fullHeight) {
+        return RD_PS_WHY_LINES;
+    }
+    if (depthWanted()) {
+        return RD_PS_WHY_DEPTH;
+    }
+    if (g_rd.settings.upscale != RD_UPSCALE_OFF) {
+        return RD_PS_WHY_UPSCALER; /* FSR 1.0 reads DISPLAY (rd_fsr1.c) */
+    }
+    if (rd__capture_armed() || rd__capture_pending()) {
+        return RD_PS_WHY_CAPTURE;
+    }
+    const RdTargetRec *disp = rd__target_rec(RD_TARGET_DISPLAY + 1);
+    if (disp && s_outW && s_outH) {
+        RhiRect box;
+        outputBox(s_outW, s_outH, &box);
+        if (reduceApplies(disp->tw, disp->th, &box, sourceCrop(disp, disp->tw))) {
+            return RD_PS_WHY_REDUCE;
+        }
+    }
+    return 0;
 }
 
 void rd__present_record(RhiCommandList cl)
 {
+    if (s_turnFailed) {
+        rd__prerotate_blank(cl, s_backbuffer, &s_backbufferState, s_outW, s_outH, s_turns);
+        return;
+    }
     if (s_blank) {
-        blankRecord(cl, s_window ? s_backbuffer : g_rd.presentOut,
-                    s_window ? &s_backbufferState : &g_rd.presentOutState);
+        blankRecord(cl, outTex(), outStateOf());
         return;
     }
     RdTargetRec *disp = rd__target_rec(RD_TARGET_DISPLAY + 1);
@@ -2300,8 +2678,19 @@ void rd__present_record(RhiCommandList cl)
         return;
     }
     const RdPresentPreset *pr = &s_present;
-    RhiTexture out = s_window ? s_backbuffer : g_rd.presentOut;
-    RhiState *outState = s_window ? &s_backbufferState : &g_rd.presentOutState;
+    RhiTexture out = outTex();
+    RhiState *outState = outStateOf();
+    /* the present from SCENE (rd_present_scene.c): an owed DISPLAY sampled
+     * from SCENE by the box blit where nothing else here reads DISPLAY,
+     * else drawn from SCENE first, in this list before its first pass */
+    bool fromScene = false;
+    if (rd__present_scene_owed()) {
+        const int why = rd__present_scene_present_why();
+        fromScene = why == 0 && rd__present_scene_ready(s_outFormat);
+        if (!fromScene) {
+            rd__present_scene_draw(cl, why ? why : RD_PS_WHY_DEVICE);
+        }
+    }
 
     RhiTexture src = disp->color;
     uint32_t sw = disp->tw, sh = disp->th;
@@ -2312,6 +2701,7 @@ void rd__present_record(RhiCommandList cl)
     memset(s_redDown, 0, sizeof(s_redDown));
     memset(s_redWin, 0, sizeof(s_redWin));
     s_redNoted = true;
+    rd__fsr1_present_begin();
     /* Downsampling: DISPLAY at its GS size first, then everything below as
      * at 1x (step 1 reads src, sw, sh) */
     const bool downsampled = downsampleRecord(cl, disp, &src, &sw, &sh);
@@ -2371,7 +2761,7 @@ void rd__present_record(RhiCommandList cl)
         rd__transition(cl, g_rd.presentLines, &g_rd.presentLinesState, RHI_STATE_RENDER_TARGET);
         const RhiRect full = {0, 0, lw, lh};
         blit(cl, src, sw, sh, g_rd.presentLines, RHI_FMT_RGBA8_UNORM, lw, lh, RHI_LOAD_DONT_CARE,
-             &full, NULL, pr->doubleFilter, 0, 0.0f, false);
+             &full, NULL, pr->doubleFilter, 0, 0.0f, false, false);
         rd__transition(cl, g_rd.presentLines, &g_rd.presentLinesState, RHI_STATE_SHADER_READ);
         src = g_rd.presentLines;
         sw = lw;
@@ -2387,35 +2777,107 @@ void rd__present_record(RhiCommandList cl)
      * out and read it back between them.  The CRT filter and the effects
      * depth keep a pass each */
     bool open = false;
+    s_folded = false;
+    /* the turn in the box blit (rd_turn_fold.h): the ledger's row as this
+     * present's swapchain has it (on: the fold may run; each present still
+     * checks what it draws) */
+    const bool foldOn = rd__turn_fold_on(s_turns != 0 && !s_turnFailed);
     if (!filtered) {
-        rd__transition(cl, out, outState, RHI_STATE_RENDER_TARGET);
         /* with the effects depth when asked for and an
          * effects program is loaded (never under the CRT filter, even when
          * it could not draw) */
         /* the frame's columns past its exact width left out (none at 4:3) */
         float crop = sourceCrop(disp, sw);
         RdFilter scaleFilter = pr->scaleFilter;
+        float su0, su1; /* the one-texel-a-pixel window (snapWindow): no FSR 1.0 there */
+        const bool snapped = snapWindow(sw, crop, box.w, &su0, &su1);
         /* anti-aliasing (or a scaled scene with more texels than the box
          * has pixels): the source box-averaged to the box first
          * (reduceRecord; the reduce takes the crop; the box blit is then
          * one texel a pixel, nearest).  Not after the downsample: its
          * picture is presented as 1x is */
+        bool reduced = false;
         if (!downsampled && reduceRecord(cl, &src, &sw, &sh, &box, crop)) {
             crop = 0.0f;
             scaleFilter = RD_FILTER_NEAREST;
+            reduced = true;
+        } else if (rd__fsr1_record(cl, &src, &sw, &sh, &box, crop, snapped)) {
+            /* Upscaling: FSR 1.0 (rd_fsr1.c): fewer texels than the box has
+             * pixels on both axes, EASU and RCAS into a texture of the box's
+             * size (the crop taken in EASU), which the box blit draws one
+             * texel a pixel, nearest; the mirror stays the box blit's (a
+             * nearest flip, as after the reduce, so the effects depth flips
+             * with the colour) */
+            crop = 0.0f;
+            scaleFilter = RD_FILTER_NEAREST;
+            reduced = true;
         }
         /* Full pixel off: the game's border over the picture (the scissor
          * inset, the viewport the box's) */
         RhiRect mask;
         const RhiRect *sc =
             rd__border_mask(&box, rd__frame_wexact(), g_rd.gsH, &mask) ? &mask : NULL;
-        const bool depth = depthWanted() && !rd__crt_on() &&
+        /* the colour adjustment in this blit (Options > Picture's tone
+         * rows; rd_tone.h): the finished picture's colour, the box alone
+         * (the bars stay the cleared black) */
+        const bool tone = rd__tone_active();
+        if (foldOn && s_turns && !s_turnFailed) {
+            /* the box blit alone, one texel a pixel (snapped, or after the
+             * reduce or FSR 1.0): drawn turned into the image itself; any
+             * other draw of this present keeps the turn pass */
+            const RdTurnFoldPresent fp = {
+                .crt = rd__crt_on(),
+                .depth = depthWanted(),
+                .scene = fromScene && src.id == disp->color.id,
+                .oneToOne = (crop == 0.0f && sw == box.w && sh == box.h) ||
+                            (!reduced && snapped && sh == box.h),
+                .batches = s_ov.buf.bCount,
+                .capture = s_cap.armed || s_shot.armed || s_shot.copied || rd__icon_hold_asked(),
+                .formatOk = s_outFormat == rd__turn_fold_format(),
+            };
+            int why = rd__turn_fold_why(&fp);
+            RhiTexture ft = {0};
+            RhiState *fst = NULL;
+            if (why == RD_TF_FOLD) {
+                if (s_window) {
+                    ft = s_backbuffer;
+                    fst = &s_backbufferState;
+                } else if (!rd__prerotate_twin_target(s_outW, s_outH, s_turns, &ft, &fst)) {
+                    ft.id = 0;
+                }
+                why = ft.id ? RD_TF_FOLD : RD_TF_FORMAT;
+            }
+            rd__turn_fold_note(why, s_outW, s_outH, s_turns);
+            if (why == RD_TF_FOLD) {
+                s_folded = true;
+                out = ft;
+                outState = fst;
+            }
+        }
+        rd__transition(cl, out, outState, RHI_STATE_RENDER_TARGET);
+        const bool depth = !s_folded && depthWanted() && !rd__crt_on() &&
                            depthBlit(cl, src, sw, sh, out, s_outFormat, s_outW, s_outH, &box, sc,
-                                     scaleFilter, mirror, crop);
+                                     scaleFilter, mirror, crop, tone);
         if (!depth) {
             open = !rd__crt_on();
-            blit(cl, src, sw, sh, out, s_outFormat, s_outW, s_outH, RHI_LOAD_CLEAR, &box, sc,
-                 scaleFilter, mirror, crop, open);
+            /* from SCENE: src is still DISPLAY's texture (no reduce, FSR
+             * 1.0 or downsample took it: rd__present_scene_present_why) */
+            s_blitScene = fromScene && src.id == disp->color.id;
+            const RhiTexture from = s_blitScene ? rd__present_scene_texture(cl) : src;
+            /* folded: the image's turned size, the box and scissor turned
+             * in blit (s_blitTurns) */
+            const uint32_t q = s_folded ? s_turns : 0u;
+            s_blitTurns = q;
+            s_blitPicW = s_outW;
+            s_blitPicH = s_outH;
+            blit(cl, from, sw, sh, out, s_outFormat, (q & 1u) ? s_outH : s_outW,
+                 (q & 1u) ? s_outW : s_outH, RHI_LOAD_CLEAR, &box, sc, scaleFilter, mirror, crop,
+                 open, tone);
+            s_blitTurns = 0;
+            if (s_blitScene) {
+                rd__present_scene_shown();
+            }
+            s_blitScene = false;
         }
     }
     /* the deferred text, drawn in list order with the regions and colours
@@ -2441,13 +2903,15 @@ void rd__present_record(RhiCommandList cl)
      * CRT filter with UI in the grid it was taken above, from a pass
      * without that UI (a no-op here then) */
     captureRecord(cl, out, outState, open, filtered ? &crtBox : &box);
+    /* the title's icon capture: a picture of its pass, copied above for the
+     * capture, is covered by the last picture shown before it (rd.h
+     * rd_icon_hold; nothing without a hold) */
+    rd__icon_hold_record(cl, out, outState, s_outFormat, s_outW, s_outH, open);
     overlayRecord(cl, out, &box, uiInPicture, open);
     if (open) {
         rhi_cmd_end_render_pass(cl);
     }
-    if (s_window) {
-        rd__transition(cl, out, outState, RHI_STATE_PRESENT);
-    }
+    outFinish(cl);
 }
 
 void rd__present_finish(void)
@@ -2464,6 +2928,10 @@ bool rd__present_will_show(void)
 
 void rd__present_shutdown(void)
 {
+    rd__prerotate_shutdown();
+    s_pic = (RhiTexture){0};
+    s_picState = NULL;
+    s_turns = 0;
     if (g_rd.presentLines.id) {
         rhi_destroy_texture(g_rd.presentLines);
     }
@@ -2475,10 +2943,15 @@ void rd__present_shutdown(void)
         rhi_destroy_texture(s_cap.tex); /* the capture's texture */
     }
     memset(&s_cap, 0, sizeof(s_cap));
+    if (s_late.buf.id) {
+        rhi_destroy_buffer(s_late.buf); /* the state picture's readback (rd_shot_late.h) */
+    }
+    memset(&s_late, 0, sizeof(s_late)); /* a pending one is answered below, with nothing */
     if (s_shot.armed || s_shot.fn) {
         shotHand(NULL, 0, 0); /* a shot no present took: dropped */
     }
     memset(&s_shot, 0, sizeof(s_shot));
+    rd__icon_hold_shutdown(); /* the held picture's texture */
     if (s_probe.tex.id) {
         rhi_destroy_texture(s_probe.tex); /* rd_display_probe's */
     }
@@ -2494,7 +2967,10 @@ void rd__present_shutdown(void)
     memset(&s_down, 0, sizeof(s_down));
     /* the last present's reduces stay noted, as its box does, for the
      * tests that read them after rd_shutdown */
-    rd__crt_shutdown(); /* the CRT filter */
+    rd__crt_shutdown();  /* the CRT filter */
+    rd__fsr1_shutdown(); /* FSR 1.0's two textures */
+    rd__upscale_free();  /* UPSCALED (rd_upscale.c) */
+    rd__fsr3_shutdown(); /* FSR 3.1's contexts (rd_fsr3.c), the GPU idle */
     /* the overlay's prims (the registration stays), the deferred text's list */
     free(s_ov.buf.v);
     free(s_ov.buf.b);
@@ -2532,6 +3008,7 @@ bool rd_display_probe(uint8_t rgba[RD_DISPLAY_PROBE_POINTS][4])
             return false;
         }
     }
+    rd__present_scene_readback(rd_target(RD_TARGET_DISPLAY).id); /* an owed DISPLAY drawn */
     const uint32_t w = disp->tw, h = disp->th;
     const uint32_t xs[RD_DISPLAY_PROBE_POINTS] = {w / 2, w / 4, 3 * w / 4, w / 4, 3 * w / 4};
     const uint32_t ys[RD_DISPLAY_PROBE_POINTS] = {h / 2, h / 4, h / 4, 3 * h / 4, 3 * h / 4};
@@ -2568,7 +3045,19 @@ bool rd_read_presented(void *dst, uint32_t *w, uint32_t *h)
     if (!g_rd.hasDevice || !dst || s_window || rhi_swapchain_format() != RHI_FMT_UNKNOWN) {
         return false;
     }
-    return rd__read_present(dst, (size_t)g_rd.presentOutW * g_rd.presentOutH * 4, w, h);
+    const size_t size = (size_t)g_rd.presentOutW * g_rd.presentOutH * 4;
+    if (rd__prerotate_twin_pending()) {
+        /* ICO_VK_FAKE_TRANSFORM: the turned twin read back and turned back,
+         * the picture a turned swapchain's screen shows (rd_prerotate.c) */
+        if (w) {
+            *w = g_rd.presentOutW;
+        }
+        if (h) {
+            *h = g_rd.presentOutH;
+        }
+        return rd__prerotate_twin_read(dst, size, g_rd.presentOutW, g_rd.presentOutH);
+    }
+    return rd__read_present(dst, size, w, h);
 }
 
 /* the output size in the settings and the pending settings (both, so a

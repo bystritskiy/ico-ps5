@@ -122,14 +122,10 @@ typedef enum UiStrId {
     UI_STR_OPT_VIBRATION,
     /* Gameplay */
     UI_STR_OPT_STICK_FIX,
-    UI_STR_OPT_YORDA,         /* [gameplay] yorda_safe */
-    UI_STR_OPT_YORDA_NOTE,    /* its explanation */
-    UI_STR_OPT_PIT_TIME,      /* [gameplay] pit_time: the Time to rescue Yorda row */
-    UI_STR_OPT_PIT_TIME_NOTE, /* its explanation */
-    UI_STR_VAL_PIT_HALF,      /* its values (Original is UI_STR_VAL_ORIGINAL) */
-    UI_STR_VAL_PIT_LONGER,
-    UI_STR_VAL_PIT_DOUBLE,
-    UI_STR_VAL_PIT_TRIPLE,
+    UI_STR_OPT_YORDA,             /* [gameplay] yorda_safe */
+    UI_STR_OPT_YORDA_NOTE,        /* its explanation */
+    UI_STR_OPT_PIT_TIME,          /* [gameplay] pit_time: the Time to rescue Yorda row */
+    UI_STR_OPT_PIT_TIME_NOTE,     /* its explanation (its value is "%d s", no words) */
     UI_STR_OPT_SHADOW_SPEED,      /* [gameplay] shadow_speed: the Shadow speed row */
     UI_STR_OPT_SHADOW_SPEED_NOTE, /* its explanation */
     UI_STR_VAL_SPEED_SLOWER,      /* its values (Original is UI_STR_VAL_ORIGINAL) */
@@ -248,6 +244,7 @@ typedef enum UiStrId {
     UI_STR_OPT_TOUCH_SIZE,
     UI_STR_OPT_TOUCH_OPACITY,
     UI_STR_VAL_ALWAYS,
+    UI_STR_VAL_ALWAYS_SCENES,
     UI_STR_VAL_SMALL,
     UI_STR_VAL_MEDIUM,
     UI_STR_VAL_LARGE,
@@ -300,9 +297,18 @@ typedef enum UiStrId {
     /* New Game+: the New Game screen's second row and its explanation */
     UI_STR_OPT_NEWGAME_PLUS,
     UI_STR_NEWGAME_PLUS_SCREEN,
+    UI_STR_NEWGAME_START,        /* the New Game screen's Start row */
+    UI_STR_NEWGAME_START_SCREEN, /* and its explanation */
     /* Settings > Display, "CRT filter" and "CRT strength" */
     UI_STR_OPT_CRT,
     UI_STR_OPT_CRT_STRENGTH,
+    /* Options > Picture, the colour adjustment: four rows (1..100, 50 the game's
+       own picture) and the note under them */
+    UI_STR_OPT_TONE_GAMMA,
+    UI_STR_OPT_TONE_BRIGHTNESS,
+    UI_STR_OPT_TONE_CONTRAST,
+    UI_STR_OPT_TONE_SATURATION,
+    UI_STR_OPT_TONE_NOTE,
     UI_STR_VAL_CRT_SCANLINES,
     UI_STR_VAL_CRT_CONSUMER,
     UI_STR_VAL_CRT_TRINITRON,
@@ -519,6 +525,25 @@ typedef enum UiStrId {
     UI_STR_VAL_HOLD_DISC_A, /* Hold type: the disc's own, A on this disc */
     UI_STR_VAL_HOLD_DISC_B, /* the disc's own, B */
     UI_STR_HOLD_TYPE_NOTE,
+    /* Controls > Zoom type ([gameplay] zoom_type), after Hold type: its
+       label, its two values and its note */
+    UI_STR_OPT_ZOOM_TYPE,
+    UI_STR_VAL_ZOOM_HOLD,
+    UI_STR_VAL_ZOOM_TOGGLE,
+    UI_STR_ZOOM_TYPE_NOTE,
+    /* Controls > Camera reset ([gameplay] camera_reset), after Zoom type: its
+       label and its note (the values are On and Off) */
+    UI_STR_OPT_CAMERA_RESET,
+    UI_STR_CAMERA_RESET_NOTE,
+    /* Controls > Look at Yorda ([gameplay] yorda_look), after Camera reset:
+       its label and its note (the values are Off and Zoom type's Hold and
+       Toggle) */
+    UI_STR_OPT_YORDA_LOOK,
+    UI_STR_YORDA_LOOK_NOTE,
+    /* Controls > Button pictures and its note (the values are names, not
+       translated: settings_pads.c) */
+    UI_STR_OPT_BUTTON_PICTURES,
+    UI_STR_BUTTON_PICTURES_NOTE,
     UI_STR_STICK_FIX_ALSO_NOTE,  /* Controls: this row is also under Gameplay */
     UI_STR_ACH_POPUPS_ALSO_NOTE, /* Extras: this row is also under Achievements */
     UI_STR_PLAYERS_NOTE,
@@ -570,7 +595,6 @@ typedef enum UiStrId {
     UI_STR_STATS_CAPTURES,
     UI_STR_STATS_SAVES,
     UI_STR_STATS_ENEMIES,
-    UI_STR_STATS_ASSISTS,
     UI_STR_STATS_AREA,
     /* the photo panel's action words, each beside its button
        picture or key (photo_ui.c) */
@@ -724,6 +748,9 @@ typedef enum UiStrId {
     /* Gameplay > Second memory card ([gameplay] second_memory_card) and its explanation */
     UI_STR_OPT_SECOND_CARD,
     UI_STR_OPT_SECOND_CARD_NOTE,
+    /* Gameplay > Shadows attack together ([gameplay] shadows_together) and its explanation */
+    UI_STR_OPT_SHADOWS_TOGETHER,
+    UI_STR_OPT_SHADOWS_TOGETHER_NOTE,
     /* Display > Anti-aliasing ([video] anti_aliasing), its note and values */
     UI_STR_OPT_AA,
     UI_STR_OPT_AA_NOTE,
@@ -732,6 +759,19 @@ typedef enum UiStrId {
     UI_STR_OPT_DOWNSAMPLE,
     UI_STR_VAL_DOWNSAMPLE_BOX,
     UI_STR_OPT_DOWNSAMPLE_NOTE,
+    /* Picture > Upscaling ([video] upscaling, issue 99): the row, its value
+       (Off is UI_STR_OFF), the Sharpness row ([video] upscaling_sharpness)
+       and the note under both */
+    UI_STR_OPT_UPSCALE,
+    UI_STR_VAL_UPSCALE_FSR1,
+    UI_STR_VAL_UPSCALE_FSR3, /* FSR 3.1 ([video] upscaling = "fsr3"; UI_STR_AA_UNAVAILABLE follows it when the device cannot) */
+    UI_STR_OPT_UPSCALE_QUALITY, /* the row under it, shown while Upscaling is FSR 3.1 */
+    UI_STR_VAL_UPSCALE_Q_NATIVE,
+    UI_STR_VAL_UPSCALE_Q_QUALITY,
+    UI_STR_VAL_UPSCALE_Q_BALANCED,
+    UI_STR_VAL_UPSCALE_Q_PERFORMANCE,
+    UI_STR_OPT_UPSCALE_SHARPNESS,
+    UI_STR_OPT_UPSCALE_NOTE,
     UI_STR_AA_OFF,
     UI_STR_AA_SSAA2,
     UI_STR_AA_SSAA4,
@@ -739,6 +779,7 @@ typedef enum UiStrId {
     UI_STR_AA_MSAA4,
     UI_STR_AA_MSAA8,
     UI_STR_AA_UNAVAILABLE, /* appended to a value that is not in force: " (off: not available)" */
+    UI_STR_AA_FSR3, /* appended while FSR 3.1 runs (it replaces the anti-aliasing): " (off: FSR 3.1)" */
     /* Extras > Add to Steam: the row and the popups (title, then body) */
     UI_STR_EXTRAS_STEAM,
     UI_STR_STEAM_ADDED,
@@ -752,6 +793,13 @@ typedef enum UiStrId {
     UI_STR_STEAM_NO_USER_BODY,
     UI_STR_STEAM_FAILED,
     UI_STR_STEAM_FAILED_BODY,
+    /* Extras > Add to the applications menu (Linux): the row, then the done
+       popup (title, body) and the failed popup (title, body) */
+    UI_STR_EXTRAS_DESKTOP,
+    UI_STR_DESKTOP_ADDED,
+    UI_STR_DESKTOP_ADDED_BODY,
+    UI_STR_DESKTOP_FAILED,
+    UI_STR_DESKTOP_FAILED_BODY,
     /* Extras > Export textures: the row, its label while running, its note,
        the progress note and the end popups (titles, bodies) */
     UI_STR_EXTRAS_EXPORT_TEXTURES,
@@ -805,10 +853,6 @@ typedef enum UiStrId {
     UI_STR_BACKUP_WHY_TOO_BIG,
     UI_STR_BACKUP_WHY_NO_DIALOG,
     UI_STR_BACKUP_WHY_NO_SPACE,
-    /* Effects > Water reflections: Original (UI_STR_VAL_ORIGINAL) or Sharp */
-    UI_STR_OPT_EFFECT_WATER,
-    UI_STR_VAL_SHARP,
-    UI_STR_EFFECT_WATER_NOTE,
     /* Effects > Motion blur: Off (UI_STR_OFF), Original (UI_STR_VAL_ORIGINAL)
        or Smooth, and the note under the row */
     UI_STR_VAL_SMOOTH,
@@ -866,11 +910,14 @@ typedef enum UiStrId {
     UI_STR_ISO_COPY_FAILED,
     UI_STR_ISO_COPYING,
     UI_STR_ISO_COPYING_LONG,
-    /* Extras > Game variants (port/game/variants.h): the page's name (also the
-       Extras link), the eight rows with their notes and values (a note ends
-       with whether the row switches achievements off) and the Debug menu
-       row (shown with Developer mode); Original is UI_STR_VAL_ORIGINAL */
-    UI_STR_SECTION_VARIANTS,
+    /* Gameplay's three pages' names (also their links on Gameplay); then
+       the game variants (port/game/variants.h): the eight rows with their
+       notes and values (a note ends with whether the row switches
+       achievements off) and Developer's Debug menu row (shown with
+       Developer mode); Original is UI_STR_VAL_ORIGINAL */
+    UI_STR_SECTION_CHAINS,
+    UI_STR_SECTION_SHADOWS,
+    UI_STR_SECTION_CUTSCENES,
     UI_STR_OPT_VAR_TOUGHNESS,
     UI_STR_OPT_VAR_TOUGHNESS_NOTE,
     UI_STR_VAL_VAR_AMERICAN,
@@ -928,7 +975,6 @@ typedef enum UiStrId {
     UI_STR_STATES_PAUSE_FIRST,
     UI_STR_STATES_REFUSED_BUILD,
     UI_STR_STATES_REFUSED_DISC,
-    UI_STR_STATES_REFUSED_SETTINGS,
     UI_STR_STATES_REFUSED_BUSY,
     UI_STR_STATES_REFUSED_CHECK,
     UI_STR_STATES_OFF,
@@ -943,6 +989,15 @@ typedef enum UiStrId {
     UI_STR_STATES_XB_CODE,
     UI_STR_STATES_XB_DATA,
     UI_STR_STATES_XB_PINNED,
+    /* a state that loads but cannot resume where it was saved, Load continuing
+       from the checkpoint it holds (port/save/state_checkpoint.h): the Save
+       states page's line for its slot, the box after the load (the saved
+       version), and the box when it cannot resume and holds no checkpoint to
+       continue from (the saved version) */
+    UI_STR_STATES_CKPT_ROW,
+    UI_STR_STATES_CKPT_LOADED,
+    UI_STR_STATES_CKPT_NONE,
+    UI_STR_STATES_PAUSE_FIRST_LOAD,
     /* Effects > Glow between frames (Original or Smooth): the label, the note, and the
        note while the row is greyed */
     UI_STR_OPT_EFFECT_GLOW_SMOOTH,
@@ -951,11 +1006,102 @@ typedef enum UiStrId {
     /* Effects > Motion blur strength (issue 181): the label and the note */
     UI_STR_OPT_EFFECT_MOTION_BLUR_STRENGTH,
     UI_STR_EFFECT_MOTION_BLUR_STRENGTH_NOTE,
+    /* Extras > Unused content (port/include/ico_unused.h): the page's name,
+       its four rows and their notes, and the Models list's names of the
+       early show title art (three pictures) */
+    UI_STR_SECTION_UNUSED,
+    UI_STR_UNUSED_ARENA,
+    UI_STR_UNUSED_ARENA_NOTE,
+    UI_STR_UNUSED_CLIMB,
+    UI_STR_UNUSED_CLIMB_NOTE,
+    UI_STR_UNUSED_MOVIE,
+    UI_STR_UNUSED_MOVIE_NOTE,
+    UI_STR_UNUSED_ART,
+    UI_STR_UNUSED_ART_NOTE,
+    UI_STR_UNUSED_ART_VER,
+    UI_STR_UNUSED_ART_START,
+    UI_STR_UNUSED_ART_COPYRIGHT,
+    /* the Save states page's refusal of a save or a load in a test room */
+    UI_STR_STATES_REFUSED_UNUSED,
+    /* Gameplay > Combat (port/game/variants.h): the page's name (also its link on
+       Gameplay) and its three rows with their notes; the community tables
+       carry English until a translator sends them */
+    UI_STR_SECTION_COMBAT,
+    UI_STR_OPT_VAR_AUTO_GUARD,
+    UI_STR_OPT_VAR_AUTO_GUARD_NOTE,
+    UI_STR_OPT_VAR_ATTACK_TURN,
+    UI_STR_OPT_VAR_ATTACK_TURN_NOTE,
+    UI_STR_OPT_VAR_SHADOWS_WAIT_DOWN,
+    UI_STR_OPT_VAR_SHADOWS_WAIT_DOWN_NOTE,
+    /* Gameplay > Combat's weapon rows (port/game/variants.h): Light sword
+       colour (Original or Red, UI_STR_VAL_ORIGINAL and UI_STR_COLOUR_RED) and
+       Stick (Original or Insect net) with their notes */
+    UI_STR_OPT_VAR_SWORD_COLOUR,
+    UI_STR_OPT_VAR_SWORD_COLOUR_NOTE,
+    UI_STR_OPT_VAR_WEAPON,
+    UI_STR_OPT_VAR_WEAPON_NOTE,
+    UI_STR_VAL_VAR_INSECT_NET,
+    /* Gameplay > Shadows (v0.10.5): Shadow toughness's fourth value and the note
+       it shows, and Peaceful shadows with its note */
+    UI_STR_VAL_VAR_THIRD_JOURNEY,
+    UI_STR_OPT_VAR_TOUGHNESS_NOTE_THIRD,
+    UI_STR_OPT_VAR_PEACEFUL,
+    UI_STR_OPT_VAR_PEACEFUL_NOTE,
+    /* Gameplay > Chains (v0.10.5): Chain swing speed and Chain swing slowdown
+       ([variants] chain_swing_speed, chain_swing_damping) with their notes,
+       and the value text of the game's own 4 ("4 (original)"; the other
+       values are plain numbers) */
+    UI_STR_OPT_VAR_CHAIN_SPEED,
+    UI_STR_OPT_VAR_CHAIN_SPEED_NOTE,
+    UI_STR_OPT_VAR_CHAIN_DAMPING,
+    UI_STR_OPT_VAR_CHAIN_DAMPING_NOTE,
+    UI_STR_VAL_VAR_CHAIN_ORIGINAL,
     /* the community translations' names (the Language and Menu language
        rows, after UI_STR_LANG_ZH), in their own language in every table */
     UI_STR_LANG_RU_BOBTTZ,
     UI_STR_LANG_RU_COBRA838,
     UI_STR_LANG_PT_BR,
+    /* v0.10.5, Ico's two rows (port/game/ico_rows.h): Developer > Free
+       movement with its note, and the Remap controls row Ask Yorda for a hint
+       (shown on the discs that have hints); the community tables carry English */
+    UI_STR_OPT_FREE_MOVEMENT,
+    UI_STR_OPT_FREE_MOVEMENT_NOTE,
+    UI_STR_REMAP_ASK_HINT,
+    /* v0.11.3, per-save difficulty (port/game/difficulty.h): the New Game screen's
+       Difficulty row (the mode names and a note each, the Customize link, the Rules
+       page), the rows new with it (No Shadows, Knock-down limit and what it counts,
+       Permadeath), the read-only note and pause-menu words, the Continue list's refusal and the
+       refused save-state text; the community tables carry English */
+    UI_STR_DIFF,
+    UI_STR_DIFF_NOTE,
+    UI_STR_DIFF_EASY,
+    UI_STR_DIFF_NORMAL,
+    UI_STR_DIFF_HARD,
+    UI_STR_DIFF_CUSTOM,
+    UI_STR_DIFF_EASY_NOTE,
+    UI_STR_DIFF_NORMAL_NOTE,
+    UI_STR_DIFF_HARD_NOTE,
+    UI_STR_DIFF_CUSTOM_NOTE,
+    UI_STR_DIFF_CUSTOMIZE,
+    UI_STR_DIFF_CUSTOMIZE_NOTE,
+    UI_STR_DIFF_RULES,
+    UI_STR_DIFF_NO_SHADOWS,
+    UI_STR_DIFF_NO_SHADOWS_NOTE,
+    UI_STR_DIFF_KNOCK_LIMIT,
+    UI_STR_DIFF_KNOCK_LIMIT_NOTE,
+    UI_STR_DIFF_KNOCK_SCOPE,
+    UI_STR_DIFF_KNOCK_SCOPE_NOTE,
+    UI_STR_DIFF_SCOPE_ROOM,
+    UI_STR_DIFF_SCOPE_JOURNEY,
+    UI_STR_DIFF_PERMADEATH,
+    UI_STR_DIFF_PERMADEATH_NOTE,
+    UI_STR_DIFF_LOCKED_NOTE,
+    UI_STR_DIFF_LINE,
+    UI_STR_DIFF_LINK,
+    UI_STR_DIFF_TOAST_ENDED,
+    UI_STR_DIFF_STATES_LOCKED,
+    UI_STR_DIFF_WORD_PERMADEATH,
+    UI_STR_DIFF_STATES_SAVE_LOCKED, /* a save state's save refused on a Permadeath journey */
     UI_STR_COUNT
 } UiStrId;
 
@@ -971,11 +1117,14 @@ UiLang ui_get_language(void);
 void ui_set_sheet_language(int sheetLang);
 int ui_sheet_language(void);
 /* The language of the game's menu words (UI_STR_MT_*, menu_text.h) over
-   sheet language sheetLang: a community translation's table over the
-   English sheets while one is chosen (ui_set_menu_words_language: a UiLang
-   from UI_LANG_COMMUNITY_FIRST, the Language row's community entry; -1, the
-   default, none), else sheetLang itself (any value, unchecked).  The words then keep the English
-   sheet's geometry (menu_text.h UiMenuTextItem: the five European sheets'). */
+   sheet language sheetLang: over the English sheets, the language
+   ui_set_menu_words_language set (any UiLang; -1, the default or a value
+   out of range, none: settings.c ui_settings_apply_language sets the Menu
+   language while a community translation is in force, so New Game,
+   Continue and the save tiles' words follow the Menu language as the
+   port's own rows do), else sheetLang itself (any value, unchecked).  The
+   words then keep the English sheet's geometry (menu_text.h
+   UiMenuTextItem: the five European sheets'). */
 void ui_set_menu_words_language(int lang);
 UiLang ui_menu_words_language(int sheetLang);
 /* the game's language number (2..6) to a UiLang; English otherwise */

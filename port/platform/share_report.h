@@ -12,7 +12,9 @@
 
 #include <stddef.h>
 
-#define ICO_SHARE_REPORT_MAX 5
+/* this run's dump zips at most (ico_share_report_collect_run) */
+#define ICO_SHARE_REPORT_RUN_ZIPS 4
+#define ICO_SHARE_REPORT_MAX (11 + ICO_SHARE_REPORT_RUN_ZIPS)
 #define ICO_SHARE_REPORT_PATH 1024
 
 typedef struct IcoShareReport {
@@ -30,9 +32,31 @@ typedef struct IcoShareReport {
                                     the picture as presented, written one
                                     present after its zip was closed
      logs_dir's newest report-*.zip the crash or hang report (report.c)
+     logs_dir's newest vu-skin-fail-*.bin
+                                    the skin check's capture on failure
+                                    (issue 123; rd_vu_skin_check.h)
+     logs_dir's newest slow-*.zip   the slow-scene dump (issue 179; a
+                                    release writes it too, and attaches it
+                                    to a crash report)
+     logs_dir's newest bench-*.csv  the rc bench's tables (window_bench.h;
+                                    an rc build's alone writes it)
+     logs_dir/vu-zero-mark.txt,     issue 179's attempts' marks on the
+     ahead-mark.txt,                install, as the crash report takes them
+     nodiscard-mark.txt,            (report.h)
+     fastps-mark.txt
    "newest": the latest modification time, then the greatest name.  NULL or
    "" folders are skipped.  The count (out->count). */
 int ico_share_report_collect(const char *logs_dir, const char *dumps_dir, IcoShareReport *out);
+
+/* ico_share_report_collect with this run's dump zips in place of the
+   newest one: every dumps_dir *.zip modified at run_start (Unix seconds)
+   or later, the newest ICO_SHARE_REPORT_RUN_ZIPS of them, listed oldest
+   first (the time, then the name), so the frames an rc build saved by
+   itself in the opening (window_capture.h) and the player's own pictures
+   of the run go together; when the run has none, the newest zip as
+   before.  run_start below 0: ico_share_report_collect exactly. */
+int ico_share_report_collect_run(const char *logs_dir, const char *dumps_dir, long long run_start,
+                                 IcoShareReport *out);
 
 /* The files' names (no folder) joined with ", " into out ("none" for no
    file), cut to size. */

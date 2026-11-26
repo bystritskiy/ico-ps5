@@ -37,6 +37,13 @@ uint32_t vkr_cache_drop_others(const char *path, char *log, size_t logCap);
 #define RHI_VK_TEST_OUT_OF_DATE (-1000001004)  /* VK_ERROR_OUT_OF_DATE_KHR */
 void vkr_test_force_present_result(int32_t result);
 uint32_t vkr_test_swapchain_creations(void);
+/* For rhi_vk_test: the next rhi_wait_submitted (the submit thread's wait
+ * before its present) or rhi_wait_value_ns (its samples' wait) reports
+ * `result` (a VkResult value, e.g. RHI_VK_TEST_DEVICE_LOST) after its wait
+ * instead of the driver's, once */
+#define RHI_VK_TEST_DEVICE_LOST (-4) /* VK_ERROR_DEVICE_LOST */
+#define RHI_VK_TEST_NOT_READY 1      /* VK_NOT_READY */
+void vkr_test_force_wait_result(int32_t result);
 /* 1 while a swapchain retired by a recreation is still held (until the
  * first present on the new one succeeds), else 0 */
 uint32_t vkr_test_retired_swapchain(void);
@@ -57,6 +64,26 @@ uint64_t vkr_test_swapchain_handle(bool retired);
 void vkr_test_fake_present_wait(int on);
 void vkr_test_fake_present_wait_hang(uint32_t ms);
 uint32_t vkr_test_present_wait_misuse(void);
+/* The display's times read back without the extension (vk_glass.c): with
+ * vkr_test_fake_glass(1) before rhi_init, presents carry ids (nothing
+ * chained) and every present but each third gets the time it was made as
+ * its display time, so rhi_present_glass's ring and its reader run on a
+ * driver without VK_GOOGLE_display_timing */
+void vkr_test_fake_glass(int on);
+
+/* For rhi_vk_test's scopes cell (rhi_vk_scope.c): the pipeline barriers
+ * vk_cmd.c records from vkr_test_barrier_trace(true) on (the trace cleared),
+ * each its two stage masks, its memory barrier's accesses (0 and 0 without
+ * one) and its buffer and image barrier counts, in recording order;
+ * vkr_test_barrier_get copies up to cap of them and returns how many were
+ * recorded (more than cap: the rest not kept).  Off by default (one branch
+ * a barrier). */
+typedef struct VkrTestBarrier {
+    uint32_t src, dst, memSrc, memDst, nMem, nBuf, nImg;
+} VkrTestBarrier;
+
+void vkr_test_barrier_trace(bool on);
+uint32_t vkr_test_barrier_get(VkrTestBarrier *out, uint32_t cap);
 
 /* For rhi_vk_test's limits cell (ICO_VK_FAKE_LIMITS): the name of the
  * VkPhysicalDeviceLimits member the last pipeline, allocation or sampler
@@ -78,6 +105,26 @@ void vkr_test_fail_texels_above(uint64_t texels);
 uint32_t vkr_test_pass_area_count(void);
 void vkr_test_pass_area_no_assert(bool on);
 
+/* For rhi_vk_test's clock cell (rhi.h rhi_read_timestamp_clock): the next
+ * submission waits on a timeline semaphore of its own until
+ * vkr_test_release_hold signals it from the host (any thread), so the
+ * recycle's wait for its slot blocks while the GPU runs nothing of it (a
+ * driver that runs submissions at once, lavapipe, otherwise never makes a
+ * wait block); false on the fence path or when the semaphore cannot be made.
+ * vkr_test_hold_destroy after the wait. */
+bool vkr_test_hold_next_submit(void);
+bool vkr_test_release_hold(void);
+void vkr_test_hold_destroy(void);
+
+/* For rhi_vk_test's range cell (vk_range.c, issue 123): the checks of the
+ * commands robust access does not cover (an indexed draw's indices, a
+ * buffer copy, a texture region, a copy's buffer rows; 16- and 32-bit
+ * indices, a BC1 texture's blocks), each on made-up resources at the edge
+ * and one past it; returns the cases with the wrong verdict (0: all right).
+ * vkr_test_range_bad counts the lines since the program started. */
+uint32_t vkr_test_range_cases(void);
+uint32_t vkr_test_range_bad(void);
+
 /* For rhi_vk_test's sync cell (vk_sync.c): the submission sync in use,
  * "timeline" or "fences" (ICO_VK_FAKE_API=1.1), and the submits since
  * rhi_init that waited for their fence slot's earlier submission (the
@@ -94,8 +141,31 @@ uint32_t vkr_test_sync_recycle_waits(void);
  * VK_KHR_get_physical_device_properties2, review finding 5) */
 uint32_t vkr_test_api_version(void);
 bool vkr_test_legacy_passes(void);
+/* The subpass read (vk_device.c vkr_subpass_read_decide): whether it is on,
+ * and since the device was made the passes begun with it, the local-read
+ * barriers skipped in a pass without it and the passes of its class whose
+ * colour is not one of its textures (each pointer may be NULL) */
+bool vkr_test_subpass_read(uint32_t *passes, uint32_t *skipped, uint32_t *misfit);
 bool vkr_test_view_usage(void);
 bool vkr_test_props2(void);
+
+/* For rhi_vk_swapchain_test's acquire cells (vk_sync.c, vk_cmd.c
+ * vkr_submit_batch): with vkr_test_submit_record(true) every vkQueueSubmit
+ * notes the binary semaphore it waits on (0: none; the timeline's own wait
+ * is not noted), that wait's stage (a VkPipelineStageFlags, 0 without a
+ * wait) and its command buffers (0: an empty batch), the first 32 since
+ * the last take; vkr_test_submit_waits copies them out in order and starts
+ * again (false: off and cleared).  vkr_test_acquire_sem is the current
+ * frame slot's acquire semaphore, to compare with waitSem. */
+typedef struct RhiVkTestSubmit {
+    uint64_t waitSem;
+    uint32_t waitStage;
+    uint32_t lists;
+} RhiVkTestSubmit;
+
+void vkr_test_submit_record(bool on);
+uint32_t vkr_test_submit_waits(RhiVkTestSubmit *out, uint32_t max);
+uint64_t vkr_test_acquire_sem(void);
 
 #ifdef __cplusplus
 }

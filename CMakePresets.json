@@ -26,7 +26,8 @@
             "displayName": "Linux x86-64, host GCC",
             "cacheVariables": {
                 "CMAKE_C_COMPILER": "gcc",
-                "ICO_STATE_FIXED_IMAGE": "ON"
+                "ICO_STATE_FIXED_IMAGE": "ON",
+                "ICO_FFX": "ON"
             }
         },
         {
@@ -50,7 +51,8 @@
             "toolchainFile": "${sourceDir}/cmake/toolchains/x86_64-w64-mingw32-gcc.cmake",
             "cacheVariables": {
                 "ICO_HEADLESS": "OFF",
-                "ICO_STATE_FIXED_IMAGE": "ON"
+                "ICO_STATE_FIXED_IMAGE": "ON",
+                "ICO_FFX": "ON"
             }
         },
         {
@@ -61,6 +63,16 @@
                 "CMAKE_BUILD_TYPE": "Debug",
                 "CMAKE_C_FLAGS_DEBUG": "-g -O1",
                 "ICO_SANITIZE": "address,undefined"
+            }
+        },
+        {
+            "name": "linux-x64-asan",
+            "inherits": "asan",
+            "displayName": "Linux x86-64, AddressSanitizer + UBSan as CI's asan suite",
+            "description": "The asan preset with what CI's asan suite adds on its command line (gcc 14, the program linked): -fsanitize=address,undefined -fno-sanitize-recover=undefined at -O1. For the local run of new tests before a push (docs/port/TESTING.md, \"Release process\").",
+            "cacheVariables": {
+                "CMAKE_C_COMPILER": "gcc-14",
+                "ICO_LINK_EXE": "ON"
             }
         },
         {
@@ -188,6 +200,11 @@
             "configurePreset": "asan"
         },
         {
+            "name": "linux-x64-asan",
+            "configurePreset": "linux-x64-asan",
+            "targets": ["all", "tests"]
+        },
+        {
             "name": "fptrap",
             "configurePreset": "fptrap"
         },
@@ -243,6 +260,13 @@
         {
             "name": "asan",
             "configurePreset": "asan",
+            "output": {
+                "outputOnFailure": true
+            }
+        },
+        {
+            "name": "linux-x64-asan",
+            "configurePreset": "linux-x64-asan",
             "output": {
                 "outputOnFailure": true
             }

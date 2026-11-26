@@ -76,6 +76,7 @@
 #include <stdbool.h>
 #include <stddef.h>
 #include <stdint.h>
+#include "rd_perf_sub.h"
 #include "rd_state.h"
 
 #ifdef __cplusplus
@@ -176,7 +177,20 @@ typedef enum RdStencilMode {
     /* the shadow resolve's A on a disc whose count steps by 8 (rd_shadow.c
      * "The step"): NOTEQUAL 0 under read mask 0x1F, the five bits 8 n mod
      * 256 keeps */
-    RD_STENCIL_TEST_NONZERO5
+    RD_STENCIL_TEST_NONZERO5,
+    /* the shadow tiles (rd_shadow_tile.c): a composite's DATE set-up over
+     * the tile mask.  CLEAR2 writes 0 into bits 6 and 7 (the reference 0),
+     * TILE_MARK writes 1 into bit 7 (the reference 0x80) where
+     * shadow_tile_mark_ps keeps the fragment (a dead tile), SET_T is SET
+     * where bit 7 is 0 (EQUAL under read mask 0x80, the reference 0x40),
+     * TEST0_T and TEST1_T are TEST0 and TEST1 where bit 7 is 0 too (read
+     * mask 0xC0, the reference 0x40: GREATER, 0x40 > s, passes on s = 0
+     * alone; EQUAL on s = 0x40 alone); none reads or writes bits 0-5 */
+    RD_STENCIL_DATE_CLEAR2,
+    RD_STENCIL_TILE_MARK,
+    RD_STENCIL_DATE_SET_T,
+    RD_STENCIL_DATE_TEST0_T,
+    RD_STENCIL_DATE_TEST1_T
 } RdStencilMode;
 
 typedef enum RdTargetFormat {
@@ -407,6 +421,29 @@ typedef struct RdSettings {
      * "window" resolution (rd__apply_display: g_rd.downsample).  0 in a
      * zeroed RdSettings: off, nothing changes */
     uint8_t downsample;
+    /* Upscaling (RdUpscale, [video] upscaling = "fsr1", issue 99): AMD
+     * FidelityFX Super Resolution 1.0 at the present, EASU then RCAS
+     * (rd_fsr1.c), where the picture has fewer texels than the presentation
+     * box on both axes (1x, or after Downsampling), never under the CRT
+     * filter or at the "window" resolution.  upscaleSharpness 0..100 (the
+     * host's default 80): RCAS's stops 2 (1 - s / 100), half a stop softer
+     * past 2x a side.  0 in a zeroed RdSettings: off, nothing changes */
+    uint8_t upscale;
+    uint8_t upscaleSharpness;
+    /* The Upscaling quality row ([video] upscaling_quality, RdUpscaleQuality),
+     * FSR 3.1's starting ratio 1.0 / 1.5 / 1.7 / 2.0 (rd_upscale_temporal.c).
+     * FSR 3.1 (RD_UPSCALE_FSR3) is off under the CRT filter and while
+     * downsample is on, MSAA and SSAA are off while it runs, and at the
+     * Original preset's 1x only Native AA applies.  0 in a zeroed
+     * RdSettings: Native AA */
+    uint8_t upscaleQuality;
+    /* A temporal upscaler (rd_upscale.h; FSR 3.1 by Upscaling, or [dev] upscale_test):
+     * the Resolution row is the display's scale and the scene is drawn at it
+     * over the upscaler's ratio.  Resolution "auto" keeps the display at the
+     * window and steps this cap on the scene's vertical scale down instead
+     * (the host, window_host.c video_settings).  0 in a zeroed RdSettings:
+     * no cap */
+    float upscaleRenderCap;
     /* Full pixel off in the game (the host sets it with fullPixel 0): the
      * picture is Full pixel on's, the reduction drawing the whole frame as
      * above (rd_replay.c), and the presenter draws the game's border over
@@ -421,14 +458,6 @@ typedef struct RdSettings {
      * scissor, DISPLAY's border is the GS's own (the tests' PS2 models,
      * the replay tool without --border-mask); ignored with fullPixel. */
     uint8_t borderMask;
-    /* Water reflections: Sharp ([video] effect_water_sharp).  The blocks
-     * rd_block_target makes that are not scene-sized (the reflections of
-     * puddle.c and pool.c, the queen barrier's copy of the frame) take the
-     * scene's scale, so their pictures have the scene's texels per GS pixel
-     * (rd_core.c rd__target_scale_of).  0 in a zeroed RdSettings: they are
-     * drawn at their own GS size, as on the PS2 (and as before this
-     * option; the replay tool's --water-sharp sets it) */
-    uint8_t waterSharp;
     /* Motion blur: Smooth ([video] effect_motion_blur_mode = "smooth" with
      * effect_motion_blur on).  The motion blur's sprite (staticBlur.c
      * MotionBlur) reads an accumulator of the scenes of every present
@@ -454,6 +483,16 @@ typedef struct RdSettings {
      * glow held, as before this option.  An explicit ICO_RD_GLOW_REDRAW
      * ([dev] glow_redraw) wins over it. */
     uint8_t glowSmooth;
+    /* Options > Picture: Gamma, Picture brightness, Contrast, Saturation
+     * ([video] gamma, brightness, contrast, saturation; 1..100).  The
+     * colour adjustment of PCSX2's shade boost (port/shaders/tone.hlsli),
+     * each value / 50 its factor, applied to the finished picture in the
+     * present's box blit, or to the CRT filter's source before the filter
+     * (rd_present.c rd__tone_active, rd__tone_params).  50 is the game's
+     * picture; 0 (a zeroed RdSettings) reads as 50, so the present is the
+     * PS2 picture's byte for byte and its box blit keeps blit_ps while
+     * every value is 0 or 50.  Not the movies (they draw their own box). */
+    uint8_t toneGamma, toneBrightness, toneContrast, toneSaturation;
     /* The internal scene resolution, in texels: the scene's
      * texture is sceneWidth x sceneHeight (GS coordinates unchanged); 0 x 0
      * with sceneScale 0 = the presentation box in the window under the
@@ -489,6 +528,34 @@ typedef enum RdCrtMode {
 /* Sets s's CRT fields: the mode, the strength (clamped to 0..1) and every
  * override to "the mode's own" (-1). */
 void rd_crt_settings(RdSettings *s, RdCrtMode mode, float strength);
+
+/* RdSettings.upscale.  RD_UPSCALE_FSR3 is FSR 3.1, the temporal upscaler: it
+ * runs only where rd_upscale_temporal_supported(), else drawn as
+ * RD_UPSCALE_OFF */
+typedef enum RdUpscale {
+    RD_UPSCALE_OFF = 0,
+    RD_UPSCALE_FSR1 = 1, /* FSR 1.0: EASU + RCAS at the present (rd_fsr1.c) */
+    RD_UPSCALE_FSR3 = 2,
+    RD_UPSCALE_COUNT
+} RdUpscale;
+
+/* RdSettings.upscaleQuality: FSR 3.1's ratios 1.0 / 1.5 / 1.7 / 2.0 */
+typedef enum RdUpscaleQuality {
+    RD_UPSCALE_Q_NATIVE = 0,
+    RD_UPSCALE_Q_QUALITY = 1,
+    RD_UPSCALE_Q_BALANCED = 2,
+    RD_UPSCALE_Q_PERFORMANCE = 3,
+    RD_UPSCALE_Q_COUNT
+} RdUpscaleQuality;
+
+/* Whether the device can run FSR 3.1 (rd_fsr3.c): a build with the
+ * FidelityFX SDK (ICO_FFX) on Vulkan 1.2 with the compute capabilities and
+ * the FidelityFX extensions; false elsewhere, logging why once.  The Options
+ * page offers the value only when this is true. */
+bool rd_upscale_temporal_supported(void);
+/* True when FSR 3.1 is in force, so MSAA and SSAA are drawn off (the
+ * Anti-aliasing row says "(off: FSR 3.1)") */
+bool rd_aa_off_for_temporal(void);
 
 /* RdSettings.antiAlias */
 typedef enum RdAntiAlias {
@@ -609,6 +676,45 @@ const RdPipelineSetPolicy *rd_pipeline_policy_careful(void);
 /* Whether the run draws with the VU vertex pre-pass now (after rd_init and
  * rd_vuprepass_selftest) */
 bool rd_vu_prepass_on(void);
+/* How the VU pre-pass writes its record this run (rd_vu_record.h):
+ * "stores" (the vertex shaders store it), "compute" (compute dispatches
+ * store it) or "targets" (render targets and copies) */
+const char *rd_vu_record_mode(void);
+/* The window's 10 s VU line's share of shared vertices (rd_vu_share.h):
+ * "; shared vertices: T triangles, S vertex invocations saved (P % of the
+ * draws')" a picture over the n pictures since the last call, whose counts
+ * it takes back to zero; the length written */
+size_t rd_vu_share_text(char *out, size_t cap, unsigned n);
+/* The same line's clause of the zero-area cull (rd_vu_zero.h): "; zero-area
+ * cull: D draws a picture culling, T triangles in culling draws (how many
+ * it removed is not measured); refused a picture: ...;
+ * checked P pictures: C of S triangle slots culled, M differ", or
+ * "; zero-area cull held|off (why)"; the block's counts back to zero */
+size_t rd_vu_zero_text(char *out, size_t cap, unsigned n);
+/* The buffer that clause needs at most (the window's VU line): every
+ * refusal reason, the shared lists and the self-test block's checked
+ * pictures, with seven-digit counts (rd_vu_zero_test) */
+#define RD_VU_ZERO_TEXT_MAX 480
+/* And the discard-free twins' (rd_nodiscard.h): "; discard-free twins: D
+ * draws a picture through them (R refused a picture: plane p, DATE d, band
+ * b, alpha a, clipped c, not made yet u, timed without them t)", "" while
+ * held or off from the start; the block's counts back to zero */
+size_t rd_nd_text(char *out, size_t cap, unsigned n);
+/* And the fast pixel build's (rd_fastps.h): "; fast pixel build: P passes a
+ * picture through it, T triangles (R refused a picture: ...)" */
+size_t rd_fps_text(char *out, size_t cap, unsigned n);
+/* And the one-pass blend's (rd_onepass.h): "; one-pass blend (...): P pairs
+ * a picture in one pass (Q of code 36), ... (R pairs kept two-pass a
+ * picture: ...)" */
+size_t rd_op_text(char *out, size_t cap, unsigned n);
+/* The record written without render targets (stores or compute: a device
+ * loss takes the restart's losstargets step first, startup_retry.h
+ * StartupRetryRun.storesWereOn) */
+bool rd_vu_record_buffered(void);
+/* The frames whose pre-pass [dev] vu_prepass_min skipped since the last
+ * call (the window's 10 s VU line), the threshold in *minSlots and the
+ * most slots one of them had in *maxSlots (either may be NULL) */
+uint32_t rd_vu_prepass_skips(uint32_t *minSlots, uint32_t *maxSlots);
 const RdSettings *rd_get_settings(void);
 /* The scene's scale in force (rd_present.c
  * rd__apply_display, from the settings applied at the last rd_begin_frame):
@@ -626,6 +732,18 @@ void rd_get_scene_scale(float *sx, float *sy);
  * allocation that failed); 0 when they are as asked.  The
  * Resolution row shows it after the asked scale, "16x (8x)". */
 int rd_scene_scale_lowered(void);
+
+/* A temporal upscaler's ratio, the display scale over the scene's (1..3),
+ * while one is asked (rd_upscale.h: Upscaling = FSR 3.1 in force, or [dev]
+ * upscale_test) and the CRT filter is off; 0 otherwise.  The host divides
+ * Auto's window scale by it, so Auto's steps lower the scene below the
+ * window (RdSettings.upscaleRenderCap). */
+float rd_upscale_ratio(void);
+/* The same for settings about to be sent (the host's Auto, before
+ * rd_set_settings): FSR 3.1 in force for st (crt: the CRT filter on) at a
+ * display scale of displayScale, or [dev] upscale_test's ratio; 0 when
+ * neither */
+float rd_upscale_ratio_of(const RdSettings *st, bool crt, float displayScale);
 
 /* gsb_SetGsDefault / dl_Swap at the start of a tick: clears the 13 lists and
  * records the per-list defaults listed above. */
@@ -661,7 +779,9 @@ uint32_t rd_precreate_pipelines(void);
  * (0, total) before the first pipeline, while a batch compiles (about every
  * 50 ms, with the pipelines finished so far) and between two batches, with
  * done never going down and below total, and (total, total) once at the
- * end; on the calling thread.  fn may present a frame (the window draws its
+ * end of a set that went to its end (a start-up set stopped early by its
+ * budget or the memory size rule ends without it: the window closes it
+ * with rd_precreate_pipelines' count, issue 215); on the calling thread.  fn may present a frame (the window draws its
  * start-up screen from it); that present asks the pipeline cache for its
  * own few pipelines, which are created at once and found again afterwards,
  * so the call is safe from inside the loop.  A nonzero return stops the set
@@ -713,6 +833,15 @@ void rd_set_batch_fn(RdActivityFn fn);
  * default): "memory unknown". */
 typedef int (*RdMemoryFn)(long *rssKb, long *peakKb);
 void rd_set_memory_fn(RdMemoryFn fn);
+/* The system's memory for a start-up batch's log line (issue 215,
+ * port/platform/mem_watch.h mem_watch_batch_clause): fn(first, last, total,
+ * out, size) is asked after each batch and returns nonzero with "free 5059
+ * MB (-2190 since the set began), file cache 2104, ..." in out when the
+ * line carries it ("; system: ..." before the pipelines' times; not in the
+ * activity file's copy).  NULL (the default): none. */
+typedef int (*RdMemoryClauseFn)(uint32_t first, uint32_t last, uint32_t total, char *out,
+                                size_t size);
+void rd_set_memory_clause_fn(RdMemoryClauseFn fn);
 /* Whether the system reported low memory (issue 128; diag_host.h
  * ico_diag_low_memory_stop: Android's onTrimMemory "running critical"):
  * fn(why, size) returns nonzero with the level's name in why.  The
@@ -725,6 +854,65 @@ void rd_set_memory_fn(RdMemoryFn fn);
  * pipelines on one thread).  NULL (the default): never asked. */
 typedef int (*RdLowMemoryFn)(char *why, size_t size);
 void rd_set_low_memory_fn(RdLowMemoryFn fn);
+
+/* The start-up set sized by the device's own memory fall (issue 215;
+ * port/platform/set_size.h, docs/port/PIPELINES.md "Sized by the memory
+ * fall").  rd_precreate_pipelines asks fn before each batch with the set's
+ * counts by family ([0] 2D: every pipeline without a VU vertex shader; [1]
+ * VU): the pipelines made so far, those not made yet from the next on, the
+ * family of the next one not stopped (-1 none), play's known need not made
+ * yet (rd_vu_rec_early.h rd_set_size_need) and the next pipeline's place.
+ * fn returns the families stopped (bit 1 << family): their keys are left to
+ * first use from then on, and when every family with keys left is stopped
+ * the set stops there (the rest made on first use, rd_pipelines_lazy with
+ * "the start-up set sized by the device's memory fall: <why>"); a set that
+ * skipped keys of a stopped family stops the same way at its end.  The stop
+ * is the set's own: no low-memory stop, so the window keeps no resume
+ * record for it.  NULL (the default): never asked. */
+typedef struct RdSetSizeAsk {
+    uint32_t made[2], left[2];
+    int next;
+    bool begin; /* the set's first ask */
+    uint64_t needRecordBytes, needArenaBytes;
+    /* the same made already (out of the free memory before the set read it) */
+    uint64_t madeRecordBytes, madeArenaBytes;
+    uint32_t place, total;
+} RdSetSizeAsk;
+
+typedef unsigned (*RdSetSizeFn)(const RdSetSizeAsk *ask, char *why, size_t size);
+void rd_set_set_size_fn(RdSetSizeFn fn);
+/* The pipelines made on first use after the start-up set (rd__get_pipeline,
+ * the lazy path's included; any thread): those since the last call and
+ * the longest of them in ms (taken: the next call starts from 0), and the
+ * run's count.  The window's 10 s memory line (window_lines.c). */
+void rd_pipelines_first_use_take(uint32_t *block, float *longestMs, uint32_t *run);
+/* The start-up set resumed where an earlier start's stopped for memory
+ * (issue 123; port/platform/pipe_resume.h, docs/port/PIPELINES.md "Stop
+ * and resume"): the window calls it before rd_precreate_pipelines.  at is
+ * the first pipeline not made, in the set's order as rd_precreate_pipelines
+ * makes it (the careful set's sprite planes builds last); a value at or past
+ * the set's size starts from the first.  batch caps the set's batches (0:
+ * half of the policy's batch, at least 4).  skipBefore: the pipelines before
+ * at are left to first use (this shader set's pipeline cache file was
+ * loaded: the driver answers them from it), the progress counting the rest
+ * only; else they are made after the rest (the set from at to its end, then
+ * from its first to at), the progress counting the whole set.  One call
+ * covers the next rd_precreate_pipelines only; the line "pipelines: the
+ * start-up set resumes at pipeline N of M ..." says what it did. */
+void rd_set_pipeline_resume(uint32_t at, uint32_t batch, bool skipBefore);
+
+/* Where the last rd_precreate_pipelines stopped when its policy's bound or
+ * the low-memory function stopped it (the rest made on first use): true
+ * with at the first pipeline not made in the set's order (the resume's
+ * rotation undone), total the set's size, batch the batch it made them in,
+ * why the stop's words (rd_pipelines_lazy's); false when it made the whole
+ * set or was not run (out zeroed). */
+typedef struct RdPipelineSetStop {
+    uint32_t at, total, batch;
+    char why[256];
+} RdPipelineSetStop;
+
+bool rd_pipeline_set_stop(RdPipelineSetStop *out);
 /* No start-up set (issues 93 and 107; docs/port/PIPELINES.md, "The start-up
  * set"): the window calls it instead of rd_precreate_pipelines, why saying
  * why ("on this device (Adreno 740, issues 93 and 107)", "by the settings
@@ -764,6 +952,34 @@ void rd_pipelines_lazy_tick(void);
  * logged).  The game thread, before the render thread starts. */
 typedef int (*RdBackgroundMemoryFn)(char *why, size_t size);
 uint32_t rd_pipelines_background_start(RdBackgroundMemoryFn memory);
+/* The skinned draws' bone-block check's own background compiles (its c2
+ * variant's three pipelines and its box checks', rd_vu_skin_check.c; issue
+ * 163) under issue 161's rule as the finisher above: memory asked before
+ * each (2: none for the rest of the run; 1: not now), one at a time;
+ * noBackground non-NULL (the start-up set stopped for memory on Qualcomm's
+ * own driver: window_pipe_finish.c) carefully: each begun only above the
+ * floor and 2 s after the last (issue 123, v0.11.3: before, none at all),
+ * its words in the one line that says so.  Until a pipeline exists its part
+ * of the check is not drawn.
+ * The window, before the render thread starts; without a call (the tests,
+ * the tool) every compile may begin. */
+void rd_vu_skin_background(RdBackgroundMemoryFn memory, const char *noBackground);
+
+/* Issue 217 (v0.11.10): on a tile-based phone GPU (the device table's
+ * SKIN_AS_BEFORE) none of the check's own pipelines is compiled at all,
+ * with or without noBackground, said in one line. */
+/* The check's counts this run (any thread: relaxed atomics, kept across a
+ * renderer's restart), for the last-run record and the report (port/platform
+ * window_pipe_finish.c hands them to last_run.h): on (its start line said
+ * on), phone (on, on a tile-based phone GPU), the checks drawn, the box
+ * checks drawn, the twins drawn, and its own pipelines begun (background or
+ * at once: c2's, column 3's, the box checks', twin C's) */
+typedef struct RdSkinRunCounts {
+    int on, phone;
+    uint64_t checks, boxDrawn, twinsDrawn, pipesBegun;
+} RdSkinRunCounts;
+
+void rd_vu_skin_run_counts(RdSkinRunCounts *out);
 /* A late game step or a slow picture: no background batch begins for
  * RD_FINISH_HOLD_MS (a batch in flight goes on).  Any thread. */
 void rd_pipelines_background_hold(void);
@@ -797,6 +1013,13 @@ void rd_index_span_text(char *out, size_t size);
  * read, rd_fx_plan.c).  Waits for the GPU.  Returns whether the path in
  * force passed. */
 bool rd_fog_selftest(void);
+/* The name of each self-test rd_fog_selftest's first run is about to run
+ * ("DATE", "the shadow count", "the fog's depth path", ..., then "the
+ * start after the self-tests" as it returns), to fn on the calling thread;
+ * the window passes last_run.h last_run_selftest_name, so a run that ends
+ * inside one names it in logs/last-run.txt (issue 215).  NULL (the
+ * default): none.  Kept until cleared. */
+void rd_set_selftest_fn(void (*fn)(const char *name));
 /* DATE's self-test (rd_date_selftest.c), where the profile asks for DATE
  * through the stencil bit (RdProfile.dateStencil): a frame of its own on
  * SCENE draws a cell of destination alpha 0x80 and one of 0x00, then a
@@ -840,8 +1063,10 @@ void rd_summary_text(char *out, size_t size);
  * after that it runs again whenever SCENE is made at a new size.  Waits
  * for the GPU.  Returns whether the blend in force passed. */
 bool rd_blend_selftest(void);
-/* The VU vertex pre-pass's self-test (rd_vuprepass_selftest.c): a frame of
- * its own (never recorded, never presented) draws three meshes made for it
+/* The VU vertex pre-pass's self-test (rd_vuprepass_selftest.c), after the
+ * skinned draws' bone-block check's start-up probe and start line, which
+ * run first whatever the pre-pass (rd_vu_skin_check.h rd__vu_skin_selftest;
+ * issue 163): a frame of its own (never recorded, never presented) draws three meshes made for it
  * (a prelit, a lit and a skinned strip) on SCENE at its real size and
  * scale, without MSAA, once through the programs' own vertex shaders and
  * once through the pre-pass, in the VU shader variant the settings draw
@@ -857,26 +1082,111 @@ bool rd_blend_selftest(void);
  * programs').  Waits for the GPU.  Returns false when it turned the
  * pre-pass off. */
 bool rd_vuprepass_selftest(void);
+/* Whether the skinned draws' bone-block check's start-up probe
+ * (rd_vu_skin_check.h; issue 163), run first by rd_vuprepass_selftest,
+ * found the device failing in it (lost, or its picture not read back); why
+ * gets the words.  The check is then off for the run; the window writes
+ * [dev] vu_skin_check = false before a loss's restart or box, so no later
+ * start runs the probe again (window_host.c).  The probe's notes go to the
+ * activity function (rd_set_activity_fn): "creating pipeline rd vu skin
+ * probe (...)" while its pipelines compile, "the VU skin check's start-up
+ * probe (rd vu skin probe): ..." while it draws and reads back
+ * (startup_retry.h startup_retry_note_has_skin_probe), so a crash, a freeze
+ * or the system's end there names it at the next start. */
+bool rd_vu_skin_probe_failed(char *why, size_t size);
+/* The skin check's capture on failure (issue 123; rd_vu_skin_check.h): the
+ * folder its sidecar is written to (the window's logs folder; NULL or ""
+ * none: no sidecar, the frame dump is still asked), kept until changed.
+ * rd_vu_skin_capture_due: true once a run, when the check has seen its
+ * first failure (twins whose counts differ, or a wrong check) and written
+ * its sidecar; path gets the sidecar's path ("" when none was written).
+ * The window then takes a frame dump for the next present (window_host.c
+ * frame_dump) and puts the sidecar in its zip.  Any thread (an atomic). */
+void rd_set_vu_skin_capture_dir(const char *dir);
+bool rd_vu_skin_capture_due(char *path, size_t size);
+
+/* Issue 123's ladder (rd_vu_bones.c; docs/port/VU_SKIN_CHECK.md "The
+ * ladder"): the skin check's evidence so far this run, which the window's
+ * pump (window_bones.c) decides from (bones_ladder.h) before it writes
+ * [dev] vu_bones = ring or turnip_debug = nobin for the next start.
+ * ring: the skinned entries read their bones through the ring this run;
+ * replays: replays whose twins were read; twins read, differ of them with
+ * A and B differing (each a twin event); ringClear the evidence that the
+ * ring read clears it (an event whose twin C, the ring read in the pass,
+ * equalled B, or a wrong check with equal bytes whose column 3 was right),
+ * ringFail the opposite; sceneOnly events whose probe of the same command
+ * in the same replay drew right (the scene pass's execution), probeWrong
+ * events whose probe was wrong; portRace wrong checks whose bytes differed
+ * (H2: not the driver's read); addr the last wrong check's address; frame
+ * the last event's; started: the renderer has chosen its modules
+ * (rd__vu_policy_init ran: the driver and its environment are those of
+ * this start); ringUsable: the ring builds could be put in force (the
+ * program entries are the plain set, on Vulkan: rd__vu_policy_init).  Any
+ * thread (each field an atomic). */
+typedef struct RdVuBonesEvidence {
+    bool started, ring, ringUsable;
+    uint32_t replays, twins, differ;
+    uint32_t ringClear, ringFail, sceneOnly, probeWrong, portRace;
+    uint32_t addr, frame;
+} RdVuBonesEvidence;
+
+void rd_vu_bones_evidence(RdVuBonesEvidence *out);
+/* The ladder's step 1 in the run (window_bones.c): mode "ring" or
+ * "cbuffer" and its mark, taken by the next rd_init over ICO_RD_VU_BONES
+ * and ICO_RD_VU_BONES_BY (the environment is not written while the
+ * renderer's, the audio's and the driver's threads may read it).  NULL
+ * mode: back to the environment.  The window's thread, before the
+ * renderer is made again. */
+void rd_set_vu_bones(const char *mode, const char *by);
 /* The longest frame replay (CPU time of recording, pipeline creation,
  * submit and present) in ms since the last reset, and *count the replays
  * in that time; reset != 0 starts a new period.  For the window's 10 s
  * statistics line. */
 double rd_replay_time_max(int reset, uint32_t *count);
 void rd_set_host_call(RdHostCall call);
-/* Frame rate Original (interpolation off): asked on the host (rd__on_host)
- * before rd_end_frame replays and presents a frame, with the frame's keep
- * flag; false leaves the frame unreplayed and unpresented (the last picture
- * stays on the screen), so a renderer slower than the game's step does not
- * hold the simulation below its rate (window_host.c's late skip at
- * Original, pace_policy.h pace_original_present).  NULL (the default, tests
- * and tools) replays every frame.  Nothing else of the frame changes: a
- * replayed frame draws the same picture as without the gate. */
-typedef bool (*RdReplayGate)(int keep);
+/* The window's hook for a first-start probe as a named phase of the run
+ * (port/render/rd_subpass_probe.c: the subpass read's; port/platform
+ * diag_host.h ico_diag_set_probe): called with the probe's name while the
+ * device runs with what it tries, with NULL after its verdict.  NULL: no
+ * hook (the tools and tests). */
+void rd_set_probe_fn(void (*fn)(const char *name));
+
+/* Frame rate Original (interpolation off): asked on the game thread before
+ * rd_end_frame replays and presents a frame, with the frame's keep flag and
+ * whether the render thread is still busy with the picture before (busy:
+ * its job not ended, or its submit and present still on the submit thread;
+ * rd_thread.h rd__thread_picture_busy; false when the picture would not be
+ * handed over).  RD_GATE_PRESENT replays and presents it; RD_GATE_LATE and
+ * RD_GATE_BUSY leave it unreplayed and unpresented (the last picture stays
+ * on the screen), so a renderer slower than the game's step does not hold
+ * the simulation below its rate (window_host.c's skip at Original,
+ * pace_policy.h pace_original_gate).
+ *
+ * With a gate set and the render thread on, the picture is handed over as
+ * the other frame rates' are (rd_thread.h rd__replay_frame_post): the
+ * render thread walks it, the submit thread submits and presents it, and
+ * the game's step waits for nothing but the hand-over (and, at its next
+ * renderer call, the picture's reads: texLock).  A frame the gate presents
+ * while the render thread is busy (a keep frame) waits for the picture
+ * before to end, its present included, first: an acquire never waits
+ * behind a present inside a picture's reads.  Without the render thread,
+ * with it parked or in sync, with a capture or blended dump armed, under
+ * rd_submit_hold, and under [dev] original_async = false
+ * (ICO_RD_ORIGINAL_ASYNC=0) the frame is replayed inside the step, the
+ * game thread waiting, as without a gate.
+ *
+ * NULL (the default, tests and tools) replays every frame inside the step:
+ * the caller reads its results after rd_end_frame.  Nothing else of the
+ * frame changes: a replayed frame draws the same picture either way. */
+enum { RD_GATE_PRESENT = 0, RD_GATE_LATE = 1, RD_GATE_BUSY = 2 };
+
+typedef int (*RdReplayGate)(int keep, bool busy);
 void rd_set_replay_gate(RdReplayGate gate);
 /* dl_Clear without dl_Swap (gsb_UpdateGSSystem(1)
  * on the movie path, gsb_UpdateGSSystem before gsSystemReady): the lists
  * recorded since rd_begin_frame are dropped unreplayed, as the PS2 drops a
- * display list it never kicks.  No-op when no frame is open. */
+ * display list it never kicks; its camera cut (rd_camera_cut) is carried
+ * to the next frame.  No-op when no frame is open. */
 void rd_discard_frame(void);
 /* True between rd_begin_frame and rd_end_frame / rd_discard_frame. */
 bool rd_frame_open(void);
@@ -970,6 +1280,23 @@ void rd_free_camera(void);
 #define RD_CULL_DROPS_MAX 48
 void rd_note_cull_drop(const char *model, int part, int rule, int views, int oneWhy);
 
+/* PC port: the scene ledger's notes from the game's sources
+ * (port/render/rd_ledger.h, docs/port/SCENE_LEDGER.md), on the game's
+ * thread, for the stage in play.  rd_note_packet_out: a packet of model
+ * (Packet.c pac_hostBuild) has no geometry the port can read
+ * (RD_PACKET_OUT_EMPTY: no mesh, nothing drawn) or its stream was cut short
+ * (RD_PACKET_OUT_CUT: at the batch cap, the scratch's room or past its
+ * data; the rest not drawn).  rd_note_game_hide: the game has model in the
+ * scene and does not draw it this tick (StageAnimation.c
+ * stage_DispAnimation*): its display flag is off (RD_GAME_HIDE_FLAG) or its
+ * stage animation's row is not playing (RD_GAME_HIDE_IDLE). */
+enum { RD_PACKET_OUT_EMPTY = 0, RD_PACKET_OUT_CUT = 1 };
+
+enum { RD_GAME_HIDE_FLAG = 0, RD_GAME_HIDE_IDLE = 1 };
+
+void rd_note_packet_out(const char *model, int why);
+void rd_note_game_hide(const char *model, int why);
+
 /* What the last present showed (rd_present's, or with interpolation off
  * rd_end_frame's one present of the frame), for the window's start-up log: the
  * frame's number, its keep flag, the strongest fade it recorded (1 + the
@@ -1003,12 +1330,20 @@ bool rd_display_probe(uint8_t rgba[RD_DISPLAY_PROBE_POINTS][4]);
  * error over half a tick, a pause of more than four steps or time going
  * backwards resets it to the measured time.  alpha = (clock - tickAtMs) /
  * tickMs in [0, 0.999], tickAtMs the simulated time the last frame closed
- * (never a measured close time).  nominalMs: the intended interval (the
+ * (never a measured close time).  While tickAtMs and tickMs stay the same
+ * (one frame pair) the clock never goes back: a reset or the pull that
+ * would move it below its last value keeps that value instead, unless time
+ * went backwards.  nominalMs: the intended interval (the
  * frame rate cap, half a refresh in mailbox), 0 when unknown. */
 typedef struct RdPresentClock {
     double clockMs, stepMs, lastMs;
     uint32_t presents; /* since the last reset; 0 = reset on the next call */
     uint32_t resets;
+    /* the frame pair of the last call (its tickAtMs and tickMs; paired 0
+     * before the first): within a pair the clock never goes back (a reset
+     * or the pull that would move it back holds it, counted in held) */
+    double pairAtMs, pairTickMs;
+    uint32_t paired, held;
 } RdPresentClock;
 
 float rd_present_clock_alpha(RdPresentClock *c, double nowMs, double tickAtMs, double tickMs,
@@ -1191,6 +1526,34 @@ bool rd_capture_presented(const char *png);
  * bug-report picture, which goes in a zip a phone shares. */
 bool rd_capture_presented_max(const char *png, uint32_t maxW);
 int rd_capture_result(char *path, uint32_t pathSize);
+/* With a temporal upscaler in force (FSR 3.1, or the test's), the next
+ * dispatch of the upscale point also gives four pictures, written after the
+ * submit of the present that follows it (before that present's own
+ * picture): <stem>-scene.png (SCENE before the upscale, render size),
+ * -velocity.png (the motion vectors), -depth.png (the depth the upscaler
+ * received) and -composite.png (its output, before the display layer);
+ * pictures wider than maxW (0: none) halved until they fit. Copies only:
+ * no picture changes. false: no device or no stem. Without an upscaler at
+ * the next present the request is dropped with a line
+ * (rd_upscale_capture.h, docs/port/DISPLAY.md "The upscaler's pictures") */
+bool rd_capture_upscale(const char *stem, uint32_t maxW);
+
+/* The last rd_capture_upscale's outcome, readable from any thread:
+ * RD_UPSCALE_CAPTURE_PENDING while it waits for a dispatch or for its
+ * pictures to be written (a keep frame does not dispatch; the wait is
+ * bounded: rd_upscale_capture.h), then one of the others; NONE before any
+ * arm. The window holds the bug-report zip's pictures until it is not
+ * PENDING (port/platform/upscale_pictures.h) */
+enum {
+    RD_UPSCALE_CAPTURE_NONE = 0,
+    RD_UPSCALE_CAPTURE_PENDING,
+    RD_UPSCALE_CAPTURE_WRITTEN,     /* all four (or those given) written */
+    RD_UPSCALE_CAPTURE_FAILED,      /* a picture not written: the renderer's line says which */
+    RD_UPSCALE_CAPTURE_NO_UPSCALER, /* no upscaler in force at the next present */
+    RD_UPSCALE_CAPTURE_EXPIRED      /* no dispatch within the wait's bound */
+};
+
+int rd_upscale_capture_state(void);
 
 /* ------------------------------------------------- a save state's picture
  * The picture a save state keeps (port/game/state_host.c): the game as it
@@ -1309,6 +1672,62 @@ bool rd_deferred_text_active(void);
 void rd_set_draw_filter(bool on, const void *const *objs, uint32_t n);
 void rd_draw_filter_open(bool open);
 bool rd_draw_filter_keeps(RdKey key);
+
+/* ------------------------------------------------- the title's icon pass
+ * The application icon is the title lettering's "I", cut out of two title
+ * frames drawn with nothing but the letter over a black, then a white
+ * clear (port/game/title_icon.c; the matte: port/platform/app_icon.h).  The
+ * game side leaves every other object out by name (title_logo.c); this
+ * leaves out the rest.
+ *
+ * rd_set_icon_pass      clearRgba non-NULL: on, from now on (the frame
+ *                     open now included) a screen prim in RD_SPACE_UI or
+ *                     RD_SPACE_FULLFRAME (after any space override: the
+ *                     menus, the layouts' sprites and text quads) and a
+ *                     deferred text item (rd_deferred_text) are not
+ *                     recorded, and the frame head clears SCENE to
+ *                     clearRgba (RGBAQ, GS units: rd_frame_head records the
+ *                     clear even when the flip sends none, rd_frame_flip
+ *                     writes clearRgba over the BG colour it is given).
+ *                     rd_post leaves out the post effects over SCENE
+ *                     that are not the letter's (rd_icon_hold.h
+ *                     rd__icon_pass_drops_post: the fog, which over the
+ *                     pass's cleared far depth covers the whole frame in
+ *                     its colour, the glow and flare, the depth of field,
+ *                     the motion blur, the aura, the eye blur, the film
+ *                     noise); the fade, the brightness and the letterbox
+ *                     go as full-frame screen prims.  World draws, the
+ *                     reduction, copies, state and targets are untouched;
+ *                     one log line at the off counts what was left out.
+ *                     NULL: off (the default), everything as
+ *                     before: a frame recorded after it is byte-identical
+ *                     to one recorded with the pass never on
+ * rd_icon_pass_on       whether it is on (the recording thread's view)
+ * rd_icon_pass_last_frame  the newest frame number given out when the pass
+ *                     was last turned on or off (the frame open then, or
+ *                     the last begun): a frame numbered above it at the
+ *                     pass's off was begun after it and holds none of it
+ *                     (the hold below ends at a present past it) */
+void rd_set_icon_pass(const uint8_t *clearRgba);
+bool rd_icon_pass_on(void);
+uint32_t rd_icon_pass_last_frame(void);
+
+/* The pass's frames are never seen (rd_icon_hold.h): they are rendered and
+ * presented as any other, and the capture reads them, but while a hold is
+ * on each present whose picture holds the pass draws the last picture
+ * presented before it over the whole output (before the overlay, after the
+ * capture's copy), until the first present past the pass's frames.
+ *
+ * rd_icon_hold          on: from now on every present copies its output,
+ *                     until the pass's first frame is presented (the copy
+ *                     the player saw last); then the copy is shown in place
+ *                     of the pass's pictures.  Off: the copy freed (the
+ *                     capture's end, title_icon.c, once a present past the
+ *                     pass was seen).  Game thread
+ * rd_icon_hold_ready    a copy was taken since the hold came on: the pass
+ *                     may start (title_icon.c waits for it a few ticks) */
+void rd_icon_hold(bool on);
+bool rd_icon_hold_ready(void);
 
 /* ------------------------------------------------------------- lists */
 
@@ -1466,8 +1885,9 @@ void rd_update_texture_rect(RdTex t, uint32_t x, uint32_t y, uint32_t w, uint32_
  *                             texels across and ICO_SHEET_RY down, each
  *                             scaled by the falloff ICO_SHEET_WX[|dx|] *
  *                             ICO_SHEET_WY[|dy|] (per mille,
- *                             shader_consts.h), rounded: the rim, a dark
- *                             halo that fades out;
+ *                             shader_consts.h), rounded: the rim, a solid
+ *                             dark band that fades out quickly (the
+ *                             outline picked in v0.11.1);
  *                          a  rimOn ? max(c, r * w) : c, the texel's
  *                             opacity, w the rim's weight (rimWeight / 64,
  *                             rounded; 1 when rimWeight is 0 or 64 or more);
@@ -1476,7 +1896,10 @@ void rd_update_texture_rect(RdTex t, uint32_t x, uint32_t y, uint32_t w, uint32_
  *                          against a 4x4 Bayer threshold picked by (x, y)
  *                          (the sheets' mottled antialiasing; fixed to the
  *                          texel, so the grain moves with the text) or, with
- *                          dither 0, rounded;
+ *                          dither 0, rounded; a texel whose a is at least
+ *                          ICO_SHEET_SOLID_ABOVE is rounded whatever the
+ *                          dither (sheet_solid_threshold: the band is
+ *                          solid, only its faint fringe dithers);
  *                          grey  the rim level lerped to the fill level by t;
  *                          alpha a in GS units (full = 0x80).
  *                        A sampled pixel blends the four sheet texels around
@@ -1502,8 +1925,8 @@ void rd_update_texture_rect(RdTex t, uint32_t x, uint32_t y, uint32_t w, uint32_
  *                        a fraction of the cost (issue 173).  A
  *                        scaled strip's page of scale 2 is baked the
  *                        same way (rd_tex.c rd__sheet_bake_scaled_rect:
- *                        its rim's magnification blends by odd 4ths,
- *                        exact in the shader's floats), both halves'
+ *                        its rim magnified as blocks, in integers as
+ *                        the shader computes it), both halves'
  *                        rows with the apron; 3 and 4 are drawn by
  *                        font_sheet_ps.  ICO_RD_SHEET_SHADER=1 ([dev]
  *                        sheet_shader) draws every scale through
@@ -1521,27 +1944,28 @@ void rd_update_texture_rect(RdTex t, uint32_t x, uint32_t y, uint32_t w, uint32_
  *                        for each sheet texel (a strip rasterised s times
  *                        finer for a scene or an output s times the GS's).
  *                        The letters are those texels' own and the rim is
- *                        the sheet's, magnified as the GS magnified a
- *                        sheet: each sheet texel (X, Y) (texels sX ..
+ *                        the sheet's, magnified as blocks: each sheet
+ *                        texel (X, Y) (texels sX ..
  *                        sX + s - 1 across, sY .. down) has the coverage
  *                        C, the mean of its s x s texels rounded, and the
  *                        rim R, the 1x dilation of C (ICO_SHEET_RX and
  *                        ICO_SHEET_RY sheet texels, the per-mille tables as
  *                        they are); its rim level is
  *                        L = quantise(rimOn ? R * weight : 0) against its
- *                        own Bayer threshold (X & 3, Y & 3).  A texel
- *                        (x, y) blends the L of the four sheet texels
- *                        around its centre, ((x + 0.5) / s - 0.5,
- *                        (y + 0.5) / s - 0.5), bilinearly: Lm on the
- *                        0..255 scale and Am of the GS units
- *                        (L * 128 + 127) / 255.  With c the texel's own
- *                        coverage and th the threshold of the sheet texel
- *                        it lies in (floor(x / s), floor(y / s)):
+ *                        own Bayer threshold (X & 3, Y & 3; rounded from
+ *                        ICO_SHEET_SOLID_ABOVE up).  A texel (x, y) takes
+ *                        the L of the sheet texel it lies in
+ *                        (floor(x / s), floor(y / s)), until v0.11.1 the
+ *                        bilinear blend of the four round its centre (the
+ *                        blend turned the solid band and the dither's
+ *                        grain into a soft gradient at 4K): Am is
+ *                        (L * 128 + 127) / 255 in GS units.  With c the
+ *                        texel's own coverage and th that sheet texel's
+ *                        threshold:
  *                          alpha  the larger of Am and the fill's
- *                                 quantise(c) in GS units, rounded;
+ *                                 quantise(c) in GS units;
  *                          grey   the rim level lerped to the fill level
- *                                 by t = c / max(c, Lm rounded),
- *                                 quantised;
+ *                                 by t = c / max(c, L), quantised;
  *                        so outside the letters a texel is the 1x strip's
  *                        rim magnified s times (its steps, its grain the
  *                        sheet texel's), and the letters' edge is the fine
@@ -1564,7 +1988,7 @@ void rd_update_texture_rect(RdTex t, uint32_t x, uint32_t y, uint32_t w, uint32_
  * A dump keeps a sheet texture's coverage and style (rd_dump.c). */
 typedef struct RdSheetStyle {
     uint8_t rimOn;     /* nonzero: the rim is drawn (light ink: the menus' words) */
-    uint8_t rimLevel;  /* grey of the rim, 0..255 (English sheets 0, French ~62) */
+    uint8_t rimLevel;  /* grey of the rim, 0..255 (the menus' European rows 100) */
     uint8_t fillLevel; /* grey of the letters' fill, 0..255 */
     uint8_t dither;    /* nonzero: the Bayer threshold; 0: rounded to the levels */
     uint8_t rimWeight; /* the rim's strength in 64ths (a faint halo); 0 or 64 and more:
@@ -1671,12 +2095,13 @@ void rd_shadow_resolve(void);
  *                  with a depth buffer when withDepth), the same target for
  *                  the same (tbp, gsW, gsH) for the rest of the frame, as
  *                  the VRAM block is one block whoever draws into it; {0}
- *                  outside a frame.  Any width: the block is drawn at its
- *                  own GS size at every aspect (one the game sizes as the
- *                  native frame, gsFrame.w x ScreenHeight, takes the scene's
- *                  resolution scale like SCENE; rd_core.c
- *                  rd__target_scale_of), or at the scene's scale under
- *                  Water reflections: Sharp (RdSettings.waterSharp)
+ *                  outside a frame.  Any width, at every aspect: the block
+ *                  takes the scene's scale, its picture the scene's texels
+ *                  per GS pixel (one the game sizes as the native frame,
+ *                  gsFrame.w x ScreenHeight, is scene-class like SCENE; one
+ *                  of any other size too; rd_core.c rd__target_scale_of);
+ *                  ICO_RD_WATER_SCALE=0, the tests' switch, keeps the other
+ *                  sizes at their GS size, as on the PS2
  * rd_alias_target   from here on, in the current list and the open frame,
  *                  rd_set_target and rd_clear_target of `from` and rd_texture
  *                  of a view of `from` (rd_target_texture) record `to`
@@ -1892,6 +2317,18 @@ bool rd_dump_frame(const char *path);
  * written) otherwise.  F12 zips it beside the frame, so `rd_replay_tool
  * --interp T` rebuilds the pictures between the two. */
 bool rd_dump_prev_frame(const char *path);
+/* The same three dumps as one malloc block (the caller frees it), for a
+ * worker thread to write: the game thread pays a memory copy (and the wait
+ * for the render thread every dump has), the disk and the zip are the
+ * worker's (port/platform/dump_auto.c, issues 123 and 179). false: nothing
+ * to dump, or the frame is over the 192 MiB limit (logged). */
+bool rd_dump_frame_mem(void **buf, size_t *len);
+bool rd_dump_prev_frame_mem(void **buf, size_t *len);
+/* rd_dump_retained_frame below, in memory */
+bool rd_dump_retained_frame_mem(uint32_t number, void **buf, size_t *len, uint32_t *dumped);
+/* The log lines rd_dump_on_demand writes about the frame (the cull drops,
+ * the water's blocks), without the files */
+void rd_dump_on_demand_log(void);
 /* The blended present's frame (F12, port/platform/window_host.c): the next
  * rd_present that draws a picture between two ticks (alpha below 1, not a
  * keep frame) writes the frame it drew (rd_interp.c's blended copy of the
@@ -1911,17 +2348,73 @@ bool rd_dump_prev_frame(const char *path);
  *                         (nothing reported) */
 bool rd_dump_blended_arm(const char *path);
 int rd_dump_blended_result(uint32_t *frame, float *alpha);
-/* The device-loss dump (port/platform/window_host.c device_lost_quit;
+
+/* The device-loss dump (port/platform/window_host.c loss_dump;
  * docs/port/RENDER.md, "The loss dump"): the frames the renderer still holds
- * as two ordinary dumps, the last closed frame (the one the lost replay
- * drew, or the tick it was blended towards) to lostPath and the one before
- * it, when the ring still holds it, to beforePath (NULL: not written).  CPU
- * data only (the commands, the payload, the image texels and VU streams the
- * renderer keeps), so it works after the device is gone.  The frames'
- * numbers into *lostFrame and *beforeFrame (0: not written; either may be
- * NULL).  True when the lost frame was written. */
-bool rd_dump_retained(const char *lostPath, const char *beforePath, uint32_t *lostFrame,
-                      uint32_t *beforeFrame);
+ * are written as two ordinary dumps, the last closed frame (the one the lost
+ * replay drew, or the tick it was blended towards) and the one before it
+ * when the ring still holds it.  CPU data only (the commands, the payload,
+ * the image texels and VU streams the renderer keeps), so it works after the
+ * device is gone.  rd_dump_retained_frames says which frames those are
+ * (held: the ring has one there; closed; its number), and the window writes
+ * each with rd_dump_retained_frame below, logging before each write, so a
+ * write that never returns names its frame and file (issue 123). */
+typedef struct RdRetainedFrame {
+    bool held, closed;
+    uint32_t number;
+} RdRetainedFrame;
+
+void rd_dump_retained_frames(RdRetainedFrame *last, RdRetainedFrame *prev);
+/* One retained frame by number (the slow-scene dump, window_host.c
+ * slow_scene_write, issue 179): the frame `number` to path when the ring
+ * still holds it as the last closed frame or the one before; nothing when
+ * it does not (rd_frame_retained says which beforehand).  The number
+ * written into *dumped (0: nothing written; may be NULL).  True when the
+ * frame was written. */
+bool rd_dump_retained_frame(uint32_t number, const char *path, uint32_t *dumped);
+/* Whether the ring holds frame `number` as the last closed frame or the one
+ * before (the thread that records frames) */
+bool rd_frame_retained(uint32_t number);
+
+/* Which frames the loss dump writes (issue 179; rd_loss_pick.h): the frame
+ * of the submission that failed, and the one replayed before it.  The
+ * backend's tags say which submission it was (RhiGpuProgress: the wait that
+ * failed, else the first not seen finished, else the frame after the newest
+ * numbered); the ring holds only the newest closed frames, so a frame the
+ * GPU may not have finished is copied to memory when the ring reuses its
+ * slot while a slot wait has stalled 100 ms or more (at most 4 copies, 16
+ * MiB each, held only while a submission is open at or after them; a loss
+ * with no stall before it finds no copy, and the pick falls back to the
+ * frames the ring holds).  rd_loss_plan stops the copies for good (no
+ * recycle copies or frees after it; one in progress is waited for, up to
+ * 3 s, else the copies are not used) and reads all of it (the main thread,
+ * with the render thread drained, or the watchdog's while the main thread
+ * is blocked); the fields tell which frame is which and what is held.
+ * how: an RdLossHow (rd_loss_pick.h).  writeFrame/writeBefore: the frames
+ * to write (the lost one and the one before it when held, else the nearest
+ * held, 0 none), writeFromCopy: it is a memory copy, not a ring slot.
+ * rd_dump_loss_frame writes one of them to path (the ring's closed slot or
+ * the copy); false when it is held by neither or the write fails.
+ * rd_loss_plan_text: one line saying all of it. */
+typedef struct RdLossPlan {
+    int how;
+    uint32_t replay, frame, before;
+    bool frameHeld, beforeHeld;
+    uint32_t writeFrame, writeBefore;
+    bool writeFromCopy, writeBeforeFromCopy;
+    uint32_t waitFrame, openFrame, newestFrame, newestReplay;
+    uint32_t heldCount, heldOldest, heldNewest;
+    uint32_t copies, copyKB, copyMaxKB;
+    uint64_t copiesTaken, copiesSeen, copiesBig, copiesFailed, copiesThrottled;
+    /* a copy in progress on the game thread did not finish in time (its
+     * drain blocked): the copies were left alone, the frames come from the
+     * ring */
+    bool copiesUnused;
+} RdLossPlan;
+
+void rd_loss_plan(RdLossPlan *plan);
+void rd_loss_plan_text(const RdLossPlan *plan, char *out, size_t size);
+bool rd_dump_loss_frame(uint32_t number, const char *path, uint32_t *dumped, bool *fromCopy);
 
 /* The loss bisect (docs/port/RENDER.md, "The loss bisect"): the frame of
  * the dump at path replayed in this renderer one pass longer each time
@@ -1958,6 +2451,28 @@ typedef struct RdLossBisect {
 } RdLossBisect;
 
 void rd_loss_bisect(const char *path, RdLossBisect *out);
+
+/* The loss bisect's last step (issue 179): the bisect above waits for the
+ * GPU after every replay, so two pictures never overlap as they do in the
+ * game.  This replays the frame of the dump at beforePath (NULL or
+ * unreadable: left out) and the frame of lostPath alternately, `rounds`
+ * times each, with no wait for the GPU between them (only the frame slot's
+ * own wait, two in flight, as the game's pictures have), then waits once.
+ * Nothing is presented (no overlay or swapchain: the start-up has no UI to
+ * draw).  result: RD_BISECT_LOST (the device was lost: lostAt, the replay of
+ * `replays` made that did, 0 when the final wait did), RD_BISECT_CLEAN,
+ * RD_BISECT_NOT_RUN with line saying why.  The renderer must have a device;
+ * a loss leaves it lost. */
+typedef struct RdLossOverlap {
+    RdBisectResult result;
+    uint32_t lostFrame, beforeFrame; /* the frames replayed (0: beforeFrame not) */
+    uint32_t rounds, replays, lostAt;
+    double ms;
+    char line[320];
+} RdLossOverlap;
+
+void rd_loss_overlap(const char *lostPath, const char *beforePath, uint32_t rounds,
+                     RdLossOverlap *out);
 
 /* The loss bisect's second level (port/render/rd_bisect_plan.h): what one
  * draw of the window was, noted while a draw window is set (no work
@@ -2089,7 +2604,11 @@ const char *rd_perf_post_name(int post);
  * table's upload), EXACT the exact blend's copies and pass, MSAA the MSAA
  * epoch's resolves and spreads, STENCIL a shadow reset's stencil clear as a
  * pass of its own, PRESENT the present (DISPLAY onto the window, the CRT
- * filter). */
+ * filter), WAIT the display wait: no pass, the stretch from the end of a
+ * presenting picture's scene list (its start stamp, the list's last
+ * command) to the start of the present's own list, which alone waits for
+ * the window's image (rd_submit.c; RdPerfRecord.gpuDisplayWaitMs; not
+ * counted among the passes). */
 enum {
     RD_PERF_PASS_UPLOAD = 0,
     RD_PERF_PASS_PREPASS,
@@ -2102,11 +2621,29 @@ enum {
     RD_PERF_PASS_MSAA,
     RD_PERF_PASS_STENCIL,
     RD_PERF_PASS_PRESENT,
+    RD_PERF_PASS_WAIT,
     RD_PERF_PASS_KIND_COUNT
 };
 
 /* A RD_PERF_PASS_* in plain words ("uploads", "DATE snapshot", ...) */
 const char *rd_perf_pass_kind_name(int kind);
+/* The name a log line prints: the same, but "before list 0" for the uploads
+   on a tile-based GPU (the CSV `kind` keeps rd_perf_pass_kind_name) */
+const char *rd_perf_pass_kind_display(int kind, bool tiler);
+
+struct RdPerfRecord;
+/* The GPU time a picture that pacing reads (the present allowance's gate
+ * and budget, the step rule, automatic resolution): the record's span
+ * (gpuMs) less its display wait (gpuDisplayWaitMs), never below 0; 0 for a
+ * record without GPU times.  The present's own list waits for the window's
+ * image between the two lists' stamps (rd_submit.c), so under vsync on a
+ * driver that waits whole batches the span now holds the wait, which fell
+ * before the first stamp while a picture was one list; less the wait,
+ * pacing reads the GPU's own work as before.  Where the stamps run ahead of
+ * the wait (issue 179's Mali) the wait figure is about 0 and the input is
+ * the span, as it was there.  The perf lines print the span and the wait
+ * apart. */
+double rd_perf_pace_gpu_ms(const struct RdPerfRecord *r);
 
 /* RdPerfPass.target: a named target (RdTargetId: SCENE, WORK0, ...) or one
  * of these */
@@ -2149,6 +2686,13 @@ typedef struct RdPerfPass {
     /* a render pass's area (rd_pass_area.c, RhiRenderPassDesc.area): its
      * offset and size in texels; aw 0 the whole target */
     uint16_t ax, ay, aw, ah;
+    /* the attachment memory the piece's render passes asked for and its
+     * texture copies' bytes (RhiStats.passColorLoadBytes ... copyTextureBytes
+     * between two starts, rhi_traffic.h), KB: colour and depth-stencil
+     * loaded and stored, cleared in tile memory; and the passes' render-area
+     * texels, thousands */
+    uint32_t colorLoadKB, colorStoreKB, depthLoadKB, depthStoreKB, clearKB, copyKB;
+    uint32_t kTexels;
 } RdPerfPass;
 
 /* A piece's label as the window's summary writes it: the effect for a
@@ -2180,6 +2724,25 @@ enum {
     RD_VU_FUSE_WHY_COUNT
 };
 
+/* Why a mesh has no facing data, so its draws have no side bands on a frame
+ * wider than 4:3 (RdMeshRec.facingWhy; RdPerfRecord.vuBesideNoFacing, the 10
+ * s line's "side bands:" clause; docs/port/VU1_PROGRAMS.md "The winding
+ * mark"): NO_TABLE a prelit mesh built without the EE's table (rebuilt from
+ * its packet where no strip records were written and none was kept for its
+ * stream in this run: a save state loaded into a fresh run, a morphed
+ * stream, the store emptied past 32 MiB, a vertex without a normal; an older
+ * dump's prelit mesh), REPLACED a model pack's prelit replacement (no
+ * normals, no table), COPY a copy whose index list differs from its
+ * source's (rd__vu_mesh_copy_marks), OTHER no memory for the marks or a
+ * stream the marks do not fit (a sheet) */
+enum {
+    RD_VU_NOFACE_NO_TABLE,
+    RD_VU_NOFACE_REPLACED,
+    RD_VU_NOFACE_COPY,
+    RD_VU_NOFACE_OTHER,
+    RD_VU_NOFACE_COUNT
+};
+
 /* Why a planned replay dropped no depth store (RdPerfRecord.storeWhy;
  * rd_store_plan.c rd__store_plan_end, docs/port/WORK_BUFFERS.md "The store
  * plan"), for the depth the line names (SCENE's where the replay has it):
@@ -2198,6 +2761,21 @@ enum {
     RD_STORE_WHY_LAST,
     RD_STORE_WHY_FULL,
     RD_STORE_WHY_COUNT
+};
+
+/* Why a DATE snapshot was taken (RdPerfRecord.dateRetakeWhy; rd_date_cut.c
+ * rd__date_snapshot, rd__date_retake's inputs): FIRST none taken yet this
+ * replay, TARGET it held another target, WRITTEN something may have written
+ * the target's alpha since (the write serial moved), AREA nothing wrote it
+ * but the draw's area was not held, TOUCHED the snapshot texture was used
+ * elsewhere since.  rd__date_retake_word gives the 10 s line's words. */
+enum {
+    RD_DATE_RETAKE_FIRST,
+    RD_DATE_RETAKE_TARGET,
+    RD_DATE_RETAKE_WRITTEN,
+    RD_DATE_RETAKE_AREA,
+    RD_DATE_RETAKE_TOUCHED,
+    RD_DATE_RETAKE_COUNT
 };
 
 /* RdPerfRecord.passAreaWhy: why a render pass on a target with its own
@@ -2266,6 +2844,48 @@ enum {
 /* RdPerfRecord.pipeFamily's counts: one per pipeline key family
  * (rd_internal.h RdKeyFamily) */
 #define RD_PERF_PIPE_FAMILIES 8
+/* RdPerfRecord.cullHizOcc's counts: the occlusion test's occluder
+ * candidates by reason (rd_vis.h RD_VIS_HZ_OCC_USED .. RD_VIS_HZ_OCC_NOTRI) */
+#define RD_PERF_HIZ_OCC 9
+
+enum { RD_PRESENT_ELSEWHERE = 0, RD_PRESENT_ON_SUBMIT = 1, RD_PRESENT_IN_STEP = 2 };
+
+/* the reasons rd_shadow_box.c counts (RdPerfRecord.shadowBoxWhy) */
+#define RD_SHADOW_BOX_WHYS 8
+/* the reasons rd_shadow_tile.c counts (RdPerfRecord.shadowTileWhy) */
+#define RD_SHADOW_TILE_WHYS 8
+/* the reasons rd_no_volume.c counts (RdPerfRecord.noVolumeWhy) */
+#define RD_NO_VOLUME_WHYS 8
+
+/* Why SCENE's render pass ended mid-picture and was begun again
+ * (RdPerfRecord.breakN; rd_perf_hooks.c, the first other piece of GPU work
+ * between the two: rd_perf_more.h rd_perf_break_of; docs/port/
+ * ANDROID_DIAGNOSTICS.md "The cost counters"): DATE a DATE snapshot,
+ * SHADOW the shadow count, its levels or a shadow reset's stencil pass,
+ * AURA the aura's passes, REDUCTION the reduction, CRACK the crack fill,
+ * GLOW the glow's passes, LAMPS a work buffer's pass outside the glow's
+ * effect (the lamps), COPY a copy, a snapshot, the fog's depth read, the
+ * exact blend's or MSAA's copies, PRESENT the present, AGAIN SCENE begun
+ * again with no piece between (a pass split for another reason: a
+ * destination-read switch, a depth change), OTHER another pass */
+enum {
+    RD_BREAK_DATE = 0,
+    RD_BREAK_SHADOW,
+    RD_BREAK_AURA,
+    RD_BREAK_REDUCTION,
+    RD_BREAK_CRACK,
+    RD_BREAK_GLOW,
+    RD_BREAK_LAMPS,
+    RD_BREAK_COPY,
+    RD_BREAK_PRESENT,
+    RD_BREAK_AGAIN,
+    RD_BREAK_OTHER,
+    RD_BREAK_COUNT
+};
+
+/* the reasons a shadow above 1x is drawn at the PS2's size
+ * (RdPerfRecord.shadowFineWhy; rd_shadowres.h RD_SR_WHY_*) */
+#define RD_SHADOW_FINE_WHYS 12
 
 typedef struct RdPerfRecord {
     uint32_t replay; /* 1, 2, ... */
@@ -2274,6 +2894,21 @@ typedef struct RdPerfRecord {
     double totalMs, interpMs, waitMs, acquireMs, uploadMs, walkMs, bindMs, submitMs, presentMs,
         readbackMs;
     double fenceWaitMs; /* the backend's blocked time on GPU completion (inside wait, readback) */
+    /* presentMs timed apart (rhi.h rhi_present_split, Vulkan; presentSplit
+     * 0 elsewhere, 1 with the driver's call, 2 the lock's wait only, no
+     * present call made): the swapchain lock's wait, the driver's present call
+     * (vkQueuePresentKHR), the surface poll after it; presentEndMs the
+     * present's end on rd's monotonic ms clock (startMs's), 0 when nothing
+     * was presented.  The window's lines on a present that blocked (issue
+     * 123, window_stall.c) */
+    uint8_t presentSplit;
+    double presentLockMs, presentCallMs, presentPollMs, presentEndMs;
+    /* where the present ran (RD_PRESENT_*): the submit thread (its job's
+     * times taken, rd__perf_submit_times), inside the game's step (Frame
+     * rate Original's replay with the game thread waiting, rd_end_frame),
+     * or elsewhere (the render thread's own job, a present of the window's);
+     * the window's line on a present that blocked names the first two */
+    uint8_t presentThread;
     uint32_t buffersCreated, buffersDestroyed, texturesCreated, texturesDestroyed;
     uint32_t memoryAllocs, memoryFrees, bindGroups, pipelineBinds, bindGroupBinds;
     /* the binds and state sets the RHI's bind cache found already in force
@@ -2286,6 +2921,17 @@ typedef struct RdPerfRecord {
      * dualLeftovers) */
     uint32_t blendEqOffSets, dualLeftovers;
     uint32_t draws, renderPasses, barriers, copies, fenceWaits, waitIdles, readbacks;
+    /* compute dispatches (RhiStats.dispatches: the VU record's under the
+     * compute builds, rd_vu_record.h; not in draws) */
+    uint32_t dispatches;
+    /* of renderPasses, those begun as VkRenderPass objects (RhiStats.passObjects:
+     * Vulkan on a driver row of rhi_pass_row.h, Qualcomm's included; 0 elsewhere) */
+    uint32_t passObjects;
+    /* the queue submits (RhiStats.submits; the submit thread's land in the
+     * record closed after them): a presenting picture's two lists, its
+     * scene's and its present's (rd_submit.c), on Vulkan an empty one
+     * where no list signalled the present's semaphore */
+    uint32_t submits;
     uint32_t textureUploads, meshUploads, tempClears, dateSnapshots, exactBlends;
     uint32_t pipelineCreates; /* pipelines created (a key the start-up set missed) */
     /* draws that sampled a render-to-texture block (RdTargetRec.block: the
@@ -2311,11 +2957,37 @@ typedef struct RdPerfRecord {
     double gpuUploadMs;              /* the upload copies at the head */
     double gpuListMs[RD_LIST_COUNT]; /* per command list (0 for a list not replayed) */
     double gpuPresentMs;             /* the present blits */
+    /* the display wait: from the scene list's last stamp to the present's
+     * own list's first (RD_PERF_PASS_WAIT), inside gpuMs.  Where the GPU
+     * writes that stamp only once the list's wait for the window's image
+     * is over (a whole-batch wait) it holds the wait; where the wait holds
+     * colour output alone (a Mali in the v0.10.4 logs) the stamp comes
+     * early and the wait shows in gpuPresentMs instead */
+    double gpuDisplayWaitMs;
     /* per picture effect (RD_PERF_POST_*), inside the times above */
     double gpuPostMs[RD_PERF_POST_COUNT];
     double startMs;      /* the replay's start (rd's monotonic ms clock) */
     float alpha;         /* rd_present's alpha; -1 for a replay that is not one */
     uint8_t firstOfTick; /* the first present of its frame */
+    /* a present handed over to the render thread: the alpha's sample (its
+     * drain's start) and the hand-over (the drain's end), startMs's clock;
+     * 0 and 0 for one made where it was asked (rd_even.h) */
+    double evenAskMs, evenHandMs;
+    /* the on-glass line (rd_glass.h): the moment's alpha by each rule (the
+     * hand-over, the GPU's predicted end, the own timer, the screen's
+     * refresh: rd_pace_rules.h RD_RULE_COUNT; -1 not computed), the rule
+     * drawn (RD_RULE_CLOCK: paced), the tick, the screen's prediction (the
+     * GPU end it came from, rd's clock, and the refresh predicted, the
+     * display's clock: rd_pace_screen.h; 0 none), and the display-times id
+     * its present carried (rhi_present_glass; 0 none) */
+    float ruleAlpha[4];
+    uint8_t rule;
+    double ruleTickMs;
+    double screenEndMs, screenAtMs;
+    /* the even cadence's desired present time (rd_pace_even.h; the
+       display's clock, ms; 0 none), from the note */
+    double desiredMs;
+    uint32_t glassId;
     /* the replay changed effect more often than there were timestamps:
        the later changes were not timed apart (their time stayed with the
        effect, or the scene, before them) */
@@ -2411,9 +3083,33 @@ typedef struct RdPerfRecord {
      * shadowSeven through the seven stencil-tested draws (and the box
      * reduction above 1x) */
     uint32_t shadowOne, shadowSeven;
+    /* The shadow's levels at the scene's scale (rd_shadowres.c): shadowFineChains
+     * the shadow chains drawn at the scene's scale this replay (their
+     * composites read the fine levels), shadowFinePasses their passes (the
+     * full-size count, three levels, six tent passes), shadowFineRefused the
+     * chains above 1x drawn at the PS2's size (a level the rule does not take) */
+    uint32_t shadowFineChains, shadowFinePasses, shadowFineRefused;
+    /* of shadowFineRefused, by reason (rd_shadowres.c's RD_SR_WHY_*) */
+    uint16_t shadowFineWhy[RD_SHADOW_FINE_WHYS];
+    /* the cuts (rd_shadowres.c): the texels the chain's passes drew this
+     * replay (their boxes) and the texels of the targets those passes cover
+     * (the levels' and temporaries' whole area, a pass each) */
+    uint32_t shadowFineTexels, shadowFineArea;
+    /* of shadowFineArea, the texels of the passes' render areas (the box and
+     * what the texture still held nonzero: a tile-based GPU's work) */
+    uint32_t shadowFineRendered;
     /* of shadowOne, the draws that read the stencil four texels a gather
      * (the rest a texel a load: g_rd.shadowLoad, rd_shadow_selftest.c) */
     uint32_t shadowGathered;
+    /* The count at its full size above 1x (rd_shadow_count.h; issue 123,
+     * v0.11.8): shadowCountStencil the first levels stepped from the
+     * stencil (no full-size pass), shadowCountFull the full-size count
+     * passes drawn (rd_shadow_one.c fullPass), shadowCountSeven the counts
+     * above 1x the seven draws made by the form's choice, shadowCountGuard
+     * the guard's fallbacks (the pass after all, or a chain refused);
+     * shadowCountForm the form asked this replay + 1 (RD_SC_*; 0 none) */
+    uint16_t shadowCountStencil, shadowCountFull, shadowCountSeven, shadowCountGuard;
+    uint8_t shadowCountForm;
     /* The one draw's pass (rd_shadow_one.c): its colour, written whole,
      * shadowOneW x shadowOneH (no depth attachment), and the stencil it
      * reads through its view, shadowReadW x shadowReadH texels (the last
@@ -2433,6 +3129,75 @@ typedef struct RdPerfRecord {
     /* The fades fold (rd_fades_fold.c): list 11's last full-frame lerp
      * sprites the reduction applied instead of drawing them into SCENE */
     uint32_t fadesFolded;
+    /* The present from SCENE (rd_present_scene.c; off by default in
+     * v0.11.5): presentSceneSkipped 1 when this replay's reduction was not
+     * drawn (DISPLAY owed, SCENE through the reduction's steps),
+     * presentSceneShown 1 when its present sampled SCENE instead of
+     * DISPLAY, presentSceneKept 1 when the switch was on and the reduction
+     * was drawn (presentSceneWhy why, rd_present_scene.h RD_PS_WHY_*),
+     * presentSceneDrawn the times DISPLAY was drawn on demand from SCENE in
+     * this replay's span (presentSceneDrawWhy the last one's why) */
+    uint32_t presentSceneSkipped, presentSceneShown, presentSceneKept, presentSceneWhy;
+    uint32_t presentSceneDrawn, presentSceneDrawWhy;
+    /* The display layer (rd_layer.h): the actions of lists 11-12 drawn into
+     * the display-scale composite after a temporal upscaler, 0 without it */
+    uint32_t layerDraws;
+    /* The glow's mask folded into its reduction (rd_glow_fold.c): glowFolded
+     * 1 when this replay's reduction computed the mask in its box (WORK2
+     * neither drawn nor read), glowKept 1 when a glow frame drew the mask
+     * into WORK2 instead, glowWhy why (RD_GLOW_FOLD_WHY_*); glowFoldRead 1
+     * when the fold read WORK2 as the fill and the sun's fans left it (only
+     * the mask's pass gone) */
+    uint32_t glowFolded, glowKept, glowWhy, glowFoldRead;
+    /* The glow drawn only where it can add light (rd_glow_light.c): the
+     * plan of this replay's glow (RD_GLOW_LIGHT_*), why it was drawn whole
+     * (RD_GLOW_LIGHT_WHY_*), the lazy clears of the glow's buffers a plan
+     * left undrawn that were drawn since (read before covered), and the
+     * render passes begun from the chain's first command to its paste under
+     * a plan (dark: WORK1's zero draw where WORK1 is not zero already, and
+     * a clear a non-sprite command reads; 0 in a steady dark room) */
+    uint32_t glowLight, glowLightWhy, glowLightLazy, glowLightPasses;
+    /* The late passes on SCENE (rd_late_pass.c): the crack fill's draw held
+     * from its snapshot to the aura's paste pass and drawn there
+     * (latePassHeld), a held fill drawn in a pass of its own after all
+     * (latePassFlushed; latePassWhy the last one's reason, rd_late_pass.h
+     * RD_LATE_WHY_*); latePassTexels SCENE's texels of the held fills drawn
+     * in the aura's pass (the colour not loaded or stored by a pass of the
+     * fill's own: 4 bytes a texel each way); latePassJoined the list 11 screen
+     * prims drawn in the open pass without SCENE's depth, latePassJoinPasses
+     * the passes they joined (each a pass begun with the depth before, of
+     * latePassJoinTexels texels in all) */
+    uint32_t latePassHeld, latePassFlushed, latePassWhy, latePassTexels;
+    uint32_t latePassJoined, latePassJoinPasses, latePassJoinTexels;
+    /* of latePassHeld, the fills drawn in the glow's paste pass (a LAMPS or
+     * WHOLE frame), not the aura's */
+    uint32_t latePassGlowHeld;
+    /* the glow's paste deferred to the aura's paste pass (RD_LATE_DEFER):
+     * drawn there (latePassDeferred, of latePassDeferTexels SCENE texels),
+     * drawn early in a pass of its own after all (latePassDeferEarly) */
+    uint32_t latePassDeferred, latePassDeferTexels, latePassDeferEarly;
+    /* the targets of glowLightLazy's clears, bit k: WORK2_PAD, WORK2, WORK3,
+     * WORK0 (rd__glow_light_lazy_text's order) */
+    uint32_t glowLightLazyWhich;
+    /* the draws a held fill drew more than one when it was drawn past
+     * SCENE's border repeat (a draw of the middle and one a repeated block,
+     * rd_crack_fill.c fillDrawHeld) */
+    uint32_t latePassBlockDraws;
+    /* fills the walk did not hold because the scan found no paste in the
+     * replay that takes them (rd_late_pass.c rd__late_pass_no_land) */
+    uint32_t latePassNoLand;
+    /* The aura's paste split (rd_aura_paste.c): pastes drawn as the alpha
+     * alone over the rows that read proven alpha 0 rows of their source
+     * (auraPasteRows of SCENE's rows) and as the paste over the band
+     * (auraPasteBand rows); pastes drawn whole (auraPasteKept; auraPasteWhy
+     * the last one's reason, rd_aura_paste.h RD_AP_WHY_*) */
+    uint32_t auraPasteSplit, auraPasteRows, auraPasteBand, auraPasteKept, auraPasteWhy;
+    /* The crack fill's cost (rd_crack_fill.c): its snapshots taken by the
+     * swap (crackSwaps, of crackSwapTexels of SCENE's colour not copied
+     * and as many not loaded) and copied (crackSwapCopied; crackSwapWhy the
+     * last one's reason, the file's SWAP_WHY_*), and its draws with the
+     * general shader's early leave at a reach of at most 2 (crackTap2) */
+    uint32_t crackSwaps, crackSwapTexels, crackSwapCopied, crackSwapWhy, crackTap2;
     /* The aura's read of SCENE into FEED128 in two passes (rd_aura_box.c):
      * the reads drawn so this replay (each one pass more, ROWBOX's: 0 or 1
      * a replay; none while the game is paused) */
@@ -2491,6 +3256,27 @@ typedef struct RdPerfRecord {
      * a frame blended between two ticks, a draw marked RD_VU_TICK_CAMERAS,
      * vuSource), once a draw whether the pre-pass recorded it or not */
     uint32_t vuTickDraws;
+    /* the VU draws issued (rd_replay_vu.c vuDraw, before any merge: a cut
+     * and a kick draw count one each) and the triangles in them (their
+     * index lists in threes; a particle's six indices a quad): the work the
+     * vertex shader does where the pre-pass is off (9 invocations a
+     * triangle; window_scene.h) */
+    uint32_t vuDraws, vuTris;
+    /* of vuTris, the triangles the index compaction left out as drawing
+     * nothing (rd_vu_compact.h: written as a filler, one vertex invocation
+     * where the GPU reuses an index within a triangle), as the counters
+     * last read back in the replay's frame slot gave them (the picture two
+     * frame slots back; 0 without the compaction) */
+    uint32_t vuTrisLeftOut;
+    /* of the draws' vu_main_vs invocations (3 a triangle), those the shared
+     * vertices' lists save (rd_vu_share.h: a draw's values less its distinct
+     * ones; 0 without them) */
+    uint32_t vuShareSaved;
+    /* the skin check's twins (rd_vu_skin_check.c twinDraw, issue 123): the
+     * draws they added (A, B and C each one) and their vertex invocations,
+     * 9 a triangle (the twins never read the pre-pass record): what the
+     * check costs, on the window's VU line */
+    uint32_t skinTwinDraws, skinTwinInvocations;
     /* The draw-merge count (rd_replay_vu.c vuMergeNote; counting only, no
      * draw or record changes): per list the VU draws that could join the
      * previous draw's run (vuMergeDraws) and the runs started (vuMergeRuns:
@@ -2517,6 +3303,53 @@ typedef struct RdPerfRecord {
      * (the state's ABE on, or the alpha plan's blending off); vuFuseKept
      * the others, by reason (RD_VU_FUSE_*) */
     uint32_t vuFusePairs, vuFuseSame, vuFuseKept[RD_VU_FUSE_WHY_COUNT];
+    /* The VU draws that kept the PS2's drops because their mesh has no
+     * facing data, by why (RD_VU_NOFACE_*; rd_replay_vu.c vuDropMode):
+     * under the camera rule every such draw, under region_rule = ps2 those
+     * on a frame wider than 4:3 with the side bands not turned off */
+    uint32_t vuBesideNoFacing[RD_VU_NOFACE_COUNT];
+    /* The VU draws with side bands that carry the card test's verdicts (a
+     * strip of the draw a card at either tick; rd_replay_vu.c vuSource):
+     * their cards' triangles keep the drop beside the picture as inside it
+     * (vu_common.hlsli vu_rule_beside; issue 189's mist quads) */
+    uint32_t vuBesideCards;
+    /* The VU draws under the camera rule (ICO_VU_CAMERA; rd_replay_vu.c
+     * vuSource; [dev] region_rule = camera): their triangles the PS2's rule
+     * drops are drawn clipped when they face the eye, their sprites outside
+     * the VU's window drawn whole */
+    uint32_t vuCameraDraws;
+    /* On a device that keeps the VU plain set (g_rd.vuNoBeside; issue 123,
+     * rd_plain_camera.h): the mesh and grid draws under the camera rule
+     * (vuPlainCamera, of vuCameraDraws) and the skinned draws that kept the
+     * PS2's drops (vuPlainKept, issue 163; under region_rule = ps2 too) */
+    uint32_t vuPlainCamera, vuPlainKept;
+    /* The visibility test (rd_vis.c rd__vis_frame; [dev] cull): the VU draw
+     * commands of the replayed lists (cullDraws), those turned into NOPs
+     * (cullSkipped: by the frustum test, cullFrustum, or by occlusion,
+     * cullOccluded, under [dev] cull = full), and the test's time on the CPU
+     * (cullMs; cullHizMs of it the occlusion test's) */
+    uint32_t cullDraws, cullSkipped, cullFrustum, cullOccluded;
+    double cullMs, cullHizMs;
+    /* The occlusion test's cost by part (rd_vis.h RdVisCounts' hiz
+     * fields): cullHizMs is the collect (cullHizCollectMs: of it the alpha
+     * proofs, cullHizAlphaMs, and the vertex pass, cullHizVertMs), the
+     * occludees' test (cullHizTestMs) and the rasterisation
+     * (cullHizRasterMs); the decodes settled before the collect
+     * (cullHizSettleMs) are outside it.  The vertices projected
+     * (cullHizVerts), the triangles read and kept as occluders before the
+     * budget (cullHizTrisRead, cullHizTrisKept), the cells covered, the
+     * draws tested, the triangles past the budget, the occluder draws that
+     * took their triangles from the collect cache of those that reached
+     * the vertex pass (cullHizCacheHits, cullHizCacheDraws), and the
+     * occluder candidates by reason (cullHizOcc: used, then refused by
+     * state, chain plane, target, bound, program, alpha, small box, no
+     * triangle: rd_vis.h RD_VIS_HZ_OCC_USED .. RD_VIS_HZ_OCC_NOTRI) */
+    double cullHizSettleMs, cullHizCollectMs, cullHizAlphaMs, cullHizVertMs, cullHizRasterMs;
+    double cullHizTestMs;
+    uint32_t cullHizVerts, cullHizTrisRead, cullHizTrisKept, cullHizTested, cullHizOverBudget;
+    uint32_t cullHizCacheHits, cullHizCacheDraws;
+    uint64_t cullHizCells;
+    uint32_t cullHizOcc[RD_PERF_HIZ_OCC];
     uint32_t prepassBatches;
     double gpuPrepassMs;
     /* The store plan (rd_replay.c storePlanScan; RdProfile.storePlan): of
@@ -2539,6 +3372,67 @@ typedef struct RdPerfRecord {
     uint8_t storePlanMode;
     uint8_t storeKept, storeKeptTarget, storeWhy;
     uint32_t storeKeptFrame;
+    /* The stencil outside the shadow window (rd_stencil_selftest.c,
+     * rd__stencil_cut_pass): the passes begun by the walk with a depth
+     * whose depth store was asked and its stencil's not (stencilCutStores),
+     * whose depth load was asked and its stencil's not, outside a shadow
+     * window (stencilCutLoads), and their texels (a byte of stencil each;
+     * the pass's area where it has one).  Outside the MSAA epoch; 0 where
+     * the stencil is loaded and stored with the depth */
+    uint32_t stencilCutStores, stencilCutLoads;
+    uint64_t stencilCutStoreTexels, stencilCutLoadTexels;
+    /* The shadows over the volumes' box (rd_shadow_box.c): the counts drawn
+     * over it (shadowBoxCounts) and the composites (shadowBoxComposites, of
+     * them shadowBoxEmpty with nothing left to draw), the composites'
+     * scissors' texels with the box and without it (shadowBoxTexels,
+     * shadowBoxAllTexels), and the counts and composites drawn whole by why
+     * (shadowBoxWhy, rd_shadow_box.h RD_SB_WHY_*) */
+    uint32_t shadowBoxCounts, shadowBoxComposites, shadowBoxEmpty;
+    uint64_t shadowBoxTexels, shadowBoxAllTexels;
+    uint16_t shadowBoxWhy[RD_SHADOW_BOX_WHYS];
+    /* The shadow tiles (rd_shadow_tile.c): the composites drawn over the
+     * tile mask (shadowTileComposites), the masks drawn (shadowTileMasks),
+     * and the boxed composites on DATE's stencil path drawn whole by why
+     * (shadowTileWhy, rd_shadow_tile.h RD_ST_WHY_*) */
+    uint32_t shadowTileComposites, shadowTileMasks;
+    uint16_t shadowTileWhy[RD_SHADOW_TILE_WHYS];
+    /* A shadow window with no volume (rd_no_volume.c): the windows taken
+     * (noVolumeKept), of them those with a pass open at the resolve
+     * (noVolumeOpen: that pass's texels noVolumePassW x noVolumePassH, its
+     * depth bound noVolumePassDepth), the zero clears owed, the level
+     * targets' texels among them, the levels and composites not drawn
+     * (noVolumeSkipped), the windows with a volume (noVolumeWith) and the
+     * windows not taken by why (noVolumeWhy, rd_no_volume.h RD_NV_WHY_*) */
+    uint16_t noVolumeKept, noVolumeOpen, noVolumeWith, noVolumeClears, noVolumeSkipped;
+    uint16_t noVolumePassW, noVolumePassH;
+    uint8_t noVolumePassDepth;
+    uint32_t noVolumeLevelTexels;
+    uint16_t noVolumeWhy[RD_NO_VOLUME_WHYS];
+    /* DATE's passes without the depth (rd_date_cut.c; docs/port/
+     * WORK_BUFFERS.md "DATE's passes without the depth"): the runs the
+     * scan found depth-free, the passes begun without the depth and the
+     * draws drawn in them, the depth target's texels those passes left
+     * out (each 4 bytes of depth and 1 of stencil, each way), the passes
+     * begun again with the depth for a draw that needed it (a wrong
+     * prediction: a pass more), the runs' draws that kept the depth (an
+     * open pass with it, the stencil path, MSAA, the exact blend, a shadow
+     * window); the DATE snapshots by why each was taken (RD_DATE_RETAKE_*;
+     * their sum is dateSnapshots) and those reused */
+    uint32_t dateCutRuns, dateCutPasses, dateCutDraws, dateCutAgain, dateCutKept;
+    uint64_t dateCutTexels;
+    uint32_t dateRetakeWhy[RD_DATE_RETAKE_COUNT], dateSnapReused;
+    /* One DATE set-up for the shadow composites (rd_date_one.c): the
+     * composites that used the set-up before them (dateOneShared; their
+     * targets' texels dateOneTexels), those kept to their own by the bound
+     * or at the replay (dateOneRefused).  The empty composites skipped
+     * (rd_shadow_box.c: emptySkipped, of them with DATE emptySkippedDate).
+     * A shadow window with no volume taken with SCENE's pass ended at the
+     * resolve (rd_no_volume.c: noVolumeBreak) and its zero clears not
+     * recorded because the target held zero already (noVolumeHeld) */
+    uint32_t dateOneShared, dateOneRefused;
+    uint64_t dateOneTexels;
+    uint32_t emptySkipped, emptySkippedDate;
+    uint16_t noVolumeBreak, noVolumeHeld;
     /* GS state as shader data (rd_uber.c): uber 1 while it is in force;
      * pipeFamily the pipeline cache by family at the replay's end, in
      * rd_internal.h RdKeyFamily's order (2D, VU, VU point, shadow, fog,
@@ -2576,21 +3470,148 @@ typedef struct RdPerfRecord {
      * gpuMs counts both) */
     uint8_t gpuBusyValid;
     double gpuBusyMs;
-    /* gpuGapValid: the replay before's record came just before this one
-     * with its timestamps; gpuGapNs this replay's first stamp less that
-     * one's last (the same GPU clock): over 0 the GPU idle between them
-     * (waiting for this replay's submit), under 0 this replay's first
-     * stamp written before the one before ended, so gpuMs counts that end
-     * too (the window's 10 s 'GPU between replays' line, pace_policy.h
-     * PaceGpuGap; the step rule's GPU time a picture is the median of
-     * gpuMs) */
+    /* gpuGapValid: a timed replay came before this one (within 60 s,
+     * rd_perf_gap.h); gpuGapNs this replay's first stamp less that one's
+     * last (the same GPU clock): over 0 the GPU idle between them (waiting
+     * for this replay's submit), under 0 this replay's first stamp written
+     * before the one before ended, so gpuMs counts that end too (the
+     * window's 10 s 'GPU between replays' line, pace_policy.h PaceGpuGap;
+     * the step rule's GPU time a picture is the median of
+     * rd_perf_pace_gpu_ms, gpuMs less the display wait);
+     * gpuGapSkipped the replays without timestamps between (their GPU work
+     * is inside the gap then) */
     uint8_t gpuGapValid;
     int64_t gpuGapNs;
+    uint32_t gpuGapSkipped;
+    /* the GPU's timestamp clock went back between the replay before and this
+     * one (rd_perf_gap.h rd_perf_gap_step_ex): by this many ns (0: it did
+     * not); gpuGapValid is 0 then */
+    uint64_t gpuGapBackNs;
+    /* the slot's clock (rd_perf_clock.h, issue 123): the replay's first
+     * stamp after its first submit on the CPU's clock, ms (gpuLateValid 1
+     * from the calibrated clocks, 2 estimated from its wait's end, 0 not
+     * known); gpuRanTwice 1 when its queries were reset again while the CPU
+     * waited for it (its first list ran a second time: a driver's reset and
+     * replay); gpuStampsMissing its recorded stamps that came back unwritten
+     * after its work was signalled finished */
+    double gpuLateMs;
+    uint8_t gpuLateValid, gpuRanTwice;
+    uint16_t gpuStampsMissing;
+    /* the slot's wait (rd_perf_clock.h, the CPU's times of the wait the
+     * backend makes in any case, no read of the work in flight): how long
+     * the recycle blocked for this replay's slot (gpuSlotWaitMs, 0 it had
+     * finished), and the time from its last submit to the wait's return
+     * (gpuDoneMs: the GPU's end of it when the wait blocked, gpuDoneValid
+     * 1; an upper bound when it had finished before, 2; 0 not known) */
+    double gpuSlotWaitMs, gpuDoneMs;
+    uint8_t gpuDoneValid;
+    /* The GPU's own sign of a reset in this record (rd_perf_clock.h
+     * rd_perf_reset_sign, issue 123; RD_RESET_*): its stamps unwritten, its
+     * first list run twice, its counter gone back with the GPU kept busy,
+     * or gone back after a span with no GPU work (a pause, a capture, the
+     * app away: not a sign; gpuIdleMs the span where measured, -1 noted
+     * only).  The skin check's span and the window's stall lines read it */
+    uint8_t gpuResetSign;
+    double gpuIdleMs;
+    /* The replay's submissions (rd_perf_sub.h, issue 123): its first
+     * submit and the slot's last submission's signal as the recycle's wait
+     * saw it (gpuSignalMs: the wait's end with gpuDoneValid 1, its start, a
+     * bound, with 2), rd's clock, 0 not known; the submissions made
+     * (gpuSubAll) and kept (gpuSubN), and the one holding the first
+     * unwritten stamp (gpuSubHung, 1-based; 0 none), named
+     * (gpuFirstMissing) for a stalled replay */
+    double gpuFirstSubmitMs, gpuSignalMs;
+    uint8_t gpuSubN, gpuSubAll, gpuSubHung;
+    RdPerfSub gpuSub[RD_PERF_SUBS];
+    char gpuFirstMissing[48];
+    /* the attachment memory the replay's render passes asked a tile-based
+     * GPU to move (rhi_traffic.h, RhiStats.pass*Bytes): colour and
+     * depth-stencil loaded and stored, cleared in tile memory, the
+     * render-area texels, and the texture copies' bytes; passUntracked the
+     * passes with an attachment of a format the table did not know (counted
+     * at 4 bytes a texel: the window's image) */
+    uint64_t colorLoadBytes, colorStoreBytes, depthLoadBytes, depthStoreBytes, clearBytes;
+    uint64_t passTexels, copyBytes;
+    uint32_t passUntracked;
+    /* The lamps' glow for less (rd_lamps.c, rd_lamps.h): this replay's
+     * lamps pass on WORK2 drawn with an area (lampsAreas, 0 or 1: the area
+     * lampsAreaX, Y, W, H in texels, lampsAreaTexels of the pass's
+     * lampsTexels) or whole (lampsWhole; lampsWhy its RD_LAMPS_WHY_*), the
+     * bytes the area did not clear, store (colour) and load and store
+     * (depth and stencil) against the whole pass (rhi_traffic_pass_sum's
+     * figures of the two), and WORK2_PAD's bands left a lazy clear
+     * (lampsPads: a pass fewer each) */
+    uint32_t lampsAreas, lampsWhole, lampsWhy, lampsPads;
+    int32_t lampsAreaX, lampsAreaY;
+    uint32_t lampsAreaW, lampsAreaH, lampsAreaTexels, lampsTexels;
+    uint32_t lampsSavedClear, lampsSavedColorStore, lampsSavedDepthLoad, lampsSavedDepthStore;
+    /* the last lamp whose screen box was not known this replay: why
+     * (RD_LAMPS_BOX_*, rd_lamps.h; 0 none) */
+    uint32_t lampsBoxWhy;
+    /* round 3 (rd_lamps.h RD_LAMPS_OWED, RD_LAMPS_FOLD4): WORK0's alpha
+     * sprites a DARK chain left a lazy clear (lampsOwed: a pass fewer each);
+     * the passes that drew two staticBlur pairs (lampsFold4: fx_blur4_ps,
+     * one pass where two fx_blur2_ps passes were: a pass fewer each) and the
+     * last reason a pair that could have gone with the next was drawn alone
+     * (lampsFold4Why, RD_LAMPS_F4_*; 0 none) */
+    uint32_t lampsOwed, lampsFold4, lampsFold4Why;
+    /* The cost counters (rd_perf_hooks.c; docs/port/ANDROID_DIAGNOSTICS.md
+     * "The cost counters"; issue 179).  The two-pass blend (no dual-source
+     * blending, rd__expand_no_dual): noDualPairs the draws drawn twice (a
+     * colour pass, then an alpha pass), noDualColour those drawn once
+     * through the colour pass alone (the mask without A), noDualTris the
+     * triangles of the VU draws drawn twice (their vertex work done twice);
+     * counted as the passes are filled (rd_fx_plan.c rd__sprite_above1x's
+     * head, every drawn pass of a 2D draw) and per VU draw (rd_replay_vu.c
+     * vuDraw); 0 with dual-source blending */
+    uint32_t noDualPairs, noDualColour, noDualTris;
+    /* SCENE's pass ended and begun again in the replay, by why (RD_BREAK_*),
+     * and the KB each moved: the stores of SCENE's pass ended and the loads
+     * of the one begun again (colour and depth-stencil, rhi_traffic.h) */
+    uint16_t breakN[RD_BREAK_COUNT];
+    uint32_t breakKB[RD_BREAK_COUNT];
+    /* Per list: the screen boxes of the VU draw commands the culler kept
+     * (rd_vis.c cmdVerdict: the bound of the batches the draw reads under
+     * its VU matrix), GS pixels clipped to the target (listBoxPx), those
+     * commands (listBoxDraws), those with no box (listBoxNone: no bound, a
+     * skinned draw, particles are not counted), the target's GS area
+     * (listBoxTargetPx, the last); 0 everywhere with [dev] cull off.  The
+     * VU triangles drawn per list (vuListTris; vuTris by list) */
+    uint64_t listBoxPx[RD_LIST_COUNT];
+    uint16_t listBoxDraws[RD_LIST_COUNT], listBoxNone[RD_LIST_COUNT];
+    uint32_t listBoxTargetPx[RD_LIST_COUNT];
+    uint32_t vuListTris[RD_LIST_COUNT];
+    /* Per list, for the where table's rate card clause (rd_perf_where.h;
+     * issue 179): vuListAgainTris the VU triangles drawn again by a draw's
+     * passes after its first (rd_replay_vu.c vuDraw: the two-pass blend's
+     * alpha pass without dual-source blending, or any second pass its plan
+     * makes; a merged run draws every pass too), shadowListTris the shadow
+     * volumes' triangles drawn (rd_replay.c doShadowStripIn, each half of a
+     * strip whose pipeline was made) */
+    uint32_t vuListAgainTris[RD_LIST_COUNT], shadowListTris[RD_LIST_COUNT];
+    /* The in-play A/B judge (port/render/rd_ab.h, rd_ab_run.h): the arms
+     * the replay was recorded under, set at its start (rd__perf_begin), so
+     * its GPU span read back later is judged as theirs: abTrial the trial's
+     * serial (0 not a trial's replay), abSeq its place in the trial,
+     * abStage its stage (-1 not known), abOff the subjects at their off arm
+     * (a bit a subject, RD_AB_ZERO the zero-area cull; only subjects that
+     * may be tried), abUsed the subjects that had work in it (the cull: a
+     * target with a lattice word) */
+    uint32_t abTrial, abSeq;
+    int32_t abStage;
+    uint8_t abOff, abUsed;
+    uint16_t abEpoch; /* the renderer it was drawn by (rd_ab.h rd_ab_forget) */
 } RdPerfRecord;
 
 /* The oldest finished record not yet popped (a queue of 64; the oldest are
  * dropped when nobody pops); false when there is none. */
 bool rd_perf_pop(RdPerfRecord *out);
+/* A span the game was not presenting (the window's notes, port/ui/ui_fps.h
+ * ui_fps_gap: the app back in the foreground, a pause of the host, a
+ * capture): a timestamp counter that went back across it is the GPU idle,
+ * not a sign of a reset (rd_perf_clock.h rd_perf_reset_sign; issue 123's
+ * capture at its log's :2736).  One atomic add; any thread. */
+void rd_perf_idle_note(void);
 /* "; Direct3D 11 submits wrote N KB to the GPU": the mean backendWriteBytes
  * a record of those rd_perf_pop handed out since the last call, "" when
  * they wrote none (every other backend); the count starts again.  The
@@ -2603,10 +3624,176 @@ const char *rd_perf_backend_text(void);
  * that hold none are left out, "" with none at all.  Into buf (size). */
 void rd_perf_why_text(char *buf, size_t size, int which, const uint64_t *counts, double replays);
 
+/* The visibility test's sums over records (rd_perf_backend_text's cull
+ * part): rd_perf_cull_add adds record r's cull* fields; rd_perf_cull_text
+ * writes the part, the mean a replay over `replays`, into buf (size), ""
+ * when no draw was walked: "; cull: N of M scene draws skipped a replay (F
+ * frustum, O occluded), T ms (occlusion H) ([dev] cull)", and when the
+ * occlusion test ran "; occlusion: collect C ms (settle S, alpha A,
+ * vertices V ms for Nv vertices, Nt triangles kept of Na; cache Hc of Dc
+ * draws), raster R ms (Nc cells), test X ms (Nd draws tested); occluders
+ * used U, refused: state/chain/target/bound/program/alpha/small/no-tri
+ * a/b/c/d/e/f/g/h; past the budget B" (docs/port/RENDER.md, "Culling") */
+typedef struct RdPerfCullSum {
+    uint64_t draws, skipped, frustum, occluded;
+    double ms, hizMs, settleMs, collectMs, alphaMs, vertMs, rasterMs, testMs;
+    uint64_t verts, trisRead, trisKept, cells, tested, overBudget, cacheHits, cacheDraws;
+    uint64_t occ[RD_PERF_HIZ_OCC];
+} RdPerfCullSum;
+
+void rd_perf_cull_add(RdPerfCullSum *s, const RdPerfRecord *r);
+void rd_perf_cull_text(char *buf, size_t size, const RdPerfCullSum *s, double replays);
+
+/* RdPerfRecord.glowWhy (rd_glow_fold.c): why a glow frame drew its mask into
+ * WORK2 (docs/port/RENDER_POST.md, "The glow's mask in its reduction"):
+ * FANS not given (the sun's fans between the fill and the mask fold the
+ * mask alone, RdPerfRecord.glowFoldRead),
+ * LAMPS a draw into WORK2 between the mask and the reduction (the lamps'
+ * meshes), SCENE a draw into SCENE between them, OTHER WORK2 drawn or read
+ * elsewhere in the frame, FORM the fill,
+ * the mask or the reduction not in the fold's form, MSAA the MSAA epoch,
+ * PLAN the fx plan off or no fx_frame_ps, UNDONE a reduction that could not
+ * take a planned fold (the fill and the mask drawn after all).
+ * rd_glow_fold_why_text gives the words the 10 s line and --stats print. */
+enum {
+    RD_GLOW_FOLD_WHY_NONE,
+    RD_GLOW_FOLD_WHY_FANS,
+    RD_GLOW_FOLD_WHY_LAMPS,
+    RD_GLOW_FOLD_WHY_OTHER,
+    RD_GLOW_FOLD_WHY_FORM,
+    RD_GLOW_FOLD_WHY_MSAA,
+    RD_GLOW_FOLD_WHY_PLAN,
+    RD_GLOW_FOLD_WHY_UNDONE,
+    RD_GLOW_FOLD_WHY_SCENE,
+    RD_GLOW_FOLD_WHY_COUNT
+};
+
+const char *rd_glow_fold_why_text(uint32_t why);
+
+/* RdPerfRecord.glowLight (rd_glow_light.c; docs/port/RENDER_POST.md, "The
+ * glow where it adds light"): NONE no glow in the replay, DARK the chain not
+ * drawn (no light in it), LAMPS the mask not drawn (the lamps' light alone),
+ * WHOLE the chain drawn as before (glowLightWhy says why), OFF a glow with
+ * ICO_RD_GLOW_LIGHT=0 or under a pass window (not counted); at every scale.
+ * rd_glow_light_text and rd_glow_light_why_text give the words;
+ * rd_glow_light_line prints the window's 10 s clause "window: glow: light
+ * (every scale): ..." for the replays since its last call (nothing when none
+ * had a glow). */
+enum {
+    RD_GLOW_LIGHT_NONE,
+    RD_GLOW_LIGHT_DARK,
+    RD_GLOW_LIGHT_LAMPS,
+    RD_GLOW_LIGHT_WHOLE,
+    RD_GLOW_LIGHT_OFF,
+    RD_GLOW_LIGHT_COUNT
+};
+
+enum {
+    RD_GLOW_LIGHT_WHY_NONE,
+    RD_GLOW_LIGHT_WHY_GREY,
+    RD_GLOW_LIGHT_WHY_FORM,
+    RD_GLOW_LIGHT_WHY_MSAA,
+    RD_GLOW_LIGHT_WHY_FANS,
+    RD_GLOW_LIGHT_WHY_SUN,
+    RD_GLOW_LIGHT_WHY_SCENE,
+    RD_GLOW_LIGHT_WHY_WORK,
+    RD_GLOW_LIGHT_WHY_OFF,
+    RD_GLOW_LIGHT_WHY_COUNT
+};
+
+const char *rd_glow_light_text(uint32_t plan);
+const char *rd_glow_light_why_text(uint32_t why);
+void rd_glow_light_line(void);
+/* the late passes on SCENE (rd_late_pass.c): the window's 10 s clause
+ * "window: late pass: ..." for the replays since its last call (nothing
+ * when no fill was held) */
+void rd_late_pass_line(void);
+/* The paused scene's hold (rd_hold.c; docs/port/RENDER.md "The paused
+ * scene's hold"): rd_set_paused_source(fn) has rd_end_frame mark each frame
+ * paused while fn() returns non-zero (the window: the game's pause, not
+ * photo mode; NULL: never); rd_hold_line writes the 10 s line `window: still
+ * scene: ...` when a paused picture was made in the block; rd_hold_replay_kind
+ * says what replay `replay` (RdPerfRecord.replay) was: 0 not paused or not
+ * known, 1 drawn from the held scene, 2 drawn in full while paused (the
+ * window's stall lines; any thread) */
+void rd_set_paused_source(int (*fn)(void));
+void rd_hold_line(void);
+int rd_hold_replay_kind(uint32_t replay);
+/* the lamps' glow for less (rd_lamps.c): the 10 s "window: lamps: N lamps
+ * passes on WORK2 with an area (...), M whole (why); P bands left lazy"
+ * line, nothing in a block without a lamps frame */
+void rd_lamps_line(void);
+/* the aura's paste split (rd_aura_paste.c): the window's 10 s clause
+ * "window: aura paste: ..." (nothing when no paste was seen) */
+void rd_aura_paste_line(void);
+/* the CPU phases a picture: "window: CPU phases ms a picture ..." (rd_cpu_phase.c) */
+void rd_cpu_phase_line(void);
+/* the pictures' evenness: "window: evenness in 10 s: ..." (rd_even.c); refreshMs the
+ * display's refresh, 0 unknown */
+void rd_even_line(double refreshMs);
+/* the window's presents are pictures as made (vsync off, uncapped, the
+ * render thread on: pace_policy.h pace_rt_as_made), set at every step: the
+ * handed-over present's alpha is then the measured hand-over less the
+ * drain's running mean, not the present clock's (rd_thread.c presentRebase,
+ * rd_rebase.h; docs/port/DISPLAY.md "The alpha") */
+void rd_present_as_made(bool on);
+/* the even cadence (rd_pace_even.h; off by default, ICO_RD_PACE_EVEN=1): with
+ * pictures as made, how long the window's pacer holds the next hand-over
+  * (ms; 0 none), untilDeadlineMs the time left before the game's next step,
+ * tickMs the game's frame, untilRuleMs for a further picture the time from
+ * which the step rule would hold it (0 none); the window's thread
+ * (window_present.c window_present_pace, the poster's) */
+double rd_present_even_hold(double untilDeadlineMs, double tickMs, double untilRuleMs);
+/* the plan's switch: on, ICO_RD_GLOW_LIGHT=0 off (the tests' A/B, no config
+ * key); rd__glow_light_force sets it (-1 the environment's) and forgets the
+ * plan's off and the plan frame before */
+bool rd__glow_light_on(void);
+void rd__glow_light_force(int on);
+/* the render passes begun in the last plan's chain, each named after the
+ * command it followed and the pass open then (the tests print it) */
+const char *rd__glow_light_debug(void);
+/* rd_date_cut.c: the 10 s line's DATE clause (rd_perf.c): each popped
+ * record's counts summed (rd__date_cut_pop, rd_perf_pop), then
+ * "; DATE: ..." at *at of out and the sums cleared (rd__date_cut_text,
+ * rd_perf_backend_text; nothing when no DATE snapshot or cut pass ran);
+ * a RD_DATE_RETAKE_* reason's words; rd__date_cut_on: the cut in force
+ * (the DATE snapshot path: RdProfile.dateStencil off, GS state as shader
+ * data off; not ICO_RD_DATE_CUT=0) */
+bool rd__date_cut_on(void);
+/* the tests' switch: -1 ICO_RD_DATE_CUT's and the profile's, 0 off, 1 on
+ * (still the snapshot path only) */
+void rd__date_cut_force(int mode);
+/* the tests' view of the last scan's depth-free runs: [start[i], end[i])
+ * ordinals (the store plan's, g_rdStoreOrd), up to max; returns the count */
+uint32_t rd__date_cut_last_runs(uint32_t *start, uint32_t *end, uint32_t max);
+void rd__date_cut_pop(const RdPerfRecord *r);
+void rd__date_cut_text(char *out, size_t n, size_t *at);
+const char *rd__date_retake_word(int why);
+/* this replay's render passes on WORK2_PAD, WORK2, WORK3 or WORK0 (named,
+ * an RdTargetId) from the glow chain's first command on (a frame's head
+ * clears not counted), *cleared those that load a CLEAR (the tests) */
+uint32_t rd__glow_light_passes_on(int named, uint32_t *cleared);
+/* "N (WORK2 n, ...)" of the lazy clears drawn per target n[4] (WORK2_PAD,
+ * WORK2, WORK3, WORK0): the 10 s line's and --stats' words */
+void rd__glow_light_lazy_text(char *buf, size_t size, const uint64_t n[4]);
+
 /* The CPU time of the replay finished last (its RdPerfRecord.totalMs,
- * popped or not): with interpolation off the window's pacing reads the
- * frame's one replay, rd_end_frame's present, after the step. */
+ * popped or not; a picture handed over is still running when the step
+ * ends, so the window's pacing reads rd_frame_post_last_take instead). */
 double rd_last_replay_ms(void);
+
+/* The CPU-side vertex work of the replay finished last (the slow-scene
+ * dump's pick, window_host.c slow_scene_poll, issue 179): its replay number,
+ * the frame it drew (RdPerfRecord.frame), its VU triangles and the
+ * pre-pass's vertices (vuTris, vuPreVertices), noted at the replay's end
+ * (rd__perf_end), before its GPU times come and while the ring still holds
+ * that frame as the last closed or the one before.  Any thread.  False when
+ * no replay has been noted yet or the note was being written. */
+typedef struct RdReplayWork {
+    uint32_t replay, frame, vuTris, vuPreVertices;
+} RdReplayWork;
+
+bool rd_perf_last_replay_work(RdReplayWork *out);
 
 /* The game thread's own cost of closing a frame since the last take:
  * rd_end_frame's walk of the frame for its end state and the rest of its
@@ -2616,6 +3803,71 @@ double rd_last_replay_ms(void);
  * The closes counted, their mean and the longest in ms; the sums start
  * again.  The window's 10 s line gives it (render_thread.c). */
 void rd_frame_close_take(unsigned *closes, double *meanMs, double *maxMs);
+
+/* Frame rate Original's pictures as the game thread made them in
+ * rd_end_frame (rd_set_replay_gate), since the last take: posts, the
+ * pictures handed over to the render thread (postMs their hand-over's time
+ * on the game thread in all, postMaxMs the longest); postWaits of them,
+ * those that waited for the picture before to end first (a keep frame
+ * while the render thread was busy, or no gate), postWaitMs that wait in
+ * all; inlines, the pictures replayed and presented inside the step, the
+ * game thread waiting (no render thread, parked, sync, a capture, [dev]
+ * original_async = false), inlineMs their time in all; busySkips, the
+ * frames the gate left out because the render thread was busy (RD_GATE_BUSY),
+ * busyBy those by what was busy (RD_BUSY_*: index 0 unused), lateSkips
+ * those it left out late.  The sums start again.  The window's 10 s
+ * game-thread line (render_thread.c, rd_frame_post_text). */
+/* What the gate's busy input found busy (rd_thread.h rd__thread_picture_busy):
+ * nothing; the render thread on the picture before (its interpolation,
+ * uploads, acquire or walk); its wait at that picture's end for the next
+ * picture's frame slot, the picture two before's GPU work (the slot ahead);
+ * the submit thread's job of the picture before (its present, one picture
+ * on the GPU at a time: the next acquire would wait for it) */
+enum { RD_BUSY_NONE, RD_BUSY_RENDER, RD_BUSY_SLOT, RD_BUSY_SUBMIT, RD_BUSY_REASONS };
+
+typedef struct RdFramePost {
+    unsigned posts, postWaits, inlines, busySkips, lateSkips;
+    unsigned busyBy[RD_BUSY_REASONS];
+    double postMs, postMaxMs, postWaitMs, inlineMs;
+} RdFramePost;
+
+void rd_frame_post_take(RdFramePost *out);
+/* The frames Frame rate Original handed over while the submit thread's
+ * picture before waited for its GPU work to end before its present (the
+ * GPU's end first, port/render/rd_submit_thread.h: those frames were
+ * skipped as busy before it), since the last take; the count starts again.
+ * The window's 10 s "frames not presented" clause (window_lines.c
+ * window_orig_words). */
+unsigned rd_thread_gpu_wait_posts_take(void);
+/* The clause of the 10 s line from p: "; its picture handed over in 0.6 ms
+ * (longest 14.2 ms; 3 waited for the picture before, 31.0 ms in all; 12
+ * skipped: render thread busy (2 on the picture before, 10 at its wait for
+ * the picture two before's GPU work, 0 for the submit thread's present));
+ * presents waited inside the step: 0 (0.0 ms)"; empty when p counts nothing
+ * (the other frame rates); out always terminated */
+void rd_frame_post_text(const RdFramePost *p, char *out, size_t cap);
+
+/* The last Original picture rd_end_frame made since the last take (false:
+ * none): how (RD_POST_HANDED, RD_POST_INLINE, RD_POST_SKIP_LATE,
+ * RD_POST_SKIP_BUSY), its frame, ms the game thread spent on it (the
+ * hand-over, its wait included, or the replay inside the step) and waitMs
+ * the hand-over's wait for the picture before.  The window takes it every
+ * pace: the slow-step line and the first present's pause on a new
+ * swapchain (window_present.c). */
+enum { RD_POST_HANDED = 1, RD_POST_INLINE, RD_POST_SKIP_LATE, RD_POST_SKIP_BUSY };
+
+typedef struct RdFramePostLast {
+    uint32_t frame;
+    int how;
+    double ms, waitMs;
+} RdFramePostLast;
+
+bool rd_frame_post_last_take(RdFramePostLast *out);
+/* The slow-step line's words for p: ", the picture handed over 0.5 ms (0.0
+ * ms waiting for the one before)", ", the picture replayed inside the step
+ * 165.6 ms", ", the picture not presented (the render thread busy)" or ",
+ * the picture not presented (the step late)"; out always terminated */
+void rd_frame_post_last_text(const RdFramePostLast *p, char *out, size_t cap);
 
 /* The pieces of timed replay `replay` (RdPerfRecord.passTimed): their
  * count, *out pointing at them until the next replay; 0 when that replay was
@@ -2627,6 +3879,27 @@ uint32_t rd_perf_passes_of(uint32_t replay, const RdPerfPass **out);
 /* [dev] perf_passes (ICO_RD_PERF_PASSES=1): every replay is timed piece by
  * piece (the window writes ico-pc-passes.csv) */
 bool rd_perf_passes_mode(void);
+
+/* Issue 123: every replay timed piece by piece from now on (on: the
+ * window's first present that blocked, so the next stall's replay is
+ * timed; ~47 more bottom-of-pipe stamps a replay, no CSV), or back to one
+ * every 250 ms (off).  True when that changed something: timestamps exist,
+ * the backend is one rd_perf_passes_arm_backend allows (on only) and it
+ * was not so already (never on iOS, where pass timing is off).  Any
+ * thread; the render thread reads it at its next replay. */
+bool rd_perf_passes_arm(bool on);
+/* Whether a present that blocked arms rd_perf_passes_arm: only when its
+ * record carries the present split (presentSplit, the Vulkan backend's)
+ * on Vulkan (MoltenVK included; kind an rhi.h RhiBackendKind); never on
+ * OpenGL, where each armed stamp's issue-time read may hold the CPU, nor
+ * on Direct3D (pure) */
+bool rd_perf_passes_arm_backend(int kind, bool presentSplit);
+/* "every replay timed pass by pass from here on Vulkan (a present blocked
+ * 359 ms at replay 2941): the next stalled replay's passes are compared
+ * with the block's" (the window's line, once; backend: the armed
+ * backend's name, rhi_backend_kind_name) */
+int rd_perf_passes_arm_text(uint32_t replay, double presentMs, const char *backend, char *buf,
+                            size_t n);
 
 /* The CSV of the pieces (the window's ico-pc-passes.csv): the header line
  * and one piece's line, each with its newline; the length written, as
@@ -2648,6 +3921,14 @@ typedef struct RdPerfPassAggEntry {
     double gpuMs, cpuMs;
     double busyMs;  /* of gpuMs, the GPU busy time (RdPerfPass.gpuBusyUs) */
     uint64_t busyN; /* the pieces that had one */
+    /* the piece before its pieces (the last seen, when another entry's),
+       how many had one and how many of those were a render pass of the
+       replay's largest area (a full-size target ended just before: on a
+       tile-based GPU its tile work may land in this one's stamps) */
+    uint8_t prevKind, prevTarget;
+    int8_t prevList, prevPost;
+    uint16_t prevW, prevH;
+    uint64_t prevN, prevFull;
 } RdPerfPassAggEntry;
 
 typedef struct RdPerfPassAgg {
@@ -2676,6 +3957,40 @@ void rd_perf_pass_agg_add(RdPerfPassAgg *a, const RdPerfPass *p, uint32_t n);
  * where the pieces bound some); the length of the text in buf (cut to fit
  * n) */
 int rd_perf_pass_agg_text(const RdPerfPassAgg *a, unsigned top, char *buf, size_t n);
+/* The same for the window's line: tiler, the uploads' entry joined to list
+ * 0's largest as "before list 0 + list 0" (they trade at a constant sum on
+ * a tile-based GPU, issue 179); before, each entry followed by the piece
+ * before it, "after list 0 SCENE 1728x1344 (the last seen; the piece before was full size in 12 of 12)" */
+int rd_perf_pass_agg_text_ex(const RdPerfPassAgg *a, unsigned top, bool tiler, bool before,
+                             char *buf, size_t n);
+/* The block's mean GPU time of one piece like p (same kind, target, list,
+ * effect and size: rd_perf_pass_agg_add's entry), ms a piece; false when
+ * the block has none like it */
+bool rd_perf_pass_agg_mean(const RdPerfPassAgg *a, const RdPerfPass *p, double *ms);
+/* Issue 123: a timed replay whose present blocked against the block's
+ * timed replays before it (a, without it), the window's line:
+ *   "stalled replay 2941 (present 352 ms, GPU 71.3 ms against the block's
+ *   27.0): the first pass 52.1 ms (the block's 1.2: it waits for the
+ *   display's image), the other 46 timed passes 27.0 ms (the block's 25.8);
+ *   list 0 SCENE 3048x2032 52.1 ms (the block's 1.2), ...; 31 of 47
+ *   passes over 2x their block mean, the rest within 1.3x (16 timed
+ *   replays in the block so far)"
+ * first its first render pass apart (the GPU's wait for the display's
+ * image lands inside it: grown alone, the display held the image) and the
+ * other timed pieces summed against the sum of their block means; then
+ * its `top` most expensive pieces, each with the block's mean of one like
+ * it ("(new to the block)" for one the block has none like), then of its
+ * pieces the block has a mean of 0.05 ms or more for, how many took over
+ * twice that mean and the largest ratio of the rest ("; 12 under 0.05 ms
+ * left out", "; 2 new to the block", "; 1 not timed" for the others).  No
+ * timed replay in the block before it (a empty): the pieces without the
+ * block's means and "no timed replay in the block before it to compare".
+ * gpuValid 0: "GPU not timed"; blockGpuMs under 0 (no GPU span in the
+ * block before it): "GPU 71.3 ms, the block's first". The length of the
+ * text in buf (cut to fit n) */
+int rd_perf_pass_grow_text(const RdPerfPassAgg *a, const RdPerfPass *p, uint32_t count,
+                           uint32_t replay, double presentMs, int gpuValid, double gpuMs,
+                           double blockGpuMs, unsigned top, char *buf, size_t n);
 /* "47.0: render passes 32.0 (lists 9.0, fog 1.0, glow 17.0, ...), DATE
  * snapshot 1.5, ...": RdPerfRecord.passKinds and passEffects summed over
  * `replays` replays, as means (kinds and effects never begun left out); the

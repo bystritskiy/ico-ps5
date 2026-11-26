@@ -51,9 +51,11 @@
  *            sheetref_texel's on the page and its apron, and after
  *            rd_update_texture_rect too; a strip rasterised at 2 and 4
  *            texels a sheet texel (style.scale) drawn 1:1 is
- *            sheetref_texel's at that scale within 1, its rim reaches 6.5 S
- *            pixels across and 4.5 S down, its fill's grain is constant
- *            over each S x S cell, magnified it is within 1 of the
+ *            sheetref_texel's at that scale within 1, its rim reaches S
+ *            pixels a sheet texel the shipped falloff lights (whole sheet
+ *            texels: magnified as blocks), its fill's grain is constant
+ *            over each S x S cell (dithered under ICO_SHEET_SOLID_ABOVE,
+ *            solid above it), magnified it is within 1 of the
  *            reference, outside the letters it is the 1x strip of its sheet
  *            texels magnified S times within 1 (the rim is the sheets'
  *            look magnified), its frame drawn again through
@@ -187,8 +189,8 @@
  *            mode; the tile-based GPU's set, the pre-pass off and every
  *            state static at a fractional Enhanced scale, both blends,
  *            under it and inside the RHI's pipeline pool less its
- *            headroom); a triangle pass with the planes (rd__plane_pass)
- *            takes the planes build of both shaders (sprite_plane_*_vs
+ *            headroom, and smaller with the pre-pass on); a triangle
+ *            pass with the planes (rd__plane_pass) takes the planes build of both shaders (sprite_plane_*_vs
  *            with sprite_ps_planes, sprite_texa_ps_planes or
  *            sprite_stq_ps_planes), enumerated, with their twins listed
  *
@@ -228,7 +230,11 @@
  *            w < 0) beside its kicked second, along v1-v2, and the cut
  *            triangle still covers v0's side; S4 (reported against
  *            Original 1x) 8 x 8 quads of one mesh under a matrix each,
- *            turned 0.002 rad, whose shared corners differ by float noise.
+ *            turned 0.002 rad, whose shared corners differ by float noise;
+ *            S6 a code-36 triangle with an x flag only and a corner whose
+ *            GS Z saturates under a GIF triangle at a depth between the
+ *            cut's true one and the saturated one: the VU's surface wins
+ *            in every mode (the main gate's bottom rail beside 48:9).
  *            (the VU drawn off the 12.4 grid, as ICO_RD_VU_OFFGRID does
  *            in Enhanced above 1x, opens S1 with the VU on P3's side and
  *            S2; a cut path with unsnapped corners opens S3 in every
@@ -2306,6 +2312,22 @@ static void testSheetBakedTexels(RdTex sheet, const char *mode)
            mode);
 }
 
+static void testSheetScaledOne(int S, const char *dir, int bake);
+
+/* 2x with the profile's bake on (a tile-based class) and off (any other,
+ * issue 126), then the profile as it was; 4x once */
+static void testSheetScaled(int S, const char *dir)
+{
+    const int was = g_rd.profile.sheetBake2x;
+    if (S == 2) {
+        testSheetScaledOne(S, dir, 1);
+        testSheetScaledOne(S, dir, 0);
+    } else {
+        testSheetScaledOne(S, dir, was);
+    }
+    rd__set_sheet_bake_2x(was != 0);
+}
+
 static void testSheetText(const char *mode, int scale, const char *dir)
 {
     for (int y = 0; y < SHEET_H; y++) {
@@ -2491,11 +2513,13 @@ static void testSheetText(const char *mode, int scale, const char *dir)
  * (style.scale S): sheetCov's shapes S times finer, plus a band of noise at
  * the strip's own texels (detail finer than a sheet texel), drawn 1:1 at
  * the texel centres in a 1x scene: every pixel is sheetref_texel's at
- * scale S within 1; the rim beside the solid block reaches 6.5 S pixels
- * across (ICO_SHEET_RX sheet texels, the sheets' width, and the half
- * sheet texel of the magnified ramp) and 4.5 S down; the fill's grain is
- * the sheet texel's (with the plain style a flat partial patch is constant
- * over each S x S cell and changes between cells); magnified 1.5x the
+ * scale S within 1; the rim beside the solid block reaches S pixels for
+ * each sheet texel the shipped falloff lights there (rimReach: whole sheet
+ * texels, the rim magnified as blocks); the fill's grain is the sheet
+ * texel's (with the plain style a flat faint patch, under
+ * ICO_SHEET_SOLID_ABOVE, is constant over each S x S cell and changes
+ * between cells; a flat patch above it is one alpha everywhere, solid,
+ * undithered); magnified 1.5x the
  * strip is within 1 of sprite_ps on the reference's texels; outside the
  * letters the strip is the 1x strip of its
  * sheet texels' mean coverage magnified S times, grey and alpha within 1
@@ -2526,14 +2550,14 @@ static int cov1At(int x, int y)
 /* the W x H pixels at (ax, ay) (grey from the RGB draw's row ay, alpha
    from the RGBA draw's row aa) over a grey, each pixel 4 x 4, at column ox
    of out (ow wide) */
-static void rimPngPut(const uint8_t *img, uint32_t w, int ax, int ay, int aa, int W, int H,
+static void rimPngPut(const uint8_t *img, uint32_t w, int ax, int ay, int aa, int W, int H, int mag,
                       uint8_t *out, int ow, int ox)
 {
     static const int bg[3] = {150, 140, 120};
-    for (int y = 0; y < H * 4; y++) {
-        for (int x = 0; x < W * 4; x++) {
-            const uint8_t *pc = &img[((size_t)(ay + y / 4) * w + (size_t)(ax + x / 4)) * 4];
-            const uint8_t *pa = &img[((size_t)(aa + y / 4) * w + (size_t)(ax + x / 4)) * 4];
+    for (int y = 0; y < H * mag; y++) {
+        for (int x = 0; x < W * mag; x++) {
+            const uint8_t *pc = &img[((size_t)(ay + y / mag) * w + (size_t)(ax + x / mag)) * 4];
+            const uint8_t *pa = &img[((size_t)(aa + y / mag) * w + (size_t)(ax + x / mag)) * 4];
             const int a = pa[3] > 128 ? 128 : pa[3];
             uint8_t *o = &out[((size_t)y * (size_t)ow + (size_t)(ox + x)) * 4];
             for (int c = 0; c < 3; c++) {
@@ -2544,12 +2568,35 @@ static void rimPngPut(const uint8_t *img, uint32_t w, int ax, int ay, int aa, in
     }
 }
 
+/* the rim's reach in sheet texels from the shipped falloff w[1..n]: the
+   distances d whose rim (full coverage at d, w[d] per mille) still lights
+   sheet texel (x0 + d dx, y0 + d dy) at its threshold, up to the first
+   that does not */
+static int rimReach(const uint16_t *w, int n, int x0, int y0, int dx, int dy)
+{
+    int d = 1;
+    for (; d <= n; d++) {
+        uint8_t g, a;
+        sheetref_texel_cr(0, (255u * w[d] + 500u) / 1000u, x0 + d * dx, y0 + d * dy, &kSheetEn,
+                          NULL, &g, &a);
+        if (!a) {
+            break;
+        }
+    }
+    return d - 1;
+}
+
 static uint8_t scaledCov(int x, int y, int S)
 {
     const int sx = x / S, sy = y / S;
-    /* a flat partial patch over sheet texels 26..32 x 6..8: the grain test
-       (164: 4.5 of the 7 steps, so the Bayer threshold picks 4 or 5) */
-    if (sx >= 26 && sx < 33 && sy >= 6 && sy < 9) {
+    /* flat patches over sheet texels 26..32 for the grain test: row 6
+       faint (half of ICO_SHEET_SOLID_ABOVE: under a step of the 7, so the
+       Bayer threshold picks 0 or 1), rows 7..8 solid (164: 4.5 steps,
+       rounded to 5 undithered) */
+    if (sx >= 26 && sx < 33 && sy == 6) {
+        return ICO_SHEET_SOLID_ABOVE / 2;
+    }
+    if (sx >= 26 && sx < 33 && sy >= 7 && sy < 9) {
         return 164;
     }
     /* the noisy patch at the strip's own texels */
@@ -2559,8 +2606,12 @@ static uint8_t scaledCov(int x, int y, int S)
     return sheetCov(sx, sy);
 }
 
-static void testSheetScaled(int S, const char *dir)
+/* a scaled sheet with the 2x bake in the state `bake` (the tile-based
+ * classes' profile, or the others'): 2x baked or drawn by font_sheet_ps,
+ * the SCENE the same either way */
+static void testSheetScaledOne(int S, const char *dir, int bake)
 {
+    rd__set_sheet_bake_2x(bake != 0);
     const int W = SHEET_W * S, H = SHEET_H * S;
     for (int y = 0; y < H; y++) {
         for (int x = 0; x < W; x++) {
@@ -2611,12 +2662,14 @@ static void testSheetScaled(int S, const char *dir)
        sheet and reference side by side, RGB then RGBA */
     const int yA = 8 + H + 4, yM = yA + H + 8, mw = W * 3 / 2, mh = H * 3 / 2;
     const int yMA = yM + mh + 8;
-    /* right of the 1:1 strip the 1x strip magnified S times, RGB
-       then RGBA, nudged by half a pixel (8 / S sixteenths of a sheet
-       texel: a pixel samples at its corner) so pixel x samples sheet
-       texel position (x + 0.5) / S, where the scaled strip's texel x
-       reads its rim; and the plain strip 1:1 (RGBA) */
-    const int x1x = 8 + W + 8, xPl = x1x + W + 8, n1 = 8 / S;
+    /* right of the 1:1 strip the 1x strip of the sheet texels' mean
+       coverage, 1:1 (nudged to the texel centres like the scaled strip),
+       RGB then RGBA: the scaled strip's texel (x, y) reads sheet texel
+       (x / S, y / S)'s rim (font.hlsl sheet_scaled: blocks), so a pixel of
+       the scaled strip is compared with that texel of this strip, not
+       with a magnified draw of it (the GS sprite's bilinear filter would
+       blend neighbouring texels); and the plain strip 1:1 (RGBA) */
+    const int x1x = 8 + W + 8, xPl = x1x + W + 8;
     /* the frame twice: as drawn (a 2x sheet's texels baked on the CPU,
      * rd__sheet_baked, font_sheet_baked_ps; 4x through font_sheet_ps),
      * then every scale through font_sheet_ps (ICO_RD_SHEET_SHADER's switch,
@@ -2626,9 +2679,10 @@ static void testSheetScaled(int S, const char *dir)
     uint8_t *img = NULL, *viaShader = NULL;
     for (int pass = 0; pass < 2; pass++) {
         if (pass == 1) {
-            CHECK(sr && sr->sheetBaked == (S == 2),
-                  "scaled sheet %d: the device texture holds %s (sheetBaked %d)", S,
-                  S == 2 ? "the baked texels" : "the coverage", sr ? sr->sheetBaked : -1);
+            const int want = S == 2 && bake;
+            CHECK(sr && sr->sheetBaked == want,
+                  "scaled sheet %d, 2x bake %d: the device texture holds %s (sheetBaked %d)", S,
+                  bake, want ? "the baked texels" : "the coverage", sr ? sr->sheetBaked : -1);
             rd__set_sheet_shader(true);
         }
         sheetFrameBegin();
@@ -2645,8 +2699,8 @@ static void testSheetScaled(int S, const char *dir)
         }
         for (int k = 0; k < 2; k++) {
             rd_texture(sheet1, RD_TEXFN_MODULATE, k ? RD_TCC_RGBA : RD_TCC_RGB);
-            sprite(512, 512, x1x * 16, (k ? yA : 8) * 16, (x1x + W) * 16, ((k ? yA : 8) + H) * 16,
-                   grey, n1, n1, SHEET_W * 16 + n1, SHEET_H * 16 + n1);
+            sprite(512, 512, x1x * 16, (k ? yA : 8) * 16, (x1x + SHEET_W) * 16,
+                   ((k ? yA : 8) + SHEET_H) * 16, grey, 8, 8, SHEET_W * 16 + 8, SHEET_H * 16 + 8);
         }
         rd_texture(sheetPlain, RD_TEXFN_MODULATE, RD_TCC_RGBA);
         sprite(512, 512, xPl * 16, yA * 16, (xPl + W) * 16, (yA + H) * 16, grey, 8, 8, W * 16 + 8,
@@ -2708,30 +2762,34 @@ static void testSheetScaled(int S, const char *dir)
              y--) {
             up++;
         }
-        /* the fill's grain (the plain strip: no rim): the flat patch's
-           S x S cells (its top row of sheet texels) have one alpha each,
-           and the cells differ (the Bayer entries of neighbouring sheet
-           texels) */
-        int mixed = 0, cells = 0, levels = 0, firstA = -1;
+        /* the fill's grain (the plain strip: no rim): the flat patches'
+           S x S cells have one alpha each; on the faint row (6) the cells
+           differ (the Bayer entries of neighbouring sheet texels), on the
+           solid row (7) they do not (levels[1]: none undithered) */
+        int mixed = 0, cells = 0, levels[2] = {0, 0};
         for (int cx = 27; cx < 32; cx++) {
-            const int cy = 6;
-            const uint8_t a = img[((size_t)(yA + cy * S) * w + (size_t)(xPl + cx * S)) * 4 + 3];
-            for (int y = 0; y < S; y++) {
-                for (int x = 0; x < S; x++) {
-                    mixed +=
-                        img[((size_t)(yA + cy * S + y) * w + (size_t)(xPl + cx * S + x)) * 4 + 3] !=
-                        a;
+            for (int cy = 6; cy < 8; cy++) {
+                const uint8_t a = img[((size_t)(yA + cy * S) * w + (size_t)(xPl + cx * S)) * 4 + 3];
+                const uint8_t a0 =
+                    img[((size_t)(yA + cy * S) * w + (size_t)(xPl + 27 * S)) * 4 + 3];
+                for (int y = 0; y < S; y++) {
+                    for (int x = 0; x < S; x++) {
+                        mixed +=
+                            img[((size_t)(yA + cy * S + y) * w + (size_t)(xPl + cx * S + x)) * 4 +
+                                3] != a;
+                    }
                 }
+                levels[cy - 6] += a != a0;
+                cells++;
             }
-            firstA = firstA < 0 ? a : firstA;
-            levels += a != firstA;
-            cells++;
         }
         const int wRgb = sheetWorst(img, w, 1, 8, yM, 8 + mw + 8, yM, mw, mh, 0, 2);
         const int wA = sheetWorst(img, w, 1, 8, yMA, 8 + mw + 8, yMA, mw, mh, 3, 3);
-        /* outside the letters (the four sheet texels a pixel's rim
-           blends have no coverage) the scaled strip is the 1x strip
-           magnified, grey and alpha */
+        /* outside the letters (no coverage in the sheet texels round
+           the pixel: there its fill is the strip's own, finer than the
+           1x strip's) the scaled strip is the 1x strip magnified as
+           blocks (pixel (x, y) = the 1x strip's texel (x / S, y / S)),
+           grey and alpha */
         int out1x = 0, rim1x = 0, worst1x = 0;
         for (int y = 0; y < H; y++) {
             const int qy = floorDivI(2 * y + 1 - S, 2 * S);
@@ -2743,8 +2801,8 @@ static void testSheetScaled(int S, const char *dir)
                 }
                 const uint8_t *sc = &img[((size_t)(8 + y) * w + (size_t)(8 + x)) * 4];
                 const uint8_t *sa = &img[((size_t)(yA + y) * w + (size_t)(8 + x)) * 4];
-                const uint8_t *oc = &img[((size_t)(8 + y) * w + (size_t)(x1x + x)) * 4];
-                const uint8_t *oa = &img[((size_t)(yA + y) * w + (size_t)(x1x + x)) * 4];
+                const uint8_t *oc = &img[((size_t)(8 + y / S) * w + (size_t)(x1x + x / S)) * 4];
+                const uint8_t *oa = &img[((size_t)(yA + y / S) * w + (size_t)(x1x + x / S)) * 4];
                 const int d[4] = {abs(sc[0] - oc[0]), abs(sc[1] - oc[1]), abs(sc[2] - oc[2]),
                                   abs(sa[3] - oa[3])};
                 for (int c = 0; c < 4; c++) {
@@ -2760,14 +2818,18 @@ static void testSheetScaled(int S, const char *dir)
                 rim1x += oa[3] != 0;
             }
         }
-        const int reachX = (2 * ICO_SHEET_RX + 1) * S / 2, reachY = (2 * ICO_SHEET_RY + 1) * S / 2;
+        /* the reach: left of the block (sheet texel 7, row 10), above it
+           (column 9, row 5) */
+        const SheetLook *lk = sheetref_default_look();
+        const int reachX = rimReach(lk->wx, ICO_SHEET_RX, 7, 10, -1, 0) * S,
+                  reachY = rimReach(lk->wy, ICO_SHEET_RY, 9, 5, 0, -1) * S;
         printf("  scaled sheet %dx: 1:1 worst %d off sheetref_texel and the 1x strip magnified "
                "(%d over 1); rim %d px across (%d), %d down (%d); grain: %d texels unlike their "
-               "cell's first, %d of %d cells another alpha; 1.5x worst %d (grey) %d (alpha) off "
-               "the reference; outside the letters %d px (%d rim) worst %d off the 1x strip "
-               "magnified\n",
-               S, worst, bad, left, reachX, up, reachY, mixed, levels, cells, wRgb, wA, out1x,
-               rim1x, worst1x);
+               "cell's first, %d faint and %d solid of %d cells another alpha; 1.5x worst %d "
+               "(grey) %d (alpha) off the reference; outside the letters %d px (%d rim) worst %d "
+               "off the 1x strip magnified\n",
+               S, worst, bad, left, reachX, up, reachY, mixed, levels[0], levels[1], cells, wRgb,
+               wA, out1x, rim1x, worst1x);
         CHECK(bad == 0,
               "scaled sheet %d: 1:1 %d texels more than 1 off sheetref_texel or the 1x "
               "strip magnified",
@@ -2778,10 +2840,10 @@ static void testSheetScaled(int S, const char *dir)
         CHECK(left == reachX && up == reachY,
               "scaled sheet %d: the rim reaches %d across (%d) and %d down (%d)", S, left, reachX,
               up, reachY);
-        CHECK(mixed == 0 && levels > 0,
+        CHECK(mixed == 0 && levels[0] > 0 && levels[1] == 0,
               "scaled sheet %d: the grain is the sheet texel's (%d texels differ inside a cell, "
-              "%d cells differ)",
-              S, mixed, levels);
+              "%d faint cells differ, %d solid)",
+              S, mixed, levels[0], levels[1]);
         CHECK(wRgb <= 1 && wA <= 1,
               "scaled sheet %d: magnified %d (grey) %d (alpha) off sprite_ps on the reference "
               "(1 allowed)",
@@ -2789,12 +2851,12 @@ static void testSheetScaled(int S, const char *dir)
     }
     if (img && dir) {
         char path[1024];
-        /* the scaled strip (left) and the 1x strip magnified */
+        /* the scaled strip (left) and the 1x strip magnified to its size */
         const int ow = W * 4 * 2 + 16, oh = H * 4;
         uint8_t *png = calloc((size_t)ow * (size_t)oh, 4);
         if (png) {
-            rimPngPut(img, w, 8, 8, yA, W, H, png, ow, 0);
-            rimPngPut(img, w, x1x, 8, yA, W, H, png, ow, W * 4 + 16);
+            rimPngPut(img, w, 8, 8, yA, W, H, 4, png, ow, 0);
+            rimPngPut(img, w, x1x, 8, yA, SHEET_W, SHEET_H, 4 * S, png, ow, W * 4 + 16);
             snprintf(path, sizeof(path), "%s/rd_pixel_rim_s%d.png", dir, S);
             CHECK(rd_write_png(path, png, (uint32_t)ow, (uint32_t)oh, (uint32_t)ow * 4, 0),
                   "scaled sheet %d: %s", S, path);
@@ -2802,9 +2864,17 @@ static void testSheetScaled(int S, const char *dir)
         }
         snprintf(path, sizeof(path), "%s/rd_pixel_sheet_s%d.rddump", dir, S);
         CHECK(rd_dump_frame(path), "rd_dump_frame (scaled sheet %d)", S);
+        /* the loaded dumps stay live: the 2x sheet runs twice (bake on, off),
+         * so count what this load added */
+        int before = 0;
+        for (uint32_t i = 0; i < RD_MAX_TEXTURES; i++) {
+            const RdTexRec *t = &g_rd.textures[i];
+            before += t->live && t->kind == RD_TEXKIND_IMAGE && t->format == RD_TEXEL_SHEET &&
+                      t->w == (uint32_t)W && t->sheetScale == S && strcmp(t->name, "dump") == 0;
+        }
         RdFrame f;
         if (rd__load_frame(path, &f)) {
-            int sheets = 0;
+            int sheets = -before;
             for (uint32_t i = 0; i < RD_MAX_TEXTURES; i++) {
                 const RdTexRec *t = &g_rd.textures[i];
                 sheets += t->live && t->kind == RD_TEXKIND_IMAGE && t->format == RD_TEXEL_SHEET &&
@@ -3203,6 +3273,30 @@ static void testDump(const char *dir)
     }
     rd__frame_free(&f);
     rd_destroy_texture(t);
+    /* rd_pixel_keep.rddump: a game-shaped keep frame after it (the head's
+     * clear, brightness, KEEP, a fade, the reduction; rd_upscale_test's):
+     * the keep loop of rd_replay_tool_fsr3_keep and _upscale_keep */
+    RdFrameHead kh;
+    memset(&kh, 0, sizeof(kh));
+    memset(kh.rgba, 0x80, 4);
+    kh.gsW = kh.gsH = 512;
+    kh.aspect = 4.0f / 3.0f;
+    kh.clear = 1;
+    rd_begin_frame();
+    rd_frame_head(&kh);
+    rd_select_list(11);
+    static const RdPostKind kk[4] = {RD_POST_BRIGHTNESS, RD_POST_KEEP, RD_POST_FADE,
+                                     RD_POST_REDUCTION};
+    for (int k = 0; k < 4; k++) {
+        RdPostParams pp;
+        memset(&pp, 0, sizeof(pp));
+        memset(pp.rgba, k == 3 ? 0x80 : 0, 3);
+        rd_select_list(k == 3 ? 12 : 11);
+        rd_post(kk[k], &pp);
+    }
+    rd_end_frame(1);
+    snprintf(path, sizeof(path), "%s/rd_pixel_keep.rddump", dir);
+    CHECK(rd_dump_frame(path), "rd_dump_frame (keep)");
 }
 
 /* ---------------------------------------------------------------- present */
@@ -3787,7 +3881,8 @@ static void testPipelines(void)
          * the vertex pre-pass off, no dynamic state (every state in the
          * keys), Enhanced at the phone's fractional 2.8125 x 2.41071 (the
          * vu_np_ps twins), both blends: under the ceiling and inside the
-         * RHI's pool less its headroom (rhi_pipeline_pool.h) */
+         * RHI's pool less its headroom (rhi_pipeline_pool.h); 1293 and
+         * 1371 in v0.10.2, 4 more with the colour adjustment's blits */
         static RdPipeKeyInt keysT[RD_PIPELINE_REACHABLE_MAX];
         const RdProfile keepProfile = g_rd.profile;
         const bool keepD = g_rd.dynDepth, keepB = g_rd.dynBlend, keepPrepass = g_rd.vuPrepass;
@@ -3815,8 +3910,19 @@ static void testPipelines(void)
         g_rd.sceneSy = 2.41071f;
         rd_set_no_dual(false);
         const uint32_t nT = rd__enumerate_reachable(keysT, RD_PIPELINE_REACHABLE_MAX);
+        uint32_t famOff[RD_KF_COUNT], famOn[RD_KF_COUNT];
+        (void)rd__pipe_family_counts(keysT, nT, RD_PIPELINE_REACHABLE_MAX, famOff);
         rd_set_no_dual(true);
         const uint32_t nTNd = rd__enumerate_reachable(keysT, RD_PIPELINE_REACHABLE_MAX);
+        /* issue 179: the same device with the pre-pass on, its default
+           since v0.11.0 (the set above is its fallback after a failed
+           self-test): the main shaders' keys, the ten pre-pass entries' and
+           the five stages' in place of the program entries' */
+        rd__set_vu_prepass(true);
+        const uint32_t nTOnNd = rd__enumerate_reachable(keysT, RD_PIPELINE_REACHABLE_MAX);
+        rd_set_no_dual(false);
+        const uint32_t nTOn = rd__enumerate_reachable(keysT, RD_PIPELINE_REACHABLE_MAX);
+        (void)rd__pipe_family_counts(keysT, nTOn, RD_PIPELINE_REACHABLE_MAX, famOn);
         rd_set_no_dual(was);
         g_rd.profile = keepProfile;
         g_rd.dynDepth = keepD;
@@ -3838,9 +3944,19 @@ static void testPipelines(void)
                   nTNd <= RHI_PIPELINE_POOL_MAX - RHI_PIPELINE_POOL_HEADROOM,
               "the tile-based GPU's set %u (%u) past the pool's %d less its headroom %d", nT, nTNd,
               RHI_PIPELINE_POOL_MAX, RHI_PIPELINE_POOL_HEADROOM);
+        printf("  pipelines: the same with the pre-pass on: %u, %u with the two-pass fallback; "
+               "VU %u and VU point %u keys (pre-pass off: VU %u, VU point %u)\n",
+               nTOn, nTOnNd, famOn[RD_KF_VU], famOn[RD_KF_VU_POINT], famOff[RD_KF_VU],
+               famOff[RD_KF_VU_POINT]);
+        CHECK(nTOn < nT && nTOnNd < nTNd && famOn[RD_KF_VU] < famOff[RD_KF_VU],
+              "the tile-based GPU's set with the pre-pass %u (%u), VU %u: not below the set "
+              "without it %u (%u), VU %u",
+              nTOn, nTOnNd, famOn[RD_KF_VU], nT, nTNd, famOff[RD_KF_VU]);
     }
     /* 347 with the triangle commands' plane shaders (rd_screen_planes.c),
-     * a second vertex shader for each triangle pass (250 without them) */
+     * a second vertex shader for each triangle pass (250 without them);
+     * 357 in v0.10.2, and 4 more with the present's colour adjustment
+     * (blit_tone_ps and blit_depth_tone_ps on both outputs, rd_tone.h) */
     CHECK(ns < 400, "reachable screen and post pipelines %u >= 400", ns);
     /* the keys a frame with the dark volume's FBMSK (colour mask 7 until the
      * next FRAME write) and the lightning's perspective STQ would otherwise
@@ -3895,12 +4011,17 @@ static void testPipelines(void)
                     found |= passEnumerated(&dp[i], keys, ns, mine, nMine);
                     CHECK(prim || found,
                           "font draw under colour mask 7 (depth %d) is not enumerated", dz);
-                    /* the menus' sheet text in the same state */
+                    /* the menus' sheet text in the same state: in the set only
+                       where a scale the bake does not cover is reachable
+                       (rd__sheet_shader_in_scene, issue 188); at this test's
+                       scale the 1x bake serves it, so the key is left out */
                     dp[i].key.fs = RD_FS_FONT_SHEET;
                     found = 0;
                     found |= passEnumerated(&dp[i], keys, ns, mine, nMine);
-                    CHECK(prim || found,
-                          "sheet text draw under colour mask 7 (depth %d) is not enumerated", dz);
+                    CHECK(prim || (found != 0) == rd__sheet_shader_in_scene(),
+                          "sheet text draw under colour mask 7 (depth %d): enumerated %d, the "
+                          "sheet rule says %d",
+                          dz, found, rd__sheet_shader_in_scene());
                     /* and a 1x sheet's (font_sheet_baked_ps) */
                     dp[i].key.fs = RD_FS_FONT_SHEET_BAKED;
                     found = 0;
@@ -3941,17 +4062,30 @@ static void testPipelines(void)
     }
     CHECK(n < RD_PIPELINE_REACHABLE_MAX, "reachable pipelines %u >= %d (with the VU programs)", n,
           RD_PIPELINE_REACHABLE_MAX);
+    /* testSheetText drew this 1x frame's sheets through font_sheet_ps under
+       [dev] sheet_shader's switch; the set leaves those keys out at 1x
+       (issue 188) and keeps them under the switch: a font_sheet_ps key is
+       checked against the set the switch makes (WARP's 36 created keys
+       hold one; lavapipe reaches here with 5 created, none of them) */
+    static RdPipeKeyInt keysSh[RD_PIPELINE_REACHABLE_MAX];
+    const bool keepSheet = g_rd.sheetShader;
+    g_rd.sheetShader = true;
+    const uint32_t nSh = rd__enumerate_reachable(keysSh, RD_PIPELINE_REACHABLE_MAX);
+    g_rd.sheetShader = keepSheet;
     for (uint32_t i = 0; i < c; i++) {
         const RdPipeKeyInt *k = rd__pipeline_key_at(i);
         int found = 0;
         for (uint32_t j = 0; j < nMine && j < RD_PIPELINE_REACHABLE_MAX; j++) {
             found |= rd__pipe_key_equal(k, &mine[j]);
         }
+        for (uint32_t j = 0; !found && k->fs == RD_FS_FONT_SHEET && j < nSh; j++) {
+            found |= rd__pipe_key_equal(k, &keysSh[j]);
+        }
         CHECK(found,
-              "created pipeline %u (prog %u blend %u vs %u fmt %u/%u z %u/%u mask %x nodual %u) is "
-              "not in the enumerated set",
-              i, k->gs.program, k->gs.blend, k->vs, k->colorFmt, k->depthFmt, k->gs.ztst,
-              k->gs.zwrite, k->gs.colorMask, k->gs.nodual);
+              "created pipeline %u (prog %u blend %u vs %u fs %s fmt %u/%u z %u/%u mask %x nodual "
+              "%u) is not in the enumerated set",
+              i, k->gs.program, k->gs.blend, k->vs, rd__fs_name(k->fs), k->colorFmt, k->depthFmt,
+              k->gs.ztst, k->gs.zwrite, k->gs.colorMask, k->gs.nodual);
     }
 }
 
@@ -4911,6 +5045,60 @@ static void testVuSeams(const char *mode)
         }
         rd_destroy_vu_mesh(m);
     }
+
+    /* S6 (the main gate's bottom rail beside the 48:9 picture): a code-36
+     * triangle whose v0 is past the guard band on the right (clip x 1.096:
+     * x flag only, mem[20..23] x and y as (X - 2048) / 1500) with a GS Z
+     * ftoi4 saturates (3.2e9 true), then a GIF triangle at GS Z 3.1e8 over
+     * the probe, 1/9 of the way to v0 from the v1-v2 edge (Z 1.6e7): the
+     * PS2's cut gives the probe Z 3.70e8, above the GIF's (GEQUAL fails,
+     * red stays); v0 drawn at its saturated Z gave 2.53e8 there (the GIF
+     * drew green over the VU's surface).  The VU triangle must win */
+    {
+        const float tri[3][4] = {{1900.0f, 200.0f, 200000000.0f, 1.0f},
+                                 {100.0f, 100.0f, 1000000.0f, 1.0f},
+                                 {100.0f, 300.0f, 1000000.0f, 1.0f}};
+        CHECK(seamGsVtx(tri[0], 0.0, 0.0, kSeamRed).z == 0x7FFFFFFFu,
+              "vu seams: S6 v0's GS Z is not saturated");
+        const RdMesh m = seamMesh(tri, kStart3, 3, kSeamRed);
+        seamBegin();
+        RdVuDraw d;
+        memset(&d, 0, sizeof(d));
+        d.prog = RD_PROG_PRELIT;
+        d.code = 36;
+        d.clip = RD_VU_CLIP_SCISSOR;
+        d.vu.mem[16][0] = d.vu.mem[17][1] = d.vu.mem[18][2] = d.vu.mem[19][3] = 1.0f;
+        d.vu.mem[19][0] = d.vu.mem[19][1] = 1792.0f;
+        d.vu.mem[20][0] = d.vu.mem[21][1] = 1.0f / 1500.0f;
+        d.vu.mem[23][0] = d.vu.mem[23][1] = -256.0f / 1500.0f;
+        d.vu.mem[22][2] = 1.0f / 400000000.0f; /* v0's clip z 0.5: no z flag */
+        d.vu.mem[23][3] = 1.0f;
+        rd_draw_vu_mesh(m, &d, RD_KEY(&kSeamKey, 36, 6));
+        const float g[3][4] = {{250.0f, 150.0f, 19375000.0f, 1.0f},
+                               {400.0f, 150.0f, 19375000.0f, 1.0f},
+                               {300.0f, 300.0f, 19375000.0f, 1.0f}};
+        RdScreenVtx gv[3];
+        for (int k = 0; k < 3; k++) {
+            gv[k] = seamGsVtx(g[k], 0.0, 0.0, kSeamGreen);
+        }
+        rd_screen_prims(RD_PRIM_TRIANGLES, gv, 3, RD_SPACE_WORLD, 1, 0);
+        rd_end_frame(0);
+        uint32_t w = 0, h = 0;
+        float sx = 1.0f, sy = 1.0f;
+        uint8_t *img = readScaled(RD_TARGET_SCENE, &w, &h, &sx, &sy);
+        const size_t px = (size_t)(300.0f * sx + 0.5f), py = (size_t)(200.0f * sy + 0.5f);
+        CHECK(img && px < w && py < h, "vu seams (%s): S6: no picture", mode);
+        if (img && px < w && py < h) {
+            const uint8_t *c = &img[(py * w + px) * 4];
+            printf("  vu seams (%s): S6 code 36, x flag only, v0's GS Z saturated, a GIF triangle "
+                   "between its true and saturated depth: the probe %d %d %d\n",
+                   mode, c[0], c[1], c[2]);
+            CHECK(c[0] > 150 && c[1] < 100, "vu seams (%s): S6: the GIF triangle won (%d %d %d)",
+                  mode, c[0], c[1], c[2]);
+        }
+        free(img);
+        rd_destroy_vu_mesh(m);
+    }
 }
 
 /* ------------------------------------------------- coplanar overlaps */
@@ -5372,6 +5560,14 @@ static void testVuPathsAt(const char *mode, RdPreset preset, float scale, int ch
 
 int main(int argc, char **argv)
 {
+    /* the PS2's region rule ([dev] region_rule = ps2): this test's
+       pictures and counts are its drops' (the camera rule's are vu1's,
+       rd_native's and rd_region_camera_ab's) */
+#ifdef _WIN32
+    _putenv_s("ICO_RD_REGION_RULE", "ps2");
+#else
+    setenv("ICO_RD_REGION_RULE", "ps2", 1);
+#endif
     /* the frames here hold golden bytes (or read SCENE back) with list
        11's last sprites drawn into SCENE; the fades fold, how the game
        draws them, is ctest rd_fades_fold's and rd_fades_fold_ab's

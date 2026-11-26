@@ -9,6 +9,7 @@
 #include "../rhi_adapter.h"
 #include "../rhi_backend.h"
 #include "../rhi_bind_cache.h"
+#include "../rhi_device_table.h"
 #include <stdlib.h>
 #include <string.h>
 
@@ -516,6 +517,29 @@ static uint32_t d11_msaa_counts(void)
 
 static char s_driverLimitText[96];
 
+/* the device table's start-up lines (../rhi_device_table.h,
+   docs/port/DEVICE_TABLE.md): no row is keyed on Direct3D 11, so the
+   header names the rows a D3D11 identity matches, with no fakes (the
+   tests' are Vulkan's); the summary's clause noted */
+static void d11_device_table_line(const char *line, void *user)
+{
+    (void)user;
+    D11_LOG("%s", line);
+}
+
+static void d11_device_table(void)
+{
+    RhiDeviceId id;
+    memset(&id, 0, sizeof id);
+    id.backend = RHI_DT_D3D11;
+    id.os = RHI_DT_OS_BUILD;
+    id.vendorId = g_d11.vendorId;
+    id.deviceId = g_d11.deviceId;
+    id.deviceName = g_d11.adapterName;
+    id.driverText = g_d11.limits.driverText;
+    (void)rhi_device_table_start(&id, NULL, d11_device_table_line, NULL);
+}
+
 static void d11_fill_limits(void)
 {
     RhiLimits *o = &g_d11.limits;
@@ -572,6 +596,11 @@ static void d11_fill_limits(void)
     /* D3D11.3 has ROVs, left off in this version (opt-in, untested) */
     o->rov = false;
     o->fragmentInterlock = false;
+    /* feature level 11_0 has no vertex shader UAVs (rhi.h RhiLimits.vertexStores) */
+    o->vertexStores = false;
+    /* no compute dispatches this release (rhi.h RhiLimits.computeStores) */
+    o->computeStores = false;
+    o->computeStoresOff = "Direct3D 11: not in this release";
     o->rasterOrderAttachment = false;
     o->rasterOrderOff = NULL;
     o->moltenvk = false;
@@ -584,8 +613,13 @@ static void d11_fill_limits(void)
      * stencil plane (d3d11_resource.c), the value in green */
     o->stencilView = true;
     o->stencilViewChannel = 1;
+    /* the format has no shader-gather support: the debug layer's error
+     * 416 on every draw of a pixel shader that gathers from it (the
+     * v0.10.0 tag's WARP run); the renderer reads it a texel a load */
+    o->stencilGather = false;
     o->vuFallbackPlain = NULL;
     o->carefulPipelines = NULL;
+    o->serialPipelines = NULL;
     o->compilerVersion = NULL;
 }
 
@@ -936,11 +970,24 @@ uint32_t rhi_read_timestamps_busy(uint64_t *ns, uint32_t max)
     return 0;
 }
 
+/* no slot clock here (rhi.h rhi_read_timestamp_clock: Vulkan's) */
+bool rhi_read_timestamp_clock(RhiTimestampClock *out)
+{
+    memset(out, 0, sizeof(*out));
+    return false;
+}
+
 /* ------------------------------------------------------- occlusion queries
  * Not supported here (rhi.h rhi_cmd_begin_occlusion: the replay tool's
  * measurement is Vulkan's); a D3D11_QUERY_OCCLUSION query per index and slot, read with GetData when the slot comes round would be the form. */
 bool rhi_occlusion_supported(void)
 {
+    return false;
+}
+
+bool rhi_occlusion_prepare(uint32_t count)
+{
+    (void)count;
     return false;
 }
 
@@ -1063,6 +1110,11 @@ void rhi_wait_frame(void)
 uint32_t rhi_frame_slot(void)
 {
     return (uint32_t)(g_d11.frameIndex % RHI_FRAMES_IN_FLIGHT);
+}
+
+bool rhi_commands_left(void)
+{
+    return true; /* no list limit a slot on this backend */
 }
 
 void rhi_wait_idle(void)
@@ -1445,6 +1497,7 @@ bool rhi_init(const RhiDeviceDesc *desc)
             g_d11.swapchain ? (g_d11.tearing ? "yes" : "no") : "n/a",
             g_d11.info ? "on" : (debug ? "asked for, not installed" : "off"),
             g_d11.cacheDir[0] ? g_d11.cacheDir : "none", g_d11.swapchain ? "" : "; headless");
+    d11_device_table();
     d11_video_memory();
     if (g_d11.memBudget == 0) {
         D11_LOG("video memory budget: not reported by this adapter");
@@ -1599,6 +1652,12 @@ bool rhi_present_fifo_fallback_on(void)
     return false;
 }
 
+/* rhi.h: no mailbox here, so no FIFO start either */
+void rhi_present_fifo_start(RhiFifoStartFn eligible)
+{
+    (void)eligible;
+}
+
 /* rhi.h: ignored, as on D3D12 (a flip-model swapchain in a window; the
  * window's fullscreen is SDL's and DXGI's to decide) */
 void rhi_set_exclusive_fullscreen(bool allowed)
@@ -1622,6 +1681,32 @@ uint64_t rhi_present_last_id(void)
     return 0;
 }
 
+/* rhi.h: no display times read back on this backend */
+uint32_t rhi_present_glass(uint64_t *lastId, uint64_t *refreshNs, RhiGlassTime *out, uint32_t max)
+{
+    (void)out;
+    (void)max;
+    if (lastId != NULL) {
+        *lastId = 0;
+    }
+    if (refreshNs != NULL) {
+        *refreshNs = 0;
+    }
+    return 0;
+}
+
+/* rhi.h: no desired present time on this backend */
+void rhi_present_desire(uint64_t desiredNs)
+{
+    (void)desiredNs;
+}
+
+/* rhi.h: no display times on this backend */
+void rhi_present_glass_use(bool on)
+{
+    (void)on;
+}
+
 int rhi_present_timing_next(uint64_t *id, uint64_t *ns)
 {
     (void)id;
@@ -1635,4 +1720,45 @@ void rhi_set_vulkan_loader(void *getInstanceProcAddr)
 }
 
 /* The rhi_create_backend entry (port/rhi/rhi_backend.h). */
+/* The native handles of rhi_native.h: not offered here (the FidelityFX
+ * compute backends exist for Vulkan and D3D12 only). */
+bool rhi_native_device(RhiNativeDevice *out)
+{
+    (void)out;
+    return false;
+}
+
+bool rhi_native_texture(RhiTexture t, RhiNativeTexture *out)
+{
+    (void)t;
+    (void)out;
+    return false;
+}
+
+bool rhi_native_command_list(RhiCommandList cl, void **out)
+{
+    (void)cl;
+    (void)out;
+    return false;
+}
+
+bool rhi_cmd_external_begin(RhiCommandList cl)
+{
+    (void)cl;
+    return false;
+}
+
+void rhi_cmd_external_end(RhiCommandList cl)
+{
+    (void)cl;
+}
+
+bool rhi_device_compute_caps(RhiComputeCaps *out)
+{
+    out->ok = out->apiVersionOk = out->subgroupOk = out->storageFormatsOk = out->float16 = false;
+    out->externalExts = false;
+    out->why = "not offered by the Direct3D 11 backend";
+    return false;
+}
+
 RHI_BACKEND_DEFINE(rhi_backend_d3d11, "d3d11");

@@ -22,9 +22,27 @@
  *   ico-pc.log               the log so far;
  *   ico-pc-previous.log      the run before's;
  *   startup-activity.txt     when there is one (diag_host.h);
+ *   last-run.txt,            where this run is and where the run before
+ *   last-run-previous.txt    was, when there are (last_run.h);
+ *   vu-zero-mark.txt,        issue 179's attempts' marks on the install,
+ *   ahead-mark.txt,          each when there is one (vu_zero_mark.h,
+ *   nodiscard-mark.txt,      ahead_mark.h, the discard-free twins',
+ *   fastps-mark.txt          the fast pixel build's, fastps_mark.h);
+ *   exit-info.txt            how the run before ended, Android's exit
+ *                            records read at this start (exit_info.h);
+ *   exit-trace-<ms>.txt|.pb  the newest trace Android kept with one (an
+ *                            ANR's text, a native crash's tombstone);
  *   config.toml, ico-pc.ini  the settings;
  *   loss-<stamp>.zip         the newest loss dump, when there is one
- *                            (stored as it is).
+ *                            (deflated: the loss dump writes its zip
+ *                            stored);
+ *   slow-<stamp>.zip         this run's slow-scene dump, when one was
+ *                            written (stored as it is);
+ *   scene-ledger.txt         what each of the last stages played contained
+ *                            and what was left out of its pictures, and the
+ *                            stage in play so far (the window's renderer
+ *                            sets it: ico_report_set_ledger; port/render/
+ *                            rd_ledger.h), when one is set.
  *
  * Written from a crash handler: no allocation, no stdio, raw file calls
  * through static buffers, the zip's entries deflated by miniz's tdefl into
@@ -55,6 +73,16 @@ void ico_report_set_paths(const char *logs_dir, const char *exe_dir, const char 
 /* Android: VERSION.txt's lines, read from the app's assets (copied, at
    most 255 bytes); report.txt takes them instead of a file. */
 void ico_report_set_version_text(const char *text);
+/* The scene ledger's text for scene-ledger.txt (port/render/rd_ledger.h
+   rd_ledger_report_text: static data and snprintf only, as the crash path
+   needs): fn writes at most cap - 1 bytes into out and returns the length;
+   NULL leaves the entry out.  A build without the renderer sets none. */
+void ico_report_set_ledger(size_t (*fn)(char *out, size_t cap));
+/* How the run before ended (exit_info.h, issue 215): the verdict for
+   report.txt's head ("the previous run ended: ..."; copied, cut to 1023
+   bytes) and the newest exit trace's file name in the logs folder (copied;
+   NULL or "" none). */
+void ico_report_set_exit_info(const char *verdict, const char *trace);
 
 typedef struct IcoReportInputs {
     const char *what;     /* "a crash: SIGSEGV ...", "the watchdog", ... */
@@ -66,6 +94,7 @@ typedef struct IcoReportInputs {
        device 320 MB available of 7632 MB"; NULL or "": unknown) */
     const char *memory;
     const char *loss_zip; /* the newest loss dump's path (NULL: none) */
+    const char *slow_zip; /* this run's slow-scene dump's path (NULL: none) */
     double uptime_s;      /* seconds into the run */
     /* text of the host's own for report.txt's end (the window: SDL's log
        ring, diag_host.h ico_diag_set_report_extra; NULL or "": none) */
@@ -76,6 +105,10 @@ typedef struct IcoReportInputs {
    (no logs folder, a write failed) with why in name. Async-signal-safe in
    practice: open/read/write/lseek and static buffers. */
 int ico_report_write(const IcoReportInputs *in, char *name, size_t name_size);
+/* The size in bytes of the last report ico_report_write wrote (0: none
+   yet): the log line names it, so a report over an issue's attachment
+   limit (GitHub's 25 MB) shows in the log. */
+unsigned long long ico_report_last_bytes(void);
 /* Deletes the oldest report-*.zip files beyond keep (normal paths only);
    the number deleted, -1 when the folder cannot be read. */
 int ico_report_prune(int keep);

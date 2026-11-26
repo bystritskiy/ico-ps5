@@ -21,6 +21,7 @@
  * them into its command (so dumps carry them). */
 #include <stdarg.h>
 #include <stdio.h>
+#include <stdlib.h>
 #include <string.h>
 #include "rd_internal.h"
 
@@ -131,8 +132,8 @@ RdTarget rd_block_target(uint32_t tbp, uint32_t gsW, uint32_t gsH, int withDepth
         rd__log("rd_block_target: more than %d blocks in one frame", RD_WATER_BLOCKS);
         return (RdTarget){0};
     }
-    /* marked as a block: under Water reflections: Sharp one that is not
-     * scene-sized takes the scene's scale (rd_core.c rd__target_scale_of) */
+    /* marked as a block: one that is not scene-sized takes the scene's
+     * scale too (rd_core.c rd__target_scale_of) */
     RdTarget t = rd__block_temp_target(gsW, gsH, withDepth);
     if (t.id != 0) {
         WaterBlock *b = &w->blocks[w->blockCount++];
@@ -395,16 +396,28 @@ void rd__block_read(const RdTargetRec *src)
  * rd_internal.h rd__block_keeps_repeat: the open border's clamp of a target
  * read (rd_replay.c drawWrap) is for the screen-space copies of the frame;
  * a screen prim reading a block smaller than the frame keeps the game's
- * wrap (the puddle's ripples, issue 106) */
+ * wrap (the puddle's ripples, issue 106).  ICO_RD_BLOCK_CLAMP=1, the tests'
+ * sabotage (docs/port/TESTING.md): no read kept, every block read clamped
+ * under an open border as before the fix, so a test can show its picture
+ * would see the defect; read once a process and logged */
 bool rd__block_keeps_repeat(const RdTargetRec *src)
 {
-    return src && src->block && !(src->w == g_rd.gsW && src->h == g_rd.gsH);
+    static int clampAll = -1;
+    if (clampAll < 0) {
+        const char *e = getenv("ICO_RD_BLOCK_CLAMP");
+        clampAll = e != NULL && strcmp(e, "1") == 0;
+        if (clampAll) {
+            rd__log("water: ICO_RD_BLOCK_CLAMP=1 (the tests' sabotage): every block read clamped "
+                    "under an open border, as before issue 106's fix");
+        }
+    }
+    return !clampAll && src && src->block && !(src->w == g_rd.gsW && src->h == g_rd.gsH);
 }
 
 /* ------------------------------------------- the F12 line (issue 106)
  * What a reporter's dump line alone has to tell about the water: which
- * scale each block was drawn at (Water reflections Original: its GS size;
- * Sharp: the scene's), and the state of the draws that wrote and read it
+ * scale each block was drawn at (the scene's; its GS size under the tests'
+ * ICO_RD_WATER_SCALE=0, or v0.11.6's Water reflections: Original), and the state of the draws that wrote and read it
  * (puddle.c's leveldown, drawRipples and copy test DATE with AFAIL
  * RGB_ONLY; the puddle surface sets the alpha bit they test).  A dump
  * carries a texture-pack replacement as a blank image (rd_dump.c), so the
@@ -579,9 +592,10 @@ size_t rd__water_dump_line(const RdFrame *f, char *line, size_t cap)
     RdStateBlock s = f->startState;
     rd__walk(f, f->keep, &s, waterLineWalk, &a);
     const RdTargetRec *sc = rd__target_rec(RD_TARGET_SCENE + 1);
-    at = waterPut(line, cap, at, "frame %u: water reflections %s; scene %gx%g", f->number,
-                  g_rd.settings.waterSharp ? "sharp" : "original", sc ? (double)sc->sx : 0.0,
-                  sc ? (double)sc->sy : 0.0);
+    at =
+        waterPut(line, cap, at, "frame %u: water reflections %s; scene %gx%g", f->number,
+                 g_rd.waterPs2 ? "at their GS size (ICO_RD_WATER_SCALE=0)" : "at the scene's scale",
+                 sc ? (double)sc->sx : 0.0, sc ? (double)sc->sy : 0.0);
     if (a.nBlocks == 0) {
         at = waterPut(line, cap, at, "; no render-to-texture block");
     }

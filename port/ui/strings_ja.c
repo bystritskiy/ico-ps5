@@ -34,11 +34,7 @@ const char *const ui_strings_ja[UI_STR_COUNT] = {
         "気軽に遊びたい方に。一部のイベントでは、さらわれる場面が表示されます。",
     [UI_STR_OPT_PIT_TIME] = "ヨルダを助けるまでの時間",
     [UI_STR_OPT_PIT_TIME_NOTE] =
-        "影がヨルダを連れ去るまでの時間です。上のヨルダの項目なら、さらわれなくなります。",
-    [UI_STR_VAL_PIT_HALF] = "半分",
-    [UI_STR_VAL_PIT_LONGER] = "やや長い",
-    [UI_STR_VAL_PIT_DOUBLE] = "2倍",
-    [UI_STR_VAL_PIT_TRIPLE] = "3倍",
+        "影がヨルダを連れて沈み始めてから連れ去るまでの秒数（一部の場面は同じ割合で短め）。さらわれない設定では無効です。",
     [UI_STR_OPT_SHADOW_SPEED] = "影の速さ",
     [UI_STR_OPT_SHADOW_SPEED_NOTE] =
         "影が歩く、走る、飛ぶ速さです。攻撃してくる頻度は変わりません。",
@@ -154,6 +150,7 @@ const char *const ui_strings_ja[UI_STR_COUNT] = {
     [UI_STR_OPT_TOUCH_SIZE] = "タッチの大きさ",
     [UI_STR_OPT_TOUCH_OPACITY] = "タッチの不透明度",
     [UI_STR_VAL_ALWAYS] = "常に表示",
+    [UI_STR_VAL_ALWAYS_SCENES] = "常に表示、シーン中はスタートのみ",
     [UI_STR_VAL_SMALL] = "小",
     [UI_STR_VAL_MEDIUM] = "中",
     [UI_STR_VAL_LARGE] = "大",
@@ -203,9 +200,17 @@ const char *const ui_strings_ja[UI_STR_COUNT] = {
     [UI_STR_MIRROR_SCREEN] = "左右を反転して遊びます。この設定はセーブデータに記録されます。",
     [UI_STR_OPT_NEWGAME_PLUS] = "ニューゲーム+",
     [UI_STR_NEWGAME_PLUS_SCREEN] =
-        "ニューゲーム+では2周目の旅を遊びます。ヨルダの言葉が訳され、エンディングとアイテムが変わります。オフにすると、クリア後も1周目の旅を遊びます。",
+        "2周目の旅を遊びます。ヨルダの言葉が訳され、エンディングとアイテムが変わります。オフは1周目の旅です。",
+    [UI_STR_NEWGAME_START] = "はじめる",
+    [UI_STR_NEWGAME_START_SCREEN] = "上の設定でニューゲームをはじめます。",
     [UI_STR_OPT_CRT] = "CRTフィルタ",
     [UI_STR_OPT_CRT_STRENGTH] = "CRTの強さ",
+    [UI_STR_OPT_TONE_GAMMA] = "ガンマ",
+    [UI_STR_OPT_TONE_BRIGHTNESS] = "画面の明るさ",
+    [UI_STR_OPT_TONE_CONTRAST] = "コントラスト",
+    [UI_STR_OPT_TONE_SATURATION] = "彩度",
+    [UI_STR_OPT_TONE_NOTE] =
+        "50はゲームが描く画面そのままです。□で50にもどします。CRTフィルタも変わりますが、くっきり表示のメニュー文字は変わりません。",
     [UI_STR_VAL_CRT_SCANLINES] = "走査線",
     [UI_STR_VAL_CRT_CONSUMER] = "家庭用テレビ",
     [UI_STR_VAL_CRT_TRINITRON] = "Trinitron",
@@ -404,6 +409,20 @@ const char *const ui_strings_ja[UI_STR_COUNT] = {
     [UI_STR_VAL_HOLD_DISC_B] = "ディスクのまま（B）",
     [UI_STR_HOLD_TYPE_NOTE] =
         "A：R1を押している間、ヨルダと手をつなぎます。B：R1を1回押すと手をつなぎ、もう一度押すと手を離します。",
+    [UI_STR_OPT_ZOOM_TYPE] = "ズーム設定",
+    [UI_STR_VAL_ZOOM_HOLD] = "押し続ける",
+    [UI_STR_VAL_ZOOM_TOGGLE] = "切り替え",
+    [UI_STR_ZOOM_TYPE_NOTE] =
+        "押し続ける：R2を押している間、ズームします。切り替え：R2を1回押すとズームし、もう一度押すと元に戻ります。",
+    [UI_STR_OPT_CAMERA_RESET] = "カメラリセット",
+    [UI_STR_CAMERA_RESET_NOTE] =
+        "オン：右スティックを押し込む（R3）と、カメラがすぐにイコへ戻ります。",
+    [UI_STR_OPT_YORDA_LOOK] = "ヨルダを見る",
+    [UI_STR_YORDA_LOOK_NOTE] =
+        "イコとカメラが、声をかけずにヨルダの方を向きます。押し続ける：L3を押している間。切り替え：L3を押すたびに開始と終了。",
+    [UI_STR_OPT_BUTTON_PICTURES] = "ボタン表示",
+    [UI_STR_BUTTON_PICTURES_NOTE] =
+        "メニューとフォトモードに表示するボタンです。自動は最後に使ったコントローラーに合わせます。",
     [UI_STR_STICK_FIX_ALSO_NOTE] = "「ゲームプレイ」にもあります。",
     [UI_STR_ACH_POPUPS_ALSO_NOTE] = "「実績」にもあります。",
     [UI_STR_PLAYERS_NOTE] = "2：2つ目のコントローラでヨルダを操作します。",
@@ -445,7 +464,6 @@ const char *const ui_strings_ja[UI_STR_COUNT] = {
     [UI_STR_STATS_CAPTURES] = "ヨルダがさらわれた回数",
     [UI_STR_STATS_SAVES] = "この旅のセーブ回数",
     [UI_STR_STATS_ENEMIES] = "この旅で倒した敵",
-    [UI_STR_STATS_ASSISTS] = "アシスト",
     [UI_STR_STATS_AREA] = "エリア",
     [UI_STR_PHOTO_ACT_MOVE] = "移動",
     [UI_STR_PHOTO_ACT_LOOK] = "視点",
@@ -516,10 +534,6 @@ const char *const ui_strings_ja[UI_STR_COUNT] = {
     [UI_STR_VAL_WINDOWED] = "ウィンドウ",
     [UI_STR_VAL_BORDERLESS] = "ボーダーレス",
     /* Effects > Cinematic bars */
-    [UI_STR_OPT_EFFECT_WATER] = "水面の映り込み",
-    [UI_STR_VAL_SHARP] = "くっきり",
-    [UI_STR_EFFECT_WATER_NOTE] =
-        "「くっきり」は水面の映り込みを選んだ解像度で描きます。「オリジナル」はPS2のやわらかい映り込みのままです。",
     [UI_STR_VAL_SMOOTH] = "なめらか",
     [UI_STR_OPT_SHOW_FPS] = "フレームレート表示",
     [UI_STR_EFFECT_MOTION_BLUR_NOTE] =
@@ -557,14 +571,13 @@ const char *const ui_strings_ja[UI_STR_COUNT] = {
         "選んだドライバーは前回起動しませんでした。端末内蔵のドライバーを使っています。",
     [UI_STR_GPU_DRIVER_NOSPACE] = "空き容量が足りず、追加できません",
     [UI_STR_GPU_DRIVER_NO_PICKER] =
-        "ファイル選択画面を開けませんでした。代わりにドライバーのzipファイルを次のフォルダーにコピーできます: %s",
+        "ファイル選択画面が開きませんでした。ドライバーのzipを次のフォルダーにコピーしてください: %s",
     [UI_STR_GPU_DRIVER_NO_PICKER_APP] =
-        "この端末にはファイルを選べるアプリがありません。ドライバーのzipファイルを次のフォルダーにコピーしてください: %s",
-    [UI_STR_GPU_DRIVER_UNREADABLE] =
-        "選んだファイルを読み込めませんでした。先にこの端末へコピーしてから、もう一度選んでください",
+        "ファイルを選べるアプリがありません。ドライバーのzipを次のフォルダーにコピーしてください: %s",
+    [UI_STR_GPU_DRIVER_UNREADABLE] = "読み込めません。先にこの端末へコピーしてください",
     [UI_STR_GPU_DRIVER_ADD_FILE] = "driversフォルダーから追加",
     [UI_STR_GPU_DRIVER_CANCELLED] =
-        "ファイルが選ばれませんでした。選択画面が開かない場合は、ドライバーのzipファイルを次のフォルダーにコピーして、driversフォルダーから追加を使ってください: %s",
+        "ファイルが選ばれませんでした。選択画面が開かない場合は、ドライバーのzipを次のフォルダーにコピーして、driversフォルダーから追加を使ってください: %s",
     [UI_STR_GPU_DRIVER_NOTE_LOST] =
         "この端末のQualcommドライバーで画面が止まりました。Turnipドライバーを追加するか、そのzipファイルを次のフォルダーにコピーしてください (%s)。次回の起動から使われます。",
     [UI_STR_QUIT_GAME] = "ゲームを終了",
@@ -592,6 +605,9 @@ const char *const ui_strings_ja[UI_STR_COUNT] = {
     [UI_STR_OPT_SECOND_CARD] = "2つ目のメモリーカード",
     [UI_STR_OPT_SECOND_CARD_NOTE] =
         "オフ：オリジナルどおりメモリーカード1つ。オン：2つ目のカードにさらに10個セーブでき、セーブとロードで両方を選べます。",
+    [UI_STR_OPT_SHADOWS_TOGETHER] = "影がいっせいに攻撃",
+    [UI_STR_OPT_SHADOWS_TOGETHER_NOTE] =
+        "オフ：オリジナルどおり、影は1体ずつ攻撃します。オン：複数の影が同時に攻撃できます。",
     [UI_STR_OPT_AA] = "アンチエイリアス",
     [UI_STR_OPT_AA_NOTE] =
         "輪郭をなめらかにします。スーパーサンプリングは画素が4倍(2x)、16倍(4x)。30に下がるときは下げます。",
@@ -599,6 +615,17 @@ const char *const ui_strings_ja[UI_STR_COUNT] = {
     [UI_STR_VAL_DOWNSAMPLE_BOX] = "元のサイズへ",
     [UI_STR_OPT_DOWNSAMPLE_NOTE] =
         "上の解像度で描いて元のサイズに縮小します。2x以上で有効。CRTフィルタとウィンドウでは無効。",
+    [UI_STR_OPT_UPSCALE] = "アップスケール",
+    [UI_STR_VAL_UPSCALE_FSR1] = "FSR 1.0",
+    [UI_STR_VAL_UPSCALE_FSR3] = "FSR 3.1",
+    [UI_STR_OPT_UPSCALE_QUALITY] = "アップスケール品質",
+    [UI_STR_VAL_UPSCALE_Q_NATIVE] = "ネイティブAA",
+    [UI_STR_VAL_UPSCALE_Q_QUALITY] = "品質優先",
+    [UI_STR_VAL_UPSCALE_Q_BALANCED] = "バランス",
+    [UI_STR_VAL_UPSCALE_Q_PERFORMANCE] = "パフォーマンス",
+    [UI_STR_OPT_UPSCALE_SHARPNESS] = "シャープネス",
+    [UI_STR_OPT_UPSCALE_NOTE] =
+        "画面より小さく描くとき、FSR（AMD）で鮮明にします。CRTフィルタとウィンドウでは無効。3.1は縮小表示なし、アンチエイリアスはオフ。",
     [UI_STR_AA_OFF] = "オフ",
     [UI_STR_AA_SSAA2] = "2xスーパーサンプリング",
     [UI_STR_AA_SSAA4] = "4xスーパーサンプリング",
@@ -606,6 +633,7 @@ const char *const ui_strings_ja[UI_STR_COUNT] = {
     [UI_STR_AA_MSAA4] = "MSAA 4x",
     [UI_STR_AA_MSAA8] = "MSAA 8x",
     [UI_STR_AA_UNAVAILABLE] = "（オフ：使用できません）",
+    [UI_STR_AA_FSR3] = "（オフ：FSR 3.1）",
     [UI_STR_EXTRAS_STEAM] = "Steamに追加",
     [UI_STR_STEAM_ADDED] = "Steamに追加しました",
     [UI_STR_STEAM_ADDED_BODY] = "Steamを起動して、ライブラリで\nICOを探してください。",
@@ -618,8 +646,12 @@ const char *const ui_strings_ja[UI_STR_COUNT] = {
     [UI_STR_STEAM_NO_USER] = "Steamアカウントが見つかりません",
     [UI_STR_STEAM_NO_USER_BODY] = "一度Steamにサインインしてから、\nもう一度お試しください。",
     [UI_STR_STEAM_FAILED] = "Steamに追加できませんでした",
-    [UI_STR_STEAM_FAILED_BODY] =
-        "ショートカット一覧を変更できませんでした。\n手動で追加する方法はREADMEにあります。",
+    [UI_STR_STEAM_FAILED_BODY] = "手動で追加する方法はREADMEにあります。",
+    [UI_STR_EXTRAS_DESKTOP] = "アプリケーションメニューに追加",
+    [UI_STR_DESKTOP_ADDED] = "メニューに追加しました",
+    [UI_STR_DESKTOP_ADDED_BODY] = "ゲームがアプリケーション\nメニューに入りました。",
+    [UI_STR_DESKTOP_FAILED] = "メニューに追加できませんでした",
+    [UI_STR_DESKTOP_FAILED_BODY] = "メニューの項目をユーザーフォルダに\n書き込めませんでした。",
     [UI_STR_EXTRAS_EXPORT_TEXTURES] = "テクスチャを書き出す",
     [UI_STR_EXPORT_TEXTURES_STOP] = "書き出しを中止",
     [UI_STR_EXPORT_TEXTURES_NOTE] =
@@ -642,7 +674,7 @@ const char *const ui_strings_ja[UI_STR_COUNT] = {
     [UI_STR_RESTORE_AGAIN] = "もう一度押して選ぶ",
     [UI_STR_RESTORE_CONFIRM_TITLE] = "バックアップから復元しますか？",
     [UI_STR_RESTORE_CONFIRM_BODY] =
-        "ここにあるメモリーカード、セーブステート、設定、実績がバックアップのものに置き換わり、ゲームが再起動します。\nもう一度押すとバックアップを選べます。",
+        "ここのメモリーカード、セーブステート、設定、実績をバックアップのものに置き換えて再起動します。\nもう一度押すとバックアップを選べます。",
     [UI_STR_RESTORE_CHOOSING] = "復元するバックアップを選んでください。",
     [UI_STR_RESTORE_READING] = "バックアップを読み込み中…",
     [UI_STR_RESTORE_PROGRESS] = "復元中：%d / %dファイル",
@@ -658,23 +690,21 @@ const char *const ui_strings_ja[UI_STR_COUNT] = {
     [UI_STR_BACKUP_DONE_BODY] = "%d個のファイルを\n%sに保存しました",
     [UI_STR_BACKUP_FAILED] = "データをバックアップできませんでした",
     [UI_STR_RESTORE_DONE] = "データを復元しています",
-    [UI_STR_RESTORE_DONE_RESTART] = "ゲームが再起動し、バックアップを元に戻します。",
+    [UI_STR_RESTORE_DONE_RESTART] = "再起動してバックアップを元に戻します。",
     [UI_STR_RESTORE_DONE_CLOSE] =
-        "ゲームを終了します。もう一度起動すると、起動時にバックアップを元に戻します。",
+        "ゲームを終了します。もう一度起動するとバックアップを元に戻します。",
     [UI_STR_RESTORE_FAILED] = "バックアップを復元できませんでした",
-    [UI_STR_BACKUP_WHY_BUSY] =
-        "今はできません：ゲームが保存中です。少し待ってからもう一度お試しください。",
+    [UI_STR_BACKUP_WHY_BUSY] = "ゲームが保存中です。少し待ってからお試しください。",
     [UI_STR_BACKUP_WHY_NOTHING] = "まだバックアップするものがありません。",
     [UI_STR_BACKUP_WHY_WRITE] =
-        "データを書き込めませんでした。空き容量を確認して、もう一度お試しください。",
+        "書き込めませんでした。空き容量を確認して、もう一度お試しください。",
     [UI_STR_BACKUP_WHY_READ] = "ファイルを読み込めませんでした。",
     [UI_STR_BACKUP_WHY_NOT_BACKUP] =
         "このファイルはこのゲームで作られたバックアップではありません。",
     [UI_STR_BACKUP_WHY_NEWER] =
-        "このバックアップは新しいバージョンで作られました。ゲームを更新してから復元してください。",
+        "新しいバージョンで作られました。ゲームを更新してから復元してください。",
     [UI_STR_BACKUP_WHY_DAMAGED] = "このバックアップは壊れています。",
-    [UI_STR_BACKUP_WHY_UNSAFE] =
-        "このバックアップにはゲームのフォルダー以外のファイルが含まれているため、使えません。",
+    [UI_STR_BACKUP_WHY_UNSAFE] = "ゲームのフォルダー以外のファイルを含むため、使えません。",
     [UI_STR_BACKUP_WHY_TOO_BIG] = "このバックアップはゲームが受け付ける大きさを超えています。",
     [UI_STR_BACKUP_WHY_NO_DIALOG] = "ファイルを選ぶ画面を開けませんでした。",
     [UI_STR_BACKUP_WHY_NO_SPACE] = "機器の空き容量が足りません。",
@@ -716,17 +746,18 @@ const char *const ui_strings_ja[UI_STR_COUNT] = {
     [UI_STR_ISO_COPYING] = "ディスクイメージをアプリにコピーしています",
     [UI_STR_ISO_COPYING_LONG] =
         "ディスクイメージをアプリにコピーしています。大きなイメージなので数分かかります",
-    [UI_STR_SECTION_VARIANTS] = "ゲームのバリエーション",
+    [UI_STR_SECTION_CHAINS] = "鎖",
+    [UI_STR_SECTION_SHADOWS] = "影",
+    [UI_STR_SECTION_CUTSCENES] = "ムービー",
     [UI_STR_OPT_VAR_TOUGHNESS] = "影の強さ",
     [UI_STR_OPT_VAR_TOUGHNESS_NOTE] =
-        "北米版：影の強さが北米版ディスクと同じになり、2周目以降も強くなりません。実績はそのままです。",
+        "北米版：影の強さが北米版ディスクと同じになり、2周目以降も強くなりません。",
     [UI_STR_VAL_VAR_AMERICAN] = "北米版",
     [UI_STR_VAL_VAR_NOT_TOUGHER] = "強くならない",
     [UI_STR_OPT_VAR_ONE_HIT] = "一振り一回だけ命中",
-    [UI_STR_OPT_VAR_ONE_HIT_NOTE] =
-        "イコの一振りは、影に一度しか当たりません。実績が無効になります。",
+    [UI_STR_OPT_VAR_ONE_HIT_NOTE] = "イコの一振りは、影に一度しか当たりません。",
     [UI_STR_OPT_VAR_NEVER_DODGE] = "影がよけない",
-    [UI_STR_OPT_VAR_NEVER_DODGE_NOTE] = "影はイコの攻撃をよけません。実績が無効になります。",
+    [UI_STR_OPT_VAR_NEVER_DODGE_NOTE] = "影はイコの攻撃をよけません。",
     [UI_STR_OPT_VAR_AGGRESSION] = "影の攻め方",
     [UI_STR_VAL_VAR_AGG_OWN] = "元のまま",
     [UI_STR_VAL_VAR_AGG_BOLD_PATIENT] = "大胆・じっくり",
@@ -734,15 +765,13 @@ const char *const ui_strings_ja[UI_STR_COUNT] = {
     [UI_STR_VAL_VAR_AGG_WARY_PATIENT] = "慎重・じっくり",
     [UI_STR_VAL_VAR_AGG_WARY_QUICK] = "慎重・すばやく",
     [UI_STR_OPT_VAR_AGGRESSION_NOTE] =
-        "影の戦い方を、大胆か慎重か、じっくりかすばやくかで変えます。実績はそのままです。",
+        "影の戦い方を、大胆か慎重か、じっくりかすばやくかで変えます。",
     [UI_STR_OPT_VAR_NO_HINTS] = "ヒントなし",
-    [UI_STR_OPT_VAR_NO_HINTS_NOTE] =
-        "北米版と同じく、ヨルダが進む先のヒントを出しません。実績はそのままです。",
+    [UI_STR_OPT_VAR_NO_HINTS_NOTE] = "北米版と同じく、ヨルダが進む先のヒントを出しません。",
     [UI_STR_OPT_VAR_BARRIER] = "女王の結界",
     [UI_STR_VAL_VAR_HITS_5] = "5回",
     [UI_STR_VAL_VAR_HITS_7] = "7回",
-    [UI_STR_OPT_VAR_BARRIER_NOTE] =
-        "女王の結界を壊すのに必要な攻撃の回数です。実績はそのままです。",
+    [UI_STR_OPT_VAR_BARRIER_NOTE] = "女王の結界を壊すのに必要な攻撃の回数です。",
     [UI_STR_OPT_VAR_NO_LOOK] = "ムービー中に見回さない",
     [UI_STR_OPT_VAR_NO_LOOK_NOTE] =
         "ムービー中に右スティックで見回せなくなります。実績はそのままです。",
@@ -753,9 +782,8 @@ const char *const ui_strings_ja[UI_STR_COUNT] = {
     [UI_STR_OPT_VAR_DEBUG_MENU_NOTE] =
         "ゲーム本来のデバッグメニューです（開発者向け）。実績が無効になります。",
     [UI_STR_OPT_VAR_TOUGHNESS_NOTE_DEMO] =
-        "このデモには北米版がありません。影が北米版ディスクと同じではないためです。強くならない：2周目以降も強くなりません。実績はそのままです。",
-    [UI_STR_OPT_VAR_NO_HINTS_NOTE_2001] =
-        "このバージョンにはヒントがないため、変わりません。実績はそのままです。",
+        "このデモには北米版がありません。影が北米版ディスクと同じではないためです。強くならない：2周目以降も強くなりません。",
+    [UI_STR_OPT_VAR_NO_HINTS_NOTE_2001] = "このバージョンにはヒントがないため、変わりません。",
     [UI_STR_OPT_VAR_NO_LOOK_NOTE_2001] =
         "このバージョンではもともとムービー中に見回せないため、変わりません。実績はそのままです。",
     [UI_STR_GPU_HANG_TURNIP] =
@@ -773,22 +801,26 @@ const char *const ui_strings_ja[UI_STR_COUNT] = {
     [UI_STR_STATES_NOTE] =
         "ステートはこのディスクのものです。後のバージョンでも読み込める場合があります。左右でアクションを選びます。",
     [UI_STR_STATES_PAUSE_FIRST] = "ステートを保存するにはゲームを一時停止してください",
+    [UI_STR_STATES_PAUSE_FIRST_LOAD] = "このステートを読み込むにはゲームを一時停止してください",
     [UI_STR_STATES_REFUSED_BUILD] = "別のバージョンのゲームで保存されています",
     [UI_STR_STATES_REFUSED_DISC] = "別のディスクで保存されています",
-    [UI_STR_STATES_REFUSED_SETTINGS] = "ゲームの設定が違います：%s",
     [UI_STR_STATES_REFUSED_BUSY] = "今はできません：ゲームを読み込み中か保存中です",
-    [UI_STR_STATES_REFUSED_CHECK] = "ステートを復元できませんでした。ゲームは続行します",
+    [UI_STR_STATES_REFUSED_CHECK] = "ロードできませんでした。ゲームは続きます",
     [UI_STR_STATES_OFF] = "このビルドではセーブステートは無効です",
     [UI_STR_STATES_TITLE_HINT] = "保存は一時停止メニューから行います",
     [UI_STR_STATES_SAVE_FAILED] = "ステートを保存できませんでした",
     [UI_STR_STATES_XB_OLD] =
-        "このセーブステートはバージョン%sで作られました。セーブステートを新しいバージョンに引き継げるようになる前のものです。メモリーカードのセーブデータはそのまま使えます。",
+        "バージョン%sで作られた古いステートのため、ロードできません。メモリーカードのセーブデータは使えます。",
     [UI_STR_STATES_XB_CODE] =
-        "このセーブステートはバージョン%sで作られました。バージョン%sでは保存した場面のゲームが変更されたため、再開できません。メモリーカードのセーブデータはそのまま使えます。",
+        "バージョン%sで作られました。バージョン%sでは保存した場面が変わったため、ロードできません。メモリーカードのセーブデータは使えます。",
     [UI_STR_STATES_XB_DATA] =
-        "このセーブステートはバージョン%sで作られました。バージョン%sではゲームが進行状況をメモリーに保持する方法が変更されたため、再開できません。メモリーカードのセーブデータはそのまま使えます。",
+        "バージョン%sで作られました。バージョン%sでは進行状況の持ち方が変わったため、ロードできません。メモリーカードのセーブデータは使えます。",
     [UI_STR_STATES_XB_PINNED] =
-        "このセーブステートはバージョン%sで作られ、そのバージョンでしか再開できません。メモリーカードのセーブデータはそのまま使えます。",
+        "バージョン%sでしかロードできません。メモリーカードのセーブデータは使えます。",
+    [UI_STR_STATES_CKPT_ROW] = "最後のチェックポイントから読み込みます",
+    [UI_STR_STATES_CKPT_LOADED] = "最後のチェックポイントから続けました（バージョン%s）。",
+    [UI_STR_STATES_CKPT_NONE] =
+        "バージョン%sで作られたため再開できず、チェックポイントもありません。",
     [UI_STR_OPT_EFFECT_GLOW_SMOOTH] = "フレーム間の光のにじみ",
     [UI_STR_EFFECT_GLOW_SMOOTH_NOTE] =
         "「オリジナル」はゲーム本来のフレームの光のにじみをその間も使います。「なめらか」は表示するフレームごとに作り直し、負荷が増えます。",
@@ -797,7 +829,95 @@ const char *const ui_strings_ja[UI_STR_COUNT] = {
     [UI_STR_OPT_EFFECT_MOTION_BLUR_STRENGTH] = "モーションブラーの強さ",
     [UI_STR_EFFECT_MOTION_BLUR_STRENGTH_NOTE] =
         "小さくするとブラーが速く消えます。100はPS2のままです。",
+    [UI_STR_SECTION_UNUSED] = "未使用コンテンツ",
+    [UI_STR_UNUSED_ARENA] = "テスト部屋：アリーナ",
+    [UI_STR_UNUSED_ARENA_NOTE] =
+        "開発者が影との戦いを試した部屋です。出口がないので、STARTから「ゲーム終了」で戻ってください。",
+    [UI_STR_UNUSED_CLIMB] = "テスト部屋：クライミング",
+    [UI_STR_UNUSED_CLIMB_NOTE] =
+        "開発者がよじ登りや箱を試した部屋です。出口がないので、STARTから「ゲーム終了」で戻ってください。",
+    [UI_STR_UNUSED_MOVIE] = "デモムービー（576ライン）",
+    [UI_STR_UNUSED_MOVIE_NOTE] =
+        "タイトル画面で放置すると流れる映像のもう一つの版です。ヨーロッパのテレビ向けに作られ、使われませんでした。",
+    [UI_STR_UNUSED_ART] = "初期展示版のタイトル画像",
+    [UI_STR_UNUSED_ART_NOTE] =
+        "初期の展示版のタイトル画面の画像です。ディスクに残っていますが、表示されません。",
+    [UI_STR_UNUSED_ART_VER] = "展示版：バージョン表記",
+    [UI_STR_UNUSED_ART_START] = "展示版：PRESS START",
+    [UI_STR_UNUSED_ART_COPYRIGHT] = "展示版：コピーライト",
+    [UI_STR_STATES_REFUSED_UNUSED] = "テスト部屋ではできません",
+    [UI_STR_SECTION_COMBAT] = "戦闘",
+    [UI_STR_OPT_VAR_AUTO_GUARD] = "自動ガード",
+    [UI_STR_OPT_VAR_AUTO_GUARD_NOTE] =
+        "オフ：正面からの影の攻撃をイコがガードしなくなり、背後から受けたときと同じように当たります。",
+    [UI_STR_OPT_VAR_ATTACK_TURN] = "影のほうを向く",
+    [UI_STR_OPT_VAR_ATTACK_TURN_NOTE] =
+        "オフ：イコの攻撃で最も近い影のほうを向かなくなり、正面に振ります。横にいる影には攻撃が当たることがあります。",
+    [UI_STR_OPT_VAR_SHADOWS_WAIT_DOWN] = "イコが倒れている間は影が待つ",
+    [UI_STR_OPT_VAR_SHADOWS_WAIT_DOWN_NOTE] =
+        "オフ：イコが倒れている間も影が待たなくなり、倒れている間も起き上がる途中も攻撃が当たります。",
+    [UI_STR_OPT_VAR_SWORD_COLOUR] = "光の剣の色",
+    [UI_STR_OPT_VAR_SWORD_COLOUR_NOTE] =
+        "赤：光の剣の軌跡が、未使用のもう一本と同じ赤になります。変わるのは色だけです。次の部屋から反映されます。",
+    [UI_STR_OPT_VAR_WEAPON] = "棒",
+    [UI_STR_VAL_VAR_INSECT_NET] = "虫取り網",
+    [UI_STR_OPT_VAR_WEAPON_NOTE] =
+        "虫取り網：棒がすべて未使用の虫取り網になります。振れず、火もつかず、影を傷つけません。次の部屋から反映されます。",
+    [UI_STR_VAL_VAR_THIRD_JOURNEY] = "3周目",
+    [UI_STR_OPT_VAR_TOUGHNESS_NOTE_THIRD] =
+        "影が3周目と同じ強さ（1周目の2倍）になります。ゲームでは3周目に到達することはありません。",
+    [UI_STR_OPT_VAR_PEACEFUL] = "おとなしい影",
+    [UI_STR_OPT_VAR_PEACEFUL_NOTE] = "オン：影は現れた場所にとどまり、イコやヨルダを襲いません。",
+    [UI_STR_OPT_VAR_CHAIN_SPEED] = "鎖の揺れの速さ",
+    [UI_STR_OPT_VAR_CHAIN_SPEED_NOTE] =
+        "イコがつかまって揺らしたときに、鎖が揺れる速さです。1が最も遅く、10が最も速く、4がゲーム本来の値です。実績はそのままです。",
+    [UI_STR_OPT_VAR_CHAIN_DAMPING] = "鎖の揺れのおさまり",
+    [UI_STR_OPT_VAR_CHAIN_DAMPING_NOTE] =
+        "イコが鎖を揺らしていないときに、揺れがおさまる速さです。1が最も遅く、10が最も速く、4がゲーム本来の値です。実績はそのままです。",
+    [UI_STR_VAL_VAR_CHAIN_ORIGINAL] = "4（オリジナル）",
     [UI_STR_LANG_RU_BOBTTZ] = "Русский (bob-ttz)",
     [UI_STR_LANG_RU_COBRA838] = "Русский (cobra838)",
     [UI_STR_LANG_PT_BR] = "Português (Brasil) (ichagas7)",
+    [UI_STR_OPT_FREE_MOVEMENT] = "フリー移動",
+    [UI_STR_OPT_FREE_MOVEMENT_NOTE] =
+        "L2を押すとスティックでイコを自由に動かせます。左スティックで移動、右スティックで上下、L3で床に降ろします。実績が無効になります。",
+    [UI_STR_REMAP_ASK_HINT] = "ヨルダにヒントを聞く",
+    [UI_STR_DIFF] = "難易度",
+    [UI_STR_DIFF_NOTE] =
+        "今回の新しい旅の影、救出までの時間、ルールを決めます。セーブにこの選択が残ります。",
+    [UI_STR_DIFF_EASY] = "イージー",
+    [UI_STR_DIFF_NORMAL] = "ノーマル",
+    [UI_STR_DIFF_HARD] = "ハード",
+    [UI_STR_DIFF_CUSTOM] = "カスタム",
+    [UI_STR_DIFF_EASY_NOTE] =
+        "動きが遅くおとなしい影で、ヨルダをさらわず、よけません。救出までの時間も長くなります。",
+    [UI_STR_DIFF_NORMAL_NOTE] = "発売時のままのゲームです。",
+    [UI_STR_DIFF_HARD_NOTE] =
+        "速くて強い影が一斉に襲い、自動ガードなし、救出までの時間が短く、1部屋で3回倒されるとゲームオーバーです。",
+    [UI_STR_DIFF_CUSTOM_NOTE] = "自分で決めるルールです。カスタマイズで全項目を変えられます。",
+    [UI_STR_DIFF_CUSTOMIZE] = "カスタマイズ",
+    [UI_STR_DIFF_CUSTOMIZE_NOTE] =
+        "項目を一つずつ変えます。どの設定とも合わない組み合わせは「カスタム」と表示されます。",
+    [UI_STR_DIFF_RULES] = "ルール",
+    [UI_STR_DIFF_NO_SHADOWS] = "影なし",
+    [UI_STR_DIFF_NO_SHADOWS_NOTE] =
+        "オン：影がまったく現れません。影がいないと、一部の物語の場面は失われたり、変わったりします。",
+    [UI_STR_DIFF_KNOCK_LIMIT] = "ダウン回数の上限",
+    [UI_STR_DIFF_KNOCK_LIMIT_NOTE] =
+        "イコがこの回数だけ倒されるとゲームオーバーです。オフなら上限なしです。",
+    [UI_STR_DIFF_KNOCK_SCOPE] = "ダウン回数の数え方",
+    [UI_STR_DIFF_KNOCK_SCOPE_NOTE] =
+        "部屋ごと（部屋に入るたびに数え直し）か、旅全体かを選びます。上限がオフのときは何も起きません。",
+    [UI_STR_DIFF_SCOPE_ROOM] = "部屋ごと",
+    [UI_STR_DIFF_SCOPE_JOURNEY] = "旅全体",
+    [UI_STR_DIFF_PERMADEATH] = "パーマデス",
+    [UI_STR_DIFF_PERMADEATH_NOTE] =
+        "オン：ゲームオーバーになるとこの旅は終わりです。「つづきから」は使えず、このセーブは二度とロードできません。",
+    [UI_STR_DIFF_LOCKED_NOTE] = "旅のはじめに選んだ設定です",
+    [UI_STR_DIFF_LINE] = "難易度",
+    [UI_STR_DIFF_LINK] = "難易度",
+    [UI_STR_DIFF_TOAST_ENDED] = "この旅は終わりました。",
+    [UI_STR_DIFF_STATES_LOCKED] = "パーマデスの旅では、セーブステートをロードできません。",
+    [UI_STR_DIFF_WORD_PERMADEATH] = "パーマデス",
+    [UI_STR_DIFF_STATES_SAVE_LOCKED] = "パーマデスの旅では、セーブステートを保存できません。",
 };

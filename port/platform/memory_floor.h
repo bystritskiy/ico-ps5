@@ -43,6 +43,8 @@
 #ifndef ICO_MEMORY_FLOOR_H
 #define ICO_MEMORY_FLOOR_H
 
+#include <stddef.h>
+
 /* the default floor's parts */
 #define ICO_MEMORY_FLOOR_PERCENT 17L
 /* the cap on Qualcomm's own driver (and a driver not known) */
@@ -61,9 +63,14 @@ typedef enum IcoMemoryFloorDriver {
 
 /* The class of a device: vendor 0x5143 (Qualcomm) whose driver text names
    neither "Mesa" nor "turnip" (any case; Mesa's Turnip reports Qualcomm's
-   vendor id and names itself there) Qualcomm's own; vendor 0 unknown; any
-   other vendor other */
-int ico_memory_floor_driver(unsigned vendor_id, const char *driver_text);
+   vendor id and names itself there) and whose Vulkan driver id (0 when the
+   driver gives none) is not Turnip's, 18 (a renamed Turnip build keeps it:
+   issue 209's "PurpleVK public driver"; port/render/rd_profile.c
+   rd__driver_is_turnip's rule) Qualcomm's own; vendor 0 unknown; any other
+   other.  The device table's MEMORY_FLOOR_CLASS (port/rhi/
+   rhi_device_table.c, docs/port/DEVICE_TABLE.md: the rows vendor-unknown and
+   qualcomm-text) read on an identity of the arguments */
+int ico_memory_floor_driver(unsigned vendor_id, unsigned driver_id, const char *driver_text);
 /* The class's words for the log lines: "Qualcomm's own driver", "another
    driver than Qualcomm's own", "the driver not known yet" */
 const char *ico_memory_floor_driver_words(int driver);
@@ -81,5 +88,38 @@ const char *ico_memory_floor_rule(long setting_mb, int driver);
 /* [dev] pipeline_memory_floor_mb's value: "" or NULL (unset) or "auto" -1,
    a whole number 0 to 1048576 that number, anything else -2 (not read) */
 long ico_memory_floor_setting(const char *text);
+
+/* Issue 123: a start whose set stopped at the floor on Qualcomm's own
+ * driver makes no set at the next start (diag_host.c: the file's "set:
+ * stopped at the system's low-memory signal (<why>)" line, whose <why> for
+ * a floor stop is "N MB available of T MB, floor F MB").  The compiler's
+ * memory, not the set, is what ran the device low: with this shader set's
+ * pipeline cache file on disk and not empty the driver answers the set's
+ * creations from the cache and does not run the compiler, so that next
+ * start tries the set again (stopping at the floor again if it comes). */
+/* Whether an activity-file line of that kind names a floor stop (not the
+   system's own signal): the "MB available of" figures after the line's
+   words */
+int ico_memory_floor_line_is_floor(const char *line);
+/* The mark a retried start's stop line ends with (diag_host.c: the line's
+   "(N MB available of T MB, floor F MB)" then this), so the start after it
+   does not retry again: at most one retry in a row */
+#define ICO_MEMORY_FLOOR_RETRIED_MARK " after a retry"
+/* Whether an activity-file stop line carries that mark */
+int ico_memory_floor_line_retried(const char *line);
+/* The retry's decision: 1 only when the previous start stopped at the
+   floor (prev_floor_stop) and was not itself a retry (prev_retried: its
+   line carries ICO_MEMORY_FLOOR_RETRIED_MARK; a retry that stops again
+   goes lazy as before the retry existed), the driver is Qualcomm's own,
+   the cache file holds cache_bytes > 0 (a file that is not there or empty:
+   a negative or 0 figure) and the renderer loaded it this start
+   (cache_loaded, rhi_pipeline_cache_loaded: a file the driver refused,
+   another driver after a system update or another shader set, answers
+   nothing, so the compiler would run).  why: the decision's words for the
+   log, either way (may be NULL).  Not called since v0.11.2: the window
+   resumes the set after any stop for memory instead
+   (window_pipe_finish.h window_pipe_floor_retry); kept with its test. */
+int ico_memory_floor_retry(int prev_floor_stop, int prev_retried, int driver, long long cache_bytes,
+                           int cache_loaded, char *why, size_t size);
 
 #endif /* ICO_MEMORY_FLOOR_H */

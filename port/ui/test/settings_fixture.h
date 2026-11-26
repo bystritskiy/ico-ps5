@@ -21,6 +21,7 @@
 #include <libscf.h>
 #include "achievements.h"
 #include "config.h"
+#include "difficulty.h" /* the New Game draft, the journey's record */
 #include "font.h"
 #include "gallery.h"
 #include "host_config.h"
@@ -97,6 +98,7 @@ extern const char *s_devNames[3];
 extern char s_reopened[ICO_AUDIO_DEVICE_NAME_MAX];
 extern int s_reopens;
 extern int s_filmCalls, s_filmLast;
+extern int s_menuOffs; /* debug_Menu_off calls (settings.c after a state load) */
 extern int failures;
 void setEnv(const char *k, const char *v);
 void setRow(int i, int up, int down, int downItem, int upItem, int left, int right, int y);
@@ -108,6 +110,7 @@ int fxRow(int palRow);
 void frame(int flags);
 int settle(int layout, int max);
 void press(int flags);
+void hold(int flags, int ticks); /* flags pressed, then held for ticks frames */
 extern char s_dir[1024];
 void path(char *out, size_t n, const char *name);
 void writeFile(const char *p, const char *text);
@@ -119,6 +122,8 @@ int enterMain(int title);
 int enterMainKeep(int title);
 int openPage(int mainL, int mainRow, UiSettingsPage page);
 int mainLink(UiSettingsPage page);
+int openLink(int parentL, UiSettingsPage parent, UiSettingsPage page);
+int openGameplayPage(int mainL, UiSettingsPage page, int *gameL);
 extern IcoGsSnapshot s_gs;
 void gsSampler(IcoGsSnapshot *out);
 int rowWithText(UiSettingsPage page, const char *str);

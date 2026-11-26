@@ -24,7 +24,8 @@ D3D12 and a Vulkan device without the dynamic state; `rd_mesh_static.1of4` is `r
   on a device-less SDL stream over the real SPU2: a writer thread under the audio lock and a
   pulling thread render the frames one thread renders; 10 s free-running with the frames and the
   silence accounted; the ramp out of and into silence while the lock is held elsewhere; the 10 s
-  line and the mode choice; the bound on the SPU2's lead over the game (2 s of pulls with the
+  line (with the sound chip's emulation per callback against the device's period: three renders)
+  and the mode choice; the bound on the SPU2's lead over the game (2 s of pulls with the
   game's frames frozen render exactly 120 ms, then a ramp and silence counted as held back; the
   game stepping releases the hold 40 ms under the bound, the trim plays the stream slower while
   over 64 ms and stops under 32) (`audio_pull`). Its checks are counts, fences and samples, never wall
@@ -36,6 +37,17 @@ D3D12 and a Vulkan device without the dynamic state; `rd_mesh_static.1of4` is `r
   `TSAN_OPTIONS=halt_on_error=1` under `setarch x86_64 -R`, which turns address-space
   randomization off for the run (the build host's kernel randomizes more than ThreadSanitizer
   accepts); a report is a failure.
+- `audio_open_test.c` (window build): the start's device open on its own thread (`out_sdl.c` and
+  `audio_host.c` included, the start's wait shortened to 200 ms and the shutdown's to 300 ms, the
+  device open replaced by a fake on the dummy driver that hands back a device-less stream when the
+  test opens its gate): adopted inside the init on the device's clock; adopted by the first vsync
+  after the fake returns, the game's clock rendering every vsync until then, the Settings move
+  refused, the watchdog's vsync reset at the adoption and nothing rendered on that vsync; a failed
+  open at once and after the wait (the game's clock, "no device"); an open that never returns
+  (two still-waiting lines in 20 s of vsyncs, the shutdown back within its bound,
+  `ico_audio_sdl_open_left` 1 so the window's exit leaves SDL's audio up (0 after an open that
+  returned), the thread left
+  behind closing what it opens) (`audio_open`). Its one wall-clock check is the shutdown's bound.
 - `audio_queue_test.c` (window build): the output on the game's clock (`out_sdl.c`'s push) on a
   device-less SDL stream: the cushion, the refill after a dry queue and its ramp with frames still
   queued, plain silence after a queue run empty, the trim and the drop limit (`audio_queue`).
@@ -197,6 +209,50 @@ D3D12 and a Vulkan device without the dynamic state; `rd_mesh_static.1of4` is `r
   credits row's lock (`credits`); with `jpn` or `kor`, the same on that disc's region: STAFF1 58,
   the song 47, the scene layout 52, the roll offset 151,050 ms (the Korean build is the Japanese
   program), the roll start's log line, which names the disc (`credits_jpn`, `credits_kor`).
+- `unused_content_test.c`: Extras > Unused content's rows, flag and start and its engine over
+  stubs of the game, DATA.DF and Settings, one run per disc (`unused_content`,
+  `unused_content_<slug>` for jpn, kor, cn, ntsc, aug6, jun26): each row's stage, which rows the
+  disc's DATA.DF has, the engine indirection, the test rooms' start (both rooms place the boy and
+  the sword, and the girl in the room whose fake `stageData` `flag0` is set, at
+  `-exitData[0].pos` with `exitData[0].rot` in radians: the fake `exitData[0]` is (12, -34, 56),
+  rot 90, so a copy as stored fails; a fake entrance row into the climbing stage, row 7, is not
+  used; each start's line; the boy's walk in skipped once per room, after the way in, by the
+  stubbed `ico_host_skip_entry_walk`), the boy's lines over a fake `boyGObj` and stubbed `GetRootPosition` /
+  `GetLowerPlaneCollision` (no boy as the stage is up, the floor and its drop, no floor, the
+  30-tick step, none past 300 ticks, the line at a game over), the camera-zone rule over a fake
+  camera set (`TopCameraSetDataOfCurrentStage`, groups stored negated) and a stubbed
+  `SetDirectRootPosition` (the arena's start inside its zone: no move, the inside line, a group
+  stored at the root itself not taken, so an un-negated test fails; the climbing room's start
+  outside every zone: of a zone whose floor lies below its box, two with the same box bottom and
+  different floors, one higher and one with no floor, the larger floor plan of the lowest wins,
+  every zone probed once from its box's top, the boy at the floor minus his fake skeleton's root
+  height 72 (`GOBJ_SUB(boyGObj)->skel` node 0's `pos[1]`, the entrance height) with his root ON its
+  floor (a measured 0) and with it 71 above (a measured 71: still 72), the girl at her own 60,
+  moved with him when up and not when `girlGObj` is NULL, the move's line with the probe from the
+  moved root, the tick line after it with the camera's zone, eye and look-at (a stubbed
+  `ico_host_camera_view`) and his draw mask; the big floor or no floor under the moved root
+  (`s_underMoved`): the "not the zone's" line and no second move; no zone with a floor: he stays, its line; no camera set: its line; no boy
+  in the 300 ticks: the never-ran line), the return to the title with its log and the reopen of
+  Options, the failures; the art row refused when the model viewer offers none of its rows, and its start
+  opening the viewer's list on the viewer's first art row (a stubbed `ico_mv_models_enter_at`),
+  the list's refusal and a start off the title refused, each logged.
+- `charfile_image_test.c`: the early show title art's hook in the game
+  (`ico2/common/src/charFileManager.c` `ico_char_file_image`) by its text, no game linked
+  (`charfile_image`, the file and `ico2/fumi/ios/cdvd.c` as arguments): each of its four twins is
+  its loader's body (`ReadModelFile`, `ReadModelFile_jun26`, `ReadTextureFile`,
+  `ReadTextureFile_ntscaug6jun26`) line for line but for the read from the cdvd handle (a copy of
+  the image), the two skips (nothing) and the call of the 2001 or demo arm (the twin's); the four
+  loaders read the handle eight times; no line of the block reads a handle; the dispatcher's
+  extension lookup over `initFunc`'s 26 rows, its two loaders told by address and its load count
+  in order; and the pack loop it stands in for (`iosCdvdMgrPackLoad`: `getPackLoader`, the row's
+  function with the directory's words and the pack's segment, `debugCdvdLoadInfoSegAdd`) as it is.
+- `unused_movie_test.c`: the attract movie row (`unused_live.c` `beginMovie` and its poll) over
+  stubs of the game, DATA.DF and Settings, one run per disc (`unused_movie`,
+  `unused_movie_<slug>` for jpn, kor, cn, ntsc, aug6, jun26): on the European disc the start from
+  the title (the return stage, the title theme's fade, the stage switch to stage 59 with op.c's
+  256 / 4 fades, the flag, no state kept), the stage up, the return as "movie ended" or "skipped",
+  the reopen of Options, the failed starts and their bounds; on the other discs the refusal
+  before the engine.
 - `camera_wall_test.c`: the blended camera's wall rule (`port/game/camera_wall.c`) without game
   sources: a segment against one wall (through it either way, past its ends and over its top
   within `ICO_CAMERA_WALL_RADIUS`, a sloped bottom, an end on the plane) and one floor (down and up
@@ -210,8 +266,113 @@ D3D12 and a Vulkan device without the dynamic state; `rd_mesh_static.1of4` is `r
   skips, records outside the arena not read, the arena and the object table byte-identical after
   every check, the `camera:` line and its Frame rate gate, a pending cut, photo mode and forgetting
   (`camera_wall_stage`).
-- `door_grace_test.c`: the doorway fix's arm and grace and a copy of the exit check's guard
-  (`door_grace`).
+- `collision_carrier_test.c`: a display object whose model has no parts but which carries a
+  collision (`ico2/common/src/DObj.c` `initPolygonState`'s PC-port block), with DObj.c, the
+  allocator over the EE RAM arena, the field collision and the matrix stack and tables compiled in
+  and the character files, the motion set-up and the object table stubbed. `synth`: the carrier
+  gets one 64-byte node matrix holding the layout's (identity; a moved and turned row's), its
+  `dobj:` line names the model, the layout row (-1 when the newest object already has a display
+  object) and the collision path, and a floor probe hits its floor (y 0; the moved row's y); the
+  same object with its collision attached after the create (the original's state) reads the next
+  block header's tag as its matrix and no probe finds the floor; a one-part model with a
+  collision, a 0-part model without one and a 0-part model with a skeleton allocate the same
+  blocks as without the collision, the carrier those plus one of 64 bytes (`collision_carrier`,
+  `collision_carrier_ntsc`, `collision_carrier_jun26`). `disc`: DATA.DF holds exactly one model
+  with no parts, `STG8TEST.DF`'s `st08a_p1.p2o` with the disc's model id (none on the June 2001
+  demo), and the room's `st08a.cl` on its carrier finds y 0 at the origin and y -1323.67 from camera
+  zone 20's box top, neither with the collision attached after the create; skipped (77) without
+  the image (`collision_carrier_disc`, `collision_carrier_disc_jpn`, `_kor`, `_cn`, `_ntsc`,
+  `_aug6`, `_jun26`).
+- `difficulty_test.c`: each journey's difficulty record (`port/game/difficulty.h`) on the CPU,
+  one run per disc: the presets row by row (Hard's Shadow toughness per disc), each classified as
+  itself and one changed row Custom (the disc's own barrier and seconds equal to Normal's; the
+  knock-down scope stepped with the limit Off keeps the preset), every row's Left/Right step (the
+  barrier has two steps, the disc's own number and the other), `ico_difficulty_notify`, the rows text's round trip (a row left out Normal's, a bad word counted,
+  the earlier `pit_time` words), the carry-over from the fifteen retired config keys (Normal when
+  all are the game's own, else Custom) and from an old state's keys text (the same text the same
+  journey id), begin / reset / `set_active` / `set_row`, the accessors of `options.h` and
+  `variants.h` reading the record (a moved variant's step writes no config key, no row switches
+  achievements off), the knock-down limit (off counts nothing; once a fall: a chained hit, a
+  landing, a fall longer than the timer, FALL and DEAD; a knock-down as he gets up a new fall;
+  another actor never; the limit's return and `over_pending`; each room and the whole journey, whose count
+  goes back to 0 after the game over the limit causes), Permadeath on any game over, at once
+  when the limit is reached and at `ico_difficulty_game_over_certain`, told once, and the states
+  lock, No Shadows, the `difficulty.record` state block (a restored record, a damaged
+  version and a missing block rebuilt from the state's keys) (`difficulty`, `difficulty_jpn`,
+  `_kor`, `_cn`, `_ntsc`, `_aug6`, `_jun26`).
+- `difficulty_file_test.c`: the difficulty sidecar, `difficulty.toml` (`port/game/difficulty_file.c`;
+  [SAVES.md](SAVES.md#the-difficulty-of-each-save)) on the CPU, one run per disc in a folder of its
+  own: a save's record written under the disc's key prefix and the card and read back by a load
+  with the same checksum (rows, mode, journey, origin, preview, count); the refusals raising
+  `ICO_DIFF_EV_REFUSED` for the pop-up; the same slot on card 1 and
+  card 2 two records; a moved file found by its checksum; the carry-over written once, found by the
+  second load with config changed, its origin kept by a later save, Normal when every key is the
+  game's own; a slot that is no save slot changing nothing; a Permadeath game over writing
+  `[finished]`, the Continue list's preview match (the slot's own entry, a file moved to card 2, a
+  newer save of the slot and another journey's save not refused) and the backstop by checksum, a
+  load of such a save finished; the whole-journey count at a save and written through as 0 after
+  the limit's game over (not into another journey's entry), and through an entry found by sum,
+  which the load copies to its own slot; a damaged file read as empty but for its ended journeys,
+  not written over by a load, kept as `difficulty.toml.bad` (then `.bad2`) by the next save, which
+  carries its ended journeys over; a later version's file never written over (its entries not
+  read, its ended journeys refused, a Permadeath end only adds its line); a file with no version
+  line but entries read as version 1; an empty file no damage; a file there but not readable
+  (`ico_difficulty_file_fail_reads`): nothing written, the record unknown until the next save
+  reads it and takes the loaded save's record first (or writes nothing while it still cannot),
+  one failed try read again, a New Game and the title clearing the unknown state; the disc's preview words (`mc_preview_play`,
+  `mc_preview_sofa`) the ones `layout_action.c`'s `la_preview_play` / `la_preview_sofa` read; a
+  text scan of the hooks in `layout_action.c` (the save hook, both load twins' hook and backstop
+  before `gflagKeepState`, the Continue list's refusal in both twins with the negative sound, the
+  three game over twins' Quit only, the helper setting Continue's own mask too and clearing Left and the stick's x on Quit) and of `backup.c`; the log lines (found by slot / by sum /
+  carry-over / none, the writes, the refusals, the damaged file) (`difficulty_file`,
+  `difficulty_file_jpn`, `_kor`, `_cn`, `_ntsc`, `_aug6`, `_jun26`).
+- `difficulty_knock_test.c`: the knock-down limit's game side
+  ([GAME_FEATURES.md](GAME_FEATURES.md#knock-down-limit)) on the CPU, `gamestate.c` compiled in over a
+  synthetic sampler, one run per disc: the snapshot's act mode and get-up timer (unknown while the boy's
+  object is unreadable); `ico_gs_knockdown` counts a fall by a hit once (a chained hit while he lies,
+  falls or is dead, a landing, a fall without a hit and another actor's fall do not count; a hit as he
+  gets up, the timer still running, does) and the latch clears through the snapshot as host_loop.c
+  passes it to `ico_difficulty_tick` once he is on his feet; Hard's third fall returns 1 and
+  every later entry while the game over is due, `ico_gs_knock_game_over_take` answers once (again after a
+  state's rebaseline), the watch line after 2 s neither down nor dead; a room entry's signal starts the
+  room's count again; the game over signal (and the June 2001 demo's `ico_gs_signal_game_over_once`, two
+  calls, one game over) clears the due game over and the counts it should; the journey scope; Permadeath
+  (any game over; the limit at once, before he lies; the snapshot's certain game overs: `gameover_flag`,
+  Ico or Yorda in DEAD, Ico in STONEDEAD; nothing with the row off); Normal counts nothing and logs nothing; each log line's text (POSIX hosts); text scans of the hooks in
+  commonact.c (four copies, the hold, the two game-over forms, `actAfterDown`), act.c (the after-proc at
+  every interrupt), StageManager.c, gamestate.c, host_loop.c and the header (`difficulty_knock`,
+  `difficulty_knock_jpn`, `_kor`, `_cn`, `_ntsc`, `_aug6`, `_jun26`).
+- `knockdown_disc_test.c`: the knock-down limit against each disc image's own tables: act mode 0x15 is
+  DOWN with `actCommonDown` for all three actor kinds, 0x16 DEAD with `actCommonDie`, 5 FALL, 26
+  CLIFF_HESITATE; the interrupt lists' terminator (429, 396, 392, 376); every row into DOWN: the
+  knock-down mail in list 3 (291, 275 ntsc, 272 aug6, 264 jun26), on the European family also the
+  landing's 55 (list 3) and 56 (FALL's list), on the 2001 discs nothing else; skipped (77) without the
+  image (`knockdown_disc`, `knockdown_disc_jpn`, `_kor`, `_cn`, `_ntsc`, `_aug6`, `_jun26`).
+- `no_shadows_census_test.c`: No Shadows' proof from the source
+  ([GAME_FEATURES.md](GAME_FEATURES.md#no-shadows)): every call in `ico2/script/src` of the eight
+  checks and calls that read or bring out a Shadow is in a reviewed table by file, function and
+  callee with its count and class (passes, gated, refused, unaffected), a new, moved or
+  recounted site failing; each hook in every disc copy of its function, before what it guards,
+  a family with a copy more or fewer failing (`EnemyGeo`'s out-of-the-world guard among them),
+  no hold variable in st13b.c; `port/game/no_shadows.c` compiled in with the test's own
+  `ico_no_shadows` and `ico_state_register`: off answers 0 and prints nothing, on the room's line
+  after two quiet ticks, the room-left counts, the forced conditions' lines and the rate limit,
+  the final fight's hold (held until begun, then its ticks; a room's reset holds again) and its
+  two FRESH blocks (`no_shadows_census`).
+- `no_shadows_disc_test.c`: off each disc image (the tables from its ELF), the Shadow rows
+  placed in their rooms against the reviewed list of that disc, the cage room's Shadow a row of
+  the cage room starting in its pit, the left-alone timer's stages (26; 25 on the June 2001
+  demo) with `backStageProcessMain`'s guard before every stage test, the Queen's stage (37)
+  without a Shadow row, no preset setting the row and the row on being what the hooks read;
+  skipped (77) without the image (`no_shadows_disc`, `no_shadows_disc_<disc>`).
+- `door_grace_test.c`: the doorway fix's arm and grace, a copy of the exit check's guard, a
+  state's grace ended at a load with the fix off (`door_grace`).
+- `ico_rows_test.c`: Developer > Free movement and the Ask Yorda for a hint button
+  ([GAME_FEATURES.md](GAME_FEATURES.md#free-movement-and-ask-yorda-for-a-hint)) on the CPU: the key
+  off by default, the row on without Developer mode doing nothing and with it on, the setter, a
+  reload reading the key again; the hint button's press counted once however long it is held, one
+  fire for each press, a press older than 12 snapshots dropped and not kept, two presses before one
+  look as one fire (`ico_rows`).
 - `yorda_trip_test.c`: Yorda trips ([GAME_FEATURES.md](GAME_FEATURES.md#yorda-trips)) on the CPU,
   the rule (`yorda_trip.c`), the game's side (`yorda_trip_live.c`) and the motion reader
   (`yorda_trip_source.c`) compiled in over a stubbed game, disc and pack index: the disc's run
@@ -231,6 +392,25 @@ D3D12 and a Vulkan device without the dynamic state; `rd_mesh_static.1of4` is `r
   from its ELF, the names and exits, the main gate stages' packs and their HETARI members with their
   sizes, the copies the game's side reads; nothing starts the game; 77 without the disc
   (`yorda_trip_disc`).
+- `pit_dive_base_test.c`: Time to rescue Yorda's base on each disc image the build names: the
+  disc's tables from its ELF, EN1 SINK_A to SINK_E by name at the numbers the `enemy_act.c` hooks
+  use, each at play speed 1 (`playSpeedRatio`, `palSpeedRatio`), without a blend row and with flag
+  bit 26 clear, the motion-orient chain (CARRY_LOOP's row of the dive's kind into SINK_A, that
+  kind's rows A to E at each last frame, E holding), every `.mob` copy's frame count in DATA.DF's
+  packs (all copies equal), and (A-1)+(B-1)+(C-1)+(D-1)+51 against `ico_pit_chain_ticks_for`
+  (`port/game/pit_time.h`: 462, the June 2001 demo 463); nothing starts the game; 77 without the
+  image (`pit_dive_base` for `ICO_DISC_IMAGE`, `pit_dive_base_<disc>` for each other image set).
+- `weapon_kinds_disc_test.c`: Gameplay's weapon rows (Light sword colour, Stick) on each disc image the build names:
+  the disc's tables from its ELF, then with Red and Insect net the kinds `ico_variant_weapon_kind`
+  gives against the disc's rows: weaponKind's row count (10, 8 on ntsc and aug6, 7 on jun26), the
+  stick made as the net's kind (7, 6 on jun26), the net's row (length 120, grip 40, power 0, the
+  stick's weight and trail, no flags, request 0), no motion-orient row of request 0 (the swing
+  never starts: the table's last row, the "no motion" row that leads to itself, answers it) while
+  the stick's request has rows, rows 8 and 9 the same bytes but the trail colours (where the light
+  sword exists; elsewhere Red not offered and kind 9 untouched), objLayout's weapons (sticks placed,
+  the net never, the light sword placed on the four discs that have it), no other kind moved;
+  nothing starts the game; 77 without the image (`weapon_kinds_disc` for `ICO_DISC_IMAGE`,
+  `weapon_kinds_disc_<disc>` for each other image set).
 - `env_bits_test.c`: where each disc's wall-reach read in `act-env.c` takes its two bits of a motion record (a shift of 6 on every disc, the host layout), every `config/motion_bits.*.txt` row naming the field at bit 24 for two bits, and a synthetic word read through the shift (the June 2001 demo once read the item-mode bits) (`env_bits`).
 - `keep_flags_test.c`: the twenty words a load's keep and restore walk reads on each disc, exactly as that disc's objects have them (issue 160's new-game flag), with the key-config slots as at start and after a Button configuration visit; one argument selects the disc (`keep_flags`, `keep_flags_<disc>`).
 - `eye_trail_test.c`: the shadows' eye trails rebuilt from their world points
@@ -246,18 +426,35 @@ D3D12 and a Vulkan device without the dynamic state; `rd_mesh_static.1of4` is `r
   [PLATFORM.md](PLATFORM.md#saving-and-loading)): every refusal of the conditions reachable and
   their order, a load without the pause, the pause menu and a port page over it; the log texts;
   the slots' paths; the `[dev]` keys' values; the listing of a missing, an empty and a filled
-  folder (each validity field changed, a damaged file, a picture); the thumbnail's size (the pause
+  folder (each validity field changed, a damaged file, a picture; another setting loadable);
+  the load's settings line (`ico_state_settings_line`); the thumbnail's size (the pause
   picture's square pixels to 960 wide, a tall one to 960 lines, the fallback DISPLAY frame at the
   box's shape) and box filter; the pause picture's path, its copy to a slot's picture and its steps
   (taken once from play to the pause menu, kept over the pages, dropped on play); after a load the
   loaded slot's picture copied to `pause.png` with its size from the PNG header (none without a
-  picture, no size for a header that is not a PNG's) and on to a later save's slot (`state_host`).
+  picture, no size for a header that is not a PNG's) and on to a later save's slot; a Permadeath
+  journey in force (`IcoStateConds.locked`): a load and a save refused as `ICO_STATE_PERMADEATH`
+  right after "off", before every other condition, with their own log words; a state's own
+  difficulty record read by its bytes (`ico_state_record_permadeath`): Permadeath on refuses it,
+  off, another record version, another size, a block past the end and no section do not, and the
+  same through a state file's reg section written and read back (`state_host`).
 - `variants_test.c`: the game variants (`port/game/variants.h`) on the CPU: every default is the game as
-  shipped (the barrier's number the disc's: 5, 7 on `jun26`), every `[variants]` key steps through
-  all its values, saves and reads back, a word or number that is no value reads as the default, the
-  setters clamp and the steps wrap, and the achievements rule (One hit per swing, Shadows never
-  dodge, Cutscene cameras ignored and a Debug menu press suspend; toughness, aggression, No hints,
-  the barrier and the look-around do not; a reload clears the Debug menu's mark), and the game
+  shipped (the barrier's number the disc's: 5, 7 on `jun26`), every variant steps through
+  all its values, saves and reads back (a global one's `[variants]` key written, a difficulty row's
+  not: the journey's record keeps it across a config reload and the title puts the game's own
+  back), the retired keys' words through the carry-over (a word or number that is no value reads
+  as the default), the setters clamp and the steps wrap, and the achievements rule (Cutscene
+  cameras ignored and a Debug menu press suspend; no difficulty row does, One hit per swing,
+  Shadows never dodge and Peaceful shadows included; a reload clears the Debug menu's mark), `test_combat` also checks `ico_variant_down_keeps_hit` (the down action's `hit` flag: Ico keeps it only with Shadows wait while Ico is down On, every other actor always), `test_peaceful` (the
+  `ico_variant_shadow_brain` hook the four Shadow starts read: 1 by default, 0 with the journey's row
+  or a carried-over key on, a bad word reads 1, a step writes no key and keeps the achievements on,
+  the other rows untouched),
+  the chain rows (`test_chain`: the game's 4 and 4 by default, `ico_variants_bind_debug_chain` leaves
+  the switches alone at 4, every value 1 to 10 reaches its own switch, 4 puts the game's value back,
+  a step wraps and writes the number, a file's value is written at the bind, 0, 11 or a word read as 4,
+  nothing written unbound), `test_state_loaded` (after a load each global switch at this run's value), Shadow toughness Third journey (`third_offered`: the step order round the offered values only,
+  the key `third_journey`, a config word or a set of it giving Original on `ntsc`, `aug6` and
+  `jun26`, `restart_index` 40 on every playthrough where offered), and the game
   hooks: the bound debug switches (untouched at the shipped values, each variant's value while it
   is on, the aggression's four battle types, the game's value put back when it is switched off or
   reloaded, written at the bind from a file, nothing written unbound), the Debug menu's opener
@@ -267,8 +464,11 @@ D3D12 and a Vulkan device without the dynamic state; `rd_mesh_static.1of4` is `r
   rows whole, aggression's battle type on every row, never past a table: the June 2001 demo's 18
   rows, never mapped by index), the restart life's playthrough index (a copy of
   `getEnemyRestartLife`'s: 38 with American or Not tougher later) and `test_offered` (American is
-  not offered on `jun26`: the config, the setter and both step directions); one run per disc (`variants`, `variants_jpn`, `variants_kor`,
-  `variants_<slug>`).
+  not offered on `jun26`: the config, the setter and both step directions; Light sword colour Red
+  offered on pal, jpn, kor and cn only) and `test_weapons` (the kinds `ico_variant_weapon_kind` and
+  `ico_variant_weapon_put_kind` give: Red 9 to 8, and 8 back to 9 wherever Red is offered (Red on, and Red switched off with a kind-8 sword in play; 8 stays 8 on a disc without Red), the net's kind 6 on
+  `jun26` and 7 elsewhere for the stick, every other kind untouched, the words, the step, a reload);
+  one run per disc (`variants`, `variants_jpn`, `variants_kor`, `variants_<slug>`).
 - `hand_ik_test.c`: the hand records as `ACTGame_ConnectHand` sets them through the real
   `handManager.c`: every target finite, a NaN into `GetTableArcCos` giving 0 and a counted fault
   (`hand_ik`).
@@ -294,7 +494,14 @@ D3D12 and a Vulkan device without the dynamic state; `rd_mesh_static.1of4` is `r
   and without Skip the opening.
 - `model_viewer_cam_test.c`: the viewer's camera step without the game (`model_viewer_cam`).
 - `model_viewer_test.c`: the viewer's table against its motion-kind blocks and the game's table
-  sizes, its names in five languages (`model_viewer`); its Japanese model column is checked by
+  sizes, its names in five languages (`model_viewer`); its three member rows (the early show
+  title art) over a fake of each disc's logo pack directory, read from the ISOs
+  (`model_viewer_rows_<slug>` for jpn, kor, cn, ntsc, aug6, jun26; `model_viewer` is the European
+  disc's): kind 35 on the Cage's stage with no motions, each id its member's `PackEnt.id` (1595
+  for the copyright on pal, 1577-1579 jpn/kor/cn, 1544-1546 ntsc, 1539-1541 aug6), the rows
+  offered (one on pal, three on the other retail discs, none on jun26) and the first art row,
+  nothing asked with no disc mounted, each asked once per disc and again after a region change,
+  and a member found in another pack not offered; its Japanese model column is checked by
   `tools/gen_mv_region.py --check` against the PAL ELF's and the Japanese ELF's `modelData`
   (`model_viewer_jpn`) and, since the Korean disc reads the same column, the Korean ELF's
   (`model_viewer_kor`).
@@ -322,12 +529,18 @@ D3D12 and a Vulkan device without the dynamic state; `rd_mesh_static.1of4` is `r
   `tools/state_region_diff.py`'s report on the two dumps: the first ten differing symbols of the
   game's data and bss and the arena's first ten differing ranges (the dumps are deleted on a
   pass). On a pass the output ends with the `state: hash masked ...` line.
-  `state_roundtrip_headless_settings`: one run saves slot 1, a
-  second run over a copy of its states folder with `[gameplay] yorda_safe = true` (a simulation
-  key) loads it and must log `state: refused load slot 1: settings differ: gameplay.yorda_safe=...`
-  and go on to its last tick. Both skip without the disc image and on a sanitizer build ([Tests
+  `state_roundtrip_headless_settings`: a run with `hold_type = "toggle"` and
+  `ignore_cutscene_cameras = true` saves slot 1, a second run without them loads it (never
+  refused for a setting): the one `was saved with other settings` line naming both, `loaded`,
+  the hold type and `ignore_demo_camera` fix-up lines, no refusal, its last tick. Both skip without the disc image and on a sanitizer build ([Tests
   that need the disc](TESTING.md#tests-that-need-the-disc)).
-- `options_test.c`: `test_shadow_speed_motions` selects each of the seven discs and checks the motions Shadow speed scales (the walk, run, fly and carry loops by their motion-table names) and the ones it leaves (the stand, the fly start, the run's end, an attack, the grab, a hit, the dissolve, the pit dive; review finding 15); the gameplay options' defaults and setters (Hold type: the disc's own by default, `toggle`
+- `options_test.c`: `test_pit_time` (Time to rescue Yorda in seconds, issue 186: the pull-in's ticks per disc, the parser's seconds, words and range, the factor seconds x 30 / ticks and the ratios 1/factor and 2/factor for 4 to 30 s with the whole pull-in lasting the seconds, Original bit for bit, and the source scan: four hooks over each copy's five SINK motions, this disc's among them, the three camera timeouts, the frame-50 test); `test_shadows_together` (Shadows attack together, issue 185): off by default
+  and from the file, `ico_opt_shadow_waits` 1 for a Shadow while another attacks with the option
+  off and 0 with it on, the turns it skipped counted (200) and logged (the change line, the first
+  8, then the 100th and 200th, the line back off), and the source scans: `enemy_act.c`'s eleven
+  `EnemyUtil_isOtherStatus(self, 0)` callers, the game's scan renamed `EnemyUtil_isOtherStatus_disc`
+  and called once by the wrapper that returns its result only when the Shadow waits, and the
+  simulation key; `test_shadow_speed_motions` selects each of the seven discs and checks the motions Shadow speed scales (the walk, run, fly and carry loops by their motion-table names) and the ones it leaves (the stand, the fly start, the run's end, an attack, the grab, a hit, the dissolve, the pit dive; review finding 15); the gameplay options' defaults and setters (Hold type: the disc's own by default, `toggle`
   from the file, an unknown word as the disc's own; `test_hold_discs` selects each of the seven
   discs and checks the resolve: A on pal/jpn/kor/cn, B on ntsc/aug6/jun26 for no key, `"disc"`, a
   bare `"hold"` and `hold_type_chosen = false`, A for a chosen `"hold"`, B for `"toggle"`, and the
@@ -338,8 +551,9 @@ D3D12 and a Vulkan device without the dynamic state; `rd_mesh_static.1of4` is `r
   -> Original, resolution 2x -> 1x, aspect auto -> 4:3`, the fields in order, cut at the size),
   `test_players_slots` (selects each 2001 disc and checks the `[players]` count kept
   per save slot and sum, a missing entry or another sum loading as one player, a later save
-  winning, each disc's prefix in the file), the video effects' keys (Water
-  reflections' `effect_water_sharp` off by default, saved, outside the preset; Motion blur's
+  winning, each disc's prefix in the file), the video effects' keys (the
+  retired `effect_water_sharp`, `true` or `false`, read as a file without it, kept by a save
+  as written, never written by the game, the saved file loaded again and saved byte for byte the same; Motion blur's
   `effect_motion_blur_mode`: `"original"` with no key, `"original"` and `"smooth"` read in any
   case, an unknown word as `"original"`, Smooth only with the switch on for the getter, kept
   under Off, saved and read back, outside the preset; a leftover
@@ -369,14 +583,34 @@ D3D12 and a Vulkan device without the dynamic state; `rd_mesh_static.1of4` is `r
 - `poly_flat_test.c`: `IsPointIsInScreen`'s x bound is the 4:3 half width at every native width
   (`poly_flat`).
 - `shadow_spawn_test.c`: the depth a shadow rises from, read at the generator kind's word as the
-  PS2 reads it; with the disc, every generator row (`shadow_spawn`).
-- `title_logo_test.c`: the logo's models and the hidden state's steps (`title_logo`).
+  PS2 reads it; with the disc, every generator row; No Shadows on the four copies of the
+  generator (a settable `ico_no_shadows_drop` stub): no enemy called in 200 ticks, the requests
+  0, no pit-opening mail, `DirectCallEnemy` answering 0 with the row unchanged,
+  `Generator_QuickCall` mailing nothing, `UnlockEnemyGenerate` leaving the row's bits
+  (`shadow_spawn`).
+- `title_logo_test.c`: the logo's models and the hidden state's steps; the application icon's
+  capture (`title_icon.c`) with the renderer and the icon files stubbed: the pass leaves
+  out every model but `I` (`title_back`, `st26a_p1`, `C`, `I_f`, `I_sd`) and off leaves the old
+  table; the capture starts after `ICO_TITLE_ICON_WAIT` ticks of layout 12 or 13 (counted again
+  after a Settings page or the model viewer, and not while a game fade runs: counted from its end, a
+  fade held at level 0 counting as none) when an icon is wanted, never when not, and a picture
+  not plain (`ICO_APP_ICON_NOT_PLAIN`) leaving it idle with the count from 0 (the capture starting
+  once it is plain); the renderer's hold first and the pass on at the tick it holds a picture
+  (after `ICO_TITLE_ICON_HELD_WAIT` ticks without one; the menu left while waiting ends it with no
+  pass); the shot over black after the settle, white once it came, the shot over
+  white, then the pass off, the pair delivered and the hold released at the first present past the
+  pass's frames (held over older frames and over a blend with the pass's last; the rule
+  `ico_title_icon_present_clean` alone; after `ICO_TITLE_ICON_HOLD_MAX` ticks without such a
+  present), done for the run; an empty answer or none within
+  the wait armed again and the run given up after three retries; a pair that differs (or a picture
+  of another size) taken again once, then the picture over black alone; the menu left during the
+  pass ending it and the next visit starting again (`title_logo`).
 
 ## port/input/test
 
 - `input_record_test.c`: the pad recording's format, round trip through the script reader, the
   change-only rule and the sample point (`input_record`).
-- `input_test.c`: the `[touch]` tables onto the layout edits and back (the `format` key, a file without the key reading `hidden` and `o0` as Off, rewritten as `off`), bindings from config text, dead zone, quantisation, the stick fix, merging, the
+- `input_test.c`: the `[touch]` tables onto the layout edits and back (the `format` key, a file without the key reading `hidden` and `o0` as Off, rewritten as `off`), bindings from config text, dead zone, quantisation, the stick fix, merging, the The hint target (`ICO_T_HINT`): unbound by default, `kb.hint`/`pad.hint`/`mouse.hint` from config text, `hint_down` from a key, a mouse button or a gamepad source (not with the gamepad off), the pad frame unchanged, one source one action with the hint, the row text (`input`).
   [libpad](ARCHITECTURE.md#terms) buffer, rumble, Escape, whether Start opens the pause menu (F6's
   tap: the play layout only, not a scene) (`input`).
 - `mouse_camera_test.c`: the mouse camera's speed and range for the hand camera (`mouse_camera`).
@@ -390,6 +624,13 @@ D3D12 and a Vulkan device without the dynamic state; `rd_mesh_static.1of4` is `r
   420 dpi: with the disc's confirm (Cross, or Circle) Off a point in the look pad's area and one in
   the stick's area are taken by the mapper but do not block the menus' click, the stick's does
   while the confirm works (the D-pad Off), and a working or Hidden button always blocks (`touch`).
+- `touch_scene_test.c`: Touch controls "Always, Start only in scenes" (`touch.c`
+  `ico_touch_scene_alpha`, [INPUT.md](INPUT.md)): the other modes and a scene-free fourth mode
+  leave every alpha, the scene fades every control without the Start bit (D-pad, faces, shoulders,
+  Select, stick, look pad) to 0 over 300 ms both ways and keeps Start (a Hidden Start stays 0, a
+  dimmer one keeps its alpha, selection is by the pad bit), the original layout is untouched, the
+  mode maps and draws like Always, and the Frame rate counter's place on the faded copy equals
+  that with the other controls dropped (`touch_scene`).
 - `touch_gap_test.c`: the Frame rate counter's place among the player's actual touch controls
   (`touch_gap.c`, [UI.md](UI.md#the-frame-rate-counter)): the default layout's old place, Start at
   the top-left drawn, Hidden and Off, every control Off, no room on the row, the stick's resting
@@ -422,17 +663,71 @@ D3D12 and a Vulkan device without the dynamic state; `rd_mesh_static.1of4` is `r
   each disc's serial, the `Ico_PAL`/`Ico_JPN`/`Ico_KOR` image names and the `drivers` folder (`android_paths`).
 - `arena_test.c`: the EE RAM [arena](ARCHITECTURE.md#terms): alignment, zero fill, address mapping,
   heap statistics (`arena`).
-- `diag_test.c`: the crash report (also from a worker thread under a batch's pipeline note), assert, watchdog, progress (with the heartbeat's start-up set count), start-up activity file (the batch notes; a start ended inside a 2D batch: the next start is lazy for that start only, nothing written, and logs the line and the last finished batch with its memory; that lazy start ended inside a pipeline: the start after writes `[dev] pipeline_set = "lazy"` through a stubbed config write, for any version (another version's line then leaves the policy to the count), with a failed write (this start only, its lazy run saying so, and the count kept so the next end writes it); a count file that cannot be written, logged; the "for this start only" run's clean exit and its end between two creations, each with its own line: the next start tries the set again and the row starts over; not after a restart or with the setting already `lazy`; an end in the background, by the lifecycle's event or `onTrimMemory(20)` (the mark set and logged once when both come), or with the app in the background before the recording began, is not counted, its mark written, logged and deleted, and back in the foreground the mark is gone and the end counts; a lazy run ended in the background between two creations, its mark logged; on a device the table makes lazy the first end promises nothing and its lazy run is not "for this start only", the second writes nothing, both clearing the row; the first end of a full set: the next start is careful, once, and the file reads `set: careful` after the note; a careful start that finishes clears the row and the start after it is full again; a careful start's own end makes the next start lazy; `pipeline_set = "careful"` and a careful end; the careful set's budget stop (`creating pipeline fog test` and `set: careful` in the file; its clean exit is "for that start only", then `pipeline_set = "careful"` is kept); the signals that stop the set (`actlowstop`: not `onTrimMemory` 5, not 10 before the set's first batch, 10 past it, 15 over 10) and the memory text with the device's; the set stopped at the system's low-memory signal (`set: stopped at the system's low-memory signal (running critical)` after `set: careful` in the file through the lazy run's clean exit, the batches' and the system's lines kept, the row cleared), the next start of the version lazy from it (pipeline set 7, nothing written, its own file keeping the line), that start's end inside a first-use pipeline stepping to lazy for one start (pipeline set 4), the stopped run's end between two creations (lazy from the file) and inside one (lazy for one start), another version trying the set again; a note of the retired extended variants counted as the pipelines' kind; a VU vertex pre-pass batch's end (a `vu_main_vs` batch among them): no pre-pass for that start only, the next such end writes `[dev] vu_prepass = false`, a run that built its pipelines and finished clears the row, the low-memory signal's line at once and as the file's `system: ` line, in the set and in a lazy run, the level-80 one marking the background) cases, Android's start after a device loss (`actlossnext`: robust access for that start, the second loss in a row writing `[dev] gpu_robust = true`, a loss in the robust start itself counting as the second, a start without a loss that did not run robust breaking the row, a failed write keeping the count, the player's `gpu_robust` ruling, a relaunch counting nothing), device-loss restart and loss bisect (the loss noted in the activity file, the bisect stubbed: once, before the game, never again after a start ended inside it; the restart's steps robust 7, blend 8, backend 9: `lossrobust`, `lossstep`, `lossbackend`; a loss on the renderer Options > Graphics > Apply switched to and not kept yet, `losstrial`: its line, restart 0 and no relaunch; the same kept, `losskept`: `blend:opengl`) cases, the loss bisect's second level (its state file, the step stubbed: the draw found in 4 starts of at most 3 lost steps each, draw 1 with its classes in 5 starts, killed at step 3 and continued at 4, a renderer that did not start, the step and start bounds, the time budget, files that do not parse) cases, the watchdog and a wait the system holds (the event pump held past the limit without an end, a stall in the game's code after it ended, the bound for one wait, that bound with no limit in force), a GPU hang with the backend's progress faked (`hang`: the WATCHDOG block's driver and wait lines, the heartbeat's wait, the dump before the report, report.txt's end, the device loss's box on Linux, the hang's own loss line in the activity file, which the next start counts, with Android's robust step, and does not bisect; `hangnodump`: the hang's line without a dump, still counted; `hangnot`: no wait in progress, a freeze with the GPU's line and no loss; `hanglimit`: the GPU hang limit, 2 s, ends the run before the later limit of 60 s, its WATCHDOG line naming the submission and the limit, the rest the hang's), the program a restart starts (`relaunchexe`: the AppImage file when `APPIMAGE` is trusted, the program itself when it is not or is unset), each in a child process
-  whose log is read back; the symbolizer (`symmap.h`) on a small GNU ld map of an ELF program (a wrapped function section, a static function in an object, an anchor not at the module's start), a Windows map excerpt, an nm table and its gzip form past inflate's 32 KB window, a cut gzip member and a map without the anchor; the crash's and the watchdog's symbol lines from `diag_test.map`, linked beside the test as `ico_pc.map` is beside the program; their report zips (`report.h`) read back with miniz (report.txt's end, summary and report block with its symbol lines, the log; the crash's report.txt kept as `diag_test_report.txt`, an example); the prune keeping the newest five; `ico_log_limited` (250 calls: the first 8, the 100th and 200th, the end summary's count; `ico_log_limited_n` with SDL's error bounds, the first 64) (`diag`).
+- `diag_test.c`: a device loss found at the lifecycle's GPU wait as the app went to the
+  background, the process then ended there (`ico_diag_note_device_loss_at_wait`): its line, the
+  activity file's loss line, and the next start counting one lost start (loss row 1); the system
+  ending the app in the background without a loss: nothing counted; the crash report (also from a worker thread under a batch's pipeline note), assert, watchdog, progress (with the heartbeat's start-up set count), start-up activity file (the batch notes; a start ended inside a 2D batch: the next start is lazy for that start only, nothing written, and logs the line and the last finished batch with its memory; that lazy start ended inside a pipeline: the start after writes `[dev] pipeline_set = "lazy"` through a stubbed config write, for any version (another version's line then leaves the policy to the count), with a failed write (this start only, its lazy run saying so, and the count kept so the next end writes it); a count file that cannot be written, logged; the "for this start only" run's clean exit and its end between two creations, each with its own line: the next start tries the set again and the row starts over; not after a restart or with the setting already `lazy`; an end in the background, by the lifecycle's event or `onTrimMemory(20)` (the mark set and logged once when both come), or with the app in the background before the recording began, is not counted, its mark written, logged and deleted, and back in the foreground the mark is gone and the end counts; a lazy run ended in the background between two creations, its mark logged; on a device the table makes lazy the first end promises nothing and its lazy run is not "for this start only", the second writes nothing, both clearing the row; the first end of a full set: the next start is careful, once, and the file reads `set: careful` after the note; a careful start that finishes clears the row and the start after it is full again; a careful start's own end makes the next start lazy; `pipeline_set = "careful"` and a careful end; the careful set's budget stop (`creating pipeline fog test` and `set: careful` in the file; its clean exit is "for that start only", then `pipeline_set = "careful"` is kept); the signals that stop the set (`actlowstop`: not `onTrimMemory` 5, not 10 before the set's first batch, 10 past it, 15 over 10) and the memory text with the device's; the set stopped at the system's low-memory signal (`set: stopped at the system's low-memory signal (running critical)` after `set: careful` in the file through the lazy run's clean exit, the batches' and the system's lines kept, the row cleared), the next start of the version lazy from it (pipeline set 7, nothing written, its own file keeping the line), that start's end inside a first-use pipeline stepping to lazy for one start (pipeline set 4), the stopped run's end between two creations (lazy from the file) and inside one (lazy for one start), another version trying the set again; issue 123's resume part (the window's
+`ico_diag_startup_set_resume_part`: appended to the stop line and kept in the file through the lazy
+run's exit, `ico_diag_startup_prev_low_memory_line` reading it back at the next start; none for the
+careful set's own budget; a resumed start (`ICO_TEST_RESUME`, `ico_diag_startup_resume`) records
+as a set, its finished set deleting the file and the start after it making the whole set, and one
+that stops again writing its own line without the retry mark; issue 215's set size rule
+(`ICO_TEST_THEN=setsize`: the handheld's 2D stop at pipeline 25 through `set_size_ask`): after a
+low-memory stop the resumed start's rule stop keeps no resume part and clears the stop line, and
+the two starts after it make the whole set (pipeline set 0) and stop at the same place); a stop at the free-memory floor (its figures in the line) read as a floor stop, and one whose line ends with ` after a retry` read as a retry that stopped again (`ico_diag_startup_prev_floor_retried`: no second retry in a row); a note of the retired extended variants counted as the pipelines' kind; a VU vertex pre-pass batch's end (a `vu_main_vs` batch among them): no pre-pass for that start only, the next such end writes `[dev] vu_prepass = false`, a run that built its pipelines and finished clears the row; an end inside a store build's batch (`actvustore`): the record stores' rung (`ico_diag_startup_vu_store` 1, its two lines, the second writing `[dev] vu_record = "targets"` and clearing the row, so a later pre-pass end starts at 1); an end inside the skin check's start-up probe (`actskinprobe`) counted as neither kind with the set as usual, the low-memory signal's line at once and as the file's `system: ` line, in the set and in a lazy run, the level-80 one marking the background) cases, Android's start after a device loss (`actlossnext`: robust access for that start, the second loss in a row writing `[dev] gpu_robust = true`, a loss in the robust start itself counting as the second, a start without a loss that did not run robust breaking the row, a failed write keeping the count, the player's `gpu_robust` ruling robust access while the row counts on (1 and 2 in a row, the loss ladder's line and `ICO_LOSS_ROW` 1 and 2, a start without a loss clearing both; a loss while the subpass read's probe is marked running,
+`ICO_TEST_PROBE`: the next start logs `the previous run (version test 1) ended while the subpass
+read's probe was running`, its loss row and robust count 0, the ends file empty, then the same loss
+without the probe: row 1 as before), a relaunch counting nothing in the row but the ladder's `loss_chain` 1, then 2 after a restart that lost it too, 0 after a fresh start; the ladder's own row (`loss_row`): a start that ran robust without a loss between two losses gives row 1 with 2 counted for robust access, a start and its two restarts lost then a fresh start row 3 and its restart row 4, the start that wrote `gpu_robust` losing it too "(3 in a row)", the phone's ladder words with `ICO_TEST_LADDER_PHONE=1`), device-loss restart and loss bisect (the loss noted in the activity file, the bisect stubbed: once, before the game, never again after a start ended inside it; the restart's steps robust 7, blend 8, backend 9: `lossrobust`, `lossstep`, `lossbackend`; a loss on the renderer Options > Graphics > Apply switched to and not kept yet, `losstrial`: its line, restart 0 and no relaunch; the same kept, `losskept`: `blend:opengl`) cases, the loss bisect's second level (its state file, the step stubbed: the draw found in 4 starts of at most 3 lost steps each, draw 1 with its classes in 5 starts, killed at step 3 and continued at 4, a renderer that did not start, the step and start bounds, the time budget, files that do not parse) cases, the watchdog's mark (`wdmark`: a run the watchdog ended with the activity file's path known leaves `-watchdog.txt`; `actwd`: the next start reads it, logs `the previous run (version test 1) was ended by the watchdog: ...` and deletes it, the start after reads none), the watchdog and a wait the system holds (the event pump held past the limit without an end, a stall in the game's code after it ended, the bound for one wait, that bound with no limit in force), a GPU hang with the backend's progress faked (`hang`: the WATCHDOG block's driver and wait lines, `the last start-up step: window: start: up in 1.0 s; the game runs`, the heartbeat's wait, the dump before the report, report.txt's end, the device loss's box on Linux, the hang's own loss line in the activity file, which the next start counts, with Android's robust step, and does not bisect; `hangnodump`: the hang's line without a dump, still counted; `hangnot`: no wait in progress, a freeze with the GPU's line and no loss; `hanglimit`: the GPU hang limit, 2 s, ends the run before the later limit of 60 s, its WATCHDOG line naming the submission and the limit, the rest the hang's), the program a restart starts (`relaunchexe`: the AppImage file when `APPIMAGE` is trusted, the program itself when it is not or is unset), each in a child process
+  whose log is read back; the symbolizer (`symmap.h`) on a small GNU ld map of an ELF program (a wrapped function section, a static function in an object, an anchor not at the module's start), a Windows map excerpt, an nm table and its gzip form past inflate's 32 KB window, a cut gzip member and a map without the anchor; the crash's and the watchdog's symbol lines from `diag_test.map`, linked beside the test as `ico_pc.map` is beside the program; their report zips (`report.h`) read back with miniz (report.txt's end, summary and report block with its symbol lines, the log; the crash's report.txt kept as `diag_test_report.txt`, an example); the crash's report.txt's performance lines by scene (the latest ranking and profile of each scene in the order the scenes came, the profile's header line left out); the prune keeping the newest five; `ico_log_limited` (250 calls: the first 8, the 100th and 200th, the end summary's count; `ico_log_limited_n` with SDL's error bounds, the first 64) (`diag`). `diag_test --switch` (`diag_switch`): the renderer switch's steps and
+  watch: a child with stderr fully buffered into its log as on Windows writes a line, a step
+  (`ico_diag_step`) and a second line, then hangs and is killed with SIGKILL: the log holds the
+  first line before the step's and not the second; a 2 s switch watch (`ico_diag_watchdog_switch`)
+  over a step that never returns ends the run with exit 4, the WATCHDOG line naming the switch and
+  the step, the main thread's place, `the last step:` and the heartbeat's switch part, not the
+  game's 1 s later limit; 4 s of steady progress under the same watch and limit end in exit 0
+  with the watch's `over after` line, and the progress phases' lines in order at their lines'
+  starts: the renderer's start step, the start-up shader set's first (`window: shaders: the
+  start-up set begins, 1 of 16`), its quarters (4, 8, 12 of 16, once each; none for the shaders
+  between them nor for a pipeline's call with the same count), its end (`the start-up set is
+  over, 16 made in 4.0 s`, once), the pipeline set's step (`ico_diag_shader_set`).
 - `share_report_test.c`: an rc build's Share a bug report's files over a fake logs and dumps
   folder: the log, the run before's when there, the newest dump zip by modification time (a loss
   zip included, an `.rddump` left out), the newest `-present.png`, the newest `report-*.zip` (not
-  another `report-` file), a tie in time to the greater name, missing folders skipped, the names
-  line and a short buffer (`share_report`).
+  another `report-` file), the newest skin check capture `vu-skin-fail-*.bin` and the newest
+  slow-scene zip `slow-*.zip` last, a tie in time
+  to the greater name, missing folders skipped, the names line and a short buffer; with the run's
+  start (`ico_share_report_collect_run`), every zip of dumps modified since in place of the newest
+  (three, then the newest four of five, oldest first, the count at ten), a start at a zip's own
+  second counting it, the newest zip when the run has none, a start below 0 the plain collect, and
+  the run's zips without a logs folder; the rc bench's newest `bench-*.csv` last (eleven with
+  every kind and four zips) (`share_report`).
+- `capture_trigger_test.c`: an rc build's frames of the opening (`capture_trigger.h`) over
+  made-up sequences of glow light plans, frames and times, in the opening or not: the lamps moment
+  on the 61st LAMPS picture in a row (not the 60th) and once a run, a run broken by another plan
+  starting again, the sun moment on the 21st WHOLE picture without a lamps dump, the later moment
+  on the 61st DARK picture counted from the lamps dump's take (none without it, none counted while
+  the lamps dump is armed, the count ended by a LAMPS picture), a later present of the same frame
+  with no plan passed over and one of a new frame (or an unknown plan) ending the run, a picture
+  outside the opening ending it, an arm dropped out of the opening (nothing used, armable again)
+  and kept while busy, the 2 s from the dump's end and not its take (the arm at exactly 2 s after
+  it), the three dumps and the cap on its own, a clock that went back, a new run, and the start
+  text, the three names and the dump lines word for word with a short buffer (`capture_trigger`).
+- `bench_plan_test.c`: the rc bench's pure parts (`bench_plan.h`): the picks of the opening's
+  frames (the plain lamps kind on the 61st LAMPS picture, not the 60th; a volume while it is armed
+  passing; a later picture of the armed kind moving the arm; a kept or refused kind not armed
+  again; a later present of the tick with no plan passed over and a new frame without one ending the
+  run; the dark kind on the 61st DARK, dropped outside the opening; the sun on the 21st WHOLE), the
+  schedule (five variants over two rounds, the second turned by two, a baseline after every four;
+  the baseline alone; the bounds), K from a picture time (the most, cut, the least), the type 7
+  quantiles, a frame's results over made-up samples (the deltas against the bracketing baselines,
+  an excluded sample left out, the baseline over both its blocks, the drift), the ranking, and the
+  head, variant, drift, ranking and sum lines and the CSV row word for word (the GPU stamps no and
+  not known), a short buffer cut, and the skip's verdicts (a press before the start, inside its
+  first half second or a key's repeat passed over; one at the guard or later skips) (`bench_plan`).
 - `backup_test.c`: Options > Extras' backup and restore (`backup.h`) on a user folder of its own
   under the build folder: the names a backup may hold (no `..`, no absolute or drive path, no `\`,
-  no empty part, the places only); a backup holding the card folders, `states/`, `config.toml` and
-  `achievements.toml` and none of `ico-pc.ini`, `logs/`, `dumps/`, the textures, a slot's
+  no empty part, the places only); a backup holding the card folders, `states/`, `config.toml`,
+  `achievements.toml` and `difficulty.toml` and none of `ico-pc.ini`, `logs/`, `dumps/`, the textures, a slot's
   developer dump or a `.tmp` file, save states and pictures stored and text deflated, the manifest
   last with the version, platform, discs, time and count; inspect reading it back and saying when
   another disc made it; the restore unpacking into `backup-restore/` and changing nothing else, the
@@ -447,8 +742,32 @@ D3D12 and a Vulkan device without the dynamic state; `rd_mesh_static.1of4` is `r
   the player's data, the rest as it was, the next start naming the copy, and an old copy of a place
   beside the data named at every start while another name is not; an unfinished unpacking deleted
   at the start; `ico_remove_tree` taking hidden files; the suggested file name (`backup`).
-- `dump_zip_test.c`: F12's zip (with the tick before as its second `.rddump`, and the blended present's frame moved in third by `ico_zip_move_file`, the loose file gone), the aspect sweep's zip and the device-loss zip (the lost frame first, the second `.rddump` the frame before, the pruning to the newest three), written and read back with miniz
+- `report_test.c` (ctest `report`): the bug report's zip (`ico_report_write`): a stored loss dump is deflated when the report takes it (issue 123's 28 MB stored loss zip made a report over GitHub's 25 MB attachment limit), the slow-scene zip is stored as it is, both read back byte for byte with miniz The logs folder's `last-run.txt` and `last-run-previous.txt` go into the zip byte for byte, and a report without them has neither entry; so do `exit-info.txt` and the exit trace `ico_report_set_exit_info` names, with the verdict line after `report.txt`'s memory line, and a report after `ico_report_set_exit_info("", "")` has neither.
+- `exit_info_test.c` (ctest `exit_info`): how the previous run ended (`port/platform/exit_info.h`, issue 215): every `ApplicationExitInfo` reason's constant name and words (the public SDK's 0-16; a signal 9 with and without the device's low-memory report, an exit code, 17, 42 and -1 printed as their numbers), the importances; the record text (the header lines, a trace name and a failed copy's `!` text, ten new records of which the newest eight are kept newest first, two not newer than the last seen, five malformed lines, a description and a summary cut to their room, Android before 11, a failed read, no text, an empty text), the trace names, the seen file; the activity file's note and loss line; the verdict's precedence table (a crash, device loss, GPU hang, watchdog and clean end of `last-run.txt`, the activity file's loss and hang lines, the record of `last-run.txt`'s pid, a torn end, the files alone with no record, off Android, Android before 11, a failed read, no `last-run.txt`, neither file, another format, a new boot id); the two issue 215 runs word for word; the longest inputs within `EXIT_INFO_VERDICT_MAX` with every part whole; `exit_info_begin` through `ICO_TEST_EXIT_INFO` in a folder under the build folder (the verdict, `exit-info.txt`, the seen file, the report's verdict and its `exit-info.txt` and trace entries, a second start with no new record, a start without the fake). CPU only.
+- `last_run_test.c` (ctest `last_run`): `logs/last-run.txt` (`port/platform/last_run.h`, issue 215): the slots' widths summing to the file's size with room for each value; a full set of values written and parsed back (every value; the pid, seconds, phase with stage and tick, background, trim level, resets, free memory with the lowest and the floor and the system's split after them (issue 215: the field's room for it), the process's memory, the crash's signal), a newline in a value, a value cut, another format's header, nothing; the file cut at every byte offset (the slots it holds whole read, the rest marked cut); a write stopped at every byte offset (each slot the new one's or the old one's whole, or marked torn, never a mix; more than half the offsets torn); the previous run's lines word for word (a field, a crash, a run that ended without a word, a cut and a torn field); the phase a step moves to, the stage a milestone names, the UTC text (1970, a leap day, 2026, 2099), the system's summary (word for word, cut to 128 bytes with the figures kept), the paths; the run's own file through its calls in a folder under the build folder (a step before the file, the start-up set and its own step, a self-test, the system's figures, three heartbeats with the lowest free memory and the system's split in the free memory field, the activity note between heartbeats, the game, the first picture, play with the stage and the heartbeat's tick, a step in play, the crash's end, the next start's 13 lines and its byte-for-byte copy, a run that ended without a word, a loss then the clean end, the watchdog's end, no file keeping the previous record); issue 215: the boot id, self-tests by name, `51 made of 684`, the record renamed and kept across a start ended between its steps. CPU only.
+- `mem_breakdown_test.c` (ctest `mem_breakdown`): where the device's memory is (`port/platform/mem_breakdown.h`, `mem_watch.h`, issue 215): `/proc/meminfo`'s and `/proc/self/status`'s fields (`Cached:` not `SwapCached:`, a field missing, a read cut inside a line, a figure past its room), the `/sys` nodes' figures (zram's third field, a word, nothing); the memory in use split into its parts summing to it (the rest below zero where two overlap, a part not read in the rest), the whole picture, the batch lines' clause and last-run.txt's part word for word; the set's summary (18.4 MB lost a pipeline over 290, part by part, the most; no pipeline made; a part read at one end; an end not read); the batch lines' rule for the 684-pipeline set (every 43 pipelines and 334 MB; 15 clauses in batches of 4 and 14 in batches of 8 without a fall; a fall of 335 MB taken and 334 not; the lowest shown as the measure; the bound under a steady fall (15 by a fall) and an uneven one (13 by count, 14 by a fall)); last-run.txt's free memory field with the split through its text and parse; on Linux and Android a fake `/proc` and `/sys` tree under the build folder (every source, a node that is a folder (`EISDIR`), nodes not present, a `/proc`-only read taking the last `/sys` figures, no `/proc/meminfo`) and the set's lines through it word for word (the sources once, the start's picture and rule, a clause by count and one by a fall, the end and the summary, the system's signal, the 10 s clause, a set stopped early). Takes the build folder.
+- `set_size_test.c` (ctest `set_size`): the start-up set sized by the device's own memory fall (`port/platform/set_size.h`, issue 215): the median (none, one, odd, even: the lower middle, a noisy set); the decision's table (the issue 215 handheld's 2D stop, 418 x 15 = 6270 MB against 4942; its VU stop with 2D stopped earlier, 218 x 24 = 5232 against 4366; the issue 123 tablet's VU stop with 2D's no fall kept, 218 x 14 = 3052 against 1512; no fall under the floor never stops; too few batches decide nothing; a fit kept; two families that fit alone and not together, the next one kept first; no floor and no figure off); a whole start of the handheld (7249 MB, floor 1915 MB, batches of 8: 2D stopped at pipeline 25, VU at 358) and of the tablet (3751 MB, floor 1947 MB, free memory rising in the 2D head: 2D no fall, VU stopped at 365, the sprite planes going on), every line, the renderer's words and the phase words word for word; a desktop without a floor (off, no line) and a phone with a floor and no fall (never stopped, one first VU batch outvoted); a noisy batch outvoted by the median; two batches deciding nothing; a batch of both families not counted and an ask whose memory was not read carried to the next; the start lines (on, off), the first picture's line, and every text at its widest within its buffer (the start line 692 bytes); the start line of a phone whose record and chunk were made before the set (0 MB to make, 128 and 32 MB named as made). CPU only.
+- `dump_zip_test.c`: F12's zip (with the tick before as its second `.rddump`, and the blended present's frame moved in third by `ico_zip_move_file`, the loose file gone), the aspect sweep's zip, the device-loss zip (the lost frame first, the second `.rddump` the frame before, its entries stored with the stored flag and deflated without it, F12's deflated, the pruning to the newest three, and `ico_loss_dump_prune_except` never deleting the zip just written when a clock that went back sorts it first) and the slow-scene zip (its name, the frame then the log, the pruning to the newest three with the loss zips left alone), written and read back with miniz; the bisect's start-up message (`ico_dump_zip_extract_why`: a file that cannot be opened with its errno, an empty or cut-short zip and another file's bytes as not a zip, a zip with no frame listing what it holds, a frame number the zip does not have, a damaged lost frame's entry named as such and never passed over for the frame before, an empty message on success); the upscaler's pictures (`upscale_pictures.c`, issue 203): the stem of `<stem>-present.png`, the four found beside it added to the bug-report zip with their bytes in the order composite, scene, velocity, depth, a cap the second would pass leaving the composite alone in and the scene's refusal named, none beside the picture adding nothing, F12's (no zip) naming the four, the wait for a capture the present after the request did not dispatch (`ico_upscale_pictures_after` with a pending outcome: the present in the zip first, nothing added while it stays pending, the four after it when written; another outcome adds at once; expired with none on disk adds nothing), and in a folder named "José" the four found (sized through `ico_path_kind`)
   (`dump_zip`).
+- `perf_hint_test.c` (ctest `perf_hint`): Android's performance hints, the pure part (`port/platform/perf_hint.h`): the target from each basis the pacer plans (Original's frame of 2 steps and of an unknown length, the vsync lock's period / 2, the 120 Hz mailbox gap 7812500 ns, the refresh, the period); a picture's work from its record (10 ms less a 3 ms present, 2 ms of fence waits and a 0.5 ms acquire is 4.5 ms; the timed GPU time carried to the untimed pictures and kept from a record that presented nothing; none for all waits or no start); against a fake backend and a clock of 0.1 ms a read: no session before the ids and a target, made once, three reports and the 10 s line word for word, the take emptying it, a target change asked once, a thread change through setThreads and (API 33) closed and made again, the background closing it and counting its pictures and the return making it again, a failed report's error, a full ring's drop counted, refused once and never asked again; the start and 10 s lines word for word, a short buffer, the game mode words, the wake period; and the hand-over on two threads (20000 pictures, the ids and the target changed every 1000: every picture reported once, the last ids and target in force). The block's numbers peeked (the ranked line's clause) without being taken, then taken. CPU only; the NDK's side runs only on a phone.
+- `clock_trap_test.c` (ctest `clock_trap`): one picture a tick behind the step rule (`port/platform/clock_trap.h`, the owner's Pixel in the cage room): the step rule's rate (`pace_rt_further_trace` on the as-made path, the further picture asked when the render thread is free) in the cage's frame (a 12.5 ms closing step, a 1.2 ms step between, 16.683333 ms steps): 60 pictures a second at reads of 8, 9.5, 11 and 11.524999 ms, 30 at 11.525, 12, 16, 16.8, 20, 24 and 30 ms, the hold the next step's test with its slack and reads' end; with a 6 ms closing step 60 up to 17.177777 ms and 30 from 17.177778 ms by the step after's test; the rule at its edges (1.1 a frame, 20 frames, asks half the frames, half held, paced never); ten seconds of the cage at one a tick (55 asks, 41 held, 30 pictures): 9 seconds closed, each said at one a tick at its close, the worst the first; a gap of five seconds closing the open second (at one a tick) and starting the next at the event; two seconds at two a tick around one at one a tick: that one said, the worst; the worse order; the clusters from a block's sums and the dip over the owner's log's cores 2-6 averages from :3048 to :5449 (exactly at :4251, 884 against 1197, and :5276, 896 against 1132.5); none with one block before or 5 samples; the ranked clause and the worst-second line (with the ring's samples inside the second, without a ring, none judged) word for word, a short buffer; the block's pictures and frames counted and zeroed by the take; when the ranked line names the clocks (`clock_trap_due`): six blocks before at a picture's CPU of 9.0-10.0 ms (median 9.5) and cores 2-6 at the :4251 dip's six (median 1197): the cage's slow block (300 pictures for 300 frames, 22.6 ms, the render thread on core 6 at 870 MHz) due and its clause word for word, the first release candidate's good block (754 for 300) never, 1.5 a tick due and one picture more not, 11.875 ms (1.25 x 9.5) due and 11.8 not, no CPU known or 19 frames not, the render thread on core 7 (its own cluster at 900), its core not known, its clock not sampled, one block before with a CPU not due; one second's text (the pin trace's) word for word with the ring's samples and without; the blocks' picture CPU median (none, three of four blocks known: 9.0) and a second's CPU raised (10.0 ms against 8.0 at the 1.25 edge, 9.97 not, any with fewer than two blocks, never with none known). Issue 179's worst second against the rate in force: a 25 a second trace with one second at 12 the worst (48 %, 9 whole seconds judged, the line word for word) where the 20-frame rule never judges it; 60 a second at two a tick with one second at 45 the worst; a second closed after a gap of 2 s or more not judged; the smaller share worse whatever the frames. CPU only.
+- `pin_release_test.c` (ctest `pin_release`): the render and game threads' single-core pins let go at one picture a tick (`port/platform/pin_release.h`), with the owner's second release candidate's seconds (stuck: 30 pictures for 30 frames, 35 of 46 held, 21.3 ms against the blocks' median 8.5; good: 58 for 30, 18 of 86 held, 6.1 ms): stuck at its edges (one a tick at 9.0 ms not, 10.625 ms (1.25 x 8.5) yes, any CPU with one block of level, two a tick never, no CPU known never); good seconds nothing; a stuck one let go and traced pinned, its line word for word (and without a level); three stuck let go, nine good, a pause second counting neither way, the tenth good taking them again (let go for 14 s, 3 at one a tick) with its line; five seconds traced after, then none; 20 trace lines; the block's counts word for word and taken; a stuck second inside the count starting it again (taken again after 20 s), let go again, taken again at once when the rule stops allowing it; not allowed: stuck seconds traced, never let go, the block's words for the few-cores rule; the trace's 300 lines then its end once, then nothing; the threads' cores a second (29 on 7, 1 on 6, one not known: one core change), the trace line word for word without a ring and with one (each core run on with its own samples, the render thread's first), nothing sampled, the block's residency with the cores' clocks (7 78 %, 6 22 %, 6 60 %, 5 40 %) word for word, a short buffer. CPU only.
+- `log_cost_test.c` (ctest `log_cost`): the logging's own cost a block (`port/platform/log_cost.h`): the overlaps (touching spans do not overlap), a phone's block with the log thread (the window thread's print, 42 writes with one slow write during a present that blocked and one during a late step, the pipe never full, a capture whose worker overlapped a late step) word for word, a full pipe, a desktop block with no log thread and the bytes not known, spans past the table counted and not kept, a short buffer.
+- `dump_auto_test.c` (ctest `dump_auto`): the automatic dumps' worker (`dump_auto.h`, issues 123 and
+  179), the zip from memory (`ico_zip_mem_files`, `ico_zip_add_bundle`): entries and log read back,
+  a missing log leaving the entries alone; a job written whole (frame, tick before, log, sidecar,
+  both costs, the drain's part, slow zips pruned to three); a reads-only job's line (`copy, reads
+  wait`); a second job while one is written dropped with its line, counted, its block the
+  caller's; an unwritable zip keeping the frame loose; the join at shutdown with a job in flight,
+  twice safe, a later job a new worker; the report's bundle (the newest three of five zips stored,
+  `automatic-captures.txt` naming each and why one is out, the report's own entries kept, a zip
+  gone `left out: gone`); the slow-scene block (`ico_dump_auto_prepare`, `_prepared`,
+  `_unprepare`: none asked, 0 refused, the size asked, busy from ask to submit, the filled block
+  written whole, given up asked, made or taken, never taken freed at shutdown); the loss keep's
+  block (`ico_dump_auto_keep_*`, a slot of its own: not busy, made beside a slow-scene block, held
+  bytes, given back asked or made, freed at shutdown); `slow_arm.c` (a held pick taken, a gone one's
+  line, the heaviest held stand-in taken at the block's end, a dropped arm's line and count).
+  Run under the asan and thread presets as well.
 - `game_data_range_test.c`: the game data ranges ([PLATFORM.md](PLATFORM.md#game-data-ranges))
   on this toolchain's compiler and linker, over a stand-in game library (`game_data_fixture.c`)
   given `ico_game`'s section treatment and the game's options: the ranges exist; every writable
@@ -470,7 +789,7 @@ D3D12 and a Vulkan device without the dynamic state; `rd_mesh_static.1of4` is `r
   the restored fiber's stack bounds in the thread block are checked too); the wrong delta and the
   wrong slot refused (`state_fiber`). `state_fiber_guard` saves a fiber, restores it into a second pool,
   resumes it in a forked child and overflows its stack: the restored slot's guard page must stop it
-  (not on Windows).
+  (not on Windows). Its `misses` case and `state_reloc`'s: [TESTING_PROGRAMS_2.md](TESTING_PROGRAMS_2.md).
 - `state_guard_test.c`: the saving process's thread pointer and stack guard
   ([PLATFORM.md](PLATFORM.md#relocation)), with both processes' values made up so it runs on
   x86-64: an exact match is rewritten and counted per value, near misses (one off, one bit off,
@@ -490,7 +809,11 @@ D3D12 and a Vulkan device without the dynamic state; `rd_mesh_static.1of4` is `r
   immediates and displacements, VEX, EVEX, the 0F 38/3A maps, nops; an unknown opcode and a cut
   instruction not decoded); the masked code hash on x86-64 and arm64 (one function at two addresses
   with other call, RIP, ADRP and low-12 offsets alike; another frame size, stack slot, internal
-  branch, register or constant not; padding left out); the symbol table from a GNU ld map (a
+  branch, register or constant not; padding left out); arm64 code hash rules 2 on a function
+  whose page is used before its ADRP through a branch back and in a jump table's case after a BR:
+  rules 1 and rules 2 equal to `tools/code_hash_a64.py`'s hashes, the two builds apart under
+  rules 1 and alike under rules 2 (the legacy tables are hashed in Python and compared here);
+  the symbol table from a GNU ld map (a
   static function's piece, sections bounding the pieces, `*fill*` and the discarded list skipped),
   lld's map and nm (names, ordinals, uniqueness, lookups), the layout hash equal for one layout at
   two addresses and other when a game global moves, another build's file and a missing anchor
@@ -516,7 +839,109 @@ D3D12 and a Vulkan device without the dynamic state; `rd_mesh_static.1of4` is `r
   refused; a simulation key this build lists that the state lacks: refused without the key-default
   function, equal at its default or unset, refused when changed or when the saved text is not what
   its hash covered, a differing key named first, a key only the state lists refused, the absent
-  keys named for the log (`state_port`).
+  keys named for the log; a key only the state lists that this build retired (a difficulty row)
+  passed over by the other-build check, refused without the retired-key function, a listed key
+  that differs still named (`state_port`).
+- `state_name_test.c`: every address a save state holds named across versions
+  ([PLATFORM.md](PLATFORM.md#across-versions)), with two synthetic builds whose images hold
+  headers, read-only data (a sized constant, literals, an anonymous constant table), code, port
+  data and the game's two ranges at other places, each with its own nm table; nothing of the game
+  starts. Laid out as Android's library (one read and execute range from the headers through the
+  code, no read-only range, the symbol file's `section` lines), a state's words (a return address,
+  a game table's start-up pointer to a literal, a literal at a sized constant's end address, a
+  60-byte literal, an EUC-JP literal, a word into the anonymous table, two statics of one name
+  told apart by their files' column, a game data pointer) carry over into a build where each
+  moved: the code range is the `.text` line's, the constant is data, four windows (three texts)
+  and the start-up value are recorded, nothing is unnamed, and each word is translated to its new
+  place (with the code range the loader's, the same words are code no unit holds and the state is
+  pinned); laid out as Linux's program (read-only data in its own range, no `section` lines) the
+  same; laid out as Windows' (PE sections, judged at 0x140000000) the texts carry over, the
+  60-byte one read from a fiber's stack, while the table's word, no text, is kept as a number and
+  the state still loads (`test_carry`). A text twice in the later build with other neighbours
+  (`is in more than one place here`), a text it lacks (`is missing here`), a code word no unit
+  holds (pinned, the save's list entry and the load's from the record: the reason, `.text`, the
+  nearest symbol and offset, the scan's label and the word's address), twenty such words counted
+  with `ICO_XB_LIST` listed (`test_refuse`); a 5 MB window (zeros with one marker) recorded by its
+  length, hash and prefix and found again past 16 more zeros, refused once the marker is gone
+  (`test_hashed`); a version 2 record's text point translated as before, a version 2 record's
+  unnamed words refused with their own words and no list, an arm64 record without page words
+  refused, a damaged version 2 text and a damaged
+  version 3 window (`test_format`); a GNU ld map's output sections (`*default*` in the memory
+  configuration not one, a long name with its numbers on the next line), the code range from
+  `.text` inside a wider executable range, the section at an address, the nearest symbol, and
+  `ico_xb_image` making the rest of the executable range read-only data (`test_sections`); in
+  `.data.rel.ro`, two statics of one name in files of one name (each a relocated pointer and
+  constants) and a compiler's private table named from the map carry over by ordinal and masked
+  contents into a build whose pointers are its own, a changed constant refused (`number 2 of its
+  name`), the same words with no section lines left unnamed as writable (`test_masked`); synthetic arm64 functions (f_a: ADRPs of two variables of one
+  bss page, f_c and f_d: one each, f_b: a third variable's page) whose targets move by non-page
+  amounts in the later image: a fiber's registers and a spilled slot holding the pages translate to
+  the pages the later ADRPs make (not the range's move), the same value outside the fiber still the
+  range's address, an ordinary address of a variable and a page-aligned arena word by their
+  symbols; f_a's two ADRPs making two pages refused (`f_a+0x0 and f_a+0x8`); one page word on two
+  fibers whose frames aim at variables now on two pages translated per fiber; a page word also an
+  ordinary address refused when the readings differ; a page-aligned word no ADRP on its fiber makes, not
+  recorded, translated as the ordinary address it is even into a page (`test_pages`); an earlier
+  version's state read again with its legacy table (issue 217), where A's code and read-only data
+  are wiped after the table is made from them (symbol file, one text run, code hashes under rules
+  1 and 2) and its format 2 record holds the units' rules-1 hashes. The record and table agree;
+  f_e's page is used before its ADRP through a branch back, so rules 1 tells A's f_e from B's and
+  rules 2 does not. A text word, a repeated name's data word, VAR3's page on a fiber and a return
+  address are named again (no word unnamed, one page word, one window) and translated in B: the
+  text to B's, the data word by B's start-up value placed back by name, the page to the page f_e's
+  ADRP and its user make in B. Without the start-up word the data word is unnamed. With the text
+  twice in B, a word into its middle is refused (`in more than one place`), and a word at its start (a whole literal, at its run's start: the table marks the run as a literal start because the byte before it is zero) takes the first copy and counts one twin. A record whose unit hash is not the
+  table's (`another build's`) or whose layout is another (`another version's`) is refused, and so
+  is a table whose f_e hash differs from B's (`the function f_e changed`) (`test_legacy`). A
+  version 2 record of another layout with unnamed words is refused for the layout first
+  (`test_format`) (`state_name`).
+- `state_legacy_test.c`: the committed legacy tables (`port/state_legacy`, the source tree's
+  folder as its argument) read by the game's loader (`state_legacy.c`). Each table the index
+  names is found by its platform and commit and loads. Its manifest's commit, code hash count and
+  text run count match, its hashes are under the current rules and in address order, its runs lie
+  inside its `.rodata` and end in a zero byte, a run found by its start gives its literal-start
+  mark, the marked runs number the manifest's `lstarts`, its symbol file places at an Android image, and
+  every function the table cuts has its hashes. No table is found for another platform or for the
+  reporter's commit of another layout. The reader acts as an APK (no asset name ends in `.gz`),
+  so every table must load by the names an APK keeps. A missing index gives -1, a missing hashes
+  file and a missing sections file are named with the reader's reason (`cannot read <table>/sections.txt:
+  dropped`), a text file cut short does not load, and a table whose manifest lacks
+  `text_index 2` is refused by name (`text index is of format 1, not 2`, `rebuilt`)
+  (`state_legacy`).
+- `tools/state_legacy_table.py check`: each legacy table's files against its manifest (sizes,
+  SHA-256, the text runs inside `.rodata` and in order, the text index's format `text_index 2`
+  and its literal-start count `lstarts`, the symbol file's `ico_diag_init`, the code
+  hashes' count, rules and address order), and the index naming each table once
+  (`state_legacy_tables`). `tools/code_hash_a64.py --selftest`: the Python XXH3-64 against
+  xxHash's sanity vectors and the rules-2 masking against hand-made functions
+  (`code_hash_a64_selftest`). `tools/test/android_syms_layout_test.py`: the Android packaging gate
+  on the game data layout hash (`tools/android_syms_lines.py layout` against
+  `port/state_legacy/layout.txt`): a guard report with the recorded hash passes, one with another
+  hash fails naming both and the checkpoint path, one with no layout line fails; the Windows
+  program's recorded hash the same, the arm64 Linux `none` passes printing the hash; `gamesec`
+  fails a map with no game object or no reserved room (`android_syms_layout`).
+- `state_carry_xbuild_test.c`: save states across two real links of one program (`state_carry.cmake`,
+  [PLATFORM.md](PLATFORM.md#the-carry-over-guard)): A linked with its read-only data in a segment of
+  its own, B with more code and texts ahead of A's and its read-only data inside the executable
+  segment (lld `--no-rosegment`, else GNU ld `-z noseparate-code`), each reading its own link map;
+  a game table of initialised pointers (two short texts, a 60-byte text, an EUC-JP text, a pointer
+  into a constant table, a function) and a block of run-time words (a short text, a 46-byte and a
+  36-byte EUC-JP text no table holds, the constant table, a function, the game's data, a port
+  variable, the block itself, a copied start-up value) saved by one build through `ico_xb_finish`
+  and loaded by the other through `ico_xb_check` and `ico_state_reloc_word`: all 15 words become the
+  loading build's own addresses, both ways, each program's layout line checked; both saves are
+  judged as a program the loader places high (`judge_lo`), where the constant-table word is named
+  by its bytes (`state_carry_xbuild`, driven by `tools/state_carry_check.py xbuild`; not built
+  under AddressSanitizer, whose red zones lie in the read-only data the save reads whole).
+- `state_carry_fixture.c`: the program `tools/state_carry_check.py selftest` compiles and links in
+  each layout (gcc: `-z separate-code` and `-z noseparate-code`; the toolchain's clang and lld for
+  arm64 Android and x86-64 Linux, `--rosegment` and `--no-rosegment`; the toolchain's mingw-w64 gcc
+  for a Windows program at 0x140000000), each with its symbol file as the packages write it (the
+  `section` lines for an ELF, the link map for the PE): its 7 game-table pointers to 6 targets all
+  named with the exact symbol file, and exactly one unnamed, "in the code but in no function" (the
+  function the negative symbol file leaves between two units), with the other; each layout checked as made (`state_carry_check`). `state_carry_image`
+  compares the tool's reading of `state_carry_probe`'s own file with that program's
+  `ico_state_image_range`.
 - `state_reloc_test.c`: the scan and the self-checks over the game's real allocator
   (`ico2/fumi/ios/memory.c` built with the game's flags): words at each range's start, middle and end
   move by their own delta and nothing else does (near misses, 0, all ones, floats, doubles, EE word
@@ -524,14 +949,34 @@ D3D12 and a Vulkan device without the dynamic state; `rd_mesh_static.1of4` is `r
   program's image range (this code inside the text, static data and strings inside the image, a
   heap block and the stack outside); a heap built by the allocator walks, a copy at another address
   walks only after the scan, and three corruptions are each refused; a thread entry or handler in data
-  is refused (`state_reloc`).
+  is refused; issue 218's rule (`ico_state_reloc_ambiguous`): a synthetic arena holding a
+  ClusterPoly table with the reporter's `{0x2640e60, 1}`, a bga record's and a keyframe's `{word, 1}`
+  and two real program pointers, the iOS image saved at 0x10027c000 and moved by 0x2964000: the image
+  may not be moved by the scan, the five words it would take for addresses counted and none moved
+  (what the scan would have done: the run moved to 0x4fa4e60), every delta 0 judged and moved
+  nothing, a moved arena (upper half 0xd) or pool named, the model tables and another build's
+  translated image not judged, the bound itself (0x10 moves, 0xf does not), and the macOS image at
+  its new base moved by a slide with its two real pointers moved and every pair left; the Windows
+  numbers inside the old code (`ico_state_code_numbers`, `ico_state_region_holds`): a word inside a
+  function at no start and no point is a number (a repeat once, a second region added to the one
+  sorted list, a full list counting what it did not keep), a function's start, a point, a word
+  outside the code and the code's end are not, a kept value a thread's stack holds is found, and the
+  translation with the identity point keeps the number while the function's address and the point
+  move; the verdict the load and the listing share (`ico_state_move_check`): an iOS state after a
+  restart names the image, in its own run it is OK, another build's Windows state whose kept
+  numbers a thread's stack holds is HELD (the first found named), without threads OK with the
+  three kept, a list too short is TOO_MANY, an image above the bound looks for no numbers, a
+  moved arena below the bound is named (`state_reloc`).
 - `state_format_test.c`: the save state file ([PLATFORM.md](PLATFORM.md#the-file)): a write read
   back field by field and byte by byte (an empty section, a 15-character name, a zero-heavy section
   packing to under an eighth), a skipped section left alone, a second write replacing the first, BUSY
   while one is in flight; each validity field changed alone gives its result and detail; every
   damaged file (magic, version, a header byte, truncation, an appended byte, a flipped packed byte) is
   `ICO_STATE_BAD_FILE`; a write into a missing folder fails on its thread and leaves no `.tmp`; the
-  build id is stable and changes with the commit and with one more block (`state_format`).
+  build id is stable and changes with the commit and with one more block; no key or hash refuses,
+  `ico_state_keys_diff` names each difference (order, a short buffer): a retired key passed over,
+  `(now absent)` without the function, a listed key that differs and a key only the state lists
+  named, a retired name this run lists compared as any key (`state_format`).
 - `state_registry_test.c`: registration order, the stored fields, every refusal with the table
   unchanged, a full table, reset (`state_registry`).
 - `sim_keys_test.c`: the simulation keys' list (no repeats, the expected keys), the text, the hash
@@ -539,11 +984,33 @@ D3D12 and a Vulkan device without the dynamic state; `rd_mesh_static.1of4` is `r
   `key=saved (now cur)` text on a short buffer too; a key the saved text lacks read as its default
   (equal unset or at the default, `key=(absent) (now cur)` otherwise; only unset for a key without
   one fixed default); every key's default (`ico_sim_key_default`, `ico_sim_key_is_default`), and
-  the first-run `config.toml` writing every listed key it holds at that default (`sim_keys`).
-- `settings_states_test.c`: the Save states page, the pause menu's rows at pitch 16 and the
+  the first-run `config.toml` writing every listed key it holds at that default (`sim_keys`); a
+  state saved before `gameplay.skip_opening` existed equal with the option off and differing
+  (`gameplay.skip_opening=(absent) (now true)`) with it on; the fifteen difficulty keys out of the
+  list and in `ICO_SIM_KEYS_RETIRED` (`ico_sim_key_retired`), out of the hash and the text, an older
+  state's text that lists them at any value equal; through the header check with the two
+  functions `state_host.c` sets it loads whatever the keys, the diff passing over the fifteen and
+  naming `gameplay.door_fix=true`; every key's carry (`ico_sim_key_carry`), `ico_sim_keys_value`.
+  The same for `developer.free_movement` (`developer.free_movement=(absent) (now true)`); `config_test.c` checks the first-run file's `[developer]` block.
+  Issue 218's side note: `gameplay.developer_mode` unset in the state and `false` now is the same
+  setting in `ico_sim_keys_first_diff` and the diff (named without the key-default function),
+  `true` now differs, the reverse is the same, every key with one default text is no difference
+  unset in the state and at its default now, while
+  `video.video_mode` unset and `pal` now and `variants.weapon` at two non-default values differ.
+- `tools/macho_image_check.py selftest`: the Apple programs' image base check
+  ([BUILDING.md](../BUILDING.md#apple-image-base)) on hand-built Mach-O headers: the released
+  layout (`__TEXT` at 0x100000000) fails as below the bound, `__TEXT` at the chosen base passes (also
+  as the arm64 slice of a universal file), a linker that ignored the base, a base of upper half 0xf
+  and an image that the largest slide carries over a 4 GB boundary fail, a 32-bit header and load
+  commands past the file's end are refused (`macho_image_check`).
+- `settings_states_test.c`: the Save states page, the pause menu's rows at pitch 16 (Square doing
+  nothing there) and the
   Continue screen's Square prompt ([UI.md](UI.md#save-states)), the pictures' box at their own
   shape, and F6 (the page from play and from the pause menu, back to the game, a late press, each
-  ignore), on each disc's layout (`settings_states`, `_jpn`, `_kor`, `_cn`, `_ntsc`, `_aug6`,
+  ignore), on a Permadeath journey (the pause row greyed and still shown, the page's line
+  "cannot be made", the Continue screen's prompt hidden with its line and Square opening nothing,
+  all back with Normal), after a load the hold type, language and Debug menu set back to this
+  run's, on each disc's layout (`settings_states`, `_jpn`, `_kor`, `_cn`, `_ntsc`, `_aug6`,
   `_jun26`).
 - `fiber_test.c`: [fibers](ARCHITECTURE.md#terms) switched round-robin with their stacks checked,
   deep stacks, the FP state inside a fiber (`fiber`, `fiber_guard`).
@@ -554,10 +1021,29 @@ D3D12 and a Vulkan device without the dynamic state; `rd_mesh_static.1of4` is `r
   from 0; time not counted, paused or asleep, does not add; a limit of 0 never fires), and the
   render thread's watch (`ico_render_hang_step`: a picture that makes 60 pipelines of 250 ms each
   is no hang, nor one inside a single creation for 20 s; with no creation a picture fires once at
-  15 s, counted from the last creation; between pictures nothing counts); pure (`gpu_hang`).
+  15 s, counted from the last creation; between pictures nothing counts), and the pipeline
+  limit's issue 188 rules (`ico_pipe_stall_limit_s`: 10 s before the game starts, 60 s on a driver
+  whose compiles run one at a time, 30 s in play; `ico_pipe_mem_moving` over the issue 188 log's
+  heartbeats: a creation from 4 s fires at 21.75 s under 10 s and 71.75 s under 60 s, counted
+  from the heartbeat after the last growth; `ico_pipe_stall_next_differs`: the self-tests and a
+  lazy run the same way unless a skippable family or a VU shader before the plain ones), and the
+  memory rule's cap (`ico_pipe_mem_hold`: a creation growing 4 MB at every heartbeat is held for
+  three times the limit, then fires at 41.75, 241.75 and 121.75 s under 10, 60 and 30 s; with
+  the free memory under the floor or a low-memory level from 20 s the limit fires at 20 s plus
+  the limit; a new creation starts its own hold; the limit off never fires);
+  pure (`gpu_hang`).
 - `gpu_driver_test.c`: the Android driver packages: `meta.json`, refusals, installs from zips made
-  here, the trial marker, and `test_list_zips` (`ico_gpu_driver_list_zips`: `a.zip`, `B.ZIP`, `incoming.*`, a text file, a hidden zip and a folder named `.zip` give two names in byte order, the cap and a missing folder) (`gpu_driver`).
-  The Android file picker ([PLATFORM.md](PLATFORM.md#the-file-picker): `IcoActivity.pickFile`,
+  here, the trial marker, the ELF page-size check (`test_pages`: two synthetic ELF64 headers, 4 KB and 16 KB
+  aligned, and one with a single 4 KB segment, on a 4 KB and a 16 KB phone; what cannot be read is not
+  refused: not ELF, big-endian, a table past the bytes, too short, NULL; at install, a 4 KB library or a 4 KB
+  helper library refused with `ICO_GPU_DRIVER_PAGES_MESSAGE` and nothing left under the root, the same zip
+  installing at 4096), the last-seen driver strings (`test_seen`: written and read back for the phone's own
+  driver and a package's folder, the page's words "Qualcomm's driver 512.676.1, Vulkan 1.3" and "Turnip, Mesa
+  25.3.0-devel, Vulkan 1.4", a Turnip without a Mesa version, any other driver with its id, quotes in a name, a
+  bad folder, a damaged file, neither file listing as a driver) and the loss window (`test_loss`: a loss under a
+  package at 0, 12 s and 29.999 s counts, at 30 s and later or on the phone's own driver does not; the marker
+  written again makes the next start see a crash), and `test_list_zips` (`ico_gpu_driver_list_zips`: `a.zip`, `B.ZIP`, `incoming.*`, a text file, a hidden zip and a folder named `.zip` give two names in byte order, the cap and a missing folder) (`gpu_driver`).
+  The Android file picker ([ANDROID_DRIVERS.md](ANDROID_DRIVERS.md#the-file-picker): `IcoActivity.pickFile`,
   `ico_android_pick_file`, `nativePickDone`) has no case: it is Java and JNI, and nothing here runs
   either. It is checked on a phone: `adb logcat -s ico-pc SDL` while pressing Add a driver shows
   the `ico_pc: file picker: pick N:` lines and the picker; `adb shell pm disable-user --user 0
@@ -570,9 +1056,13 @@ D3D12 and a Vulkan device without the dynamic state; `rd_mesh_static.1of4` is `r
   is on, from `config.toml` and then from `ico_host_set_second_card`, an explicit `saves2`
   winning, no folder made), portable mode, the `[dev]`
   keys exported as environment switches (`ico_dev_env_value`, `test_dev_env`; `present_fallback`
-  auto, off or fifo), a restart's
-  `ICO_RD_BLEND` and `ICO_RD_VU_PREPASS` over the ini's (`test_retry_blend`,
-  `test_retry_prepass`), the disc choice's rules in order (`ico_host_choose_disc`,
+  auto, off or fifo; `glow_fold` as `ICO_RD_GLOW_FOLD`; `submit_thread` as `ICO_RD_SUBMIT_THREAD`,
+  off and false as 0, true as 1, its ini name; `vu_bones` ring or cbuffer and `vu_bones_by` as
+  it is, exported as `ICO_RD_VU_BONES` and `ICO_RD_VU_BONES_BY`, `turnip_debug` with no variable),
+  a restart's
+  `ICO_RD_BLEND`, `ICO_RD_VU_PREPASS` and `ICO_RD_VU_RECORD` (`targets` at the targets and
+  losstargets steps, the pre-pass kept) over the ini's (`test_retry_blend`,
+  `test_retry_prepass`, `test_retry_record`), the disc choice's rules in order (`ico_host_choose_disc`,
   `test_choose_disc`), the logs folder set by `ico_host_set_logs_dir` (`test_logs_override`), and
   on Linux the AppImage's program folder: with `APPIMAGE` and `APPDIR` set in the process the
   folder, `ico-pc.ini`, `logs/` and a `userdata/` portable folder are the AppImage file's, and
@@ -594,10 +1084,20 @@ D3D12 and a Vulkan device without the dynamic state; `rd_mesh_static.1of4` is `r
   cleanly: the Asian disc's `STGST13C.DF` (stage 4) and `STGST02A.DF`, the Korean disc's
   `STGSTAFF1.DF`, the August 2001 preview's `STGST13C.DF` (`inflate_disc_cn`,
   `inflate_disc_cn_st02a`, `inflate_disc_kor`, `inflate_disc_aug6`; skipped without the image).
-- `memory_floor_test.c`: the start-up set's free-memory floor (`memory_floor.h`) by driver class: on Qualcomm's own driver and a driver not known 17 % of the device's memory, at most 2048 MB on a device of more than 8 GB (696 MB on a 4 GB phone, 522 MB on a 3 GB one, 1392 MB on 8 GB, 1445 MB on 8500 MB, 1915 MB on the Retroid Pocket 6's 11265 MB, 2048 MB on 12288, 15552 and 16384 MB); on any other driver the same up to 8 GB and at most 512 MB above (8500 to 16384 MB); a setting gives the floor for every class, `0` none; the class from the vendor id and the driver text (0x5143 with Qualcomm's own text, with "turnip Mesa driver", "Turnip Mesa 26.3.0", "Mesa 25.1.0"; PowerVR, Mali, vendor 0) and its words; the PowerVR DXT-48 phone's figures (15552 MB, another driver: 1823 MB, where the 2048 MB cap stopped its set, and 2554 MB continue, 512 MB continues, 511 MB stops, a setting of 2048 stops at 1823); the issue 161 start on the Retroid Pocket 6 on Qualcomm's own driver (11265 MB: 3340 MB continues and 1693 MB, where it stalled, stops under 1915 MB; 1915 MB continues, 1914 MB stops; a driver not known stops at 1693 too; a setting of 1900 stops at 1693, 1600 does not; on Turnip 1693 continues); a 4 GB phone at 1200 MB available continues, at 600 MB stops, on every class; an unknown figure never stops; the log lines' words for each class, a setting and off (`ico_memory_floor_rule`); the `[dev] pipeline_memory_floor_mb` text ("" and "auto" unset, "0" off, "2048" a floor, "-1" and "x" not read) (`memory_floor`).
+- `pipe_resume_test.c`: the start-up set resumed after a low-memory stop (`pipe_resume.h`, issue
+  123): the stop line's part (`; resume at pipeline 312 of 1196, batches of 8, stop 1, 2026-11-09
+  20:45`) word for word, an empty date as `an unknown date`, a cut buffer; the part read back from
+  a whole stop line with the floor's figures and the retry mark, a line without it (none), numbers out of range refused (the place at or past the set, a set, batch or stop count of
+  0, a word for a number), a round trip; the batch across starts that stop again (32, 16, 8, 4, 4;
+  the careful 8 to 4; 5 and 1 to 4; 0 stays 0); the place inside a set that shrank (0 at or past
+  its end); the stop count (1, or the previous + 1 for a resumed start); the longest line against
+  the activity file's 256 bytes (`pipe_resume`).
+- `memory_floor_test.c`: the start-up set's free-memory floor (`memory_floor.h`) by driver class: on Qualcomm's own driver and a driver not known 17 % of the device's memory, at most 2048 MB on a device of more than 8 GB (696 MB on a 4 GB phone, 522 MB on a 3 GB one, 1392 MB on 8 GB, 1445 MB on 8500 MB, 1915 MB on the Retroid Pocket 6's 11265 MB, 2048 MB on 12288, 15552 and 16384 MB); on any other driver the same up to 8 GB and at most 512 MB above (8500 to 16384 MB); a setting gives the floor for every class, `0` none; the class from the vendor id and the driver text (0x5143 with Qualcomm's own text, with "turnip Mesa driver", "Turnip Mesa 26.3.0", "Mesa 25.1.0"; PowerVR, Mali, vendor 0) and its words; the PowerVR DXT-48 phone's figures (15552 MB, another driver: 1823 MB, where the 2048 MB cap stopped its set, and 2554 MB continue, 512 MB continues, 511 MB stops, a setting of 2048 stops at 1823); the issue 161 start on the Retroid Pocket 6 on Qualcomm's own driver (11265 MB: 3340 MB continues and 1693 MB, where it stalled, stops under 1915 MB; 1915 MB continues, 1914 MB stops; a driver not known stops at 1693 too; a setting of 1900 stops at 1693, 1600 does not; on Turnip 1693 continues); a 4 GB phone at 1200 MB available continues, at 600 MB stops, on every class; an unknown figure never stops; the log lines' words for each class, a setting and off (`ico_memory_floor_rule`); the `[dev] pipeline_memory_floor_mb` text ("" and "auto" unset, "0" off, "2048" a floor, "-1" and "x" not read); issue 123's retry (`ico_memory_floor_retry`): the next start's set again only after a stop at the floor (the activity line's figures tell it from the system's signal), on Qualcomm's own driver, with a cache file that is not empty and that the renderer loaded (a missing or empty one, one the renderer did not load, the system's signal, another driver and a driver not known make no set), not after a start that was itself a retry (the stop line's ` after a retry` mark, `ico_memory_floor_line_retried`), the reporter's 1940 MB of 11453 MB and 1.4 MB file (`memory_floor`).; a renamed Turnip build (issue 209's "PurpleVK public driver" text) is another driver with its Vulkan driver id 18 and Qualcomm's own by the text alone
 - `lifecycle_test.c`: the mobile lifecycle's step tables on fake operations: the render thread
   parked before the GPU idles and the surface goes, going on only after the surface is made again,
-  and the tables as before without that operation (`lifecycle`).
+  and the tables as before without that operation; the performance profile written just before the
+  log's flush going to the background (`perf`) and ending (`perf-end`), in no other table, and the
+  tables as before without its operation (`lifecycle`).
 - `frame_mailbox_test.c`: the game thread's and the render thread's hand-over
   (`port/platform/frame_mailbox.h`) driven from one thread under a fake clock: the latest frame
   wins (two replaced, counted), slot pins, the lock grid, the job queue in order and full, the
@@ -631,7 +1131,15 @@ D3D12 and a Vulkan device without the dynamic state; `rd_mesh_static.1of4` is `r
   long waiting for the disc drops nothing, each counted in `discExcused`), and the render thread's
   asynchronous present (`testAsyncLock`: under the lock at 60 Hz a 5 ms step with a 12.5 ms
   present on the game thread falls behind, the same present split 9 ms on the game thread and
-  3.5 ms on the render thread keeps every step on time, one present a step; `testAsyncRates`: the
+  3.5 ms on the render thread keeps every step on time, one present a step; `testRoomOffGame`:
+  the lock at 60 Hz with Direct3D 11's wait for room in the present queue on the render thread (the
+  render thread's whole job modelled: 1.5 ms of interpolation, 0.5 ms more of reads, 0.3 ms of
+  submit and present, the wait ending at the next vblank, a full FIFO queue; a 3 ms step whose
+  first renderer call waits for the picture's reads): made after the present, at the end of the
+  picture, it is 13.5-15 ms a picture with no read wait, the next present waiting 0.3-1.2 ms for
+  it as the display's wait, one present a step, no step past the next due time, no drop, skip or
+  resync, the alphas exact; made in the acquire, inside the reads, every step carries 3.5-5 ms of
+  read waits (issue 126, PACEEVAL's finding 3); `testAsyncRates`: the
   timer path paced by the GPU's time with the presents handed over, 9, 12, 17, 20 and 25 ms
   pictures give about a period over the picture time presents a step and 30 ms every new frame, a
   9 ms present with a 3 ms step two presents a step against one; `testRenderThreadPlan`: the
@@ -684,10 +1192,11 @@ D3D12 and a Vulkan device without the dynamic state; `rd_mesh_static.1of4` is `r
   (`PaceRtTyp`) against their recent longest at a phone's load (each picture's reads from a table
   of 61 with a mean of 10 ms and a deviation of 2.5 ms, its interpolation and its submit with
   them, the closing step 7.5-14.4 ms in turn, 9 on average, the step between about 1 ms), over
-  100 s: 4098 / 3947 / 3814 presents at 24 / 25 / 26 ms GPU pictures where the longest gives 3482
-  / 3435 / 3429; 14 / 22 / 2 steps missing their period, all the pictures', 7 / 8 / 0 over the
-  floor and none later than 3.5 ms; one fall-back of 120 steps at 24 and 25 ms; the game's clock
-  at most 8.3 ms behind; 343 (322) with the driver's back-pressure (320 / 317 while the plan took
+  100 s: 4098 / 3949 / 3814 presents at 24 / 25 / 26 ms GPU pictures where the longest gives 3482
+  / 3435 / 3429; 14 / 21 / 2 steps missing their period, all the pictures', 7 / 7 / 0 over the
+  floor and none later than 3.4 ms; one fall-back of 120 steps at 24 and 25 ms, begun two steps
+  after its third miss (the miss judged first) and ended at its limit; the game's clock at most
+  7.0 ms behind; 343 (322) with the driver's back-pressure (320 / 317 while the plan took
   the picture before's fence) and 397 (341) with the step between calling the renderer, no miss
   (numbers from `build-host/tmp/v098/evidence/pace4/c_cells.py`, `rc11_cells.py`, the
   back-pressure cells re-run in `build-host/tmp/v098/evidence/pace5/c_cells.py`); `testRc12`: a
@@ -710,9 +1219,36 @@ D3D12 and a Vulkan device without the dynamic state; `rd_mesh_static.1of4` is `r
   reads, a 3.4 ms closing step) 460 presents in 10 s with the rule as that phone's build ran it
   (the job's 0 read as the thread off: the picture before's fence in 747 of 749 asks; the phone
   45.6 fps) and 671 now, 633 with the GPU's time alternating 21.0 / 8.6 ms, 6725 over 100 s with no
-  miss; the Enhanced preset at 848x448 451 / 653 (the phone 45.5) and at 1696x896 302 / 545;
+  miss; the Enhanced preset at 848x448 451 / 657 (the phone 45.5; its one back-off ended after 72
+  steps by the pictures fitting) and at 1696x896 302 / 545;
   `testRc12`'s native blocks 302 / 431, 302 / 458, 301 / 339 (the GPU makes 446 / 461 / 339)
-  (`build-host/tmp/v098/evidence/pace6/c_cells_rc13.py`) (`pace_loop`).
+  (`build-host/tmp/v098/evidence/pace6/c_cells_rc13.py`); `testBackoffEvidence`: the step rule's
+  back-off (`PaceStepEst`: a miss judged two steps on by the GPU's records around it, an outlier
+  miss when one took more than 7/4 of the median of the 8 before it, the third counted in 300 steps
+  the whole period for at most 120 steps, ended by the frames' first further picture fitting the
+  normal plan 15 frames in a row) against the one before it (`RT_RULE_V0114`, `rtV0114Note`), vsync
+  off uncapped on a 120 Hz mailbox at `testStepRule`'s as-made load with the pipe's GPU time from
+  the records: 9 / 12 / 13.5 / 17 / 20 / 25 ms GPU pictures give 1080 / 835 / 743 / 590 / 502 / 401
+  presents in 10 s, what the GPU makes, as before (121 and 124 steps at the whole period at 17 and
+  25 ms where it planned 241 and 484); 13.5 ms with one picture in 20 at 2.5x 6896 over 100 s, what
+  those pictures cost (6898), no back-off (before 6052, 5664 of 6000 steps strict); three misses the
+  plan made one back-off of 29 steps (before 120); 20 ms pictures varying 13-29 ms for 2 s the
+  back-off ended 38 steps after them (before 83); sustained, every back-off at its limit, 2209
+  presents in 40 s (before 2222); a GPU varying 9.1-19.4 ms about 13.5 2751 in 40 s (before 2529);
+  the game's clock within a refresh of the rule before's in every cell; `testFill`: further presents
+  asked with the render thread idle (`pace_rt_fill`, `pace_rt_pipe_idle`, `PaceRtAsk.slotAhead`,
+  the GPU test `PACE_RT_TEST_GPU`; `s_rtGame.slotAhead`: a job ends waiting for the next picture's
+  frame slot, `s_rtGame.fill`) against the rule before them, both with the slot ahead, at the
+  phone's opening load (its log's 10 s blocks: a closing step of 3.5-5.8 ms, the step between 0.3-0.7 ms, reads of
+  6 / 9 / 12 / 15 ms with a 2.7 ms deviation, the submit thread's job 10 ms) over 100 s on a 120
+  Hz and a 60 Hz mailbox, a steady GPU and the phone's (the mean 6 % over the median, one
+  picture in 200 at 1.76 times it), GPU times of 13 / 17 / 21 / 25 / 30 / 40 ms: each cell's
+  presents within 3 of the table `s_fillWant`, every frame shown, no resync, at least 94 % of the
+  rule before's presents, the same at 40 ms; per GPU time up to 30 ms the latest step start no
+  later than before, the misses over the floor at most 6 more, the steps at the whole period no
+  more; over that grid the misses over the floor at most half (161 against 534) and the steps at
+  the whole period at most a tenth (216 against 11637); at 21 ms with 9 and 12 ms reads on the
+  phone's GPU the GPU busy 95 % or more and no step at the whole period (`pace_loop`).
 - `cpu_place_test.c`: which core a thread runs on (`port/platform/cpu_place.h`): the histogram
   (by core, out of range and -1 as not known, the most-run core with the lowest on a tie, the take
   emptying it, the share on a mask), the cores' speeds from a fake sysfs under the build folder on
@@ -723,24 +1259,191 @@ D3D12 and a Vulkan device without the dynamic state; `rd_mesh_static.1of4` is `r
   (`cpu_place_split`: `0-1 2.2 GHz, 2-6 3.1 GHz, 7 3.8 GHz` gives the render thread core 7
   alone and the submit thread 2-6, a 4+3+1 phone 7 and 4-6, a core of unknown speed in neither; no
   split with two fastest cores, with the fastest the only one above the slowest, with one speed
-  or none known), and the calling
+  or none known), the placement rule (`cpu_place_plan`: 2 faster of 8 gives the game and render
+  threads both cores and the submit thread none; 3 and 4 faster keep render and submit with the
+  game thread free; one faster the render thread alone; all equal or none known nothing), and the calling
   thread (its core inside the cores it may run on, the priority text's `nice`, a pin to no core
   refused, a pin to the cores already allowed taken), and a pin's result by the cores read back
   (`cpu_place_pin_result`: core 7 asked, the call's yes and 2-7 read back is other cores; the same
   mask kept; a refused call; nothing read back; on Linux the checked pin to the cores allowed
-  kept, a core the system lacks refused with its errno) (`cpu_place`).
+  kept, a core the system lacks refused with its errno), and a thread made after a pin (Linux,
+  two or more cores allowed: the test thread kept to one core, an `ico_thread` made then has
+  that one core with no mask kept and every allowed core once `cpu_place_keep_free` kept them;
+  `cpu_place_thread_free` resets the kept thread itself, then finds it already there, and does
+  nothing with no mask kept); issue 179: the thread's CPU time, core lists to masks, the threads
+  line from a fake table and a fake `/proc/self/task` (`cpu_place`).
+- `cpu_keep_test.c` (ctest `cpu_keep`): the render, game and submit threads' cores after the start
+  (`port/platform/cpu_keep.h`), every expectation from the rule's words: the rule on
+  `0-1 2.2 GHz, 2-6 3.1 GHz, 7 3.8 GHz` (render 7 alone, game 6 alone, submit 2-5, others 0-5;
+  core 7 refused: 6, 5, `2-4, 7`, `0-4, 7`; 7 not allowed: 6, 5, 2-4, 0-4; the pair 6-7; the
+  start's rule 2-7 with submit 2-6; the game thread's 6 refused: 5; only 7 fast and allowed;
+  every fast core refused: none), a Helio G85 (two faster cores: the few-cores rule, render 7
+  alone, game 6 alone, submit and others 0-5; 7 refused: 6 alone and 6-7; the game thread's 6
+  refused: 6-7; both refused: the pair 6-7 for both; the start's rule with others 0-7; a cpuset
+  without 7: render 6 alone, the game thread on 0-6), 1 + 7 (render 7 alone, the game thread on
+  0-7, the rest 0-6, no pair), the Pixel, a 4 + 3 + 1 phone and 4 + 4 applying (7, 6, 4-5), a 1 + 2 + 1
+  four-core device (3, 2, 1, others 0-1), one speed (4 and 8 cores) and one core (off); the keeper against a fake kernel
+  that keeps a mask a thread: every pin kept (the ideal at the start, a scene and the focus
+  asking nothing more, the try and block lines word for word, the system moving the render
+  thread to 2-7 counted once and pinned back), core 7 alone widened to 2-7 as the owner's
+  Pixel did (6 alone, quiet until the 10 s retry, a scene asking at once, the ideal once the
+  kernel keeps it), every one-core pin widened (the pair, the game thread's cores refused one a
+  tick until it joins the others' 0-5, then quiet), a cpuset without core 7 (never asked, then
+  asked when the allowed cores grow), the render thread's id not known yet (the request waits),
+  the submit thread starting later, a new render thread; the few-cores rule against the fake
+  kernel (the Helio G85 all kept with its try and block lines word for word, every one-core pin
+  widened: the pair with the rest still 0-5, the game thread's core alone widened: 6-7 for it at
+  the next tick, the held cores the sweep moves threads off and none under the start's rule or
+  the Pixel's, the start line word for word for 2 + 6 and 1 + 7, none for the Pixel); each
+  thread's cores on five layouts read from a fake sysfs under the build folder (2 + 6, 1 + 7,
+  4 + 4, 1 + 3 + 4, 8 of one speed: the start's rule, the keeper's first tick, the sweep's picks
+  among two audio threads and a driver's thread made on the game thread's start cores, a worker
+  on core 0, the UI thread and one not read; Linux); the reasons' words; and cpu_place's
+  samples by core word for word, a thread's cpuset and its cores from a fake tree under the
+  build folder (`/top-app` and `cpus`, the root set, `effective_cpus`, no such thread: `ENOENT`)
+  and a registered free thread moved back by `cpu_place_refree` (Linux, two or more cores
+  allowed: left alone when skipped, moved, then not touched); the pipeline set's cores
+  (`cpu_keep_set_cores`): on the 2 + 6 and 1 + 7 layouts a worker starting while the set runs
+  keeps every core (the process's, or every core with a speed), the rule's own once it is done,
+  under the Pixel's rule and with the keeper off the rule's own throughout; the sweep leaving a
+  set's worker on every core while its id is in the skip list and moving it after; the set's line
+  word for word in its three modes and a short buffer; the pins let go (`cpu_keep_release`): the
+  `RELEASED` sets on the Pixel (2-7 for the three threads, 0-7 for the rest; refusals not
+  mattering; 2-6 and 0-6 with a cpuset without 7), a 4 + 3 + 1 phone and 4 + 4 (4-7, 0-7), none
+  under the few-cores rule (the Helio G85, 1 + 7) or on one speed; the keeper on the Pixel's
+  widening kernel let go from 6 alone (no ideal asked, the same wish twice changing nothing, no
+  10 s retry, a scene asking nothing, the try and block lines word for word), taken again (the
+  ideal 7 asked first, widened, the walk from ALONE: 6 alone, `why: the pins taken again`), the
+  10 s retry back; the Helio G85's keeper unchanged by the wish; the keeper off taking none; the
+  two new reasons' words. CPU only: the kernel's own answers are a phone's.
+- `attempt_ledger_test.c` (ctest `attempt_ledger`): the attempt ledger (`port/platform/
+  attempt_ledger.h`): the picture-health report's row (on, not applicable, its two counts in the
+  block line, taken per block); the pins let go row (not applicable off Android, under the
+  few-cores rule and with nothing pinned, each with its words; on with its reason in the start
+  line; its two counts in the block line, taken per block); every row `not reported` at the start, a state with its why, the serial
+  moving on a change only, the block line's counts taken per block (the next block from 0), a
+  static row, rows not reported left out (their counts kept for when they are), the stalls clause
+  with no Adreno row, with one not applicable (`off`) and one on, out-of-range ids ignored, a short
+  buffer cut and terminated; the deciders as seven device classes' owners call them (the
+  Mali-G52, the Pixel, a PowerVR B, an Adreno 740 on Qualcomm's driver and on Turnip, a desktop
+  with MSAA, a Mac with the break forced): no row at all left `not reported` (the pins let go on for the Android classes, not applicable elsewhere; the start-up set's size likewise; the start line in one or two whole-row 4 KB parts), the rows not built
+  `not in this build`, the cores' rows, the no-volume break's
+  state with its reason in the start line, the Qualcomm passes row on only on Qualcomm's driver,
+  its count and the stalls clause `(...; the Adreno attempt on|off)`, the block's stalls on that
+  row's second count where it applies (none not applicable, `(1 ...)` and `(3 ...)` on, then 0
+  with no stalls asked), the high queue priority's row `removed` on
+  every class (taken off, issues 215 and 123) with its words in the start line (`Qualcomm queue at
+  high priority removed (taken off, issues 215 and 123)`), left out of every block line and
+  still removed after a reset, the VU record by compute's and
+  the turn fold's states per class (the VU record by compute on with the shipped default on the
+  Pixel's D-Series DXT, off by default on the PowerVR B, which never ran it; the Mali and the Adreno
+  turned phones' turn fold off by default, not applicable on the desktops), the subpass read's
+  state and why per class (off by default on the Mali-G52 and the Adreno 740 on Qualcomm's driver
+  with the words `off on this driver this release: ...` in the start line, on for the Intel driver
+  row's probe, not applicable for no GPU timestamps on the PowerVR B and off the route with the
+  fixed words, refused over off by default), the blend constant `not in this build`; the two small cuts'
+  deciders' other states (the switch, the define, a mode by name, no compute stores; the fold on
+  only with its self-test passed, refused by it, not run, no turned swapchain); the VU record
+  sized from need per class (on where the need's size made less than the memory bound allowed:
+  the Mali-G52 and a desktop at the Original frame rate; not applicable where the bound allowed
+  no more, under the floor or with the pre-pass off; nothing made because the record already
+  held the need, the owner's Pixel's 1024 rows, said as that and not as the memory, and the
+  memory's words where it held less) and its growths in play in the start and block lines; the index compaction per class (on on the Mali-G52's compute record as the Arm
+  class and on the Pixel's compute record, each with its self-test passed, not applicable with the
+  vertex stores elsewhere) and its other
+  states (the tests' switch both ways, refused by the self-test, each class's define off, the
+  self-test not run, not the compute record with and without its words), its triangles left out
+  in the start and block lines; the in-between pictures for the GPU's predicted end per class (not
+  applicable at the Mali-G52 reporter's Original frame rate and on the desktop with vsync on, not
+  applicable without a slot clock on the PowerVR B, off by default for the Pixel, both Adreno 740 drivers and
+  the Mac uncapped), as made without a clock yet leaving the
+  row as it was, on with the tests' switch, its pictures placed and held at the bound in the start
+  and block lines; the own timer's row not applicable where paced, on as made on the Android classes and off by
+  default as made on the Mac (the shipped decision), off by default with a given reason, on with its
+  counts in the block line; the screen's refresh row on for the Android classes where the GPU
+  model's row is off by default, off by default on the Mac, and off by default with a given reason;
+  the even cadence's row off by default with its reason (`three phone rcs did not land pictures on
+  their refresh`); the no-volume break on for the Pixel (`the PowerVR D-Series DXT-48-1536`) and off
+  by default for the rest of its class with its reason; at the reset the compaction's row `not reported`, the blend
+  constant's `not in this build` (CPU only). The old robust-access row: on for the Mali-G52 class (its reporter's `config.toml` held a `gpu_robust = true` without the mark), not applicable for the others; each class's whole start line within the window's 4 KB buffer with that row and the last in it; the row's three states with their words in the start line, `on (static)` in the block line, `not reported` after the reset. No capture after a stall (issue 123): on for the Adreno 740 on Qualcomm's driver (where the skin check runs), not applicable for the others; its two states' words in the start line, its count per block (`3 checks skipped after a reset`, then 0), `not reported` after the reset. The flat outputs (issue 123): not applicable on the Adreno 740 under Qualcomm's own driver (the VU pre-pass off by its device table), on elsewhere; nothing before the renderer said, then on and off with the pre-pass (`ico_attempt_flat0_reach`), the tests' twins remembered; the capture row's words (`slow-scene capture in two steps on 1 slow-scene captures (0 made here)`). The start line in parts (`ico_attempt_start_part`): each class's line in one part equal to the whole text; every row's reason 600 bytes long: each part within 4 KB, whole rows, `attempts at the start (continued):` after the first, every row once in order; a row longer than a 64-byte buffer cut and passed; past the rows or no row nothing.
+- `core_share_test.c` (ctest `core_share`): the share of run time on the faster cores of the
+  threads that do not sample their own core (`port/platform/core_share.h`, issue 179): ten seconds
+  of the Helio G85's submit, SDL audio and driver threads and two pipeline workers under one name,
+  the line word for word, the Pixel's 2-7, an unknown core and no fast mask adding nothing, a full
+  table, a short buffer, field 39 of a stat line whose name holds spaces and brackets (CPU only).
+- `present_latency_test.c` (ctest `present_latency`): the present's latency in a 10 s block
+  (`port/platform/present_latency.h`, issue 123): four made-up records (from the hand-over and
+  from the replay's start; the driver's call split at the picture's GPU end before, after and across
+  the call; one without a GPU end seen) and two left out (no present end, an end before its
+  start); the mean and longest, the parts before the present and of it, the line word for word
+  (no queue priority clause: the priority was taken off), the call not split without a GPU end,
+  nothing with no present (CPU only).
+- `stall_coincide_test.c` (ctest `stall_coincide`): what a stall coincided with (`port/platform/
+  stall_coincide.h`, issue 179): the block's pass medians (none before five, odd and even counts,
+  the ring's last 64, a full key table), the spike rule at its bounds (5.9x not, 8.3x and 40.1 ms
+  yes, 40.0 ms not, no median not), the classes of issue 179's moment (memory under the floor;
+  with a 150 ms render wait and pressure rising; none; the GPU clock at 300 of 950 MHz), the
+  moment and tally lines word for word, issue 123's Adreno 740 stall (19 stamps unwritten, memory
+  under Qualcomm's floor: memory and the GPU's own sign of a reset, `(a hang)`), the hung replay
+  named with the next one's restart (`(the first: list 0's end), and at replay 690: the GPU's clock
+  restarted (a hang)`), a sign without a stamp unwritten (`not a hang`), a restart after a span with
+  no GPU work said and not counted (measured, and by the notes alone), the tally's hangs apart
+  (issue 123's block of three hangs and the 197 ms present after them: `4 in the block, 3 of them
+  hangs ... and 1 other`), the line rules (a block of 352 on a fresh run: its first 16, then the
+  first 8, 100th, 200th and 300th of the others, 325 left out and said; issue 123's tablet's block
+  tallies for 3630 s all written; a stall every picture for an hour, 360 blocks of 600: 500 + 8 +
+  2155 lines, every stall counted), the
+  submissions around a stall word for word (issue 123's first: the scene's submission holding the
+  first unwritten stamp, the present's list, the stalled present's own, `1 seen, 3 not known`), a
+  short buffer, the pressure and status parsers (`VmSwap` read past `RssShmem`, absent from a
+  status without it), the driver's thread names (CPU only). Issue 179's classes from the stalled
+  replay's pieces against their medians: list 0 at 6x with the others' median 1.125x is `one piece
+  grew` and its clauses word for word (the pieces, the GPU idle before, the triangles against
+  their median), the others' median at 1.5x still one piece and at 2.0x `the GPU slow as a whole`,
+  every piece at 3.0-3.5x with one without a median left out (its work begun before the picture
+  before ended), one piece alone no class, the median peeked without adding.
+- `slow_judge_test.c` (ctest `slow_judge`; `port/platform/slow_judge.cmake`): what slow pictures
+  and steps are judged against (`port/platform/slow_judge.h`, issue 179): a table of pacing states
+  (the PAL disc at Frame rate Original on 60 Hz: 40 ms, the step bound 8 x 40 / 16.666667; 60 a
+  second on 120 Hz; Uncapped; a cap of 144 on 60 Hz; no refresh known; nothing known) with the
+  slow-picture bound, the slow-step bound and the rate in force; the reporter's 18.7 ms pictures
+  and 11 ms steps not slow at 25 a second (slow against one refresh); the step's CPU words (most
+  off the CPU, most on it, not known, a short buffer); the game's rate from its frame closes (250
+  frames over 10 s of frame intervals 25.0, 234 23.4) and from the wall time (251 in 10.0 s:
+  25.1); the line word for word (CPU only).
+- `sys_cell_test.c` (ctest `sys_cell`): the log thread's last-value cell (`port/platform/
+  sys_cell.h`): read back whole with its time and cost, the memory block's 16 values whole (a cell
+  of 6 cut the 14-value `memory in the block` line, which then never printed), a write in
+  progress read as nothing, a writer thread against a reader (CPU only).
+- `thread_stat_test.c`: `schedstat` parsed and read from a fake `/proc/self/task`, the block's
+  difference, its words (`thread_stat`).
 - `fps_counter_test.c`: the Frame rate counter's number (`port/platform/fps_counter.h`): 0 before
   the first second, 50 presents a second give 50 at every whole second, a second that ran 1.5 s long
   divides by its real length and rounds to the nearest (91 presents 61, 89 presents 59), replays
   counted through the renderer's count being zeroed after a tick (100 a second, none lost), a
-  change of mode starting the second again, a time going backwards changing nothing (`fps_counter`).
-- `pace_policy_test.c`: the slow-present decision, Resolution "auto"'s steps, the gap between
+  change of mode starting the second again (not counted as a gap), a time going backwards changing
+  nothing; issue 123: a 1.1 s capture noted (`fps_gap`) starts the second again with 50 kept, the
+  next second 40; a 2 s gap between ticks with no note (the guard at `ICO_GPU_HANG_MIN_S`) the same,
+  while with `gapNs` the 15 s limit a 13 s gap stays in the second (10 presents over 13.3 s, 1); a
+  450 ms stall inside play reads 27, three 440 ms stalls in 1.36 s read 5, neither a restart
+  (`fps_counter`).
+- `pace_policy_test.c`: the slow-present decision, Resolution "auto"'s steps (and under a
+  temporal upscaler from the window's scale over its ratio, `pace_auto_window_scale`), the gap between
   presents, the vsync lock's n and alphas and its period's sanity, and the vblank clock's laws on a
   synthetic display, and the late-present skip: a whole period behind skips, with or without
   sound, less does not, slow presents skip past the deadline, never two frames in a row while the
   same frame may stay skipped; the timer path's loop under a fake clock keeps a 30 frames a second
   game on 39 ms presents at real time with no resync, where a frame skipped for one step only fell
-  behind, and a 60 frames a second game on 20 ms presents through the late arm alone; the present
+  behind, and a 60 frames a second game on 20 ms presents through the late arm alone; Frame rate
+  Original's rule (`testOriginalRule`: `pace_original_present`'s late arm, `pace_original_gate`
+  leaving a frame on time out while the render thread or the submit thread is busy with the
+  picture before and a keep frame never; `testOriginalLoop`: the picture inside the step, 9 to 90
+  ms a picture, the game at 50 steps a second; `testOriginalSplit`: the picture handed over, walks
+  of 5 to 40 ms and presents of 1 to 300 ms on the submit thread, a frame every step or every
+  second: the game at 50 steps a second within 2 % with no resync, the pictures between 1000 /
+  (present + walk + a frame interval) and 1000 / (present + walk) a second, the audio's lead under
+  its bound, where the same 320 ms picture inside the step resyncs and runs the game under its
+  rate); the present
   allowance's rule (`testBudgetRule`: one late step arming only, a second within 60 steps dropping
   to one below its presents, a late step of new frames only confirming an armed drop, the arm's 60
   steps, the hold, the lock's climb a probe straight back to the ceiling that holds through its 60
@@ -771,8 +1474,15 @@ D3D12 and a Vulkan device without the dynamic state; `rd_mesh_static.1of4` is `r
   every present waiting for the next vblank: 30 presents a second, nothing armed or dropped); the
   clamp of a cap above the refresh in mailbox mode (`testPresentGap`, `testCapEqualsRefresh`),
   and the step rule's answer to a miss (`testStepRule`: under the 2 ms floor nothing, over it the
-  margin widened by the lateness and falling an eighth a step, the third over it within 300 steps
-  the whole period for 120 steps, then 240, 480 at most, halved by 300 clean steps; a phone log's
+  margin widened by the lateness and falling an eighth a step, each judged two steps on (counted
+  with no GPU record around it), the third counted within 300 steps the whole period for 120 steps
+  at its limit and again 120 for a fourth; the evidence: a frame's first ask judged only while
+  backed off, 15 frames of 33.4 ms in a row ending it, a frame that would not have fitted or a
+  counted miss starting the run again, `pace_step_fit_frames` at 33.4 / 40 / 16.7 ms frames; the
+  outlier miss: `pace_step_est_gpu`'s typical only with 8 records, 7/4 of the median not an
+  outlier and a nanosecond over it one, a record 3 steps before or 1 after the miss making it an
+  outlier (its widening taken back), one 4 steps before not; `pace_step_normal_fits` handing over
+  what the whole period holds and holding what runs past the slack or overruns; a phone log's
   sequence of misses with no fall-back; a game's miss changing nothing and counted down inside a back-off
   as a step; `pace_step_start_late` past the later of the due time and the step before's end less
   the pacer's wake; `pace_step_by_pictures`' edges, a hold under the floor the game's), and the
@@ -799,28 +1509,214 @@ D3D12 and a Vulkan device without the dynamic state; `rd_mesh_static.1of4` is `r
   word, a block with no ask, a hold before the rule with no trace, a short buffer cut; the frame
   slots apart, the submit thread's job 0 with `submitOn`, not behind), and the GPU's time between
   timed replays (`testGpuGap`, `PaceGpuGap`: the idle floor of 0.05 ms, an overlap capped at the
-  span, the `window: GPU between replays` part word for word, a short buffer) (`pace_policy`).
+  span, the `window: GPU between replays` part word for word, a short buffer; issue 123: gaps
+  timed across untimed replays counted, the gaps after the presents that blocked listed, one
+  stall, the first 8 of 11 kept; the longest text fits the window's `PACE_GPU_GAP_TEXT_MAX` buffer
+  whole); `testFillParts`: the idle ask's parts, `pace_rt_fill`'s three answers, the GPU's
+  longest lately (`pace_rt_gpu_long`: up at once, a 32nd of the way down, 20 ms over 5.5-5.7 ms
+  over 40 records on), the pipe's GPU time (`pace_rt_fill_gpu_ns`: the larger of the median and
+  the mean), `pace_step_est_gpu`'s typical and longest, `pace_rt_pipe_idle` (the job's end by
+  the slot ahead's wait or by its reads, no end known, the submit thread's job before the next
+  picture, what it returns), the GPU test's ends and limits to the nanosecond with the next step
+  closing a frame and between frames, its trace and the block's line word for word, the block's
+  line with waits and no ask (`pace_policy`).
 - `perf_block_test.c`: a block of replays by phase: sums, maxes, the replays over a threshold, the
   longest phase (`perf_block`).
 - `present_fallback_test.c`: the FIFO fallback's decision (`present_fallback.h`): the stock
   Adreno driver's blocks of 376-382 ms at 0, 9 and 14 s switch at the third and never again, the
   switch line word for word, the 10 s line's `toward FIFO` and `since presents went FIFO` words;
   two blocks 40 s apart, blocks 31 s apart and blocks under 200 ms (52 ms, 21 of 143 ms) switch
-  nothing; Turnip's driver text is not eligible while the count still rises; `[dev]
+  nothing; Turnip's driver text, or a Turnip build's driver id 18 under another name (issue 209's PurpleVK: not eligible, not Qualcomm's own, no FIFO from the start, the gate NO; Qualcomm's own driver with id 8 unchanged), is not eligible while the count still rises; a Mali-G52's blocks (204, 231,
+  240 ms at 408, 412, 416 s) under the other-driver gate answer once, never switch, with the line
+  word for word and no suffix (`testOther`; `ico_present_fallback_qualcomm_own` for Mali, AMD and
+  NVIDIA no); the window's gate (`testGate`, `ico_present_fallback_gate`, which
+  `window_present_fallback.c`'s `gate()` calls): Qualcomm's own driver `GATE_YES`; Mali, PowerVR,
+  NVIDIA and AMD `GATE_OTHER` (a revert of the vendor check to `GATE_YES` fails here); Turnip and
+  RADV texts, vsync on, a swapchain not in mailbox mode, a backend other than Vulkan, no device and
+  `[dev] present_fallback=fifo` `GATE_NO`; `[dev] present_fallback=off` `GATE_KEPT`; `[dev]
   present_fallback=off` keeps mailbox with its line once; a count reached with vsync on switches at
-  the next block once eligible; the driver texts and the `[dev]` values (`present_fallback`).
+  the next block once eligible; the driver texts and the `[dev]` values (`present_fallback`); FIFO from the first swapchain
+  (`testStart`): Qualcomm's own driver (0x5143, text neither Mesa nor turnip, driver id 8 or none) with auto and vsync
+  off on Android yes; off, fifo, vsync on, Mesa and turnip texts, other vendors and any platform
+  but Android (Windows on Snapdragon: `ico_present_fallback_start_asked`) no; the start line word
+  for word. `pace_policy_test`'s `testFifoFromStart`: vsync off with a FIFO swapchain keeps the
+  as-made rule, the paced allowance and the back-to-back gap.
+- `display_rate_test.c`: the refresh rate's log lines and the Android frame rate pin's decisions
+  (`display_rate.h`, issue 123): the watch (first rate noted, 59.94 against 59.95 not a change, an
+  unknown rate not one, 144 -> 60 -> 120 two changes), the block's line and the change's line word
+  for word, the 10 s poll (`display_rate_poll`: a change SDL announced written at the event's run
+  time, one it did not with its own line, no change and an unknown rate nothing), `[dev] frame_rate_pin` (auto, off, false, 0, no, any case), the rate asked for each
+  Frame rate row (60, 120, 144; Original, Uncapped, off and above 1000 none), the sequence set,
+  nothing, set, release, nothing, a device without the call never asked, a refused ask tried
+  again, a new native window or a resume forgetting the ask and the next set made again
+  (`DISPLAY_PIN_SET_AGAIN`; none wanted then: nothing asked or said), the pin's lines, the Android
+  display timing line (`display_choreo_text`: reachable with `AChoreographer_getInstance` and either
+  callback, not reachable without it or without both); Uncapped's ask (`display_top_rate`,
+  `display_pin_want`, `display_pin_next_uncapped`): the highest rate at the current mode's
+  size (60 and 120, a rate listed twice, 120.00 and 120.02 one rate, one mode, none, a list not read,
+  144 Hz at another size not counted, 59.94 and 119.88 asked as listed with 120 in the state, 59.94
+  and 60.00 two rates, invalid rates, more than 32 rates), the rule's order (a number and Original as
+  before, the pin off, no seamless-only call, refused, the list, focus with and without a held ask),
+  the row 120 then Uncapped at 120 a new ask, a release and a lost surface clearing it, every
+  Uncapped line word for word and a short buffer (`display_rate`).
+- `present_stall_block_test.c`: the present stalls per 10 s block and per run
+  (`present_stall_block.h`, issue 123): blocks before the run's first stall write no line and join
+  the run's sums; the issue 123 log's stalled block (a 340 ms present 33.4 ms after the replay
+  before, a stalled span of 87.1 ms kept out of the band, the GPU clock restarted) word for word;
+  the block after it still writes; a stall after an 818 ms CPU-side pause with a measured gap, an
+  overlap, one with no start time, a GPU clock read; more stalls than the list holds; the band
+  index; the run's line (restarts, CPU-side gaps against the 80 ms idle timeout, the held range,
+  by the stall's display rate and by band) word for word; a short buffer; the GPU's start against
+  the submit (calibrated, and "about" from the wait's end) and a first list that ran twice in the
+  stall's entry and the run's line (`present_stall_block`).
+- `gpu_sysfs_test.c`: the kernel GPU driver's nodes, the pure part (`gpu_sysfs.h`, issue 123): the nodes' texts parsed (`905000000`, `42 %`, leading blanks, a sign, empty, no digit first, a 4 KB text, a buffer read to its length only, digits past a long long's room), Hz to MHz rounded; the ring of 64 (70 samples, the oldest dropped); the 10 s block (the clock's range and mean, busy's mean, the resets in the block against the last before it and from the ring's start, the thermal level's highest, a temperature, only busy read, a steady clock, an empty block); around a present (the sample before, the ones during, the one after, samples exactly at its start and end, none before, none after, nothing read); the open line (the usual readable set, every node denied, the directory missing, nothing present, only the once nodes with errnos named), the block and around lines word for word, a short buffer cut; issue 179: the devfreq name rule and lines, the CPU clocks by class and around a present; the kernel's `/sys/kernel/gpu` nodes sampled and the Mali driver's `gpuinfo` and MediaTek's `gpufreq_status` read once, in the open line's lists where GED is denied; the around line's change of the GPU's reset count across a stall (+0, +1, none when one side did not read it or there is no sample after) and the start's one line on it (readable with its count, EACCES, no node, the directory missing, no KGSL) word for word (`gpu_sysfs`).
+- `thermal_text_test.c`: the thermal and screen recording words (`thermal_text.h`, issue 123): the
+  status name table (NONE 0 to SHUTDOWN 6, -1 and 7 UNKNOWN), the change line (`MODERATE (2) ->
+  SEVERE (3) (run time 212.4 s)`) and the recording line (visible, not visible), the 10 s block's line
+  with every part, without a headroom (NaN), headroom alone, status alone, recording alone and
+  nothing reported (`not available (why)`), the around line's ending in the same cases (empty when
+  nothing is reported), a short buffer cut and terminated, all word for word (`thermal_text`).
+- `present_hist_test.c`: the 10 s histogram of the driver's present call (`present_hist.h`): a
+  limit is not over itself, a call is counted in every row it is over, issue 123's block
+  (750 presents of 9 to 15 ms and five of 344 to 365 ms: 5 in every row), the line word for
+  word, an empty block's empty text, a small buffer cut, negative and NaN times not counted;
+  the lines around a present that blocked (issue 123), word for word: the blocked line's split
+  (`present_split_text`: a reporter's stall of 359 ms with a 67.9 ms GPU span against the block's
+  26.7, with its `other` time, the block's first timed replay, the lock without a present call, `other`
+  never under 0, a gap under 0, the call not timed apart, no gap, no GPU span) and the after line (`present_after_text`: the replay after the stall, its gap across one
+  and two untimed replays, no GPU span, a short buffer cut); the stall lines' threshold
+  (`present_stall_lines`: from 250 ms on, never from 50 to 250 ms nor for NaN); a clock that went
+  back (issue 123: "the GPU's timestamp clock went back 20699.4 ms ...", no gap words) (`present_hist`).
+- `bones_ladder_test.c`: issue 123's ladder across starts (`bones_ladder.h`,
+  [VU_SKIN_CHECK.md](VU_SKIN_CHECK.md#the-ladder)): the step for each run's evidence over sequences
+  of starts as `window_bones.c` applies them (step 1 written and healed over 2,000 presents; step 1
+  still differing over 8 twin events (not 1 or 7): step 2 marked trial, then `turnip_debug = off`
+  and a later start's stop; step 2 healed with step 1 in force: `turnip_debug = retest`, the
+  re-test clean over 2,000 presents: the key removed, step 1 alone healed after; the re-test with
+  8 twin events (not 3): `nobin` marked needed, then kept healed and `off` on a differing twin; the
+  re-test on a driver nobin cannot reach not judged; step 2 healed without step 1 kept; step 2 out
+  of reach: the stop; step 1 skipped when the ring read beside the picture did not
+  clear it twice (once waits) or the scene pass's execution differed twice with no wrong probe; step 1 untested after 8
+  events; nothing without a differing twin; a port race never acted on), step 1's switch in the run
+  as `window_bones.c` polls it each pump (`bones_restart_step`: asked once, at the pump after the
+  write, never while a movie plays or in the run's first 30 s, never again in the run), step 1 never written where the ring builds cannot be used (the extended
+set: `BONES_WAIT_PLAIN`, its line) while step 2's evidence still acts, step 2 taken for in force
+only when the Turnip package loaded and the mark carries trial or needed (`bones_nobin_in_force`,
+  `bones_turnip_state`: a nobin without either word, an older ladder's or a hand-written one, is a
+  re-test), the mark
+  written and read back with its words and a hand-written value never taken for it, the start, action, step 1
+  (now, waiting, next start) and switch lines word for word (`bones_ladder`).
+- `robust_persist_test.c`: the port's own `[dev] gpu_robust` turning itself off (`robust_persist.h`): the mark `gpu_robust_by` written and read back and a hand-written value never taken for it, the rule over sequences of starts (three clean starts in a row turn it off; a loss or an end while preparing resets the count; a start that never reached the game leaves it; another version turns it off at once; no mark does nothing), the mark through the config text, the removal of both `[dev]` keys leaving every other line (a `gpu_robust` in another section included), the three log lines word for word, a `gpu_robust = true` without the mark through config fixtures as the window reads them (`robust_start_step`): issue 179's reporter's file and a desktop's removed at once whatever the previous start's end (as a mark of another version is), a hand-written `gpu_robust_by` no mark, both lines removed by the marked key's removal and the next start finding nothing, then a loss ladder's key with the running version's mark kept by a loss and taken off after three clean starts, a marked key unchanged, `false` (with or without a mark) and a key outside `[dev]` never removed, the removal's line and ico-pc.ini's line word for word (`robust_ini_line`) (`robust_persist`).
 - `pipeline_skip_test.c`: the record of a pipeline family a device's driver stopped in (`pipeline_skip.h`): the family a start-up activity note names (one sprite planes build alone, or a lazy creation, names it; the issue 161 mixed batch, a plain build, a vertex shader batch and a cut note name none; the in-flight key inside a mixed batch names it when that key is a planes build), the value written and read back, a match on the same device and driver only (not after a driver update or on another device), the clear (`pipeline_skip`).
 - `sched_test.c`: the fiber scheduler against the EE kernel's rules through the SDK calls
-  (`sched`).
+  (`sched`); the longest single switch (`ico_sched_switch_max`: a 30 ms thread against a 1 ms
+  one names the long one, its time at least 30 ms, the reset empties it, a NULL id).
+- `window_scene_test.c`: the window's scene lines (`window_scene.h`, issue 179; the VU line's
+  draws' invocations after the index compaction, a triangle it left out one (`23k more (3 a
+  triangle, after the index compaction 1 a triangle it left out: 2.5k of 9.2k; ...`); the cost-model fit only over a spread of 2 or more in the vertex invocations, the smallest counted above 0 (a block with keep frames' zero-invocation replays beside narrow scene replays: no fit), else `fit: not enough spread (x N..M ...)`): the layout kinds
+  of the European disc's ids (a movie over any layout is a scene, the title's two, the pause menu,
+  the options and button configuration, the vibration choice, the memory card's and the Continue
+  screen's file lists, the load and the save's confirmation, anything else `other`; a table without
+  the last five leaves layout 0 `other`), the block's layout share over a
+  sequence of steps (`layout: play 6.2 s, scene 3.1 s, pause 0.7 s, other 0.0 s`, the empty block,
+  a kind out of range ignored, a reset, a cut buffer), the slow step's game threads part (`game
+  threads 199.3 in 39 switches (longest Main 171.2 ms; on core 2)`, the core or the longest switch
+  left out, no name) and the VU line (pre-pass off 9 a triangle, on the recorded vertices with the draws' own
+  vu_main_vs three a triangle beside them, never summed, the k and
+  M words, no replays, a cut buffer), its skin check twins' part (`; twins 42 draws, 76k vertex
+  invocations a picture`, no replays, none drawn: nothing, a cut buffer), the GPU work line (the invocations 9 a triangle off and the recorded vertices on, the work less the display wait and the present, never negative, the fit word for word), the acquire line (none asked: nothing) and the images in use, word for word, and
+  the slow-scene dump's trigger over a block's figures (each condition alone: kind, window, movie,
+  three a run, 30 s, 8 replays, the bound off; the bound itself is not over; the display wait taken from
+  the work; no negative work; a later dump at 1.5 times the last block's work: 74.9 against 50
+  not due, 75 due, the count at 3 not due, the first at any last work), the replay pick (a vertex
+  work at or above the block's mean) and its log line with the vertex work and "dump 2 of 3", and
+  a block's share of a counter (the difference, or the value itself after a restart from 0), and
+  the GPU-bound hint at the end of the 10 s presents line (issue 123: the reporter's 3x figures,
+  25.7 presented fps against 30 game fps, 217 late skips, GPU 37.7 ms, a fit of 0.01 ms a thousand
+  over invocations spread 200k..552k (mean 376k): 2x, 3.8 + 33.9 x (2/3)^2 = 18.8 ms, word for
+  word; nothing at the game's rate, without late skips, with the GPU inside the step or with no
+  game rate; the reporter's own narrow 370k..382k and no fit at all: GPU-bound, no step named, the
+  reason given; the vertex work alone past the budget: no step; a flat line at 1x, at 2.5x rounding
+  down to 2x, and 4x of 6x at 25 game fps, the largest offered step that fits; a cut buffer; the
+  frames not presented counted as late plus render-thread-busy ones (`window_scene_hint_skips`,
+  issue 179: 157 busy and no late skip still prints the hint); the kinds' words for the
+  performance lines' scene names, `other` past the kinds; the scene key (`window_scene_key`): the
+  stage and the game's name of it on every kind once a stage is loaded (`stage 4 scene (st04a
+  (TEST))`, `stage 1 other (st01- logo) (keep frames)` with the name's `:` written `-`, `stage 2
+  title` without a name, `title` before any stage, `stage 0 play`), a cut buffer and none; the
+  slow-scene captures' last kept for play (issue 179: two scene blocks take two, a third scene
+  block not even in a new stage, the first slow play block the third at any work over the bound and
+  its line `in play (the dump kept for play)` word for word, not under the bound, not a second play
+  block, scenes after play's up to three) (`window_scene`).
 - `startup_retry_test.c`: the steps after a graphics driver crash while building a pipeline, the
   crash chain to the box, the variable and the relaunch environment, the `dst` field of a
-  pipeline's or a start-up batch's note, its VU vertex pre-pass keys and modules, and the chains
+  pipeline's or a start-up batch's note, its VU vertex pre-pass keys and modules, the skin check's
+  start-up probe's notes (`startup_retry_note_has_skin_probe`: its compile and its draw, neither
+  the pre-pass's nor a destination read's), and the chains
   with the pre-pass (a crash in one of its pipelines: cache, noprepass, then the rest without it;
-  a loss in a run drawing with it: lossnoprepass, blend, backend) (`startup_retry`).
+  a loss in a run drawing with it: lossnoprepass, blend, backend), the record stores' rung (a crash
+  in a store build's pipeline: targets before noprepass; a loss in a run drawing with the stores:
+  losstargets before lossnoprepass; their values, what they draw, and a store note read from the
+  pipeline and batch notes) (`startup_retry`).
+- `app_icon_image_test.c`: the icon's image maths on a synthetic soft-edged shape composed over black
+  and white: the matte's alpha within 2 and colour within 2 (where alpha >= 192), the box of alpha
+  >= 8, the square with its 10 % margin and its shift and shrink at the frame's edge, the 256 x 256
+  crop when shrinking and growing, the 48/32/16 downscales keeping colour at clear edges, the ghost
+  refusal at 3 px and acceptance at 0 and 1 px, and the single-frame luma key (`app_icon_image`); the clear background (matte and luma key: corner texels alpha 0, the letter's centre opaque) and `ico_icon_flat` (a flat alpha-215 wash is recognised).
+- `ico_icon_test.c`: `ico_icon_write` read back: the header (count 4), `dwBytesInRes = 40 + w*h*4 +
+  mask`, the bottom-up BGRA rows, the clear column kept clear, the zero mask, the 256 entry holding
+  the PNG byte for byte, contiguous offsets ending at the file's end, no `.tmp` (`ico_icon`).
+- `app_icon_files_test.c`: the icon files over a fake user folder: wanted on missing, not after a
+  store, wanted on another label, not on an empty label with the files present, wanted on an empty
+  label without the PNG; the paths, the copies, the stamp (`dev` for an empty label), no `.tmp`
+  left, the refusals, and the capture guard `ico_app_icon_picture_plain` (CRT filter on or off at
+  strength 0, each of the four tone values off 50, 0 read as 50, Upscaling on) (`app_icon_files`).
+- `icon_stamp_test.c`: the Windows exe's icon resources (`icon_stamp.c`) from an `.ico` that
+  `ico_icon_write` made of a 256 x 256 RGBA test image: four `RT_ICON` images with ids 1..4, each
+  the `.ico` image's bytes in place (the 16/32/48 `BITMAPINFOHEADER`s with height 2*h and their
+  sizes, the 256 entry the given PNG with its signature), the `RT_GROUP_ICON` directory (6 + 4 x 14
+  bytes, each entry the `.ico` entry's first 12 bytes and then its id); the refusals (a cursor file,
+  0 or 33 images, a cut directory, a cut image, an empty image, an offset inside the directory or
+  past the end, no output); the stamp text (`<label> <disc>`, `dev` for an empty label, the refusals)
+  read back from the resource's bytes with no terminator, a line end or a NUL; and the command-line
+  quoting of paths with spaces, a trailing backslash, quotes, backslashes before a quote and an empty
+  argument, split back by the C runtime's rules, and the too-long refusal keeping the line so far;
+  the stamped copy's PE check (`ico_icon_stamp_pe_check`) on a small PE32+ laid out as the game's
+  exe (`.text`, `.rsrc`, `.reloc`): passing with `.rsrc` grown and `.reloc` moved, refusing a changed
+  code byte, entry point, import directory, section name or flags, no resource directory, a cut file,
+  a short `SizeOfImage`, another machine and a file that is not PE, sections that overlap, a
+  relocation directory outside every section or past its section's end, a symbol table pointer
+  inside the sections (as a stamped exe kept it before the helper zeroed it), past the file's end or with its
+  symbols cut, and accepting one right after the sections and a program that carries symbols;
+  `ico_icon_stamp_clear_symbols` zeroing the two header fields and refusing a cut or non-PE head;
+  the helper's refusal line (`ico_icon_stamp_refusal`) and the game's reading of it
+  (`ico_icon_stamp_refused`: the same stamp only, not a new label, another disc, a prefix of the
+  stamp, an in-use line, a stamped line, an empty or missing line) (`icon_stamp`). The resource update itself (`tools/ico_icon_stamp.c`) runs only on Windows.
+- `rd_png_mem_test.c` (`port/render/test`): `rd_write_png_mem` against the exact bytes the file
+  writer produced before the split (a 2 x 2 image, RGBA and RGB), equal to the file writer's bytes
+  for a multi-block image, a round trip through `texpack_load_png` with a padded pitch, and the
+  refusals (`rd_png_mem`).
+- `desktop_entry_test.c`: Extras > Add to the applications menu's pure functions (`desktop_entry.c`,
+  Unix hosts): the entry's exact text, the `Exec` quoting for `/games/my dir/ico_pc` and for `$`, `"`,
+  `\`, a backtick and `%`, the refusals (empty, a control character, too small a buffer), the data
+  folder rule (`XDG_DATA_HOME` absolute, else `HOME/.local/share`), and an install over a fake data
+  folder: the PNG copied byte for byte, both files under the app id's name, no `.tmp`, a second
+  install replacing the first, nothing written for a missing PNG (`desktop_entry`).
 - `steam_shortcut_test.c`: Add to Steam's CRC and id, a sample `shortcuts.vdf` appended byte-true,
   the duplicate check, `loginusers.vdf`, and the recorded program path: the AppImage file when
   `APPIMAGE` names one and the program lies under `APPDIR`, else the program itself
-  (`test_self_exe`) (`steam_shortcut`).
+  (`test_self_exe`), and the icon field: `ico_steam_vdf_set_icon` on an empty icon (every other byte
+  identical), the program as the icon (quoted, plain, case-less), a missing field, either field order,
+  the player's own icon, no entry, a file that is not a shortcuts file, and the whole job with an
+  entry added earlier, a new entry, the player's icon and no icon file (`steam_shortcut`).
+- `backend_switch.cmake` (window build, the disc image; skipped without it): Options > Graphics >
+  Apply through the program itself, `[dev] backend_switch_test = "opengl,vulkan"` from a portable
+  folder on SDL's offscreen driver, Vulkan on lavapipe, OpenGL on llvmpipe: both switches applied
+  and kept through `ico_window_switch_backend` and `ico_window_reopen`, `done, 2 switches, 0
+  failed`, OpenGL's compile-thread line, the switch steps through `up in`, the switch's watchdog
+  line, the run's last tick, no WATCHDOG, CRASH or FAILED (`backend_switch_window`, labels
+  `platform` and `window`, run alone, 1500 s). It starts the game: the orchestrator's gate, not a
+  package's.
 - `window_video_test.c`: fullscreen and mode requests on SDL's offscreen driver (`window_video`),
   Fullscreen holding the desktop's mode (its size and refresh rate) or no mode where the driver
   takes none, as `ico_window_video_desktop_mode` returns. The swapchain's
@@ -831,1062 +1727,8 @@ D3D12 and a Vulkan device without the dynamic state; `rd_mesh_static.1of4` is `r
 
 ## port/render/test
 
-- `fog_lut_test.c`: the depth fog's game side, the same on every compiler (`fog_lut`;
-  `fog_lut_arm64` under qemu).
-- `gltf_test.c`: the glTF reader and writer, bit-exact round trips, GLB, a Blender-style file,
-  refusals (`gltf`).
-- `gsb_cull_test.c`: the game's cull against the blended pictures' cameras and the windows that
-  scale with the width; with the disc, a stage (`gsb_cull`, `gsb_cull_stage`).
-- `modelpack_test.c`: model packs end to end on synthetic models under the build tree
-  (`modelpack`).
-- `rd_alpha_plan_test.c`: the alpha/blend planner on the CPU ([RENDER.md](PIPELINES.md),
-  the alpha plan): every ATST x AREF x As range under AFAIL KEEP and the FB_ONLY split against
-  `gs_alpha_pass` over every As of the range, the other AFAIL shapes pixel by pixel, the blend
-  identities over every Cs and Cd (`gs_blend_reg_ch`, `gs_dst_channel`), a model of the
-  fixed-function path over every blend mode, PABE, FBA, COLCLAMP, FIX and range (the planned
-  passes store the pixel the plan before stores), the ranges of screen prims, meshes, grids and
-  particles (a mesh's span kept for its replay when its record has no stream serial, across
-  replays while its serial holds, read again under a new one), and `rdtex_alpha_range` against
-  every texel and two- and three-texel blends (`rd_alpha_plan`).
-- `rd_blur_test.c`: `staticBlur.c`'s full-screen effects on rd (`rd_blur`, sharded); its CPU
-  part checks the open border's strips (`checkBorderStrips`: pixels 0, 1 and W - 2, W - 1 alone,
-  each with column 2's or W - 3's U, plain and mirrored, the hardware sprite's S the same); the
-  `above1x` shard runs the aura's chain at Enhanced 4x against the CPU model with the above-1x
-  box (`above1x_ref.c`) for the decimations and the GS's bilinear at the finer grid for the work
-  buffers drawn back over the frame, the `effects_scaled` shard the seven post modes (the glow's
-  and the depth of field's pastes) at Enhanced 2x the same way, no B-spline in either, and every
-  scale-1 comparison checks that no sprite took a kernel (`checkAbove1x`, `checkEffectsScaled`,
-  `compareAll`); the `blur_fold` shard runs the seven post modes with the blur pairs folded
-  (`RdProfile.blurFold`, `fx_blur2_ps`), every target against the CPU model of the two passes
-  exactly, nine folds a chain, every pipeline created enumerated (`checkBlurFold`); the `fx_plan`
-  shard runs the seven post modes and 40 motion blur frames with the frame-size sprites' plan
-  (`rd_fx_plan.c`), every target against the CPU model exactly, the constant fold and the
-  premultiplied paste counted, then with the scene passes readable and the destination by local
-  read (`fx_local_ps`) where the device has local read, post mode 7's DATE subtract into SCENE among
-  the local reads (`fxLocalDate` 1 or more, none without the local read), its self-test passing
-  (`checkFxPlan`); the
-  `fix128_skip` shard holds the plan off (it counts the skip's snapshots); the
-  `motion_blur_smooth` shard (`rd_blur_smooth_test.inc`) runs Motion blur: Smooth against
-  Original: a still picture within 1 at 1, 4 and 10 presents a tick, a moving bar's four presents
-  a tick one DISPLAY under Original and four under Smooth with the ghost after the tick within 2,
-  and the restart after a tick without the motion blur holding no ghost
-  (`checkMotionBlurSmooth`); the `motion_blur_strength` shard (`rd_blur_strength_test.inc`)
-  runs Motion blur strength over that bar under Original and Smooth: at 100 % the presents the
-  bytes of the zeroed setting's, at 50 % of FIX 32 the bytes of the sprite recorded at FIX 16
-  (every sprite counted, the last FIX 32 drawn as 16), Original's ghost after the tick within 1
-  of the GS formula's at FIX 16 and 32 and Smooth's within 2 of Original's
-  (`checkMotionBlurStrength`; `checkStrengthFix`, with the recording checks, the rounding's
-  cases); `motion_blur_smooth_scaled` the accumulator and its target at
-  SCENE's size at Enhanced 2x with the full-height scene, freed by `rd_shutdown`
-  (`checkMotionBlurSmoothScaled`); the `aura_box` shard (`rd_blur_aura_box_test.inc`) draws the
-  `above1x` shard's aura frames (the three feedback modes over hard edges, gradients and, every
-  other frame, noise) at Enhanced 2x, at the phone's 2364 x 1080 scene (4.617 x 2.411 here, the
-  box's edges off the texel grid by a fraction that moves from column to column) and at 1.5x, each
-  from a fresh renderer with the aura's two-pass read forced off and on (`rd__aura_box_force`):
-  every frame's FEED128 the same bytes, SCENE's and DISPLAY's hashes the same, reads in two passes
-  counted with it on and none in one, none with it off, every pipeline created enumerated
-  (`checkAuraBox`; [WORK_BUFFERS.md](WORK_BUFFERS.md#the-auras-feedback-read)); the `glow_edge_wide` shard runs the flare at 512, 848 and 2048
-  GS pixels wide: one frame against the CPU model (which draws the replay's strip over the
-  columns the blur's first pass leaves, `rd__glow_edge_strip`), ten strips a frame with the pairs
-  the blur fold draws as one pass (which draw none) and none at 4:3, WORK1's left columns the bytes of its first drawn one, then a frame with nothing cleared
-  in it replayed over magenta and over green work buffers (`rd__set_work_clear`): SCENE the same
-  bytes both ways, and without the strip different in the left eighth of a wide frame alone
-  (`checkGlowEdgeWide`; [WORK_BUFFERS.md](WORK_BUFFERS.md#the-glows-left-edge)). The
-  `shrinks_wide_device` shard's model draws the strip too. The `blur_fold_wide` shard runs the
-  flare at 512, 688, 2048 and 2560 GS pixels wide with the blur fold on: 9, 9, 8 and 8 pairs
-  folded, every target against the CPU model (the strip in it), the same frame replayed with the
-  fold off against the model again (the folded and unfolded chains the same bytes at every
-  width), and with the strip off every target still the model's (`checkBlurFoldWide`;
-  [WORK_BUFFERS.md](WORK_BUFFERS.md#the-blur-fold-on-a-wide-frame)).
-- `rd_fx_frame_test.c`: the frame-size sprites' plan on the CPU against `gs_math.hlsli`: the
-  constant fold's channels over every blend mode, FIX, COLCLAMP, PABE and a set of RGBAQ against
-  `gs_dst_channel` for every Cd and Ad, the premultiplied term through the fixed-function add and
-  reverse subtract against `gs_blend_reg_ch` for every Cs, C and Cd of the four forms, and the keys
-  `rd__fx_enumerate` adds (none with the plan off, the constant fold's seven without the frame and
-  local modules, one of them the depth attached under Z ALWAYS without Z write), with no draw made
-  without a device (`rd_fx_frame`).
-- `rd_fades_fold_test.c`: the fades fold ([RENDER_POST.md](RENDER_POST.md#the-fades-fold)) on the CPU,
-  without a device: `gs_fold_ch` (`gs_math.hlsli`) with no rounding term against `gs_blend_reg_ch`
-  of ALPHA 0x44 and 0x64 for every Cs, Cd and factor 0 to 0x80 (a texel stepped at scale 1 is the
-  texel the sprite stored under the exact blend), with the term 64 against the nearest level;
-  `gs_fold_applies`'s rows (the count, a bar step on the bars' rows only, no bar); above 1x, a
-  bilinear of four taps modelled as two lerps of 8-bit weights (rounded, then truncated): a step
-  of factor 0 or 0x80 the same bytes before or after it (the count of channels two levels apart
-  for a step between levels printed: the model's worst case; the plan takes one such step a row
-  above 1x, and refuses a fade and bars both between levels on the bars' rows there);
-  `rd__fades_fold_exact`'s
-  table (the attachment read's usage bit under attachment, the storage read's under storage); the
-  cases of `rd_gsbase` (the fade (200, 100, 7) at 50, the brightness at 12, the letterbox at 25 over
-  rows 0 to 57 and from 455 on, and their chains) recorded through `rd_post`, planned, and every
-  texel of rd_gsbase's gradient stepped as `fx_fold4` steps a tap against the sprites drawn in
-  turn: byte for byte under the exact blend (the plan's rounding from `rd__fades_fold_exact` of
-  the attachment mode), the nearest level under the fixed-function one, the chains of two steps
-  between levels drawn there; and `rd__fades_fold_plan` on frames recorded as the game's
-  post passes record them: the fade alone (its step, alpha, the nearest level under the
-  fixed-function blend, the floor under an exact one, its command's ordinal), the fade and the
-  letterbox (the bars one step, SCENE's rows 0 to 57 and from H - 57 on, under an exact blend;
-  drawn under the fixed-function blend unless the bars are black; at scale 2 black bars and a
-  black fade fold with the rows the replay's corner snap gives, 116 and 2H - 114, a fade between
-  levels does not; at full height 1x black bars fold unless `rd__set_a1x_gs_keep` is off), the
-  brightness, the fade and the letterbox (three steps in order, under an exact blend; the
-  brightness and the fade drawn under the fixed-function one), and the frames it leaves alone: the keep
-  sprite or a menu after the fade, text quads drawn into SCENE after it (the deferred text's
-  quads leave it), a Z-testing sprite after the letterbox (one before it leaves the letterbox
-  folding), the effects depth or a depth read by a later frame (the bars drawn, a fade after them
-  folds), a draw into SCENE in list 12, MSAA, a factor above 0x80 (`rd_fades_fold`).
-- `rd_boot_present_test.c`: a saved start-up through the presenter, present by present; needs
-  `ICO_BOOT_DUMP_DIR` (`rd_boot_present`).
-- `rd_blend_selftest_test.c` with `rd_blend_selftest.cmake`: the exact blend's start-up self-test
-  and the attachment read's Qualcomm rule; the mode left in force, the forest's tint under it, the
-  targets without the attachment read where it is off, the self-test again at a new scene size;
-  its log lines matched plain, sabotaged, under the fake Adreno, with each `ICO_RD_BLEND` and
-  without a destination read (`rd_blend_selftest*`); its 22 samples include the after cell, an
-  opaque cell drawn after the blended draws and read at an even and an odd texel column (`after
-  cell, even column`, `after cell, odd column` in a failure line), which a driver that keeps a
-  dual-source equation with blending off fails, and the overlap of two sprites of one LERP command
-  (`one draw, second over first`: the read's rasterization order inside a draw). Under GS state as
-  shader data (`ICO_RD_UBER=on`): the attachment read taken for it and kept
-  (`rd_blend_selftest_uber`, the profile line's and the start line's words), kept when sabotaged
-  (`rd_blend_selftest_uber_sabotage`: `[dev] uber = on` keeps it as `[dev] blend` does), and
-  `ICO_RD_BLEND=fixed` turning it off (`rd_blend_selftest_uber_blend_fixed`). The fixed-function blend is the default
-  everywhere, so the exact paths are covered by opt-in runs: `rd_blend_selftest_blend_attachment`,
-  `_blend_exact` and `_blend_storage` name the mode, and `rd_pixel_attachment`,
-  `rd_fog_attachment`, `rd_present_attachment`, `rd_crt_attachment` and `rd_perf_attachment` run
-  `rd_pixel_test`, `rd_fog_test`, `rd_present_test`, `rd_crt_test` and `rd_perf_test` under
-  `ICO_RD_BLEND=attachment` with the same expectations and hashes the exact blend had as the
-  default (`port/render/CMakeLists.txt`). `rd_pixel_uber` runs `rd_pixel_test` under
-  `ICO_RD_UBER=on` (GS state as shader data, [PIPELINES.md](PIPELINES.md#gs-state-as-data)): the
-  attachment read's expectations, its exact-mode matrix leaving out and counting the cells the
-  read draws its own way (the premultiplied subtracts' floor, DATE per primitive) and holding the
-  subtracts within the blender's rounding of the fixed-function draw (each RGB channel the same or
-  a level under, two where the two quads overlap; the alpha and the depth the same),
-  `testUberSubtractOracle` (`port/render/test/rd_pixel_uber_test.inc`) comparing every pixel of
-  the premultiplied subtracts (ALPHA modes 1 and 6: FIX 0x10, 0x55, 0x80 and 0xC0, or As; FBA off
-  and on; a noise texture over another, both drawn 1:1 so every Cd, Cs and As is a texel the CPU
-  holds) against a CPU oracle of the GS's blend, per channel `clamp(Cd + (((0 - Cs) F) >> 7), 0,
-  255)` with the GS's arithmetic shift (`gs_blend_reg_ch`'s arithmetic, checked against the
-  formula), COLCLAMP on, PABE off, the alpha As with FBA's MSB: through the colour read 0 pixels
-  differ; on the blender (`rd_pixel`, `rd_pixel_attachment`, `rd_pixel_storage`, `rd_pixel_nodual`,
-  where the subtracts stay there) every pixel is `clamp(Cd - ((Cs F) >> 7), 0, 255)`, one level
-  above the oracle exactly where `Cs F` is not a multiple of 128 and never below (the first
-  differing pixel is printed with its cell, Cd, Cs and F), `testDateStencil` checking the
-  per-primitive DATE first, `testScreenRuns`' boundary case
-  expecting its two DATE sprites in one draw (no snapshot to retake) and `testPipelines` looking
-  each run-time key up as the read's normalised image. The pass-dump compare of the corpus
-  under `ICO_RD_UBER=on` is made against baselines made with `ICO_RD_BLEND=attachment
-  ICO_RD_UBER=off`: with `ICO_RD_UBER_PREMUL=0 ICO_RD_UBER_DATE=0` every target byte for byte at
-  the whole scales, as shipped only the premultiplied subtracts and the overlapping DATE draws
-  apart (a script of the release's evidence runs it; no ctest, the corpus is machine-local).
-- `rd_vuprepass_selftest_test.c` with `rd_vuprepass_selftest.cmake`: the VU vertex and triangle
-  pre-passes' start-up self-test at Enhanced, 16:9, scale 2 and at Original, 4:3, 1x: the
-  pre-pass left on (it passes on lavapipe), turned off when its first command's vertex records are
-  drawn a texel off (`ICO_RD_VU_PREPASS_SABOTAGE=1`), its triangles' slot A a slot off (`=tri`) or
-  the tick stage's tick 1 at tick 0's camera (`=ticks`), or not tried when it is off by the
-  settings (`ICO_RD_VU_PREPASS=0`); the summary text, the reachable set made after it (the main
-  shaders', the pre-pass entries' and the five record stages' keys, or none of the pre-passes'),
-  SCENE left to its clear; its log line matched (`rd_vuprepass_selftest`,
-  `rd_vuprepass_selftest_plain`, `rd_vuprepass_selftest_sabotage`,
-  `rd_vuprepass_selftest_sabotage_tri`, `rd_vuprepass_selftest_ticks`,
-  `rd_vuprepass_selftest_off`); the device profile's class ends with the backend's name (`Vulkan):`,
-  `OpenGL):`) and is the desktop column on OpenGL and Direct3D 11. With the pre-pass on, its draws
-  are batched (`g_rd.vuPreBatch`) unless `ICO_RD_VU_PREPASS_BATCH=0`, which
-  `rd_vuprepass_selftest_unbatched` sets (the self-test one draw an entry and stage). The draw
-  merge is on (`g_rd.vuMerge`, the summary's `VU merge on`) unless `ICO_RD_VU_MERGE=0`, which
-  `rd_vuprepass_selftest_unmerged` sets (both sides of the self-test's comparison one GPU draw a VU
-  draw), or on Direct3D 11.
-- `rd_vustage_ab.cmake`: every dump of `tools/vustage_dumps.txt` (the dump corpus, machine-local
-  paths, `*` globs, a missing dump named and skipped, none at all `SKIP`) replayed by
-  `rd_replay_tool --pass-dump --stats` under `ICO_RD_BLEND=fixed` the
-  old way (`ICO_RD_VU_PREPASS=0`: the programs' entries) and through the record
-  (the pre-passes, the main shaders, `vu_ps`), at Original 4:3 1x and Enhanced 4:3 2x: every named
-  target's PNG byte for byte, no VU draw the old way with the record, no Direct3D 11
-  debug-layer error and no refused record copy (`rhi_cmd_copy_texture_to_buffer: ... skipped`) in
-  either run, the stats lines printed; a dump with no VU command (the four 2D dumps of the corpus) records no pre-pass and passes with 0
-  passes; the records' camera is the one each command's draw uses (the walk follows the field's half
-  pixel as `replayFrame` does). SKIP without the list, its dumps or a device (`rd_vustage_ab`).
-- `rd_replay_tool --stats` also prints two counting lines (no draw or record changes): `VU merge:
-  N draws in M runs (mean R a run); blocked by ...; per list: L:N/M ...` and `VU pre-pass batches:
-  B distinct (stage, frame, stream, bones) of D draws`. A run is consecutive VU draws of one pass
-  that could be one GPU draw: equal pipeline, texture and stream groups, DrawCB bytes (FNV-1a),
-  scissor, FrameCB and target, each a single planned pass with no DATE stencil, no storage or
-  destination-read pass and no skin, with no other draw between them; a draw that cannot join (or
-  cannot merge at all) starts a run of its own, and the first key that differed is added to the
-  `blocked by` counts. N counts every VU draw, so the mean is draws per run. The batches are the
-  distinct (stage key, FrameCB, stream buffer, bones zero or not) of the pre-pass's draws; 0 with
-  the pre-pass off. What the draw merge drew is the line after them: `VU merge: N draws in M GPU
-  draws (K merged into G, A alone; merge on)`, N the draws through the merge builds, K of them in
-  runs of two or more drawn as G GPU draws, A drawn one a GPU draw (`merge off` and zeros with
-  `ICO_RD_VU_MERGE=0`; [VU1_PROGRAMS.md](VU1_PROGRAMS.md#the-draw-merge)). Then code 36's pairs
-  (one a batch): `VU fuse: N pairs fused, M kept apart (blend form K, plans differ L, passes P,
-  dst/DATE D, no planes Q, no merge build B, fuse off F), S under one pipeline already; fuse on`, N
-  the batches whose kick took its cut's pipeline, M those kept apart by the first reason that held,
-  S those whose two draws had one plan without the fuse (`fuse off` and every pair with ABE off
-  under `fuse off F` with `ICO_RD_VU_FUSE=0` or the merge off;
-  [VU1_PROGRAMS.md](VU1_PROGRAMS.md#the-fused-scissor-pair)). And the store plan's: `stores: N
-  depth and M colour stores dropped a replay of P passes (D with a depth; store plan on)`, N the
-  passes whose depth (and stencil) was neither loaded nor stored, M the passes whose colour was
-  (the shadow count's while it is made, about one a replay; every other colour is kept),
-  P the passes the walk began and D those with a depth outside the MSAA epoch (`store plan off`
-  and N 0 with `ICO_RD_STORE_PLAN=0`, `all` and N = D with `ICO_RD_STORE_PLAN=all`;
-  [WORK_BUFFERS.md](WORK_BUFFERS.md#the-store-plan)).
-  After the shadow count's line, `constant
-  reads on: N sprites drawn in a cleared source's colour, M target reads kept (the source drawn since
-  its clear, or not cleared this replay)`: N the post sprites drawn untextured in the colour of a
-  source target that held only its last clear, M those reading another target that were not (`off`
-  and N 0 with `ICO_RD_CONSTANT_READS=0`, every read then counted in M;
-  [WORK_BUFFERS.md](WORK_BUFFERS.md#a-cleared-source-read-as-its-colour)).
-- `rd_vubatch_ab.cmake`: the same dumps through the record twice, one point draw an entry and
-  stage (`ICO_RD_VU_PREPASS_BATCH=0`) and in the pre-pass's batches, at Original 4:3 1x, Enhanced
-  4:3 2x and Enhanced 16:9 2x under `ICO_RD_BLEND=fixed`: every named target's PNG byte for byte,
-  every VU command through the record in both, the same vertices, no more pre-pass draws batched
-  and fewer where one an entry made two or more; each run's draws printed, and the totals
-  (`rd_vubatch_ab`; [VU1_PROGRAMS.md](VU1_PROGRAMS.md#the-pre-passs-batches)). SKIP as
-  `rd_vustage_ab`.
-- `rd_vumerge_ab.cmake`: the same dumps twice, every VU draw a GPU draw of its own
-  (`ICO_RD_VU_MERGE=0`) and with the draw merge, through the record and through the programs' own
-  entries (`ICO_RD_VU_PREPASS=0`, the tile-based GPUs' path), at Original 4:3 1x, Enhanced 4:3 2x
-  and Enhanced 16:9 2x under `ICO_RD_BLEND=fixed`: every named target's PNG byte for byte, `merge
-  off` with nothing merged against `merge on`, the merged run's GPU draws (the first stats line's)
-  exactly the other's less what its runs joined (K less G of the `VU merge` line), and fewer over
-  the whole list; each pair's draws printed (`rd_vumerge_ab`;
-  [VU1_PROGRAMS.md](VU1_PROGRAMS.md#the-draw-merge)). SKIP as `rd_vustage_ab`.
-- `rd_vufuse_ab.cmake`: the same dumps and those of `tools/vufuse_dumps.txt` (the PowerVR phone's
-  three frames) twice with the draw merge on, code 36's kicks under their own pipelines
-  (`ICO_RD_VU_FUSE=0`) and the fused scissor pair, at five settings under `ICO_RD_BLEND=fixed`: the
-  phone's profile (`ICO_RD_VU_PREPASS=0`, `--enhanced --resolution 2x --aspect 2.189 --present
-  2364x1080`; a narrower dump skips it) and the same at its Resolution Auto (`--resolution 2364x1080
-  --full-height --full-pixel`, a fractional scale: the no-planes twins), the programs' entries at
-  Enhanced 4:3 2x, and the record at
-  Enhanced 4:3 and 16:9 2x: every named target's PNG (and `PRESENT.png`) byte for byte, `fuse off`
-  with no pair fused against `fuse on`, the same pairs counted by both (the `VU fuse` line's fused,
-  kept apart and one-pipeline counts), the fused run's GPU draws exactly the other's less the
-  difference of what the merge joined (K less G of each run's `VU merge` line), no pair kept apart
-  for the pixel shader (`no planes 0`: every pixel shader a pair draws with reads the mark), at
-  every setting that counted pairs with ABE off some fused and fewer GPU draws in total, and on
-  every phone frame some fused at both phone settings; each pair's counts printed
-  (`rd_vufuse_ab`; [VU1_PROGRAMS.md](VU1_PROGRAMS.md#the-fused-scissor-pair)). SKIP
-  as `rd_vustage_ab`.
-- `rd_vumerge_ab.cmake` and `rd_vufuse_ab.cmake` take `-DBLEND_ENV=` (the blend both runs draw
-  with, `ICO_RD_BLEND=fixed` by default): `rd_vumerge_ab_uber`, `rd_vufuse_ab_uber` and their
-  `_pixel` twins on `rd_pixel`'s frames run them under `ICO_RD_UBER=on`, the VU draws through the
-  colour read, merged and fused (`port/render/rd_replay_vu.c` (`vuMergeDst`, `vuFuseVerdict`)).
-- `rd_vumerge_mali.cmake` (label `mali`): the dumps of `tools/vumerge_mali_dumps.txt` (the Mali-G52
-  reporter's frame of issue 164 in `/primary/dev/ico-dumps/164/`, the two phone frames
-  `rd_vufuse_ab` reads and a 2026-10-07 capture; a line is the dump, `expect=IN/GPU` and the
-  tool's setting arguments) on the plain device and under `ICO_VK_FAKE_LIMITS=mali
-  ICO_VK_FAKE_NO_DUAL=1` (a phone's limits, every lerp draw two passes), under
-  `ICO_RD_BLEND=fixed`: every named target's PNG byte for byte, both fakes' lines in the faked run,
-  the `VU merge` figures (draws, GPU draws, merged, into, alone) and the fused pairs the plain
-  device's, and `expect=` the plain run's merged figure (826 into 87 on the 164 frame)
-  (`rd_vumerge_mali`; [VU1_PROGRAMS.md](VU1_PROGRAMS.md#the-draw-merge-without-dual-source-blending)).
-  SKIP as `rd_vustage_ab`.
-- `rd_noplanes_ab.cmake`: the dumps of `tools/noplanes_dumps.txt` (the title's and the boot's
-  frames, each drawing one screen-prim triangle key with planes, and a capture drawing none; a line
-  is the dump, `expect=same|fallback:N|report` and the tool's setting arguments) with the sprite
-  planes builds and under `ICO_RD_NO_SPRITE_PLANES=1` (issue 161's fallback): the second run's line
-  that the builds are off, `sprite no-planes 0` in the first; `expect=same` every named target's PNG
-  byte for byte and no command through the fallback, `expect=fallback:N` byte for byte with N
-  commands through it (the title's and the boot's dumps: 2), `expect=report` at least one command
-  through it and the targets that differ listed (`rd_noplanes_ab`;
-  [WORK_BUFFERS.md](WORK_BUFFERS.md#without-the-sprite-planes)). SKIP as `rd_vustage_ab`.
-- `rd_occlusion_tool.cmake`: `rd_replay_tool --occlusion` ([RENDER.md](RENDER.md#culling)) on the
-  first dump of the machine-local list `tools/occlusion_corpus.txt` that is here, at Original 4:3
-  1x: the line `occlusion: hidden N of M list-0 draws, T of U triangles (index count / 3); hidden
-  commands: S` with M above 0, N at most M, T at most U and S `none` or a `--nop` spec of list 0,
-  the second line, the settings note, `--occlusion-out` holding S and `--occlusion-csv` its header
-  and a line a command; then the plain replay and the replay with `--nop @SPEC`, each `--pass-dump`
-  with `--present 640x480` under `ICO_RD_BLEND=fixed`: DISPLAY.png and PRESENT.png byte for byte
-  (`rd_occlusion_tool`). SKIP without the list, a dump of it or a device.
-- `rd_vumerge_ab_pixel`, `rd_vufuse_ab_pixel` and `rd_vustage_ab_pixel`: the two scripts above and
-  `rd_vustage_ab.cmake` on the frames `rd_pixel`
-  leaves (fixture `rd_dump`; the list `rd_pixel_vu_dumps.txt` in the build folder):
-  `rd_pixel_vu.rddump` (the VU seams' S4 at Original 1x: 64 code-32 draws of one prelit mesh
-  under one state, a matrix each, which the merge joins), `rd_pixel_vu36.rddump` (S3's first
-  case: a code-36 strip whose first triangle is cut and whose second is kicked) and
-  `rd_pixel_frame.rddump` (no VU draw). Every machine has these, so unlike the two above they do
-  not skip; the 16:9 and phone settings skip for the 4:3 frames by design. CI's Direct3D 11 job
-  runs the same on WARP ([below](TESTING.md#the-render-suite-on-direct3d-11-warp)).
-- `rd_vumerge_fallback.cmake` (ctest `rd_vumerge_fallback`, fixture `rd_dump`): `rd_replay_tool`
-  on `rd_pixel_vu.rddump` with `--time 3` under `ICO_RD_BLEND=fixed`, with the merge, with
-  `ICO_RD_VU_MERGE=0` and with `ICO_RD_FAKE_MERGE_FAIL=1` (the first pipeline made with a merge
-  build kept as failed): the faked run logs one failure line naming the merge build and once
-  `rd: VU merge: off: the driver could not compile <build> (<backend>); one GPU draw a VU draw
-  from here`, and its timed replays draw what `ICO_RD_VU_MERGE=0` draws, more than the merge
-  (`rd_replay_vu.c` `rd__vu_merge_fallback`).
-- `rd_store_plan_test.c` (`rd_store_plan`, lavapipe, 77 without a device): the store plan's keep
-  (`rd_store_plan.c`, [WORK_BUFFERS.md](WORK_BUFFERS.md#the-store-plan)) at Enhanced 16:9 2x: after
-  the start's self-tests (`rd_fog_selftest`: DATE, the fx local read, the shadow count, the fog) and
-  again at a new scene size (`rd_reset_scene`), SCENE's depth is not kept (the shadow count's frame
-  reads it with no clear of its own and once kept it for the whole run); a new SCENE
-  (`clearPending`) read in list 3 before any clear is not kept, and the next frame (list 0's clear
-  and a Z-tested draw, then list 7 on WORK3 and on SCENE without touching the depth) drops at least
-  one depth store; a frame reading SCENE's depth with no clear keeps it, the cleared frame then drops
-  none and its record says `storeKept` 1, SCENE, since that frame and the reason
-  `RD_STORE_WHY_KEEP`; no validation error. Between those, the PowerVR phone's frame 5354 in shape
-  (list 0's Z-tested draws, the fog's touch in a pass of its own, the aura's passes on WORK3, list
-  11's two screen sprites on SCENE without a Z test or Z write) with [video] effects_depth on and no
-  effects program, as on the phone: exactly one depth store dropped (list 11's SCENE pass), as a whole
-  frame and as a keep frame; with `rd__force_effects_depth` (an effects program's stand-in) none, the
-  record's reason `RD_STORE_WHY_EFFECTS`, and no keep left after it; replayed with its presents,
-  every record `rd_perf_pop` returns holds the drops its replay counted and `rd_perf_backend_text`
-  says `stores: 1 depth` (with the effects depth `stores: 0 depth` and `nothing dropped in N
-  replays, N of them: kept for an effects program`). The drops' bytes are `rd_store_plan_ab`'s
-  (next).
-- `rd_pass_cut_test.c` (`rd_pass_cut`, lavapipe, 77 without a device): the passes cut
-  (`rd_pass_cut.c`, [WORK_BUFFERS.md](WORK_BUFFERS.md#passes-cut)) at Enhanced 16:9 2x under
-  `ICO_RD_STORE_POISON=1`, each forced on against off (`rd__pass_cut_force`): a clear of WORK3 then
-  a sprite on it textured from WORK2 (drawn just before): the clear taken by WORK3's pass
-  (`clearsCarried` 1, one walk pass fewer), WORK3 and WORK2 byte for byte; the clear skip's
-  decision on a frame's scan (AURA_WORK cleared, WORK0's sprite reading it, the constant read's note
-  for it): skipped, but not with a later read, a depth or the cut off; after a skip a read of
-  AURA_WORK shows the clear's colour (its green fill gone), a later replay drawing its left half
-  leaves the right half the clear's colour, a later replay clearing it first leaves that clear; the
-  last store: list 0 clears SCENE and draws Z-tested, list 4 draws on WORK3, then on SCENE a sprite,
-  the depth's last touch and another sprite: `storeLastDropped` 1 on, 0 off, one depth store more
-  dropped, SCENE byte for byte; a copy or a draw on another target between: 1 (the pass begun at
-  the touch), a DATE draw between: 0 with one last store counted as kept for a DATE draw
-  (`lastStoreWhy`, its words `1 last stores kept (1 a DATE draw)`), none counted for the others; a
-  draw textured from WORK3 between while WORK3 is not readable: 1 (the pass begun at that draw); the
-  pass's first draw and one between textured from WORK3 (readable from the first on): 1, the pass
-  begun at the first draw, and the guard's frame after it drops it again; post sprites
-  (`cellPost`): the glow's `cleanUpFB` pair into SCENE (constant fold; the second Z GEQUAL at Z 1,
-  the depth's last touch in a pass of its own) drops that pass's store (1 on, 0 off, no reason
-  counted), the same pair as a motion blur's keeps it (0, one reason: a post sprite), the aura's
-  DATE sprite (TEST 0x34000) after a Z GEQUAL screen sprite leaves that sprite the last touch (1,
-  no reason), SCENE byte for byte in each; the pass area forced on:
-  list 0's pass (it takes SCENE's clear) and list 4's (full-frame sprites, one the frame's height)
-  counted as kept whole (`passAreaWhy`: `2 passes kept whole (1 a clear as its load, 1 its draws
-  cover the picture)`), none with the area off, SCENE byte for byte; no validation error.
-- `rd_pass_cut_ab.cmake`: the dumps of `tools/pass_cut_dumps.txt` (`tools/pass_area_dumps.txt`'s;
-  machine-local, a missing one skipped) replayed with `--pass-dump --stats` under
-  `ICO_RD_BLEND=fixed`, `ICO_RD_STORE_PLAN=1`, `ICO_RD_STORE_POISON=1` and `ICO_RD_FADES_FOLD=0`
-  (list 11's sprites drawn, as the gate draws them: with the fold list 11's pass goes and the
-  reduction's DISPLAY clear has no barrier left to be carried past) five times: every cut off
-  (`ICO_RD_CLEAR_CARRY=0`, `ICO_RD_CLEAR_SKIP=0`, `ICO_RD_LAST_STORE=0`), each alone on, all on; at
-  the phone's Resolution Auto with its paths (`ICO_RD_VU_PREPASS=0`, `ICO_RD_FOG_PATH=local`,
-  `ICO_RD_DATE_PATH=stencil`; a narrower dump skips it) and at Enhanced 2x 4:3: every PNG
-  (`PRESENT.png` and every named target) byte for byte against the off run, the off run cutting
-  nothing, the same draws, the passes fewer by the clears carried and skipped, the depth stores
-  dropped more by those at the last touch and fewer by at most one a clear carried or skipped (a
-  cleared pass whose depth store the plan dropped goes with its carry: queen rd-00100 at Enhanced
-  2x, 2 dropped with every cut off and 1 with its two clears carried); over the phone's frames at
-  its setting each cut must cut something, the last touch counted on two more runs of those frames
-  with `ICO_RD_CRACK_FILL=0` (every cut off, the last store alone on; compared byte for byte with
-  each other), as the crack fill's read of SCENE's depth at list 7 keeps the fog's pass's depth
-  store wherever it is drawn (`rd_pass_cut_ab`). SKIP as `rd_vustage_ab`.
-- `rd_store_plan_ab.cmake`: the same dumps and those of `tools/vufuse_dumps.txt` (the phone's three
-  frames) three times under
-  `ICO_RD_BLEND=fixed` and `ICO_RD_STORE_POISON=1` (a depth or stencil load the plan leaves
-  undefined clears to 0.5 and 0x5A instead: lavapipe keeps an attachment's contents whatever its
-  load and store ops say, measured on Mesa 25.0.7, so without the poison a wrong plan draws the same
-  bytes there): every depth store kept (`ICO_RD_STORE_PLAN=0`), the store plan, and every depth
-  store dropped (`ICO_RD_STORE_PLAN=all`, a wrong plan), at three settings: the phone's profile
-  (`ICO_RD_VU_PREPASS=0`, `ICO_RD_FOG_PATH=local`, `ICO_RD_DATE_PATH=stencil`, `--enhanced
-  --resolution 2x --aspect 2.189 --present 2364x1080`; a narrower dump skips it) and the record at
-  Enhanced 4:3 and 16:9 2x: with the plan every named target's PNG (and `PRESENT.png`) byte for
-  byte against every store kept, `store plan off` with nothing dropped, `on` and `all` with the same
-  passes and passes with a depth and the same colour stores dropped (the shadow count's colour,
-  poisoned to 0x5A: no named target may show it), `all` dropping every depth store, the plan dropping some over the
-  whole list, and the wrong plan changing at least one target over the whole list (the poison shows
-  a dropped store that a later pass reads); each run's counts printed (`rd_store_plan_ab`;
-  [WORK_BUFFERS.md](WORK_BUFFERS.md#the-store-plan)). SKIP as `rd_vustage_ab`.
-- `rd_thread_ab.cmake`: the same dumps and those of `tools/vufuse_dumps.txt` through
-  `rd_replay_tool --render-thread off`, `sync` and `on` (every replay, the interpolation and the
-  renderer's calls on a thread of the renderer's own, `port/render/rd_thread.h`), with
-  `--pass-dump` at Original (640x480) and Enhanced 4:3 2x (1280x960), and for every F12 zip the
-  blended present at 0.5 between its two frames: every target's PNG of `sync` and `on` byte for
-  byte `off`'s, and the threaded runs saying `render thread: sync` / `on`; the blended present is
-  made three times in a row in every mode (`--repeat 3`), the `on` run handing the three over
-  back to back as the window does, and must say `submit thread: ended (N` with N at least 3
-  (their submit and present on the submit thread, `port/render/rd_submit_thread.h`) and, where
-  the device says `rhi_vk: frame slots: apart`, `submit thread: the frame slots apart` (the second
-  and third recorded while the one before is submitted, RHI.md "Frame slots and the submit
-  thread"); the last picture's PNG byte for byte `off`'s
-  (`rd_thread_ab`; [PLATFORM.md](PLATFORM.md#the-render-thread)). SKIP as `rd_vustage_ab`.
-- `rd_constant_reads_ab.cmake`: the same dumps and those of `tools/constant_reads_dumps.txt` (the
-  PowerVR phone's two frames, the aura with no aura object) twice, every post sprite reading
-  its source (`ICO_RD_CONSTANT_READS=0`) and a source holding only its clear drawn as its colour, at
-  four settings under `ICO_RD_BLEND=fixed`: the phone's profile (`ICO_RD_VU_PREPASS=0`) at 2x
-  (`--enhanced --resolution 2x --aspect 2.189 --present 2364x1080`) and at its Resolution Auto size
-  (`--resolution 2364x1080 --full-height --full-pixel`, the same aspect and present; a narrower dump
-  skips both), and the record at Enhanced 4:3 and 16:9 2x: every named target's PNG (and
-  `PRESENT.png`) byte for byte, `constant reads off` with none served against `on`, the same target
-  reads counted by both (served plus kept against the other's kept), and every phone frame served at
-  both phone settings; each pair's counts printed (`rd_constant_reads_ab`;
-  [WORK_BUFFERS.md](WORK_BUFFERS.md#a-cleared-source-read-as-its-colour)). SKIP as `rd_vustage_ab`.
-- `rd_fades_fold_ab.cmake`: the dumps of `tools/fades_fold_dumps.txt` (the forest's
-  `rd-00720` and `rd-01076`, the queen's `rd-00100`, the PowerVR phone's F12 zip `frame-20261028-173610-v4657`; machine-local) and,
-  with `ICO_BOOT_DUMP_DIR`, the start-up's frames 115 to 123, each first listed (`--list
-  --no-device`: list 11's last twelve commands in the log, so it shows which dumps end with the
-  fade, the letterbox or the brightness), then replayed with `--pass-dump --stats` with list 11's
-  last full-frame lerp sprites drawn into SCENE (`ICO_RD_FADES_FOLD=0`, the tests' way to draw
-  them as before) and with the fold (the default; its log line must name the GS's floor under the exact blend and the
-  nearest level under the fixed-function one, and a reduction that did not take a planned fold
-  fails), under
-  `ICO_RD_BLEND=attachment` and `fixed`, at Original (`--present 640x480`), Enhanced 2x
-  (`--present 1280x960`) and the phone's Resolution Auto (`--resolution 2364x1080 --full-height
-  --full-pixel --aspect 2.189`, `ICO_RD_VU_PREPASS=0`; a narrower dump skips it): `fades fold off`
-  with none folded against `on`; every target's PNG but SCENE's (which holds the picture without
-  the sprites by design) byte for byte where nothing folded and under the exact blend where the log
-  says the steps met SCENE's texels before the GS filter, elsewhere within two levels on every
-  channel (the measured bound, [DIVERGENCES.md](DIVERGENCES.md) VD-27), the channels a level apart
-  printed per target by `port/render/test/png_level_diff.py`;
-  some dump must fold (`rd_fades_fold_ab`; [RENDER_POST.md](RENDER_POST.md#the-fades-fold),
-  [DIVERGENCES.md](DIVERGENCES.md) VD-27). SKIP as `rd_vustage_ab`.
-- `rd_crack_late_ab.cmake`: the crack fill after lists 4-6 against pass dumps of the build that drew
-  it before the fog: each line of `tools/crack_late_dumps.txt` (`<setting> <dump> <baseline
-  folder>`, machine-local: six corpus dumps at the gate's Enhanced 2x 4:3 against
-  `build-host/tmp/v095/after/w3/pd`, and five of the PowerVR phone's frames at its Resolution Auto,
-  2364x1080 at 2.189 under its profile's fakes, against `build-host/tmp/v098/evidence/cheap/base-phone`)
-  replayed with `--pass-dump --stats` under `ICO_RD_BLEND=fixed ICO_RD_FADES_FOLD=0` (the
-  baselines' own): the stats line says `crack fill on: P passes` (P 0 where the fill was the
-  first draw of the aura's paste pass, else 1) and `1 fills after lists 4-6`,
-  or, on a dump with no fog of SCENE above 1x (`0 passes, 0 pixels filled (0 replays counted;
-  scale 0x0, ...; 0 fogged replays above 1x not filled; 0 fills after lists 4-6`: the v3086 and
-  v1985 frames), every target the baseline's bytes; every target within 64 levels on at most 0.2 %
-  of its pixels (the bound, the pixels apart and the largest difference printed per target;
-  [DIVERGENCES.md](DIVERGENCES.md) VD-20), or, past it, the run replayed once more with
-  `ICO_RD_CRACK_FILL=0` and the glow's mask (WORK2, `cleanUpFB`'s depth test: the late fill leaves
-  the crack's depth) that run's byte for byte, and each target past the bound no farther from the
-  baseline than the no-fill run's (no more pixels apart, no larger difference); at the phone's
-  setting the stats line's copies one fewer than the baseline log's and its passes no more. Every
-  run that drew the fill is replayed again with `ICO_RD_CRACK_PLACE=7` (the fill at the start of
-  list 7, the place before `rd__crack_fill_place` moved it after the glow's `cleanUpFB` or
-  into the aura's paste pass): every PNG that replay's bytes, the run's passes no more than its,
-  and at the phone's setting a run whose stats place the fill later (`1 fills in the aura's paste
-  pass` or `1 fills after the glow's alpha`) at least one pass fewer. A
-  missing dump or baseline is skipped; none: SKIP. The baselines are pictures of the fill before the
-  fog; another change to the picture needs baselines of its own before this test can tell the two
-  apart.
-- `rd_aura_box_ab.cmake`: the dumps of `tools/aura_box_dumps.txt` (`tools/vustage_dumps.txt`'s and
-  the PowerVR phone's three F12 zips `frame-20261028-{105852-v4103,151709-v2199,173610-v4657}`;
-  machine-local) replayed with `--pass-dump --stats` under `ICO_RD_BLEND=fixed` with the aura's
-  read of the picture into FEED128 in one pass (`ICO_RD_AURA_BOX=0`) and in two
-  (`ICO_RD_AURA_BOX=1`, `rd_aura_box.c`), at the phone's Resolution Auto (`--enhanced --resolution
-  2364x1080 --full-height --full-pixel --aspect 2.189 --present 2364x1080`,
-  `ICO_RD_VU_PREPASS=0`; a narrower dump skips it) and at Enhanced 2x 4:3 (`--present 1280x960`):
-  every PNG (FEED128, SCENE, `PRESENT.png` and the other named targets; ROWBOX is the renderer's
-  own texture, never written) byte for byte, `aura box off: 0` against `on`, the two-pass run's
-  passes and draws the other's plus one each a read in two passes; some dump must read in two
-  passes (`rd_aura_box_ab`). SKIP as `rd_vustage_ab`.
-- `rd_shadow_merge_ab.cmake`: the dumps of `tools/shadow_merge_dumps.txt` (`tools/vustage_dumps.txt`'s,
-  the PowerVR phone's three F12 zips and its F12 frame of the heavy stage 6 room `frame-20261102-222516-v2325.zip` in
-  the effort's evidence folder; machine-local, a missing one skipped) replayed with `--pass-dump
-  --stats` under `ICO_RD_BLEND=fixed` and `ICO_RD_STORE_POISON=1` with the shadow volumes in a pass
-  of their own (`ICO_RD_SHADOW_MERGE=0`) and in the scene's open pass (`=1`, `rd_shadow_merge.c`),
-  at the phone's Resolution Auto under the MoltenVK fakes (a tile-based class) and at Enhanced 2x
-  4:3: every PNG byte for byte (the count targets' clears the on run leaves undrawn are drawn with
-  the poison's 0x5A there, so a reader would show), `shadow volumes in the scene's pass off: 0 of R
-  counts, 0 passes armed; 0 count targets' clears not drawn` against `on: M of R`, the same draws,
-  the on run's passes the off run's less M; some reset must be taken (`rd_shadow_merge_ab`). SKIP
-  as `rd_vustage_ab`.
-- `rd_pass_area_ab.cmake`: the dumps of `tools/pass_area_dumps.txt` (`tools/vustage_dumps.txt`'s,
-  the PowerVR phone's three F12 zips and its F12 frame of 2026-11-02
-  `frame-20261102-091017-v15677.rddump` in the effort's evidence folder; machine-local, a
-  missing one skipped) replayed with `--pass-dump --stats` under `ICO_RD_BLEND=fixed` with the
-  passes' render areas off (`ICO_RD_PASS_AREA=0`) and on (`=1`, `rd_pass_area.c`, on whatever the
-  device: lavapipe clips every draw to the area, so an area that misses a texel shows), at the
-  phone's Resolution Auto (as `rd_aura_box_ab`) and at Enhanced 2x 4:3: every PNG byte for byte,
-  `pass area off: 0 passes` against `on`, the same draws, the on run's passes the off run's plus
-  at most its passes ended early; the phone's frames (`frame-20261028-*`, `frame-20261102-*`, the
-  phone's F12 frame of 2026-11-02 11:42 and its blended twin among them) at the phone's setting
-  must give some pass an area or name `its draws cover the picture` among the passes kept whole
-  (the tool's `--stats` clause; the aura's paste and list 11's fades are full-frame sprites, so the
-  stage 6 frames have no area to give) (`rd_pass_area_ab`). SKIP as `rd_vustage_ab`.
-- `rd_glow_cheap_ab.cmake`: the glow's cheaper passes ([RENDER.md](RENDER.md#the-glows-passes):
-  WORK2's fill in the mask's pass, cleanUpFB in the fog's) against stored pass dumps, as no switch
-  turns them off: the 14 glow dumps of `tools/glow_cheap_dumps.txt` (machine-local, a missing one
-  skipped) replayed with `--pass-dump --stats` under `ICO_RD_BLEND=fixed ICO_RD_FADES_FOLD=0` at
-  the PowerVR phone's profile on lavapipe (`ICO_VK_FAKE_LIMITS=moltenvk ICO_RD_VU_PREPASS=0`,
-  2364x1080, Full height, Full pixel, the dump's own aspect, presented at 2364x1080; baselines
-  `build-host/tmp/v098/evidence/glow/pd-phone`, made by the tool before the cuts) and at the gate's
-  Original and Enhanced 2x 4:3 (baselines `build-host/tmp/v095/after/w3/pd`, named as
-  `gate-wave.sh` names them): every baseline PNG the same bytes or within `-DBOUND` levels (0,
-  `png_level_diff.py`), the `glow N passes` count at least two fewer than the baseline's at the
-  phone's setting and no more at the others; each run's line prints the passes before and after
-  and its largest difference. The run's own count meets the rule with the crack fill drawn (it
-  is drawn after `cleanUpFB`'s two sprites, which stay in the fog's pass: [the fill's
-  place](RENDER_POST.md#the-fills-place-after-list-7)), and at the phone's setting a run whose
-  stats say the fill was drawn says `1 fills after the glow's alpha`. The seven frames the
-  crack fill changed (v4251, the loss frame, rd-00720, the two issue-91 frames, v2567 and its
-  previous frame) are compared at the phone's setting and Enhanced 2x with refreshed pictures
-  (`-DBASE_REFRESH`, `build-host/tmp/v098/evidence/glow/pd-w15`: main 7832a2e4f's, each first
-  checked to have the no-fill replay's WORK2 and no target farther from the old baseline than
-  that replay), the old baseline's log still giving the passes before. A setting without a
-  baseline is skipped; nothing compared: SKIP (`rd_glow_cheap_ab`). A baseline refresh for a
-  later change to the glow's drawing replaces the folders.
-- `rd_dst_usage_test.c`: the blend policy's footprint: by default only the fixed-function blend
-  exists (`g_rd.dstModes` OFF, no destination-read layout, shader twin or target usage, no
-  readable pass, both exact modes refused); with `ICO_RD_BLEND=attachment` only that mode's
-  layout, twins and `SCENE` usage, and a start-up set that grows when the mode is switched on
-  (`rd_dst_usage`; 77 without a Vulkan device).
-- `rd_crack_test.c` with `rd_crack.cmake`: the crack filler above 1x
-  ([RENDER_POST.md](RENDER_POST.md#crack-filling-above-1x)). A 640 x 448 frame under Enhanced, two flat
-  triangles sharing a long diagonal edge, the second one's edge one 12.4 step (1/16 GS pixel) to
-  the right, two sprites 1.5 GS pixels apart, below them a concave fold (two strips whose depth
-  falls steeply towards their shared line) and the fog, replayed with the filler off and then
-  as the environment has it, SCENE read back: at 2x, 4x and 1800 x 1080 texels (2.8125 x 2.41;
-  `rd_crack`, `rd_crack_4x`, `rd_crack_frac`) the edge shows texels of the clear's fog without
-  the filler and none with it, each filled texel the colour of a drawn texel within the reach on
-  its row or column after the fog (the fill drawn after lists 4-6) and its depth unchanged, the slit keeps every texel of the clear's fog, nothing
-  the first replay drew changes (the fold among it), one fill pass is drawn and its count equals
-  the texels changed; with `backdrop` (`rd_crack_backdrop`, `rd_crack_backdrop_4x`,
-  `rd_crack_backdrop_frac`) a far plane writes Z over the frame first and the two triangles lie
-  near each other in depth, so the cracks hold the plane's depth and colour and are filled the
-  same (the discontinuity form) while the slit keeps the plane;
-  Where the reach is 1 on both axes (`rd_crack`, `rd_crack_backdrop`, the 2x cases and their `_gl` twins) the
-  frame is also replayed with the general shader (`rd__crack_fill_force_general`): every byte of colour and
-  depth and the count are the reach-1 shader's (`crack_fill1_ps`), and the `rd: crack fill: the reach-1 shader`
-  line is matched (`EXPECT2`).
-  at 1x, under Original, under MSAA4 and with `ICO_RD_CRACK_FILL=0` (`rd_crack_1x`,
-  `rd_crack_original`, `rd_crack_msaa`, `rd_crack_off`) no fill pass and the same bytes (under
-  MSAA4 the frame has no shadow, so the epoch is still open at the fog and the skip line says so); under
-  MSAA4 the frame is replayed again without anti-aliasing and the filler: along the edge the
-  MSAA4 picture holds at most 5 % of its texels with the clear's depth (colours without a depth
-  readback) and the slit keeps the clear's fog on every texel; the same
-  2x run on the depth copy, the buffer path, D24S8 (no depth readback: colours only) and the
-  two-pass blend (`rd_crack_depth_copy`, `rd_crack_buffer`, `rd_crack_d24s8`, `rd_crack_nodual`).
-  Under the MoltenVK report (`ICO_VK_FAKE_LIMITS=moltenvk`, a tile-based profile) `rd_crack_tiler`
-  and `rd_crack_tiler_on` (`ICO_RD_CRACK_FILL=1`) find the filler on by default, as on every
-  class (the old `off on this tile-based GPU` line denied). `rd_crack_tiler_fold` (`rd_crack_test
-  2 fold`, 77 without local read; the name is the old fold's) checks the fog's local read: one fill,
-  drawn after lists 4-6 (`RdCrackCounts.late`), the fog by the local read in the same replay
-  (`fogLocalDraws`), one render pass more than without the filler besides the count's (the fill's
-  own: nothing breaks the scene pass at the fog), and SCENE's colour and depth byte-identical to a
-  replay on the depth copy path; `rd_crack_tiler_fold_mali` the same under
-  `ICO_VK_FAKE_LIMITS=mali` with `ICO_RD_FOG_PATH=local`. Both deny the old state line's `drawn
-  inside the scene pass with the local fog`. The fill's place under the MoltenVK report:
-  `rd_crack_glow` (`rd_crack_test 2 glow`) adds the glow's `cleanUpFB` after the fog (list 7: two
-  untextured sprites into SCENE, Cs * As + Cd with RGBAQ 0, 0, 0, 0 under Z ALWAYS, then alpha 192
-  at Z 1 under Z GEQUAL), so the fill is drawn after them with RGB alone (`RdCrackCounts.afterAlpha`
-  1; the filled texel's RGB its neighbour's, its alpha `cleanUpFB`'s); `rd_crack_aura` (`2 aura`)
-  adds the aura's paste (list 8: one colour into WORK0 by a sprite, then WORK0 over SCENE through
-  (Cs - Cd) * As + Cd at As 32), so the fill is the first draw of the paste's pass (`pasted` 1, no
-  fill pass of its own). Each replays the frame with the place pinned to the start of list 7
-  (`rd__crack_fill_set_place(1)`): SCENE's colour and depth the same bytes, one fill pass there,
-  and two render passes fewer (glow, on the fog's local read; at least one otherwise) or one (aura)
-  with the place; the once lines are matched (`EXPECT2`), and `rd_crack_aura` denies the line that
-  says the paste could not take the fill.
-  Each run's `rd: crack fill:` state line is matched (`-DEXPECT`, `-DEXPECT2`; `-DDENY` must not
-  match); `rd_replay_tool_crack` runs the tool on `rd_pixel`'s dump with `--enhanced --resolution
-  2x --stats --no-crack-fill` and matches `crack fill: off (the replay tool's --no-crack-fill)`
-  and the `stats: crack fill off: 0 passes, 0 pixels filled` line. `rd_crack_resolved_msaa2` and
-  `rd_crack_resolved_msaa4` run the tool on the corpus room `lightning/rd-00300.rddump`
-  (machine-local under `build-host/tmp/corpus/dumps/`, SKIP without it) with `--enhanced
-  --resolution 2x --aa msaa2|msaa4 --stats`: its MSAA epoch closes at the shadow count's pass in
-  list 3, before the fog, so the filler draws on the resolved picture: the state line ends `(drawn
-  after the MSAA resolve)`, the stats line reads `crack fill on: 1 passes, M pixels filled` with M
-  above 0, no replay left unfilled, `1 fills after lists 4-6` and `1 fills after the MSAA resolve`, and no `not drawn` line
-  (`-DNEED_FILE`: SKIP without the dump; `-DNEED=rd: msaa: N samples`: SKIP where the device does
-  not offer the count, which it then draws as off: lavapipe offers 4 only)
-  ([MSAA.md](MSAA.md#the-crack-filler-after-the-resolve)).
-- `rd_crt_test.c`: the CRT filter's options and its shader (`rd_crt`, `rd_crt_fixed`); downsampling
-  changes no byte under the filter (`checkOff`).
-- `rd_debug_test.c`: `debug.c` on the host, recorded (`rd_debug`); with the Game variants' bind
-  (`debug_VariableInit` hands `ico_variants_bind_debug` the five switches and `debug_MenuOpen`)
-  and the menu opened through that opener drawn on each of three ticks with no pad (title and bug
-  list), nothing while closed, Triangle closing it.
-- `rd_display_change_test.c`: a display change while the game runs (`rd_display_change`, and
-  `rd_display_change_gl`): a frame of VU meshes under linear filters, strips, sprites and the
-  reduction; a fresh start at Original (1x), then a second start at Original with the start-up
-  set, switched to Enhanced at an output whose box gives a fractional scale and back to Original.
-  At each state two frames are recorded and replayed: neither replay makes a pipeline
-  (`RdPerfRecord.pipelineCreates` 0, `rd__pipeline_count` unchanged after the frame's
-  `rd_begin_frame`), the switch to Enhanced makes the no-planes twins at its `rd_begin_frame` and
-  its second replay draws VU passes through `vu_np_ps` (where the twin is loaded and the blend is
-  fixed-function), and back at Original the second replay's draws, render passes, pipeline binds,
-  blur folds, glow passes, no-planes passes, above-1x draws and crack fill passes are the fresh
-  start's and DISPLAY is the fresh start's, byte for byte
-  ([DISPLAY.md](DISPLAY.md#video-options-and-presets), run-time changes). The switch runs with the
-  renderer's own thread on (not on OpenGL) and a display progress function that presents a blank
-  frame as the window's screen does: every call of it is on the test's thread, none inside a
-  render-thread job, and it is called when the change made pipelines; `rhi_call_guard_settle`
-  makes a busy guard's wait. The window's half (the
-  present allowance started again) has no test: the window is not run in the tests.
-- `rd_filter_test.c`: the model viewer's draw filter on synthetic keys (`rd_filter`).
-- `rd_fog_selftest_test.c` with `rd_fog_selftest.cmake`: the fog's self-test and probe; its log line
-  matched for each path, MSAA counts, odd widths and [Full pixel](ARCHITECTURE.md#terms)
-  (`rd_fog_selftest*`; the local read's first under `ICO_RD_FOG_PATH=local`,
-  `rd_fog_selftest_local`). With `rd_date_selftest.cmake` and `ICO_RD_DATE_PATH=stencil`, DATE's
-  self-test, which the fog's first run runs first: `DATE: stencil path (self-test: stencil ok 5,
-  snapshot ok 5)` matched once (`rd_date_selftest`; the fifth sample a DATM 1 command's own
-  overlap, the alpha before the draw), and under `ICO_RD_UBER=on` `DATE: colour read path
-  (self-test: colour read ok 5, stencil ok 5, snapshot ok 5)` (`rd_date_selftest_uber`: the
-  colour read's fifth sample the GS's per-primitive one). The failure paths, under
-  `ICO_VK_FAKE_LIMITS=moltenvk` (the profile's Apple row: `fogLocal` and `dateStencil` the
-  profile's own, not `[dev]`'s): with `ICO_RD_DATE_SABOTAGE=1`, `DATE: snapshot path (self-test:
-  stencil fail ...` and `profile: DATE stencil off (self-test)` (`rd_date_selftest_sabotage`);
-  with `ICO_RD_FOG_SABOTAGE=local`, `local fail N, copy ok N`, the copy taken at both sizes and
-  `profile: fog local off (self-test)` (`rd_fog_selftest_local_sabotage`). Both scripts take
-  `-DEXTRA` and `-DEXTRA2`, regexes that must each match the log at least once. With
-  `rd_shadow_selftest.cmake`, the shadow count's self-test, which the fog's first run and its run
-  at the second scene size run: every `shadow count: one draw (self-test: equal to the seven draws
-  over WxH, 142 band centres ok)` line matched, at least one, and the line saying how the stencil
-  is read, `four texels a gather, equal to the seven draws byte for byte` or `a texel a load, as
-  the gathers' count ...` (`rd_shadow_selftest`); with
-  `ICO_RD_SHADOW_SABOTAGE=1`, `shadow count: seven draws (self-test: one draw differs ...)` and
-  `profile: shadow count one draw off (self-test)` (`rd_shadow_selftest_sabotage`); both with
-  `_gl` twins. The desktop's
-  local-read probe after the first self-tests (`ICO_RD_LOCAL_PROBE=1`, lavapipe being the desktop
-  class with local read): with `ICO_RD_LOCAL_PROBE_SABOTAGE=fast` the local reads kept, the fog
-  local at both sizes and `profile: local read on the desktop: kept (probe x vs y ms)`
-  (`rd_local_probe_kept`); with `slow` turned off, `DATE stencil off (probe)`, every target made
-  again and the fog in place at both sizes (`rd_local_probe_off`)
-  ([WORK_BUFFERS.md](WORK_BUFFERS.md#the-desktops-local-read-and-its-probe)).
-- `rd_local_probe_test.c`: the local-read probe's verdict on synthetic times, no device: kept up to
-  5 % slower, off above, kept with a time missing (`rd_local_probe_rule`).
-- `rd_fog_test.c`: the depth fog of `fog_DrawFog` on the CPU and on the device, every depth path
-  (`rd_fog`, `rd_fog_*`; the local read from the start in `rd_fog_local`, the other paths' replays
-  the same bytes); at 2x a depth ramp's fog alpha equals the above-1x formula (the table
-  interpolated, the ordered dither) texel for texel, and the 1x cases count no above-1x draw
-  (`checkRamp`); the outer columns' probe: its count of GS Z 0 rows on D32F and D24 words, the texel
-  each GS column is read at (1x, 2.8125x, and Full pixel's window with GS column 0 left out) and
-  the line of the first 8 and last 8 GS columns on the CPU with each of the places those columns
-  go (open, cropped, closed at 512 and at a wide 832, Full pixel's window with its `-` columns:
-  `checkEdgeLine`), then with Full pixel on at 4:3 the cells' scene, two cells left at Z 0 at the
-  frame's edges, gives 32 rows in each of the 16 columns and the left's run (`checkEdgeProbe`; on
-  Vulkan and OpenGL, which copy a region of a depth to a buffer, else only on the buffer path), and
-  with it off a line, if one was logged, says the border is closed.
-- `rd_gsbase_test.c`: `GsBase.c`'s host path driving a synthetic scene (`rd_gsbase`; its post
-  checks read SCENE back, so it draws list 11's last sprites whatever `ICO_RD_FADES_FOLD` says:
-  the fold's DISPLAY is `rd_fades_fold`'s and `rd_fades_fold_ab`'s); photo mode's
-  Deja vu draws the stage's sandstorm object once a frame with the vision's two nodes, gives back
-  what it borrowed, adds no film grain, and draws nothing in stage 40, with the effect off or with
-  photo mode closed (`checkDejaVeil`); its film reel on a row of `film_noise_l4.bga`'s shape: the
-  first photo tick starts the row, each later tick runs it once on the filter's own frames, the
-  game's frames and node records are the same after every tick and draw, the noise objects are
-  drawn in model order before the veil with the evaluated nodes, their fade following the
-  envelope's own frame tick by tick and wrapping at its length, nothing with the effect off, in
-  stage 40 or with photo mode closed, the veil alone without the row (`checkDejaReel`; the
-  evaluator there stands in for the game's). The wall test's flip hook on every disc's
-  `gsb_UpdateGSSystem` copy, the check scripted: each flip passes `+0x380`'s translation, the stage
-  and whether a game cut is pending since the flip before; a crossing marks the frame that flip
-  closes (`RdCamera.cut` 2, `RD_SNAP_WALL` against the frame before), not the next;
-  `gsb_ResetGSSystem` forgets the eye (`checkCameraWall`).
-- `rd_still_test.c`: the still re-present's hash and decision (`rd_still`, no device): two ticks with
-  the same sprites and a still camera hash the same at alpha 0.25, 0.5, 0.75 and 0.999 (the presenter's top), as a first and as
-  a later present (the head copies are not in it); one colour word of the second tick, a sprite that
-  moves, a moving camera and Motion blur: Smooth change or withhold it; `rd__reshow_why` for every
-  input. The pictures: `rd_replay_tool DUMP out.png --interp 0.9 DUMP --interp-any --presents 3
-  --present WxH` (a dump as its own tick before: nothing moves) writes the same PNGs with and without
-  `ICO_RD_STILL_REPRESENT=0`, and its lines say which presents were `shown again`.
-- `rd_replay_tool_still.cmake` (`rd_replay_tool_still`): the still re-present on a corpus dump as its own tick
-  before, 4 presents at Enhanced 4:3 2x at 1280x960: presents 1 to 3 end `; shown again`, and all four pictures are the same bytes
-  as with `ICO_RD_STILL_REPRESENT=0` (Not Run without the dump).
-- `rd_replay_tool_glow_hold.cmake`: the glow held between ticks (`port/render/rd_glow_hold.c`)
-  against its chain drawn at every present (`ICO_RD_GLOW_REDRAW=1`), on two consecutive godrays
-  dumps (`build-host/tmp/pcsx2cmp/godrays/port2/keep/rd-01076` and `rd-01077`; Not Run without
-  them) at Enhanced 4:3 2x, `--presents 2` with `ICO_RD_STILL_REPRESENT=0` (every present
-  rendered) (`rd_replay_tool_glow_hold`). A still tick (rd-01076 as its own tick before): the lines
-  say `glow drawn (the tick's first present)` for present 0 and `glow held` (or, with the switch,
-  `glow redrawn ([dev] glow_redraw)`) for present 1, and SCENE and the presented picture of both
-  presents are the same bytes held and redrawn. A moving tick (rd-01076 then rd-01077): present 0
-  the same bytes both ways, and every pixel of present 1's SCENE that differs lies within 128
-  texels of the glow's mask (WORK2 not at its fill level, either run's) (with Python and Pillow).
-  `build-host/tmp/v094/after/v2-ab.sh` is the A/B over more pairs (statistics, crops, the region
-  at 32, 64 and 128 texels, lavapipe timings).
-- `rd_replay_tool_save_blended.cmake`: the blended present's frame F12 saves
-  (`rd_dump_blended_arm`) replays alone as drawn: `rd_replay_tool CUR --interp T PREV
-  --save-blended B` writes the frame built between the two after its replay, `rd_replay_tool B`
-  replays it without `--interp`, and SCENE and the presented picture (1280x960) are the same bytes
-  as the `--interp` run's. `rd_replay_tool_save_blended`: rd-01076 then rd-01077 (the godrays pair
-  above) at alpha 0.5, Enhanced 4:3 2x; `rd_replay_tool_save_blended_163`: issue 163's pair
-  (`build-host/tmp/v097/evidence/163/frame/`) at its present's alpha 0.999000013, 2x, full height,
-  Full pixel (Not Run without the dumps). Both run the `--interp` again with `--render-thread
-  sync` and `on` (`-DRT`): the interpolation and the replays on the render thread give the same
-  picture and the same saved blended frame, byte for byte (the payload's alignment gaps are zeroed
-  for this: the first threaded run's dump differed in 3 padding bytes the main thread's heap left).
-- `rd_interp_test.c`: presentation between [ticks](ARCHITECTURE.md#terms) on two synthetic frames
-  (`rd_interp`); the feedback head copies (`testFeedback`: `DISPLAY_HELD` and `FEED_HELD` at a
-  tick's first present and the later ones, none for DISPLAY under Motion blur: Smooth, FEED128's
-  unchanged, the motion blur's record as recorded; FIX' of 32 at 1, 2, 4 and 10 presents and at
-  the ends); its rotation cases live in `rd_interp_turn_test.inc` and its seams cases in
-  `rd_interp_seams_test.inc`, included where they stood, and its bars case in
-  `rd_interp_bars_test.inc` (`testBars`: the same screen sprite under another key in each tick is
-  drawn once, whole; a taller one or another blend FIX still cross-fades,
-  [WORK_BUFFERS.md](WORK_BUFFERS.md#screen-sprites-redrawn-under-a-new-key-between-ticks)), and
-  its keeps in `rd_interp_memo_test.inc` (`testStreamMemos`, `port/render/rd_interp_mesh.c`: two
-  meshes of the same bytes compared once and the answer kept, a rewrite compared again, one
-  buffer the same shape uncompared, a record with no serial compared at every ask; a skinned
-  bone's pivot its bound vertices' centroid, the same at the next present and after another
-  mesh's, moved by a rewrite; a shadow volume paired at 0.75, then drawn at 0.25 and 0.75 from the
-  kept pairs, the 0.75 volume byte for byte the one paired anew);
-  rotation continuity (`testRotationContinuity`): a rigid draw and a bone turning
-  170 then 190 degrees a tick stand at 265 degrees half way (on forward the long way, not back to
-  85), at 217.5 at alpha 0.25 and at the tick's pose at alpha 1; 190 degrees with no turn before
-  keeps the tick's pose; a 20 degree turn after another blends bit for bit as without one. Across
-  a gap (`testRotationGap`): after a pair with no present, a camera cut or a discarded frame the
-  wheel turning 200 degrees a tick continues the long way from the turn two ticks before, a turn
-  8 ticks old serves and 9 does not, a pose the memory does not carry to keeps the tick's, a turn
-  under the snap blends the short way. The trolley's wheels (`testRotationWheels`): two draws, of
-  one key and of two, at 185 degrees a tick with their places in the list changing every tick,
-  both forward the long way; the ride of `box.c` (0.5 a tick of push, 0.98 friction, radius 10)
-  up to 125 degrees a tick blended every pair, then a camera cut, and each pair after it forward.
-  The seams (`testStillSeams`, drawn through the game's screen and clip matrices): two still prelit
-  parts with different model to world matrices, the camera orbiting 28 degrees, are still draws at
-  alpha 0.5, each bit for bit the same part unmatched (the tick's block re-based, `camCurDraw`);
-  their shared vertex at a cell's middle lands in the expected cell through `vu1_ref` (placement);
-  two meshes of one model matrix with other centroids have bit-equal camera and model rows, and a
-  point a quarter of an ulp from a cell's edge lands in one cell in both (the mechanism); at alpha 0
-  the frame's view is the tick before's bit for bit and each part's rows lie within the still bound
-  of the tick before's. The seams at alpha 0 (`testStillSeamsAlpha0`): the same two parts, their
-  shared vertex at a cell's middle through the tick before's camera, (1) both matched, (2) both
-  unmatched, (3) A matched and B unmatched (the wedge's case); in each the frame's view is the tick
-  before's, both parts' camera and model rows are those of (2) bit for bit (the tick's block
-  through the tick before's camera, `camCurDraw`), no picture is mixed, and the vertex lands in the
-  same cell in both; B through the tick's own block and camera lands over 16 pixels away, so (3) fails on a renderer without the alpha 0 camera; frames
-  without a camera count a mixed picture (`mixed` 1). The size flap (`testSeamsSizeTail`, Enhanced):
-  B drawn with the region code at one tick and the scissor code at the other, so one payload
-  carries a card section and the other not, at alpha 0 and 0.5: both parts blend (none mismatched
-  by size, `sizeTailBlended` 1), both are still draws with the shared vertex in one cell, and B's
-  card section is the tick's. The present clock (`testPresentClock`) notes
-  its value before the clamp (`rd__present_clock_raw`), below 0 for a present before the tick's
-  time, and `rd__alpha_bin` sorts the alphas into the 10 s line's bins. The ticks' eyes
-  (`testEyeTicks`, on a device): alpha 0 carries the ticks' cameras as every present between the
-  ticks, alpha 1 none.
-- `rd_layout_test.c`: the layout frame from the game's layout calls (`rd_layout`).
-- `rd_mesh_test.c`: the mesh path from `Packet.c` to the VU shaders (`rd_mesh`, sharded), each
-  device case's frame replayed again with the VU vertex pre-pass switched, the picture byte for
-  byte the same, and every pipeline created in the set of either setting (`gpuCase`); the
-  `mesh_gen` shard: a save state load's generation floor (`rd_drop_vu_meshes`) applies once a
-  slot, so a slot wraps through the full 16-bit cycle after it (0xFFF1..0xFFFF, 1, 2, ...); the
-  content table's four sandstorm sheets and the tiles appended to them (`sheetTableChecks`), one
-  sheet on the device at 4:3 byte for byte the same with and without the tiles and at 16:9 the
-  columns beside it drawn (`sheetPixels`), and the `photo_veil` shard: the veil's two layers at
-  60:9 drawing every pixel with the tiles (`photoVeilPixels`), and the `photo_reel` shard: the film
-  reel's four specks of the deja dump at their places on the 16:9 frame, none tiled, every pixel
-  inside a speck's own place and in the 4:3 picture's columns (`photoReelPixels`).
-- `rd_mip_test.c`: the Enhanced mip chain's size and its builder staying inside it (`rd_mip`).
-- `rd_mirror_test.c`: mirror mode's flag and the flipped presenter output (`rd_mirror`).
-- `rd_passring_test.c`: the pass ring the device-loss report prints: order, wrap, the replay table, the
-  replays printed (the last three, whole at 430 passes a replay), the line format (the VU
-  vertex pre-pass's entry among them, `testVuPre`) and the loss bisect's line; the pipeline
-  note's hold (`testHold`: the shadow reduce's order, its pipeline looked up held leaving the
-  seven draws' entry alone, its own entry at the GS size taking it when asked again); pure
-  (`rd_passring`).
-- `rd_msaa_test.c`: the anti-aliasing's MSAA against the frame without it (`rd_msaa`); with
-  `msaa_resolve_ps` or `depth_resolve_ps` cleared for one call (a backend that cannot make one)
-  the supported mask holds the supersampling values only; `testShadowReset`: a frame whose list 3
-  holds the shadow count with a reset on SCENE's depth resolves once a replay
-  (`RdPerfRecord.msaaResolves` 1, two when the reset's stencil clear closes the epoch again from
-  inside `msaaEnd`), closes at list 3 (`msaaCloseAt` 4) and leaves SCENE byte for byte as the same
-  frame without the reset; `testSkySlit`: two triangles of one surface over the clear with a 1/16
-  pixel crack along their shared edge, the shadow count, then `cleanUpFB`'s glow mask (a sprite
-  at GS Z 1, alpha 192, alpha only, GEQUAL without Z writes): MSAA4 marks no more texels along the
-  crack than the frame without anti-aliasing (the covered-majority resolve,
-  [MSAA.md](MSAA.md)) and some silhouette pixels' colours still differ; on any device, `testSuspend` (Options > Graphics >
-  Apply's renderer switch): `rd_suspend` with a frame open, `rd_resume` carrying the scene size,
-  the frame counter, the mirror mode and the GS state (its texture cleared), a texture id from
-  before naming nothing, the DATE self-test's flag cleared, no frame open until
-  `rd_resume_frame` opens one (once), whose temporary target is freed and which closes without
-  a picture.
-- `rd_native_test.c`: the native frame's centre rule on a synthetic frame at five widths
-  (`rd_native`).
-- `rd_perf_test.c`: the renderer's CPU cost per replay and its steady state, and the start-up set
-  through `rhi_create_pipelines`: its progress calls (from 0, never back, the total once at the
-  end), a stop after the first batch and the rest made by the next call; last, the background
-  finisher (`checkBackgroundSet`): the set stopped after its first batch by the low-memory function
-  is offered, `rd_pipelines_background_start` takes it once (a second start returns 0), the memory
-  function is asked once before the first batch, one batch adds at most 32 pipelines, the system's
-  signal (the function's 2) ends the finisher with nothing more made, and a second stopped set run
-  to the end leaves every key of the reachable set with a pipeline and none made on first use
-  after it; off Vulkan (`rd_perf_gl`, `rd_perf_attachment_gl`: no background creation) the start
-  returns 0 with the finisher off and the memory never asked, and every key is made on first use;
-  the exact blend's
-  counters (`RdPerfRecord.dstDraws`, `storagePasses`, `dstSwitches`) under each blend path the
-  device has (none under the fixed-function blend, no storage pass or switch under the attachment
-  read) and, under the storage read, the storage pass merge's DISPLAY bytes equal to the unmerged
-  ones with no more passes or switches; the replay and record phases run without the VU vertex
-  pre-pass (their barrier counts), a `prepass` phase replays the frame with it (the records still
-  pending from before the switch dropped by replay number, since a record is pushed
-  `RHI_FRAMES_IN_FLIGHT` replays after its own; nothing created after the phase's first two
-  replays, one pre-pass a replay with the same vertices, every mesh command through it, steady
-  barriers, DISPLAY byte for byte the picture without it), a `passes` phase times the record
-  phase's last frame pass by pass (`rd__set_perf_passes`): each timed record's pieces begin with
-  the uploads (the pre-pass second where the device takes it) and end with the present, the
-  pieces the pass ring also notes are its entries of that replay one for one and in order (a
-  render pass at the ring's size), the pieces' draws and pipeline binds add up to the record's,
-  their counts by kind are the record's `passKinds`, every piece has a GPU time and they add up
-  to the record's GPU time within 10 percent and 0.5 ms; without the key a replay is timed only
-  250 ms after the last timed one (`RD_PERF_PASS_EVERY_MS`), an untimed one has no pieces, and
-  every replay counts one upload and one present; without the list and effect stamps
-  (`rd__set_perf_list_stamps`) the lists' times are 0, the GPU total is there and the pieces add
-  up to it; before any device, the CSV header and line,
-  the top-passes text (with a cut to a short buffer) and the passes-by-kind text, to the byte
-  (`checkPassTexts`). The reachable set is made with the pre-pass (`rd_perf`, `rd_perf_mali`).
-- `rd_pixel_test.c`: rd through the Vulkan [RHI](ARCHITECTURE.md#terms), pixel by pixel; leaves the
-  dump the tool tests replay (`rd_pixel`). Its pipelines case holds the reachable set under
-  `RD_PIPELINE_REACHABLE_MAX` with both blends, the tile-based GPU's set too (its profile with
-  local read and the fx plan, the pre-pass off, every state static, Enhanced at 2.8125 x 2.41071:
-  1153 keys), that one also inside the RHI's pipeline pool
-  less its headroom (`testPipelines`). Its DATE case replays one frame through the stencil bit
-  and through the snapshot (where the device has local read): one DATE command of two overlapping
-  sprites over cells of alpha 0x80 and 0, SCENE the same bytes both ways and the snapshot's
-  semantics within the draw (`testDateStencil`; it skips under `ICO_RD_BLEND=storage` and prints
-  why: the storage read has no colour attachment to read, so DATE takes the snapshot there). Its alpha plan case replays one frame with the
-  alpha/blend planner off and on: prelit quads of vertex alpha 0x80, 0x70 and 0x40 under the
-  railing's state, a LERP FIX 0x80 sprite and a LERP sprite of As 0, SCENE's colour and depth the
-  same bytes, three draws counted one-pass (`testAlphaPlan`); the railing keeps its split. Both
-  replays run with the fixed-function blend (the mode forced off for them): under the storage read
-  the unplanned quads stay on that blend while the planned ones take the exact read, a rounding
-  apart, so under a mode asked a third replay (the plan on, that mode) must stay within 3 per
-  channel of the planned fixed-function one with the depth equal; a mismatch prints the first
-  differing pixel and both values.
-  Its AA1 wedge case (`testAa1Wedge`, `rd_pixel_aa1_test.inc`) draws the drained room's ripple
-  state (PRIM.AA1, ABE, `Cs * FIX + Cd` with FIX 0x60, Z write, DATE DATM 1, a flat colour of 64,
-  so every fragment adds 48) over SCENE: a four-vertex strip with an acute corner and an
-  octagonal ring of eight quads, at alpha 0xFF and again at 0x80, and checks every pixel's red is
-  48 times the fragments a C model of PCSX2's `DrawTriangle` and `DrawEdgeTriangle` draws there
-  (the GS's fill for the interiors) and its DATE keeps, the destination alpha tested as each
-  fragment is written (`GSDrawScanline.cpp`), the alpha 0xFF wherever one lands, the As of the
-  single edge pixels at 0x80 and the alpha of the last kept fragment within 1, and that the
-  model's DATE rejects more than 400 fragments at 0x80 (473 at 450 pixels; DIVERGENCES.md VD-17:
-  the port draws the strips primitive by primitive through DATE's stencil bit). It runs on the
-  device's own DATE path and, where the device has local read and the blend is not the storage
-  read, again through the stencil bit (SCENE made with DATE's local read, setups counted, no
-  snapshot), the DATE stencil draws counted both times; it prints the pixels with 1, 2 and 3 or
-  more fragments and the fragments the model's DATE rejects and keeps. Under GS state as shader
-  data (`rd_pixel_uber`) the device's own path is the colour read: no stencil pair and no
-  snapshot, the DATE draws counted as reading the alpha and the Z-writing strips drawn triangle by
-  triangle, two draws each (at least 72 screen draws for the 36 triangles;
-  `port/render/rd_replay_aa1.inc` (`aa1OrderDraw`)), the same bytes; the stencil cell then holds
-  the colour read's DATE off (`g_rd.uberDate`), as `testDateStencil` does.
-  `rd_state`'s `aa1 DATE pairs` case checks the ripple state's pairs are enumerated: TEST0 and
-  TEST0_SET (Z write on and off) in the screen set, TEST1 and TEST1_CLR in DATE's set with
-  `dateStencil` and not without; its tiler set allows DATE's screen twins 224 + 12 and counts one
-  setup key of its own (the CLEAR key is the desktop set's).
-  Its VU seams case (`testVuSeams`, at Original 1x and 4x and Enhanced 2.25x and 4x) counts the
-  clear's pixels along edges two draws share: S1 a code-32 triangle beside a GIF one, S2 two
-  meshes 0.01 GS pixel apart, S3 a code-36 cut triangle beside a kicked one, S4 8 x 8 quads under
-  a matrix each, none in any mode; S5 a code-32 triangle the region test drops, drawn clipped
-  beside an exact one, their shared vertex's GS Z saturated and its X and Y off the 1/16 grid:
-  none above Original 1x, where the clipped triangle is drawn, and at Original 1x not drawn
-  (`vu_corner_cut_position`).
-  Its present case (`testPresent`: the presenter's output pixel at the centre between its two
-  DISPLAY neighbours) runs right after the reduction, before `testReductionUint` makes the
-  targets again: a target made again holds whatever the driver's memory held until the next
-  replay clears it (lavapipe hands the freed DISPLAY's memory back, llvmpipe's OpenGL gives
-  zeros), so DISPLAY read after that is not the frame the presenter showed.
-- `rd_present_test.c`: the display options through `GsBase.c` and the presenter (`rd_present`;
-  the save state's picture, `checkShot`: the box of the open frame's present, CRT off and on, a
-  later frame's present dropping it, one copy with the photo capture, replaced, cancelled and
-  dropped at the shutdown; `checkShotDeferred`: the state host's deferred answer
-  (`rd_capture_shot_arm`, `rd_capture_shot_take`) taken once with the box, no answer for a
-  replaced or a cancelled request, a later frame's present dropping it as NULL, here and with the
-  renderer's own thread presenting (not on OpenGL); `checkOverlayThread`: both overlay layers
-  (the main one drawing through port/ui's font in overlay mode) of a picture `rd_present_post`
-  hands over are collected on the test's thread before it returns, never in a render-thread job,
-  once a layer a present; the test's own text in the font's overlay mode while the picture may
-  still run gives all its quads; the output equals the one without the thread byte for byte;
-  `rd_present_blank`'s layers are collected on the test's thread too (not on OpenGL);
-  `checkFailedPresent`: with a host of the test's own that runs each picture handed over at the
-  next drain, a present that presents is not counted by `rd_thread_failed_presents` and one that
-  fails there (a movie shown by then) is, once; `checkWaitSplit`: with a host of the test's own
-  whose picture ends at the next drain (5 ms), `rd_present_post`'s waits for the picture before
-  are counted by whose (`RdThreadBlock` `freshWaits`/`furtherWaits`: one new frame's present of
-  5 ms, two further presents' of 10 ms), another drain in neither, and `rd_frame_close_take`
-  counts the frames closed since its last take and starts again;
-  the scene limit's fallback checks drive the Vulkan backend's `vkr_test_fail_texels_above` and
-  are skipped on Direct3D 12, OpenGL and Direct3D 11, which have no such hook);
-  the open border's outer columns (`rd_present_border_test.inc`, `checkOpenBorderEdges`): at
-  2340x1080 (832 columns, the frame its exact width) and 4:3, 1x and 2x, the mirror on and off,
-  SCENE red with green over GS columns 1 .. W - 2 presents green outer columns, byte for byte the
-  present of SCENE green everywhere, and without the strips (`rd__set_blur_border_repeat`) only the
-  outer columns differ; at 16:9 (cropped) and with Full pixel off the strips change no byte;
-  DISPLAY's strips are their neighbour columns' bytes at 1x and one value a row at 2x; SCENE's
-  own outer columns (`checkSceneBorderRepeat`): a fogged frame whose SCENE leaves GS columns 0, 1,
-  W - 2, W - 1 at the clear (the fog paints them white) and a glow-like post sprite spreading SCENE
-  eight GS pixels in from each edge presents, at 16:9 Enhanced 2x with Full pixel off (the border
-  mask), at 16:9 2x with it on (whole scale: cropped), at 2340x1080 with it on (open) and off
-  (closed on a wide frame), and in Full pixel's window at 2560x1080 (the window's scale 2.8125,
-  `ox` 1.5: texels of columns 0 and 1 in it), byte for byte the frame drawn over every column,
-  with one repeat a replay, and without the repeat (`rd__set_scene_border_repeat`) differs within
-  14 GS pixels of the box's edges alone; each run's `rd__scene_border_state` is the one expected;
-  at 4:3 with it off (the border closed on the PS2's frame) SCENE is kept as drawn; the 48:9 strips (`checkExactEdges`) are checked one
-  value a row over the texels they cover by a whole texel (from 0 to below 2k - 0.75 and from
-  k (W - 2.25) + 1 on, k texels a GS pixel); the present pins hold without the strips, and with
-  them differ in the outer columns alone (`checkFullPixelOnPin`),
-  an old file's `window_size` among them (ignored, kept as written);
-  the targets' scales include the work buffers and shadow levels at their GS sizes at every scale
-  and Water reflections' block: its GS size under Original, the scene's scale under Sharp (4x at
-  4x), both the GS size at 1x (`checkScales`); downsampling in force with a scale or a fixed size,
-  not at the `window` resolution or under the CRT filter, and the supersampling measured against
-  the GS grid (4x + SSAA2 is 4x, 2x + SSAA4 is 4x, 1x + SSAA2 is 2x; `checkScales`); without
-  anti-aliasing 4x into 640 x 480 and into 1600 x 1200 both take the window's reduce, byte for byte
-  the CPU's box average (`cpuReduce`), and 1x into 320 x 240 keeps the plain blit
-  (`checkAaOffReduce`); with downsampling at 2x and 4x into 640 x 480 and 2x into 512 x 384,
-  DISPLAY is the run's without it byte for byte, the downsampled DISPLAY
-  (`rd__read_present_downsample`) is `cpuReduce` of it byte for byte with the same passes and no
-  window reduce (`rd__last_present_reduce`), 4x + SSAA2 and 1x + SSAA2 present the downsampled 4x
-  and 2x byte for byte, and on smooth gradients the downsampled presents are within 4 LSB of the
-  1x present (`checkDownsample`).
-- `rd_raw_test.c`: the raw packet builders outside `seki` (`rd_raw`).
-- `rd_replay_tool_list.cmake`: `--list --no-device` on `rd_pixel`'s dump (`rd_replay_tool_list`).
-- `rd_replay_tool_pass_dump.cmake`: `--pass-dump`, `--target` and `--aspect` on that dump
-  (`rd_replay_tool_pass_dump`).
-- `rd_replay_tool_loss_bisect.cmake`: `--loss-bisect` on that dump runs clean on the device with one
-  replay per pass and one to count them, `--passes 1-P` (the whole frame) draws the plain replay's
-  picture and `--passes 1` stops the walk at pass 2; the second level's draw window: `--passes 1-P
-  --draws 1-N` (every draw of the last pass) draws the plain picture, and one step with `--draws
-  1-2` and one with `--mask-marks` run clean and name their last draw (`rd_replay_tool_loss_bisect`).
-- `rd_replay_tool_pass_split.cmake`: that dump with `ICO_RD_PASS_SPLIT=8` draws the plain replay's
-  DISPLAY picture byte for byte (`rd_replay_tool_pass_split`).
-- `rd_replay_tool_pass_merge.cmake`: that dump under `ICO_RD_BLEND=storage` with the storage pass
-  merge draws `ICO_RD_PASS_MERGE=0`'s DISPLAY picture byte for byte at 1x and 2x, with no more
-  passes or pass switches; skips without the storage read, as on a lavapipe before Mesa 25.2,
-  which has no interlock; from 25.2 lavapipe has it and the test runs
-  (`rd_replay_tool_pass_merge`).
-- `rd_replay_tool_snap_swap.cmake`: that dump on each blend path the device has, at 1x and 2x:
-  the staticBlur sprites' snapshot swap draws `ICO_RD_SNAP_SWAP=0`'s (the copy's) DISPLAY picture
-  byte for byte, and its copies plus swaps are the copy's snapshots (`rd_replay_tool_snap_swap`).
-- `rd_replay_tool_keys.cmake`: every dump of `ICO_DUMPS` (a list or a folder; skips without it)
-  through `rd_replay_tool --keys` at 1x, `--enhanced --resolution 2x` and `--enhanced --resolution
-  2340x1080`, on the fake phone limits (`ICO_VK_FAKE_LIMITS=mali`) and again with the tile-based
-  GPU's paths forced (`ICO_RD_DATE_PATH=stencil`, `ICO_RD_FOG_PATH=local`, `ICO_RD_BLUR_FOLD=1`;
-  the fake limits drop the local read, so the two cannot be combined, and a device without local
-  read compares the desktop set again, which the test's output says), and with those paths under
-  GS state as shader data (`ICO_RD_UBER=on`: the collapsed set, config `uber`). `--keys` walks the replay
-  with nothing drawn (`rd__pipeline_gather`), makes the keys it names and compares them with
-  `rd__enumerate_reachable`; the test fails on a key the set lacks, which on a device is one
-  first-use stall (`firstUseLine`), never a wrong picture. The union of the asked keys is left in
-  `rd_replay_tool_keys/keys-<config>-<size>.txt` (`rd_replay_tool_keys`).
-- `rd_submit_queue_test.c`: the submit thread's queue (`port/render/rd_submit_queue.h`): jobs run in the order posted, numbered from 1, an empty one refused; at most `RD_SUBMIT_DEPTH` queued and running, the running job counted until it finishes (one at a time, a third post refused meanwhile); the finished jobs' times taken oldest first, once, the oldest dropped and counted past the depth; the longest present since the last take, once (1 ns for a 0 ms present, 0 for a job that presents nothing); the block's means, longest, depth, waits by the render thread and the others, lists submitted on the render thread, cleared by the take with the depth carried for the jobs still queued; the jobs queued and running of each frame slot (a running job counted until it finishes, the other slot's queued job not counted for this one) and the pictures begun beside the other slot's job (`testSlots`) (`rd_submit_queue`).
-- `rd_pipe_finish_test.c`: the background finisher's choices (`rd_pipe_finish.h`): a set of 1196 keys stopped after 33 gives its batches from key 33 in the set's order, 32 a batch, the keys made meanwhile and the failed ones skipped, a batch never mixing keys with and without a destination read (the other kind's key starts the next), every key not made taken exactly once, 37 batches for 1163 keys of one kind (the last of 11), none past the end; the step after a picture: a batch in flight waits, then is taken whatever the memory or a hold; the system's signal ends the finisher, no key left ends it, a hold (late step, slow picture) and a reading under the floor wait until their time, the memory is read only when nothing else holds the batch, then a batch begins; every step's words (`rd_pipe_finish`).
-- `rd_cache_name_test.c`: the Vulkan pipeline cache file's name (`rd_cache_name.h`): two builds' tables of the same modules, each in its own memory, name the same file (no build in the name); one byte of a module changed (its first, a middle one, its last), a module a word longer or shorter, renamed, its stage changed, two swapped, one dropped or added, or `RD_PIPELINE_CACHE_FORMAT` raised each name another; names joined differently do not collide; the form `pipelines-<16 hex digits>.vkcache` (34 characters), a 35-byte buffer taken, 34 and NULL refused; an empty table still names a file (`rd_cache_name`).
-- `rd_bisect_plan_test.c`: the loss bisect's second-level planner against oracles: a draw that
-  faults with every draw before it (1, 731 and 1,312 of 1,312) found within 12 steps, the masked
-  step's verdict, a killed step counted as lost, a step without a verdict planned again,
-  contradicting prefixes ending the plan, 1,000 random oracles ending within 16 steps
-  (`rd_bisect_plan`).
-- `rd_depth_copy_dump.cmake`: a player dump with the fog replayed with the depth in place, copied
-  and through a buffer, SCENE byte for byte the same (`rd_fog_depth_copy_dump`, `_d24s8`).
-- `rd_shadow_test.c`: the shadow count on the stencil (`rd_shadow`); at scene scale 4 each
-  composite, not flagged above 1x, against the float bilinear of its level within 3 LSB, then with
-  `RdProfile.shadowBspline` ([dev] `shadow_bspline`) against the CPU B-spline within 3 (4 on the
-  fixed-function blender) and a row across the shadow falling and rising once, the softening's AA0 (at its GS size) the area box of SCENE and its composite back the
-  bilinear between AA0's texels, not counted above 1x (`checkComposite4x`, `checkSoftening4x`).
-  Case m (with each case o run): the shadow volumes in the scene's open pass
-  (`rd__shadow_merge_force` off and on) under `ICO_RD_STORE_POISON=1`, the synthetic volumes
-  through both paths and Shadow.c's model through the one draw: the count, SHADOW0-2 and SCENE
-  byte for byte, list 0's pass armed and the reset taken with it on (`shadowMergeArmed`,
-  `shadowMerged` 1), one render pass fewer, the count target's new-target clear left undrawn
-  (`shadowClearSkipped` 1; drawn as 0x5A under the poison), nothing armed, taken or left off.
-  Case o: the count resolved in one draw from the stencil view against the seven stencil-tested
-  draws (`RdProfile.shadowOne` flipped between two recordings of one frame), the count at its GS
-  size (`rd__shadow_count_read`), SHADOW0-2 and SCENE byte for byte for the synthetic volumes,
-  Shadow.c's model and a rectangle at four sub-pixel offsets, at 1x, at scale 2 and at 1931 x 1093
-  texels (fractional on both axes), each recording resolved by the path asked
-  (`g_rdPerf.shadowOne`, `shadowSeven`), the one draw with its stencil read four texels a gather
-  and again a texel a load (`g_rd.shadowLoad`, counted by `shadowGathered`); the one draw's table for n = 0, 1, 63, 64, 128 and 255
-  against 4 n mod 256 (`checkTable`, no device). Case p, with each case o run: the count target's
-  colour neither loaded nor stored between the reset and the resolve
-  (`rd__store_plan_count_color`), the synthetic volumes through the one draw and the seven draws
-  under `ICO_RD_STORE_POISON=1` (the dropped load clears the colour to 0x5A) with the store plan
-  off and on: the count, SHADOW0-2 and SCENE byte for byte, the colour dropped only with the plan
-  (`shadowColorDropped`, `storeColorDropped`), and above 1x on the one draw the scaled count
-  target poisoned at every texel (`poisonFrame`;
-  [WORK_BUFFERS.md](WORK_BUFFERS.md#the-shadow-counts-colour)). Its `_gl` twin compares OpenGL's
-  stencil view the same way; without the view the comparison prints a line and is skipped. Case x
-  (`rd_shadow_test edges`, ctest `rd_shadow_edges` and its `_gl` twin): the shadow composites'
-  two kernels at scale 2, the same frames (the synthetic volumes, Shadow.c's model, a rectangle at
-  +7/16) recorded with one bilinear tap (the default) and with the B-spline (`shadowBspline`
-  flipped between two recordings): SHADOW0-2 byte for byte, no pass above 1x with the bilinear and
-  the three composites with the B-spline, SCENE byte for byte except within N of a shadow edge (a
-  composited level not constant over level texels i0 - 2 to i0 + 3, the kernels' joint support and
-  a tie: N = 3 level texels), some texels differing; the |d| histogram printed (`checkEdges2x`;
-  [WORK_BUFFERS.md](WORK_BUFFERS.md#the-shadow-edges-above-1x)).
-- `rd_state_test.c`: the recording half of rd without a GPU: the payload arena's alignment gap
-  zeroed over a reused buffer's bytes (`testPayloadPad`), the VU fallback's set
-  (`rd__vu_set_choose`, `testVuSetPolicy`: the stock Adreno 740's table row and two Turnip driver
-  texts take the plain set with the start line's words, Qualcomm's driver without a row, lavapipe,
-  RADV and NVIDIA the extended one, `[dev] vu_set = plain` (`ICO_RD_VU_SET=plain` or
-  `ICO_RD_VU_PLAIN=1`) and the host's reason the plain one, `vu_set = extended` the extended one
-  over each), the aura's measurement switch (`rd__aura_kernel_pick`, `testAuraKernelPick`: `[dev]
-  aura_kernel = gs` drops the box of the aura's read of SCENE into FEED128 alone; unset, empty or
-  `box` keeps it), the aura's two-pass switch (`rd__aura_box_pick`, `testAuraBox`: unset, empty,
-  `auto` or another word the profile's, the on and off words over it, never on and no key of it in
-  the set without a device, the pass list's name `ROWBOX`), the shadow count's colour
-  (`rd__store_plan_count_color`, `testShadowCountColor`: under the plan the temporary count
-  target's loaded colour goes DONT_CARE at its load and store, counted; a CLEAR, SCENE as the
-  count, the plan off and no replay keep their ops; the pass list's `shadow count`), dump version 14's ticks' cameras (none in a
-  the set without a device, the pass list's name `ROWBOX`), the pass area (`testPassArea`,
-  `rd_state_pass_area_test.inc`: `rd__pass_area_cmd`'s boxes for a screen sprite and the aura's
-  sprite on SCENE at 1x, at the phone's 848 x 448 GS frame in 2364 x 1080 texels and under Full
-  pixel's crop hold every texel they cover and reach at most the pad past them; a VU grid, a draw
-  on FEED128 and the sprite under DATE the whole target, a clear the end of a pass's commands; the
-  pass begun at the sprite holds its box and the aura's, ends before the FEED128 draw, and its area
-  is their union out to whole 32 x 32 tiles; none for a pass begun at a sprite the grid follows;
-  `rd__pass_area_why`: none at the sprite, a 3D draw at the sprite before the grid and at the grid;
-  the phone's paste (the aura's sprite over the frame's rect, FEED128's UVs) and list 11's
-  full-frame fade, at 1x, the phone's frame and Full pixel: boxes of the whole target, the paste's
-  run ending before the next FEED128 sprite, both kept whole because their draws cover the picture;
-  `rd_perf_why_text`'s words for one replay and a mean over two, and cut to a small buffer; the
-  switch's words), dump version 14's ticks' cameras (none in a
-  tick's frame, a blended frame's round-trip), list order, defaults, state leakage,
-  the alpha test's plan for every Z write, AFAIL, ATE and alpha mask (one draw where the test decides
-  nothing, `testAlphaMerge`), the start-up set's VU keys by variant and with the VU vertex
-  pre-pass (`testEnumerationVu`, `testEnumerationPrepass`: every program entry's key without the
-  pre-pass has its `vu_main_vs` or `vu_particle_main_vs` twin with it, and the keys a phone made on
-  first use, blend 4 and 12 under Z ALWAYS (as `vu_main_vs` keys) and the UI sprite under Z GEQUAL, are in the set), the tile-based
-  profile's set against the desktop one, static, with dynamic depth and with dynamic depth and
-  blend, with and without local read (`testTilerSet`: the desktop keys and exactly DATE's, the fog's
-  local key and the fold key, none twice; printed beside the careful-set target; each set under
-  `RD_PIPELINE_REACHABLE_MAX` and inside the RHI's pipeline pool less its headroom), the tile
-  class's largest set (its profile with local read and the fx plan, stand-in modules), the
-  pre-pass off and every state static at 2.8125 x 2.41071, 1153 keys: the 2x set
-  and the `vu_np_ps` keys (the DATE pass's twins of them too), each with its `vu_ps` key in the
-  set, under the same two bounds (`testTilerFracSet`), GS state as shader data's planner and set
-  (`testUberSet`: a LERP, a premultiplied subtract, an unblended mask-7 pass and a DATE pass one
-  key through the read; the tiler set at the phone's fractional scale at least four times smaller
-  than the fixed-function one, no DATE key, the VU family at most a third, no plain twin of a key
-  the read draws, the counts and families printed), and a dump's menu text sheets loading as the renderer makes them, a sheet with
-- `diag_test.c`: the crash report (also from a worker thread under a batch's pipeline note), assert, watchdog, progress (with the heartbeat's start-up set count), start-up activity file (the batch notes), device-loss restart and loss bisect (the loss noted in the activity file, the bisect stubbed: once, before the game, never again after a start ended inside it) cases, each in a child process; the symbolizer, the report file and `ico_log_limited` (above)
-- `rd_tex_test.c`: the texture cache and `Texture.c` on synthetic TIM2 files, and a text texture
-  that could not be uploaded named once in the log, the game's own textures never
-  (`textUploadLogChecks`) (`rd_tex`). `slotReloadChecks` (issue 174): a slot `tex_Init` hands the
-  next stage, loaded with a picture of the same size and format, gets a new texture (one create,
-  no in-place update) and the old texture keeps its texels for one frame tick and is destroyed
-  after two. `threadPixels`: thirty replays handed to the renderer's own
-  thread without waiting (`rd__replay_frame_async`) while the test's thread, the game's side,
-  records the next frame through the texture cache and updates a texture of its own (each change
-  waiting for the replay's reads, `rd__texlock_wait`): every replay run there and SCENE as drawn on
-  one thread; the counts printed (not on OpenGL). On lavapipe the frame slots are apart (the
-  timeline sync), so each replay's walk runs while the submit thread ends and submits the one
-  before (RHI.md "Frame slots and the submit thread"): the race check for that partition. `threadSync`: in the sync mode a picture is
-  waited for and not counted as handed over (`rd_submit_async` false), with the thread on it is
-  until the drain (not on OpenGL). It is the render thread's program to run under
-  ThreadSanitizer, as `audio_pull_test`: the `asan` preset with `-DICO_SANITIZE=thread` into a
-  build folder of its own (`build-host/linux-x64-tsan`), `--target rd_tex_test`, run with
-  `TSAN_OPTIONS=halt_on_error=1` under `setarch x86_64 -R`; a report is a failure.
-- `rd_tex_pool_test.c`: the texture decode pool against the game thread's decode, 200 textures of
-  every format and TEXA mode with levels and queued updates, the bounded queue's fallback, and on a
-  device the uploads' alpha scans, byte for byte (`rd_tex_pool`; 77 without a device;
-  [TEXTURES.md](TEXTURES.md#tests)).
-- `rd_vu_frac_test.c`: the pixel side at a fractional scale, CPU only (`rd_vu_frac`): the truth
-  table of `rd__vu_pixel_fs`, `rd__planes_dropped` and `rd__screen_planes_want` over the profile
-  flag, the preset, the exact blend, nine scales (whole and fractional on either axis), the two
-  filters, a texture with and without GS levels, the chain clip plane and the entries; the
-  start-up set at 2.8125 x 2.41071 being the 2x set and one `vu_np_ps` twin per `vu_ps` key; the
-  `vuNoPlanes` count; and in the embedded SPIR-V every input of `vu_np_ps`, `vu_texa_np_ps` and
-  their `_nodual` builds at location 0, 1 or 2 with `vu_ps`'s type and interpolation there, and
-  `vu_ps`'s inputs matching the outputs of every VU vertex shader that draws (the main shaders,
-  the programs' entries and their plain builds).
-- `rd_water_test.c`: the surfaces that render to and sample from textures (`rd_water`).
-- `texpack_disc_test.c`: the PCSX2 names of every texture on the disc (the walk of
-  `port/render/texpack_walk.h`), and how many of a pack's files they reach (`texpack_disc`).
-- `texpack_e2e_test.c`: the texture pack end to end on the real pieces (`texpack_e2e`).
-- `texpack_export_test.c`: the texture export's core on TIM2 files it makes: the names written are
-  the level-alone candidates, each PNG at the padded size, a file already there kept, short and
-  24-bit CLUTs refused, a repeated texture one file and a duplicate, the manifest's counts and
-  flags, a second run writing nothing, a stopped and a dry run (`texpack_export`); `--disc` a dry
-  export of the disc against `texpack_names.txt` and a cancel (`texpack_export_disc`).
-- `texpack_load_test.c`: the DDS and PNG loaders on files built in memory; with a pack, its files
-  (`texpack_load`, `texpack_pack_files`).
-- `texpack_name_test.c`: XXH3, the swizzle and the names against PCSX2's rules (`texpack_name`).
-- `texpack_test.c`: the pack's index and loader on fake files (`texpack`).
-- Helpers: `mesh_env.h` (the mesh tests' game stubs), `vu_models.h` (synthetic models),
-  `sheet_ref.c`/`.h` (the sheet-text shader on the CPU), `above1x_ref.c`/`.h` (the above-1x
-  kernels and the fog's formula on the CPU, written from their definitions).
+The renderer's test programs have a page of their own:
+[TESTING_PROGRAMS_RENDER.md](TESTING_PROGRAMS_RENDER.md). Continued in [TESTING_PROGRAMS_RENDER_2.md](TESTING_PROGRAMS_RENDER_2.md).
 
 ## port/rhi/test
 
@@ -1902,7 +1744,8 @@ D3D12 and a Vulkan device without the dynamic state; `rd_mesh_static.1of4` is `r
   one slot ended and submitted on a thread B while the test's thread recycles the other slot,
   begins its list there and records it (B ends once that list has begun), with a test slot guard
   (`rhi_set_slot_guard`) freeing the test thread's slot calls while B's job is of the other slot:
-  no guard wait while recycling and recording, one at the second list's end, and both targets
+  no guard wait while recycling, recording and ending the second list (the end is a slot call),
+  one at its submit, and both targets
   equal row by row to the same two lists made one after the other and to their squares (red and
   green, and a blue one); skipped where the slots are not apart (`thread slots cell skipped`:
   Direct3D 12, OpenGL, Direct3D 11, and Vulkan's fence ring: `ICO_VK_FAKE_API=1.0`, `1.0bare` and
@@ -1923,14 +1766,105 @@ D3D12 and a Vulkan device without the dynamic state; `rd_mesh_static.1of4` is `r
   in front at 0.75 count 64, 0 and 64 samples, read once the slot is recycled; a begin outside a
   pass dropped, the read saying 3 indices; two frames, the first making and resetting the pool at
   its first begin, the second resetting it in the slot's first list; a frame without queries reads
-  none; then again under `ICO_VK_DEPTH_ALWAYS=1`: 64, 64, 64); the adapter cell (`adapterCell`: `rhi_set_adapter_wanted` with a name no device
+  none; then again under `ICO_VK_DEPTH_ALWAYS=1`: 64, 64, 64; then with the pools made
+  beforehand for 4 queries (`rhi_occlusion_prepare`, twice): the same counts, and a query past the
+  4 dropped, not read); the adapter cell (`adapterCell`: `rhi_set_adapter_wanted` with a name no device
   has still starts, on the device a plain start picks, one `rhi_adapter_list` entry current and
-  automatic; the plain start's own name picks it again; NULL is automatic); the sync cell (`syncCell`) checks the fence ring under `ICO_VK_FAKE_API=1.1`
+  automatic; the plain start's own name picks it again; NULL is automatic); the clock cell
+  (`clockCell`, issue 123, `rhi_read_timestamp_clock`: a slot's second use with its first list
+  held on the host 150 ms by `vkr_test_hold_next_submit`, so the recycle's wait blocks: the trace
+  (on lavapipe one point after the work, the use's own; a driver whose query read does not wait,
+  the previous use's stale stamps first and the still stretch theirs), no second run, two
+  submissions and their times, both stamps, the calibrated pair after the wait with stamp 0 placed
+  after the release; on the fence path no hold, the rest checked); the range cell (`rangeCell`,
+  `port/rhi/vk/vk_range.c`: no indexed draw or copy of the cells before it past its resource, and
+  each check at the edge and one past it, 16- and 32-bit indices, buffer copies without wrap,
+  texture regions and mips, a copy's buffer rows, BC1 blocks); the sync cell (`syncCell`) checks the fence ring under `ICO_VK_FAKE_API=1.1`
   and `1.0`, and under `1.0` the device's version (1.0), the `VkRenderPass` path and the UINT
   views' usage structure (`VK_KHR_maintenance2`) (`rhi_vk_vk11`, `rhi_vk_vk10`); under `1.0bare` (a
   1.0 loader without `VK_KHR_get_physical_device_properties2`, review finding 5) the same, the device
   made with no extended queries (`rhi_vk_vk10bare`); the D32F cell (`d32fCell`) checks
   `RhiLimits.depth32Attachment` against `ICO_VK_FAKE_NO_D32F_ATTACHMENT` (`rhi_vk_vk10_nod32f`).
+  Every run ends with the vertex stores' cell (`rhi_test_stores.c`, `rhi_test_vertex_stores`; alone
+  with the argument `stores`: `rhi_vk_stores`, `rhi_vk_stores_vk11` under `ICO_VK_FAKE_API=1.1`,
+  `rhi_vk_stores_global` under `ICO_VK_GLOBAL_BARRIERS=1`): 64 points of `vs_store` (each writes
+  its four words at its element) through a pipeline with no fragment shader, no target and
+  `noRaster`, in a pass without attachments, inside `rhi_cmd_buffer_store_begin` / `_end`; a copy
+  over the buffer, the stores again, a copy out to a readback buffer, every word read back, no
+  validation message (synchronisation validation on); 77 where the device reports no
+  vertex stores, after checking that the bracket refuses (`rhi_vk_nostores`, the argument
+  `nostores` under `ICO_VK_FAKE_NO_VERTEX_STORES=1`, passes only on that refusal). Then the
+  compute stores' cell (`rhi_test_compute.c`, `rhi_test_compute_stores`; the VU record's
+  dispatches, issue 179; alone with the argument `compute`: `rhi_vk_compute`, `_vk11`
+  (`ICO_VK_FAKE_API=1.1`), `_global` (`ICO_VK_GLOBAL_BARRIERS=1`), `_novs` (no vertex stores: the
+  dispatches alone, as on the Mali-G52)): one group of 64 invocations of `cs_store` (`vs_store`'s
+  words) through a compute pipeline (`RhiPipelineDesc.compute`) inside
+  `rhi_cmd_buffer_compute_begin` / `_end`, over a copy's fill, a fill again and a second dispatch,
+  a copy out, every word read back, the dispatches counted (`RhiStats.dispatches`); with vertex
+  stores too, the bind-point rule: one layout (u0 to the vertex and compute stages), a store draw
+  into A, a dispatch into B, A refilled, a store draw into B: B holds the stores and A the fill
+  (a bind cache that skipped B's second bind would leave the graphics bind point on A); no
+  validation message; 77 where the device reports no compute stores, after checking that the
+  bracket refuses, a dispatch counts nothing and a reason is given (`rhi_vk_nocompute`, the
+  argument `nocompute` under `ICO_VK_FAKE_NO_COMPUTE_STORES=1`, passes only on that refusal).
+  Then the buffer barriers' scopes (`rhi_vk_scope.c`, `rhi_vk_scope_cell`; issue 179; alone with
+  the argument `scopes`: `rhi_vk_scopes`, `_vk11` (`ICO_VK_FAKE_API=1.1`, label vk11), `_global`
+  (`ICO_VK_GLOBAL_BARRIERS=1`), `_novs` (no vertex stores), each with the layer's shader access
+  analysis on, `VK_KHRONOS_VALIDATION_SYNCVAL_SHADER_ACCESSES_HEURISTIC=true`: without it the
+  synchronisation checks see no shader's buffer read; every `rhi_vk*` and
+  `rhi_native*` run has it): eight lists, each submitted and waited for,
+  counted by `RhiStats.fragmentHolds` (the barriers whose first scope holds fragment work and whose
+  second the vertex, compute or copy stages): "a picture" (a mesh upload into an index and storage
+  buffer, the record's dispatch and store pass in their brackets, a colour pass, a texture upload),
+  then "the next picture" (the same: 0 holds), a texture upload over the sampled texture (1), the
+  record's held-back end with a transition out of `SHADER_READ` before a pass (1, 0 under the
+  global barriers), a texture upload over the sampled texture, a mesh upload and the record, then
+  in the same list the mesh upload, the record and the texture upload (the texture's hold recorded
+  before the record in the old order, 1, none in the renderer's order, 0;
+  `port/render/rd_upload_late.h`), a fragment shader that declares a storage buffer made (`rhi_vk_ps_storage.h`)
+  and the upload and dispatch again (2: the copy and the bracket now wait for fragment work), a
+  draw whose fragment shader reads the arena and a copy over it (1, no write after read), the
+  record read back word for word; no validation message. `ICO_TEST_SCOPE_WANT` (`wide` or
+  `narrow`) names the scopes the device must run (`RhiLimits.wideBarriers`, `port/rhi/rhi_tile_rule.h`;
+  `rhi_vk_scopes`: narrow, lavapipe is not a tile-based phone GPU); under the wide ones (issues 179
+  and 211) every list holds fragment work (the next picture's at least 2: the opening barrier's
+  colour output reaching the transfer stage, the mesh upload's wait naming the fragment stage), the
+  same lists clean under the synchronisation checks and the record read back word for word:
+  `rhi_vk_scopes_arm` on Arm's phone GPU faked (`ICO_VK_FAKE_VENDOR=0x13B5`: the tile rule),
+  `rhi_vk_scopes_wide` the wide scopes faked on lavapipe (`ICO_VK_FAKE_SCOPES=wide`, a test-only
+  switch), `rhi_vk_scopes_arm_narrow` Arm faked with the narrow scopes faked
+  (`ICO_VK_FAKE_SCOPES=narrow`: the override rules, the narrow counts), and `rhi_vk_scopes_mac`
+  MoltenVK faked off iOS (`ICO_VK_FAKE_LIMITS=moltenvk`: a Mac, narrow). Every one but the global
+  run then traces three lists' barriers (`rhi_vk.h` `vkr_test_barrier_trace`) and checks them field
+  for field: a mesh upload alone (the wide scopes: exactly the opening barrier, the copy's wait,
+  its visibility and the closing barrier, each with the masks of the release before the narrowing), a texture copied into the
+  arena (the copy's wait the shader stages and vertex input alone, no transfer stage, no memory
+  barrier), and texture copy, buffer copy, texture copy (the second's barrier with a buffer barrier:
+  the hazard record kept; narrow: none); the narrow runs the narrow closing barrier. `rhi_vk_offer` (the same `clock` run, passing on the device start's `rhi_vk: offered (read only, nothing enabled for it): calibrated time domains ...; global queue priority ... offered` line, issue 123). `rhi_vk_pipeline_stats` (the same run, passing on the device start's `rhi_vk: pipeline statistics: offered|not offered (read only, nothing enabled` line, issue 179). `rhi_vk_offer_timing` (the same run, passing on that line's `display timing: VK_GOOGLE_display_timing yes|no, VK_EXT_present_timing yes|no, VK_KHR_present_id yes|no, VK_KHR_present_wait yes|no` clause: nothing enabled for them). `rhi_vk_clock_arm` (the argument `clock`: the clock cell alone) on Arm faked with
+  `ICO_TEST_POLLED_WANT=0`: the single wait, a held wait of 150 ms with no trace point, no
+  calibrated pair and no fall (`RhiLimits.polledWait` false); every other run asserts the polled
+  wait's trace as before. `rhi_vk_budget` and `rhi_vk_budget_phone` (the argument `budget`):
+  `rhi_get_stats`' video memory read twice (`VK_EXT_memory_budget`): the free part the budget less
+  the use, never above the budget, the two reads in a moment equal; on Arm's phone GPU faked
+  (`ICO_TEST_BUDGET_WANT=0`) all three 0 (not asked).
+  Then a pass's own colour read in it with a depth target bound (`rhi_vk_subpass.c`,
+  `rhi_vk_subpass_cell`; issue 179; alone with the argument `subpass`, each with the shader access
+  analysis on: `rhi_vk_subpass` through dynamic rendering's local read, `_vk11`
+  (`ICO_VK_FAKE_API=1.1`), `_vk10` (`=1.0` with `ICO_VK_FAKE_NO_DYNAMIC=1`, label vk10) and
+  `_mali_vk11` (with `ICO_VK_FAKE_LIMITS=mali`) through the `VkRenderPass` path's subpass read
+  ([RHI.md](RHI.md#local-read)), each with `ICO_VK_SUBPASS_READ=1` (the read is an experiment, off
+  by default); `_vk11_off` the 1.1 profile as shipped (the read off, no local read, the cell not
+  run); `_legacy` (`ICO_VK_LEGACY_PASSES=1`: the Intel row's path, no subpass read, the cell not
+  run) and `_legacy_on` (with `ICO_VK_SUBPASS_READ=1`); `ICO_TEST_SUBPASS_WANT=1` / `0` makes the
+  cell fail unless the read is on / off as the row says; labels vk11 for the 1.1 rows): a 16x16
+  RGBA8 target cleared, then in a pass with a D32F_S8 depth a draw of A
+  over the left half, the COLOR barrier, a draw through `ps_subpass` over all of it (the GS LERP of
+  its colour over the colour it reads), the BACK barrier, a draw over the bottom rows; a
+  colour-only readable pass with a COLOR barrier (skipped and counted on the subpass read); a
+  second RGBA8 target made without the input usage drawn with the same pipeline and the depth.
+  Every texel exact, the subpass read's counts (2 passes with it, 1 barrier skipped, 0 misfits),
+  no validation message. Without the self-dependency the layer reports
+  `VUID-vkCmdPipelineBarrier-None-07889` (checked by hand).
 - `rhi_d3d12_test.c`: the same checks on D3D12, a Windows GUI program that writes a log and shows
   a message box (`rhi_d3d12`).
 - `rhi_d3d11_test.c`: the same checks on Direct3D 11 (WARP; WARP again with
@@ -1940,7 +1874,9 @@ D3D12 and a Vulkan device without the dynamic state; `rd_mesh_static.1of4` is `r
   next frame, 2064 for marks 512, 2050 and 1000 in one frame, and all 8192 of a buffer never noted,
   each read back byte for byte; the video memory fields of `RhiStats` on WARP: a budget, no more
   to reserve than the budget, two reads inside 250 ms equal; the hardware adapter, the swapchain on
-  a hidden window, Vulkan for comparison), the cells' shaders compiled at run time from
+  a hidden window, after each present the frame latency wait made ahead of the acquire
+  (`rhi_wait_present_room`) asked twice with the same answer and false with a backbuffer acquired,
+  Vulkan for comparison), the cells' shaders compiled at run time from
   `rhi_test_hlsl.h`; a Windows GUI program that writes `rhi_d3d11_test.log` and shows a message box
   (`rhi_d3d11`, registered on a native Windows build only). The `win-x64` and `win-x64-clang`
   cross builds build it; CI's `windows` job runs it with `--console` on WARP
@@ -1960,9 +1896,19 @@ D3D12 and a Vulkan device without the dynamic state; `rd_mesh_static.1of4` is `r
   (the bind cache off, [RHI.md](RHI.md#the-bind-cache)): the bind cache cell then wants no skip,
   the repeats' pipeline binds recorded (6 more) and the group binds the same, the same exact
   pictures; the dynamic state cell's repeats send every command again (none counted) and the
-  dual-source leftover cell counts 3 commands and no leftover.
+  dual-source leftover cell counts 3 commands and no leftover. `rhi_vk_serial` runs them under
+  `ICO_VK_FAKE_SERIAL=1` (one compile at a time, issue 188): `RhiLimits.serialPipelines` set, the
+  batch and the background set on one thread each, and a pipeline made on the test's thread while
+  the background set compiles (the lock taken by both).
 - `rhi_d3d12_plan_test.c`: the D3D12 backend's state and barrier bookkeeping on the CPU
-  (`rhi_d3d12_plan`).
+  (`rhi_d3d12_plan`), with the external-compute cases (the storage grant by format, the capability
+  answer, what the external end puts back).
+- `rhi_native_test.c`: `rhi_native.h` on Vulkan (lavapipe): the device handles, textures granted
+  storage, the storage barriers, the external begin/end bracket and a two-pass picture identical
+  with and without it, and the FidelityFX extensions (`RhiComputeCaps.externalExts`: true on a
+  Vulkan 1.2 device in an `ICO_FFX` build, false without the upscaler) (`rhi_native`; exit 77 without
+  a device). `rhi_test_native.c` runs inside the
+  common cells of every backend: the handles where offered, "not offered" on Direct3D 11 and OpenGL.
 - `rhi_d3d11_shader_plan_test.c`: the Direct3D 11 backend's shader route on the CPU
   (`port/rhi/d3d11/d3d11_shader.c`): the macros text and its malformed forms, the include lookup,
   the flat-register rule on hand-made sources, on `rhi_test_hlsl.h` (which must equal
@@ -1981,24 +1927,201 @@ D3D12 and a Vulkan device without the dynamic state; `rd_mesh_static.1of4` is `r
   (`rhi_gl`, and `rhi_gl_nodual` under `ICO_GL_FAKE_NO_DUAL=1`). ctest runs both on Mesa's llvmpipe
   (`LIBGL_ALWAYS_SOFTWARE=1`, `SDL_VIDEO_DRIVER=offscreen`); they skip (77) without an OpenGL
   context. On llvmpipe the destination-read cells skip (no fragment shader interlock; GLSL has no
-  attachment read).
+  attachment read). `rhi_gl_stores` (the argument `stores`) is `rhi_vk_stores`' twin: it skips (77)
+  while the OpenGL backend reports no vertex stores, having checked that its bracket refuses;
+  `rhi_gl_compute` (the argument `compute`) is `rhi_vk_compute`'s: 77 while it reports no compute
+  stores, having checked that its compute bracket refuses and a dispatch counts nothing.
+- `rhi_gl_sync_wait_test.c`: the OpenGL backend's fence wait with a limit on the CPU
+  (`port/rhi/gl/gl_sync_wait.c`, `gl_device.c` `gl_wait_sync`) over a stub fence and a fake clock: one
+  that never signals ends at the 15 s limit in 300 slices of 50 ms, the pump between them, the 2 s
+  line once; one signalling in the third slice returns with neither; a failed wait returns failed;
+  no limit waits out a 100 s fence in 1 s slices (`rhi_gl_sync_wait`).
 - `rhi_gl_glsl_test.c`: the OpenGL backend's GLSL inflate on the CPU (`port/rhi/gl/gl_glsl.c`, miniz):
   a deflated text round-trips NUL-terminated; a wrong text length, a corrupt or truncated stream and
   no stream give none (`rhi_gl_glsl`).
 - `rhi_driver_version_test.c`: the driver version text of the adapter line
   (`port/rhi/rhi_driver_version.c`) for each vendor's packing, the Qualcomm and MoltenVK rules and
-  the colour bytes a pixel of each Apple GPU family (`rhi_metal_color_bytes`)
+  the colour bytes a pixel of each Apple GPU family (`rhi_metal_color_bytes`), and the Mesa version out of
+  a driver's name and `driverInfo` (`rhi_mesa_version_parse`: `Mesa 25.3.0-devel (git-bbdd688)` and the
+  issue 163 tablet's `Mesa 26.3.0-devel (git-a995eaeda4)` as devel, a release, a distribution's `25.0.7-2`
+  as no devel, a release candidate (`-rc` with a number), `mesa-25.1`, `MESA v24.2.8-DEVEL`, a bare version under a Mesa name, a Mesa word with
+  no number then one with it; Qualcomm's compiler text, NVIDIA's version, empty, a lone major and NULL give
+  none; a short buffer), `rhi_text_one_line` (Qualcomm's driver text with newlines on one line, issue 123) and
+  `rhi_driver_compiler_serial` (issue 188: the issue 188 log's PowerVR B-Series text at Vulkan 1.1
+  and the driver name alone at 1.3 give `PowerVR B-Series`; a Rogue text at 1.1, the D-Series
+  DXT-48's text at 1.4, an unknown version, Qualcomm naming a B-Series and Mali give none)
   (`rhi_driver_version`).
-- `rhi_adapter_match_test.c`: the `[video] adapter` rules (`port/rhi/rhi_adapter.c`): the exact
+ `rhi_adapter_match_test.c`: the `[video] adapter` rules (`port/rhi/rhi_adapter.c`): the exact
   name's index, the first of two equal names, no match for another case, a part of a name, a
   longer name, `""`, NULL or a NULL entry; the device-list text with and without scores, the
   unsuitable reasons, a short buffer cut (`rhi_adapter_match`).
+- `rhi_vk_pass_row_test.c`: the render pass driver row (`port/rhi/rhi_pass_row.c`), pure: Intel's
+  Windows driver (driver id 5, or no id on a Windows build) at Vulkan 1.3.215 (the issue 123
+  report's HD 530 on 101.2125), 1.3.200 and 1.2.182 takes `VkRenderPass` objects; 1.3.216, 1.3.289
+  and 1.4, Mesa's ANV on the same GPU, an Intel GPU on a non-Windows build without an id, NVIDIA,
+  AMD and Qualcomm keep dynamic rendering; the reason names the driver and `vkCmdBeginRendering`;
+  the `[dev] legacy_passes` words (`1`, `true`, `on`, `yes` in any case; `0`, `false`, `off`, `no`;
+  anything else, empty and NULL none) (`rhi_vk_pass_row`). Qualcomm's row (issue 123): vendor 0x5143
+  with Qualcomm's driver id (8) or no id takes `VkRenderPass` objects on an Android build (not elsewhere: both ids with `android` 0 keep dynamic rendering); Turnip's id (18) and another id
+  on the same vendor, Qualcomm's id on Arm's vendor, Arm, Intel and Imagination with no id keep
+  dynamic rendering; neither row answers for the other's driver; the reason names Qualcomm, the issue
+  and `vkCmdBeginRendering`. On lavapipe (`rhi_vk_test`): `rhi_vk_qcom_passes` every cell with the
+  device put on the row alone (`ICO_VK_FAKE_PASS_ROW=qualcomm`), failing if the device line says
+  `render passes dynamic;`; `rhi_vk_qcom_passes_off` the clock cell with `ICO_VK_LEGACY_PASSES=0`
+  over the row, failing if it says `render passes legacy`.
+- `rhi_qprio_source.cmake` (ctest `rhi_vk_qprio_source`, a CMake script, every target): no
+  code path asks a global queue priority (the high priority asked on Qualcomm's own driver under
+  Android for issue 123 was taken off, issues 215 and 123): every C, C++ and Objective-C source and
+  header under `port/` is scanned for `DeviceQueueGlobalPriorityCreateInfo` and
+  `DEVICE_QUEUE_GLOBAL_PRIORITY_CREATE_INFO` (the structure and its sType, KHR and EXT), and fails
+  on any; it prints the files scanned and fails when `port/rhi/vk/vk_device.c` is not among them.
+  Its lavapipe twin `rhi_vk_qprio_none` (`rhi_vk_test clock` on Qualcomm's row,
+  `ICO_VK_FAKE_PASS_ROW=qualcomm`) passes on the read-only start line `rhi_vk: queue priority: the
+  driver's default (medium), not asked: global queue priority ... offered (the game's queue family
+  N's priorities: ...); the game asks no device for a global priority` and fails on `asked and
+  granted`, `asked and refused` or `with global priority high`.
+- `rhi_device_table_test.c` (ctests `rhi_device_table`, `rhi_device_table_docs`): the device table
+  (`port/rhi/rhi_device_table.c`, [DEVICE_TABLE.md](DEVICE_TABLE.md)), pure: unique row ids, every
+  setting's evidence, release and revisit condition, a row sets a choice once, rows read only the
+  derived facts resolved before what they set, every override link names a row it shares a choice
+  with, the start-up header and the summary clause of the Mali-G52 MC2, the Adreno 740 on
+  Qualcomm's driver, the PowerVR DXT-48-1536, the Intel HD 530 and an RTX 3090 word for word (and
+  the `mali-g52` row's line, an overridden setting's and a fake's words), the clause with every
+  row in force and cut at a small buffer, the noted clause, a row's value by id, the header of
+  WARP on Direct3D 12 (`vendor-unknown`), a GTX 750 Ti on Direct3D 11 and llvmpipe on OpenGL
+  through `rhi_device_table_start`, and the summary's room: the issue 123 tablet's summary
+  of the last release (1810 bytes before the clause), grown by the longest GPU name and driver text of the
+  logged devices and the clause with every row in force, leaves at least 128 of the summary's
+  2047 bytes; the longest header (every row, the longest name) fits `report.c`'s key line and each
+  row's line the start lines' 2048-byte buffer with the same margin (it prints the three sizes). `rhi_device_table_docs` runs it with
+  `--check-docs docs/port/DEVICE_TABLE.md`: the list between the markers must be what `--docs`
+  prints.
+- `rhi_device_table_equiv_test.c` (ctest `rhi_device_table_equiv`): the device table changes no
+  behaviour, pure. `rhi_device_table_ref.inc` keeps a copy of every rule the table replaces (each
+  naming its source lines) and the test compares each choice, value and words byte for byte, as the
+  call sites compose it, over about 1.4 million identities: the vendors that sent a log and the
+  rest of the tile-based list, the Adreno device ids beside the 740's, the GPU names the rows read,
+  driver ids 0, 1, 3 to 9, 13, 14 and 18, fourteen driver texts (Qualcomm's, Turnip's, PurpleVK's,
+  the B-Series in any case, Mesa's, none), the Vulkan versions around 1.3.215 on Intel and vendor
+  0, every OS and backend, MoltenVK, a driver package; on the logged devices every combination of
+  `ICO_VK_FAKE_VENDOR`, `_PASS_ROW`, `_ADRENO`, `_SERIAL`, `_NO_PREPASS`,
+  `ICO_RD_VU_COMPACT_ARM` and `ICO_VK_FAKE_LIMITS=moltenvk`, and the profile's run inputs. It links
+  `rhi_pass_row.c`, `rhi_driver_version.c`, `rhi_tile_rule.c`, `memory_floor.c` and
+  `present_fallback.c` and compares each with its copy over the matrix (those files' predicates read
+  the table, so the copies prove the moved predicates; also `rhi_tile_phone` on
+  every combination, `rhi_tile_vendor`, the serial rule at any Vulkan version). The Vulkan call
+  sites' reads are the library's functions the test calls too: the fakes' parse
+  (`rhi_device_fakes_parse`), the two pass rows, the subpass class with every way Qualcomm's row
+  can apply, the VU rows and the serial rule's reason. On the logged devices on
+  every backend, OS, MoltenVK and driver package, the one-choice read (`rhi_device_table_choice`)
+  and the backends' evaluation (`rhi_device_table_start`) equal the whole evaluation. It fails
+  The renderer's reads (`port/render/rd_device_rows.c`, linked in): every renderer call site's
+  composition of its choices (the class, its Adreno and PowerVR tests, the tile class and
+  columns, the blur fold, the lamps' three classes with and without a device, the crack fill's and
+  the shadow tiles' classes, the stencil cut's words and want, the VU record's class and measured
+  device, the no-volume window and its break, the compaction's DXT, the skin check's default and
+  phone rule, the VU set's kind, words and side bands, the tile-based limits and orders) against
+  the old rules' copies on every identity of the matrix and with the fakes; again on every logged
+  GPU of `DEVICES.md` (the NVIDIA, AMD, Intel, Apple, Arm, Qualcomm and Imagination ones) at each
+  Vulkan version of the matrix's edges with the profile's run inputs; and with no device (the
+  zeroed limits) on every backend, whatever evaluation an earlier device left; and
+  `rd__driver_is_turnip`, `rd__profile_vendor_adreno` and `rd__vu_class_measured` against their
+  copies. The platform's reads (`port/platform/attempt_ledger.c` linked in too): on every vendor,
+  driver id and driver text of the matrix, `ico_present_fallback_gate` on every combination of
+  vsync, mailbox, backend and mode, `ico_present_fallback_start` on every mode, build and vsync,
+  the window's swapchain question (`window_present_fallback.c` `fifo_start_now`) and the Android
+  build's stock driver hint (`gpu_driver_android.c` `on_stock_qualcomm`) as those call sites
+  compose them, against copies taken before they read the table; and the attempt ledger's four
+  phrases where no row holds (`rhi_device_choice_na_words`), from the table and as
+  `ico_attempt_decide_no_volume_break`, `_pass_objects`, `_vu_compute` and `_compaction` write
+  them, byte for byte. It fails when a row is in force on no identity, an override link decides none, or two
+  matching rows differ without a link. The queue's high priority, taken off (issues 215 and 123),
+  is the one change since the copies: its rule's copy (`ref_qprio_row`) stays and the identities it
+  asked on are counted and printed (`N where the old rule asked the queue's high priority (none now)`;
+  none fails), and a choice whose name holds `PRIORITY` fails. About 19 s at -O2, about 2.5 minutes under the address and
+  undefined-behaviour sanitizers at -O1 (hand-measured).
+- `rhi_subpass_verdict_test.c`: the subpass read's decision at a Vulkan start and its verdict file
+  (`port/rhi/rhi_subpass_verdict.h`), pure: every branch of `rhi_subpass_decide` in its order
+  (`[dev] subpass_read = off`, `ICO_VK_FAKE_NO_DST` with and without the key, `= on` over a refusal
+  and over Arm's class, local read, no file, no timestamps before the class, the classes' defaults
+  this release (Arm, Qualcomm and the others off by default with their words, nothing written
+  whatever the file holds; the Intel row probed; `ICO_VK_SUBPASS_PROBE_CLASS=1` over Arm's, `=0` over
+  Intel's), `kept`, `refused`, `probing` asking for the refusal to be written, none asking for the
+  mark), the key's text, the file beside a pipeline cache path (`/`,
+  `\`, none, empty, too long), the line's parse (another key or format, an unknown state, a key's
+  prefix, a why cut to its buffer, the line's end) and a write, read, overwrite and remove of a file
+  in the test's folder (`rhi_subpass_verdict`). On lavapipe, `rhi_vk_subpass_verdict`
+  (`test/rhi_vk_subpass_verdict.cmake`, `rhi_vk_test subpass` at `ICO_VK_FAKE_API=1.1` with
+  `ICO_VK_SUBPASS_VERDICT`): lavapipe's class and the Arm fakes' off by default with their words and
+  no file written; then with `ICO_VK_SUBPASS_PROBE_CLASS=1`: no file, the read on for the probe and the mark taken away at the clean
+  shutdown; a `kept` verdict on, the file unchanged; a `probing` mark off and rewritten `refused`
+  for good; a refusal off; another driver's verdict, the probe again.
+- `rhi_vk_tile_rule_test.c`: the barrier scopes and the submission wait a Vulkan start runs
+  (`port/rhi/rhi_tile_rule.c`, pure; issues 179 and 211): which devices are tile-based phone GPUs
+  (`rhi_tile_phone`: the Android branch whatever the vendor, iOS through MoltenVK, a faked
+  tile-based vendor; not a desktop, Macs and Qualcomm desktops included); the wide scopes and the
+  single wait on a phone, the narrow scopes and the polled wait elsewhere, the reasons and the
+  summary's tags word for word; the loss ladder on a desktop (one lost start: the wide scopes, the
+  wait still polled and its reason saying a second gives the single wait; two and nine: both, never
+  the pre-pass rung) and on a phone (one or more: the VU pre-pass off, its reason the loss's words),
+  the reasons saying this start only and nothing written; the tests' `ICO_VK_FAKE_SCOPES` (`wide`, `narrow`)
+  picking the scopes alone on any device, another value or an empty one no override; the vendor
+  table (Qualcomm, Arm, Imagination, Samsung, Apple, Broadcom; not lavapipe, AMD, NVIDIA, Intel or
+  0) and `ICO_LOSS_ROW`'s parse (not a number 0, at most 9) (`rhi_vk_tile_rule`).
+- `rhi_traffic_test.c`: the attachment bytes each render pass asks a tile-based GPU to move and
+  the texture copies' bytes (`port/rhi/rhi_traffic.c`, pure; issue 179's performance lines): the
+  bytes a texel by format and aspect (RGBA8 4, R8 1, RGBA16F 8, RGBA32_UINT 16, a block format 0,
+  D32F_S8's depth 4 and stencil 1); a scene pass at 912x512 loading and storing its colour and its
+  depth-stencil, the same cleared with the depth not stored, a read-only depth never stored, a
+  render area clamped to the size, MSAA 4x, attachments the table does not know (4 bytes, the depth
+  as D32F, untracked), a pass with no attachment; the handle table over 3000 handles with every
+  third deleted (the backward shift keeps the rest reachable), forget; the sums in `RhiStats`
+  through the pass and copy calls (a copy counted once: its texels times the aspect's bytes, the
+  bytes read, as many written), the window's image counted untracked (`rhi_traffic`).
+- `rhi_vk_spirv_scan_test.c`: `port/rhi/vk/vk_spirv_scan.c`, pure: the RHI tests' ten modules
+  (every `ps_*` a fragment module without a storage buffer, `vs_store` and `cs_store` with one,
+  `vs_main` neither), `rhi_vk_ps_storage.h`'s fragment shader (a StructuredBuffer: BufferBlock)
+  found and its `vs_tri` not; hand-built modules (the StorageBuffer class on a pointer and on a
+  variable, PhysicalStorageBuffer, the buffer device address capability, BufferBlock as a member
+  decoration, a Fragment entry among two, a uniform block not a storage buffer); a module without
+  the magic, a short header, an instruction of length 0 or past the end, NULL: refused with
+  nothing found (`rhi_vk_spirv_scan`).
+- `rhi_vk_pass_crumb_test.c`: the render pass breadcrumb the crash report prints
+  (`port/rhi/rhi_pass_crumb.c`), pure: none before a pass; a pass stored is inside the driver's
+  begin until marked begun, then ended; the `VkRenderPass` path's two phases before the begin
+  (making its objects; not begun when they could not be made), word for word; the line word for word for the crack fill's shape at 2x (one
+  colour, no depth, dynamic rendering) and for two colours with one view missing and a read-only
+  D32S8 on a `VkRenderPass`; the attachment-less record pass; a short buffer cut and terminated with
+  the full length returned; the reset (`rhi_vk_pass_crumb`).
 - `rhi_vk_enum_test.c`: every `rhi.h` enumeration has a Vulkan mapping, `RGBA32_UINT` among them
   (`rhi_vk_enum`).
 - `rhi_vk_present_mode_test.c`: the present-mode choice over the sets drivers offer, and FIFO
   over every set and preference under the FIFO fallback (Android's mailbox and FIFO with vsync off,
-  Mesa's four modes, vsync on with mailbox preferred, FIFO latest ready asked) (`rhi_vk_present_mode`).
-- `rhi_vk_swapchain_test.c`: the window path without a display, on SDL's offscreen driver
+  Mesa's four modes, vsync on with mailbox preferred, FIFO latest ready asked), and the turned
+  swapchain's choice (`vkr_prerotate_turns`: 90, 270 and 180 at issue 179's 1612x720; identity, a
+  mirrored turn, a turn not offered, `[dev] prerotate = false` and images past the surface's largest
+  keep identity) (`rhi_vk_present_mode`).
+- `ffx_link_test.c`: the FidelityFX FSR 3.1 upscaler (`port/rhi/ffx`, `ICO_FFX`) linked into a C
+  program and run through raw Vulkan calls (volk, not the RHI): the first Vulkan 1.2 device with
+  the features the FFX backend reads enabled where present (16-bit floats, subgroup size control,
+  synchronization2, non-uniform storage buffer indexing); the Quality render size at 1280x960
+  (853x640); the backend and an upscale context for a 640x480 render and a 1280x960 output; its
+  provider (3.1.x) and a non-zero GPU memory figure; the context destroyed; then the upscale
+  dispatch with the textures the port hands it (`port/render/rd_fsr3.c`): an RGBA8 colour, a
+  `D32_SFLOAT_S8_UINT` depth read through its depth aspect (moved from the RHI's read-only depth
+  layout to `SHADER_READ_ONLY_OPTIMAL` around the dispatch, as rd_fsr3.c does) and an RGBA16F
+  motion, 640x480, into an RGBA8 storage image at 960x720, a context with the port's flags
+  (inverted depth, auto exposure) and the debug checks, four frames of FSR's jitter (phase count
+  18), each frame's output read back: not black, its centre the flat input's colour; no FFX
+  message. Any validation error or warning fails it (the layer's sync validation on). Skipped (77) without a loader, a Vulkan 1.2 device or a device it can make
+  (`ffx_link_test`).
+- `rhi_vk_swapchain_test.c`: the window path without a display, on SDL's offscreen driver;
+  `swapAcquired` per frame; the acquire's wait with the list that uses the image (issue 179,
+  `acquireWaits` through `vkr_test_submit_waits`: a list of off-screen work before it waits for
+  nothing, the image's list on the acquire at `COLOR_ATTACHMENT_OUTPUT`, a dropped acquire drained
+  by one empty batch at `ALL_COMMANDS`; on the fence ring in `rhi_vk_swapchain_vk11`; and the
+  acquire's fence: the image's list counts one picture in `acquireReadyAtSubmit` or
+  `acquireNotReady` (which one depends on the machine), a dropped acquire counts none)
   (`rhi_vk_swapchain`).
 - Helpers: `rhi_test_common.c`/`.h` (the shared cells, seven of whose pipelines come from one
   `rhi_create_pipelines` call with a failing description among them, and the fill-rule cell:
@@ -2014,7 +2137,11 @@ D3D12 and a Vulkan device without the dynamic state; `rd_mesh_static.1of4` is `r
 ## port/shaders/test
 
 - `shaders_table_test.c`: every embedded entry compiled for SPIR-V and signed DXIL, the vertex
-  pre-pass's among them (`expectedPrepass`) (`shaders_table`).
+  pre-pass's among them (`expectedPrepass`), the colour adjustment's box blits (`expectedTone`),
+  FSR 1.0's two pixel shaders (`expectedFsr1`, with AMD's `ffx_a.h` and `ffx_fsr1.h` among the
+  embedded Direct3D 11 sources) and
+  the cluster entries' ring builds (`vu_skin_ring_plain_vs` and its two kin in `expectedPlain`)
+  (`shaders_table`).
 - `gs_math_test.c`: `gs_math.hlsli` compiled as C against the [GS](ARCHITECTURE.md#terms) formulas,
   and its integer forms against the operators they replace ([SHADERS.md](SHADERS.md#integer-forms))
   (`gs_math`); `hlsl_shim.h` makes it compile.
@@ -2030,7 +2157,12 @@ D3D12 and a Vulkan device without the dynamic state; `rd_mesh_static.1of4` is `r
   axes and the separable combine, and the fog's `gs_fog_channel` (`checkAbove1xKernels`); on the
   device, `sprite_ps` above 1x over a magnified, a decimated and a mixed noise texture with the
   steps from `DrawCB.scale[3]` against the steps from the pixel's footprint, at most 2 levels apart
-  (`checkAbove1xSteps`).
+  (`checkAbove1xSteps`); and `blit_vs`'s quarter turns (`DrawCB.aux1.w`, the present into a
+  pre-rotated swapchain): a 3x2 picture with four coloured corners turned 90, 180 and 270 degrees,
+  every pixel against an image written out by hand from the Vulkan spec's `ROTATE_90` ("rotated 90
+  degrees clockwise") and Google's pre-rotation sample's `glm::rotate` by +90 degrees about Z, so a
+  90 and a 270 swapped in the shader fails here even when the twin's CPU table is swapped with it
+  (`checkTurns`).
 - `vu1_test.c`: the [VU1](ARCHITECTURE.md#terms) program shaders against their CPU references and
   hand traces, the card verdicts handed over as the renderer does, and the CPU's card test against
   the reference; the record: every mesh case's vertices through its pre-pass entry and its
@@ -2038,8 +2170,19 @@ D3D12 and a Vulkan device without the dynamic state; `rd_mesh_static.1of4` is `r
   case's sprites through `vu_particle_pre_vs`, and its probe and pictures through `vu_main_vs` or
   `vu_particle_main_vs` and `vu_ps` byte for byte the program entry's (with the same `vu_ps`), the
   probe within the CPU reference's bounds, the mesh, particle and tick-camera cases counted (part
-  b (4)); the pictures use the plain mapping (no exact viewport), so the planes stay the GPU's
-  there (`vu1`, `vu1_mali`).
+  b (4)); the side bands (part a's rule, between-ticks and facing rows, a card keeping the drop
+  beside the picture; part b's `DEPART_EYE_EDGE`
+  cases at the picture's right edge, turned to the eye and away; every other case drawn with
+  `ICO_VU_NO_BESIDE`); the camera rule (part a's `vu1ref_region_camera` rows; part b's
+  `Case.camera` cases drawn with `ICO_VU_CAMERA`: behind the eye out of the box and Enhanced, out of
+  range out of the box, a card, the 48:9 edge, between two ticks, turned to the eye drawn clipped
+  and away dropped; a grid card out of the box two-sided, drawn; a sprite past its window out of
+  the box, drawn whole); the pictures use the plain mapping (no exact viewport), so the planes stay
+  the GPU's there; every cluster case without the extended flags and tick cameras drawn again
+  through its ring build (`vu_X_ring_plain_vs`, the bones through t5 from `IcoVuCB.mark[3]`, a
+  layout with slot 5): probe and pictures byte for byte the plain variant's, the count printed and
+  required above 0 (issue 123's ladder, [VU_SKIN_CHECK.md](VU_SKIN_CHECK.md#the-ladder)) (`vu1`,
+  `vu1_mali`).
 
 ## port/test
 
@@ -2054,6 +2197,16 @@ D3D12 and a Vulkan device without the dynamic state; `rd_mesh_static.1of4` is `r
   or the first quadword that differs) byte for byte with the committed files. `vu1_test.c`'s
   `testVariantPlumbing` holds the state's variant, its names, the flag's bit and the block's size, and
   names the demo's hand traces that are still to be written.
+- `unused_content_audit_pal`, `_jpn`, `_kor`, `_ntsc`, `_aug6`, `_jun26`, `_cn`
+  (`tools/unused_content_audit.py --slug <disc> --check`; no C program): reads the disc image's
+  DATA.DF directory, the packs' member directories (the head of each pack's deflate stream, no
+  member's data except the animation files that decide a model's use), the folder's files and the
+  boot ELF's tables (`port/data/gen/<disc>/table_desc.c`), and compares the disc's section of
+  [UNUSED_CONTENT_AUDIT.md](UNUSED_CONTENT_AUDIT.md) with it: the entries no table or program string
+  names, the stage rows no exit row of a reached stage leads to (roots: the boot's logo and the
+  title's attract in `op.c`, whose literals the tool also checks are still in the source), the
+  movie rows, the logo pack's and test rooms' models by who uses them, the stream motions and sound
+  streams, the debug files. Skipped (77) without the image (`ICO_DISC_IMAGE`, `ICO_DISC_IMAGE_<DISC>`).
 - `layout_asserts.c`: the generated struct layout asserts, which hold at compile time
   (`layout_asserts`).
 - `gs_blend_test.c` is a standalone CPU program on the GS blender's drift, not a ctest.
@@ -2083,7 +2236,29 @@ D3D12 and a Vulkan device without the dynamic state; `rd_mesh_static.1of4` is `r
   `menu_look_kor`, `menu_look_cn`; the Korean ink 252.8 fill, 41.8 rim, measured on the disc; the
   Asian disc's expectation is the Japanese numbers until `menu_look_cn` has been run on it).
 - `menu_look_test.c`: the menus' Arimo text against the game's menu sheets from the disc
-  (`menu_look`); `menu_sheets.c`/`.h` decode the sheets.
+  (`menu_look`): the sheets' survey held to its record, the port's outline pinned (the European
+  rows' rim grey 100, the falloff tables as `sheetref_default_look` reads them, eight levels, the
+  solid threshold), each item's strip against its sheet rectangle within limits that pin the
+  port's look; `menu_sheets.c`/`.h` decode the sheets. Three development modes run from the
+  environment on the same binary instead of the checks (exit 0 unless a row does not resolve):
+  `ICO_MENU_LOOK_REF46=1` measures the title's publisher plate (texProperty row 46, "Sony Computer
+  Entertainment Europe Presents", and row 48, the copyright line) on each language's sheet once:
+  the grey/alpha histogram, then per distance from the letters (0 the ink, 1..8 texels across in
+  the row and down in the column) the mean alpha, the alpha-weighted darkness, the count, the
+  variance, the alpha histogram and the agreement with the 4x4 and 8x8 Bayer orders at their best
+  phase (the 8x8 told from the 4x4 by its fine pairs), the outline's alpha steps and grey, and the
+  falloff normalised to the ink (`WX'`, `WY'`); `ICO_MENU_LOOK_INK=<grey>` lowers the ink rule
+  (200), `ICO_MENU_LOOK_BG=g1,g2` adds backdrop greys to the pictures
+  (`menu_look/ref46/<row>-<lang>.png`, x1 and x4 on black, the greys and 128).
+  `ICO_MENU_LOOK_OUTLINE=1` draws the menus' words (Continue, New Game, Options, the save prompt,
+  the card warning, one French row, the port's "Mirror mode", "Picture" and a note) in candidate
+  looks through `sheet_ref.h`'s `SheetLook` (C1..C3 and C6 fixed tables, C4 the plate's measured
+  profile, C5 the shader's constants) with the full and the faint rim, rim black and the
+  language's grey, beside the plate's crop: `menu_look/outline/<candidate>.png`, `contact.png`
+  and the legend `contact.txt`. `ICO_MENU_LOOK_COVERAGE=1` writes the outline design page's
+  material: each of those words' strip coverage (before the rim, the dither's phase kept) and the
+  English rows 46 and 48 as grey and alpha, binary PGM files under `menu_look/coverage/` with
+  `index.txt` (each word's strip size and trim box, each row's sheet and corner).
 - `menu_text_test.c`: the game's menu words and the port's rows drawn in the sheets' look; the
   Models viewer's counter drawn for 600 frames at 3x and 1x (`testCounterStream`: shelves
   reclaimed, no plain-font word, no second page, the steady rows in place; at 3x the counter's
@@ -2092,6 +2267,12 @@ D3D12 and a Vulkan device without the dynamic state; `rd_mesh_static.1of4` is `r
   texture); `testStaleRowReturns`: four upper rows at another size leave for 100 frames, their
   shelf is emptied meanwhile (the first row's old cell then holds other texels) and they come
   back with the same letters, no word in the plain font (`menu_text`).
+- `settings_desktop_test.c`: Options > Extras > Add to the applications menu over a fake handler
+  (`settings_desktop`, and on the other discs `_jpn`, `_kor`, `_cn`: the row and the disc's confirm
+  button): hidden without a handler and on the pause menu, shown on the title right after Add to
+  Steam with its words, Down from Add to Steam lands on it, Cross runs the handler once and its
+  answer is the popup (done, failed, an unknown answer as failed), the page kept, the strings
+  translated in every built-in language.
 - `settings_backup_test.c`: Options > Extras > Back up your data and Restore from a backup over
   a fake `UiBackupHost` (`settings_backup`, and on the other discs `_jpn`, `_kor`, `_cn`: the rows
   and the disc's confirm button): the rows hidden without a host and on the pause menu, shown on
@@ -2106,17 +2287,23 @@ D3D12 and a Vulkan device without the dynamic state; `rd_mesh_static.1of4` is `r
   the backup dropped when the cursor moves off and after a minute, a refused one's reason; the
   strings translated and the row names fitting in every language.
 - `settings_test.c`, `settings_extra_test.c`, `settings_extras_test.c`: the Settings menu over
-  fake tables, CPU only (`settings`, `settings_extra`, `settings_extras`); `settings_test.c`'s
+  fake tables, CPU only (`settings`, `settings_extra`, `settings_extras`); `settings_extras_test.c`'s
+  `testUnused` (Extras > Unused content over a fake `UiUnusedHost`: the link hidden without a host
+  and, with one line, with no row; the rows per `available`; Cross calling `open` once and
+  leaving on its layout; the reopen; nothing from the pause menu) and `settings_discs_test.c`'s
+  `checkUnusedRows` (each disc's four rows and the link through the real CPU side over a fake
+  DATA.DF engine); `settings_test.c`'s
   `testShowFps` steps Display > Frame rate counter (Off by default, Right then Left both switch it, the preset kept, `[video] show_fps` saved as `true`, a file's `true` read; the Display row list is nine rows with the new row after Frame rate, and the pause menu's Display page is eight with Video mode hidden, both in the Options window's slots ([UI.md](UI.md#the-window))); `ui_fps.c` itself is in the window build only and has no test (the number is `fps_counter_test`'s; a hand check: the corner, legible, off by default; on a phone with the touch controls on the top edge between the D-pad and Select);
   `testEffects` steps Motion blur round Off, Original (the default) and Smooth, each step saved as
   `effect_motion_blur` and `effect_motion_blur_mode` with the getters at once, the note under the
   row and the page fitting from both menus; `settings_test.c` also
-  `testDownsample` (the Downsampling row right after Anti-aliasing on Picture and not on Display, Off by default, its note, Right and Left, the preset kept, `[video] downsample` saved and read), the texture and model pack rows and the CRT rows on Picture, the dump rows through the Developer page (four rows with Developer mode on, two without), and `settings_photo_test.c` writing `settings_picture.png` and `settings_developer.png` beside the other pages; `settings_test.c`'s `testNotesFit` (every page's note in all eight languages wraps to at most two lines and is kept whole by the note row's 256-byte buffer); `settings_extra_test.c`'s `testGraphicsApi` (Options > Graphics: the link hidden with no renderer names and with one, shown after Effects with four; the Graphics API row's value text and the `video.backend` key through Right round Vulkan, OpenGL, Direct3D 12, Direct3D 11 and Automatic, Left wrapping, the key saved after leaving the page, an unlinked value shown as written and stepped from Automatic) and `testGraphicsApply` (Graphics > Apply over a fake `UiGraphicsHost` running `vulkan`: Apply hidden without a host, for Automatic and Vulkan, with one renderer, shown for OpenGL with its note; Cross asks for `opengl` once; the countdown's Keep and Revert alone with the cursor on Revert and the note counting 10 then 9 s; 600 `ui_settings_vsync` calls at 60 Hz ask for `vulkan` with the timeout reason and put the value back to Automatic; Keep calls `kept()` and saves `[video] backend = "opengl"`; Revert and Triangle ask for the backend that ran and put the value back; a failed answer's popup names both renderers and puts the value the page found back (no Apply then); a refused one shows nothing and keeps the choice; a pending one is polled every frame with Cross ignored until it answers; `ui_settings_save_on_quit` during the countdown writes the value the page found, the countdown going on, and Keep then saves the choice; Automatic with the host's `automatic()` naming OpenGL offers no Apply while OpenGL runs and offers it on Vulkan; the strings translated in every language) and `settings_test.c`'s `testBuild` (the Main page's sixteen rows, the Display page's nine, the Picture page's eleven, the Effects page's eight, the Developer page's four and the Graphics page's six: Graphics API, Graphics card, Apply, Keep, Revert, Back); `settings_adapter_test.c` (`settings_adapter`, and on the other discs `_jpn`, `_kor`, `_cn`: the row alone): Options > Graphics > Graphics card over a fake `UiGraphicsHost` with a fake `runningAdapter()`: the row and, with one renderer, the link hidden with no card names and with one, both shown with two and the Graphics API row hidden, the note, the page fitting; Right round the two cards and Automatic writing `video.adapter` (`""` for Automatic), Left wrapping, the key saved; a saved name the list lacks shown as written and stepped from Automatic; Apply hidden for the card running and for Automatic on Automatic's card, shown for the other card; Cross asks for `vulkan` on that card; the countdown hides the row; 600 vsyncs ask for the card before with the timeout reason; Keep saves `[video] adapter`; Automatic on the other card asks for `""`, Revert for the card before; a failed answer's popup names both cards and puts the value found back; the strings translated in every language; the Main page's row lists in the settings tests read sixteen rows (seventeen with the rc build's Share a bug report); `settings_extra_test.c`'s Graphics driver case (`testGpuDriver`, a fake host) checks the seven answers' popups (picker not opened, no picker app, file unreadable among them) and the Add from the drivers folder row: hidden at 0 zips, shown at 2, Left and Right going round the names, Cross calling `installFileBegin` once for the shown zip with a second Cross ignored while it runs, the poll's popup; presses Right in photo mode through Deja vu and checks the popup's words (`ui__photo_film_word`)
+  `testDownsample` (the Downsampling row right after Anti-aliasing on Picture and not on Display, Off by default, its note, Right and Left, the preset kept, `[video] downsample` saved and read), `testUpscale` (the Upscaling row right after Downsampling with Sharpness under it, hidden while Upscaling is Off, Off by default, its note, Right and Left, Sharpness 80 stepping by 10 and held at 0 and 100, the preset kept, `[video] upscaling` and `upscaling_sharpness` saved and read), the texture and model pack rows and the CRT rows on Picture, the dump rows and the Debug menu through the Developer page (five rows with Developer mode on, four on the June 2001 demo, two without), and `settings_photo_test.c` writing `settings_picture.png` and `settings_developer.png` beside the other pages; `settings_test.c`'s `testNotesFit` (every page's note in all eight languages wraps to at most two lines and is kept whole by the note row's 256-byte buffer); `settings_extra_test.c`'s `testGraphicsApi` (Options > Graphics: the link hidden with no renderer names and with one, shown after Effects with four; the Graphics API row's value text and the `video.backend` key through Right round Vulkan, OpenGL, Direct3D 12, Direct3D 11 and Automatic, Left wrapping, the key saved after leaving the page, an unlinked value shown as written and stepped from Automatic) and `testGraphicsApply` (Graphics > Apply over a fake `UiGraphicsHost` running `vulkan`: Apply hidden without a host, for Automatic and Vulkan, with one renderer, shown for OpenGL with its note; Cross asks for `opengl` once; the countdown's Keep and Revert alone with the cursor on Revert and the note counting 10 then 9 s; 600 `ui_settings_vsync` calls at 60 Hz ask for `vulkan` with the timeout reason and put the value back to Automatic; Keep calls `kept()` and saves `[video] backend = "opengl"`; Revert and Triangle ask for the backend that ran and put the value back; a failed answer's popup names both renderers and puts the value the page found back (no Apply then); a refused one shows nothing and keeps the choice; a pending one is polled every frame with Cross ignored until it answers; `ui_settings_save_on_quit` during the countdown writes the value the page found, the countdown going on, and Keep then saves the choice; Automatic with the host's `automatic()` naming OpenGL offers no Apply while OpenGL runs and offers it on Vulkan; the strings translated in every language) and `settings_test.c`'s `testBuild` (the Main page's sixteen rows, the Display page's nine, the Picture page's eleven, the Effects page's nine (Back included), the Developer page's five, the Gameplay page's eleven (the Chains, Cutscenes and pause menu Difficulty links before Back), the Chains page's four, the Cutscenes page's four, Customize's six (its three links, Mirror mode, New Game+, Back) and its Shadows page's eight, Combat page's seven and Rules page's seven (each with Back), the Extras page's eleven with the Unused content link fifth, the Unused content page's five and the Graphics page's six: Graphics API, Graphics card, Apply, Keep, Revert, Back); `settings_adapter_test.c` (`settings_adapter`, and on the other discs `_jpn`, `_kor`, `_cn`: the row alone): Options > Graphics > Graphics card over a fake `UiGraphicsHost` with a fake `runningAdapter()`: the row and, with one renderer, the link hidden with no card names and with one, both shown with two and the Graphics API row hidden, the note, the page fitting; Right round the two cards and Automatic writing `video.adapter` (`""` for Automatic), Left wrapping, the key saved; a saved name the list lacks shown as written and stepped from Automatic; Apply hidden for the card running and for Automatic on Automatic's card, shown for the other card; Cross asks for `vulkan` on that card; the countdown hides the row; 600 vsyncs ask for the card before with the timeout reason; Keep saves `[video] adapter`; Automatic on the other card asks for `""`, Revert for the card before; a failed answer's popup names both cards and puts the value found back; the strings translated in every language; the Main page's row lists in the settings tests read sixteen rows (seventeen with the rc build's Share a bug report); `settings_extra_test.c`'s Graphics driver case (`testGpuDriver`, a fake host) checks the eight answers' popups (picker not opened, no picker app, file unreadable and the wrong memory page size, whose popup holds the host's own sentence, among them), the note's last-seen line for each driver (the phone's own, the first, one never started: the line first, the Adreno note after it, a failed driver's note kept, the note alone again without a line from the host) and the Add from the drivers folder row: hidden at 0 zips, shown at 2, Left and Right going round the names, Cross calling `installFileBegin` once for the shown zip with a second Cross ignored while it runs, the poll's popup; presses Right in photo mode through Deja vu and checks the popup's words (`ui__photo_film_word`)
   and holds the fixed row lists of Controls (14 rows) and Touch screen (9 rows);
   `settings_extra_test.c` opens the Touch screen page (`testTouchPage`: the link only with a touch screen, the three overlay rows' values and save, both pages fitting from both entries) and the Edit layout page over a fake editor host and a real editor (`testTouchEditorPage`: open, Back to the Edit layout row with the edits kept, locked while Touch controls is Off or without a host, Snap to grid and Grid size saved as `touch.snap` and `touch.grid`, Reset layout and Reset all layouts), and steps Controls > Hold type from the title and the pause menu (the disc's own first, then A, then B), checks the saved
   `gameplay.hold_type` and `hold_type_chosen` and that `ui_settings_install` sets `optionControlType` from it, a bare `"hold"` (the old first-run text) as the disc's own (`testHoldType`),
-  steps Effects > Water reflections between Original and Sharp, checks its
-  note, its key and the page's eight rows (`testWaterReflections`), and Main's Disc row
+  checks Effects has no Water reflections row or note and keeps a file's
+  `effect_water_sharp = true` or `false` line through a save as written (`testWaterRetired`),
+  and Main's Disc row
   (`testDiscRow`: shown with more than one disc's game data only, its values and `[game] disc`, the page
   with all fourteen rows), and Main's Save a picture for a bug report (`testReportPicture`: shown with
   a host handler only, with developer mode off and on, directly above the Developer link, Cross calls the handler once and
@@ -2132,24 +2319,87 @@ D3D12 and a Vulkan device without the dynamic state; `rd_mesh_static.1of4` is `r
   confirming, Cross and Triangle going back, the title's rows, the notes' serial, the mouse,
   the prompts and the boot's hand-over to the title with Skip the opening
   (`testSkipOpeningTitle`).
+- `settings_step_test.c` (`settings_step`, `_jpn`, `_kor`, `_cn`): Options > Picture stepping (issue 202),
+  CPU only over the shared fixture (`hold` presses a button and holds it): holding Left or Right on
+  Gamma (the press alone for 15 ticks, the first repeat at the 16th, one every 3 ticks after,
+  release and hold again, the other direction, the stick's d-pad emulation, held at 1 and 100,
+  1 to 100 in 98 repeats, presses with gaps never repeating), a wrapping row (Filter) held for 75
+  ticks stepping once, L1/R1 by 10 on the four colour rows (held at 1 and 100, nothing on Filter,
+  written on leaving the page), the rows that repeat, and Mirror mode's stick on the menus
+  (`ico_pad_menu_stick_x`, `docs/port/INPUT.md`).
 - `settings_photo_test.c`: the Settings screens through rd on a device, written as PNGs
   (`settings_render`, which also draws the Touch screen page, the editor page and the main page
-  scrolled by nine Downs, `settings_main_scrolled.png`, and the Picture and Developer pages, `settings_picture.png` and `settings_developer.png`); with `jpn` or `kor`, that disc's title and main page (`settings_render_jpn`,
+  scrolled by nine Downs, `settings_main_scrolled.png`, the Picture and Developer pages, `settings_picture.png` and `settings_developer.png`, and Gameplay's Chains, Shadows and Cutscenes pages opened through Gameplay, `settings_gameplay_chains.png`, `settings_gameplay_shadows.png` and `settings_gameplay_cutscenes.png`, also at 1080p); with `jpn` or `kor`, that disc's title and main page (`settings_render_jpn`,
   `settings_render_kor`); `cn` the same for the Asian disc (`settings_cn`, `settings_extra_cn`,
   `settings_extras_cn`, `settings_render_cn`, `ui_cn`, `gallery_cn`, `model_viewer_cn`); `ntsc`,
-  `aug6` and `jun26` run settings_extra_test's Game variants page, the Options window
+  `aug6` and `jun26` run settings_extra_test's game variants pages, the Options window
   (`testScroll`) and the boot's hand-over to the title with Skip the opening
   (`testSkipOpeningTitle`: the boot's layout 4 handing over to 51, the title 9; issue 160) only
   (`settings_extra_ntsc`, `settings_extra_aug6`, `settings_extra_jun26`: Cross
   confirms, the 2001 notes, the demo's 7-hit barrier, its toughness row without American and no
   Debug menu row; the window's edge moves through that disc's own cursor move).
 - `settings_extra_test.c`'s `testSecondCard`: Options > Gameplay > Second memory card from the
-  title and the pause menu, after Skip the opening and before the Film effect, Off by default; a
+  title and the pause menu, after the East Reflector door fix and before Film effect, Off by default; a
   registered listener hears the current value, Right turns it on with one call and sets
   `gameplay.second_memory_card`, the saved file has it, its note shows on the cursor, Left turns
   it off with one more call; the cleared page still fits. `settings_test.c`'s `testBuild` reads
-  the Gameplay page's twelve rows, `testGameOptions` nine Downs from Yorda to Film effect, and
+  the Gameplay page's eleven rows, `testGameOptions` three Downs from the stick fix to Film effect, and
   `settings_discs` (every disc) shows the row from both entries.
+- `settings_test.c`'s `testNewGameMouse` (`settings`): the New Game screen with the mouse
+  (`ui_mouse_tick`, 640 x 480): a hover moves nothing; a click steps Difficulty, opens Customize
+  (there a click turns Mirror mode On) and starts the game mirrored at Hard.
+- `settings_test.c`: Gameplay > Chains' four rows (the Chain swing speed and Chain swing slowdown rows
+  after Natural chains), their value text ("4 (original)", else the number), ten steps round
+  4..10, 1..4 with the key written as the number and the achievements untouched, and their notes after
+  Natural chains' note.
+- `settings_extra_test.c`'s `testNaturalChains` and `testSkipOpening`: Options > Gameplay > Chains >
+  Natural chains (the page's first row, before the chain rows) and Gameplay > Cutscenes > Skip the opening (the
+  page's first row), each opened through Gameplay (`openGameplayPage`, `openLink` in
+  `settings_fixture.c`) from the title and the pause menu, Off by default, Right on and the key,
+  saved, the note on the cursor, Left off, the page fitting, Back to Gameplay and then to the main
+  page.
+- `settings_extra_test.c`'s `testVariantsPage` (`testVariants`, and `testVariantsOtherDisc` on
+  `jpn`, `kor`, `ntsc`, `aug6`, `jun26`), from the title and the pause menu: no Game variants row
+  on Extras; Gameplay's ten labels and the two links, no journey row on Gameplay or its Chains page;
+  Light sword colour (shown with a light sword) and Stick stepped with their keys, kinds and notes;
+  Gameplay > Cutscenes' four rows, No cutscene look-around and Ignore cutscene cameras on and off
+  with the achievements rule (the 2001 discs' own notes); `checkPageFits` on each; Developer's Debug
+  menu hidden without Developer mode, shown with it (not on the demo) before Back, its note, unbound
+  staying on Developer, bound opening the game's menu once and closing Options into the title or
+  the game.
+- `settings_difficulty_test.c` (`settings_difficulty`, and on every other disc
+  `settings_difficulty_<slug>`): the New Game screen's Difficulty row and Customize's pages run by the
+  real layout code: Normal, Hard (three knock-downs in a room), Easy round with their notes, nothing in
+  force before the confirm; the left stick stepping Difficulty one step a push (held 60 ticks: one),
+  toggling Mirror mode, and stepping Customize's Shadow speed; Customize opened on its first row, Shadows from it, Right on Shadow speed
+  turning the draft Custom (no config key, the journey in force untouched), No Shadows' row and note,
+  Back to Customize on the link and to the screen on Customize, Difficulty from Custom to Easy and back
+  to the kept Custom rows, an edit back to Normal's rows; Rules: the count greyed while the limit is Off
+  and not after, the limit around 0..9, Whole journey, Permadeath On and its note; START hands the draft
+  to the journey (`ico_difficulty_begin`: its rows, Custom, a New Game's origin and journey, counts 0);
+  a cleared Hard save's New Game+ starting at Hard, kept through Triangle and back, a cleared Custom
+  save's at Custom, the title's at Normal; Mirror mode and New Game+ (`testScreenRows`: no draft
+  rows, a step leaving the draft, kept by Difficulty, read-only greyed and refused); the screen's
+  notes in two lines in every table; no
+  Customize note naming achievements; the pause menu's read-only view (no link from the title, the link
+  from the pause menu, the journey's values greyed with their note, a step ignored, Back to Gameplay on
+  the link, the New Game pages the draft's again); the journey line's text and the journey events' pop-ups (a counted
+  knock-down short of the limit, the limit and a Permadeath journey's end raise none; the refusal's does).
+- `settings_test.c`'s `testNewGameScreen`, `testNewGameMouse` and `testNewGameStartFlags`: the
+  screen's three rows round, Mirror mode and New Game+ set on Customize and applied at Start, the journey Normal after a plain confirm, the mouse's
+  click on Difficulty's arrows and value (a hover moving nothing) and the start with Hard, and on every
+  other disc Right then START putting Hard in force with that disc's Shadow toughness;
+  `settings_discs_test.c`'s `checkDraftRows`: every draft row on Customize's pages shown on every disc,
+  Hard's toughness, the toughness values the disc offers, the disc's toughness and No hints notes.
+- `settings_test.c`'s `testFreeMovement`: Options > Developer > Free movement after the Debug
+  menu, shown with Developer mode, Off by default, Right turning it on (`ico_free_movement`, the
+  key set and saved), its note on the cursor, Developer mode off leaving the row's value and
+  switching the movement off, Left turning it off; `settings_test.c`'s Developer page now lists six
+  rows (five on the demo); `settings_discs_test.c` shows the row on every disc with Developer mode
+  and walks Remap controls to its end: Ask Yorda for a hint after the right stick's Right on the
+  hint discs (pal, jpn, kor, cn), Reset to defaults straight after it on ntsc, aug6 and jun26
+  (`settings_discs`, `settings_discs_<slug>`); `strings_complete_test.c` checks the three new
+  strings in the eight tables.
 - `settings_extra_test.c`'s `testScroll` (the Options window, [UI.md](UI.md#the-window)): Controls
   from the pause menu, with a touch screen, opens at the top with the down mark only (Effects and Display fit in the window and do not scroll); Down on the window's last row scrolls one
   row, Up on its first scrolls back; Up on the first row wraps to Back and Up on Back shows the end
@@ -2167,7 +2417,9 @@ D3D12 and a Vulkan device without the dynamic state; `rd_mesh_static.1of4` is `r
   with each disc's serial (`ui_str_serial`); the sheet language's default and setter; the menu
   language's rule (`ui_lang.c`, its inputs stubbed); a community translation's table (an id it has
   not translated NULL, English at run time, at least half translated, its name in every table;
-  in the Brazilian Portuguese one, rows cobra838 corrected or filled),
+  in the Brazilian Portuguese one, rows cobra838 corrected or filled; the Gameplay pages' three
+  names, Chains, Shadows and Cutscenes, in the eight tables' own words and NULL, English, in the
+  three community tables),
   the translation in force (`ui_lang_text_resolve`: the European disc in English only), Auto
   following it, the menu words over the English sheet (`ui_menu_words_language`); the Japanese
   line-break rules (`strings_complete`).
@@ -2194,7 +2446,10 @@ D3D12 and a Vulkan device without the dynamic state; `rd_mesh_static.1of4` is `r
   to English) and the strips with his words (`subtitles_pt_br`, `subtitles_pt_br_jpn`, `_kor`,
   `_cn`, in the `settings_toml` lock).
 - `ui_mouse_test.c`: the pointer's arithmetic in the menus (`ui_mouse`).
-- `ui_test.c`: the embedded fonts, UTF-8, the runtime text; each language's own Deja vu string
+- `ui_test.c`: the embedded fonts, UTF-8, the runtime text; `testPickedOutline`: `kSheetInk`'s
+  five European rows are the user's pick of 2026-11-08 (rim on, rim grey 100, fill 255, dither on;
+  the falloff, levels, solid rule and Bayer matrix of that pick are `_Static_assert`s in
+  `port/render/test/sheet_ref.c`); each language's own Deja vu string
   (`UI_STR_PHOTO_FILM_DEJA`); a Japanese popup body wider than the panel takes a second line, an
   English one keeps its one; the popups' timing in seconds at the default 50 Hz and at 60 Hz
   (`ui_popup_set_vsync_hz`) (`ui`); with `jpn` or `kor`, the glyph rows, the table sizes and the pad

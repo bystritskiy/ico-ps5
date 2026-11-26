@@ -25,6 +25,7 @@ others.
 | `port/input/mouse_camera.h`, `mouse_camera.c` | the mouse camera's speed and range for the game's hand camera |
 | `port/input/pointer.h`, `pointer.c` | the mouse pointer in the menus |
 | `port/input/touch.h`, `touch.c` | the touch overlay's input mapper |
+| `port/input/pad_kind.h`, `pad_kind.c` | the kind of controller pressed last (`ico_input_last_pad_kind`): SDL's gamepad types mapped, for the button pictures |
 | `port/input/touch_edit.h`, `touch_edit.c` | the layout edits (per posture and control), their config text and rails, and the layout editor's state machine |
 | `port/input/CMakeLists.txt` | `ico_input` and the input tests |
 | `port/input/test/` | the input unit tests |
@@ -64,6 +65,20 @@ window (`port/platform/window_host.c`) drives it (`port/input/input_sdl.h`, head
   set, on every disc: `subGirlControl` and its 2001 arms), slots 2..7 drive no port. A pad keeps its slot across a reconnection by serial, then
   path, then a GUID no other known pad shares; a different pad plugged in while a player's slot
   stands empty takes that slot. The log names the slot (`input: gamepad slot N "<name>"`).
+- The kind of controller pressed last (`ico_input_last_pad_kind`, `port/input/pad_kind.c`), the
+  Button pictures setting's Auto ([UI.md](UI.md#button-pictures)): every new press of a slot's
+  pad (a button, a trigger or a stick past half, as the remap screen's edges are found, per slot)
+  reports the kind of that pad's `SDL_GetGamepadType`: Xbox 360, Xbox One and Steam (A B X Y in
+  the Xbox places) are Xbox, the Switch Pro Controller and a pair of Joy-Cons Nintendo, every
+  other type (PS3, PS4, PS5, standard, unknown, a single Joy-Con, GameCube) PlayStation; a key
+  press, a mouse button and a finger down on the touch screen report PlayStation. Before any press,
+  and in the headless build, it is PlayStation. `pad_kind.h` mirrors SDL 3.4.18's
+  `SDL_GamepadType` values so the mapping's test needs no SDL; `input_sdl.c` checks each with
+  `_Static_assert`. A change writes `input: last pad kind Xbox (was PlayStation; the press:
+  xboxone), change 1` (the first 8, then every 100th). The buttons are read by position
+  (`SDL_GAMEPAD_BUTTON_SOUTH` is Cross on every pad, SDL_gamepad.h's button comment: B on a
+  Switch pad, A on an Xbox pad) and the port sets no hint that trades them, so the pictures are
+  mapped by position too.
 
 Rumble: libpad maps the game's actuator bytes through `scePadSetActAlign`'s table (the small
 motor on or off to 0xFFFF, the large motor's level times 257; `port/input/pad_host.c`
@@ -114,7 +129,7 @@ same on every platform and live as config text, parsed by the same code as a pla
 
 The rows live in `[input.kb]`, `[input.mouse]` and `[input.pad]`, one key per target name (`l2`,
 `r2`, `l1`, `r1`, `triangle`, `circle`, `cross`, `square`, `select`, `l3`, `r3`, `start`, `up`,
-`right`, `down`, `left`, `lstick_up` .. `rstick_right`), the value a name, a comma list or an
+`right`, `down`, `left`, `lstick_up` .. `rstick_right`, and `hint`, an action: see below), the value a name, a comma list or an
 array of names, or `"none"`; `[input.kb]` also has `walk`. The default rows are in
 `default_text` (`ico_bindings_default_text`). Names are case-insensitive and ignore blanks and
 underscores, with aliases such as `return`, `grave`, `lshift`, `pgup` (`name_eq`, `key_alias`).
@@ -122,6 +137,14 @@ An unknown key or a bad value is logged (`input: ignoring "<key> = <value>" (unk
 value)`), an unknown name as `input: <key>: unknown key "<name>"` (or `mouse button`,
 `gamepad source`), more than four sources as `input: <key>: only the first 4 sources are used`, and
 the rest still applies (`ico_bindings_set`, `bind_list`).
+
+`hint` (`ICO_T_HINT`, Ask Yorda for a hint) is the one target that is neither a pad button nor a stick
+direction: it has no bit in the pad frame and no default on any device. `ico_bindings_step` only sets
+`IcoBindings.hint_down` (a key or mouse button of the row held, or a gamepad source while the gamepad
+is on), and `input_sdl.c` hands it to `ico_hint_ask_note` (`port/game/ico_rows.c`) once for each
+device snapshot of the first player; player two's step (a copy of the bindings) is not noted. The
+game's side is [GAME_FEATURES.md](GAME_FEATURES.md#free-movement-and-ask-yorda-for-a-hint). A press
+is therefore not part of a recorded pad (`input_record.c`) and replays do not repeat it.
 
 A new `[input]` switch needs its field in `IcoBindings` (`port/input/input.h`), its default line in
 `default_text` and its parse in `ico_bindings_set` (`port/input/bindings.c`), its name in
@@ -150,8 +173,25 @@ apart from `bindings.c` so that a build without `config.toml` does not pull in t
 `IcoVirtualPad` holds the buttons (the game's logical word, active high), the menus' word and
 four stick floats from -1 to +1, x to the right and y downwards (`port/input/input.h`).
 `ico_input_vpad_to_frame` turns it into a byte frame: the optional stick fix, the mirror (stick X
-negated on both sticks; the d-pad bits are not flipped here, because the menus are drawn pre-flipped, and the game's own d-pad to stick vector in `iosPadGetStick` swaps its Left and Right under `ico_opt_mirror()` instead), then `ico_input_quantise` (0 to 128, the DualShock's idle; -1 to 0; +1 to
+negated on both sticks; the d-pad bits are not flipped here, because the menus are drawn pre-flipped, and the game's own d-pad to stick vector in `iosPadGetStick` swaps its Left and Right under `ico_opt_mirror()` instead; the menus take the stick's x back, below), then `ico_input_quantise` (0 to 128, the DualShock's idle; -1 to 0; +1 to
 255) (`port/input/vpad.c`).
+
+Mirror mode and the menus. The mirror is for the flipped 3D picture: the game steers Ico, the
+camera, photo mode and the free camera with the negated x, and the d-pad's
+synthesised stick vector is swapped to match (`pad_mirror_test`). The layouts (the title, the
+pause and End Game menus, Options, the save, load and memory card screens, Continue, the ending's
+save prompt and every screen after the ending up to the title, and the port's own pages) are drawn
+unflipped (`port/render/rd_replay.c` `mirrorUi`), and they read Left and Right from the d-pad bits,
+which are not flipped, and from the left stick through the game's d-pad emulation `lt_analog2Pad`
+(`ico2/common/src/layout_texture.c`: below 20 is Left, from 236 Right). That one reader takes the
+stick's x through `ico_pad_menu_stick_x` (`port/input/pad_host.c`): the byte unchanged with the
+option off, its reflection 255 - x with it on (the frame's bytes are symmetric about 127.5, and the
+two thresholds are each other's reflection), so the stick moves a menu's cursor the way it was
+pushed in both modes. `pad[0].ana[2]` itself is left as the frame gave it, for the 3D readers. It
+follows the option rather than the frame's source, so a recording of a mirrored run (its frames as
+negated) replays as it ran. The first reflection of a run logs `input: Mirror mode: the menus take
+the stick's left and right as pushed (they are drawn unflipped)`; `ico_pad_menu_stick_x_reflected`
+counts them (`settings_step`).
 
 The stick fix scales a stick vector by 1 + 0.2 x d / 45, d the angle in degrees to the nearest
 axis, so the off-axis divisor of the game's `iosPadNormalizeStick` (`ico2/fumi/ios/pad.c`)
@@ -256,7 +296,7 @@ Main reads the pad). Lines are written after the vsync step that read them
 `port/platform/main_host.c` (`record_open`, `record_header`) opens it: on by default in the window
 build as `logs/input-<time>.txt`, off headless; the ini's `input_record=` (`[dev] input_record`)
 takes `false`, `true` or a path. The header (`# ico-pc input recording`) carries the build, the
-config values the simulation depends on (`ICO_SIM_KEYS`, `port/platform/sim_keys.c`, which includes `gameplay.hold_type` and `gameplay.hold_type_chosen`), the effective fixed clock and stick fix,
+config values the simulation depends on (`ICO_SIM_KEYS`, `port/platform/sim_keys.c`, which includes `gameplay.hold_type`, `gameplay.hold_type_chosen`, `gameplay.zoom_type`, `gameplay.camera_reset` and `gameplay.yorda_look`), the effective fixed clock and stick fix,
 and the [native frame](ARCHITECTURE.md#terms)'s width and aspect; a width change adds
 `# tick N gs_width W`. Loading a recording as the pad script compares each header value with the
 run's and logs each difference (`record_check`), since the replay may then not follow the session.
@@ -342,7 +382,15 @@ bindings' like any other source before the stick fix, the mirror and the quantis
   is held for one step; up to 10 fingers at once.
 - **Visibility**: `touch_mode` Off never maps or draws; Auto hides the overlay while a gamepad is
   connected (and drops the touches) and 5 s after the last finger event, with 300 ms fades; Always
-  draws at full opacity and maps with a gamepad too. `touch_opacity` scales the drawing.
+  draws at full opacity and maps with a gamepad too; `always_scenes` is Always, and while the scene
+  flag is set (`ico_input_sdl_set_touch_scene`: `current_layout_id` is the region's `layout_scene`,
+  or `mpegPlay`; `window_host.c` sets it once a pump) every control whose `pad` lacks `ICO_PAD_START`
+  (selected by the bit, so a remapped Start follows) fades to alpha 0 over 300 ms on the overlay's
+  copy of the layout only (`ico_touch_scene_alpha`; the mapper, the Hidden rule and the menu-tap
+  failsafe read the unfaded layout, and the Frame rate counter re-places itself through the
+  alpha > 0 rule). Logged: `touch: scene begins/ends` and `touch: Start-only fade out/in`, the
+  first 8 then every 100th (`ico_log_limited`, so the end-of-run summary counts them; `ico_input`
+  links `ico_platform` for it in the window build). `touch_opacity` scales the drawing.
 
 `input_sdl.c` wires it: the finger events, cancel on focus loss and backgrounding, the step once a
 vsync (`ico_touch_update`), the layout from the output's size, safe area, density and fold that
@@ -570,11 +618,12 @@ The editor is driven by the Edit layout page (`port/ui/touch_edit_ui.c` (`ui_tou
 | `input_record` (`input_record_test.c`) | the recording's line format, the round trip through the script reader over a long session, the "only when it changes" rule, a second read in a tick, the poll's timing, a scripted session recorded through libpad and loaded back |
 | `touch` (`touch_test.c`) | the mapper's layouts over phones, a notch, foldables, a tablet and monitors at every size, the hinge rule, the floating stick, the d-pad and face buttons, sliding, cancel, the look pad's decay, hiding and fades, the merged pad with the stick fix off and on |
 | `touch_edit` (`touch_edit_test.c`) | an unedited layout equal to the default field by field and byte for byte over the screen table, the anchor arithmetic on four screens with and without insets, the clamp into the bounds and out of the band, a camera hole on the left and an inset on the right (`test_cutout`: negative offsets kept, saved and parsed, clamped to the window, `l0` flush with the safe edge, a drop with its centre inside kept inside, a gamepad nudge past the safe edge, the band carried to the window's top, TABLETOP's bounds), the region-clamped forms on four inset screens (`test_v084_forms`: the region's formulas, the stick's area and the look pad in it, SPLIT beside the region's band, `ico_touch_edit_outside`), Hidden and Off controls and the rails (no floor, every control), the stick's and the look pad's areas, the flat crease seeing the edits, the config text round trip with bad and out-of-range lines (`hidden` and `off` alone and after a place), the format-1 reading of `hidden` and `o0` as Off (`test_format_migration`), the opacity steps through Hidden and Off on the gamepad with Undo and the overlap and refuse rules counting Hidden and skipping Off (`test_hidden_off_editor`), sizes to 300 % on screen in the three postures on a phone and a 3000 x 2000 tablet (`test_size_300`), the editor fed synthetic fingers and gamepad words (tap, drag and snap, the refused drop, overlap, cancel, pinch, a pinch from a fresh two-finger touch, the steppers, All, the posture switch, Undo, Reset, Done, a readout tap doing nothing), and the toolbar strip and the hint on the screen table and the smallest region of each posture (the strip inside the region, over the top row by 2.5 q at most with 5.5 q left, clear of every other control; SPLIT's second row on a hand-built narrow side) |
+| `pad_kind` (`pad_kind_test.c`) | every SDL gamepad type's kind and name, values out of range, the kind the reported presses leave (a keyboard, mouse or touch press PlayStation) and the changes counted once each |
 | `mouse_camera` (`mouse_camera_test.c`) | the camera step arithmetic, and the speed and range applied only while the mouse drives the camera |
 | `pad_script` (`pad_script_test.c`) | the script reader and what libpad then shows the game's pad state machine, replayed from `pad.c`'s libpad calls in their order |
 | `movie_pad` (`port/platform/test/movie_pad_test.c`) | the Start edge through the game's own pad code during a movie ([FMV.md](FMV.md)) |
 
-The first five are registered in `port/input/CMakeLists.txt`, `pad_script` in
+The first six are registered in `port/input/CMakeLists.txt`, `pad_script` in
 `port/null/CMakeLists.txt`, `movie_pad` in `port/platform/CMakeLists.txt`. Run them with
-`ctest --preset linux-x64 -R '^(input|input_record|touch|touch_edit|mouse_camera|pad_script|movie_pad)$'`
+`ctest --preset linux-x64 -R '^(input|input_record|touch|touch_edit|pad_kind|mouse_camera|pad_script|movie_pad)$'`
 ([TESTING_PROGRAMS.md](TESTING_PROGRAMS.md)).

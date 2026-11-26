@@ -11,14 +11,19 @@
 #include <jni.h>
 #include <stdint.h>
 #include <stdio.h>
+#include <stdlib.h>
 #include <string.h>
+#include <unistd.h>
+#include "bones_ladder.h"
 #include "config.h"
+#include "cpu_place.h"
 #include "diag_host.h"
 #include "gpu_driver.h"
 #include "host_android.h"
 #include "host_fs.h"
 #include "iso_import.h"
 #include "rhi.h"
+#include "rhi_device_table.h"
 #include "rhi_driver_version.h"
 #include "strings.h" /* port/ui: the hang box's driver route (UI_STR_GPU_HANG_TURNIP) */
 
@@ -64,11 +69,14 @@ static const char *driver_root(void)
     return s_root;
 }
 
+static void info_forget(void);
+
 static void list_refresh(void)
 {
     const char *root = driver_root();
     s_count = root != NULL ? ico_gpu_driver_list(root, s_list, ICO_GPU_DRIVER_LIST_MAX) : 0;
     s_listed = 1;
+    info_forget();
 }
 
 /* <files>/drivers, made if missing so a USB cable finds it; relisted */
@@ -113,6 +121,93 @@ static int find_folder(const char *folder)
 static int s_trial;         /* the player's driver is on trial (the marker is written) */
 static unsigned s_presents; /* presents since the start, while on trial */
 static char s_active[160];  /* its folder */
+/* a driver package was opened for this start (kept after the trial ends),
+   and when its first present was (SDL_GetTicks ms, 0 before any): a device
+   loss soon after counts like a crash inside it
+   (ico_gpu_driver_android_device_lost, which the watchdog's thread can
+   call while the main thread presents: SDL atomics; the first present's
+   time in 32 bits of SDL_GetTicks ms, the difference taken modulo 2^32,
+   right for any loss within 49 days of it) */
+static SDL_AtomicInt s_custom;
+static SDL_AtomicU32 s_firstPresentMs;
+/* the package opened for this start is Turnip's (its library
+   libvulkan_freedreno.so): the start TU_DEBUG can reach (issue 123's
+   ladder, tu_debug_apply) */
+static int s_turnipPackage;
+
+/* the package's library is Turnip's (Mesa's freedreno Vulkan driver) */
+static int library_is_turnip(const char *library)
+{
+    const char *base = library != NULL ? strrchr(library, '/') : NULL;
+
+    base = base != NULL ? base + 1 : library;
+    return base != NULL && strcmp(base, "libvulkan_freedreno.so") == 0;
+}
+
+/* Issue 123's ladder, step 2 (bones_ladder.h; docs/port/VU_SKIN_CHECK.md
+   "The ladder"): [dev] turnip_debug = nobin, which the skin check writes
+   when the twins of a skinned draw still differ with the bones read through
+   the ring, sets TU_DEBUG=nobin in the process environment before the
+   package loads (Mesa reads it when the driver starts: the binning pass
+   off, every pass drawn in system memory; docs.mesa3d.org/drivers/
+   freedreno.html lists nobin among TU_DEBUG's options), only when the
+   package's library is Turnip's and the mark beside it carries the word
+   trial or needed (bones_nobin_wanted).  Whether the variable reaches the driver
+   through libadrenotools on Android is not verified: the twins' result
+   under it is the indicator (window_bones.c reads TU_DEBUG back). */
+static void tu_debug_apply(const char *library)
+{
+    const char *want = ico_config_get_string("dev.turnip_debug", "");
+    const char *by = ico_config_get_string("dev.turnip_debug_by", "");
+    const char *old = getenv("TU_DEBUG");
+    const BonesTurnip state = bones_turnip_state(want, by);
+    char value[256];
+
+    /* since v0.11.0 step 2 is re-tested (bones_ladder.h): retest, or a
+       nobin without the mark's word trial or needed (a v0.10.5 ladder's, or
+       set by hand), runs this start without it */
+    if (state == BONES_TU_RETEST || state == BONES_TU_UNMARKED) {
+        fprintf(stderr,
+                "gpu driver: TU_DEBUG=nobin not set at this start ([dev] turnip_debug = %s%s%s%s): "
+                "the skin check re-tests whether it is needed\n",
+                want,
+                state == BONES_TU_UNMARKED ? " without the word trial or needed, taken as retest"
+                                           : "",
+                by[0] != '\0' ? ", turnip_debug_by = " : "", by);
+        return;
+    }
+    if (!bones_nobin_wanted(want, by)) {
+        return;
+    }
+    if (!library_is_turnip(library)) {
+        fprintf(stderr,
+                "gpu driver: [dev] turnip_debug = nobin, but the package's library is %s, not "
+                "Turnip's libvulkan_freedreno.so: TU_DEBUG is not set\n",
+                library != NULL ? library : "unknown");
+        return;
+    }
+    if (old != NULL && strstr(old, "nobin") != NULL) {
+        snprintf(value, sizeof(value), "%s", old);
+    } else if (old != NULL && old[0] != '\0') {
+        snprintf(value, sizeof(value), "%s,nobin", old);
+    } else {
+        snprintf(value, sizeof(value), "nobin");
+    }
+    if (setenv("TU_DEBUG", value, 1) != 0) {
+        fprintf(stderr, "gpu driver: TU_DEBUG could not be set ([dev] turnip_debug = nobin)\n");
+        return;
+    }
+    fprintf(stderr,
+            "gpu driver: TU_DEBUG=%s set before %s loads ([dev] turnip_debug = nobin%s%s): "
+            "whether the driver reads it through the package loader is not verified; the skin "
+            "check's twins under it are the indicator\n",
+            value, library, by[0] != '\0' ? ", turnip_debug_by = " : "", by);
+}
+
+int ico_gpu_driver_android_turnip_package(void)
+{
+    return SDL_GetAtomicInt(&s_custom) && s_turnipPackage;
+}
 
 /* a Java exception from the last call, cleared: 1 when there was one */
 static int clear_exception(JNIEnv *env)
@@ -247,6 +342,9 @@ int ico_gpu_driver_android_start(void)
     rhi_set_vulkan_loader(NULL);
     s_trial = 0;
     s_presents = 0;
+    s_turnipPackage = 0;
+    SDL_SetAtomicInt(&s_custom, 0);
+    SDL_SetAtomicU32(&s_firstPresentMs, 0);
     if (!ico_gpu_driver_android_supported()) {
         /* issue 158: Android 8 (API 26 and 27); the choice is kept for a
            newer system, nothing is written */
@@ -269,7 +367,9 @@ int ico_gpu_driver_android_start(void)
         return 0;
     }
     if (ico_gpu_driver_trial_crashed(root, s_active)) {
-        driver_failed(s_active, "the last start with it ended before it drew");
+        driver_failed(s_active,
+                      "the last start with it ended before it drew, or lost the graphics device "
+                      "within the first 30 seconds");
         return 0;
     }
     const int i = find_folder(s_active);
@@ -308,6 +408,9 @@ int ico_gpu_driver_android_start(void)
     fprintf(stderr, "gpu driver: opening %s (%s, %s) from %s, hooks in %s%s%s\n", s_active,
             s_list[i].meta.name, s_list[i].meta.libraryName, driverDir, hookDir,
             tmpLibDir != NULL ? ", patched loader in " : "", tmpLibDir != NULL ? tmpLibDir : "");
+    /* issue 123's ladder, step 2: before the package's library loads */
+    tu_debug_apply(s_list[i].meta.libraryName);
+    s_turnipPackage = library_is_turnip(s_list[i].meta.libraryName);
     void *lib = adrenotools_open_libvulkan(RTLD_NOW, ADRENOTOOLS_DRIVER_CUSTOM, tmpLibDir, hookDir,
                                            driverDir, s_list[i].meta.libraryName, NULL, NULL);
     if (lib == NULL) {
@@ -325,6 +428,7 @@ int ico_gpu_driver_android_start(void)
     }
     rhi_set_vulkan_loader(gipa);
     s_trial = 1;
+    SDL_SetAtomicInt(&s_custom, 1);
     return 1;
 }
 
@@ -338,6 +442,10 @@ void ico_gpu_driver_android_init_failed(void)
 
 void ico_gpu_driver_android_presented(void)
 {
+    if (SDL_GetAtomicInt(&s_custom) && SDL_GetAtomicU32(&s_firstPresentMs) == 0) {
+        /* never 0 once set; the first one wins */
+        (void)SDL_CompareAndSwapAtomicU32(&s_firstPresentMs, 0, (Uint32)SDL_GetTicks() | 1u);
+    }
     if (!s_trial || ++s_presents < TRIAL_PRESENTS) {
         return;
     }
@@ -346,6 +454,46 @@ void ico_gpu_driver_android_presented(void)
         ico_gpu_driver_trial_ok(s_root);
     }
     fprintf(stderr, "gpu driver: %s drew %u frames; it is kept\n", s_active, TRIAL_PRESENTS);
+}
+
+/* A device loss (or a hung present, which the window treats as one) within
+   ICO_GPU_DRIVER_LOSS_WINDOW_MS of the first present under a driver package
+   counts like a crash inside the driver: the trial marker is written again
+   (it went after 300 presents), so the next start falls back to the phone's
+   own driver with the box. Later losses are the game's or the card's. Logged
+   either way; once a run. */
+void ico_gpu_driver_android_device_lost(void)
+{
+    static SDL_AtomicInt s_done; /* once a run, whichever thread comes first */
+    const char *root = driver_root();
+
+    if (!SDL_GetAtomicInt(&s_custom) || !SDL_CompareAndSwapAtomicInt(&s_done, 0, 1)) {
+        return;
+    }
+    const Uint32 first = SDL_GetAtomicU32(&s_firstPresentMs);
+    const unsigned long long since =
+        first != 0 ? (unsigned long long)(Uint32)((Uint32)SDL_GetTicks() - first) : 0;
+    if (!ico_gpu_driver_loss_counts(1, since)) {
+        fprintf(stderr,
+                "gpu driver: the graphics device was lost %llu ms after the first present under "
+                "%s, past the %llu ms that count against the driver; the next start keeps it\n",
+                since, s_active, ICO_GPU_DRIVER_LOSS_WINDOW_MS);
+        return;
+    }
+    if (root != NULL && ico_gpu_driver_trial_begin(root, s_active) == 0) {
+        fprintf(stderr,
+                "gpu driver: the graphics device was lost under %s (%s, %llu ms; inside the "
+                "%llu ms that count like a crash in the driver): the next start falls back to "
+                "the phone's own driver and says so\n",
+                s_active, first != 0 ? "after the first present" : "before any present", since,
+                ICO_GPU_DRIVER_LOSS_WINDOW_MS);
+    } else {
+        fprintf(stderr,
+                "gpu driver: the graphics device was lost %llu ms after the first present under "
+                "%s, but the start marker could not be written; the next start loads it "
+                "again\n",
+                since, s_active);
+    }
 }
 
 void ico_gpu_driver_android_end(void)
@@ -375,6 +523,8 @@ static int s_fromFolder;
 /* the folder the last install made; written before install_done, read once
    the state says DONE */
 static char s_installed[160];
+/* the refusal's sentence for UI_GPU_INSTALL_PAGES, written before install_done */
+static char s_installWhy[256];
 
 /* The picker watch (issue 135): some phones' pickers close without any
    answer (the activity comes back to the front with no onActivityResult) or
@@ -400,6 +550,8 @@ static void install_done(int result)
 static int SDLCALL install_thread(void *user)
 {
     (void)user;
+    /* the process's cores, not its creator's (cpu_place.h cpu_place_thread_free) */
+    (void)cpu_place_thread_free();
     char tmp[1200], zip[1200], folder[160], why[256];
     const char *root = s_root;
 
@@ -431,8 +583,11 @@ static int SDLCALL install_thread(void *user)
                                                    : UI_GPU_INSTALL_UNREADABLE);
         return 0;
     }
-    const int r = ico_gpu_driver_install_zip(root, zip, SDL_GetAndroidSDKVersion(), folder,
-                                             sizeof(folder), why, sizeof(why));
+    /* the phone's memory page size (4096, or 16384 on a phone with 16 KB
+       pages: a driver library built for 4 KB is refused there) */
+    const unsigned pageSize = (unsigned)getpagesize();
+    const int r = ico_gpu_driver_install_zip_pages(root, zip, SDL_GetAndroidSDKVersion(), pageSize,
+                                                   folder, sizeof(folder), why, sizeof(why));
     ico_remove(zip);
     if (r == ICO_GPU_DRIVER_OK) {
         fprintf(stderr, "gpu driver: installed %s\n", folder);
@@ -445,8 +600,14 @@ static int SDLCALL install_thread(void *user)
         }
         install_done(UI_GPU_INSTALL_ADDED);
     } else {
-        fprintf(stderr, "gpu driver: the chosen file was not installed: %s\n", why);
-        install_done(r == ICO_GPU_DRIVER_NOSPACE ? UI_GPU_INSTALL_NOSPACE : UI_GPU_INSTALL_BAD);
+        fprintf(stderr, "gpu driver: the chosen file was not installed (memory page size %u): %s\n",
+                pageSize, why);
+        if (r == ICO_GPU_DRIVER_BAD && strcmp(why, ICO_GPU_DRIVER_PAGES_MESSAGE) == 0) {
+            snprintf(s_installWhy, sizeof(s_installWhy), "%s", why);
+            install_done(UI_GPU_INSTALL_PAGES);
+        } else {
+            install_done(r == ICO_GPU_DRIVER_NOSPACE ? UI_GPU_INSTALL_NOSPACE : UI_GPU_INSTALL_BAD);
+        }
     }
     return 0;
 }
@@ -607,10 +768,77 @@ void ico_gpu_driver_android_note_loss_on_stock(void)
    device and this one runs on the phone's own Qualcomm driver (no driver
    package loaded; Turnip reports Qualcomm's vendor id too, hence
    customDriver) */
+/* --- what each driver was last seen to be (the page's lines) ------------------- */
+
+/* the words for each installed driver and the phone's own, read from the
+   last_seen files (gpu_driver.h) and kept until the list or a file changes */
+static char s_info[ICO_GPU_DRIVER_LIST_MAX][200];
+static int s_infoLoaded[ICO_GPU_DRIVER_LIST_MAX];
+static char s_infoSystem[200];
+static int s_infoSystemLoaded;
+
+static void info_forget(void)
+{
+    memset(s_infoLoaded, 0, sizeof(s_infoLoaded));
+    s_infoSystemLoaded = 0;
+}
+
+/* this start's driver, from the device's limits, into the last_seen file of
+   the package that ran (folder NULL: the phone's own driver) and the log */
+static void seen_write(const char *folder)
+{
+    const RhiLimits *l = rhi_limits();
+    const char *root = driver_root();
+    IcoGpuDriverSeen seen;
+    char words[200];
+
+    if (l == NULL || l->driverName == NULL || root == NULL) {
+        return;
+    }
+    memset(&seen, 0, sizeof(seen));
+    snprintf(seen.name, sizeof(seen.name), "%s", l->driverName);
+    snprintf(seen.version, sizeof(seen.version), "%s",
+             l->driverVersion != NULL ? l->driverVersion : "");
+    if (l->mesa.known) {
+        rhi_mesa_version_text(&l->mesa, seen.mesa, sizeof(seen.mesa));
+    }
+    seen.driverId = (int)l->driverId;
+    seen.vulkanMajor = (int)l->apiMajor;
+    seen.vulkanMinor = (int)l->apiMinor;
+    seen.known = 1;
+    ico_gpu_driver_seen_text(&seen, words, sizeof(words));
+    fprintf(stderr, "gpu driver: this start runs %s: %s (driver ID %d)%s%s\n",
+            folder != NULL ? folder : "the phone's own driver", words, seen.driverId,
+            seen.mesa[0] ? ", " : "", seen.mesa);
+    if (ico_gpu_driver_seen_write(root, folder, &seen) != 0) {
+        fprintf(stderr, "gpu driver: could not write the last-seen file for %s\n",
+                folder != NULL ? folder : "the phone's own driver");
+    }
+    info_forget();
+}
+
+/* The device table's TURNIP_NOTE (port/rhi/rhi_device_table.c, the row
+   stock-qualcomm-android: an Android build, no driver package, vendor
+   0x5143) on an identity of this start: the build's OS, the package the
+   window says was loaded and the device's vendor id (no limits: no vendor,
+   so no row).  The rule this file held before; port/rhi/test/
+   rhi_device_table_equiv_test.c compares the two. */
+static int on_stock_qualcomm(int customDriver)
+{
+    const RhiLimits *l = rhi_limits();
+    RhiDeviceId id;
+
+    memset(&id, 0, sizeof id);
+    id.os = RHI_DT_OS_BUILD;
+    id.customDriver = (uint8_t)(customDriver != 0);
+    id.vendorId = l != NULL ? l->vendorId : 0u;
+    return rhi_device_table_choice(&id, RHI_DC_TURNIP_NOTE, NULL) != 0;
+}
+
 void ico_gpu_driver_android_device_up(int customDriver)
 {
-    s_onStock =
-        !customDriver && rhi_limits() != NULL && rhi_limits()->vendorId == RHI_VENDOR_QUALCOMM;
+    seen_write(customDriver && s_active[0] != '\0' ? s_active : NULL);
+    s_onStock = on_stock_qualcomm(customDriver);
     if (s_onStock && ico_diag_startup_end_count(ICO_DIAG_END_LOSS) > 0) {
         ico_gpu_driver_android_note_loss_on_stock();
     }
@@ -630,6 +858,37 @@ const char *ico_gpu_driver_android_hang_note(void)
 static int host_lost_on_stock(void)
 {
     return s_lostOnStock;
+}
+
+/* the page's line for driver i (-1 the phone's own) */
+static const char *host_info(int i)
+{
+    const char *root = driver_root();
+    IcoGpuDriverSeen seen;
+
+    list_ensure();
+    if (root == NULL || i >= s_count || i < -1) {
+        return "";
+    }
+    char *out = i < 0 ? s_infoSystem : s_info[i];
+    int *loaded = i < 0 ? &s_infoSystemLoaded : &s_infoLoaded[i];
+    if (!*loaded) {
+        const size_t cap = i < 0 ? sizeof(s_infoSystem) : sizeof(s_info[0]);
+        if (ico_gpu_driver_seen_read(root, i < 0 ? NULL : s_list[i].folder, &seen)) {
+            ico_gpu_driver_seen_text(&seen, out, cap);
+        } else if (i < 0) {
+            snprintf(out, cap, "Not seen yet: it shows after a start with the phone's own driver.");
+        } else {
+            snprintf(out, cap, "Not started yet, so its version is not known.");
+        }
+        *loaded = 1;
+    }
+    return out;
+}
+
+static const char *host_install_why(void)
+{
+    return s_installWhy;
 }
 
 static int host_count(void)
@@ -762,6 +1021,8 @@ static const char *result_text(int r)
         return "NO PICKER APP";
     case UI_GPU_INSTALL_UNREADABLE:
         return "UNREADABLE";
+    case UI_GPU_INSTALL_PAGES:
+        return "WRONG PAGE SIZE";
     default:
         return "CANCELLED";
     }
@@ -827,6 +1088,8 @@ static const UiGpuDriverHost k_host = {
     .installFileBegin = host_install_file_begin,
     .folderPath = ico_gpu_driver_android_folder_text,
     .lostOnStock = host_lost_on_stock,
+    .info = host_info,
+    .installWhy = host_install_why,
 };
 
 const UiGpuDriverHost *ico_gpu_driver_android_host(void)
@@ -926,7 +1189,9 @@ int ico_gpu_driver_android_choose(char *folder, size_t n, char *why, size_t whyn
     }
     if (r != UI_GPU_INSTALL_ADDED) {
         snprintf(why, whyn, "%s",
-                 r == UI_GPU_INSTALL_NOSPACE      ? "Not enough free space."
+                 r == UI_GPU_INSTALL_NOSPACE ? "Not enough free space."
+                 : r == UI_GPU_INSTALL_PAGES
+                     ? "That driver package is not built for this phone's 16 KB memory pages."
                  : r == UI_GPU_INSTALL_UNREADABLE ? "The chosen file could not be read."
                  : r == UI_GPU_INSTALL_CANCELLED  ? "No file was chosen."
                  : r == UI_GPU_INSTALL_NO_PICKER  ? "The file picker could not be opened."

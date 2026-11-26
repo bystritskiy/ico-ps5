@@ -34,11 +34,7 @@ const char *const ui_strings_en[UI_STR_COUNT] = {
         "For a less stressful game. A few scripted scenes still show the capture.",
     [UI_STR_OPT_PIT_TIME] = "Time to rescue Yorda",
     [UI_STR_OPT_PIT_TIME_NOTE] =
-        "How long a shadow takes to pull Yorda into a pit. The Yorda row above stops it altogether.",
-    [UI_STR_VAL_PIT_HALF] = "Half",
-    [UI_STR_VAL_PIT_LONGER] = "Longer",
-    [UI_STR_VAL_PIT_DOUBLE] = "Double",
-    [UI_STR_VAL_PIT_TRIPLE] = "Triple",
+        "Seconds from a shadow sinking with Yorda until she is taken; quicker in some scenes, in proportion. Shadows never taking Yorda stops it.",
     [UI_STR_OPT_SHADOW_SPEED] = "Shadow speed",
     [UI_STR_OPT_SHADOW_SPEED_NOTE] =
         "How fast shadows walk, run and fly. It does not change how often they attack.",
@@ -153,6 +149,7 @@ const char *const ui_strings_en[UI_STR_COUNT] = {
     [UI_STR_OPT_TOUCH_SIZE] = "Touch size",
     [UI_STR_OPT_TOUCH_OPACITY] = "Touch opacity",
     [UI_STR_VAL_ALWAYS] = "Always",
+    [UI_STR_VAL_ALWAYS_SCENES] = "Always, Start only in scenes",
     [UI_STR_VAL_SMALL] = "Small",
     [UI_STR_VAL_MEDIUM] = "Medium",
     [UI_STR_VAL_LARGE] = "Large",
@@ -203,8 +200,16 @@ const char *const ui_strings_en[UI_STR_COUNT] = {
     [UI_STR_OPT_NEWGAME_PLUS] = "New Game+",
     [UI_STR_NEWGAME_PLUS_SCREEN] =
         "New Game+ plays the second journey: Yorda’s words translated, the ending and items changed. Off plays the first journey even after finishing.",
+    [UI_STR_NEWGAME_START] = "Start",
+    [UI_STR_NEWGAME_START_SCREEN] = "Begins the new game with the choices above.",
     [UI_STR_OPT_CRT] = "CRT filter",
     [UI_STR_OPT_CRT_STRENGTH] = "CRT strength",
+    [UI_STR_OPT_TONE_GAMMA] = "Gamma",
+    [UI_STR_OPT_TONE_BRIGHTNESS] = "Picture brightness",
+    [UI_STR_OPT_TONE_CONTRAST] = "Contrast",
+    [UI_STR_OPT_TONE_SATURATION] = "Saturation",
+    [UI_STR_OPT_TONE_NOTE] =
+        "50 is the picture as the game draws it. Square puts 50 back. The CRT filter follows; sharp menu text does not.",
     [UI_STR_VAL_CRT_SCANLINES] = "Scanlines",
     [UI_STR_VAL_CRT_CONSUMER] = "Consumer TV",
     [UI_STR_VAL_CRT_TRINITRON] = "Trinitron",
@@ -402,6 +407,20 @@ const char *const ui_strings_en[UI_STR_COUNT] = {
     [UI_STR_VAL_HOLD_DISC_B] = "Disc’s own (B)",
     [UI_STR_HOLD_TYPE_NOTE] =
         "A: keep R1 held to hold Yorda’s hand. B: press R1 once to take her hand, press again to let go.",
+    [UI_STR_OPT_ZOOM_TYPE] = "Zoom type",
+    [UI_STR_VAL_ZOOM_HOLD] = "Hold",
+    [UI_STR_VAL_ZOOM_TOGGLE] = "Toggle",
+    [UI_STR_ZOOM_TYPE_NOTE] =
+        "Hold: the camera zooms in while you keep R2 held. Toggle: press R2 once to zoom in, press again to zoom out.",
+    [UI_STR_OPT_CAMERA_RESET] = "Camera reset",
+    [UI_STR_CAMERA_RESET_NOTE] =
+        "On: click the right stick (R3) to bring the camera straight back to Ico.",
+    [UI_STR_OPT_YORDA_LOOK] = "Look at Yorda",
+    [UI_STR_YORDA_LOOK_NOTE] =
+        "Ico and the camera turn to Yorda without calling her. Hold: while you hold L3. Toggle: L3 starts and stops it.",
+    [UI_STR_OPT_BUTTON_PICTURES] = "Button pictures",
+    [UI_STR_BUTTON_PICTURES_NOTE] =
+        "The buttons shown in menus and photo mode. Auto follows the controller you used last.",
     [UI_STR_STICK_FIX_ALSO_NOTE] = "Also under Gameplay.",
     [UI_STR_ACH_POPUPS_ALSO_NOTE] = "Also under Achievements.",
     [UI_STR_PLAYERS_NOTE] = "2: a second controller controls Yorda.",
@@ -443,7 +462,6 @@ const char *const ui_strings_en[UI_STR_COUNT] = {
     [UI_STR_STATS_CAPTURES] = "Yorda captured",
     [UI_STR_STATS_SAVES] = "Saves this journey",
     [UI_STR_STATS_ENEMIES] = "Enemies defeated this journey",
-    [UI_STR_STATS_ASSISTS] = "Assists",
     [UI_STR_STATS_AREA] = "Area",
     [UI_STR_PHOTO_ACT_MOVE] = "move",
     [UI_STR_PHOTO_ACT_LOOK] = "look",
@@ -514,10 +532,6 @@ const char *const ui_strings_en[UI_STR_COUNT] = {
     [UI_STR_VAL_WINDOWED] = "Windowed",
     [UI_STR_VAL_BORDERLESS] = "Borderless",
     /* Effects > Cinematic bars */
-    [UI_STR_OPT_EFFECT_WATER] = "Water reflections",
-    [UI_STR_VAL_SHARP] = "Sharp",
-    [UI_STR_EFFECT_WATER_NOTE] =
-        "Sharp draws the reflections in water at the resolution you chose; Original keeps the PS2’s softer reflections.",
     [UI_STR_VAL_SMOOTH] = "Smooth",
     [UI_STR_OPT_SHOW_FPS] = "Frame rate counter",
     [UI_STR_EFFECT_MOTION_BLUR_NOTE] =
@@ -554,14 +568,13 @@ const char *const ui_strings_en[UI_STR_COUNT] = {
         "The driver you chose did not start last time. The phone’s own driver is in use.",
     [UI_STR_GPU_DRIVER_NOSPACE] = "Not enough space to add this driver.",
     [UI_STR_GPU_DRIVER_NO_PICKER] =
-        "The file picker could not be opened. You can copy the driver’s zip file into the game’s drivers folder instead: %s",
+        "The file picker did not open. Copy the driver’s zip into the drivers folder instead: %s",
     [UI_STR_GPU_DRIVER_NO_PICKER_APP] =
-        "No app on this device can choose a file. Copy the driver’s zip file into the game’s drivers folder instead: %s",
-    [UI_STR_GPU_DRIVER_UNREADABLE] =
-        "The chosen file could not be read. Copy it onto this device first, then choose it again.",
+        "No app here can choose a file. Copy the driver’s zip into the drivers folder instead: %s",
+    [UI_STR_GPU_DRIVER_UNREADABLE] = "Unreadable: copy it to this device first",
     [UI_STR_GPU_DRIVER_ADD_FILE] = "Add from the drivers folder",
     [UI_STR_GPU_DRIVER_CANCELLED] =
-        "No file was chosen. If the file picker does not appear on this device, copy the driver’s zip file into the game’s drivers folder and use Add from the drivers folder: %s",
+        "No file chosen. If no file picker appears, copy the driver’s zip into the drivers folder and use Add from the drivers folder: %s",
     [UI_STR_GPU_DRIVER_NOTE_LOST] =
         "The graphics stopped responding on this device’s own Qualcomm driver. A Turnip driver package can help: add one here, or copy its zip file into the game’s drivers folder (%s). Used from the next start.",
     [UI_STR_QUIT_GAME] = "Quit game",
@@ -589,6 +602,9 @@ const char *const ui_strings_en[UI_STR_COUNT] = {
     [UI_STR_OPT_SECOND_CARD] = "Second memory card",
     [UI_STR_OPT_SECOND_CARD_NOTE] =
         "Off: one memory card, as the original. On: a second card with ten more saves; the game’s save and load screens offer both.",
+    [UI_STR_OPT_SHADOWS_TOGETHER] = "Shadows attack together",
+    [UI_STR_OPT_SHADOWS_TOGETHER_NOTE] =
+        "Off: as the original, the shadows take turns to attack. On: several shadows may attack at the same time.",
     [UI_STR_OPT_AA] = "Anti-aliasing",
     [UI_STR_OPT_AA_NOTE] =
         "Smooths jagged edges. Supersampling draws 4 times (2x) or 16 times (4x) the pixels; lower it if the counter drops to 30.",
@@ -596,6 +612,17 @@ const char *const ui_strings_en[UI_STR_COUNT] = {
     [UI_STR_VAL_DOWNSAMPLE_BOX] = "To original size",
     [UI_STR_OPT_DOWNSAMPLE_NOTE] =
         "Draws at the Resolution above, then shrinks to the game's own size. Needs 2x or more; not with the CRT filter or at Window.",
+    [UI_STR_OPT_UPSCALE] = "Upscaling",
+    [UI_STR_VAL_UPSCALE_FSR1] = "FSR 1.0",
+    [UI_STR_VAL_UPSCALE_FSR3] = "FSR 3.1",
+    [UI_STR_OPT_UPSCALE_QUALITY] = "Upscaling quality",
+    [UI_STR_VAL_UPSCALE_Q_NATIVE] = "Native AA",
+    [UI_STR_VAL_UPSCALE_Q_QUALITY] = "Quality",
+    [UI_STR_VAL_UPSCALE_Q_BALANCED] = "Balanced",
+    [UI_STR_VAL_UPSCALE_Q_PERFORMANCE] = "Performance",
+    [UI_STR_OPT_UPSCALE_SHARPNESS] = "Sharpness",
+    [UI_STR_OPT_UPSCALE_NOTE] =
+        "FSR (AMD) sharpens a picture drawn smaller than the screen. Not with the CRT filter or at Window. 3.1: no Downsampling; anti-aliasing off.",
     [UI_STR_AA_OFF] = "Off",
     [UI_STR_AA_SSAA2] = "2x supersampling",
     [UI_STR_AA_SSAA4] = "4x supersampling",
@@ -603,6 +630,7 @@ const char *const ui_strings_en[UI_STR_COUNT] = {
     [UI_STR_AA_MSAA4] = "MSAA 4x",
     [UI_STR_AA_MSAA8] = "MSAA 8x",
     [UI_STR_AA_UNAVAILABLE] = " (off: not available)",
+    [UI_STR_AA_FSR3] = " (off: FSR 3.1)",
     [UI_STR_EXTRAS_STEAM] = "Add to Steam",
     [UI_STR_STEAM_ADDED] = "Added to Steam",
     [UI_STR_STEAM_ADDED_BODY] = "Start Steam and look for ICO\nin your library.",
@@ -614,8 +642,12 @@ const char *const ui_strings_en[UI_STR_COUNT] = {
     [UI_STR_STEAM_NO_USER] = "No Steam account found",
     [UI_STR_STEAM_NO_USER_BODY] = "Sign in to Steam once,\nthen try again.",
     [UI_STR_STEAM_FAILED] = "Could not add to Steam",
-    [UI_STR_STEAM_FAILED_BODY] =
-        "The shortcut list could not be changed.\nThe README shows how to add it by hand.",
+    [UI_STR_STEAM_FAILED_BODY] = "The README shows how to add it by hand.",
+    [UI_STR_EXTRAS_DESKTOP] = "Add to the applications menu",
+    [UI_STR_DESKTOP_ADDED] = "Added to the menu",
+    [UI_STR_DESKTOP_ADDED_BODY] = "The game is in your\napplications menu.",
+    [UI_STR_DESKTOP_FAILED] = "Could not add to the menu",
+    [UI_STR_DESKTOP_FAILED_BODY] = "The menu entry could not be\nwritten to your user folder.",
     [UI_STR_EXTRAS_EXPORT_TEXTURES] = "Export textures",
     [UI_STR_EXPORT_TEXTURES_STOP] = "Stop exporting",
     [UI_STR_EXPORT_TEXTURES_NOTE] =
@@ -638,7 +670,7 @@ const char *const ui_strings_en[UI_STR_COUNT] = {
     [UI_STR_RESTORE_AGAIN] = "Press again to choose a backup",
     [UI_STR_RESTORE_CONFIRM_TITLE] = "Restore from a backup?",
     [UI_STR_RESTORE_CONFIRM_BODY] =
-        "The memory card, save states, settings and achievements here are replaced by the backup’s, and the game restarts.\nPress again to choose the backup.",
+        "Replaces the memory card, save states,\nsettings and achievements here, then restarts.\nPress again to choose the backup.",
     [UI_STR_RESTORE_CHOOSING] = "Choose the backup to restore.",
     [UI_STR_RESTORE_READING] = "Reading the backup…",
     [UI_STR_RESTORE_PROGRESS] = "Restoring: %d of %d files",
@@ -654,21 +686,18 @@ const char *const ui_strings_en[UI_STR_COUNT] = {
     [UI_STR_BACKUP_DONE_BODY] = "%d files saved to\n%s",
     [UI_STR_BACKUP_FAILED] = "Could not back up your data",
     [UI_STR_RESTORE_DONE] = "Restoring your data",
-    [UI_STR_RESTORE_DONE_RESTART] = "The game restarts now and puts the backup in place.",
+    [UI_STR_RESTORE_DONE_RESTART] = "Restarting to put the backup in place.",
     [UI_STR_RESTORE_DONE_CLOSE] =
-        "The game closes now. Start it again: it puts the backup in place as it starts.",
+        "The game closes now. Start it again\nto put the backup in place.",
     [UI_STR_RESTORE_FAILED] = "Could not restore the backup",
-    [UI_STR_BACKUP_WHY_BUSY] = "Not now: the game is saving. Try again in a moment.",
+    [UI_STR_BACKUP_WHY_BUSY] = "The game is saving. Try again in a moment.",
     [UI_STR_BACKUP_WHY_NOTHING] = "There is nothing to back up yet.",
-    [UI_STR_BACKUP_WHY_WRITE] =
-        "The data could not be written. Check the free space and try again.",
+    [UI_STR_BACKUP_WHY_WRITE] = "Could not write the data.\nCheck the free space and try again.",
     [UI_STR_BACKUP_WHY_READ] = "The file could not be read.",
     [UI_STR_BACKUP_WHY_NOT_BACKUP] = "This file is not a backup made by this game.",
-    [UI_STR_BACKUP_WHY_NEWER] =
-        "This backup was made by a newer version. Update the game to restore it.",
+    [UI_STR_BACKUP_WHY_NEWER] = "Made by a newer version.\nUpdate the game to restore it.",
     [UI_STR_BACKUP_WHY_DAMAGED] = "This backup is damaged.",
-    [UI_STR_BACKUP_WHY_UNSAFE] =
-        "This backup holds files outside the game’s own folders, so it is not used.",
+    [UI_STR_BACKUP_WHY_UNSAFE] = "It holds files outside the game’s\nfolders, so it is not used.",
     [UI_STR_BACKUP_WHY_TOO_BIG] = "This backup is larger than the game accepts.",
     [UI_STR_BACKUP_WHY_NO_DIALOG] = "No file chooser could be opened.",
     [UI_STR_BACKUP_WHY_NO_SPACE] = "There is not enough free space on the device.",
@@ -709,18 +738,18 @@ const char *const ui_strings_en[UI_STR_COUNT] = {
     [UI_STR_ISO_COPYING] = "Copying the disc image into the app",
     [UI_STR_ISO_COPYING_LONG] =
         "Copying the disc image into the app. It is a large image: this takes a few minutes",
-    [UI_STR_SECTION_VARIANTS] = "Game variants",
+    [UI_STR_SECTION_CHAINS] = "Chains",
+    [UI_STR_SECTION_SHADOWS] = "Shadows",
+    [UI_STR_SECTION_CUTSCENES] = "Cutscenes",
     [UI_STR_OPT_VAR_TOUGHNESS] = "Shadow toughness",
     [UI_STR_OPT_VAR_TOUGHNESS_NOTE] =
-        "American: every Shadow as tough as on the North American disc, and no tougher on later playthroughs. Achievements stay on.",
+        "American: every Shadow as tough as on the North American disc, and no tougher on later playthroughs.",
     [UI_STR_VAL_VAR_AMERICAN] = "American",
     [UI_STR_VAL_VAR_NOT_TOUGHER] = "Not tougher later",
     [UI_STR_OPT_VAR_ONE_HIT] = "One hit per swing",
-    [UI_STR_OPT_VAR_ONE_HIT_NOTE] =
-        "Each swing of Ico’s weapon can hurt a Shadow only once. Switches achievements off.",
+    [UI_STR_OPT_VAR_ONE_HIT_NOTE] = "Each swing of Ico’s weapon can hurt a Shadow only once.",
     [UI_STR_OPT_VAR_NEVER_DODGE] = "Shadows never dodge",
-    [UI_STR_OPT_VAR_NEVER_DODGE_NOTE] =
-        "The Shadows never step aside from Ico’s swings. Switches achievements off.",
+    [UI_STR_OPT_VAR_NEVER_DODGE_NOTE] = "The Shadows never step aside from Ico’s swings.",
     [UI_STR_OPT_VAR_AGGRESSION] = "Shadow aggression",
     [UI_STR_VAL_VAR_AGG_OWN] = "Their own",
     [UI_STR_VAL_VAR_AGG_BOLD_PATIENT] = "Bold, patient",
@@ -728,15 +757,14 @@ const char *const ui_strings_en[UI_STR_COUNT] = {
     [UI_STR_VAL_VAR_AGG_WARY_PATIENT] = "Wary, patient",
     [UI_STR_VAL_VAR_AGG_WARY_QUICK] = "Wary, quick",
     [UI_STR_OPT_VAR_AGGRESSION_NOTE] =
-        "How the Shadows fight: bold or wary, patient or quick. Their own keeps each Shadow’s habits. Achievements stay on.",
+        "How the Shadows fight: bold or wary, patient or quick. Their own keeps each Shadow’s habits.",
     [UI_STR_OPT_VAR_NO_HINTS] = "No hints",
     [UI_STR_OPT_VAR_NO_HINTS_NOTE] =
-        "Yorda gives no hints about where to go, as on the North American disc. Achievements stay on.",
+        "Yorda gives no hints about where to go, as on the North American disc.",
     [UI_STR_OPT_VAR_BARRIER] = "Queen barrier",
     [UI_STR_VAL_VAR_HITS_5] = "5 hits",
     [UI_STR_VAL_VAR_HITS_7] = "7 hits",
-    [UI_STR_OPT_VAR_BARRIER_NOTE] =
-        "How many hits it takes to break the Queen’s barrier. Achievements stay on.",
+    [UI_STR_OPT_VAR_BARRIER_NOTE] = "How many hits it takes to break the Queen’s barrier.",
     [UI_STR_OPT_VAR_NO_LOOK] = "No cutscene look-around",
     [UI_STR_OPT_VAR_NO_LOOK_NOTE] =
         "The right stick no longer looks around during cutscenes. Achievements stay on.",
@@ -747,9 +775,9 @@ const char *const ui_strings_en[UI_STR_COUNT] = {
     [UI_STR_OPT_VAR_DEBUG_MENU_NOTE] =
         "The game’s own debug menu, for developers. Switches achievements off.",
     [UI_STR_OPT_VAR_TOUGHNESS_NOTE_DEMO] =
-        "American is not offered on this demo: its Shadows are not the North American disc’s. Not tougher later: no tougher on later playthroughs. Achievements stay on.",
+        "American is not offered on this demo: its Shadows are not the North American disc’s. Not tougher later: no tougher on later playthroughs.",
     [UI_STR_OPT_VAR_NO_HINTS_NOTE_2001] =
-        "This version of the game gives no hints, so this changes nothing. Achievements stay on.",
+        "This version of the game gives no hints, so this changes nothing.",
     [UI_STR_OPT_VAR_NO_LOOK_NOTE_2001] =
         "This version of the game has no look-around in cutscenes, so this changes nothing. Achievements stay on.",
     [UI_STR_GPU_HANG_TURNIP] =
@@ -767,22 +795,24 @@ const char *const ui_strings_en[UI_STR_COUNT] = {
     [UI_STR_STATES_NOTE] =
         "A state belongs to this disc. Later versions may load it too. Left and Right pick the action.",
     [UI_STR_STATES_PAUSE_FIRST] = "Pause the game to save a state",
+    [UI_STR_STATES_PAUSE_FIRST_LOAD] = "Pause the game to load this state",
     [UI_STR_STATES_REFUSED_BUILD] = "Saved by another version of the game",
     [UI_STR_STATES_REFUSED_DISC] = "Saved from another disc",
-    [UI_STR_STATES_REFUSED_SETTINGS] = "A gameplay setting differs: %s",
     [UI_STR_STATES_REFUSED_BUSY] = "Not now: the game is loading or saving",
-    [UI_STR_STATES_REFUSED_CHECK] = "The state could not be restored; the game goes on",
+    [UI_STR_STATES_REFUSED_CHECK] = "Could not load it; play goes on",
     [UI_STR_STATES_OFF] = "Save states are off on this build",
     [UI_STR_STATES_TITLE_HINT] = "Saving is done from the pause menu",
     [UI_STR_STATES_SAVE_FAILED] = "The state could not be saved",
     [UI_STR_STATES_XB_OLD] =
-        "This save state was made by version %s,\nbefore save states could carry over\nto newer versions.\nYour memory-card saves still work.",
+        "Made by version %s, too old to load.\nYour memory-card saves still work.",
     [UI_STR_STATES_XB_CODE] =
-        "This save state was made by version %s.\nVersion %s changed the part of the game\nit was saved in, so it cannot be resumed.\nYour memory-card saves still work.",
+        "Made by version %s; version %s changed\nthat part of the game, so it cannot load.\nYour memory-card saves still work.",
     [UI_STR_STATES_XB_DATA] =
-        "This save state was made by version %s.\nVersion %s changed how the game keeps\nits progress in memory, so it cannot be resumed.\nYour memory-card saves still work.",
-    [UI_STR_STATES_XB_PINNED] =
-        "This save state was made by version %s,\nand only that version can resume it.\nYour memory-card saves still work.",
+        "Made by version %s; version %s changed\nhow progress is kept, so it cannot load.\nYour memory-card saves still work.",
+    [UI_STR_STATES_XB_PINNED] = "Only version %s can load it.\nYour memory-card saves still work.",
+    [UI_STR_STATES_CKPT_ROW] = "Loads from its last checkpoint",
+    [UI_STR_STATES_CKPT_LOADED] = "Resumed at its last checkpoint\n(made by version %s).",
+    [UI_STR_STATES_CKPT_NONE] = "Made by version %s: it cannot be\nresumed and has no checkpoint.",
     [UI_STR_OPT_EFFECT_GLOW_SMOOTH] = "Glow between frames",
     [UI_STR_EFFECT_GLOW_SMOOTH_NOTE] =
         "Original keeps the game’s own frame’s glow between frames. Smooth makes it again for every frame shown; it costs more graphics time.",
@@ -790,7 +820,96 @@ const char *const ui_strings_en[UI_STR_COUNT] = {
     [UI_STR_OPT_EFFECT_MOTION_BLUR_STRENGTH] = "Motion blur strength",
     [UI_STR_EFFECT_MOTION_BLUR_STRENGTH_NOTE] =
         "Lower values make the trail fade faster; 100 is the PS2’s own trail.",
+    [UI_STR_SECTION_UNUSED] = "Unused content",
+    [UI_STR_UNUSED_ARENA] = "Test room: arena",
+    [UI_STR_UNUSED_ARENA_NOTE] =
+        "A room the makers used to try fights with the Shadows; it has no exit, so leave with Start, then End Game.",
+    [UI_STR_UNUSED_CLIMB] = "Test room: climbing",
+    [UI_STR_UNUSED_CLIMB_NOTE] =
+        "A room the makers used to try climbing and boxes; it has no exit, so leave with Start, then End Game.",
+    [UI_STR_UNUSED_MOVIE] = "Attract movie (576 lines)",
+    [UI_STR_UNUSED_MOVIE_NOTE] =
+        "A second copy of the film the title screen plays when left alone, made for European televisions and never shown.",
+    [UI_STR_UNUSED_ART] = "Early show title art",
+    [UI_STR_UNUSED_ART_NOTE] =
+        "Pictures from the title screen of an early show version, left on the disc and never shown.",
+    [UI_STR_UNUSED_ART_VER] = "Early show: version mark",
+    [UI_STR_UNUSED_ART_START] = "Early show: Press Start",
+    [UI_STR_UNUSED_ART_COPYRIGHT] = "Early show: copyright",
+    [UI_STR_STATES_REFUSED_UNUSED] = "Not in a test room",
+    [UI_STR_SECTION_COMBAT] = "Combat",
+    [UI_STR_OPT_VAR_AUTO_GUARD] = "Automatic guard",
+    [UI_STR_OPT_VAR_AUTO_GUARD_NOTE] =
+        "Off: Ico no longer blocks a Shadow’s attack from the front; it lands as an attack from behind does.",
+    [UI_STR_OPT_VAR_ATTACK_TURN] = "Turn to face shadows",
+    [UI_STR_OPT_VAR_ATTACK_TURN_NOTE] =
+        "Off: Ico swings straight ahead instead of turning toward the nearest Shadow; the swing’s reach is unchanged.",
+    [UI_STR_OPT_VAR_SHADOWS_WAIT_DOWN] = "Shadows wait while Ico is down",
+    [UI_STR_OPT_VAR_SHADOWS_WAIT_DOWN_NOTE] =
+        "Off: the Shadows no longer hold back while Ico is knocked down, and their swings land while he is on the ground and getting up.",
+    [UI_STR_OPT_VAR_SWORD_COLOUR] = "Light sword colour",
+    [UI_STR_OPT_VAR_SWORD_COLOUR_NOTE] =
+        "Red: the light sword leaves a red trail, as its unused twin in the game does; nothing else changes. From the next room.",
+    [UI_STR_OPT_VAR_WEAPON] = "Stick",
+    [UI_STR_VAL_VAR_INSECT_NET] = "Insect net",
+    [UI_STR_OPT_VAR_WEAPON_NOTE] =
+        "Insect net: each stick is the game’s unused insect net; it cannot be swung or lit and never hurts a Shadow. From the next room.",
+    [UI_STR_VAL_VAR_THIRD_JOURNEY] = "Third journey",
+    [UI_STR_OPT_VAR_TOUGHNESS_NOTE_THIRD] =
+        "Shadows as tough as on a third playthrough, which the game never reaches (twice the first journey’s).",
+    [UI_STR_OPT_VAR_PEACEFUL] = "Peaceful shadows",
+    [UI_STR_OPT_VAR_PEACEFUL_NOTE] =
+        "On: Shadows stay where they appear and never go after Ico or Yorda.",
+    [UI_STR_OPT_VAR_CHAIN_SPEED] = "Chain swing speed",
+    [UI_STR_OPT_VAR_CHAIN_SPEED_NOTE] =
+        "How fast a chain swings when Ico hangs on it and swings it. 1 is the slowest, 10 the fastest, 4 the game’s own. Achievements stay on.",
+    [UI_STR_OPT_VAR_CHAIN_DAMPING] = "Chain swing slowdown",
+    [UI_STR_OPT_VAR_CHAIN_DAMPING_NOTE] =
+        "How quickly a swing dies down while Ico is not swinging the chain. 1 is the slowest, 10 the quickest, 4 the game’s own. Achievements stay on.",
+    [UI_STR_VAL_VAR_CHAIN_ORIGINAL] = "4 (original)",
     [UI_STR_LANG_RU_BOBTTZ] = "Русский (bob-ttz)",
     [UI_STR_LANG_RU_COBRA838] = "Русский (cobra838)",
     [UI_STR_LANG_PT_BR] = "Português (Brasil) (ichagas7)",
+    [UI_STR_OPT_FREE_MOVEMENT] = "Free movement",
+    [UI_STR_OPT_FREE_MOVEMENT_NOTE] =
+        "Press L2 to fly Ico with the sticks: the left stick moves him, the right stick goes up and down, L3 sets him on the floor. Switches achievements off.",
+    [UI_STR_REMAP_ASK_HINT] = "Ask Yorda for a hint",
+    [UI_STR_DIFF] = "Difficulty",
+    [UI_STR_DIFF_NOTE] =
+        "Sets the Shadows, the rescue time and the rules for this new journey. The save keeps the choice.",
+    [UI_STR_DIFF_EASY] = "Easy",
+    [UI_STR_DIFF_NORMAL] = "Normal",
+    [UI_STR_DIFF_HARD] = "Hard",
+    [UI_STR_DIFF_CUSTOM] = "Custom",
+    [UI_STR_DIFF_EASY_NOTE] =
+        "Slower, gentler Shadows that never take Yorda and never dodge, and more time to rescue her.",
+    [UI_STR_DIFF_NORMAL_NOTE] = "The game as it shipped.",
+    [UI_STR_DIFF_HARD_NOTE] =
+        "Faster, tougher Shadows that attack together, no automatic guard, less time to rescue Yorda, game over after 3 knock-downs in a room.",
+    [UI_STR_DIFF_CUSTOM_NOTE] = "Your own rules. Change every row under Customize.",
+    [UI_STR_DIFF_CUSTOMIZE] = "Customize",
+    [UI_STR_DIFF_CUSTOMIZE_NOTE] =
+        "Change each rule on its own. A mix that matches no preset shows as Custom.",
+    [UI_STR_DIFF_RULES] = "Rules",
+    [UI_STR_DIFF_NO_SHADOWS] = "No Shadows",
+    [UI_STR_DIFF_NO_SHADOWS_NOTE] =
+        "On: Shadows never appear. Some story moments are lost or play differently without them.",
+    [UI_STR_DIFF_KNOCK_LIMIT] = "Knock-down limit",
+    [UI_STR_DIFF_KNOCK_LIMIT_NOTE] =
+        "A game over once Ico has been knocked down this many times. Off sets no limit.",
+    [UI_STR_DIFF_KNOCK_SCOPE] = "Knock-downs count",
+    [UI_STR_DIFF_KNOCK_SCOPE_NOTE] =
+        "Counts knock-downs in each room (starting again on entering one) or across the whole journey. Does nothing while the limit is Off.",
+    [UI_STR_DIFF_SCOPE_ROOM] = "Each room",
+    [UI_STR_DIFF_SCOPE_JOURNEY] = "Whole journey",
+    [UI_STR_DIFF_PERMADEATH] = "Permadeath",
+    [UI_STR_DIFF_PERMADEATH_NOTE] =
+        "On: any game over ends this journey. There is no Continue, and the save can no longer be loaded.",
+    [UI_STR_DIFF_LOCKED_NOTE] = "Chosen when the journey began",
+    [UI_STR_DIFF_LINE] = "Difficulty",
+    [UI_STR_DIFF_LINK] = "Difficulty",
+    [UI_STR_DIFF_TOAST_ENDED] = "This journey has ended.",
+    [UI_STR_DIFF_STATES_LOCKED] = "Save states cannot be loaded on a Permadeath journey.",
+    [UI_STR_DIFF_WORD_PERMADEATH] = "Permadeath",
+    [UI_STR_DIFF_STATES_SAVE_LOCKED] = "Save states cannot be made on a Permadeath journey.",
 };

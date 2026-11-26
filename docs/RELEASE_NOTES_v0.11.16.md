@@ -1,0 +1,10 @@
+## New
+
+- Save states now load whatever your settings are: a state made with other settings (Hold type, Zoom type, Camera reset, the Gameplay rows and the rest) used to be refused, and now loads with the settings you have now. A state made in the other of 50 Hz and 60 Hz keeps its own video mode until you restart the game. A state made with Developer mode on and loaded with it off turns achievements off until you restart the game.
+- Options > Controls > Look at Yorda: choose Hold or Toggle to turn Ico and the camera toward Yorda with L3 (click the left stick in, or V on the keyboard) without calling her, so she stays where she is.
+- The log's summary of where each scene's time went now also compares each part of the picture with the graphics chip's speeds measured at start-up, and says roughly how much of each part's time those speeds account for.
+
+## Fixed
+
+- An attempted fix for the slowdown in busy scenes such as the boat and the cage on phones like the moto g24, in three parts: a faster way of drawing the scenery close to the camera, which a start-up check wrongly refused on these phones, can now be used there; the scenery's shapes that cannot be seen are skipped again, in a safer way than the one that turned the picture black there before; and some see-through scenery away from the camera is drawn once instead of twice. Each is used only where a check at start-up shows the picture comes out the same, and stays off if the game ends badly while using it; the first and the last are also timed while you play (never on the title screen) and kept only where they are faster, and the skipping stops at once if a picture comes back unfinished.
+- An attempted fix for Android save states from the last few versions starting again from the last checkpoint instead of where they were saved: a state now resumes at the moment it was saved when nothing it was in the middle of has changed since. Until version 1.0 this is not guaranteed, and the older the state the less likely: a state saved in the middle of something a newer version changed (and, for now, in a place with birds) still continues from its last checkpoint.

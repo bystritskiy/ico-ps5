@@ -74,6 +74,13 @@ STUB_FN(gif_StartPacketPri)
 STUB_FN(ico_ach_slot_loaded)
 STUB_FN(ico_ach_slot_saved)
 STUB_FN(ico_diag_milestone)
+/* port/game/difficulty.h: the sidecar's slot calls and the Continue twins'
+   rule, for the hooks layout_action.c takes in v0.11.3 */
+STUB_FN(ico_difficulty_finished)
+STUB_FN(ico_difficulty_slot_finished)
+STUB_FN(ico_difficulty_slot_loaded)
+STUB_FN(ico_difficulty_slot_saved)
+STUB_FN(ico_difficulty_sum_finished)
 STUB_FN(ico_mirror_slot_loaded)
 STUB_FN(ico_mirror_slot_saved)
 STUB_FN(ico_opt_hold_type_toggled)
@@ -82,6 +89,14 @@ STUB_FN(ico_opt_output_toggled)
 STUB_FN(ico_players_slot_loaded)
 STUB_FN(ico_players_slot_saved)
 STUB_FN(ico_rand)
+STUB_FN(ico_unused_game_over)
+/* port/game/unused_content.c's flag: no test room runs here */
+int ico_unused_active(void);
+
+int ico_unused_active(void)
+{
+    return 0;
+}
 STUB_FN(iosMcDelete)
 STUB_FN(iosMcFormat)
 STUB_FN(iosMcGetBlockSaveInfo)

@@ -1,0 +1,10 @@
+## New
+
+- Options > Picture: Gamma, Picture brightness, Contrast and Saturation now change by 1 with each press instead of 5.
+- On phones and handhelds with a Snapdragon chip, the log now checks a little of the characters' drawing as you play and says when it comes out wrong (for the stray streak report).
+- Русский (bob-ttz): 30 more rows translated, among them the Picture rows, the Gameplay pages, the Unused content page and five notes that were shown in English.
+
+## Fixed
+
+- Entering a test room from Options > Extras > Unused content no longer ends in a game over at once: the character starts on the room's floor where the camera can see him, in both rooms; the climbing room, which has no floor on the original disc, is given one.
+- Motion blur: Smooth made the picture far too blurry when the camera moved at Frame rate 60 or Uncapped on some devices; the trail is now as long as the original's at every frame rate.

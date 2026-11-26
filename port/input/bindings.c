@@ -24,10 +24,11 @@
 #define BUTTON_ON 0.5f
 
 static const char *const target_names[ICO_T_COUNT] = {
-    "l2",          "r2",           "l1",        "r1",          "triangle",    "circle",
-    "cross",       "square",       "select",    "l3",          "r3",          "start",
-    "up",          "right",        "down",      "left",        "lstick_up",   "lstick_down",
-    "lstick_left", "lstick_right", "rstick_up", "rstick_down", "rstick_left", "rstick_right"};
+    "l2",        "r2",          "l1",          "r1",           "triangle",
+    "circle",    "cross",       "square",      "select",       "l3",
+    "r3",        "start",       "up",          "right",        "down",
+    "left",      "lstick_up",   "lstick_down", "lstick_left",  "lstick_right",
+    "rstick_up", "rstick_down", "rstick_left", "rstick_right", "hint"};
 
 static const char *const gp_names[ICO_GP_COUNT] = {
     "none",      "south",       "east",         "west",          "north",  "back",   "start",
@@ -334,7 +335,7 @@ static int parse_choice(const char *v, const char *const *names, int n)
     return -1;
 }
 
-const char *const ico_touch_mode_names[3] = {"off", "auto", "always"};
+const char *const ico_touch_mode_names[4] = {"off", "auto", "always", "always_scenes"};
 const char *const ico_touch_size_names[3] = {"small", "medium", "large"};
 
 /* Bind `value` to a row of a table; type 0 keys, 1 mouse, 2 gamepad. */
@@ -419,7 +420,7 @@ int ico_bindings_set(IcoBindings *b, const char *key, const char *value)
         } else if (strcmp(key, "mouse_decay") == 0 && parse_float(value, 0.0f, 0.99f, &f) == 0) {
             b->mouse_decay = f;
         } else if (strcmp(key, "touch_mode") == 0 &&
-                   (on = parse_choice(value, ico_touch_mode_names, 3)) >= 0) {
+                   (on = parse_choice(value, ico_touch_mode_names, 4)) >= 0) {
             b->touch_mode = on;
         } else if (strcmp(key, "touch_size") == 0 &&
                    (on = parse_choice(value, ico_touch_size_names, 3)) >= 0) {
@@ -735,6 +736,7 @@ void ico_bindings_step(IcoBindings *b, const IcoInputRaw *raw, IcoVirtualPad *ou
     memset(&gp, 0, sizeof(gp));
     memset(&kb, 0, sizeof(kb));
     memset(out, 0, sizeof(*out));
+    b->hint_down = 0;
 
     /* the mouse camera's stick */
     if (b->mouse_on && b->mouse_camera) {
@@ -755,6 +757,7 @@ void ico_bindings_step(IcoBindings *b, const IcoInputRaw *raw, IcoVirtualPad *ou
         for (t = 0; t < 8; t++) {
             d[t] = gp_down(raw, b->gp[ICO_T_LSTICK_UP + t]);
         }
+        b->hint_down = gp_down(raw, b->gp[ICO_T_HINT]);
         x = raw->axis[0];
         y = raw->axis[1];
         ico_input_deadzone(&x, &y, b->deadzone);
@@ -783,8 +786,10 @@ void ico_bindings_step(IcoBindings *b, const IcoInputRaw *raw, IcoVirtualPad *ou
                 if (on) {
                     kb.buttons |= 1u << t;
                 }
-            } else {
+            } else if (t < ICO_T_HINT) {
                 d[t - ICO_T_LSTICK_UP] = on;
+            } else if (on) {
+                b->hint_down = 1;
             }
         }
         dirs(d[0], d[1], d[2], d[3], &kb.lx, &kb.ly);

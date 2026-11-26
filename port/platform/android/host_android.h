@@ -11,6 +11,7 @@
 
 #include <stddef.h>
 #include "android_paths.h"
+#include "thermal_text.h"
 
 /* The logcat tag of every line the program writes there. */
 #define ICO_ANDROID_LOG_TAG "ico-pc"
@@ -49,6 +50,40 @@ void ico_android_log_mirror_flush(void);
    no stdio, and the mirror's lock only if it comes within half a second
    (the crashing thread may be the reader). */
 void ico_android_log_mirror_try_flush(void);
+
+/* The log thread's own cost since the last take (port/platform/log_cost.h):
+   its file writes (one a chunk read from the pipe), their ms and the
+   longest with the first words of the chunk, those of
+   ICO_LOG_MIRROR_SLOW_MS or more one by one (the first
+   ICO_LOG_MIRROR_SLOW_KEEP; monotonic ms, ico_thread_now_ms's clock), its
+   logcat writes' ms, the bytes read, the most bytes found waiting in the
+   pipe and the pipe's size.  Kept under a spinlock of its own (never the
+   mirror's lock, which is held through the file write): a take never waits
+   for a write. */
+#define ICO_LOG_MIRROR_SLOW_MS 8.0
+#define ICO_LOG_MIRROR_SLOW_KEEP 32
+
+typedef struct IcoLogMirrorStats {
+    unsigned long long bytes;
+    unsigned writes, slow, slowN;
+    double writeMs, longestMs, logcatMs;
+    char longestFamily[48];
+    double slowT0[ICO_LOG_MIRROR_SLOW_KEEP], slowT1[ICO_LOG_MIRROR_SLOW_KEEP];
+    unsigned pipeMax, pipeCap; /* bytes; pipeCap 0 not known */
+} IcoLogMirrorStats;
+
+/* 0 and *out filled (then emptied, the pipe's size kept), -1 without the
+   mirror */
+int ico_android_log_mirror_take(IcoLogMirrorStats *out);
+/* A function the log thread calls about once every ICO_LOG_MIRROR_TICK_MS
+   (its poll wakes for it), outside the mirror's lock: the window's asks
+   that must not run on the game thread (window_stall.c: the thermal state
+   by JNI, /proc).  NULL stops it.  The log thread is an SDL thread, so
+   SDL_GetAndroidJNIEnv attaches it.  _running: 1 when the log thread
+   exists (the mirror started), so a tick set will run */
+#define ICO_LOG_MIRROR_TICK_MS 1000.0
+void ico_android_log_mirror_set_tick(void (*tick)(void));
+int ico_android_log_mirror_running(void);
 /* The error box for the end of a crash or the watchdog (diag_host.h
    ico_diag_set_fatal_ui): ico_android_message_box without stdio. */
 void ico_android_fatal_box(const char *text);
@@ -69,6 +104,58 @@ int ico_android_message_box_buttons(void *window, const char *text, const char *
    (the host loop's), the thread SDL_GetAndroidJNIEnv answers for. Does
    nothing when the phone has no vibrator or the call is not available. */
 void ico_host_vibrate(int amplitude, int ms);
+
+/* Sets the recents card's (task switcher's) icon from the PNG at pngPath
+   (IcoActivity.setTaskIcon).  Returns 1 when the activity took it (and logs
+   `window: icon: the recents card is set from <path>`), else 0 with the
+   reason logged (`window: icon: <reason>`).  Must be called on SDL's main
+   thread, as ico_host_vibrate. */
+int ico_android_task_icon(const char *pngPath);
+
+/* The phone's thermal state and screen recording (IcoActivity.thermalHeadroom,
+   thermalStatus and the two listeners' last pushes, issue 123;
+   thermal_text.h): the headroom and status asked of the Java side now, the
+   status from the last push when it cannot be asked, the recording state
+   from the last push (-1 never). Anything not reported is thermal_text.h's
+   "none". *why, when not NULL, gets the words for the block line's "not
+   available (...)". Must be called on SDL's main thread, as
+   ico_host_vibrate. A Java side without the methods costs one failed
+   lookup, then nothing. */
+ThermalState ico_host_thermal(const char **why);
+
+/* The system's game mode (IcoActivity.gameMode: GameManager.getGameMode,
+   Android 12 and later), for the performance hints' line only: 0
+   unsupported, 1 standard, 2 performance, 3 battery, 4 custom; -1 before
+   Android 12; -2 the call could not be made.  On SDL's main thread, as
+   ico_host_vibrate. */
+int ico_android_game_mode(void);
+
+/* The display the activity is on (IcoActivity.displayModes, Android 11 and
+   later), for the frame rate pin under Uncapped (window_display_rate.c):
+   up to cap floats into out, the current mode's physical width and
+   height, the display's refresh rate (Display.getRefreshRate, the rate
+   SDL's Java side reads), then each supported mode's width, height and
+   rate.
+   Returns the floats copied (the array's length when it fits), -1 when the
+   list could not be read (before Android 11, no method, a Java exception,
+   no display).  On SDL's main thread, as ico_host_vibrate. */
+int ico_android_display_modes(float *out, int cap);
+/* The battery (IcoActivity.batteryState: BatteryManager's current and
+   level, the sticky battery broadcast's voltage and status), read only,
+   for the log where /sys/class/power_supply is not readable (window_stall.c,
+   power_read.h power_from_android): out[0] the current in uA (INT_MIN
+   none), out[1] the voltage in mV, out[2] the level in %, out[3]
+   BATTERY_STATUS_* (each < 0 none).  1 when the call answered, 0 not (no
+   method, a Java exception, no activity).  From the log thread, as the
+   thermal asks. */
+int ico_android_battery(int out[4]);
+/* The refresh rate the activity's display listener last reported
+   (IcoActivity.watchDisplay: at the start of each visible stretch and at
+   every change of the display's rate or mode list), 0 before the first;
+   *serial (when not NULL) the reports so far, *ms (when not NULL) SDL's
+   ticks in ms (SDL_GetTicks) at the last, *modes (when not NULL) the last
+   report's mode list hash.  Any thread. */
+float ico_android_display_hz(int *serial, unsigned *ms, int *modes);
 
 /* The screen as the activity last reported it (IcoActivity.sendScreen,
    from the system's window-layout callbacks and every configuration

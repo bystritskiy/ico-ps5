@@ -24,6 +24,7 @@
 #include "gallery.h"
 #include "ico_credits.h"
 #include "ico_gamestate.h"
+#include "ico_rows.h" /* Developer > Free movement */
 #include "input.h"
 #include "layout_ext.h"
 #include "menu_text.h"
@@ -35,12 +36,21 @@
 #include "popup.h"
 #include "strings.h"
 #include "sysconf.h"
-#include "touch_edit.h"        /* the touch layout edits (port/input) */
-#include "settings_graphics.h" /* the Graphics page's rows and Apply */
-#include "settings_backup.h"   /* Extras' Back up your data and Restore from a backup */
-#include "settings_states.h"   /* the Save states page's cards, actions and F6 latch */
-#include "touch_edit_ui.h"     /* the Edit layout page */
-#include "variants.h"          /* Extras > Game variants */
+#include "touch_edit.h"          /* the touch layout edits (port/input) */
+#include "settings_graphics.h"   /* the Graphics page's rows and Apply */
+#include "settings_backup.h"     /* Extras' Back up your data and Restore from a backup */
+#include "settings_desktop.h"    /* Extras' Add to the applications menu */
+#include "settings_states.h"     /* the Save states page's cards, actions and F6 latch */
+#include "settings_newgame.h"    /* the New Game screen */
+#include "settings_difficulty.h" /* the New Game draft's rows on Customize's pages */
+#include "settings_unused.h"     /* Extras > Unused content's host */
+#include "settings_variants.h"   /* the game variants rows' values, notes and rule */
+#include "settings_upscale.h"    /* the Upscaling rows: FSR 3.1, quality */
+#include "settings_pads.h"       /* Controls > Button pictures */
+#include "settings_step.h"       /* held Left/Right, L1/R1 */
+#include "sim_keys.h"            /* a loaded state's keys (reapply after a load) */
+#include "touch_edit_ui.h"       /* the Edit layout page */
+#include "variants.h"            /* the game variants rows (Gameplay and its pages) */
 #include "ui_hint.h"
 #include "ui_internal.h" /* ui__font_prefer_chinese */
 #include "ui_list.h"
@@ -61,9 +71,10 @@ extern PadState pad[16];
 extern int NonLinearCameraMove; /* the language, 2..6 */
 extern int systemStatus[12];    /* [0]: 1 PAL 50 Hz, 0 60 Hz */
 extern int gFlagGameClear;
-extern int stage_no;             /* common/src/main.c: the stage running, 1 the title */
-extern int gsResetFunc(int val); /* debug.c: gsb_Init, the boot screen's reset */
-extern void CUR_SE(void);        /* layout_action.c: the menus' sounds */
+extern int stage_no;              /* common/src/main.c: the stage running, 1 the title */
+extern int gsResetFunc(int val);  /* debug.c: gsb_Init, the boot screen's reset */
+extern void debug_Menu_off(void); /* debug.c: the Debug menu closed (developer mode's) */
+extern void CUR_SE(void);         /* layout_action.c: the menus' sounds */
 extern void POSITIVE_SE(void);
 extern void NEGATIVE_SE(void);
 extern void la_host_leave(void); /* layout_action.c (ICO_HOST) */
@@ -73,9 +84,6 @@ extern void la_host_resume_play(void);
 /* fumi/sound/s_init.c: the PS2's stereo (0) or mono (1) output */
 extern int soundOutputModeGet(void);
 extern void soundOutputModeSet(int mode);
-/* layout_action.c: what la_vibe_select's confirm did after
-   the vibration choice, gflagOn(382): the new game starts */
-extern void la_host_new_game_go(void);
 /* the game's Options screen's settings (common/src/main.c,
    fumi/ios/pad.c): its film effect 0..4 (only once the game is cleared),
    hold type A 0 or B 1, players 1 (0) or 2 (1), and the vibration switch;
@@ -173,7 +181,10 @@ static int entryGame(int e)
 #define NOTE_Y 196
 #define HEADER_SIZE 30.0f
 #define NOTE_SIZE 19.0f
-#define REMAP_ITEMS (ICO_T_COUNT + 2) /* the targets, Reset, Back */
+/* the targets on this disc (Ask Yorda for a hint, the last, is for the discs
+   with hints), then Reset and Back */
+#define REMAP_TARGETS (ICO_NTSCAUG6JUN26 ? ICO_T_COUNT - 1 : ICO_T_COUNT)
+#define REMAP_ITEMS (REMAP_TARGETS + 2)
 
 /* the pause menu's Photo mode row: under Options, its letters starting
    where the pause rows' do (menu_text.c's left anchor, 7 texels into the
@@ -185,17 +196,15 @@ static int entryGame(int e)
 #define PAUSE_ROW_W 250
 /* The title is laid out by the port (placeTitle): its four rows, Continue
    (49), New Game (50, and 51 on the New-Game-only layout), Options and
-   "Quit to desktop", one game pitch apart (20 field lines, the Options
-   screen's), and the copyright line (48) below Quit with the same space
-   between its capitals and Quit's as between the rows' (19 field lines:
-   its capitals are 24 output pixels at 960 x 720, the rows' 31).  The PAL
-   data has Continue at 135, New Game at 165 and the copyright line at 195,
-   the next step below New Game, which left no room for the port rows.
-   Where the block can go was measured on window runs' titles (960 x 720
-   Original, 1920 x 1440 Enhanced at full height): the copyright line's sprite, its rim and
-   descenders included, ends 17 pixels above the picture's end at 195 (5 field
-   lines), and the logo ends 384 pixels down; Continue at 119 and the
-   copyright line at 198 leave about 6 pixels at either end. */
+   "Quit to desktop", one game pitch apart (20 field lines), and the
+   copyright line (48) below Quit with the same space between its capitals
+   and Quit's as between the rows' (19 field lines).  The PAL data has
+   Continue at 135, New Game at 165 and the copyright line at 195, which
+   left no room for the port rows.  Measured on window runs' titles (960 x
+   720 Original, 1920 x 1440 Enhanced at full height): the copyright line
+   ends 17 pixels above the picture's end at 195, and the logo ends 384
+   pixels down; Continue at 119 and the copyright line at 198 leave about 6
+   pixels at either end. */
 #define TITLE_PITCH 20
 #define TITLE_CONTINUE_Y 119
 #define TITLE_COPYRIGHT_STEP 19
@@ -208,7 +217,7 @@ static int entryGame(int e)
 #define PAL_COPYRIGHT_Y 195
 
 /* Main's sixteen, and the rc builds' Share a bug report (ICO_RC_TOOLS) */
-#define MAX_ROWS (17 + ICO_RC_TOOLS)
+#define MAX_ROWS (18 + ICO_RC_TOOLS)
 
 typedef struct Row {
     int opt;   /* UiSettingsOpt */
@@ -277,13 +286,7 @@ enum {
     STAT_CAPTURES,
     STAT_SAVES,
     STAT_ENEMIES,
-    STAT_NEWGAME_PLUS,
-    STAT_MIRROR,
-    STAT_ACHIEVEMENTS,
-    STAT_ASSISTS, /* the heading; the active assists one a line under it */
-    STAT_ASSIST_1,
-    STAT_ASSIST_2,
-    STAT_ASSIST_3,
+    STAT_DIFFICULTY, /* the mode, "n / N" with a knock-down limit, Permadeath */
     STAT_AREA,
     STAT_LINES
 };
@@ -326,11 +329,11 @@ static char s_text[256];
 
 /* the remap screen's order: the face buttons first, as a pad is read */
 static const int kRemapOrder[ICO_T_COUNT] = {
-    ICO_T_CROSS,     ICO_T_CIRCLE,      ICO_T_SQUARE,      ICO_T_TRIANGLE,    ICO_T_L1,
-    ICO_T_R1,        ICO_T_L2,          ICO_T_R2,          ICO_T_L3,          ICO_T_R3,
-    ICO_T_START,     ICO_T_SELECT,      ICO_T_UP,          ICO_T_DOWN,        ICO_T_LEFT,
-    ICO_T_RIGHT,     ICO_T_LSTICK_UP,   ICO_T_LSTICK_DOWN, ICO_T_LSTICK_LEFT, ICO_T_LSTICK_RIGHT,
-    ICO_T_RSTICK_UP, ICO_T_RSTICK_DOWN, ICO_T_RSTICK_LEFT, ICO_T_RSTICK_RIGHT};
+    ICO_T_CROSS,     ICO_T_CIRCLE,      ICO_T_SQUARE,      ICO_T_TRIANGLE,     ICO_T_L1,
+    ICO_T_R1,        ICO_T_L2,          ICO_T_R2,          ICO_T_L3,           ICO_T_R3,
+    ICO_T_START,     ICO_T_SELECT,      ICO_T_UP,          ICO_T_DOWN,         ICO_T_LEFT,
+    ICO_T_RIGHT,     ICO_T_LSTICK_UP,   ICO_T_LSTICK_DOWN, ICO_T_LSTICK_LEFT,  ICO_T_LSTICK_RIGHT,
+    ICO_T_RSTICK_UP, ICO_T_RSTICK_DOWN, ICO_T_RSTICK_LEFT, ICO_T_RSTICK_RIGHT, ICO_T_HINT};
 
 /* --------------------------------------------------------------- rows */
 
@@ -387,13 +390,6 @@ static int stepIndex(int i, int n, int dir)
 {
     return ((i + dir) % n + n) % n;
 }
-
-/* [gameplay] pit_time's words, in ICO_PIT_* order */
-static const char *const kPitWords[ICO_PIT_COUNT] = {"half", "original", "longer", "double",
-                                                     "triple"};
-
-/* [gameplay] shadow_speed's words, in ICO_SPEED_* order */
-static const char *const kSpeedWords[ICO_SPEED_COUNT] = {"slower", "original", "faster", "fastest"};
 
 static const float kMouseSens[] = {0.25f, 0.5f, 0.75f, 1.0f, 1.25f, 1.5f, 2.0f, 2.5f, 3.0f, 4.0f};
 /* the Mouse camera speed row's steps; the last one is "Instant" */
@@ -701,12 +697,33 @@ static int gpuShowFailed(void)
     return 0;
 }
 
+/* the chosen driver's last-seen line and the page's note as one note
+   (gpuRefresh), "" when the host has no line or the two would not fit the
+   note's buffer; the main loop of the refresh writes it */
+static char s_gpuLiveNote[320];
+
+static const char *noteText(int strId, char *out, size_t size);
+
 static void gpuRefresh(Page *pg)
 {
     const int note = gpuShowFailed() ? UI_STR_GPU_DRIVER_FAILED
                      : s_gpuHostSet && s_gpuHost.lostOnStock != NULL && s_gpuHost.lostOnStock()
                          ? UI_STR_GPU_DRIVER_NOTE_LOST
                          : UI_STR_GPU_DRIVER_NOTE;
+    s_gpuLiveNote[0] = '\0';
+    if (s_gpuHostSet && s_gpuHost.info != NULL) {
+        const char *info = s_gpuHost.info(gpuSelected());
+        char text[256];
+        const size_t il = info != NULL ? strlen(info) : 0;
+        if (il > 0) {
+            const char *words = noteText(note, text, sizeof(text));
+            /* the wrapped note holds 255 bytes with its line breaks */
+            if (il + 2 + strlen(words) < 230) {
+                snprintf(s_gpuLiveNote, sizeof(s_gpuLiveNote), "%s%s%s", info,
+                         info[il - 1] == '.' ? " " : ". ", words);
+            }
+        }
+    }
     for (int k = 0; k < pg->count; k++) {
         if (pg->rows[k].note >= 0) {
             pg->rows[k].noteStr = note;
@@ -780,7 +797,7 @@ static void gpuFolderPopup(UiStrId id)
 {
     char text[UI_POPUP_TEXT], body[UI_POPUP_TEXT];
     fmtText(id, "s", NULL, gpuFolderText(), text, sizeof(text));
-    wrapText(text, 21.0f, 540.0f, body, sizeof(body));
+    wrapText(text, UI_POPUP_BODY_SIZE, UI_POPUP_BODY_WIDTH, body, sizeof(body));
     ui_popup_push(ui_str(UI_STR_SECTION_GPU_DRIVER), body);
 }
 
@@ -806,6 +823,13 @@ static void gpuPoll(void)
         gpuFolderPopup(UI_STR_GPU_DRIVER_NO_PICKER_APP);
     } else if (r == UI_GPU_INSTALL_UNREADABLE) {
         ui_popup_push(ui_str(UI_STR_GPU_DRIVER_UNREADABLE), "");
+    } else if (r == UI_GPU_INSTALL_PAGES) {
+        /* the host's own sentence (English, as the driver's names are) */
+        char body[UI_POPUP_TEXT];
+        const char *why = s_gpuHost.installWhy != NULL ? s_gpuHost.installWhy() : NULL;
+        wrapText(why != NULL && why[0] != '\0' ? why : ui_str(UI_STR_GPU_DRIVER_BAD),
+                 UI_POPUP_BODY_SIZE, UI_POPUP_BODY_WIDTH, body, sizeof(body));
+        ui_popup_push(ui_str(UI_STR_SECTION_GPU_DRIVER), body);
     } else {
         /* the picker closed without a file (some phones' pickers answer so
            at once, or never open): the folder route is named */
@@ -867,6 +891,8 @@ static int s_contWarned;
    and Back (from 200) on every disc */
 #define CONT_HINT_Y 183
 static UiHint s_contHint;
+static unsigned s_contLockedLines; /* contProc: showings with the prompt held back */
+static int s_contLockedWas;
 static void statesCloseAfterLoad(void);
 static void gameCursorOn(int to, int row);
 static void buildStatesPage(void);
@@ -893,6 +919,7 @@ static int contProc(int first, int item);
 static int s_stFromPause;     /* opened from the pause menu's row: Back returns there */
 static int s_stFromContinue;  /* opened from the Continue screen: Back returns there */
 static int s_stLeave;         /* a state was loaded: the page closes at the next tick */
+static int s_stLeaveScene;    /* ... from the title onto the game's empty layout */
 static int s_procLayout = -1; /* the layout the last settings proc ran in */
 
 void ui_settings_sync_after_state_load(void)
@@ -1248,40 +1275,6 @@ static const char *onOff(int v)
     return ui_str(v ? UI_STR_ON : UI_STR_OFF);
 }
 
-/* Extras > Game variants: one row per IcoVariantId, in its order */
-static int isVarOpt(int opt)
-{
-    return opt >= UI_OPT_VAR_TOUGHNESS && opt <= UI_OPT_VAR_IGNORE_CAMS;
-}
-
-_Static_assert(UI_OPT_VAR_IGNORE_CAMS - UI_OPT_VAR_TOUGHNESS + 1 == ICO_VARIANT_COUNT &&
-                   UI_OPT_VAR_TOUGHNESS + ICO_VARIANT_AGGRESSION == UI_OPT_VAR_AGGRESSION &&
-                   UI_OPT_VAR_TOUGHNESS + ICO_VARIANT_BARRIER_HITS == UI_OPT_VAR_BARRIER &&
-                   UI_OPT_VAR_TOUGHNESS + ICO_VARIANT_NO_CUTSCENE_LOOK == UI_OPT_VAR_NO_LOOK,
-               "a Settings row for each variant, in variants.h's order");
-
-static const char *variantText(int opt)
-{
-    static const int tough[ICO_TOUGHNESS_COUNT] = {UI_STR_VAL_ORIGINAL, UI_STR_VAL_VAR_AMERICAN,
-                                                   UI_STR_VAL_VAR_NOT_TOUGHER};
-    static const int agg[ICO_AGGRESSION_COUNT] = {
-        UI_STR_VAL_VAR_AGG_OWN, UI_STR_VAL_VAR_AGG_BOLD_PATIENT, UI_STR_VAL_VAR_AGG_BOLD_QUICK,
-        UI_STR_VAL_VAR_AGG_WARY_PATIENT, UI_STR_VAL_VAR_AGG_WARY_QUICK};
-    const IcoVariantId id = (IcoVariantId)(opt - UI_OPT_VAR_TOUGHNESS);
-    const int v = ico_variant_get(id);
-
-    switch (id) {
-    case ICO_VARIANT_SHADE_TOUGHNESS:
-        return ui_str(tough[v >= 0 && v < ICO_TOUGHNESS_COUNT ? v : 0]);
-    case ICO_VARIANT_AGGRESSION:
-        return ui_str(agg[v >= 0 && v < ICO_AGGRESSION_COUNT ? v : 0]);
-    case ICO_VARIANT_BARRIER_HITS:
-        return ui_str(v == 1 ? UI_STR_VAL_VAR_HITS_7 : UI_STR_VAL_VAR_HITS_5);
-    default:
-        return onOff(v);
-    }
-}
-
 /* The game's own language (NonLinearCameraMove, 2..6), -1 on a disc that
    has none (port/core/region.h has_game_language: the Japanese and
    Korean ones) */
@@ -1311,6 +1304,8 @@ static const char *menuLanguageName(int lang)
     return ui_str((UiStrId)ids[lang >= 0 && lang < UI_LANG_TABLES ? lang : 0]);
 }
 
+static int s_loggedWordsLang = -2; /* the menu words' language last logged */
+
 void ui_settings_apply_language(void)
 {
     /* the port's text: [ui] language, else the disc's (ui_lang.c) */
@@ -1325,9 +1320,60 @@ void ui_settings_apply_language(void)
     ui_set_sheet_language(sheet >= 0            ? sheet
                           : gameLanguage() >= 0 ? (int)ui_lang_from_game(gameLanguage())
                                                 : (int)UI_LANG_EN);
-    /* the game's menu words in a community translation over the English
-       sheets while one is in force (ui_lang.h ui_settings_text_language) */
-    ui_set_menu_words_language(ui_settings_text_language());
+    /* while a community translation is in force (ui_lang.h
+       ui_settings_text_language) the game's menu words over the English
+       sheets are the Menu language's, as the port's rows beside them (Auto:
+       the translation itself); a disc language keeps the sheets' own words */
+    const int wordsLang = ui_settings_text_language() >= 0 ? (int)ui_get_language() : -1;
+    if (wordsLang != s_loggedWordsLang) {
+        fprintf(stderr, "settings: the game's menu words in %s (%s)\n",
+                wordsLang >= 0 ? ico_opt_ui_language_name(wordsLang) : "the sheets' language",
+                wordsLang >= 0 ? "the Menu language over a community translation"
+                               : "no community translation in force");
+        s_loggedWordsLang = wordsLang;
+    }
+    ui_set_menu_words_language(wordsLang);
+}
+
+int ui_settings_reapply_after_state_load(const char *saved_keys)
+{
+    char dev[8];
+    int changed = 0;
+
+    if (optionControlType != ico_opt_hold_type()) {
+        fprintf(stderr,
+                "settings: after the load the hold type is this run's %s again (the "
+                "state had %s)\n",
+                ico_opt_hold_type() == ICO_HOLD_TOGGLE ? "B" : "A",
+                optionControlType == ICO_HOLD_TOGGLE ? "B" : "A");
+        applyHoldType();
+        changed |= UI_REAPPLY_HOLD_TYPE;
+    }
+    if (gameLanguage() >= 0 && gameLanguage() != ico_boot_language()) {
+        /* the Language row's way: the game's text and subtitles follow at
+           their next load, the port's words at once */
+        fprintf(stderr,
+                "settings: after the load the game's language is this run's %d again (the "
+                "state had %d)\n",
+                ico_boot_language(), gameLanguage());
+        setGameLanguage(ico_boot_language());
+        ui_settings_apply_language();
+        changed |= UI_REAPPLY_LANGUAGE;
+    }
+    if (!ico_opt_developer_mode() &&
+        ico_sim_keys_value(saved_keys, "gameplay.developer_mode", dev, sizeof dev) &&
+        strcmp(dev, "true") == 0) {
+        /* debug_Menu runs only in developer mode (main.c): a menu the state
+           left open would come back with it; the run counts as one that
+           used it (achievements off) and the bound switches are this run's
+           again (variants.h) */
+        debug_Menu_off();
+        fprintf(stderr, "settings: after the load developer mode is off in this run: the Debug "
+                        "menu is closed\n");
+        (void)ico_variants_developer_state_loaded();
+        changed |= UI_REAPPLY_DEBUG_MENU;
+    }
+    return changed;
 }
 
 static const char *languageName(int game)
@@ -1517,6 +1563,18 @@ static int extrasModels(void)
    the title comes back with the cursor on Settings.  Locked: nothing. */
 static void gameCursorOn(int to, int row);
 
+/* the menu closes on to (a start's layout), the title's cursor on Settings */
+static int extrasLeave(int to)
+{
+    if (to < 0) {
+        return -1;
+    }
+    la_host_leave();
+    gameCursorOn(s_origin,
+                 s_entryRow[s_origin == LAYOUT_TITLE_NEW ? ENTRY_TITLE13 : ENTRY_TITLE12]);
+    return to;
+}
+
 static int extrasCredits(void)
 {
     if (!creditsUnlocked()) {
@@ -1527,14 +1585,18 @@ static int extrasCredits(void)
         return -1;
     }
     ui_settings_save();
-    int to = ico_credits_start();
-    if (to < 0) {
+    return extrasLeave(ico_credits_start());
+}
+
+/* Extras > Unused content's rows (settings_unused.c): from the title, as
+   Credits starts */
+static int extrasUnused(int opt)
+{
+    if (!onTitle()) {
         return -1;
     }
-    la_host_leave();
-    gameCursorOn(s_origin,
-                 s_entryRow[s_origin == LAYOUT_TITLE_NEW ? ENTRY_TITLE13 : ENTRY_TITLE12]);
-    return to;
+    ui_settings_save();
+    return extrasLeave(ui__unused_open(opt));
 }
 
 static int extrasOpen(int opt)
@@ -1748,6 +1810,9 @@ static const char *rawValue(int opt, char *buf, unsigned size)
     if (isCharOpt(opt)) {
         return charValue(opt, buf, size);
     }
+    if (ui__diff_opt(opt)) {
+        return ui__diff_text(opt, buf, size); /* the New Game draft's */
+    }
     switch (opt) {
     case UI_OPT_PRESET: {
         static const int presetStr[3] = {UI_STR_VAL_ORIGINAL, UI_STR_VAL_ENHANCED,
@@ -1785,6 +1850,10 @@ static const char *rawValue(int opt, char *buf, unsigned size)
         static const int aaStr[ICO_AA_COUNT] = {UI_STR_AA_OFF,   UI_STR_AA_SSAA2, UI_STR_AA_SSAA4,
                                                 UI_STR_AA_MSAA2, UI_STR_AA_MSAA4, UI_STR_AA_MSAA8};
         const int aa = aaStored();
+        if (aa != ICO_AA_OFF && ui__temporal_on(&o)) {
+            snprintf(buf, size, "%s%s", ui_str(aaStr[aa]), ui_str(UI_STR_AA_FSR3));
+            return buf;
+        }
         if (aaInForce()) {
             return ui_str(aaStr[aa]);
         }
@@ -1836,8 +1905,6 @@ static const char *rawValue(int opt, char *buf, unsigned size)
         return buf;
     case UI_OPT_EFFECT_FOG:
         return onOff(o.effectFog);
-    case UI_OPT_EFFECT_WATER:
-        return ui_str(o.effectWaterSharp ? UI_STR_VAL_SHARP : UI_STR_VAL_ORIGINAL);
     case UI_OPT_EFFECT_CINEMATIC_BARS:
         return onOff(o.effectCinematicBars);
     case UI_OPT_FULL_PIXEL:
@@ -1856,6 +1923,16 @@ static const char *rawValue(int opt, char *buf, unsigned size)
         return onOff(o.showFps);
     case UI_OPT_DOWNSAMPLE:
         return ui_str(o.downsample == ICO_DOWNSAMPLE_BOX ? UI_STR_VAL_DOWNSAMPLE_BOX : UI_STR_OFF);
+    case UI_OPT_UPSCALE:
+    case UI_OPT_UPSCALE_QUALITY:
+        return ui__upscale_text(&o, opt, buf, size);
+    case UI_OPT_UPSCALE_SHARPNESS:
+        if (o.upscaleSharpness == ICO_UPSCALE_SHARPNESS_DEFAULT) {
+            snprintf(buf, size, "%d (%s)", o.upscaleSharpness, ui_str(UI_STR_VAL_DEFAULT));
+        } else {
+            snprintf(buf, size, "%d", o.upscaleSharpness);
+        }
+        return buf;
     case UI_OPT_CRT:
         /* [video] crt and crt_mode as one value */
         return ui_str(
@@ -1865,6 +1942,18 @@ static const char *rawValue(int opt, char *buf, unsigned size)
     case UI_OPT_CRT_STRENGTH:
         snprintf(buf, size, "%d %%", (int)(o.crtStrength * 100.0f + 0.5f));
         return buf;
+    case UI_OPT_TONE_GAMMA:
+    case UI_OPT_TONE_BRIGHTNESS:
+    case UI_OPT_TONE_CONTRAST:
+    case UI_OPT_TONE_SATURATION: {
+        const int v = *ui__tone_field(&o, opt);
+        if (v == ICO_TONE_DEFAULT) {
+            snprintf(buf, size, "%d (%s)", v, ui_str(UI_STR_VAL_DEFAULT));
+        } else {
+            snprintf(buf, size, "%d", v);
+        }
+        return buf;
+    }
     case UI_OPT_BRIGHTNESS:
         if (brightness() == BRIGHTNESS_DEFAULT) {
             snprintf(buf, size, "%d (%s)", brightness(), ui_str(UI_STR_VAL_DEFAULT));
@@ -1950,10 +2039,23 @@ static const char *rawValue(int opt, char *buf, unsigned size)
         }
         return ui_str(toggle ? UI_STR_VAL_HOLD_B : UI_STR_VAL_HOLD_A);
     }
+    case UI_OPT_CAMERA_RESET:
+        return onOff(ico_opt_camera_reset()); /* [gameplay] camera_reset */
+    case UI_OPT_YORDA_LOOK: {                 /* [gameplay] yorda_look: Off, Hold, Toggle */
+        static const int lookStr[3] = {UI_STR_OFF, UI_STR_VAL_ZOOM_HOLD, UI_STR_VAL_ZOOM_TOGGLE};
+        return ui_str(lookStr[ico_opt_yorda_look()]);
+    }
+    case UI_OPT_ZOOM_TYPE:
+        /* [gameplay] zoom_type: Hold (the game's own) or Toggle */
+        return ui_str(ico_opt_zoom_type() == ICO_ZOOM_TOGGLE ? UI_STR_VAL_ZOOM_TOGGLE
+                                                             : UI_STR_VAL_ZOOM_HOLD);
+    case UI_OPT_BUTTON_PICTURES:
+        return ui__pads_text(buf, size);
     case UI_OPT_TOUCH_MODE: {
-        static const int modeStr[3] = {UI_STR_OFF, UI_STR_VAL_AUTO, UI_STR_VAL_ALWAYS};
+        static const int modeStr[4] = {UI_STR_OFF, UI_STR_VAL_AUTO, UI_STR_VAL_ALWAYS,
+                                       UI_STR_VAL_ALWAYS_SCENES};
         const int m = touchModeInForce();
-        return ui_str(modeStr[m >= 0 && m < 3 ? m : 1]);
+        return ui_str(modeStr[m >= 0 && m < 4 ? m : 1]);
     }
     case UI_OPT_TOUCH_SIZE: {
         static const int sizeStr[3] = {UI_STR_VAL_SMALL, UI_STR_VAL_MEDIUM, UI_STR_VAL_LARGE};
@@ -1978,24 +2080,8 @@ static const char *rawValue(int opt, char *buf, unsigned size)
         return buf;
     case UI_OPT_PLAYERS:
         return girlControlMode != 0 ? "2" : "1";
-    case UI_OPT_YORDA:
-        return onOff(ico_opt_yorda_safe());
-    case UI_OPT_PIT_TIME: {
-        static const int pitStr[ICO_PIT_COUNT] = {UI_STR_VAL_PIT_HALF, UI_STR_VAL_ORIGINAL,
-                                                  UI_STR_VAL_PIT_LONGER, UI_STR_VAL_PIT_DOUBLE,
-                                                  UI_STR_VAL_PIT_TRIPLE};
-        return ui_str(pitStr[ico_opt_pit_time()]);
-    }
-    case UI_OPT_SHADOW_SPEED: {
-        static const int speedStr[ICO_SPEED_COUNT] = {UI_STR_VAL_SPEED_SLOWER, UI_STR_VAL_ORIGINAL,
-                                                      UI_STR_VAL_SPEED_FASTER,
-                                                      UI_STR_VAL_SPEED_FASTEST};
-        return ui_str(speedStr[ico_opt_shadow_speed()]);
-    }
     case UI_OPT_DOOR_FIX:
         return onOff(ico_opt_door_fix());
-    case UI_OPT_YORDA_TRIPS:
-        return onOff(ico_opt_yorda_trips());
     case UI_OPT_NATURAL_CHAINS:
         return onOff(ico_opt_natural_chains());
     case UI_OPT_SKIP_OPENING:
@@ -2020,15 +2106,15 @@ static const char *rawValue(int opt, char *buf, unsigned size)
     }
     case UI_OPT_DEVELOPER:
         return onOff(ico_opt_developer_mode());
-    case UI_OPT_VAR_TOUGHNESS:
-    case UI_OPT_VAR_ONE_HIT:
-    case UI_OPT_VAR_NEVER_DODGE:
-    case UI_OPT_VAR_AGGRESSION:
-    case UI_OPT_VAR_NO_HINTS:
-    case UI_OPT_VAR_BARRIER:
+    case UI_OPT_FREE_MOVEMENT:
+        return onOff(ico_free_movement_row());
     case UI_OPT_VAR_NO_LOOK:
     case UI_OPT_VAR_IGNORE_CAMS:
-        return variantText(opt);
+    case UI_OPT_VAR_SWORD_COLOUR:
+    case UI_OPT_VAR_WEAPON:
+    case UI_OPT_VAR_CHAIN_SPEED:
+    case UI_OPT_VAR_CHAIN_DAMPING:
+        return ui__variant_text(opt);
     case UI_OPT_EXTRAS_CREDITS:
         return creditsUnlocked() ? "" : ui_str(UI_STR_ACH_LOCKED);
     default:
@@ -2050,6 +2136,9 @@ static int isGameOpt(int opt)
 
 static int optShown(int opt, int link)
 {
+    if (ui__diff_opt(opt)) {
+        return ui__diff_shown(opt);
+    }
     if (opt == UI_OPT_CIRCLE_BACK) {
         /* the European disc's: Circle confirms on the Japanese and Korean ones */
         return lt_ext_has_circle_back();
@@ -2079,6 +2168,9 @@ static int optShown(int opt, int link)
     if (opt == UI_OPT_LINK && link == UI_PAGE_TOUCH) {
         return touchPresent(); /* Controls > Touch screen */
     }
+    if (opt == UI_OPT_LINK && link == UI_PAGE_CUSTOMIZE) {
+        return !onTitle(); /* Gameplay > Difficulty: the journey's, from the pause menu only */
+    }
     if (opt == UI_OPT_GPU_ADD) {
         return s_gpuHostSet && s_gpuHost.adreno() != 0;
     }
@@ -2102,8 +2194,17 @@ static int optShown(int opt, int link)
     if (isExtrasOpt(opt)) {
         return onTitle(); /* the Extras row itself shows from both */
     }
+    if (opt == UI_OPT_LINK && link == UI_PAGE_UNUSED) {
+        return onTitle() && ui__unused_any_shown(); /* none on the June 2001 demo */
+    }
+    if (ui__unused_row(opt) >= 0) {
+        return onTitle() && ui__unused_shown(opt); /* the disc's own (the host's) */
+    }
     if (opt == UI_OPT_EXTRAS_STEAM) {
         return onTitle() && s_steamFn != NULL;
+    }
+    if (opt == UI_OPT_EXTRAS_DESKTOP) {
+        return onTitle() && ui__desktop_hosted();
     }
     if (opt == UI_OPT_EXTRAS_EXPORT_TEXTURES) {
         return onTitle() && s_texExportHostSet;
@@ -2134,14 +2235,17 @@ static int optShown(int opt, int link)
         }
         return 0;
     }
+    if (opt == UI_OPT_VAR_SWORD_COLOUR) {
+        return ui__variant_shown(opt); /* not on the 2001 discs */
+    }
     if (isGameOpt(opt) && onTitle()) {
         return 0;
     }
     if (opt == UI_OPT_FILM_EFFECT || opt == UI_OPT_PLAYERS) {
         return gFlagGameClear != 0;
     }
-    if (opt == UI_OPT_DUMP_TEXTURES || opt == UI_OPT_DUMP_MODELS) {
-        return ico_opt_developer_mode(); /* for pack authors */
+    if (opt == UI_OPT_DUMP_TEXTURES || opt == UI_OPT_DUMP_MODELS || opt == UI_OPT_FREE_MOVEMENT) {
+        return ico_opt_developer_mode(); /* pack authors; Free movement */
     }
     if (opt == UI_OPT_VAR_DEBUG_MENU) {
         /* the game's debug menu; PC port: not on the June 2001 demo, whose
@@ -2176,6 +2280,9 @@ static int optShown(int opt, int link)
     if (opt == UI_OPT_EFFECT_MOTION_BLUR_STRENGTH) {
         return ico_video_effect_motion_blur(); /* nothing to weaken with Motion blur Off */
     }
+    if (opt == UI_OPT_UPSCALE_SHARPNESS || opt == UI_OPT_UPSCALE_QUALITY) {
+        return ui__upscale_row_shown(opt);
+    }
     if (opt == UI_OPT_MOUSE_CAMERA || opt == UI_OPT_MOUSE_SENS || opt == UI_OPT_MOUSE_INVERT ||
         opt == UI_OPT_MOUSE_SPEED || opt == UI_OPT_MOUSE_RANGE || opt == UI_OPT_MOUSE_RETURN) {
         return !ico_video_android(); /* no mouse camera on a phone */
@@ -2206,8 +2313,8 @@ int ui_settings_opt_shown(UiSettingsOpt opt)
 static int steppable(int opt)
 {
     return (opt >= UI_OPT_PRESET && opt <= UI_OPT_DEVELOPER) /* includes the Effects rows */ ||
-           opt == UI_OPT_GPU_DRIVER || opt == UI_OPT_GPU_ADD_FILE || opt == UI_OPT_GRAPHICS_API ||
-           opt == UI_OPT_GRAPHICS_ADAPTER;
+           opt == UI_OPT_FREE_MOVEMENT || opt == UI_OPT_GPU_DRIVER || opt == UI_OPT_GPU_ADD_FILE ||
+           opt == UI_OPT_GRAPHICS_API || opt == UI_OPT_GRAPHICS_ADAPTER || ui__diff_opt(opt);
 }
 
 static int resolutionLocked(void)
@@ -2266,8 +2373,6 @@ static int *videoSwitch(IcoVideoOptions *o, UiSettingsOpt opt)
         return &o->effectSoftening;
     case UI_OPT_EFFECT_FOG:
         return &o->effectFog;
-    case UI_OPT_EFFECT_WATER:
-        return &o->effectWaterSharp;
     case UI_OPT_EFFECT_CINEMATIC_BARS:
         return &o->effectCinematicBars;
     case UI_OPT_SHOW_FPS:
@@ -2294,7 +2399,11 @@ void ui_settings_step(UiSettingsOpt opt, int dir)
         s_dirtyConfig = 1;
         return;
     }
-    if (isVarOpt(opt)) {
+    if (ui__diff_opt(opt)) {
+        ui__diff_step(opt, dir); /* the New Game draft's row: no config */
+        return;
+    }
+    if (ui__var_opt(opt)) {
         /* [variants] <key>, written in memory; the page's leaving saves */
         ico_variant_step((IcoVariantId)(opt - UI_OPT_VAR_TOUGHNESS), dir);
         s_dirtyConfig = 1;
@@ -2347,6 +2456,22 @@ void ui_settings_step(UiSettingsOpt opt, int dir)
         o.aspect = stepIndex(o.aspect, ICO_ASPECT_COUNT, dir);
         video = 1;
         break;
+    case UI_OPT_UPSCALE:
+    case UI_OPT_UPSCALE_QUALITY:
+        ui__upscale_step(&o, opt, dir);
+        video = 1;
+        break;
+    case UI_OPT_UPSCALE_SHARPNESS: {
+        /* 0 .. 100 in tens, held at both ends */
+        const int v = ico_video_upscale_sharpness_clamp(o.upscaleSharpness +
+                                                        dir * ICO_UPSCALE_SHARPNESS_STEP);
+        if (v == o.upscaleSharpness) {
+            return;
+        }
+        o.upscaleSharpness = v;
+        video = 1;
+        break;
+    }
     case UI_OPT_ANTI_ALIAS: {
         if (aaLocked()) {
             return; /* Off under Original */
@@ -2404,13 +2529,11 @@ void ui_settings_step(UiSettingsOpt opt, int dir)
     case UI_OPT_EFFECT_DEPTH_OF_FIELD:
     case UI_OPT_EFFECT_SOFTENING:
     case UI_OPT_EFFECT_FOG:
-    case UI_OPT_EFFECT_WATER:
     case UI_OPT_EFFECT_CINEMATIC_BARS:
     case UI_OPT_SHOW_FPS:
     case UI_OPT_DOWNSAMPLE:
     case UI_OPT_FULL_PIXEL: {
-        /* the plain On/Off display rows (and Water reflections' Original
-           and Sharp) */
+        /* the plain On/Off display rows */
         int *const on = videoSwitch(&o, opt);
         *on = !*on;
         video = 1;
@@ -2466,6 +2589,15 @@ void ui_settings_step(UiSettingsOpt opt, int dir)
         o.crtStrength = (float)stepTenth(o.crtStrength, dir);
         video = 1;
         break;
+    case UI_OPT_TONE_GAMMA:
+    case UI_OPT_TONE_BRIGHTNESS:
+    case UI_OPT_TONE_CONTRAST:
+    case UI_OPT_TONE_SATURATION: {
+        /* ICO_TONE_STEP (1) a press, held at 1 and 100 (issue 194) */
+        ui__tone_add(&o, opt, dir * ICO_TONE_STEP);
+        video = 1;
+        break;
+    }
     case UI_OPT_VIDEO_MODE:
         /* as kanbanBoot.c step 201: the value, then gsb_Init on a change */
         systemStatus[0] = systemStatus[0] != 0 ? 0 : 1;
@@ -2576,15 +2708,22 @@ void ui_settings_step(UiSettingsOpt opt, int dir)
         break;
     case UI_OPT_TOUCH_MODE: {
         /* live from the next vsync (input_sdl.c reads the table); a phone
-           steps between Auto and Always only: Off there would leave no
-           way to turn the buttons back on (ico_touch_effective_mode) */
+           steps Auto, Always, Always with Start only in scenes and back:
+           Off there would leave no way to turn the buttons back on
+           (ico_touch_effective_mode) */
         IcoBindings *b = liveBindings();
         const int m = touchModeInForce();
 
         if (ico_video_android()) {
-            b->touch_mode = m == ICO_TOUCH_MODE_AUTO ? ICO_TOUCH_MODE_ALWAYS : ICO_TOUCH_MODE_AUTO;
+            /* Auto, Always, Always with Start only in scenes: the order is
+               the enum's, Off (0) left out */
+            const int at =
+                m >= ICO_TOUCH_MODE_AUTO && m < ICO_TOUCH_MODE_COUNT ? m - ICO_TOUCH_MODE_AUTO : 0;
+
+            b->touch_mode = ICO_TOUCH_MODE_AUTO + stepIndex(at, ICO_TOUCH_MODE_COUNT - 1, dir);
         } else {
-            b->touch_mode = stepIndex(m >= 0 && m < 3 ? m : 1, 3, dir);
+            b->touch_mode =
+                stepIndex(m >= 0 && m < ICO_TOUCH_MODE_COUNT ? m : 1, ICO_TOUCH_MODE_COUNT, dir);
         }
         s_dirtyBindings = 1;
         break;
@@ -2636,34 +2775,9 @@ void ui_settings_step(UiSettingsOpt opt, int dir)
         lt_ext_set_circle_back(ico_opt_circle_back());
         s_dirtyConfig = 1;
         break;
-    case UI_OPT_YORDA:
-        ico_opt_set_yorda_safe(!ico_opt_yorda_safe());
-        ico_config_set_bool("gameplay.yorda_safe", ico_opt_yorda_safe());
-        s_dirtyConfig = 1;
-        break;
-    case UI_OPT_PIT_TIME:
-        /* Half, Original, Longer, Double, Triple around; the factor is read at the
-           next dive (options.h) */
-        ico_opt_set_pit_time(stepIndex(ico_opt_pit_time(), ICO_PIT_COUNT, dir));
-        ico_config_set_string("gameplay.pit_time", kPitWords[ico_opt_pit_time()]);
-        s_dirtyConfig = 1;
-        break;
-    case UI_OPT_SHADOW_SPEED:
-        /* Slower, Original, Faster, Fastest around; read every game tick (options.h) */
-        ico_opt_set_shadow_speed(stepIndex(ico_opt_shadow_speed(), ICO_SPEED_COUNT, dir));
-        ico_config_set_string("gameplay.shadow_speed", kSpeedWords[ico_opt_shadow_speed()]);
-        s_dirtyConfig = 1;
-        break;
     case UI_OPT_DOOR_FIX:
         ico_opt_set_door_fix(!ico_opt_door_fix());
         ico_config_set_bool("gameplay.door_fix", ico_opt_door_fix());
-        s_dirtyConfig = 1;
-        break;
-    case UI_OPT_YORDA_TRIPS:
-        /* the motions are added at a stage load, so the next room has them
-           (port/game/yorda_trip.h) */
-        ico_opt_set_yorda_trips(!ico_opt_yorda_trips());
-        ico_config_set_bool("gameplay.yorda_trips", ico_opt_yorda_trips());
         s_dirtyConfig = 1;
         break;
     case UI_OPT_NATURAL_CHAINS:
@@ -2748,6 +2862,30 @@ void ui_settings_step(UiSettingsOpt opt, int dir)
         s_dirtyConfig = 1;
         break;
     }
+    case UI_OPT_CAMERA_RESET:
+        /* [gameplay] camera_reset: Off and On (port/game/camera_reset.h) */
+        ico_opt_set_camera_reset(!ico_opt_camera_reset());
+        ico_config_set_string("gameplay.camera_reset",
+                              ico_opt_camera_reset_name(ico_opt_camera_reset()));
+        s_dirtyConfig = 1;
+        break;
+    case UI_OPT_YORDA_LOOK:
+        /* [gameplay] yorda_look: Off, Hold, Toggle around (port/game/yorda_look.h) */
+        ico_opt_set_yorda_look(stepIndex(ico_opt_yorda_look(), 3, dir));
+        ico_config_set_string("gameplay.yorda_look", ico_opt_yorda_look_name(ico_opt_yorda_look()));
+        s_dirtyConfig = 1;
+        break;
+    case UI_OPT_ZOOM_TYPE:
+        /* [gameplay] zoom_type: Hold and Toggle around (port/game/zoom_toggle.h) */
+        ico_opt_set_zoom_type(ico_opt_zoom_type() == ICO_ZOOM_TOGGLE ? ICO_ZOOM_HOLD
+                                                                     : ICO_ZOOM_TOGGLE);
+        ico_config_set_string("gameplay.zoom_type", ico_opt_zoom_type_name(ico_opt_zoom_type()));
+        s_dirtyConfig = 1;
+        break;
+    case UI_OPT_BUTTON_PICTURES:
+        ui__pads_step(dir); /* [input] button_pictures */
+        s_dirtyConfig = 1;
+        break;
     case UI_OPT_FILM_EFFECT: {
         /* row 300: 0..4 around, the stage animations with it */
         int m = optionScreenMode >= 0 && optionScreenMode < FILM_EFFECTS ? optionScreenMode : 0;
@@ -2758,20 +2896,23 @@ void ui_settings_step(UiSettingsOpt opt, int dir)
         /* row 325 */
         girlControlMode = girlControlMode == 0;
         break;
+    case UI_OPT_FREE_MOVEMENT:
+        ico_free_movement_set(!ico_free_movement_row());
+        ico_config_set_bool("developer.free_movement", ico_free_movement_row());
+        s_dirtyConfig = 1;
+        break;
     case UI_OPT_DEVELOPER:
         ico_opt_set_developer_mode(!ico_opt_developer_mode());
         ico_config_set_bool("gameplay.developer_mode", ico_opt_developer_mode());
         s_dirtyConfig = 1;
         if (!ico_opt_developer_mode() && o.dumpModels) {
-            /* Dump models is switched off with developer mode, as Dump
-               textures is below */
+            /* Dump models goes off with developer mode, as Dump textures */
             o.dumpModels = 0;
             video = 1;
         }
         if (!ico_opt_developer_mode() && o.dumpTextures) {
-            /* Dump textures lives under Developer mode; with its row
-               hidden it is switched off too, or the dumps would go on being
-               written on every start with no row to stop them */
+            /* with its row hidden it goes off too, or the dumps would go
+               on with no row to stop them */
             o.dumpTextures = 0;
             video = 1;
         }
@@ -2910,6 +3051,9 @@ static void targetName(int t, char *buf, unsigned size)
         return;
     case ICO_T_SELECT:
         snprintf(buf, size, "%s", ui_str(UI_STR_BTN_SELECT));
+        return;
+    case ICO_T_HINT:
+        snprintf(buf, size, "%s", ui_str(UI_STR_REMAP_ASK_HINT));
         return;
     default:
         break;
@@ -3062,6 +3206,17 @@ static void setNote(int row, int strId)
     }
 }
 
+/* settings_newgame.h: the New Game screen builds with these */
+void ui__settings_set_note(int row, int strId)
+{
+    setNote(row, strId);
+}
+
+int ui__settings_add_layout(int first, int last, float colA, int (*proc)(int, int), int def)
+{
+    return addLayout(first, last, colA, proc, def);
+}
+
 /* ------------------------------------------------------------ building */
 
 static int settingsProc(int first, int item);
@@ -3072,7 +3227,6 @@ static const UiListDef kAchDef, kRemapDef, kGalDef;
 static int s_galFill = -1, s_galTime = -1, s_galTotal = -1;
 static UiHint s_galHint;
 static int entryProc(int first, int item);
-static void buildNewGameScreen(void);
 static void buildQuitScreen(void);
 static int s_quitLayout = -1;
 
@@ -3297,6 +3451,22 @@ static void buildOptionPage(int id, int header, const int *opts, const int *strs
     case UI_PAGE_PICTURE:
         addNote(pg, UI_OPT_ANTI_ALIAS, UI_STR_OPT_AA_NOTE);
         addNote(pg, UI_OPT_DOWNSAMPLE, UI_STR_OPT_DOWNSAMPLE_NOTE);
+        addNote(pg, UI_OPT_UPSCALE, UI_STR_OPT_UPSCALE_NOTE);
+        addNote(pg, UI_OPT_UPSCALE_QUALITY, UI_STR_OPT_UPSCALE_NOTE);
+        addNote(pg, UI_OPT_UPSCALE_SHARPNESS, UI_STR_OPT_UPSCALE_NOTE);
+        /* one note under the four colour rows (the Graphics driver's pattern) */
+        addNote(pg, UI_OPT_TONE_GAMMA, UI_STR_OPT_TONE_NOTE);
+        for (int i = 1; i < pg->count; i++) {
+            if (pg->rows[i].opt >= UI_OPT_TONE_BRIGHTNESS &&
+                pg->rows[i].opt <= UI_OPT_TONE_SATURATION) {
+                for (int j = 0; j < i; j++) {
+                    if (pg->rows[j].opt == UI_OPT_TONE_GAMMA) {
+                        pg->rows[i].note = pg->rows[j].note;
+                        pg->rows[i].noteStr = UI_STR_OPT_TONE_NOTE;
+                    }
+                }
+            }
+        }
         addNote(pg, UI_OPT_TEXTURE_PACK, UI_STR_TEXTURE_PACK_NOTE);
         addNote(pg, UI_OPT_MODEL_PACK, UI_STR_MODEL_PACK_NOTE);
         break;
@@ -3304,6 +3474,8 @@ static void buildOptionPage(int id, int header, const int *opts, const int *strs
         addNote(pg, UI_OPT_DEVELOPER, UI_STR_DEVELOPER_NOTE);
         addNote(pg, UI_OPT_DUMP_TEXTURES, UI_STR_DUMP_TEXTURES_NOTE);
         addNote(pg, UI_OPT_DUMP_MODELS, UI_STR_DUMP_MODELS_NOTE);
+        addNote(pg, UI_OPT_VAR_DEBUG_MENU, UI_STR_OPT_VAR_DEBUG_MENU_NOTE);
+        addNote(pg, UI_OPT_FREE_MOVEMENT, UI_STR_OPT_FREE_MOVEMENT_NOTE);
         break;
     case UI_PAGE_AUDIO:
         break;
@@ -3312,7 +3484,6 @@ static void buildOptionPage(int id, int header, const int *opts, const int *strs
         addNote(pg, UI_OPT_EFFECT_GLOW_SMOOTH, UI_STR_EFFECT_GLOW_SMOOTH_NOTE);
         addNote(pg, UI_OPT_EFFECT_MOTION_BLUR, UI_STR_EFFECT_MOTION_BLUR_NOTE);
         addNote(pg, UI_OPT_EFFECT_MOTION_BLUR_STRENGTH, UI_STR_EFFECT_MOTION_BLUR_STRENGTH_NOTE);
-        addNote(pg, UI_OPT_EFFECT_WATER, UI_STR_EFFECT_WATER_NOTE);
         break;
     case UI_PAGE_GPU_DRIVER:
         /* one note under the page, on every row but Back */
@@ -3340,6 +3511,10 @@ static void buildOptionPage(int id, int header, const int *opts, const int *strs
     case UI_PAGE_CONTROLS:
         addNote(pg, UI_OPT_BUTTON_CONFIG, UI_STR_BUTTON_CONFIG_NOTE);
         addNote(pg, UI_OPT_HOLD_TYPE, UI_STR_HOLD_TYPE_NOTE);
+        addNote(pg, UI_OPT_ZOOM_TYPE, UI_STR_ZOOM_TYPE_NOTE);
+        addNote(pg, UI_OPT_CAMERA_RESET, UI_STR_CAMERA_RESET_NOTE);
+        addNote(pg, UI_OPT_YORDA_LOOK, UI_STR_YORDA_LOOK_NOTE);
+        addNote(pg, UI_OPT_BUTTON_PICTURES, UI_STR_BUTTON_PICTURES_NOTE);
         addNote(pg, UI_OPT_STICK_FIX, UI_STR_STICK_FIX_ALSO_NOTE);
         addNote(pg, UI_OPT_CIRCLE_BACK, UI_STR_CIRCLE_BACK_NOTE);
         break;
@@ -3349,15 +3524,23 @@ static void buildOptionPage(int id, int header, const int *opts, const int *strs
         addNote(pg, UI_OPT_TOUCH_EDIT, UI_STR_TOUCH_EDIT_NOTE);
         break;
     case UI_PAGE_GAMEPLAY:
-        addNote(pg, UI_OPT_YORDA, UI_STR_OPT_YORDA_NOTE);
-        addNote(pg, UI_OPT_PIT_TIME, UI_STR_OPT_PIT_TIME_NOTE);
-        addNote(pg, UI_OPT_SHADOW_SPEED, UI_STR_OPT_SHADOW_SPEED_NOTE);
         addNote(pg, UI_OPT_DOOR_FIX, UI_STR_OPT_DOOR_FIX_NOTE);
-        addNote(pg, UI_OPT_YORDA_TRIPS, UI_STR_OPT_YORDA_TRIPS_NOTE);
-        addNote(pg, UI_OPT_NATURAL_CHAINS, UI_STR_OPT_NATURAL_CHAINS_NOTE);
-        addNote(pg, UI_OPT_SKIP_OPENING, UI_STR_OPT_SKIP_OPENING_NOTE);
         addNote(pg, UI_OPT_SECOND_CARD, UI_STR_OPT_SECOND_CARD_NOTE);
         addNote(pg, UI_OPT_PLAYERS, UI_STR_PLAYERS_NOTE);
+        addNote(pg, UI_OPT_VAR_SWORD_COLOUR, UI_STR_OPT_VAR_SWORD_COLOUR_NOTE);
+        addNote(pg, UI_OPT_VAR_WEAPON, UI_STR_OPT_VAR_WEAPON_NOTE);
+        break;
+    case UI_PAGE_CHAINS:
+        addNote(pg, UI_OPT_NATURAL_CHAINS, UI_STR_OPT_NATURAL_CHAINS_NOTE);
+        addNote(pg, UI_OPT_VAR_CHAIN_SPEED, UI_STR_OPT_VAR_CHAIN_SPEED_NOTE);
+        addNote(pg, UI_OPT_VAR_CHAIN_DAMPING, UI_STR_OPT_VAR_CHAIN_DAMPING_NOTE);
+        break;
+    case UI_PAGE_CUTSCENES:
+        /* the 2001 discs' own No cutscene look-around note: refreshPage,
+           ui__variant_note */
+        addNote(pg, UI_OPT_SKIP_OPENING, UI_STR_OPT_SKIP_OPENING_NOTE);
+        addNote(pg, UI_OPT_VAR_NO_LOOK, UI_STR_OPT_VAR_NO_LOOK_NOTE);
+        addNote(pg, UI_OPT_VAR_IGNORE_CAMS, UI_STR_OPT_VAR_IGNORE_CAMS_NOTE);
         break;
     case UI_PAGE_EXTRAS:
         /* the locked style's value: Credits shows it until unlocked */
@@ -3374,18 +3557,11 @@ static void buildOptionPage(int id, int header, const int *opts, const int *strs
         addNote(pg, UI_OPT_EXTRAS_RESTORE, UI_STR_RESTORE_NOTE);
         addNote(pg, UI_OPT_ACH_POPUPS, UI_STR_ACH_POPUPS_ALSO_NOTE);
         break;
-    case UI_PAGE_VARIANTS:
-        /* each row says whether it switches achievements off (the disc's
-           own notes on the 2001 discs: refreshPage, variantNote) */
-        addNote(pg, UI_OPT_VAR_TOUGHNESS, UI_STR_OPT_VAR_TOUGHNESS_NOTE);
-        addNote(pg, UI_OPT_VAR_ONE_HIT, UI_STR_OPT_VAR_ONE_HIT_NOTE);
-        addNote(pg, UI_OPT_VAR_NEVER_DODGE, UI_STR_OPT_VAR_NEVER_DODGE_NOTE);
-        addNote(pg, UI_OPT_VAR_AGGRESSION, UI_STR_OPT_VAR_AGGRESSION_NOTE);
-        addNote(pg, UI_OPT_VAR_NO_HINTS, UI_STR_OPT_VAR_NO_HINTS_NOTE);
-        addNote(pg, UI_OPT_VAR_BARRIER, UI_STR_OPT_VAR_BARRIER_NOTE);
-        addNote(pg, UI_OPT_VAR_NO_LOOK, UI_STR_OPT_VAR_NO_LOOK_NOTE);
-        addNote(pg, UI_OPT_VAR_IGNORE_CAMS, UI_STR_OPT_VAR_IGNORE_CAMS_NOTE);
-        addNote(pg, UI_OPT_VAR_DEBUG_MENU, UI_STR_OPT_VAR_DEBUG_MENU_NOTE);
+    case UI_PAGE_UNUSED:
+        addNote(pg, UI_OPT_UNUSED_ARENA, UI_STR_UNUSED_ARENA_NOTE);
+        addNote(pg, UI_OPT_UNUSED_CLIMB, UI_STR_UNUSED_CLIMB_NOTE);
+        addNote(pg, UI_OPT_UNUSED_MOVIE, UI_STR_UNUSED_MOVIE_NOTE);
+        addNote(pg, UI_OPT_UNUSED_ART, UI_STR_UNUSED_ART_NOTE);
         break;
     case UI_PAGE_CHARACTERS: {
         /* a swatch right of each colour row's arrows, then one note row
@@ -3416,6 +3592,13 @@ static void buildOptionPage(int id, int header, const int *opts, const int *strs
     }
     default:
         break;
+    }
+    /* the New Game draft's rows (Customize's pages): each its own note,
+       chosen again at refresh (ui__diff_note) */
+    for (int i = 0; i < pg->count; i++) {
+        if (ui__diff_opt(pg->rows[i].opt)) {
+            addNote(pg, pg->rows[i].opt, ui__diff_note(pg->rows[i].opt));
+        }
     }
     /* the window's marks, on a page that can show more rows than its slots
        (U+25B2, U+25BC) */
@@ -3539,19 +3722,9 @@ static void addEntryLayout(int e, int first, int last)
 #define STATS_GAP 10 /* between a label and its value */
 #define STATS_BACK_MARGIN 8
 
-static const int kStatLabel[STAT_LINES] = {UI_STR_STATS_PLAY_TIME,
-                                           UI_STR_STATS_DEATHS,
-                                           UI_STR_STATS_CAPTURES,
-                                           UI_STR_STATS_SAVES,
-                                           UI_STR_STATS_ENEMIES,
-                                           UI_STR_OPT_NEWGAME_PLUS,
-                                           UI_STR_OPT_MIRROR,
-                                           UI_STR_SECTION_ACHIEVEMENTS,
-                                           UI_STR_STATS_ASSISTS,
-                                           0,
-                                           0,
-                                           0,
-                                           UI_STR_STATS_AREA};
+static const int kStatLabel[STAT_LINES] = {
+    UI_STR_STATS_PLAY_TIME, UI_STR_STATS_DEATHS, UI_STR_STATS_CAPTURES, UI_STR_STATS_SAVES,
+    UI_STR_STATS_ENEMIES,   UI_STR_DIFF_LINE,    UI_STR_STATS_AREA};
 
 /* the backdrop, then each line's label and value; returns the last row */
 static int buildStats(void)
@@ -3671,8 +3844,8 @@ static int achUnlocked(void)
    puts every row back to its defaultMask before the procs run, and the
    default follows the last frame's choice so the lines fade with the menu.
    Shown while a stage runs (not the title's stage 1) and photo mode is
-   off; the visible lines are packed from the top, the assists' only those
-   on, the area's only where the save screen names one. */
+   off; the visible lines are packed from the top, the area's only where
+   the save screen names one. */
 static void pauseStats(int show)
 {
     char text[STAT_LINES][96];
@@ -3682,36 +3855,21 @@ static void pauseStats(int show)
     }
     if (show) {
         ui_settings_apply_language();
-        const int got = achUnlocked();
-        const int n = ico_ach_count();
         playTimeText(ico_gs_play_frames(), text[STAT_PLAY_TIME], sizeof(text[0]));
         snprintf(text[STAT_DEATHS], sizeof(text[0]), "%u", ico_gs_run_game_overs());
         snprintf(text[STAT_CAPTURES], sizeof(text[0]), "%u", ico_gs_run_captures());
         snprintf(text[STAT_SAVES], sizeof(text[0]), "%u", ico_gs_run_saves());
         snprintf(text[STAT_ENEMIES], sizeof(text[0]), "%u", ico_gs_run_enemies());
-        snprintf(text[STAT_NEWGAME_PLUS], sizeof(text[0]), "%s", onOff(gFlagGameClear != 0));
-        snprintf(text[STAT_MIRROR], sizeof(text[0]), "%s", onOff(ico_opt_mirror()));
-        snprintf(text[STAT_ACHIEVEMENTS], sizeof(text[0]), "%d / %d", got, n);
         for (int i = 0; i < STAT_LINES; i++) {
-            on[i] = i < STAT_ASSISTS;
+            on[i] = 1;
         }
         if (ico_gs_run_partial()) {
             /* an older save kept no count of these: hidden rather than
                counted from the load, until a New Game */
             on[STAT_SAVES] = on[STAT_ENEMIES] = 0;
         }
-        const int assist[3] = {ico_opt_yorda_safe(), ico_opt_stick_fix(), ico_opt_developer_mode()};
-        static const int kAssistStr[3] = {UI_STR_OPT_YORDA, UI_STR_OPT_STICK_FIX,
-                                          UI_STR_OPT_DEVELOPER_MODE};
-        int k = STAT_ASSIST_1;
-        for (int a = 0; a < 3; a++) {
-            if (assist[a]) {
-                snprintf(text[k], sizeof(text[0]), "%s", ui_str((UiStrId)kAssistStr[a]));
-                on[k++] = 1;
-            }
-        }
-        on[STAT_ASSISTS] = k > STAT_ASSIST_1;
-        text[STAT_ASSISTS][0] = '\0';
+        /* the journey's difficulty has a line of its own */
+        ui__diff_line_text(text[STAT_DIFFICULTY], sizeof(text[0]));
         const char *area = areaName(stage_no);
         on[STAT_AREA] = area != NULL;
         snprintf(text[STAT_AREA], sizeof(text[0]), "%s", area ? area : "");
@@ -3748,10 +3906,23 @@ static void pauseStats(int show)
         b->defaultMask = shown ? 0 : 1;
         lt_mask_property(s_statBack, shown ? 0 : 1);
         /* three field lines over the first line's box and one under the
-           last's: thirteen lines end at 198, above the lower bar (200) */
+           last's: seven lines end at 126, above the lower bar (200) */
         b->dispY = STATS_Y - 3;
         b->dispH = 2 * (shown * STATS_PITCH + 4);
     }
+}
+
+/* Square and "Save states" on the prompt line, both rows tappable as Square
+   (ui_mouse.c); returns the first row */
+static int buildSquarePrompt(UiHint *h)
+{
+    static const UiHintItem kItem[1] = {{LT_GLYPH_SQUARE, -1, UI_STR_STATES}};
+    const int first = lt_ext_prop_count() + LT_GAME_PROPERTY_COUNT;
+    ui_hint_build(h, CONT_HINT_Y, NOTE_SIZE, kItem, 1);
+    for (int r = first; r < lt_ext_prop_count() + LT_GAME_PROPERTY_COUNT; r++) {
+        lt_ext_set_pointer_role(r, LT_POINTER_SQUARE);
+    }
+    return first;
 }
 
 static void buildEntries(void)
@@ -3776,23 +3947,20 @@ static void buildEntries(void)
             P(s_statesRow)->right = s_pages[UI_PAGE_STATES].layout;
         }
     }
-    /* the Continue screen's prompt: Square and "Save states" on a line of
-       its own under the file picture's frame (contProc shows it), in a
-       layout with no cursor that repoint chains after the file select */
-    s_contLayout = -1;
-    if (s_statesAtBuild) {
-        static const UiHintItem kCont[1] = {{LT_GLYPH_SQUARE, -1, UI_STR_STATES}};
-        const int first = lt_ext_prop_count() + LT_GAME_PROPERTY_COUNT;
-        ui_hint_build(&s_contHint, CONT_HINT_Y, NOTE_SIZE, kCont, 1);
-        const int end = lt_ext_prop_count() + LT_GAME_PROPERTY_COUNT;
-        for (int r = first; r < end; r++) {
-            lt_ext_set_pointer_role(r, LT_POINTER_SQUARE);
-        }
-        s_contLayout = addLayout(first, end, 0.0f, contProc, -1);
-    }
     int last = buildStats();
     addEntryLayout(ENTRY_PAUSE, s_photoRow,
                    last >= 0 ? last : (s_statesRow >= 0 ? s_statesRow : s_photoRow));
+    /* Square and "Save states" on the Continue screen only, under the file
+       picture's frame (contProc shows it), in a layout with no cursor that
+       repoint chains after the file select, outside the pause menu's rows.
+       The pause menu has no Square prompt and reads no Square: its Save
+       states row and F6 open the page */
+    s_contLayout = -1;
+    if (s_statesAtBuild) {
+        const int first = buildSquarePrompt(&s_contHint);
+        s_contLayout =
+            addLayout(first, lt_ext_prop_count() + LT_GAME_PROPERTY_COUNT, 0.0f, contProc, -1);
+    }
     for (int e = ENTRY_TITLE12; e <= ENTRY_TITLE13; e++) {
         /* "Options": the pause menu's word (UI_STR_MT_OPTIONS, the
            sheets' own wording in each language), a text row in the menus'
@@ -3829,8 +3997,8 @@ static void build(void)
        and Gameplay open their pages; Save a picture for a bug report stays
        on this page, always shown (with a host handler), and in an rc build
        Share a bug report below it (ICO_RC_TOOLS, on a phone); the Developer
-       page last, before Back (Developer mode, and under it Dump textures
-       and Dump models, shown while it is on) */
+       page last, before Back (Developer mode, and under it Dump textures,
+       Dump models and the Debug menu, shown while it is on) */
     static const int mainOpts[] = {
         UI_OPT_LINK,         UI_OPT_LINK, UI_OPT_LINK, UI_OPT_LINK,           UI_OPT_LINK,
         UI_OPT_LINK,         UI_OPT_LINK, UI_OPT_LINK, UI_OPT_LANGUAGE,       UI_OPT_MENU_LANGUAGE,
@@ -3890,16 +4058,10 @@ static void build(void)
     static const int gpuStrs[] = {UI_STR_OPT_GPU_DRIVER, UI_STR_GPU_DRIVER_ADD,
                                   UI_STR_GPU_DRIVER_ADD_FILE, UI_STR_GPU_DRIVER_REMOVE,
                                   UI_STR_BACK};
-    static const int fxOpts[] = {UI_OPT_EFFECT_GLOW,
-                                 UI_OPT_EFFECT_GLOW_SMOOTH,
-                                 UI_OPT_EFFECT_DEPTH_OF_FIELD,
-                                 UI_OPT_EFFECT_SOFTENING,
-                                 UI_OPT_EFFECT_MOTION_BLUR,
-                                 UI_OPT_EFFECT_MOTION_BLUR_STRENGTH,
-                                 UI_OPT_EFFECT_FOG,
-                                 UI_OPT_EFFECT_WATER,
-                                 UI_OPT_EFFECT_CINEMATIC_BARS,
-                                 UI_OPT_BACK};
+    static const int fxOpts[] = {
+        UI_OPT_EFFECT_GLOW,      UI_OPT_EFFECT_GLOW_SMOOTH,    UI_OPT_EFFECT_DEPTH_OF_FIELD,
+        UI_OPT_EFFECT_SOFTENING, UI_OPT_EFFECT_MOTION_BLUR,    UI_OPT_EFFECT_MOTION_BLUR_STRENGTH,
+        UI_OPT_EFFECT_FOG,       UI_OPT_EFFECT_CINEMATIC_BARS, UI_OPT_BACK};
     static const int fxStrs[] = {UI_STR_OPT_EFFECT_GLOW,
                                  UI_STR_OPT_EFFECT_GLOW_SMOOTH,
                                  UI_STR_OPT_EFFECT_DEPTH_OF_FIELD,
@@ -3907,74 +4069,68 @@ static void build(void)
                                  UI_STR_OPT_EFFECT_MOTION_BLUR,
                                  UI_STR_OPT_EFFECT_MOTION_BLUR_STRENGTH,
                                  UI_STR_OPT_EFFECT_FOG,
-                                 UI_STR_OPT_EFFECT_WATER,
                                  UI_STR_OPT_EFFECT_CINEMATIC_BARS,
                                  UI_STR_BACK};
     /* Picture: the picture's own rows (Brightness is the pause menu's, the
-       Model pack the title's); the Downsampling row goes right after
-       Anti-aliasing */
-    static const int picOpts[] = {UI_OPT_ANTI_ALIAS, UI_OPT_DOWNSAMPLE,   UI_OPT_FULL_HEIGHT,
-                                  UI_OPT_FILTER,     UI_OPT_FULL_PIXEL,   UI_OPT_BRIGHTNESS,
-                                  UI_OPT_CRT,        UI_OPT_CRT_STRENGTH, UI_OPT_TEXTURE_PACK,
-                                  UI_OPT_MODEL_PACK, UI_OPT_BACK};
+       Model pack the title's); Downsampling, Upscaling and Sharpness go
+       right after Anti-aliasing */
+    /* clang-format off */
+    static const int picOpts[] = {
+        UI_OPT_ANTI_ALIAS, UI_OPT_DOWNSAMPLE, UI_OPT_UPSCALE, UI_OPT_UPSCALE_QUALITY,
+        UI_OPT_UPSCALE_SHARPNESS, UI_OPT_FULL_HEIGHT, UI_OPT_FILTER, UI_OPT_FULL_PIXEL,
+        UI_OPT_BRIGHTNESS, UI_OPT_CRT, UI_OPT_CRT_STRENGTH, UI_OPT_TONE_GAMMA,
+        UI_OPT_TONE_BRIGHTNESS, UI_OPT_TONE_CONTRAST, UI_OPT_TONE_SATURATION,
+        UI_OPT_TEXTURE_PACK, UI_OPT_MODEL_PACK, UI_OPT_BACK};
+    /* clang-format on */
     static const int picStrs[] = {UI_STR_OPT_AA,
                                   UI_STR_OPT_DOWNSAMPLE,
+                                  UI_STR_OPT_UPSCALE,
+                                  UI_STR_OPT_UPSCALE_QUALITY,
+                                  UI_STR_OPT_UPSCALE_SHARPNESS,
                                   UI_STR_OPT_FULL_HEIGHT,
                                   UI_STR_OPT_FILTERING,
                                   UI_STR_OPT_FULL_PIXEL,
                                   UI_STR_OPT_BRIGHTNESS,
                                   UI_STR_OPT_CRT,
                                   UI_STR_OPT_CRT_STRENGTH,
+                                  UI_STR_OPT_TONE_GAMMA,
+                                  UI_STR_OPT_TONE_BRIGHTNESS,
+                                  UI_STR_OPT_TONE_CONTRAST,
+                                  UI_STR_OPT_TONE_SATURATION,
                                   UI_STR_OPT_TEXTURE_PACK,
                                   UI_STR_OPT_MODEL_PACK,
                                   UI_STR_BACK};
-    /* Developer: Developer mode, and the dumps it unlocks */
-    static const int devOpts[] = {UI_OPT_DEVELOPER, UI_OPT_DUMP_TEXTURES, UI_OPT_DUMP_MODELS,
-                                  UI_OPT_BACK};
+    /* Developer: Developer mode, and what it unlocks: the two dumps and
+       the game's Debug menu (not on the June 2001 demo) */
+    static const int devOpts[] = {UI_OPT_DEVELOPER,      UI_OPT_DUMP_TEXTURES, UI_OPT_DUMP_MODELS,
+                                  UI_OPT_VAR_DEBUG_MENU, UI_OPT_FREE_MOVEMENT, UI_OPT_BACK};
     static const int devStrs[] = {UI_STR_OPT_DEVELOPER_MODE, UI_STR_OPT_DUMP_TEXTURES,
-                                  UI_STR_OPT_DUMP_MODELS, UI_STR_BACK};
+                                  UI_STR_OPT_DUMP_MODELS,    UI_STR_OPT_VAR_DEBUG_MENU,
+                                  UI_STR_OPT_FREE_MOVEMENT,  UI_STR_BACK};
     /* Characters after Credits (from both entries; the other three
-       from the title only) */
-    static const int extrasOpts[] = {UI_OPT_EXTRAS_MUSIC,
-                                     UI_OPT_EXTRAS_MODELS,
-                                     UI_OPT_EXTRAS_CREDITS,
-                                     UI_OPT_LINK,
-                                     UI_OPT_LINK,
-                                     UI_OPT_EXTRAS_STEAM,
-                                     UI_OPT_EXTRAS_EXPORT_TEXTURES,
-                                     UI_OPT_EXTRAS_BACKUP,
-                                     UI_OPT_EXTRAS_RESTORE,
-                                     UI_OPT_ACH_POPUPS,
-                                     UI_OPT_BACK};
-    static const int extrasStrs[] = {UI_STR_EXTRAS_MUSIC,
-                                     UI_STR_EXTRAS_MODELS,
-                                     UI_STR_EXTRAS_CREDITS,
-                                     UI_STR_SECTION_CHARACTERS,
-                                     UI_STR_SECTION_VARIANTS,
-                                     UI_STR_EXTRAS_STEAM,
-                                     UI_STR_EXTRAS_EXPORT_TEXTURES,
-                                     UI_STR_EXTRAS_BACKUP,
-                                     UI_STR_EXTRAS_RESTORE,
-                                     UI_STR_OPT_ACH_POPUPS,
-                                     UI_STR_BACK};
-    static const int extrasLinks[] = {-1, -1, -1, UI_PAGE_CHARACTERS, UI_PAGE_VARIANTS, -1, -1, -1,
-                                      -1, -1, -1};
+       from the title only), then Unused content (from the title) */
+    static const int extrasOpts[] = {UI_OPT_EXTRAS_MUSIC,   UI_OPT_EXTRAS_MODELS,
+                                     UI_OPT_EXTRAS_CREDITS, UI_OPT_LINK,
+                                     UI_OPT_LINK,           UI_OPT_EXTRAS_STEAM,
+                                     UI_OPT_EXTRAS_DESKTOP, UI_OPT_EXTRAS_EXPORT_TEXTURES,
+                                     UI_OPT_EXTRAS_BACKUP,  UI_OPT_EXTRAS_RESTORE,
+                                     UI_OPT_ACH_POPUPS,     UI_OPT_BACK};
+    static const int extrasStrs[] = {
+        UI_STR_EXTRAS_MUSIC,       UI_STR_EXTRAS_MODELS,          UI_STR_EXTRAS_CREDITS,
+        UI_STR_SECTION_CHARACTERS, UI_STR_SECTION_UNUSED,         UI_STR_EXTRAS_STEAM,
+        UI_STR_EXTRAS_DESKTOP,     UI_STR_EXTRAS_EXPORT_TEXTURES, UI_STR_EXTRAS_BACKUP,
+        UI_STR_EXTRAS_RESTORE,     UI_STR_OPT_ACH_POPUPS,         UI_STR_BACK};
+    static const int extrasLinks[] = {
+        -1, -1, -1, UI_PAGE_CHARACTERS, UI_PAGE_UNUSED, -1, -1, -1, -1, -1, -1, -1};
+    /* Extras > Unused content: press rows, each the disc's own */
+    static const int unusedOpts[] = {UI_OPT_UNUSED_ARENA, UI_OPT_UNUSED_CLIMB, UI_OPT_UNUSED_MOVIE,
+                                     UI_OPT_UNUSED_ART, UI_OPT_BACK};
+    static const int unusedStrs[] = {UI_STR_UNUSED_ARENA, UI_STR_UNUSED_CLIMB, UI_STR_UNUSED_MOVIE,
+                                     UI_STR_UNUSED_ART, UI_STR_BACK};
     /* the Save states page's ways in (the pause menu's row, the Continue
        screen's prompt) exist when its host was set before the menus were
        built */
     s_statesAtBuild = ui__states_hosted();
-    /* Extras > Game variants (from both entries, with the Characters link
-       before it): the eight [variants] rows, the Debug menu (Developer mode
-       only) and Back */
-    static const int varOpts[] = {
-        UI_OPT_VAR_TOUGHNESS,  UI_OPT_VAR_ONE_HIT, UI_OPT_VAR_NEVER_DODGE, UI_OPT_VAR_AGGRESSION,
-        UI_OPT_VAR_NO_HINTS,   UI_OPT_VAR_BARRIER, UI_OPT_VAR_NO_LOOK,     UI_OPT_VAR_IGNORE_CAMS,
-        UI_OPT_VAR_DEBUG_MENU, UI_OPT_BACK};
-    static const int varStrs[] = {UI_STR_OPT_VAR_TOUGHNESS,   UI_STR_OPT_VAR_ONE_HIT,
-                                  UI_STR_OPT_VAR_NEVER_DODGE, UI_STR_OPT_VAR_AGGRESSION,
-                                  UI_STR_OPT_VAR_NO_HINTS,    UI_STR_OPT_VAR_BARRIER,
-                                  UI_STR_OPT_VAR_NO_LOOK,     UI_STR_OPT_VAR_IGNORE_CAMS,
-                                  UI_STR_OPT_VAR_DEBUG_MENU,  UI_STR_BACK};
     /* the characters' colours, one row per IcoAppPart; Switch shows
        only inside the model viewer */
     static const int charOpts[] = {UI_OPT_CHAR_ICO_SKIN,
@@ -4016,24 +4172,26 @@ static void build(void)
                                     UI_OPT_OUTPUT, UI_OPT_DEVICE, UI_OPT_BACK};
     static const int audioStrs[] = {UI_STR_OPT_VOLUME, UI_STR_OPT_MUSIC_VOL, UI_STR_OPT_EFFECTS_VOL,
                                     UI_STR_OPT_OUTPUT, UI_STR_OPT_DEVICE,    UI_STR_BACK};
-    /* the game's Button configuration, Vibration and Hold type after
-       Remap, from the pause menu; the Touch screen page's link before
-       Back, with a touch screen; the mouse camera's rows (not on
+    /* the game's Button configuration and Vibration after Remap, from the
+       pause menu, then Button pictures, Hold type, Zoom type, Camera reset and Look at Yorda; the Touch screen page's
+       link before Back, with a touch screen; the mouse camera's rows (not on
        Android) */
-    static const int ctlOpts[] = {UI_OPT_LINK,        UI_OPT_BUTTON_CONFIG, UI_OPT_VIBRATION,
-                                  UI_OPT_HOLD_TYPE,   UI_OPT_STICK_FIX,     UI_OPT_MOUSE_CAMERA,
-                                  UI_OPT_MOUSE_SENS,  UI_OPT_MOUSE_INVERT,  UI_OPT_MOUSE_SPEED,
-                                  UI_OPT_MOUSE_RANGE, UI_OPT_MOUSE_RETURN,  UI_OPT_CIRCLE_BACK,
-                                  UI_OPT_LINK,        UI_OPT_BACK};
-    static const int ctlStrs[] = {UI_STR_OPT_REMAP,        UI_STR_OPT_BUTTON_CONFIG,
-                                  UI_STR_OPT_VIBRATION,    UI_STR_OPT_HOLD_TYPE,
-                                  UI_STR_OPT_STICK_FIX,    UI_STR_OPT_MOUSE_CAMERA,
-                                  UI_STR_OPT_MOUSE_SENS,   UI_STR_OPT_MOUSE_INVERT,
-                                  UI_STR_OPT_MOUSE_SPEED,  UI_STR_OPT_MOUSE_RANGE,
-                                  UI_STR_OPT_MOUSE_RETURN, UI_STR_OPT_CIRCLE_BACK,
-                                  UI_STR_SECTION_TOUCH,    UI_STR_BACK};
-    static const int ctlLinks[] = {UI_PAGE_REMAP, -1, -1, -1, -1, -1, -1, -1, -1, -1, -1, -1,
-                                   UI_PAGE_TOUCH, -1};
+    static const int ctlOpts[] = {
+        UI_OPT_LINK,        UI_OPT_BUTTON_CONFIG, UI_OPT_VIBRATION,    UI_OPT_BUTTON_PICTURES,
+        UI_OPT_HOLD_TYPE,   UI_OPT_ZOOM_TYPE,     UI_OPT_CAMERA_RESET, UI_OPT_YORDA_LOOK,
+        UI_OPT_STICK_FIX,   UI_OPT_MOUSE_CAMERA,  UI_OPT_MOUSE_SENS,   UI_OPT_MOUSE_INVERT,
+        UI_OPT_MOUSE_SPEED, UI_OPT_MOUSE_RANGE,   UI_OPT_MOUSE_RETURN, UI_OPT_CIRCLE_BACK,
+        UI_OPT_LINK,        UI_OPT_BACK};
+    static const int ctlStrs[] = {
+        UI_STR_OPT_REMAP,           UI_STR_OPT_BUTTON_CONFIG, UI_STR_OPT_VIBRATION,
+        UI_STR_OPT_BUTTON_PICTURES, UI_STR_OPT_HOLD_TYPE,     UI_STR_OPT_ZOOM_TYPE,
+        UI_STR_OPT_CAMERA_RESET,    UI_STR_OPT_YORDA_LOOK,    UI_STR_OPT_STICK_FIX,
+        UI_STR_OPT_MOUSE_CAMERA,    UI_STR_OPT_MOUSE_SENS,    UI_STR_OPT_MOUSE_INVERT,
+        UI_STR_OPT_MOUSE_SPEED,     UI_STR_OPT_MOUSE_RANGE,   UI_STR_OPT_MOUSE_RETURN,
+        UI_STR_OPT_CIRCLE_BACK,     UI_STR_SECTION_TOUCH,     UI_STR_BACK};
+    static const int ctlLinks[] = {
+        UI_PAGE_REMAP, -1, -1, -1, -1, -1, -1, -1, -1, -1, -1, -1, -1, -1, -1, -1,
+        UI_PAGE_TOUCH, -1};
     /* Controls > Touch screen: the overlay's three rows, then the layout
        editor's (Edit layout opens UI_PAGE_TOUCH_LAYOUT) */
     static const int touchOpts[] = {
@@ -4045,16 +4203,41 @@ static void build(void)
         UI_STR_OPT_TOUCH_EDIT, UI_STR_OPT_TOUCH_SNAP,  UI_STR_OPT_TOUCH_GRID,
         UI_STR_TOUCH_RESET,    UI_STR_TOUCH_RESET_ALL, UI_STR_BACK};
     static const int touchLinks[] = {-1, -1, -1, UI_PAGE_TOUCH_LAYOUT, -1, -1, -1, -1, -1};
-    /* the game's Film effect and Players, once the game is cleared */
-    static const int gameOpts[] = {UI_OPT_YORDA,          UI_OPT_PIT_TIME,     UI_OPT_SHADOW_SPEED,
-                                   UI_OPT_STICK_FIX,      UI_OPT_DOOR_FIX,     UI_OPT_YORDA_TRIPS,
-                                   UI_OPT_NATURAL_CHAINS, UI_OPT_SKIP_OPENING, UI_OPT_SECOND_CARD,
-                                   UI_OPT_FILM_EFFECT,    UI_OPT_PLAYERS,      UI_OPT_BACK};
-    static const int gameStrs[] = {
-        UI_STR_OPT_YORDA,          UI_STR_OPT_PIT_TIME,     UI_STR_OPT_SHADOW_SPEED,
-        UI_STR_OPT_STICK_FIX,      UI_STR_OPT_DOOR_FIX,     UI_STR_OPT_YORDA_TRIPS,
-        UI_STR_OPT_NATURAL_CHAINS, UI_STR_OPT_SKIP_OPENING, UI_STR_OPT_SECOND_CARD,
-        UI_STR_OPT_FILM_EFFECT,    UI_STR_OPT_PLAYERS,      UI_STR_BACK};
+    /* Gameplay (from both entries): the game's Film effect and Players
+       from the pause menu once the game is cleared, the two weapon rows;
+       X before Back (the Controls >
+       Touch screen pattern).  The rows a journey's difficulty holds are the
+       New Game's Customize pages' (settings_difficulty.c); from the pause
+       menu the Difficulty link opens them read-only */
+    static const int gameOpts[] = {UI_OPT_STICK_FIX,   UI_OPT_DOOR_FIX, UI_OPT_SECOND_CARD,
+                                   UI_OPT_FILM_EFFECT, UI_OPT_PLAYERS,  UI_OPT_VAR_SWORD_COLOUR,
+                                   UI_OPT_VAR_WEAPON,  UI_OPT_LINK,     UI_OPT_LINK,
+                                   UI_OPT_LINK,        UI_OPT_BACK};
+    static const int gameStrs[] = {UI_STR_OPT_STICK_FIX,
+                                   UI_STR_OPT_DOOR_FIX,
+                                   UI_STR_OPT_SECOND_CARD,
+                                   UI_STR_OPT_FILM_EFFECT,
+                                   UI_STR_OPT_PLAYERS,
+                                   UI_STR_OPT_VAR_SWORD_COLOUR,
+                                   UI_STR_OPT_VAR_WEAPON,
+                                   UI_STR_SECTION_CHAINS,
+                                   UI_STR_SECTION_CUTSCENES,
+                                   UI_STR_DIFF_LINK,
+                                   UI_STR_BACK};
+    static const int gameLinks[] = {
+        -1, -1, -1, -1, -1, -1, -1, UI_PAGE_CHAINS, UI_PAGE_CUTSCENES, UI_PAGE_CUSTOMIZE, -1};
+    /* Gameplay > Chains: the chains Ico lets down for her and how they swing
+       (the [variants] chain rows) */
+    static const int chainOpts[] = {UI_OPT_NATURAL_CHAINS, UI_OPT_VAR_CHAIN_SPEED,
+                                    UI_OPT_VAR_CHAIN_DAMPING, UI_OPT_BACK};
+    static const int chainStrs[] = {UI_STR_OPT_NATURAL_CHAINS, UI_STR_OPT_VAR_CHAIN_SPEED,
+                                    UI_STR_OPT_VAR_CHAIN_DAMPING, UI_STR_BACK};
+    /* Gameplay > Cutscenes: the opening skipped, the two cutscene
+       [variants] rows */
+    static const int cutOpts[] = {UI_OPT_SKIP_OPENING, UI_OPT_VAR_NO_LOOK, UI_OPT_VAR_IGNORE_CAMS,
+                                  UI_OPT_BACK};
+    static const int cutStrs[] = {UI_STR_OPT_SKIP_OPENING, UI_STR_OPT_VAR_NO_LOOK,
+                                  UI_STR_OPT_VAR_IGNORE_CAMS, UI_STR_BACK};
     _Static_assert(sizeof(dispOpts) == sizeof(dispStrs), "a string for each Display row");
     _Static_assert(sizeof(ctlOpts) == sizeof(ctlStrs) && sizeof(ctlOpts) == sizeof(ctlLinks),
                    "a string and a link for each Controls row");
@@ -4068,11 +4251,16 @@ static void build(void)
     _Static_assert(N_OF(picOpts) <= MAX_ROWS, "the picOpts rows fit the page's row budget");
     _Static_assert(N_OF(devOpts) <= MAX_ROWS, "the devOpts rows fit the page's row budget");
     _Static_assert(sizeof(gpuOpts) == sizeof(gpuStrs), "a string for each Graphics driver row");
-    _Static_assert(sizeof(gameOpts) == sizeof(gameStrs), "a string for each Gameplay row");
+    _Static_assert(sizeof(gameOpts) == sizeof(gameStrs) && sizeof(gameOpts) == sizeof(gameLinks),
+                   "a string and a link for each Gameplay row");
+    _Static_assert(sizeof(chainOpts) == sizeof(chainStrs), "a string for each Chains row");
+    _Static_assert(sizeof(cutOpts) == sizeof(cutStrs), "a string for each Cutscenes row");
     _Static_assert(sizeof(extrasOpts) == sizeof(extrasStrs) &&
                        sizeof(extrasOpts) == sizeof(extrasLinks),
                    "a string and a link for each Extras row");
     _Static_assert(sizeof(charOpts) == sizeof(charStrs), "a string for each Characters row");
+    _Static_assert(sizeof(unusedOpts) == sizeof(unusedStrs) && N_OF(unusedOpts) <= MAX_ROWS,
+                   "a string for each Unused content row, within the page's budget");
     _Static_assert(N_OF(charOpts) <= MAX_ROWS, "the Characters rows fit");
     _Static_assert(N_OF(mainOpts) <= MAX_ROWS, "the mainOpts rows fit the page's row budget");
     _Static_assert(N_OF(dispOpts) <= MAX_ROWS, "the dispOpts rows fit the page's row budget");
@@ -4082,8 +4270,8 @@ static void build(void)
     _Static_assert(N_OF(ctlOpts) <= MAX_ROWS, "the ctlOpts rows fit the page's row budget");
     _Static_assert(N_OF(gameOpts) <= MAX_ROWS, "the gameOpts rows fit the page's row budget");
     _Static_assert(N_OF(extrasOpts) <= MAX_ROWS, "the extrasOpts rows fit the page's row budget");
-    _Static_assert(sizeof(varOpts) == sizeof(varStrs), "a string for each Game variants row");
-    _Static_assert(N_OF(varOpts) <= MAX_ROWS, "the Game variants rows fit");
+    _Static_assert(N_OF(chainOpts) <= MAX_ROWS, "the Chains rows fit the page's row budget");
+    _Static_assert(N_OF(cutOpts) <= MAX_ROWS, "the Cutscenes rows fit the page's row budget");
 
     ui_font_init(); /* the notes are wrapped by measuring */
     memset(s_pages, 0, sizeof(s_pages));
@@ -4106,8 +4294,22 @@ static void build(void)
     buildOptionPage(UI_PAGE_TOUCH, UI_STR_SECTION_TOUCH, touchOpts, touchStrs, touchLinks,
                     N_OF(touchOpts), UI_PAGE_CONTROLS);
     buildTouchEditorPage();
-    buildOptionPage(UI_PAGE_GAMEPLAY, UI_STR_SECTION_GAMEPLAY, gameOpts, gameStrs, NULL,
+    buildOptionPage(UI_PAGE_GAMEPLAY, UI_STR_SECTION_GAMEPLAY, gameOpts, gameStrs, gameLinks,
                     N_OF(gameOpts), UI_PAGE_MAIN);
+    buildOptionPage(UI_PAGE_CHAINS, UI_STR_SECTION_CHAINS, chainOpts, chainStrs, NULL,
+                    N_OF(chainOpts), UI_PAGE_GAMEPLAY);
+    /* the New Game's Customize and its three pages (settings_difficulty.c) */
+    for (int p = 0; p < UI_PAGE_COUNT; p++) {
+        const int *o, *t, *k;
+        int head;
+        const int n = ui__diff_page(p, &o, &t, &k, &head);
+        if (n > 0 && n <= MAX_ROWS) {
+            buildOptionPage(p, head, o, t, k, n,
+                            p == UI_PAGE_CUSTOMIZE ? UI__PARENT_NEW_GAME : UI_PAGE_CUSTOMIZE);
+        }
+    }
+    buildOptionPage(UI_PAGE_CUTSCENES, UI_STR_SECTION_CUTSCENES, cutOpts, cutStrs, NULL,
+                    N_OF(cutOpts), UI_PAGE_GAMEPLAY);
     buildOptionPage(UI_PAGE_EFFECTS, UI_STR_SECTION_EFFECTS, fxOpts, fxStrs, NULL, N_OF(fxOpts),
                     UI_PAGE_MAIN);
     buildOptionPage(UI_PAGE_GRAPHICS, UI_STR_SECTION_GRAPHICS, apiOpts, apiStrs, NULL,
@@ -4125,8 +4327,8 @@ static void build(void)
        the count at install */
     buildOptionPage(UI_PAGE_CHARACTERS, UI_STR_SECTION_CHARACTERS, charOpts, charStrs, NULL,
                     N_OF(charOpts), UI_PAGE_EXTRAS);
-    buildOptionPage(UI_PAGE_VARIANTS, UI_STR_SECTION_VARIANTS, varOpts, varStrs, NULL,
-                    N_OF(varOpts), UI_PAGE_EXTRAS);
+    buildOptionPage(UI_PAGE_UNUSED, UI_STR_SECTION_UNUSED, unusedOpts, unusedStrs, NULL,
+                    N_OF(unusedOpts), UI_PAGE_EXTRAS);
     buildStatesPage();
     buildListPage(UI_PAGE_ACHIEVEMENTS, UI_STR_SECTION_ACHIEVEMENTS, &kAchDef, UI_PAGE_MAIN);
     buildListPage(UI_PAGE_REMAP, UI_STR_OPT_REMAP, &kRemapDef, UI_PAGE_CONTROLS);
@@ -4154,7 +4356,7 @@ static void build(void)
     if (s_photoRow >= 0) {
         P(s_photoRow)->right = ui_photo_build();
     }
-    buildNewGameScreen();
+    ui__newgame_build();
     if (ico_opt_developer_mode()) {
         /* the layout extension's budget (layout_ext.h): what Settings and
            its screens use of the tables */
@@ -4162,146 +4364,6 @@ static void build(void)
                 lt_ext_prop_count(), LT_EXT_MAX_PROPERTIES, lt_ext_layout_count(),
                 LT_EXT_MAX_LAYOUTS);
     }
-}
-
-/* ------------------------------------------------------ the New Game screen
- * The New Game screen, between the vibration choice and the start
- * (settings.h ui_new_game_screen_enter): two labelled rows, "Mirror mode" and
- * "New Game+", each with "Off" and "On" side by side (left/right through
- * their item links, up/down between the rows), and a line of explanation
- * for the row the cursor is on, in the lower half where the vibration
- * screen has its rows (the title stage's logo is above).  Each row keeps
- * its own choice: the cursor moving down or up lands on the other row's
- * chosen item, and that row's choice stays lit while the cursor is away. */
-
-static int s_newGameLayout = -1;
-static int s_newGameRow[2][2] = {{-1, -1}, {-1, -1}}; /* [row][off, on] */
-static int s_newGameNote = -1;
-static int s_newGameChosen;
-static int s_mirrorChoice, s_ngpChoice; /* each row's Off (0) or On (1) */
-
-#define LAYOUT_VIBE_SELECT (ico_region_cur()->layout_vibe) /* la_vibe_select's screen (9) */
-#define NEW_GAME_ROW_Y 112
-#define NEW_GAME_ROW_H 34
-#define NEW_GAME_NOTE_Y 182 /* with its 30 lines, clear of the layout's bottom (212) */
-
-static int newGameScreenProc(int first, int item);
-
-static void buildNewGameScreen(void)
-{
-    static const int kLabel[2] = {UI_STR_OPT_MIRROR, UI_STR_OPT_NEWGAME_PLUS};
-    int first = lt_ext_prop_count() + LT_GAME_PROPERTY_COUNT;
-    for (int r = 0; r < 2; r++) {
-        const int y = NEW_GAME_ROW_Y + r * NEW_GAME_ROW_H;
-        /* the label right-aligned up to x 300, Off and On after it */
-        ui_settings_add_row(40, y, 260, NEW_GAME_ROW_H, 0, -1, kLabel[r], NULL, 0.0f,
-                            UI_ALIGN_RIGHT);
-        s_newGameRow[r][0] = ui_settings_add_row(320, y, 110, NEW_GAME_ROW_H, 1, -1, UI_STR_OFF,
-                                                 NULL, 0.0f, UI_ALIGN_CENTER);
-        s_newGameRow[r][1] = ui_settings_add_row(440, y, 110, NEW_GAME_ROW_H, 1, -1, UI_STR_ON,
-                                                 NULL, 0.0f, UI_ALIGN_CENTER);
-        P(s_newGameRow[r][0])->rightItem = s_newGameRow[r][1];
-        P(s_newGameRow[r][1])->leftItem = s_newGameRow[r][0];
-    }
-    s_newGameNote = ui_settings_add_row(20, NEW_GAME_NOTE_Y, 600, 30, 0, -1, 0, " ", NOTE_SIZE,
-                                        UI_ALIGN_CENTER);
-    P(s_newGameNote)->centerX = 1;
-    setNote(s_newGameNote, UI_STR_MIRROR_SCREEN);
-    int last = lt_ext_prop_count() + LT_GAME_PROPERTY_COUNT - 1;
-    s_newGameLayout = addLayout(first, last + 1, 0.6f, newGameScreenProc, s_newGameRow[0][0]);
-}
-
-/* The rows' state from the cursor: the cursor's row takes the item it is
-   on as its choice; up and down land on the other row's choice (the two
-   rows in a loop, as the Settings pages'); the choice of the row the
-   cursor is not on stays lit (an item whose owner is the cursor's item is
-   not dimmed, layout_texture.c display_texture); the note explains the
-   cursor's row. */
-static void newGameSync(void)
-{
-    const int cur = lt_ext_layout(s_newGameLayout)->curItem;
-    int curRow = 0;
-    for (int r = 0; r < 2; r++) {
-        for (int c = 0; c < 2; c++) {
-            if (cur == s_newGameRow[r][c]) {
-                curRow = r;
-                *(r == 0 ? &s_mirrorChoice : &s_ngpChoice) = c;
-            }
-        }
-    }
-    const int choice[2] = {s_mirrorChoice, s_ngpChoice};
-    for (int r = 0; r < 2; r++) {
-        const int other = s_newGameRow[1 - r][choice[1 - r]];
-        for (int c = 0; c < 2; c++) {
-            LtProperty *e = P(s_newGameRow[r][c]);
-            e->downItem = e->upItem = other;
-            e->ownerItem = r != curRow && c == choice[r] ? cur : -1;
-        }
-    }
-    setNote(s_newGameNote, curRow == 0 ? UI_STR_MIRROR_SCREEN : UI_STR_NEWGAME_PLUS_SCREEN);
-}
-
-int ui_new_game_screen_enter(void)
-{
-    if (!s_built || s_newGameLayout < 0) {
-        return -1;
-    }
-    LtProp *l = lt_ext_layout(s_newGameLayout);
-    l->defaultItem = l->curItem = s_newGameRow[0][0];
-    s_newGameChosen = 0;
-    /* no run until the choice: a cleared save's new game (la_load_processing
-       returns to the vibration screen) does not keep the loaded slot's flag
-       on the title stage behind this screen */
-    ico_opt_mirror_reset();
-    s_mirrorChoice = 0;
-    /* New Game+ follows how the player came here: on from a finished save
-       (la_load_processing carries its cleared flag into the new game), off
-       from the title's New Game (which clears the flag) */
-    s_ngpChoice = gFlagGameClear ? 1 : 0;
-    newGameSync();
-    return s_newGameLayout;
-}
-
-int ui_new_game_screen_layout(void)
-{
-    return s_newGameLayout;
-}
-
-int ui_new_game_screen_row(int row, int on)
-{
-    return row == 0 || row == 1 ? s_newGameRow[row][on ? 1 : 0] : -1;
-}
-
-static int newGameScreenProc(int first, int item)
-{
-    (void)item;
-    ui_settings_apply_language();
-    if (first) {
-        s_newGameChosen = 0;
-    }
-    newGameSync();
-    /* as la_vibe_select: input only once faded in, and the choice once (the
-       stage change stops the layout procs in the same tick) */
-    if (s_newGameChosen || lt_fade_status() != 2) {
-        return -1;
-    }
-    int flags = pad[0].flags;
-    if (flags & (PAD_OK | LT_PAD_START)) {
-        s_newGameChosen = 1;
-        POSITIVE_SE();
-        ico_opt_set_mirror(s_mirrorChoice);
-        /* the game's only record of a second playthrough: the chosen value
-           wins over the save's (la_host_new_game_go's gflagInit leaves it),
-           and the save and every place the game checks it follow */
-        gFlagGameClear = s_ngpChoice;
-        la_host_new_game_go();
-        return -1;
-    }
-    if (flags & PAD_BACK) {
-        NEGATIVE_SE();
-        return LAYOUT_VIBE_SELECT;
-    }
-    return -1;
 }
 
 /* ---------------------------------------------------------- the quit screen
@@ -4549,6 +4611,11 @@ static void placePause(void)
         P(prev)->downItem = ROW_PAUSE_BACK;
     }
     back->upItem = prev;
+    if (s_statesRow >= 0) {
+        /* greyed on a Permadeath journey (no state saves or loads; the page
+           still opens for Delete and says why) */
+        lt_ext_set_dim(s_statesRow, shown[1] && ico_difficulty_states_locked());
+    }
 }
 
 /* whether the pause menu's rows are the PAL ones (or as placePause and
@@ -4630,6 +4697,7 @@ void ui_settings_install(void)
     if (s_origin < 0) {
         s_origin = LAYOUT_PAUSE;
     }
+    ui__diff_listen(); /* the journey events */
     /* the port's text in the menu language ([ui] language) */
     ui_settings_apply_language();
     /* [audio] output: an explicit stereo or mono is the game's from the
@@ -4649,6 +4717,7 @@ void ui_settings_install(void)
 
 void ui_settings_reset(void)
 {
+    ui__diff_set_readonly(0);
     s_built = 0;
     s_warned = 0;
     s_origin = LAYOUT_PAUSE;
@@ -4679,10 +4748,7 @@ void ui_settings_reset(void)
     /* the wrapped notes are set again on the rebuilt rows */
     memset(s_noteStr, 0, sizeof(s_noteStr));
     memset(s_noteLang, 0, sizeof(s_noteLang));
-    s_newGameLayout = -1;
-    s_newGameRow[0][0] = s_newGameRow[0][1] = s_newGameRow[1][0] = s_newGameRow[1][1] = -1;
-    s_newGameNote = -1;
-    s_newGameChosen = s_mirrorChoice = s_ngpChoice = 0;
+    ui__newgame_reset();
     s_quitLayout = s_quitYesNo[0] = s_quitYesNo[1] = -1;
     s_quitChosen = 0;
     for (int i = 0; i < ICO_APP_PART_COUNT; i++) {
@@ -5016,7 +5082,7 @@ static int leaveTo(int pageId, int to)
     return to;
 }
 
-/* Options closes for the game's debug menu (Game variants > Debug menu),
+/* Options closes for the game's debug menu (Developer > Debug menu),
    what changed saved: from the title back to the title, the cursor on the
    row that opened Options; from the pause menu into the game, as the pause
    menu's Back does (la_game_pause: the sound resumed, la_game_loop) */
@@ -5037,7 +5103,30 @@ static int closeForDebugMenu(void)
 
 static int parentLayout(const Page *pg)
 {
+    if (pg->parent == UI__PARENT_NEW_GAME) {
+        if (ui__diff_readonly()) {
+            return s_pages[UI_PAGE_GAMEPLAY]
+                .layout; /* the pause menu's view (leaveTo: on its link) */
+        }
+        return ui__newgame_customize_back(); /* the cursor on Customize */
+    }
     return pg->parent >= 0 ? s_pages[pg->parent].layout : s_origin;
+}
+
+/* settings_newgame.h: the New Game screen's Customize opens its page on its
+   first row, every page under it too */
+int ui__settings_open_customize(void)
+{
+    ui__diff_set_readonly(0); /* the New Game draft's */
+    for (int p = 0; p < UI_PAGE_COUNT; p++) {
+        Page *pg = &s_pages[p];
+        if ((p == UI_PAGE_CUSTOMIZE || pg->parent == UI_PAGE_CUSTOMIZE) && pg->layout >= 0) {
+            lt_ext_layout(pg->layout)->defaultItem = lt_ext_layout(pg->layout)->curItem =
+                pageFirstNav(pg);
+            pg->offset = 0;
+        }
+    }
+    return s_pages[UI_PAGE_CUSTOMIZE].layout;
 }
 
 /* ------------------------------------------------- the Save states page
@@ -5139,6 +5228,10 @@ static int statesLeaveQuiet(void)
 {
     ui__states_release();
     s_stLeave = 0;
+    if (s_stLeaveScene) {
+        s_stLeaveScene = 0;
+        return extrasLeave(ico_region_cur()->layout_scene);
+    }
     if (s_statesRow >= 0) {
         gameCursorOn(LAYOUT_PAUSE, s_statesRow);
     }
@@ -5169,6 +5262,35 @@ static void statesCloseAfterLoad(void)
     }
 }
 
+/* A state continued from its checkpoint (state_checkpoint_live.c): the stage
+   is changing.  In play the menu closes as after a load (the pause menu,
+   as End Game leaves it); from the title's page on the game's empty layout,
+   as Extras' starts leave it (extrasLeave), the title's cursor on Settings. */
+void ui_settings_sync_after_state_checkpoint(void)
+{
+    const int up = s_built && pageOfLayout(current_layout_id, NULL) == &s_pages[UI_PAGE_STATES];
+
+    /* this runs at the end of a Main tick, after the tick's picture was made
+       with the page's slot pictures: they are released by the page's own
+       close at its next tick (statesLeaveQuiet), never under that picture */
+    if (up && onTitle()) {
+        s_stFromPause = s_stFromContinue = 0;
+        s_stLeave = s_stLeaveScene = 1;
+        return;
+    }
+    if (up) {
+        s_origin = LAYOUT_PAUSE;
+        if (s_statesRow >= 0) {
+            gameCursorOn(LAYOUT_PAUSE, s_statesRow);
+        }
+        s_stFromPause = 1;
+        s_stFromContinue = 0;
+        s_stLeave = 1;
+        return;
+    }
+    statesCloseAfterLoad();
+}
+
 /* The Continue screen's prompt (its layout chained after the file select,
    whose proc runs after this one with the item this one returns: the file
    la_mc_file_select picked, handed on as it came).  Shown while the screen
@@ -5179,8 +5301,19 @@ static void statesCloseAfterLoad(void)
 static int contProc(int first, int item)
 {
     (void)first;
+    /* not while the journey in force refuses every state (Permadeath:
+       the condition the load itself checks first, state_rules.c) */
+    const int locked = ico_difficulty_states_locked();
     const int shown = ui__states_hosted() && current_layout_id == LAYOUT_LOAD_FILES &&
-                      s_pages[UI_PAGE_STATES].layout >= 0 && la_host_mc_files_shown();
+                      s_pages[UI_PAGE_STATES].layout >= 0 && la_host_mc_files_shown() && !locked;
+    const int hid = locked && current_layout_id == LAYOUT_LOAD_FILES && la_host_mc_files_shown();
+    if (hid && !s_contLockedWas && (++s_contLockedLines <= 8 || s_contLockedLines % 100 == 0)) {
+        fprintf(stderr,
+                "settings: the Save states prompt not shown on the card's files: the journey "
+                "has Permadeath on (%u)\n",
+                s_contLockedLines);
+    }
+    s_contLockedWas = hid;
     s_procLayout = current_layout_id;
     ui_hint_show(&s_contHint, 0, shown);
     ui_hint_layout(&s_contHint);
@@ -5348,7 +5481,7 @@ static void remapFill(void *user, int d, UiListSlot *out)
 {
     (void)user;
     static char lab[96], colA[96], colB[96];
-    if (d < ICO_T_COUNT) {
+    if (d < REMAP_TARGETS) {
         int t = kRemapOrder[d];
         targetName(t, lab, sizeof(lab));
         out->label = lab;
@@ -5362,7 +5495,7 @@ static void remapFill(void *user, int d, UiListSlot *out)
             out->colB = colB;
         }
     } else {
-        out->labelStr = d == ICO_T_COUNT ? UI_STR_REMAP_RESET : UI_STR_BACK;
+        out->labelStr = d == REMAP_TARGETS ? UI_STR_REMAP_RESET : UI_STR_BACK;
     }
 }
 
@@ -5400,7 +5533,7 @@ static int remapInput(void *user, int d, int flags)
     if (flags & PAD_BACK) {
         return leaveTo(UI_PAGE_REMAP, parentLayout(pg));
     }
-    if (d >= 0 && d < ICO_T_COUNT) {
+    if (d >= 0 && d < REMAP_TARGETS) {
         if (flags & PAD_OK) {
             POSITIVE_SE();
             ui_remap_capture_start(&s_capture, kRemapOrder[d]);
@@ -5413,7 +5546,7 @@ static int remapInput(void *user, int d, int flags)
             s_dirtyBindings = 1;
             return -1;
         }
-    } else if (d == ICO_T_COUNT && (flags & PAD_OK)) {
+    } else if (d == REMAP_TARGETS && (flags & PAD_OK)) {
         /* the bindings only; sensitivity and the other [input] values stay */
         IcoBindings def, *b = liveBindings();
         ico_bindings_defaults(&def);
@@ -5424,7 +5557,7 @@ static int remapInput(void *user, int d, int flags)
         s_dirtyBindings = 1;
         POSITIVE_SE();
         return -1;
-    } else if (d == ICO_T_COUNT + 1 && (flags & PAD_OK)) {
+    } else if (d == REMAP_TARGETS + 1 && (flags & PAD_OK)) {
         return leaveTo(UI_PAGE_REMAP, parentLayout(pg));
     }
     return UI_LIST_PASS;
@@ -5689,19 +5822,15 @@ static void markShow(int mark, int on, int y)
     }
 }
 
-/* A page's rows as the entry in force shows them (optShown): Extras'
-   Music, Models and Credits only from the title, the game's settings only
-   from the pause menu, its Film effect and Players once the game is
-   cleared.  The hidden ones are masked with their values; the shown ones
-   are linked in a loop and placed in the window: one slot each from
-   WIN_Y0, WIN_PITCH apart, Back in the slot after the last.  On a page
-   with more shown rows than WIN_SCROLL before Back, the window shows
-   WIN_SCROLL of them from pg->offset, moved so the cursor's row is in it
-   (a page entered on a row out of view: Back from a sub-page, a reopened
-   page), Back in the last slot; the rows out of view are masked as the
-   hidden ones are (the mouse never hits a masked row), their links stay
-   (scrollMove moves the cursor across the window's edges), and a mark
-   above and below the window shows while rows are out of view that way. */
+/* A page's rows as the entry in force shows them (optShown): the hidden
+   ones are masked with their values; the shown ones are linked in a loop and
+   placed in the window: one slot each from WIN_Y0, WIN_PITCH apart, Back in
+   the slot after the last.  On a page with more shown rows than WIN_SCROLL
+   before Back, the window shows WIN_SCROLL of them from pg->offset, moved so
+   the cursor's row is in it, Back in the last slot; the rows out of view are
+   masked as the hidden ones are (the mouse never hits a masked row), their
+   links stay (scrollMove moves the cursor across the window's edges), and a
+   mark above and below the window shows while rows are out of view. */
 static void layoutPage(Page *pg, int id)
 {
     int shown[MAX_ROWS], scroll;
@@ -5775,20 +5904,16 @@ static void layoutPage(Page *pg, int id)
 }
 
 /* The window's edge moves, on a page that scrolls (layoutPage): Down on
-   the last row in view (not the last before Back) scrolls one row; Down on
-   Back with rows above the window out of view puts the window at the top;
-   Up on the first row in view (not the first) scrolls one row back; Up on
-   Back with rows below the window out of view puts the window at the end.
-   The page only moves the window, before the game's own move (layout_
-   texture.c default_item_select, after this proc in the same tick): the
-   row the cursor's link leads to is then in view and unmasked, and the
-   move is the game's on every disc, its sound and glow too (left to
-   itself it would follow the link onto a masked row, the 2001 discs', or
-   walk past it to the next row in view, the European disc's).  The game's
-   move is never switched off for the tick (lt_item_select_disable), so the
-   mouse wheel's queued notches go on (ui_mouse.c drops them after a tick
-   with the item select off).  Every other move is the game's: both rows
-   are in view.  Returns 1 when the window moved. */
+   the last row in view scrolls one row; Down on Back with rows above the
+   window out of view puts the window at the top; Up on the first row in view
+   scrolls one row back; Up on Back with rows below the window out of view
+   puts the window at the end.  The page only moves the window, before the
+   game's own move (layout_texture.c default_item_select, after this proc in
+   the same tick): the row the cursor's link leads to is then in view and
+   unmasked, and the move is the game's on every disc, its sound and glow too.
+   The game's move is never switched off for the tick (lt_item_select_disable),
+   so the mouse wheel's queued notches go on (ui_mouse.c drops them after a
+   tick with the item select off).  Returns 1 when the window moved. */
 static void refreshPage(Page *pg, int id, int cur);
 
 static int scrollMove(Page *pg, int id, LtProp *lay, int flags)
@@ -6075,26 +6200,6 @@ static int gfxProc(const Row *r, int flags)
     return 0;
 }
 
-/* PC port: a Game variants row's note on the running disc. The June 2001
-   demo offers no American toughness (port/game/variants.h
-   ico_variant_offered: its Shadows are its own), and the three 2001 discs
-   have no hints (variants.c ico_hints_on) and no cutscene look-around (the
-   game's debug_VariableInit leaves debug_hand_camera 0 on them), so those
-   two rows say they change nothing there */
-static int variantNote(int opt, int strId)
-{
-    if (opt == UI_OPT_VAR_TOUGHNESS && ICO_JUN26) {
-        return UI_STR_OPT_VAR_TOUGHNESS_NOTE_DEMO;
-    }
-    if (opt == UI_OPT_VAR_NO_HINTS && ICO_NTSCAUG6JUN26) {
-        return UI_STR_OPT_VAR_NO_HINTS_NOTE_2001;
-    }
-    if (opt == UI_OPT_VAR_NO_LOOK && ICO_NTSCAUG6JUN26) {
-        return UI_STR_OPT_VAR_NO_LOOK_NOTE_2001;
-    }
-    return strId;
-}
-
 static void refreshPage(Page *pg, int id, int cur)
 {
     if (pg->isList) {
@@ -6153,12 +6258,14 @@ static void refreshPage(Page *pg, int id, int cur)
                 liveNoteText(r->note, text);
             }
         }
-        if (r->opt == UI_OPT_VAR_TOUGHNESS) {
-            r->noteStr = variantNote(r->opt, UI_STR_OPT_VAR_TOUGHNESS_NOTE);
-        } else if (r->opt == UI_OPT_VAR_NO_HINTS) {
-            r->noteStr = variantNote(r->opt, UI_STR_OPT_VAR_NO_HINTS_NOTE);
+        if (ui__diff_opt(r->opt)) {
+            /* the draft's value and the disc choose the note; the count
+               greyed while there is no limit */
+            r->noteStr = ui__diff_note(r->opt);
+            lt_ext_set_dim(r->label, ui__diff_dimmed(r->opt));
+            lt_ext_set_dim(r->value, ui__diff_dimmed(r->opt));
         } else if (r->opt == UI_OPT_VAR_NO_LOOK) {
-            r->noteStr = variantNote(r->opt, UI_STR_OPT_VAR_NO_LOOK_NOTE);
+            r->noteStr = ui__variant_note(r->opt, UI_STR_OPT_VAR_NO_LOOK_NOTE);
         }
         if (r->opt == UI_OPT_EFFECT_GLOW_SMOOTH) {
             /* locked: the note says when the row matters (it shows always) */
@@ -6177,6 +6284,18 @@ static void refreshPage(Page *pg, int id, int cur)
             if (r->value >= 0) {
                 lt_ext_set_dim(r->value, locked);
             }
+        }
+        if (id == UI_PAGE_GPU_DRIVER && s_gpuLiveNote[0] != '\0' && r->note >= 0) {
+            /* the chosen driver's line, then the note (gpuRefresh); written
+               again only when it changed or another text took the note */
+            static char s_written[320];
+            const int ni = r->note - LT_GAME_PROPERTY_COUNT;
+            if (ni < 0 || ni >= LT_EXT_MAX_PROPERTIES || s_noteStr[ni] != -1 ||
+                strcmp(s_written, s_gpuLiveNote) != 0) {
+                liveNoteText(r->note, s_gpuLiveNote);
+                snprintf(s_written, sizeof(s_written), "%s", s_gpuLiveNote);
+            }
+            liveNote = 1;
         }
         if (r->note >= 0) {
             if (r->noteStr == UI_STR_GRAPHICS_KEEP_ASK) {
@@ -6204,6 +6323,9 @@ static int settingsProc(int first, int item)
        to the pause menu when it was opened from its row) */
     const int prevLayout = s_procLayout;
     s_procLayout = current_layout_id;
+    if (id == UI_PAGE_GAMEPLAY && !onTitle()) {
+        ui__diff_set_readonly(1); /* its Difficulty link opens the journey's rows, read-only */
+    }
     if (id != UI_PAGE_STATES && ui__states_is_open()) {
         ui__states_release(); /* the Save states page was left for this one */
     }
@@ -6230,7 +6352,21 @@ static int settingsProc(int first, int item)
     if (id == UI_PAGE_MUSIC) {
         gallery_tick(); /* the engine, once a Main tick while the page is up */
     }
+    if (id == UI_PAGE_STATES && first && s_stLeave) {
+        /* a close a load asked for while the page was up, which the page
+           never ran: a checkpoint load from the title changes the stage, and
+           the stage's own layout replaced the page before its next tick.
+           Taken now it would close the page as it opens (from the pause
+           menu: onto the game's empty layout); dropped instead */
+        fprintf(stderr,
+                "settings: Save states: the close a load left (%s) dropped; the page "
+                "opens\n",
+                s_stLeaveScene ? "onto the empty layout" : "onto the pause menu");
+        s_stLeave = s_stLeaveScene = 0;
+    }
     if (id == UI_PAGE_STATES && s_stLeave) {
+        fprintf(stderr, "settings: Save states closed after a load (%s)\n",
+                s_stLeaveScene ? "onto the empty layout" : "onto the pause menu");
         return statesLeaveQuiet(); /* a state was loaded */
     }
     if (first) {
@@ -6309,14 +6445,30 @@ static int settingsProc(int first, int item)
         if (r->label != lay->curItem) {
             continue;
         }
-        if ((flags & (LT_PAD_LEFT | LT_PAD_RIGHT)) && canStep(r->opt)) {
-            ui_settings_step((UiSettingsOpt)r->opt, (flags & LT_PAD_LEFT) ? -1 : 1);
+        const int rep = ui__step_repeat(first, r->label, r->opt, (unsigned)pad[0].now);
+        const int stepFlags = flags | rep;
+        if ((stepFlags & (LT_PAD_LEFT | LT_PAD_RIGHT)) && canStep(r->opt) &&
+            ui__step_row(r->opt, (stepFlags & LT_PAD_LEFT) ? -1 : 1, rep)) {
+            CUR_SE();
+            refreshPage(pg, id, lay->curItem);
+        }
+        if ((flags & (LT_PAD_L1 | LT_PAD_R1)) && canStep(r->opt) &&
+            ui__tone_step(r->opt,
+                          (flags & LT_PAD_L1) ? -ICO_TONE_STEP_COARSE : ICO_TONE_STEP_COARSE)) {
+            s_dirtyVideo = 1; /* the colour rows by 10 */
             CUR_SE();
             refreshPage(pg, id, lay->curItem);
         }
         if ((flags & LT_PAD_SQUARE) && r->opt == UI_OPT_BRIGHTNESS && canStep(r->opt)) {
             /* the adjust screen's Default */
             systemStatus[11] = BRIGHTNESS_DEFAULT;
+            CUR_SE();
+            refreshPage(pg, id, lay->curItem);
+        }
+        if ((flags & LT_PAD_SQUARE) && r->opt >= UI_OPT_TONE_GAMMA &&
+            r->opt <= UI_OPT_TONE_SATURATION && canStep(r->opt)) {
+            ui__tone_step(r->opt, 0); /* the colour adjustment's 50, the game's own picture */
+            s_dirtyVideo = 1;
             CUR_SE();
             refreshPage(pg, id, lay->curItem);
         }
@@ -6373,6 +6525,10 @@ static int settingsProc(int first, int item)
             POSITIVE_SE();
             steamAdd();
         }
+        if ((flags & PAD_OK) && r->opt == UI_OPT_EXTRAS_DESKTOP) {
+            POSITIVE_SE();
+            ui__desktop_press();
+        }
         if ((flags & PAD_OK) && r->opt == UI_OPT_EXTRAS_EXPORT_TEXTURES) {
             POSITIVE_SE();
             texExportPress();
@@ -6391,7 +6547,7 @@ static int settingsProc(int first, int item)
             refreshPage(pg, id, lay->curItem);
         }
         if ((flags & PAD_OK) && r->opt == UI_OPT_VAR_DEBUG_MENU) {
-            /* Game variants > Debug menu: marks it used (achievements off)
+            /* Developer > Debug menu: marks it used (achievements off)
                and opens the game's menu (debug.c debug_MenuOpen); Options
                closes so the menu has the pad */
             POSITIVE_SE();
@@ -6425,8 +6581,8 @@ static int settingsProc(int first, int item)
         if ((flags & PAD_OK) && r->opt == UI_OPT_BACK) {
             return leaveTo(id, parentLayout(pg));
         }
-        if ((flags & PAD_OK) && isExtrasOpt(r->opt)) {
-            int to = extrasOpen(r->opt);
+        if ((flags & PAD_OK) && (isExtrasOpt(r->opt) || ui__unused_row(r->opt) >= 0)) {
+            int to = isExtrasOpt(r->opt) ? extrasOpen(r->opt) : extrasUnused(r->opt);
             if (to >= 0) {
                 POSITIVE_SE();
                 return to;

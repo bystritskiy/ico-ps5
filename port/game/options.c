@@ -1,15 +1,22 @@
 /*
  * port/game/options.c
  *
- * The port's gameplay options (options.h).
+ * The port's gameplay options (options.h).  Five of them (yorda_safe,
+ * pit_time, shadow_speed, yorda_trips, shadows_together) are rows of the
+ * journey's difficulty record (difficulty.h): their accessors keep their
+ * names and read the active record; their setters edit it.
  */
 #include "options.h"
 
 #include <stdio.h>
+#include <stdlib.h>
 #include <string.h>
 
 #include "appearance.h"
 #include "config.h"
+#include "difficulty.h"
+#include "ico_rows.h"
+#include "pit_time.h"
 #include "region.h" /* port/core: the per-disc keys (ico_region_key_prefixed) */
 #include "variants.h"
 
@@ -18,9 +25,8 @@ int ico_mv_active;
 
 /* -1: not read yet; 0 or 1 */
 static int s_stick_fix = -1;
-static int s_yorda_safe = -1;
 static int s_door_fix = -1;
-static int s_yorda_trips = -1;
+static unsigned long s_shadows_together_went; /* the turns the option skipped, this run */
 static int s_natural_chains = -1;
 static int s_skip_opening = -1;
 static int s_second_card = -1;
@@ -73,61 +79,149 @@ void ico_opt_set_stick_fix(int on)
 
 int ico_opt_yorda_safe(void)
 {
-    return get(&s_yorda_safe, "gameplay.yorda_safe");
+    return ico_difficulty_row(ICO_DIFF_YORDA_SAFE);
 }
 
 void ico_opt_set_yorda_safe(int on)
 {
-    s_yorda_safe = on != 0;
+    ico_difficulty_set_row(ICO_DIFF_YORDA_SAFE, on != 0);
 }
 
-/* [gameplay] pit_time (options.h): -1 not read yet, else ICO_PIT_* */
-static int s_pit_time = -1;
-static const char *const kPitNames[ICO_PIT_COUNT] = {"half", "original", "longer", "double",
-                                                     "triple"};
-static const float kPitFactors[ICO_PIT_COUNT] = {0.5f, 1.0f, 1.5f, 2.0f, 3.0f};
+/* the pit time last logged (-1: none yet): the line comes at the first read
+   and on every change of the journey's row */
+static int s_pit_logged = -1;
+
+/* the ticks a second the pull-in's length is counted in (pit_time.h) */
+#define PIT_TICK_HZ ICO_PIT_TICK_HZ
+
+int ico_opt_pit_chain_ticks_for(const char *slug)
+{
+    return ico_pit_chain_ticks_for(slug);
+}
+
+int ico_opt_pit_chain_ticks(void)
+{
+    return ico_opt_pit_chain_ticks_for(ico_region_cur()->slug);
+}
+
+static int pit_base_for(int ticks)
+{
+    return (ticks + PIT_TICK_HZ / 2) / PIT_TICK_HZ;
+}
+
+int ico_opt_pit_base_seconds(void)
+{
+    return pit_base_for(ico_opt_pit_chain_ticks());
+}
+
+/* seconds held to the range; the base itself is Original */
+static int pit_hold(int seconds, int ticks, int *note)
+{
+    if (seconds < ICO_PIT_MIN_SECONDS || seconds > ICO_PIT_MAX_SECONDS) {
+        seconds = seconds < ICO_PIT_MIN_SECONDS ? ICO_PIT_MIN_SECONDS : ICO_PIT_MAX_SECONDS;
+        if (note != NULL) {
+            *note = 1;
+        }
+    }
+    return seconds == pit_base_for(ticks) ? ICO_PIT_ORIGINAL : seconds;
+}
+
+int ico_opt_pit_parse(const char *text, int ticks, int *note)
+{
+    /* the earlier versions' words: that many times the disc's own time */
+    static const struct {
+        const char *word;
+        int num, den;
+    } kWords[] = {{"half", 1, 2}, {"longer", 3, 2}, {"double", 2, 1}, {"triple", 3, 1}};
+
+    char *end = NULL;
+    long v;
+    size_t i;
+
+    if (note != NULL) {
+        *note = 0;
+    }
+    if (text == NULL || strcmp(text, "original") == 0) {
+        return ICO_PIT_ORIGINAL;
+    }
+    for (i = 0; i < sizeof(kWords) / sizeof(kWords[0]); i++) {
+        if (strcmp(text, kWords[i].word) == 0) {
+            const int t = ticks * kWords[i].num / kWords[i].den;
+            int held = 0;
+            const int r = pit_hold((t + PIT_TICK_HZ / 2) / PIT_TICK_HZ, ticks, &held);
+
+            if (note != NULL && held) {
+                *note = 2; /* a known word, held to the range: not a bad value */
+            }
+            return r;
+        }
+    }
+    v = strtol(text, &end, 10);
+    if (end == text || *end != '\0') {
+        if (note != NULL) {
+            *note = 1;
+        }
+        return ICO_PIT_ORIGINAL;
+    }
+    return pit_hold(v < 0 ? 0 : v > 1000 ? 1000 : (int)v, ticks, note);
+}
 
 static void log_pit_time(int v)
 {
-    fprintf(stderr, "gameplay: pit time %s (x%.1f)\n", kPitNames[v], (double)kPitFactors[v]);
+    const int ticks = ico_opt_pit_chain_ticks();
+    char value[16];
+
+    if (v == ICO_PIT_ORIGINAL) {
+        snprintf(value, sizeof(value), "original");
+    } else {
+        snprintf(value, sizeof(value), "%d s", v);
+    }
+    fprintf(stderr,
+            "gameplay: pit time %s (this disc's pull-in %d ticks = %.1f s, shown as %d s; "
+            "x%.3f)\n",
+            value, ticks, (double)ticks / PIT_TICK_HZ, pit_base_for(ticks),
+            (double)ico_opt_pit_time_factor());
 }
 
 int ico_opt_pit_time(void)
 {
-    if (s_pit_time < 0) {
-        const char *v = ico_config_get_string("gameplay.pit_time", "original");
-        int i;
+    int v = ico_difficulty_row(ICO_DIFF_PIT_TIME);
 
-        s_pit_time = ICO_PIT_ORIGINAL;
-        for (i = 0; v != NULL && i < ICO_PIT_COUNT; i++) {
-            if (strcmp(v, kPitNames[i]) == 0) {
-                s_pit_time = i;
-                break;
-            }
-        }
-        if (v != NULL && i == ICO_PIT_COUNT) {
-            fprintf(stderr,
-                    "options: [gameplay] pit_time = \"%s\" is not one of half, original, longer, "
-                    "double, triple\n",
-                    v);
-        }
-        log_pit_time(s_pit_time);
+    /* the disc's own seconds read as Original (a record made on a disc whose
+       base is another) */
+    if (v != ICO_PIT_ORIGINAL) {
+        v = pit_hold(v, ico_opt_pit_chain_ticks(), NULL);
     }
-    return s_pit_time;
-}
-
-void ico_opt_set_pit_time(int v)
-{
-    v = v >= 0 && v < ICO_PIT_COUNT ? v : ICO_PIT_ORIGINAL;
-    if (v != s_pit_time) {
+    if (v != s_pit_logged) {
+        s_pit_logged = v;
         log_pit_time(v);
     }
-    s_pit_time = v;
+    return v;
+}
+
+void ico_opt_set_pit_time(int seconds)
+{
+    const int v = seconds == ICO_PIT_ORIGINAL ? ICO_PIT_ORIGINAL
+                                              : pit_hold(seconds, ico_opt_pit_chain_ticks(), NULL);
+
+    ico_difficulty_set_row(ICO_DIFF_PIT_TIME, v);
+    (void)ico_opt_pit_time(); /* its line on a change */
+}
+
+int ico_opt_pit_seconds(void)
+{
+    const int v = ico_opt_pit_time();
+
+    return v != ICO_PIT_ORIGINAL ? v : ico_opt_pit_base_seconds();
 }
 
 float ico_opt_pit_time_factor(void)
 {
-    return kPitFactors[ico_opt_pit_time()];
+    const int v = ico_opt_pit_time();
+
+    /* the seconds over the disc's own length: 8 s on a 462-tick pull-in is 240/462 */
+    return v == ICO_PIT_ORIGINAL ? 1.0f
+                                 : (float)(v * PIT_TICK_HZ) / (float)ico_opt_pit_chain_ticks();
 }
 
 float ico_opt_pit_dive_ratio(int camera)
@@ -135,8 +229,8 @@ float ico_opt_pit_dive_ratio(int camera)
     return (camera != 0 ? 2.0f : 1.0f) / ico_opt_pit_time_factor();
 }
 
-/* [gameplay] shadow_speed (options.h): -1 not read yet, else ICO_SPEED_* */
-static int s_shadow_speed = -1;
+/* the shadow speed last logged (-1: none yet) */
+static int s_speed_logged = -1;
 static const char *const kSpeedNames[ICO_SPEED_COUNT] = {"slower", "original", "faster", "fastest"};
 static const float kSpeedFactors[ICO_SPEED_COUNT] = {0.75f, 1.0f, 1.25f, 1.5f};
 
@@ -148,35 +242,21 @@ static void log_shadow_speed(int v)
 
 int ico_opt_shadow_speed(void)
 {
-    if (s_shadow_speed < 0) {
-        const char *v = ico_config_get_string("gameplay.shadow_speed", "original");
-        int i;
+    int v = ico_difficulty_row(ICO_DIFF_SHADOW_SPEED);
 
-        s_shadow_speed = ICO_SPEED_ORIGINAL;
-        for (i = 0; v != NULL && i < ICO_SPEED_COUNT; i++) {
-            if (strcmp(v, kSpeedNames[i]) == 0) {
-                s_shadow_speed = i;
-                break;
-            }
-        }
-        if (v != NULL && i == ICO_SPEED_COUNT) {
-            fprintf(stderr,
-                    "options: [gameplay] shadow_speed = \"%s\" is not one of slower, original, "
-                    "faster, fastest\n",
-                    v);
-        }
-        log_shadow_speed(s_shadow_speed);
+    v = v >= 0 && v < ICO_SPEED_COUNT ? v : ICO_SPEED_ORIGINAL;
+    if (v != s_speed_logged) {
+        s_speed_logged = v;
+        log_shadow_speed(v);
     }
-    return s_shadow_speed;
+    return v;
 }
 
 void ico_opt_set_shadow_speed(int v)
 {
     v = v >= 0 && v < ICO_SPEED_COUNT ? v : ICO_SPEED_ORIGINAL;
-    if (v != s_shadow_speed) {
-        log_shadow_speed(v);
-    }
-    s_shadow_speed = v;
+    ico_difficulty_set_row(ICO_DIFF_SHADOW_SPEED, v);
+    (void)ico_opt_shadow_speed(); /* its line on a change */
 }
 
 float ico_opt_shadow_speed_factor(void)
@@ -206,6 +286,26 @@ int ico_opt_shadow_speed_motion(int motion)
     return 0;
 }
 
+float ico_opt_shadow_turn_limit(int kind, int motion, float s)
+{
+    static unsigned scaled;
+    float f;
+
+    if (kind != 4 || !ico_opt_shadow_speed_motion(motion)) {
+        return s;
+    }
+    f = ico_opt_shadow_speed_factor();
+    if (f == 1.0f) {
+        return s;
+    }
+    /* counted for the 10 s summaries: how often a shadow's turn limit was scaled */
+    if (++scaled <= 8 || scaled % 100 == 0) {
+        fprintf(stderr, "gameplay: shadow turn x%.2f (%.1f -> %.1f degrees a tick, %u)\n",
+                (double)f, (double)s, (double)(s * f), scaled);
+    }
+    return s * f;
+}
+
 int ico_opt_door_fix(void)
 {
     return get(&s_door_fix, "gameplay.door_fix");
@@ -216,21 +316,74 @@ void ico_opt_set_door_fix(int on)
     s_door_fix = on != 0;
 }
 
+/* Yorda trips and Shadows attack together last logged (-1: none yet) */
+static int s_trips_logged = -1;
+static int s_together_logged = -1;
+
 int ico_opt_yorda_trips(void)
 {
-    if (s_yorda_trips < 0) {
-        s_yorda_trips = ico_config_get_bool("gameplay.yorda_trips", 0) != 0;
-        fprintf(stderr, "gameplay: yorda trips %s\n", s_yorda_trips ? "on" : "off");
+    const int on = ico_difficulty_row(ICO_DIFF_YORDA_TRIPS) != 0;
+
+    if (on != s_trips_logged) {
+        s_trips_logged = on;
+        fprintf(stderr, "gameplay: yorda trips %s\n", on ? "on" : "off");
     }
-    return s_yorda_trips;
+    return on;
 }
 
 void ico_opt_set_yorda_trips(int on)
 {
-    if ((on != 0) != s_yorda_trips) {
-        fprintf(stderr, "gameplay: yorda trips %s\n", on ? "on" : "off");
+    ico_difficulty_set_row(ICO_DIFF_YORDA_TRIPS, on != 0);
+    (void)ico_opt_yorda_trips(); /* its line on a change */
+}
+
+static void log_shadows_together(int on)
+{
+    if (on) {
+        fprintf(stderr, "gameplay: shadows attack together: all at once (no turns)\n");
+    } else {
+        fprintf(stderr, "gameplay: shadows attack together: 1 at once (the game's turns)\n");
     }
-    s_yorda_trips = on != 0;
+}
+
+int ico_opt_shadows_together(void)
+{
+    const int on = ico_difficulty_row(ICO_DIFF_SHADOWS_TOGETHER) != 0;
+
+    if (on != s_together_logged) {
+        s_together_logged = on;
+        log_shadows_together(on);
+    }
+    return on;
+}
+
+void ico_opt_set_shadows_together(int on)
+{
+    ico_difficulty_set_row(ICO_DIFF_SHADOWS_TOGETHER, on != 0);
+    (void)ico_opt_shadows_together(); /* its line on a change */
+}
+
+int ico_opt_shadow_waits(int other_attacking)
+{
+    if (!other_attacking) {
+        return 0;
+    }
+    if (!ico_opt_shadows_together()) {
+        return 1; /* the game's turn */
+    }
+    s_shadows_together_went++;
+    if (s_shadows_together_went <= 8 || s_shadows_together_went % 100 == 0) {
+        fprintf(stderr,
+                "gameplay: shadows attack together: a shadow did not wait for another's attack "
+                "(%lu this run)\n",
+                s_shadows_together_went);
+    }
+    return 0;
+}
+
+unsigned long ico_opt_shadows_together_went(void)
+{
+    return s_shadows_together_went;
 }
 
 int ico_opt_natural_chains(void)
@@ -301,6 +454,8 @@ void ico_opt_set_mirror(int on)
 void ico_opt_mirror_reset(void)
 {
     ico_opt_set_mirror(ico_config_get_bool("gameplay.mirror", 0) != 0);
+    /* the title belongs to no journey: Normal (difficulty.h) */
+    ico_difficulty_reset();
 }
 
 void ico_opt_set_mirror_listener(void (*fn)(int on))
@@ -702,15 +857,177 @@ void ico_opt_hold_type_toggled(int type)
     }
 }
 
+/* [gameplay] zoom_type (options.h): -1 not read yet, else ICO_ZOOM_HOLD or
+   ICO_ZOOM_TOGGLE */
+static int s_zoom_type = -1;
+
+int ico_opt_zoom_type(void)
+{
+    /* the type last logged */
+    static int logged = -1;
+
+    if (s_zoom_type < 0) {
+        const char *v = ico_config_get_string("gameplay.zoom_type", "hold");
+
+        s_zoom_type = v != NULL && strcmp(v, "toggle") == 0 ? ICO_ZOOM_TOGGLE : ICO_ZOOM_HOLD;
+        if (v != NULL && strcmp(v, "toggle") != 0 && strcmp(v, "hold") != 0) {
+            fprintf(stderr,
+                    "options: [gameplay] zoom_type = \"%s\" is not one of hold, toggle: hold\n", v);
+        }
+    }
+    if (s_zoom_type != logged) {
+        logged = s_zoom_type;
+        fprintf(stderr, "options: zoom type %s\n", ico_opt_zoom_type_name(s_zoom_type));
+    }
+    return s_zoom_type;
+}
+
+void ico_opt_set_zoom_type(int type)
+{
+    s_zoom_type = type == ICO_ZOOM_TOGGLE ? ICO_ZOOM_TOGGLE : ICO_ZOOM_HOLD;
+}
+
+const char *ico_opt_zoom_type_name(int type)
+{
+    return type == ICO_ZOOM_TOGGLE ? "toggle" : "hold";
+}
+
+/* [gameplay] camera_reset (options.h): -1 not read yet, else 0 or 1 */
+static int s_camera_reset = -1;
+
+int ico_opt_camera_reset(void)
+{
+    /* the value last logged */
+    static int logged = -1;
+
+    if (s_camera_reset < 0) {
+        const char *v = ico_config_get_string("gameplay.camera_reset", "off");
+
+        s_camera_reset = v != NULL && strcmp(v, "on") == 0;
+        if (v != NULL && strcmp(v, "on") != 0 && strcmp(v, "off") != 0) {
+            fprintf(stderr,
+                    "options: [gameplay] camera_reset = \"%s\" is not one of off, on: off\n", v);
+        }
+    }
+    if (s_camera_reset != logged) {
+        logged = s_camera_reset;
+        fprintf(stderr, "options: camera reset %s\n", ico_opt_camera_reset_name(s_camera_reset));
+    }
+    return s_camera_reset;
+}
+
+void ico_opt_set_camera_reset(int on)
+{
+    s_camera_reset = on != 0;
+}
+
+const char *ico_opt_camera_reset_name(int on)
+{
+    return on != 0 ? "on" : "off";
+}
+
+/* [gameplay] yorda_look (options.h): -1 not read yet, else ICO_YORDA_LOOK_* */
+static int s_yorda_look = -1;
+
+int ico_opt_yorda_look(void)
+{
+    /* the value last logged */
+    static int logged = -1;
+
+    if (s_yorda_look < 0) {
+        const char *v = ico_config_get_string("gameplay.yorda_look", "off");
+
+        s_yorda_look = v == NULL                  ? ICO_YORDA_LOOK_OFF
+                       : strcmp(v, "hold") == 0   ? ICO_YORDA_LOOK_HOLD
+                       : strcmp(v, "toggle") == 0 ? ICO_YORDA_LOOK_TOGGLE
+                                                  : ICO_YORDA_LOOK_OFF;
+        if (v != NULL && strcmp(v, "off") != 0 && s_yorda_look == ICO_YORDA_LOOK_OFF) {
+            fprintf(
+                stderr,
+                "options: [gameplay] yorda_look = \"%s\" is not one of off, hold, toggle: off\n",
+                v);
+        }
+    }
+    if (s_yorda_look != logged) {
+        logged = s_yorda_look;
+        fprintf(stderr, "options: look at yorda %s\n", ico_opt_yorda_look_name(s_yorda_look));
+    }
+    return s_yorda_look;
+}
+
+void ico_opt_set_yorda_look(int type)
+{
+    s_yorda_look =
+        type == ICO_YORDA_LOOK_HOLD || type == ICO_YORDA_LOOK_TOGGLE ? type : ICO_YORDA_LOOK_OFF;
+}
+
+const char *ico_opt_yorda_look_name(int type)
+{
+    return type == ICO_YORDA_LOOK_HOLD ? "hold" : type == ICO_YORDA_LOOK_TOGGLE ? "toggle" : "off";
+}
+
+/* [input] button_pictures (options.h): -2 not read yet, else
+   ICO_BUTTON_PICTURES_* */
+static int s_button_pictures = -2;
+static const char *const kButtonPicturesNames[ICO_BUTTON_PICTURES_COUNT] = {
+    "playstation", "xbox", "nintendo", "wii_classic"};
+
+int ico_opt_button_pictures(void)
+{
+    if (s_button_pictures == -2) {
+        const char *v = ico_config_get_string("input.button_pictures", "auto");
+
+        s_button_pictures = ICO_BUTTON_PICTURES_AUTO;
+        for (int i = 0; v != NULL && i < ICO_BUTTON_PICTURES_COUNT; i++) {
+            if (strcmp(v, kButtonPicturesNames[i]) == 0) {
+                s_button_pictures = i;
+            }
+        }
+        if (s_button_pictures == ICO_BUTTON_PICTURES_AUTO && v != NULL && strcmp(v, "auto") != 0) {
+            fprintf(stderr,
+                    "options: [input] button_pictures = \"%s\" is not one of auto, playstation, "
+                    "xbox, nintendo, wii_classic: auto\n",
+                    v);
+        }
+    }
+    return s_button_pictures;
+}
+
+void ico_opt_set_button_pictures(int choice)
+{
+    s_button_pictures =
+        choice >= 0 && choice < ICO_BUTTON_PICTURES_COUNT ? choice : ICO_BUTTON_PICTURES_AUTO;
+}
+
+const char *ico_opt_button_pictures_name(int choice)
+{
+    return choice >= 0 && choice < ICO_BUTTON_PICTURES_COUNT ? kButtonPicturesNames[choice]
+                                                             : "auto";
+}
+
+int ico_opt_button_pictures_store(void)
+{
+    return ico_config_set_string("input.button_pictures",
+                                 ico_opt_button_pictures_name(ico_opt_button_pictures())) != 0
+               ? -1
+               : 0;
+}
+
 void ico_opt_reload(void)
 {
-    s_stick_fix = s_yorda_safe = s_door_fix = s_mirror = s_developer_mode = s_circle_back = -1;
-    s_pit_time = s_shadow_speed = -1;
-    s_natural_chains = s_skip_opening = s_yorda_trips = s_second_card = -1;
+    /* the difficulty rows (yorda_safe, pit_time, shadow_speed, yorda_trips,
+       shadows_together) are the journey's, not the config's: kept */
+    s_stick_fix = s_door_fix = s_mirror = s_developer_mode = s_circle_back = -1;
+    s_natural_chains = s_skip_opening = s_second_card = -1;
+    ico_rows_reload();
     s_output = -2;
     s_ui_language = -2;
     s_text_language = -2;
     s_hold_choice = -1;
+    s_zoom_type = -1;
+    s_camera_reset = -1;
+    s_yorda_look = -1;
+    s_button_pictures = -2;
     /* the characters' colours ([characters], appearance.h) */
     ico_appearance_reload();
     /* the game variants ([variants], variants.h) */

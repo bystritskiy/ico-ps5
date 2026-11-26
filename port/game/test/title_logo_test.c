@@ -7,7 +7,8 @@
  *   title     on the title's menu nothing hides; a Settings page over the
  *             title hides the logo's models, never another stage object;
  *             back on layout 12 or 13 the logo shows on the first frame,
- *             and back on the Continue screen (19) from the Save states page
+ *             and back on the Continue screen (19) from the Save states page;
+ *             the New Game screen (from the vibration screen, 9) leaves it
  *   extras    the model list over the title hides it; Credits and a
  *             model's stage load (the title fading out on a layout of
  *             neither) keep it hidden until the stage changes, and the next
@@ -16,10 +17,36 @@
  *   stretch   title_back is the title's full-frame model, by name alone, on any
  *             stage and on no other; no other model is, the logo's
  *             included
+ *   icon      the application icon's capture (title_icon.c) with the
+ *             renderer and the icon files stubbed: the pass off leaves the
+ *             old table; ICO_TITLE_ICON_WAIT ticks on layout 12 or 13
+ *             (counted again after the menu left) start it when an icon is
+ *             wanted, never when not, and only while no game fade runs
+ *             (counted again from its end; a fade held at level 0 counts
+ *             as none): the renderer's hold on first, the
+ *             pass on once it holds a picture (or after
+ *             ICO_TITLE_ICON_HELD_WAIT ticks without one; the menu left
+ *             meanwhile ends it); a picture not plain
+ *             (ICO_APP_ICON_NOT_PLAIN) leaves it idle and asks again after
+ *             another wait, not done for the run; on, every model but "I"
+ *             is left out (title_back, st26a_p1, C, I_f, I_sd); the shot over
+ *             black is armed after the settle, the clear turns white once
+ *             it came, the shot over white after the settle again, then the
+ *             pass off, the pair delivered, the hold released at the first
+ *             present past the pass's frames (not over a blend with one;
+ *             after ICO_TITLE_ICON_HOLD_MAX ticks without one), done for
+ *             the run; an empty answer or none within the
+ *             wait is armed again, and after ICO_TITLE_ICON_RETRIES the
+ *             run gives up; "the frames differ" takes the pair again once,
+ *             then the picture over black alone; the menu left during the
+ *             pass ends it and the next visit starts again
  */
 #include <stdio.h>
+#include <stdlib.h>
 #include <string.h>
 
+#include "app_icon.h" /* ICO_APP_ICON_OK, _GHOST */
+#include "title_icon.h"
 #include "title_logo.h"
 
 static int failures;
@@ -37,7 +64,10 @@ static int failures;
 /* the game's globals and the menus' answers */
 int stage_no;
 int current_layout_id;
-static int s_covers; /* ui_settings_covers_title */
+int ico_mv_active;          /* options.h */
+int fadeStatus;             /* seki/src/Basic.c: gsb_fade's state */
+unsigned char fadeColor[4]; /* and its colour */
+static int s_covers;        /* ui_settings_covers_title */
 static int s_list = -1;
 
 int ui_settings_covers_title(void)
@@ -56,6 +86,8 @@ int ico_mv_title_list_layout(void)
 #define EMPTY 0           /* the game's empty layout, while a stage changes */
 #define PAUSE 58          /* the Options screen */
 #define CONTINUE_FILES 19 /* the Continue screen's file select */
+#define VIBE 9            /* the vibration screen (the European disc's) */
+#define NEWGAME 320       /* the New Game screen (a port layout) */
 
 /* one frame of draws: the logo's I and a castle mesh of the stage */
 static int s_logoShown, s_castleShown;
@@ -107,6 +139,24 @@ static void testTitle(void)
     CHECK(!s_logoShown, "the Save states page over it: hidden");
     frame(TITLE, CONTINUE_FILES, 0);
     CHECK(s_logoShown, "back on the Continue screen: shown on the first frame");
+    /* the New Game screen, reached from the vibration screen: not a page,
+       the logo is left as the vibration screen had it (the game's own title
+       animation has taken the lettering away by then); a page over the title
+       before it still keeps it hidden until a stage change */
+    frame(TITLE, 13, 0);
+    frame(TITLE, VIBE, 0);
+    CHECK(s_logoShown, "the vibration screen: shown");
+    frame(TITLE, NEWGAME, 0);
+    CHECK(s_logoShown && s_castleShown,
+          "the New Game screen: the logo left shown, the stage drawn");
+    frame(TITLE, VIBE, 0);
+    CHECK(s_logoShown, "back on the vibration screen: shown");
+    frame(TITLE, PAGE, 1);
+    CHECK(!s_logoShown, "a page over the title: hidden");
+    frame(TITLE, NEWGAME, 0);
+    CHECK(!s_logoShown, "the New Game screen after a page: stays hidden");
+    frame(46, EMPTY, 0);
+    CHECK(s_logoShown, "a stage change: shown");
 }
 
 static void testExtras(void)
@@ -179,6 +229,488 @@ static void testStretch(void)
     frame(TITLE, 12, 0);
 }
 
+/* ------------------------------------------------------------ the icon */
+
+/* the stubs' state */
+enum { ANS_NONE = 0, ANS_NULL, ANS_PICTURE };
+
+static struct {
+    int wanted;
+    int arms, cancels, delivers, singles;
+    int pass;            /* on */
+    uint8_t passRgba[4]; /* its colour */
+    int hold;            /* the renderer's hold on */
+    int held;            /* held's answer: the renderer holds a picture */
+    int holds;           /* hold(1) calls */
+    int answer;          /* the next take's: none, NULL, a picture of answerByte */
+    uint8_t answerByte;
+    uint32_t answerW;
+    int deliverR[2];       /* deliver's answers in turn */
+    int seenA, seenB;      /* the first byte of the pair deliver got */
+    int seenSingle;        /* the first byte deliver_single got */
+    uint32_t passLast;     /* pass_last's answer */
+    int presentValid;      /* presented's: a present was made */
+    uint32_t presentFrame; /* and its frame and alpha */
+    float presentAlpha;
+} st;
+
+static int stWanted(void)
+{
+    return st.wanted;
+}
+
+static int stArm(void)
+{
+    st.arms++;
+    return 1;
+}
+
+static int stTake(uint8_t **rgba, uint32_t *w, uint32_t *h)
+{
+    const int a = st.answer;
+    st.answer = ANS_NONE;
+    if (a == ANS_NONE) {
+        return 0;
+    }
+    *rgba = NULL;
+    *w = *h = 0;
+    if (a == ANS_PICTURE) {
+        *w = st.answerW;
+        *h = 2;
+        *rgba = malloc((size_t)*w * *h * 4);
+        memset(*rgba, st.answerByte, (size_t)*w * *h * 4);
+    }
+    return 1;
+}
+
+static void stCancel(void)
+{
+    st.cancels++;
+}
+
+static void stPass(const uint8_t *rgba)
+{
+    st.pass = rgba != NULL;
+    if (rgba) {
+        memcpy(st.passRgba, rgba, 4);
+    }
+}
+
+static void stHold(int on)
+{
+    st.hold = on;
+    st.holds += on != 0;
+}
+
+static int stHeld(void)
+{
+    return st.held;
+}
+
+static int stDeliver(const uint8_t *a, const uint8_t *b, int w, int h)
+{
+    CHECK(w == 4 && h == 2, "icon: the pair's size %dx%d", w, h);
+    st.seenA = a[0];
+    st.seenB = b[w * h * 4 - 1];
+    return st.deliverR[st.delivers++ & 1];
+}
+
+static int stSingle(const uint8_t *a, int w, int h)
+{
+    CHECK(w == 4 && h == 2, "icon: the single picture's size %dx%d", w, h);
+    st.seenSingle = a[0];
+    st.singles++;
+    return ICO_APP_ICON_OK;
+}
+
+static uint32_t stPassLast(void)
+{
+    return st.passLast;
+}
+
+static int stPresented(uint32_t *frame, float *alpha)
+{
+    *frame = st.presentFrame;
+    *alpha = st.presentAlpha;
+    return st.presentValid;
+}
+
+static const IcoTitleIconOps kStub = {stWanted, stArm,     stTake,   stCancel,   stPass,     stHold,
+                                      stHeld,   stDeliver, stSingle, stPassLast, stPresented};
+
+static void iconStart(int wanted)
+{
+    ico_title_icon_reset();
+    memset(&st, 0, sizeof(st));
+    st.wanted = wanted;
+    st.answerW = 4;
+    st.deliverR[0] = st.deliverR[1] = ICO_APP_ICON_OK;
+    st.held = 1; /* the renderer holds a picture by the tick after the hold */
+    /* the presents already past the pass's frames: the hold is released
+       at the first tick after the pass (testIconResume holds them back) */
+    st.passLast = 10;
+    st.presentValid = 1;
+    st.presentFrame = 12;
+    st.presentAlpha = 1.0f;
+    ico_title_icon_set_ops(&kStub);
+}
+
+/* n ticks of the title's menu */
+static void menuTicks(int n)
+{
+    for (int i = 0; i < n; i++) {
+        frame(TITLE, 12, 0);
+    }
+}
+
+/* ticks of the menu until the shot is armed (at most limit); the ticks */
+static int untilArmed(int limit)
+{
+    const int arms = st.arms;
+    int n = 0;
+    while (st.arms == arms && n < limit) {
+        frame(TITLE, 13, 0);
+        n++;
+    }
+    return n;
+}
+
+static int isBlack(void)
+{
+    return st.pass && st.passRgba[0] == 0 && st.passRgba[1] == 0 && st.passRgba[2] == 0;
+}
+
+static int isWhite(void)
+{
+    return st.pass && st.passRgba[0] == 0xFF && st.passRgba[1] == 0xFF && st.passRgba[2] == 0xFF;
+}
+
+/* the answer to the armed shot, taken on the next tick */
+static void answer(int kind, uint8_t byte)
+{
+    st.answer = kind;
+    st.answerByte = byte;
+    frame(TITLE, 12, 0);
+}
+
+static void testIconSkip(void)
+{
+    static const char *const others[] = {"title_back", "st26a_p1", "C",    "O",
+                                         "I_f",        "I_sd",     "C_sd", "boy"};
+    iconStart(1);
+    menuTicks(ICO_TITLE_ICON_WAIT);
+    CHECK(!ico_title_icon_pass_on() && !st.pass && st.hold &&
+              ico_title_icon_state() == ICO_TITLE_ICON_HOLD,
+          "icon: the hold on first, the pass not yet");
+    CHECK(!ico_title_logo_skip("C"), "icon: the hold alone leaves every model drawn");
+    menuTicks(1);
+    CHECK(ico_title_icon_pass_on() && isBlack() && st.hold,
+          "icon: the pass on over black once a picture is held");
+    CHECK(!ico_title_logo_skip("I"), "icon: I drawn in the pass");
+    for (unsigned i = 0; i < sizeof(others) / sizeof(others[0]); i++) {
+        CHECK(ico_title_logo_skip(others[i]), "icon: %s left out in the pass", others[i]);
+    }
+    ico_title_icon_reset();
+    CHECK(!ico_title_icon_pass_on() && !st.pass && !st.hold,
+          "icon: reset turns the pass and the hold off");
+    /* off: the old table (the logo shown on the menu, nothing left out) */
+    frame(TITLE, 12, 0);
+    for (unsigned i = 0; i < sizeof(others) / sizeof(others[0]); i++) {
+        CHECK(!ico_title_logo_skip(others[i]), "icon off: %s drawn", others[i]);
+    }
+    frame(TITLE, PAGE, 1);
+    CHECK(ico_title_logo_skip("I") && ico_title_logo_skip("C") &&
+              !ico_title_logo_skip("st26a_p1") && !ico_title_logo_skip("title_back"),
+          "icon off: a Settings page hides the logo alone");
+    frame(TITLE, 12, 0);
+    ico_title_icon_set_ops(NULL);
+}
+
+static void testIconSteps(void)
+{
+    /* not wanted: done, nothing on */
+    iconStart(0);
+    menuTicks(ICO_TITLE_ICON_WAIT + 5);
+    CHECK(ico_title_icon_state() == ICO_TITLE_ICON_DONE && !st.pass && !st.hold && st.holds == 0 &&
+              st.arms == 0,
+          "icon: not wanted, nothing captured");
+
+    /* wanted but the picture not plain (the CRT filter, a colour
+       adjustment or Upscaling on): idle, not done for the run; asked again
+       after another wait, and the capture starts once the picture is plain */
+    iconStart(ICO_APP_ICON_NOT_PLAIN);
+    menuTicks(ICO_TITLE_ICON_WAIT);
+    CHECK(ico_title_icon_state() == ICO_TITLE_ICON_IDLE && !st.pass && !st.hold && st.holds == 0 &&
+              st.arms == 0,
+          "icon: not plain: idle, nothing captured");
+    menuTicks(ICO_TITLE_ICON_WAIT - 1);
+    CHECK(ico_title_icon_state() == ICO_TITLE_ICON_IDLE && !st.pass,
+          "icon: not plain: the wait counted again from 0");
+    st.wanted = 1; /* the settings changed */
+    menuTicks(2);
+    CHECK(ico_title_icon_pass_on() && isBlack() && st.hold,
+          "icon: plain again: the capture starts at the next wait's end");
+
+    /* the wait: counted on layout 12/13 only, again after the menu left */
+    iconStart(1);
+    frame(TITLE, 55, 0); /* the intro's layout */
+    menuTicks(ICO_TITLE_ICON_WAIT - 1);
+    CHECK(!st.pass, "icon: %d ticks of the menu: not yet", ICO_TITLE_ICON_WAIT - 1);
+    frame(TITLE, PAGE, 1); /* a Settings page: the logo hidden */
+    frame(TITLE, 12, 0);
+    menuTicks(ICO_TITLE_ICON_WAIT - 2);
+    CHECK(!st.pass, "icon: the count starts again after the menu left");
+    ico_mv_active = 1;
+    menuTicks(5);
+    CHECK(!st.pass, "icon: never inside the model viewer");
+    ico_mv_active = 0;
+    menuTicks(ICO_TITLE_ICON_WAIT - 1);
+    CHECK(!st.pass, "icon: the viewer restarted the count");
+    frame(TITLE, 12, 0);
+    CHECK(!st.pass && st.hold && st.holds == 1 && ico_title_icon_state() == ICO_TITLE_ICON_HOLD,
+          "icon: %d ticks of the menu: the hold on", ICO_TITLE_ICON_WAIT);
+    frame(TITLE, 12, 0);
+    CHECK(isBlack() && st.hold && ico_title_icon_state() == ICO_TITLE_ICON_SETTLE_A,
+          "icon: the next tick, a picture held: the pass on over black");
+
+    /* shot A after the settle; the clear white once it came */
+    CHECK(untilArmed(20) == ICO_TITLE_ICON_SETTLE && st.arms == 1,
+          "icon: shot A armed after %d ticks", ICO_TITLE_ICON_SETTLE);
+    frame(TITLE, 12, 0);
+    frame(TITLE, 12, 0);
+    CHECK(ico_title_icon_state() == ICO_TITLE_ICON_SHOT_A && isBlack(),
+          "icon: waiting for shot A, still black");
+    answer(ANS_PICTURE, 0x11);
+    CHECK(isWhite() && st.hold && ico_title_icon_state() == ICO_TITLE_ICON_SETTLE_B,
+          "icon: shot A taken, the clear white");
+    CHECK(untilArmed(20) == ICO_TITLE_ICON_SETTLE && st.arms == 2,
+          "icon: shot B armed after the settle");
+    answer(ANS_PICTURE, 0xEE);
+    CHECK(st.delivers == 1 && st.seenA == 0x11 && st.seenB == 0xEE,
+          "icon: the pair delivered (over black, over white)");
+    CHECK(!st.pass && !ico_title_icon_pass_on() && st.hold,
+          "icon: the pass off at once, the hold kept");
+    menuTicks(1);
+    CHECK(!st.hold && ico_title_icon_state() == ICO_TITLE_ICON_DONE,
+          "icon: the hold released at the first present past the pass, done");
+    menuTicks(ICO_TITLE_ICON_WAIT * 2);
+    CHECK(st.arms == 2 && !st.pass, "icon: done for the run");
+    ico_title_icon_set_ops(NULL);
+}
+
+static void testIconRetries(void)
+{
+    /* empty answers: armed again, then given up */
+    iconStart(1);
+    menuTicks(ICO_TITLE_ICON_WAIT);
+    untilArmed(20);
+    for (int i = 0; i < ICO_TITLE_ICON_RETRIES; i++) {
+        answer(ANS_NULL, 0);
+        CHECK(ico_title_icon_pass_on() && isBlack(), "icon: drop %d: the pass stays", i + 1);
+        CHECK(untilArmed(20) == 1 && st.arms == i + 2, "icon: drop %d: armed again next tick",
+              i + 1);
+    }
+    answer(ANS_NULL, 0);
+    CHECK(!st.pass && st.hold && st.delivers == 0 && st.singles == 0,
+          "icon: drop %d: given up, the pass off", ICO_TITLE_ICON_RETRIES + 1);
+    menuTicks(1);
+    CHECK(!st.hold && ico_title_icon_state() == ICO_TITLE_ICON_DONE, "icon: given up for the run");
+
+    /* no answer within the wait: cancelled and armed again */
+    iconStart(1);
+    menuTicks(ICO_TITLE_ICON_WAIT);
+    untilArmed(20);
+    menuTicks(ICO_TITLE_ICON_TIMEOUT);
+    CHECK(st.cancels == 1, "icon: no answer within %d ticks: cancelled", ICO_TITLE_ICON_TIMEOUT);
+    CHECK(untilArmed(20) == 1 && st.arms == 2, "icon: and armed again");
+    answer(ANS_PICTURE, 0x22);
+    CHECK(isWhite(), "icon: the late shot A kept");
+
+    /* the pair differs: taken again once, then the picture over black alone */
+    iconStart(1);
+    st.deliverR[0] = st.deliverR[1] = ICO_APP_ICON_GHOST;
+    menuTicks(ICO_TITLE_ICON_WAIT);
+    untilArmed(20);
+    answer(ANS_PICTURE, 0x31);
+    untilArmed(20);
+    answer(ANS_PICTURE, 0xC1);
+    CHECK(st.delivers == 1 && isBlack() && st.hold && st.holds == 1 &&
+              ico_title_icon_state() == ICO_TITLE_ICON_SETTLE_A,
+          "icon: the pair differs: over black again, the hold kept");
+    untilArmed(20);
+    answer(ANS_PICTURE, 0x32);
+    untilArmed(20);
+    answer(ANS_PICTURE, 0xC2);
+    CHECK(st.delivers == 2 && st.singles == 1 && st.seenSingle == 0x32 && !st.pass,
+          "icon: it differs again: the second picture over black alone");
+    menuTicks(1);
+    CHECK(ico_title_icon_state() == ICO_TITLE_ICON_DONE && !st.hold, "icon: then done");
+
+    /* a picture of another size over white: as the pair differing */
+    iconStart(1);
+    st.deliverR[0] = ICO_APP_ICON_OK;
+    menuTicks(ICO_TITLE_ICON_WAIT);
+    untilArmed(20);
+    answer(ANS_PICTURE, 0x41);
+    untilArmed(20);
+    st.answerW = 6;
+    answer(ANS_PICTURE, 0xD1);
+    CHECK(st.delivers == 0 && isBlack(), "icon: a resized window: the pair again");
+    st.answerW = 4;
+    untilArmed(20);
+    answer(ANS_PICTURE, 0x42);
+    untilArmed(20);
+    answer(ANS_PICTURE, 0xD2);
+    CHECK(st.delivers == 1 && st.seenA == 0x42 && st.seenB == 0xD2 && !st.pass,
+          "icon: then delivered");
+
+    /* the menu left during the pass: ended, started again next visit */
+    iconStart(1);
+    menuTicks(ICO_TITLE_ICON_WAIT);
+    untilArmed(20);
+    answer(ANS_PICTURE, 0x51);
+    frame(TITLE, EMPTY, 0); /* New Game: the title fading out */
+    CHECK(!st.pass && st.hold, "icon: the menu left: the pass off");
+    frame(TITLE, EMPTY, 0);
+    frame(TITLE, EMPTY, 0);
+    CHECK(!st.hold && ico_title_icon_state() == ICO_TITLE_ICON_IDLE,
+          "icon: the hold released, idle");
+    menuTicks(ICO_TITLE_ICON_WAIT + 1);
+    CHECK(isBlack() && st.arms == 1, "icon: the next visit starts again");
+    untilArmed(20);
+    CHECK(st.arms == 2, "icon: and arms");
+    frame(26, EMPTY, 0); /* the stage changed while armed */
+    CHECK(!st.pass && st.cancels >= 1, "icon: a stage change while armed cancels the shot");
+    ico_title_icon_reset();
+    ico_title_icon_set_ops(NULL);
+}
+
+/* the hold is released at the first present past the pass's frames, not
+   after a count of ticks; a blend with a pass frame is not past them; the
+   safety net releases it after ICO_TITLE_ICON_HOLD_MAX ticks */
+static void testIconResume(void)
+{
+    /* the rule alone */
+    CHECK(!ico_title_icon_present_clean(10, 1.0f, 10), "icon: the pass's last frame is not clean");
+    CHECK(!ico_title_icon_present_clean(3, 1.0f, 10), "icon: an older frame is not clean");
+    CHECK(ico_title_icon_present_clean(11, 1.0f, 10), "icon: the next frame at alpha 1 is clean");
+    CHECK(!ico_title_icon_present_clean(11, 0.5f, 10) &&
+              !ico_title_icon_present_clean(11, 0.0f, 10),
+          "icon: the next frame blended with the pass's last is not clean");
+    CHECK(ico_title_icon_present_clean(12, 0.25f, 10),
+          "icon: a blend of two later frames is clean");
+
+    iconStart(1);
+    menuTicks(ICO_TITLE_ICON_WAIT);
+    untilArmed(20);
+    answer(ANS_PICTURE, 0x61);
+    untilArmed(20);
+    st.passLast = 40; /* the pass ends with frame 40 open */
+    st.presentFrame = 38;
+    answer(ANS_PICTURE, 0xE1); /* the pair: the pass off, the hold kept */
+    CHECK(!st.pass && st.hold && st.delivers == 1, "icon: resume: the pass off, held");
+    menuTicks(5); /* presents of frames walked before the pass went off */
+    st.presentFrame = 40;
+    menuTicks(5);
+    CHECK(st.hold && ico_title_icon_state() == ICO_TITLE_ICON_RESUME,
+          "icon: resume: held while the presents show the pass's frames (10 ticks)");
+    st.presentFrame = 41;
+    st.presentAlpha = 0.5f; /* frame 41 blended with 40 */
+    menuTicks(1);
+    CHECK(st.hold, "icon: resume: held over a blend with the pass's last frame");
+    st.presentAlpha = 1.0f;
+    menuTicks(1);
+    CHECK(!st.hold && ico_title_icon_state() == ICO_TITLE_ICON_DONE,
+          "icon: resume: released at the first present past the pass, done");
+
+    /* no present past the pass at all (none made, or the frames stopped):
+       the safety net */
+    iconStart(1);
+    menuTicks(ICO_TITLE_ICON_WAIT);
+    untilArmed(20);
+    answer(ANS_PICTURE, 0x62);
+    untilArmed(20);
+    st.presentValid = 0;
+    answer(ANS_PICTURE, 0xE2);
+    menuTicks(ICO_TITLE_ICON_HOLD_MAX - 1);
+    CHECK(st.hold, "icon: resume: no present yet after %d ticks: held",
+          ICO_TITLE_ICON_HOLD_MAX - 1);
+    menuTicks(1);
+    CHECK(!st.hold && ico_title_icon_state() == ICO_TITLE_ICON_DONE,
+          "icon: resume: released after %d ticks without a present past the pass",
+          ICO_TITLE_ICON_HOLD_MAX);
+    ico_title_icon_set_ops(NULL);
+}
+
+/* the pass waits for the renderer to hold a picture: on at the tick it
+   says so, after ICO_TITLE_ICON_HELD_WAIT ticks without; the menu left
+   while waiting ends it with no pass */
+static void testIconHold(void)
+{
+    iconStart(1);
+    st.held = 0;
+    menuTicks(ICO_TITLE_ICON_WAIT);
+    CHECK(st.hold && !st.pass, "icon: hold: on, the pass waits");
+    menuTicks(2);
+    CHECK(st.hold && !st.pass && ico_title_icon_state() == ICO_TITLE_ICON_HOLD,
+          "icon: hold: no picture held yet, still waiting");
+    st.held = 1;
+    menuTicks(1);
+    CHECK(isBlack() && ico_title_icon_state() == ICO_TITLE_ICON_SETTLE_A,
+          "icon: hold: the pass on at the tick a picture is held");
+
+    iconStart(1);
+    st.held = 0;
+    menuTicks(ICO_TITLE_ICON_WAIT);
+    menuTicks(ICO_TITLE_ICON_HELD_WAIT - 1);
+    CHECK(!st.pass && ico_title_icon_state() == ICO_TITLE_ICON_HOLD,
+          "icon: hold: %d ticks without a picture: waiting", ICO_TITLE_ICON_HELD_WAIT - 1);
+    menuTicks(1);
+    CHECK(isBlack() && st.hold && ico_title_icon_state() == ICO_TITLE_ICON_SETTLE_A,
+          "icon: hold: after %d ticks the pass on anyway", ICO_TITLE_ICON_HELD_WAIT);
+
+    iconStart(1);
+    st.held = 0;
+    menuTicks(ICO_TITLE_ICON_WAIT);
+    frame(TITLE, EMPTY, 0); /* New Game while waiting */
+    CHECK(!st.pass && st.hold && ico_title_icon_state() == ICO_TITLE_ICON_RESUME,
+          "icon: hold: the menu left while waiting: no pass");
+    frame(TITLE, EMPTY, 0);
+    CHECK(!st.hold && ico_title_icon_state() == ICO_TITLE_ICON_IDLE && st.arms == 0,
+          "icon: hold: released, idle");
+    ico_title_icon_set_ops(NULL);
+}
+
+/* the capture waits for the game's fade (gsb_fade) to end: the ticks with
+   one running are not counted, and the count starts again at its end; a
+   fade held at an end at level 0 is none, at a level above 0 one */
+static void testIconFade(void)
+{
+    iconStart(1);
+    fadeStatus = 2; /* the title's fade-in running */
+    menuTicks(ICO_TITLE_ICON_WAIT * 2);
+    CHECK(!st.hold && st.holds == 0 && ico_title_icon_state() == ICO_TITLE_ICON_IDLE,
+          "icon: fade: nothing while the fade runs");
+    fadeStatus = 3;
+    fadeColor[3] = 40; /* held at a level: still over the picture */
+    menuTicks(ICO_TITLE_ICON_WAIT);
+    CHECK(st.holds == 0, "icon: fade: a fade held above level 0 still waits");
+    fadeColor[3] = 0;
+    menuTicks(ICO_TITLE_ICON_WAIT - 1);
+    CHECK(st.holds == 0, "icon: fade: %d ticks after its end: not yet", ICO_TITLE_ICON_WAIT - 1);
+    fadeStatus = 1; /* a new fade: the count from 0 again */
+    menuTicks(1);
+    fadeStatus = 0;
+    menuTicks(ICO_TITLE_ICON_WAIT - 1);
+    CHECK(st.holds == 0, "icon: fade: the count started again after another fade");
+    menuTicks(1);
+    CHECK(st.hold && st.holds == 1 && ico_title_icon_state() == ICO_TITLE_ICON_HOLD,
+          "icon: fade: the capture starts %d ticks after the fade ended", ICO_TITLE_ICON_WAIT);
+    fadeColor[3] = 0;
+    ico_title_icon_reset();
+    ico_title_icon_set_ops(NULL);
+}
+
 int main(void)
 {
     testModels();
@@ -186,6 +718,12 @@ int main(void)
     testExtras();
     testPause();
     testStretch();
+    testIconSkip();
+    testIconSteps();
+    testIconRetries();
+    testIconResume();
+    testIconHold();
+    testIconFade();
     if (failures) {
         printf("title_logo_test: %d failure(s)\n", failures);
         return 1;

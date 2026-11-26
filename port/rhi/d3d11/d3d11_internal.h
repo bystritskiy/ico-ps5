@@ -33,6 +33,7 @@
 #include <dxgi1_6.h>
 #include <stdio.h>
 #include "../rhi.h"
+#include "../rhi_native.h"
 #include "../d3d12/d3d12_plan.h" /* the pools, layouts, the DXBC input signature reader */
 #include "d3d11_shader.h"
 
@@ -491,6 +492,10 @@ typedef struct D11State {
     HANDLE frameLatencyEvent;
     bool frameLatencyTimeoutLogged;
     bool frameLatencySkipWait;
+    /* the frame latency wait made ahead of the next acquire
+     * (rhi_wait_present_room): that acquire does not wait again; cleared by
+     * it and by a new waitable object */
+    bool frameLatencyWaited;
     bool frameStatsValid;
     uint64_t frameStatsPresent, frameStatsRefresh, frameStatsSyncRefresh, frameStatsSyncNs;
     /* RhiStats: presents and the time in Present, waits that blocked and

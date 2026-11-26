@@ -56,10 +56,16 @@
 int ico_opt_developer_mode(void);
 int ico_opt_debug_option(void);
 
-/* PC port: port/game/variants.h: the Game variants hold these debug
-   switches and open the debug menu (debug_VariableInit binds them) */
+/* PC port: port/game/variants.h: the game variants (Options > Gameplay >
+   Shadows and Cutscenes) hold these debug switches, and Options >
+   Developer > Debug menu opens the debug menu (debug_VariableInit binds
+   them) */
 void ico_variants_bind_debug(int *one_hit, int *ignore_dodge, int *battle_type,
                              int *ignore_demo_camera, int *hand_camera, void (*menu_open)(void));
+
+/* Gameplay > Chains' Chain swing speed and slowdown: the two chain switches
+   (port/game/variants.h ico_variants_bind_debug_chain) */
+void ico_variants_bind_debug_chain(int *cycle_speed, int *slow_speed);
 
 #ifdef ICO_RD
 
@@ -1210,13 +1216,18 @@ void debug_VariableInit(void)
     if (ico_opt_developer_mode() && ico_opt_debug_option() != 0) {
         debug_GetDebugOption();
     }
-    /* PC port: Options > Extras > Game variants: the switches they hold
-       (One hit per swing, Shadows never dodge, Shadow aggression, Ignore
-       cutscene cameras, No cutscene look-around) bound here, after the retail
+    /* PC port: the game variants (Options > Gameplay > Shadows and
+       Cutscenes): the switches they hold (One hit per swing, Shadows never
+       dodge, Shadow aggression, Ignore cutscene cameras, No cutscene
+       look-around) bound here, after the retail
        values and the option file, and written at once; a variant at its
        shipped value leaves its switch as set above (port/game/variants.c) */
     ico_variants_bind_debug(&debug_one_hit_only, &debug_ignore_dodge, &debug_enemy_battle_type,
                             &debug_ignore_demo_camera, &debug_hand_camera, debug_MenuOpen);
+    /* PC port: Chain swing speed and slowdown hold CHAIN CYCLE SPEED and CHAIN
+       SLOW SPEED (4 and 4 above; chain.c's initPendulum and DecreasePdlChain
+       read them on every disc) */
+    ico_variants_bind_debug_chain(&debug_chain_cycle_speed, &debug_chain_slow_speed);
 }
 
 void debug_Init(void)
@@ -3119,6 +3130,43 @@ static int debug_SelectStageMain(int ret, int stage)
     return ret;
 }
 
+/* PC port: Settings > Extras > Unused content's test rooms (port/game/
+   unused_live.c, port/include/ico_unused.h): the same way into a stage as
+   Stage Select's above, with the fade the title's own stage changes have
+   (stgmgrForceSwitchWithFade, as a load from the title), so the port
+   writes no game flag of its own.  mpegPlayReturnStage is left alone (a
+   room is no movie). */
+void ico_host_enter_test_stage(int stage);
+
+void ico_host_enter_test_stage(int stage)
+{
+    int on = 1;
+    soundDataSegAllClose(0, 2);
+    seEnvForceClose = on;
+    enable_game_pause = on;
+    kanbanInit(0);
+    gflagOn(PAL_NTSC_AUG6JUN26(394, 361, 360));
+    scpBoyControlReadDisable = 0;
+    stgmgrForceSwitchWithFade(stage, 8.0f, 4.0f);
+    gflagOff(PAL_NTSC_AUG6JUN26(388, 355, 354));
+    ACTGame_SetActors_Debug(stage, on);
+}
+
+/* PC port: a test room's boy starts without the entrance's walk in.  The
+   flag the game's own scripts set around a checkpoint load (script.c
+   scpSekizouCheckPoint, st13c.c, e3.c) so the boy stands where the load
+   put him: E3_StageStartBoy (fumi/src/boyact.c) and its June 2001 form
+   clear it and return before the walk (motion 8 for the stage's w2
+   frames, which on the climbing room's ramp could walk him off it).
+   Set before the stage's objects are built, as the scripts set it before
+   CheckPoint; the port writes no flag number of its own. */
+void ico_host_skip_entry_walk(void);
+
+void ico_host_skip_entry_walk(void)
+{
+    gflagOn(PAL_NTSC_AUG6_JUN26(381, 348, 347, 332));
+}
+
 int debug_SelectStage(void)
 {
     return debug_SelectStageMain(PAL_JPNKORNTSCCN_AUG6JUN26(debug_SelectCsvWindowWithLine("stage select", 10, 80, 11, stageData,
@@ -4313,7 +4361,7 @@ void debug_Menu_off(void)
 }
 
 /* PC port: what SELECT does in debug_Menu above (developer mode, main.c),
-   for Options > Extras > Game variants > Debug menu: the menu opens on its
+   for Options > Developer > Debug menu: the menu opens on its
    first row; nothing changes while it is already open */
 void debug_MenuOpen(void)
 {

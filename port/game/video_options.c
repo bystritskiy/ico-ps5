@@ -73,12 +73,16 @@ void ico_video_defaults_for(IcoVideoOptions *o, int android)
     o->crtMode = ICO_CRT_CONSUMER;
     o->crtStrength = 1.0f;
     o->crtScanlines = o->crtMask = o->crtHalation = o->crtBloom = o->crtCurvature = -1.0f;
+    o->toneGamma = o->toneBrightness = o->toneContrast = o->toneSaturation = ICO_TONE_DEFAULT;
     o->texturePack = 1;
     o->dumpTextures = 0;
     o->modelPack = 1;
     o->dumpModels = 0;
     o->showFps = 0;
     o->downsample = ICO_DOWNSAMPLE_OFF;
+    o->upscale = ICO_UPSCALE_OFF;
+    o->upscaleSharpness = ICO_UPSCALE_SHARPNESS_DEFAULT;
+    o->upscaleQuality = ICO_UPSCALE_Q_NATIVE;
     o->texturePackBudgetMb = ICO_TEXPACK_BUDGET_DEFAULT;
     o->texturePackPrecache = 1;
     o->texturePackCacheMb = 0;
@@ -91,7 +95,6 @@ void ico_video_defaults_for(IcoVideoOptions *o, int android)
     o->effectGlowSmooth = 0;
     o->effectFog = 1;
     o->effectCinematicBars = 1;
-    o->effectWaterSharp = 0;
     o->effectsDepth = 1;
 }
 
@@ -165,6 +168,49 @@ int ico_video_parse_downsample(const char *s, int *ds)
 const char *ico_video_downsample_name(int ds)
 {
     return ds >= 0 && ds < ICO_DOWNSAMPLE_COUNT ? kDownsample[ds] : kDownsample[ICO_DOWNSAMPLE_OFF];
+}
+
+static const char *const kUpscale[ICO_UPSCALE_COUNT] = {"off", "fsr1", "fsr3"};
+
+int ico_video_parse_upscale(const char *s, int *up)
+{
+    for (int i = 0; i < ICO_UPSCALE_COUNT; i++) {
+        if (lower_eq(s, kUpscale[i])) {
+            *up = i;
+            return 0;
+        }
+    }
+    return -1;
+}
+
+const char *ico_video_upscale_name(int up)
+{
+    return up >= 0 && up < ICO_UPSCALE_COUNT ? kUpscale[up] : kUpscale[ICO_UPSCALE_OFF];
+}
+
+int ico_video_upscale_sharpness_clamp(int v)
+{
+    return v < 0 ? 0 : v > 100 ? 100 : v;
+}
+
+static const char *const kUpscaleQuality[ICO_UPSCALE_Q_COUNT] = {"native", "quality", "balanced",
+                                                                 "performance"};
+
+int ico_video_parse_upscale_quality(const char *s, int *q)
+{
+    for (int i = 0; s && i < ICO_UPSCALE_Q_COUNT; i++) {
+        if (lower_eq(s, kUpscaleQuality[i])) {
+            *q = i;
+            return 0;
+        }
+    }
+    return -1;
+}
+
+const char *ico_video_upscale_quality_name(int q)
+{
+    return q >= 0 && q < ICO_UPSCALE_Q_COUNT ? kUpscaleQuality[q]
+                                             : kUpscaleQuality[ICO_UPSCALE_Q_NATIVE];
 }
 
 static const char *const kAntiAlias[ICO_AA_COUNT] = {"off",   "ssaa2", "ssaa4",
@@ -434,6 +480,10 @@ static void sanitize(IcoVideoOptions *o)
     o->crtHalation = crt_override(o->crtHalation, 1.0f);
     o->crtBloom = crt_override(o->crtBloom, 1.0f);
     o->crtCurvature = crt_override(o->crtCurvature, 0.25f);
+    o->toneGamma = ico_video_tone_clamp(o->toneGamma);
+    o->toneBrightness = ico_video_tone_clamp(o->toneBrightness);
+    o->toneContrast = ico_video_tone_clamp(o->toneContrast);
+    o->toneSaturation = ico_video_tone_clamp(o->toneSaturation);
     o->texturePack = o->texturePack != 0;
     o->dumpTextures = o->dumpTextures != 0;
     o->modelPack = o->modelPack != 0;
@@ -441,6 +491,13 @@ static void sanitize(IcoVideoOptions *o)
     o->showFps = o->showFps != 0;
     if (o->downsample < 0 || o->downsample >= ICO_DOWNSAMPLE_COUNT) {
         o->downsample = ICO_DOWNSAMPLE_OFF;
+    }
+    if (o->upscale < 0 || o->upscale >= ICO_UPSCALE_COUNT) {
+        o->upscale = ICO_UPSCALE_OFF;
+    }
+    o->upscaleSharpness = ico_video_upscale_sharpness_clamp(o->upscaleSharpness);
+    if (o->upscaleQuality < 0 || o->upscaleQuality >= ICO_UPSCALE_Q_COUNT) {
+        o->upscaleQuality = ICO_UPSCALE_Q_NATIVE;
     }
     if (o->texturePackBudgetMb < ICO_TEXPACK_BUDGET_MIN) {
         o->texturePackBudgetMb = ICO_TEXPACK_BUDGET_MIN;
@@ -464,7 +521,6 @@ static void sanitize(IcoVideoOptions *o)
     o->effectGlowSmooth = !!o->effectGlowSmooth;
     o->effectFog = !!o->effectFog;
     o->effectCinematicBars = !!o->effectCinematicBars;
-    o->effectWaterSharp = !!o->effectWaterSharp;
     o->effectsDepth = !!o->effectsDepth;
 }
 
@@ -536,6 +592,24 @@ static void read_config(void)
     o.crtHalation = (float)ico_config_get_float("video.crt_halation", -1.0);
     o.crtBloom = (float)ico_config_get_float("video.crt_bloom", -1.0);
     o.crtCurvature = (float)ico_config_get_float("video.crt_curvature", -1.0);
+    /* the colour adjustment: no key (a file from before the rows) is 50, the
+       game's own picture; a value outside 1..100 (or not a number, which
+       the reader gives as the default) is clamped and said */
+    {
+        static const char *const keys[4] = {"video.gamma", "video.brightness", "video.contrast",
+                                            "video.saturation"};
+        int *const dst[4] = {&o.toneGamma, &o.toneBrightness, &o.toneContrast, &o.toneSaturation};
+
+        for (int i = 0; i < 4; i++) {
+            const long long v = ico_config_get_int(keys[i], ICO_TONE_DEFAULT);
+
+            *dst[i] = ico_video_tone_clamp(v < -1000 ? -1000 : v > 1000 ? 1000 : (int)v);
+            if ((long long)*dst[i] != v) {
+                fprintf(stderr, "video: %s %lld is not %d..%d; %d used\n", keys[i] + 6, v,
+                        ICO_TONE_MIN, ICO_TONE_MAX, *dst[i]);
+            }
+        }
+    }
     /* texture packs */
     o.texturePack = ico_config_get_bool("video.texture_pack", 1) != 0;
     o.dumpTextures = ico_config_get_bool("video.dump_textures", 0) != 0;
@@ -546,6 +620,29 @@ static void read_config(void)
                                    &o.downsample) != 0) {
         o.downsample = ICO_DOWNSAMPLE_OFF;
         fprintf(stderr, "video: downsample not understood; \"off\" used\n");
+    }
+    {
+        const int r =
+            ico_video_parse_upscale(ico_config_get_string("video.upscaling", "off"), &o.upscale);
+        if (r != 0) {
+            o.upscale = ICO_UPSCALE_OFF;
+            fprintf(stderr, "video: upscaling not understood; \"off\" used\n");
+        }
+        if (ico_video_parse_upscale_quality(
+                ico_config_get_string("video.upscaling_quality", "native"), &o.upscaleQuality) !=
+            0) {
+            o.upscaleQuality = ICO_UPSCALE_Q_NATIVE;
+            fprintf(stderr, "video: upscaling_quality not understood; \"native\" used\n");
+        }
+        const long long v =
+            ico_config_get_int("video.upscaling_sharpness", ICO_UPSCALE_SHARPNESS_DEFAULT);
+        o.upscaleSharpness = ico_video_upscale_sharpness_clamp(v < -1000  ? -1000
+                                                               : v > 1000 ? 1000
+                                                                          : (int)v);
+        if ((long long)o.upscaleSharpness != v) {
+            fprintf(stderr, "video: upscaling_sharpness %lld is not 0..100; %d used\n", v,
+                    o.upscaleSharpness);
+        }
     }
     {
         long long mb =
@@ -595,7 +692,6 @@ static void read_config(void)
     }
     o.effectFog = ico_config_get_bool("video.effect_fog", 1);
     o.effectCinematicBars = ico_config_get_bool("video.effect_cinematic_bars", 1);
-    o.effectWaterSharp = ico_config_get_bool("video.effect_water_sharp", 0);
     /* the depth handed to an effects program (ReShade) */
     o.effectsDepth = ico_config_get_bool("video.effects_depth", 1);
     /* Glow between frames: an explicit key wins; no key (a file from before
@@ -708,6 +804,11 @@ int ico_video_save(void)
        a hand-set 0.25 is kept) */
     r |= ico_config_set_float("video.crt_strength",
                               (double)(int)(o.crtStrength * 100.0f + 0.5f) / 100.0);
+    /* the colour adjustment always: each has a row in the menu */
+    r |= ico_config_set_int("video.gamma", o.toneGamma);
+    r |= ico_config_set_int("video.brightness", o.toneBrightness);
+    r |= ico_config_set_int("video.contrast", o.toneContrast);
+    r |= ico_config_set_int("video.saturation", o.toneSaturation);
     /* the overrides only when set: an absent key is the mode's value */
     {
         static const char *const keys[5] = {"video.crt_scanlines", "video.crt_mask",
@@ -726,6 +827,10 @@ int ico_video_save(void)
     r |= ico_config_set_bool("video.dump_models", o.dumpModels);
     r |= ico_config_set_bool("video.show_fps", o.showFps);
     r |= ico_config_set_string("video.downsample", ico_video_downsample_name(o.downsample));
+    r |= ico_config_set_string("video.upscaling", ico_video_upscale_name(o.upscale));
+    r |= ico_config_set_int("video.upscaling_sharpness", o.upscaleSharpness);
+    r |= ico_config_set_string("video.upscaling_quality",
+                               ico_video_upscale_quality_name(o.upscaleQuality));
     /* the config-only keys only when not at their defaults, as the CRT
        overrides: an absent key is the default */
     if (o.texturePackBudgetMb != ICO_TEXPACK_BUDGET_DEFAULT) {
@@ -749,7 +854,6 @@ int ico_video_save(void)
         ico_config_set_string("video.effect_glow_mode", o.effectGlowSmooth ? "smooth" : "original");
     r |= ico_config_set_bool("video.effect_fog", o.effectFog);
     r |= ico_config_set_bool("video.effect_cinematic_bars", o.effectCinematicBars);
-    r |= ico_config_set_bool("video.effect_water_sharp", o.effectWaterSharp);
     /* file-only, so only when not at its default, or to keep a key the
        file already has in step (2: no key) */
     if (!o.effectsDepth || ico_config_get_bool("video.effects_depth", 2) != 2) {
@@ -875,6 +979,11 @@ int ico_video_motion_blur_strength_clamp(int v)
            ICO_MOTION_BLUR_STRENGTH_STEP;
 }
 
+int ico_video_tone_clamp(int v)
+{
+    return v < ICO_TONE_MIN ? ICO_TONE_MIN : v > ICO_TONE_MAX ? ICO_TONE_MAX : v;
+}
+
 int ico_video_effect_glow_smooth(void)
 {
     if (!s_read) {
@@ -920,14 +1029,6 @@ int ico_video_effect_cinematic_bars(void)
         read_config();
     }
     return s_opt.effectCinematicBars;
-}
-
-int ico_video_effect_water_sharp(void)
-{
-    if (!s_read) {
-        read_config();
-    }
-    return s_opt.effectWaterSharp;
 }
 
 int ico_video_effects_depth(void)
@@ -993,6 +1094,30 @@ int ico_video_downsample(void)
         read_config();
     }
     return s_opt.downsample;
+}
+
+int ico_video_upscale(void)
+{
+    if (!s_read) {
+        read_config();
+    }
+    return s_opt.upscale;
+}
+
+int ico_video_upscale_quality(void)
+{
+    if (!s_read) {
+        read_config();
+    }
+    return s_opt.upscaleQuality;
+}
+
+int ico_video_upscale_sharpness(void)
+{
+    if (!s_read) {
+        read_config();
+    }
+    return s_opt.upscaleSharpness;
 }
 
 int ico_video_framerate(void)
@@ -1072,6 +1197,18 @@ int ico_video_changes_text(const IcoVideoOptions *was, const IcoVideoOptions *no
     snprintf(a, sizeof(a), "%.2f", (double)p->crtStrength);
     snprintf(b, sizeof(b), "%.2f", (double)o->crtStrength);
     changes_field(out, size, "crt strength", a, b);
+    snprintf(a, sizeof(a), "%d", p->toneGamma);
+    snprintf(b, sizeof(b), "%d", o->toneGamma);
+    changes_field(out, size, "gamma", a, b);
+    snprintf(a, sizeof(a), "%d", p->toneBrightness);
+    snprintf(b, sizeof(b), "%d", o->toneBrightness);
+    changes_field(out, size, "brightness", a, b);
+    snprintf(a, sizeof(a), "%d", p->toneContrast);
+    snprintf(b, sizeof(b), "%d", o->toneContrast);
+    changes_field(out, size, "contrast", a, b);
+    snprintf(a, sizeof(a), "%d", p->toneSaturation);
+    snprintf(b, sizeof(b), "%d", o->toneSaturation);
+    changes_field(out, size, "saturation", a, b);
     changes_field(out, size, "texture pack", p->texturePack ? "on" : "off",
                   o->texturePack ? "on" : "off");
     changes_field(out, size, "dump textures", p->dumpTextures ? "on" : "off",

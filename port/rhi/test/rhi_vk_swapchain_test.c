@@ -23,7 +23,17 @@
  * such a frame costs one submit, and a frame whose drawing list does not
  * present costs one submit per list and none more.  The display's timing
  * of presents on a stand-in for vkWaitForPresentKHR (presentTiming, and a
- * wait that does not keep its timeout: presentWaitHang).  Exit
+ * wait that does not keep its timeout: presentWaitHang).  Each frame's
+ * image counts as acquired (RhiStats.swapAcquired) from its acquire to its
+ * present.  Only the submit of the list that uses the acquired image waits
+ * on the acquire's semaphore (issue 179, acquireWaits): a list of
+ * off-screen passes before it waits for nothing, and an acquire no list
+ * used is drained by an empty batch at ALL_COMMANDS; the same on the fence
+ * ring (the rhi_vk_swapchain_vk11 run).  The GPU's end first (besidePresent:
+ * a worker thread as the submit thread waits for its picture's GPU end
+ * before the present, rhi_wait_submitted; this thread's acquire of the
+ * other slot returns beside that wait, and a rebuild from this thread
+ * waits for the worker's whole job first; not on the fence ring).  Exit
  * 77 when SDL has no offscreen Vulkan surface or no device presents to it. */
 #include "rhi.h"
 #include "vk/rhi_vk.h"
@@ -64,6 +74,17 @@ static int frame(SDL_Window *win, RhiFormat fmt, int n)
         printf("FAIL frame %d: no backbuffer\n", n);
         return 1;
     }
+    int failures = 0;
+    {
+        /* the image held: one acquired, not yet presented (RhiStats.swapAcquired) */
+        RhiStats st;
+        rhi_get_stats(&st);
+        if (st.swapImages == 0 || st.swapAcquired != 1) {
+            printf("FAIL frame %d: %llu images, %llu acquired after the acquire\n", n,
+                   (unsigned long long)st.swapImages, (unsigned long long)st.swapAcquired);
+            failures++;
+        }
+    }
     RhiCommandList cl = rhi_begin_commands();
     RhiTextureBarrier b0 = {bb, RHI_STATE_UNDEFINED, RHI_STATE_RENDER_TARGET};
     rhi_cmd_barrier(cl, &b0, 1);
@@ -74,7 +95,8 @@ static int frame(SDL_Window *win, RhiFormat fmt, int n)
                              RHI_LOAD_CLEAR,
                              {(float)r / 255.0f, (float)g / 255.0f, (float)bl / 255.0f, 1.0f},
                              RHI_STORE_STORE,
-                             false};
+                             false,
+                             {0}};
     rp.colorCount = 1;
     rp.width = w;
     rp.height = h;
@@ -84,7 +106,6 @@ static int frame(SDL_Window *win, RhiFormat fmt, int n)
     rhi_cmd_barrier(cl, &b1, 1);
     rhi_submit(cl);
 
-    int failures = 0;
     uint32_t pitch = 0;
     if (!rhi_readback_texture(bb, RHI_ASPECT_COLOR, px, sizeof(px), &pitch) || pitch != w * 4) {
         printf("FAIL frame %d: readback (pitch %u)\n", n, pitch);
@@ -108,6 +129,15 @@ static int frame(SDL_Window *win, RhiFormat fmt, int n)
     rhi_cmd_barrier(cl2, &b2, 1);
     rhi_submit(cl2);
     rhi_present();
+    {
+        RhiStats st;
+        rhi_get_stats(&st);
+        if (st.swapAcquired != 0) {
+            printf("FAIL frame %d: %llu acquired after the present\n", n,
+                   (unsigned long long)st.swapAcquired);
+            failures++;
+        }
+    }
     return failures;
 }
 
@@ -235,8 +265,8 @@ static int followSize(SDL_Window *win, RhiFormat fmt)
     RhiTextureBarrier b0 = {bb, RHI_STATE_UNDEFINED, RHI_STATE_RENDER_TARGET};
     rhi_cmd_barrier(cl, &b0, 1);
     RhiRenderPassDesc rp = {0};
-    rp.color[0] =
-        (RhiColorAttachment){bb, RHI_LOAD_CLEAR, {0.0f, 0.0f, 0.0f, 1.0f}, RHI_STORE_STORE, false};
+    rp.color[0] = (RhiColorAttachment){
+        bb, RHI_LOAD_CLEAR, {0.0f, 0.0f, 0.0f, 1.0f}, RHI_STORE_STORE, false, {0}};
     rp.colorCount = 1;
     rp.width = aw;
     rp.height = ah;
@@ -280,12 +310,23 @@ static int presentAtSwapSize(int n)
         printf("FAIL frame %d: no backbuffer\n", n);
         return 1;
     }
+    int failures = 0;
+    {
+        /* the image held: one acquired, not yet presented (RhiStats.swapAcquired) */
+        RhiStats st;
+        rhi_get_stats(&st);
+        if (st.swapImages == 0 || st.swapAcquired != 1) {
+            printf("FAIL frame %d: %llu images, %llu acquired after the acquire\n", n,
+                   (unsigned long long)st.swapImages, (unsigned long long)st.swapAcquired);
+            failures++;
+        }
+    }
     RhiCommandList cl = rhi_begin_commands();
     RhiTextureBarrier b0 = {bb, RHI_STATE_UNDEFINED, RHI_STATE_RENDER_TARGET};
     rhi_cmd_barrier(cl, &b0, 1);
     RhiRenderPassDesc rp = {0};
-    rp.color[0] =
-        (RhiColorAttachment){bb, RHI_LOAD_CLEAR, {0.0f, 0.0f, 0.0f, 1.0f}, RHI_STORE_STORE, false};
+    rp.color[0] = (RhiColorAttachment){
+        bb, RHI_LOAD_CLEAR, {0.0f, 0.0f, 0.0f, 1.0f}, RHI_STORE_STORE, false, {0}};
     rp.colorCount = 1;
     rp.width = sw;
     rp.height = sh;
@@ -295,7 +336,7 @@ static int presentAtSwapSize(int n)
     rhi_cmd_barrier(cl, &b1, 1);
     rhi_submit(cl);
     rhi_present();
-    return 0;
+    return failures;
 }
 
 /* The submits of a present (RhiStats.submits; rhi_readback_texture's own
@@ -331,6 +372,167 @@ static int submitCounts(SDL_Window *win, RhiFormat fmt)
                (unsigned long long)(b.presents - a.presents));
         failures++;
     }
+    return failures;
+}
+
+/* VkPipelineStageFlags of the waits acquireWaits expects (the test does
+   not include the Vulkan headers) */
+#define STAGE_COLOR_OUTPUT 0x00000400u /* VK_PIPELINE_STAGE_COLOR_ATTACHMENT_OUTPUT_BIT */
+#define STAGE_ALL_COMMANDS 0x00010000u /* VK_PIPELINE_STAGE_ALL_COMMANDS_BIT */
+
+/* one list of off-screen work: off cleared, left readable */
+static void offscreenList(RhiTexture off, RhiState *state)
+{
+    RhiCommandList cl = rhi_begin_commands();
+    RhiTextureBarrier b0 = {off, *state, RHI_STATE_RENDER_TARGET};
+    rhi_cmd_barrier(cl, &b0, 1);
+    RhiRenderPassDesc rp = {0};
+    rp.color[0] = (RhiColorAttachment){
+        off, RHI_LOAD_CLEAR, {0.25f, 0.5f, 0.75f, 1.0f}, RHI_STORE_STORE, false, {0}};
+    rp.colorCount = 1;
+    rp.width = 16;
+    rp.height = 16;
+    rhi_cmd_begin_render_pass(cl, &rp);
+    rhi_cmd_end_render_pass(cl);
+    RhiTextureBarrier b1 = {off, RHI_STATE_RENDER_TARGET, RHI_STATE_SHADER_READ};
+    rhi_cmd_barrier(cl, &b1, 1);
+    *state = RHI_STATE_SHADER_READ;
+    rhi_submit(cl);
+}
+
+/* Issue 179: the acquire's wait goes with the submit of the list that uses
+ * the acquired image (vk_cmd.c vkr_submit_batch), never with a list of
+ * off-screen work before it, whose colour passes it would otherwise hold
+ * for the presentation engine.  (a) A list of off-screen work, then a list
+ * that clears the image and moves it to PRESENT: two submits, the first
+ * without a wait, the second on the acquire's semaphore at
+ * COLOR_ATTACHMENT_OUTPUT, and no empty batch before the present.  (b) The
+ * off-screen list alone, then the surface released with the image unused:
+ * the list waits for nothing, and the dropped acquire's semaphore is
+ * waited on by one empty batch at ALL_COMMANDS (vkr_drain_acquire_wait; a
+ * present of an image no list used would show it in an undefined layout,
+ * so the present's empty batch is the same call, vkr_submit_batch with no
+ * command buffers).  Each on the sync this run uses: the timeline here,
+ * the fence ring in rhi_vk_swapchain_vk11. */
+static int acquireWaits(SDL_Window *win, RhiFormat fmt)
+{
+    int failures = 0;
+    RhiTexture off = rhi_create_texture(&(RhiTextureDesc){16, 16, 1, RHI_FMT_RGBA8_UNORM,
+                                                          RHI_TEX_RENDER_TARGET | RHI_TEX_SAMPLED,
+                                                          "acquire cell", 0});
+    if (!off.id) {
+        printf("FAIL acquire cells: no off-screen target\n");
+        return 1;
+    }
+    RhiState offState = RHI_STATE_UNDEFINED;
+    RhiVkTestSubmit s[8];
+    uint32_t sw = 0, sh = 0;
+    if (!rhi_swapchain_size(&sw, &sh)) {
+        printf("FAIL acquire cells: no swapchain\n");
+        rhi_destroy_texture(off);
+        return 1;
+    }
+
+    /* (a) */
+    RhiStats st0, st1;
+    rhi_wait_idle();
+    rhi_get_stats(&st0);
+    rhi_wait_frame();
+    RhiTexture bb = rhi_acquire_backbuffer();
+    if (!bb.id) {
+        printf("FAIL acquire cell a: no backbuffer\n");
+        rhi_destroy_texture(off);
+        return 1;
+    }
+    uint64_t acq = vkr_test_acquire_sem();
+    vkr_test_submit_record(true);
+    offscreenList(off, &offState);
+    RhiCommandList cl = rhi_begin_commands();
+    RhiTextureBarrier b0 = {bb, RHI_STATE_UNDEFINED, RHI_STATE_RENDER_TARGET};
+    rhi_cmd_barrier(cl, &b0, 1);
+    RhiRenderPassDesc rp = {0};
+    rp.color[0] = (RhiColorAttachment){
+        bb, RHI_LOAD_CLEAR, {0.0f, 0.0f, 0.0f, 1.0f}, RHI_STORE_STORE, false, {0}};
+    rp.colorCount = 1;
+    rp.width = sw;
+    rp.height = sh;
+    rhi_cmd_begin_render_pass(cl, &rp);
+    rhi_cmd_end_render_pass(cl);
+    RhiTextureBarrier b1 = {bb, RHI_STATE_RENDER_TARGET, RHI_STATE_PRESENT};
+    rhi_cmd_barrier(cl, &b1, 1);
+    rhi_submit(cl);
+    rhi_present();
+    rhi_wait_idle();
+    rhi_get_stats(&st1);
+    /* the image list's submit asked the acquire's fence: one picture counted,
+       ready or not (which of the two depends on the machine) */
+    const uint64_t counted = (st1.acquireReadyAtSubmit - st0.acquireReadyAtSubmit) +
+                             (st1.acquireNotReady - st0.acquireNotReady);
+    if (counted != 1) {
+        printf("FAIL acquire cell a: %llu pictures counted by the acquire fence, want 1\n",
+               (unsigned long long)counted);
+        failures++;
+    }
+    uint32_t n = vkr_test_submit_waits(s, 8);
+    vkr_test_submit_record(false);
+    printf("acquire cell a (%s sync): %u submits:", vkr_test_sync_kind(), n);
+    for (uint32_t i = 0; i < n; i++) {
+        printf(" [%u lists, %s, stage 0x%x]", s[i].lists,
+               s[i].waitSem == 0 ? "no wait" : (s[i].waitSem == acq ? "the acquire" : "other"),
+               s[i].waitStage);
+    }
+    printf("\n");
+    if (acq == 0 || n != 2 || s[0].lists != 1 || s[0].waitSem != 0 || s[1].lists != 1 ||
+        s[1].waitSem != acq || s[1].waitStage != STAGE_COLOR_OUTPUT) {
+        printf("FAIL acquire cell a: want an off-screen list without a wait, then the image's "
+               "list on the acquire at COLOR_ATTACHMENT_OUTPUT, and no empty batch\n");
+        failures++;
+    }
+
+    /* (b) */
+    rhi_get_stats(&st0);
+    rhi_wait_frame();
+    bb = rhi_acquire_backbuffer();
+    if (!bb.id) {
+        printf("FAIL acquire cell b: no backbuffer\n");
+        rhi_destroy_texture(off);
+        return failures + 1;
+    }
+    acq = vkr_test_acquire_sem();
+    vkr_test_submit_record(true);
+    offscreenList(off, &offState);
+    rhi_wait_idle();
+    rhi_release_surface(); /* the acquire dropped with no list on its image */
+    rhi_get_stats(&st1);
+    /* no list used the image: the empty batch is no present list, nothing counted */
+    if (st1.acquireReadyAtSubmit != st0.acquireReadyAtSubmit ||
+        st1.acquireNotReady != st0.acquireNotReady) {
+        printf("FAIL acquire cell b: the dropped acquire was counted by the fence\n");
+        failures++;
+    }
+    n = vkr_test_submit_waits(s, 8);
+    vkr_test_submit_record(false);
+    unsigned onAcquire = 0, emptyAll = 0;
+    for (uint32_t i = 0; i < n; i++) {
+        onAcquire += s[i].waitSem == acq;
+        emptyAll += s[i].waitSem == acq && s[i].lists == 0 && s[i].waitStage == STAGE_ALL_COMMANDS;
+    }
+    printf("acquire cell b: %u submits, %u on the acquire, %u of them empty at ALL_COMMANDS\n", n,
+           onAcquire, emptyAll);
+    if (acq == 0 || n < 2 || s[0].lists != 1 || s[0].waitSem != 0 || onAcquire != 1 ||
+        emptyAll != 1) {
+        printf("FAIL acquire cell b: want the off-screen list without a wait and one empty "
+               "batch on the acquire at ALL_COMMANDS\n");
+        failures++;
+    }
+    if (!rhi_recreate_surface(win)) {
+        printf("FAIL acquire cell b: rhi_recreate_surface\n");
+        rhi_destroy_texture(off);
+        return failures + 1;
+    }
+    failures += frame(win, fmt, 60); /* the window path works again */
+    rhi_wait_idle();
+    rhi_destroy_texture(off);
     return failures;
 }
 
@@ -402,9 +604,260 @@ static int pollSize(SDL_Window *win, RhiFormat fmt)
     return failures;
 }
 
+/* The GPU's end first on the window path (port/render/rd_submit_thread.h;
+ * issue 179): a worker thread stands for the submit thread with the frame
+ * slots apart (the slot guard and the call guard set as the window's are:
+ * the worker's calls never wait, the other thread's slot calls of a slot
+ * the worker holds no job of run beside it, every other call waits for
+ * the worker).  The picture of slot A is recorded and submitted with its
+ * GPU work held on the host (vkr_test_hold_next_submit, released from a
+ * third thread 150 ms later), and the worker makes the wait before the
+ * present (rhi_wait_submitted) and then the present.
+ *   beside   while the worker waits, this thread recycles slot B and
+ *            acquires its image: the acquire returns before the worker's
+ *            wait ends (the swapchain's lock is not held by the wait; the
+ *            swapchain's image to spare, vk_swapchain.c
+ *            vkr_acquire_ahead_ok), another image than A's; after the
+ *            worker presented A's image this thread submits and presents
+ *            B's: nothing acquired after it, no validation error.
+ *   rebuild  while the worker waits, rhi_resize_swapchain from this thread
+ *            waits for the worker's whole job (its wait and its present on
+ *            the old swapchain) and then makes one swapchain at the new
+ *            size; the next frame draws on it.
+ * Skipped on the fence ring (the slots one at a time: rhi_wait_submitted
+ * makes no wait there). */
+static int s_bpActive, s_bpDone, s_bpWaited;
+static SDL_ThreadID s_bpWorker;
+static uint32_t s_bpSlot;
+
+/* the worker's id, stored by the worker itself before its first call (0:
+   none) */
+static bool bpOnWorker(void)
+{
+    const SDL_ThreadID w = __atomic_load_n(&s_bpWorker, __ATOMIC_ACQUIRE);
+    return w != 0 && SDL_GetCurrentThreadID() == w;
+}
+
+static bool bpBusy(void *u)
+{
+    (void)u;
+    return __atomic_load_n(&s_bpActive, __ATOMIC_ACQUIRE) != 0 && !bpOnWorker();
+}
+
+static void bpWait(void *u)
+{
+    (void)u;
+    while (__atomic_load_n(&s_bpActive, __ATOMIC_ACQUIRE) != 0) {
+        SDL_Delay(1);
+    }
+}
+
+static bool bpFree(void *u, uint32_t slot)
+{
+    (void)u;
+    return !bpOnWorker() && slot % RHI_FRAMES_IN_FLIGHT != s_bpSlot;
+}
+
+static bool bpPending(void *u, uint32_t slot)
+{
+    (void)u;
+    return __atomic_load_n(&s_bpActive, __ATOMIC_ACQUIRE) != 0 &&
+           slot % RHI_FRAMES_IN_FLIGHT == s_bpSlot;
+}
+
+static bool bpWorkerQ(void *u)
+{
+    (void)u;
+    return bpOnWorker();
+}
+
+static int SDLCALL bpJob(void *u)
+{
+    (void)u;
+    __atomic_store_n(&s_bpWorker, SDL_GetCurrentThreadID(), __ATOMIC_RELEASE);
+    const bool waited = rhi_wait_submitted();
+    __atomic_store_n(&s_bpWaited, waited ? 1 : 0, __ATOMIC_RELEASE);
+    __atomic_store_n(&s_bpDone, 1, __ATOMIC_RELEASE); /* the wait over: the present next */
+    rhi_present();
+    __atomic_store_n(&s_bpWorker, (SDL_ThreadID)0, __ATOMIC_RELEASE);
+    __atomic_store_n(&s_bpActive, 0, __ATOMIC_RELEASE);
+    return 0;
+}
+
+static int SDLCALL bpRelease(void *u)
+{
+    (void)u;
+    SDL_Delay(150);
+    return vkr_test_release_hold() ? 0 : 1;
+}
+
+/* slot A's picture: acquired, cleared, moved to PRESENT and submitted held;
+   the worker started on it (its slot noted first). 0 on success */
+static int bpStart(SDL_Thread **worker, SDL_Thread **release, RhiTexture *bbA)
+{
+    rhi_wait_frame();
+    *bbA = rhi_acquire_backbuffer();
+    if (!bbA->id) {
+        printf("FAIL GPU's end first: no backbuffer for slot A\n");
+        return 1;
+    }
+    uint32_t sw = 0, sh = 0;
+    (void)rhi_swapchain_size(&sw, &sh);
+    RhiCommandList cl = rhi_begin_commands();
+    RhiTextureBarrier b0 = {*bbA, RHI_STATE_UNDEFINED, RHI_STATE_RENDER_TARGET};
+    rhi_cmd_barrier(cl, &b0, 1);
+    RhiRenderPassDesc rp = {0};
+    rp.color[0] = (RhiColorAttachment){
+        *bbA, RHI_LOAD_CLEAR, {0.25f, 0.5f, 0.75f, 1.0f}, RHI_STORE_STORE, false, {0}};
+    rp.colorCount = 1;
+    rp.width = sw;
+    rp.height = sh;
+    rhi_cmd_begin_render_pass(cl, &rp);
+    rhi_cmd_end_render_pass(cl);
+    RhiTextureBarrier b1 = {*bbA, RHI_STATE_RENDER_TARGET, RHI_STATE_PRESENT};
+    rhi_cmd_barrier(cl, &b1, 1);
+    if (!vkr_test_hold_next_submit()) {
+        printf("FAIL GPU's end first: no hold on the timeline sync\n");
+        return 1;
+    }
+    rhi_submit(cl);
+    s_bpSlot = rhi_frame_slot() % RHI_FRAMES_IN_FLIGHT;
+    __atomic_store_n(&s_bpDone, 0, __ATOMIC_RELEASE);
+    __atomic_store_n(&s_bpWaited, 0, __ATOMIC_RELEASE);
+    __atomic_store_n(&s_bpActive, 1, __ATOMIC_RELEASE);
+    *worker = SDL_CreateThread(bpJob, "bp worker", NULL);
+    if (*worker == NULL) {
+        __atomic_store_n(&s_bpActive, 0, __ATOMIC_RELEASE);
+        (void)vkr_test_release_hold();
+        printf("FAIL GPU's end first: no worker thread\n");
+        return 1;
+    }
+    *release = SDL_CreateThread(bpRelease, "bp release", NULL);
+    if (*release == NULL) {
+        (void)vkr_test_release_hold();
+    }
+    return 0;
+}
+
+static int bpFinish(SDL_Thread *worker, SDL_Thread *release)
+{
+    int failures = 0, rc = 0;
+    SDL_WaitThread(worker, NULL);
+    if (release != NULL) {
+        SDL_WaitThread(release, &rc);
+    }
+    if (rc != 0) {
+        printf("FAIL GPU's end first: the hold not released\n");
+        failures++;
+    }
+    vkr_test_hold_destroy();
+    if (!__atomic_load_n(&s_bpWaited, __ATOMIC_ACQUIRE)) {
+        printf("FAIL GPU's end first: the worker's rhi_wait_submitted made no wait\n");
+        failures++;
+    }
+    return failures;
+}
+
+static int besidePresent(SDL_Window *win, RhiFormat fmt)
+{
+    if (!rhi_limits()->slotOverlap) {
+        printf("GPU's end first: the frame slots one at a time (the fence ring): not driven\n");
+        return 0;
+    }
+    int failures = 0;
+    static const RhiCallGuard guard = {NULL, bpBusy, bpWait, NULL};
+    static const RhiSlotGuard slots = {NULL, bpFree, bpPending, bpWorkerQ};
+    RhiStats st;
+    rhi_wait_idle();
+    rhi_get_stats(&st);
+    printf("GPU's end first: the swapchain has %llu images\n", (unsigned long long)st.swapImages);
+    rhi_set_call_guard(&guard);
+    rhi_set_slot_guard(&slots);
+
+    /* beside */
+    SDL_Thread *worker = NULL, *release = NULL;
+    RhiTexture bbA = {0};
+    if (bpStart(&worker, &release, &bbA) != 0) {
+        failures++;
+    } else {
+        rhi_wait_frame(); /* slot B: the worker holds no job of it */
+        const RhiTexture bbB = rhi_acquire_backbuffer();
+        const bool beside = !__atomic_load_n(&s_bpDone, __ATOMIC_ACQUIRE);
+        if (!bbB.id || bbB.id == bbA.id || !beside) {
+            printf("FAIL GPU's end first, beside: slot B's acquire %s (image %u, A's %u) %s the "
+                   "worker's wait ended\n",
+                   bbB.id ? "returned" : "gave no image", bbB.id, bbA.id,
+                   beside ? "before" : "after");
+            failures++;
+        }
+        uint32_t sw = 0, sh = 0;
+        (void)rhi_swapchain_size(&sw, &sh);
+        RhiCommandList cl = rhi_begin_commands();
+        if (bbB.id) {
+            RhiTextureBarrier b0 = {bbB, RHI_STATE_UNDEFINED, RHI_STATE_RENDER_TARGET};
+            rhi_cmd_barrier(cl, &b0, 1);
+            RhiRenderPassDesc rp = {0};
+            rp.color[0] = (RhiColorAttachment){
+                bbB, RHI_LOAD_CLEAR, {0.75f, 0.5f, 0.25f, 1.0f}, RHI_STORE_STORE, false, {0}};
+            rp.colorCount = 1;
+            rp.width = sw;
+            rp.height = sh;
+            rhi_cmd_begin_render_pass(cl, &rp);
+            rhi_cmd_end_render_pass(cl);
+            RhiTextureBarrier b1 = {bbB, RHI_STATE_RENDER_TARGET, RHI_STATE_PRESENT};
+            rhi_cmd_barrier(cl, &b1, 1);
+        }
+        rhi_end_commands(cl); /* a slot call: beside the worker too */
+        failures += bpFinish(worker, release);
+        rhi_submit(cl); /* after the worker's present, as the next job's */
+        rhi_present();
+        rhi_wait_idle();
+        rhi_get_stats(&st);
+        if (st.swapAcquired != 0 || !rhi_present_shown()) {
+            printf("FAIL GPU's end first, beside: %llu images still acquired, the last present "
+                   "%s\n",
+                   (unsigned long long)st.swapAcquired,
+                   rhi_present_shown() ? "shown" : "not shown");
+            failures++;
+        }
+    }
+
+    /* rebuild */
+    worker = release = NULL;
+    if (!failures && bpStart(&worker, &release, &bbA) != 0) {
+        failures++;
+    } else if (!failures) {
+        const uint32_t n0 = vkr_test_swapchain_creations();
+        SDL_SetWindowSize(win, 112, 84);
+        SDL_SyncWindow(win);
+        const uint64_t t0 = SDL_GetTicksNS();
+        const bool made = rhi_resize_swapchain(112, 84, true);
+        const double ms = (double)(SDL_GetTicksNS() - t0) / 1e6;
+        const bool after = __atomic_load_n(&s_bpActive, __ATOMIC_ACQUIRE) == 0;
+        failures += bpFinish(worker, release);
+        uint32_t sw = 0, sh = 0;
+        if (!made || !after || vkr_test_swapchain_creations() != n0 + 1 ||
+            !rhi_swapchain_size(&sw, &sh) || sw != 112 || sh != 84) {
+            printf("FAIL GPU's end first, rebuild: made %d %.1f ms in, %s the worker's job, %u "
+                   "swapchains made (want 1), %ux%u\n",
+                   (int)made, ms, after ? "after" : "before", vkr_test_swapchain_creations() - n0,
+                   sw, sh);
+            failures++;
+        }
+        failures += frame(win, fmt, 40);
+    }
+    rhi_set_slot_guard(NULL);
+    rhi_set_call_guard(NULL);
+    rhi_wait_idle();
+    printf("GPU's end first: %s\n", failures ? "failed"
+                                             : "the acquire beside the wait, the "
+                                               "rebuild after the job");
+    return failures;
+}
+
 static int run(SDL_Window *win)
 {
-    RhiDeviceDesc dd = {win, true, true, "rhi_vk_swapchain_test"};
+    RhiDeviceDesc dd = {win, true, true, "rhi_vk_swapchain_test", NULL};
     if (!rhi_init(&dd)) {
         printf("SKIP rhi_vk_swapchain_test: rhi_init with an offscreen window failed\n");
         return 77;
@@ -509,6 +962,12 @@ static int run(SDL_Window *win)
     if (!failures) {
         failures += pollSize(win, fmt);
     }
+    if (!failures) {
+        failures += acquireWaits(win, fmt);
+    }
+    if (!failures) {
+        failures += besidePresent(win, fmt);
+    }
     rhi_wait_idle();
     rhi_shutdown();
     if (rhi_vk_validation_error_count()) {
@@ -550,7 +1009,7 @@ static int timingNotes(uint64_t *lastId, unsigned *notes, unsigned *timed)
    that is made again or destroyed meanwhile, and stops at rhi_shutdown */
 static int presentTiming(SDL_Window *win)
 {
-    RhiDeviceDesc dd = {win, true, true, "rhi_vk_swapchain_test"};
+    RhiDeviceDesc dd = {win, true, true, "rhi_vk_swapchain_test", NULL};
     uint64_t lastId = 0;
     unsigned notes = 0, timed = 0;
     int failures = 0;
@@ -637,7 +1096,7 @@ static int presentTiming(SDL_Window *win)
    presented meanwhile, not held until the wait ends */
 static int presentWaitHang(SDL_Window *win)
 {
-    RhiDeviceDesc dd = {win, true, true, "rhi_vk_swapchain_test"};
+    RhiDeviceDesc dd = {win, true, true, "rhi_vk_swapchain_test", NULL};
     int failures = 0;
 
     SDL_SetWindowSize(win, 64, 48);
@@ -688,6 +1147,89 @@ static int presentWaitHang(SDL_Window *win)
     return failures;
 }
 
+/* The display's times read back (rhi_present_glass, vk_glass.c): fake 1
+   the test's stand-in (ids without the extension, every third present not
+   reported, a refresh of 8333333 ns), 0 the driver's own where it offers
+   VK_GOOGLE_display_timing (lavapipe's headless surface may not: then
+   nothing to check but that no id is given).  Each present's id one more
+   than the one before; the times taken oldest first, their ids presented
+   ones, increasing; no validation error with the struct chained; before
+   rhi_present_glass_use(true) no id and no time.  Off Android the driver's
+   extension is not enabled (vk_glass.c): fake 0 then gives no id */
+static int glassTimes(SDL_Window *win, int fake)
+{
+    RhiDeviceDesc dd = {win, true, true, "rhi_vk_swapchain_test", NULL};
+    int failures = 0;
+    SDL_SetWindowSize(win, 64, 48);
+    SDL_SyncWindow(win);
+    vkr_test_fake_glass(fake);
+    if (!rhi_init(&dd)) {
+        printf("FAIL rhi_init for the display's times\n");
+        vkr_test_fake_glass(0);
+        return 1;
+    }
+    const RhiFormat fmt = rhi_swapchain_format();
+    uint64_t prev = 0, refresh = 0;
+    uint32_t taken = 0, lastTaken = 0;
+    /* not in use (rhi_present_glass_use false: not as made): no id, no
+       time read, as v0.11.5's present */
+    rhi_present_glass_use(false);
+    for (int n = 0; n < 3 && !failures; n++) {
+        failures += frame(win, fmt, 50 + n);
+        uint64_t id = 7;
+        RhiGlassTime t[4];
+        const uint32_t k = rhi_present_glass(&id, &refresh, t, 4);
+        if (id != 0 || k != 0) {
+            printf("FAIL glass: not in use, present %d carried id %llu, %u times read\n", n,
+                   (unsigned long long)id, k);
+            failures++;
+        }
+    }
+    rhi_present_glass_use(true);
+    for (int n = 0; n < 12 && !failures; n++) {
+        failures += frame(win, fmt, 60 + n);
+        uint64_t id = 0;
+        RhiGlassTime t[64];
+        const uint32_t k = rhi_present_glass(&id, &refresh, t, 64);
+        if (n == 0 && id == 0 && !fake) {
+            printf("glass: no display times here (VK_GOOGLE_display_timing not offered)\n");
+            break;
+        }
+        if (id != prev + 1u) {
+            printf("FAIL glass: present %d carried id %llu after %llu\n", n, (unsigned long long)id,
+                   (unsigned long long)prev);
+            failures++;
+        }
+        prev = id;
+        for (uint32_t i = 0; i < k; i++) {
+            if (t[i].id <= lastTaken || t[i].id > id || t[i].desiredNs != 0) {
+                printf("FAIL glass: time of id %u (after %u, the last present %llu)\n", t[i].id,
+                       lastTaken, (unsigned long long)id);
+                failures++;
+            }
+            lastTaken = t[i].id;
+        }
+        taken += k;
+    }
+    printf("glass: %llu presents, %u times read back, refresh %llu ns%s\n",
+           (unsigned long long)prev, taken, (unsigned long long)refresh,
+           fake ? " (the stand-in)" : "");
+    if (fake && (taken != 8u || refresh != 8333333u)) {
+        printf("FAIL glass: the stand-in gave %u times (8 of 12 expected), refresh %llu\n", taken,
+               (unsigned long long)refresh);
+        failures++;
+    }
+    rhi_present_glass_use(false);
+    rhi_wait_idle();
+    rhi_shutdown();
+    vkr_test_fake_glass(0);
+    if (rhi_vk_validation_error_count()) {
+        printf("FAIL %u validation error(s)\n", rhi_vk_validation_error_count());
+        failures++;
+    }
+    return failures;
+}
+
 int main(void)
 {
     SDL_SetHint(SDL_HINT_VIDEO_DRIVER, "offscreen");
@@ -706,6 +1248,9 @@ int main(void)
         rc = 1;
     }
     if (rc == 0 && presentWaitHang(win) != 0) {
+        rc = 1;
+    }
+    if (rc == 0 && (glassTimes(win, 1) != 0 || glassTimes(win, 0) != 0)) {
         rc = 1;
     }
     SDL_DestroyWindow(win);

@@ -5,6 +5,7 @@
  * (window_host.h).
  */
 #include <SDL3/SDL.h>
+#include <errno.h>
 #include <stdio.h>
 #include <stdlib.h>
 #include <string.h>
@@ -13,12 +14,15 @@
 #include <unistd.h>
 #include <sys/stat.h>
 #endif
+#include "app_icon.h"
+#include "app_icon_window.h"
 #include "audio_host.h"
 #include "cdvd_host.h"
 #include "config.h"
 #include "diag_host.h"
 #include "display_clock.h"
 #include "dump_zip.h"
+#include "exit_info.h"
 #include "font.h" /* port/ui: ico_window_progress's text and bar */
 #include "host_config.h"
 #include "host_fs.h"
@@ -33,10 +37,12 @@
 #include "options.h"
 #include "pace_policy.h"
 #include "perf_block.h"
+#include "present_hist.h"
 #include "photo_mode.h"
 #include "photo_ui.h"
 #include "pointer.h"
 #include "pump_watch.h"
+#include "rd_ratecard.h" /* rd_rate_card: the device's unit costs at start-up */
 #include "rd.h"
 #include "rd_bisect_plan.h"
 #include "rd_passring.h"
@@ -57,14 +63,31 @@
 #include "ui_mouse.h"
 #include "video_options.h"
 #include "window_host.h"
+#include "log_cost.h" /* LOG_COST_DRAIN */
+#include "mem_watch.h"
 #include "window_lines.h"
+#include "window_loss.h"
 #include "window_pipeline_skip.h"
+#include "window_bones.h"
+#include "window_robust.h"
+#include "window_display_rate.h"
 #include "window_pipe_finish.h"
 #include "window_present.h"
+#include "slow_judge.h"
 #include "render_thread.h"
 #include "window_present_fallback.h"
+#include "cpu_place.h"
+#include "window_perf_rank.h"
+#include "window_perf_hint.h"
+#include "window_scene.h"
+#include "window_stall.h"
 #include "window_disc.h"
 #include "window_blended.h"
+#include "window_pause.h"
+#include "window_dump_auto.h"
+#include "dump_auto.h"
+#include "slow_arm.h"
+#include "window_keep_block.h"
 #include "window_sweep.h"
 #include "window_lifecycle.h"
 #include "window_pump_win.h"
@@ -76,9 +99,15 @@
 #include "android/host_android.h"
 #elif !defined(ICO_IOS)
 #include "steam_shortcut.h"
+#if defined(__linux__) && !defined(__ANDROID__)
+#include "desktop_entry.h"
 #endif
+#endif
+#include "upscale_pictures.h"
 #if ICO_RC_TOOLS && defined(__ANDROID__)
 #include "share_report.h" /* an rc build's Share a bug report (settings.h) */
+#include "window_bench.h"
+#include "window_capture.h"
 #include "strings.h"
 #endif
 
@@ -221,9 +250,11 @@ static struct {
     unsigned longestVsync;
     int longestShown;
     double gpu, maxGpu, gpuList[GPU_LISTS], gpuUpload, gpuPresent, gpuPrepass;
+    double gpuDisplayWait;              /* rd.h RdPerfRecord.gpuDisplayWaitMs */
     double gpuPost[RD_PERF_POST_COUNT]; /* per picture effect (rd.h RD_PERF_POST_*) */
     unsigned gpuPostPartial;            /* replays whose effects were not all timed apart */
     uint64_t draws, passes, pipeBinds, groupBinds, groups, barriers, copies, bytes, meshBytes;
+    uint64_t submits;                           /* the queue submits (rd.h RdPerfRecord.submits) */
     uint64_t pipeSkips, groupSkips, stateSkips; /* the bind cache's (RhiStats *Skipped) */
     uint64_t texUploads, meshUploads, dateSnaps, exact, pipeCreates;
     /* the exact blend's draws and passes, the glow's passes, the target
@@ -235,6 +266,12 @@ static struct {
     /* the VU vertex pre-pass's vertices, draws and the mesh and grid draws
        drawn the old way (rd.h RdPerfRecord.vuPre*) */
     uint64_t vuPreVerts, vuPreDraws, vuPreFallbacks;
+    uint64_t vuDraws, vuTris, vuLeftOut; /* the VU draws, their triangles, left out (rd.h) */
+    uint64_t twinDraws, twinInv;         /* the skin check's twins' draws and invocations */
+    /* the timed replays' (vertex invocations, GPU work ms) for the VU line's
+       least-squares line (window_scene.h SceneVuFit, issue 179): vertex
+       invocations against the GPU's work */
+    SceneVuFit vuFit;
     /* the pixel diet's draws: the alpha/blend planner's one-pass and
        opaque draws, the frame-size plan's constant, additive and local-read
        sprites, the VU passes without the planes (rd.h RdPerfRecord) */
@@ -243,6 +280,13 @@ static struct {
     /* the sprites drawn in a cleared source's colour and the target reads
        kept (rd.h RdPerfRecord.constReads, constKept) */
     uint64_t constReads, constKept, fadesFolded;
+    /* the glow's mask folded into its reduction: the replays that folded it
+       (of them those reading WORK2 as the sun's fans left it) and the glow
+       replays that drew it into WORK2, by reason (rd.h
+       RdPerfRecord.glowFolded, glowFoldRead, glowKept, glowWhy;
+       rd_glow_fold.c) */
+    uint64_t glowFolded, glowFoldRead, glowKept;
+    uint64_t glowWhyN[RD_GLOW_FOLD_WHY_COUNT];
     /* the passes with a render area, their tiles, their targets' tiles and
        those ended early (rd.h RdPerfRecord.passAreas ..., rd_pass_area.c) */
     uint64_t passAreas, passAreaTiles, passAreaTargetTiles, passAreaEnds;
@@ -257,7 +301,8 @@ static struct {
     /* present calls over 50 ms and the longest (present_blocked) */
     unsigned presentBlocked;
     double presentBlockedMaxMs;
-    PaceGpuGap gpuGap; /* the GPU's time between replays (rd.h RdPerfRecord.gpuGapNs) */
+    PresentHist presentHist; /* every presented replay's present call (present_hist.h) */
+    PaceGpuGap gpuGap;       /* the GPU's time between replays (rd.h RdPerfRecord.gpuGapNs) */
 } s_perf;
 
 /* The display under the vsync lock, for the 10 s display line
@@ -294,9 +339,12 @@ Uint64 window_refresh_ns(Uint64 fallback)
 {
     const SDL_DisplayMode *dm =
         s_window != NULL ? SDL_GetCurrentDisplayMode(SDL_GetDisplayForWindow(s_window)) : NULL;
+    /* Android: the activity's report when SDL's mode is older (window_display_rate.h) */
+    const double hz = s_window != NULL
+                          ? window_display_refresh_hz(dm != NULL ? (double)dm->refresh_rate : 0.0)
+                          : 0.0;
 
-    return dm != NULL && dm->refresh_rate > 1.0f ? (Uint64)(1e9 / (double)dm->refresh_rate)
-                                                 : fallback;
+    return hz > 1.0 ? (Uint64)(1e9 / hz) : fallback;
 }
 
 static void video_settings(RdSettings *rs, int w, int h)
@@ -318,8 +366,6 @@ static void video_settings(RdSettings *rs, int w, int h)
     rs->fullPixel = (uint8_t)(o.fullPixel != 0);
     /* off: the same picture, the game's border masked over it */
     rs->borderMask = (uint8_t)(o.fullPixel == 0);
-    /* Water reflections: Sharp, in either preset (at 1x it changes nothing) */
-    rs->waterSharp = (uint8_t)(o.effectWaterSharp != 0);
     /* Motion blur: Smooth, in either preset; Off and Original are the
        game's (staticBlur.c reads the switch) */
     rs->motionBlurSmooth = (uint8_t)(o.effectMotionBlur != 0 && o.effectMotionBlurSmooth != 0);
@@ -331,6 +377,12 @@ static void video_settings(RdSettings *rs, int w, int h)
        draws an MSAA count the device lacks as off (rd_aa_supported_mask) */
     rs->antiAlias = (uint8_t)ico_video_anti_alias();
     rs->downsample = (uint8_t)(o.downsample == ICO_DOWNSAMPLE_BOX); /* PC port: issue 149 */
+    /* Upscaling: FSR 1.0 / FSR 3.1, their Sharpness and FSR 3.1's quality (PC port: issue 99) */
+    rs->upscale = (uint8_t)(o.upscale == ICO_UPSCALE_FSR1   ? RD_UPSCALE_FSR1
+                            : o.upscale == ICO_UPSCALE_FSR3 ? RD_UPSCALE_FSR3
+                                                            : RD_UPSCALE_OFF);
+    rs->upscaleSharpness = (uint8_t)o.upscaleSharpness;
+    rs->upscaleQuality = (uint8_t)o.upscaleQuality; /* FSR 3.1's ratio: RdUpscaleQuality's order */
     rs->sceneWidth = (uint32_t)o.resW;
     rs->sceneHeight = (uint32_t)o.resH;
     rs->sceneScale = (float)o.resScale;
@@ -344,6 +396,18 @@ static void video_settings(RdSettings *rs, int w, int h)
         rs->sceneScale = (float)ico_video_auto_scale();
         s_autoRes.windowScale =
             (boxH < (float)rs->outputHeight ? boxH : (float)rs->outputHeight) / 448.0f;
+        /* a temporal upscaler (port/render/rd_upscale.h): the display stays
+           the window's, and Auto's steps cap the scene's scale below it
+           instead, from the window's over the upscaler's ratio (FSR 3.1's
+           for these settings, rd_upscale_ratio_of: the renderer has not
+           seen them yet) */
+        const float upRatio =
+            rd_upscale_ratio_of(rs, o.crt && o.crtStrength > 0.0f, s_autoRes.windowScale);
+        if (upRatio > 0.0f) {
+            rs->upscaleRenderCap = rs->sceneScale;
+            rs->sceneScale = 0.0f;
+            s_autoRes.windowScale = pace_auto_window_scale(s_autoRes.windowScale, upRatio);
+        }
         s_autoRes.tickBudget = o.framerate == ICO_FRAMERATE_ORIGINAL;
         s_autoRes.samples.budgetNs = o.framerate > 0        ? 1000000000ull / (Uint64)o.framerate
                                      : s_autoRes.tickBudget ? 40000000ull /* PAL until paced */
@@ -356,6 +420,11 @@ static void video_settings(RdSettings *rs, int w, int h)
     rs->crtHalation = o.crtHalation;
     rs->crtBloom = o.crtBloom;
     rs->crtCurvature = o.crtCurvature;
+    /* the colour adjustment in either preset, with or without the CRT filter */
+    rs->toneGamma = (uint8_t)o.toneGamma;
+    rs->toneBrightness = (uint8_t)o.toneBrightness;
+    rs->toneContrast = (uint8_t)o.toneContrast;
+    rs->toneSaturation = (uint8_t)o.toneSaturation;
     /* texture packs and the dump, in either preset */
     rs->texturePack = (uint8_t)(o.texturePack != 0);
     /* the dump is a Developer mode row: never in force without it (a
@@ -381,6 +450,7 @@ static void video_settings(RdSettings *rs, int w, int h)
         window_timer_budget_reset();
     }
     s_pres.framerate = ico_video_framerate();
+    window_frame_rate_pin(s_window, s_pres.framerate); /* Android: the cap as a fixed rate */
     rs->interpolate = (uint8_t)(s_pres.framerate != ICO_FRAMERATE_ORIGINAL);
     /* presenting between ticks with vsync on, the swapchain prefers the
        mailbox mode: no tearing, and a present never waits for the display,
@@ -449,6 +519,34 @@ _Static_assert(ICO_STEAM_ADDED == UI_STEAM_ADDED && ICO_STEAM_EXISTS == UI_STEAM
 static int steam_add_handler(void)
 {
     return ico_steam_add_this_game();
+}
+#endif
+
+/* Extras > Add to the applications menu: Linux only (a desktop entry for the
+   freedesktop menus; port/platform/desktop_entry.h). The program is the one
+   Add to Steam starts: the AppImage file when run from one. The picture is
+   the icon the title screen's capture made; before it exists the entry is
+   written without one (the menu then shows its generic icon) and the log
+   says so. */
+#if defined(__linux__) && !defined(__ANDROID__)
+static int desktop_add_handler(void)
+{
+    char exe[1024], home[1024], png[1024];
+    const char *picture = NULL;
+    int r;
+
+    if (ico_steam_self_exe(exe, sizeof(exe)) != 0 ||
+        ico_desktop_entry_data_home(home, sizeof(home)) != 0) {
+        fprintf(stderr, "ico_pc: applications menu: no program path or data folder\n");
+        return UI_DESKTOP_FAILED;
+    }
+    if (ico_app_icon_current_path(png, sizeof(png), 0) == 0 && png[0] != '\0') {
+        picture = png;
+    }
+    r = ico_desktop_entry_install(home, exe, picture);
+    fprintf(stderr, "ico_pc: applications menu: %s in %s (%s): %s\n", exe, home,
+            picture != NULL ? "with the icon" : "no icon made yet", r == 0 ? "written" : "failed");
+    return r == 0 ? UI_DESKTOP_DONE : UI_DESKTOP_FAILED;
 }
 #endif
 
@@ -646,6 +744,7 @@ void window_pace_paused(Uint64 ns)
     if (ns == 0 || s_deadline == 0) {
         return; /* nothing, or the pacer not started (a size event at open) */
     }
+    ui_fps_gap(); /* no presents in it */
     s_deadline += ns;
     if (s_pres.tickAt != 0) {
         s_pres.tickAt += ns;
@@ -884,6 +983,8 @@ static void resume_recheck(void)
                 pw, ph);
     }
     rd_log_frame_state("after resume");
+    /* Android: the surface came back without the frame rate vote */
+    window_frame_rate_pin_resumed(s_window, s_pres.framerate);
 }
 
 #if defined(__ANDROID__) || defined(ICO_IOS)
@@ -945,6 +1046,9 @@ static void lc_gpu_wait_idle(void *u)
 {
     (void)u;
     rhi_wait_idle();
+    if (rhi_device_lost()) { /* issue 179: counted now, the system may end the app there */
+        ico_diag_note_device_loss_at_wait("the GPU wait as the app went to the background");
+    }
 }
 
 static void lc_surface_release(void *u)
@@ -979,6 +1083,7 @@ static void lc_pace_reset(void *u)
     (void)u;
     s_deadline = SDL_GetTicksNS();
     s_pres.paceEnd = 0;
+    s_pres.paceEndCpuNs = 0;
     memset(&s_pres.paceHist, 0, sizeof(s_pres.paceHist));
     s_pres.paceSlow = false;
     s_pres.skipOpen = false;
@@ -986,6 +1091,7 @@ static void lc_pace_reset(void *u)
     s_pres.lockN = 0; /* the lock starts again from now */
     s_pres.lastReturn = 0;
     window_timer_budget_reset();
+    ui_fps_gap(); /* the counter's second too */
 }
 
 static int lc_config_dirty(void *u)
@@ -1029,6 +1135,7 @@ static void lc_log_flush(void *u)
 static void lc_render_park(void *u, int parked)
 {
     (void)u;
+    window_perf_hint_active(!parked); /* the hint session closed in the background */
     if (parked) {
         ico_render_thread_park();
     } else {
@@ -1051,6 +1158,7 @@ static const IcoLifecycleOps k_lifecycle_ops = {
     lc_log,
     lc_log_flush,
     lc_render_park,
+    window_perf_rank_lifecycle,
 };
 
 /* SDL's event watch: the four lifecycle events as they arrive (the queue
@@ -1127,6 +1235,77 @@ static int display_progress(void *ctx, uint32_t done, uint32_t total);
 static int progress_present_notes(const char *title, const char *phase, int pct, int allowCancel,
                                   const char *note0, const char *note1);
 
+/* the start-up screen appears only once a wait is noticeable (the set's
+   rule, pipeline_progress below; the self-tests' too) */
+#define PIPE_SCREEN_AFTER_MS 250.0
+
+/* Issue 188: the start-up screen around the blend and VU pre-pass
+   self-tests, in every branch (the set, the lazy start, Apply's switch):
+   their pipelines are compiled on this thread before the set, and on a
+   PowerVR B-Series phone the first did not return for 10 s with nothing on
+   the screen.  At a start the set's rule holds: nothing is drawn when they
+   are quick (every desktop start, a warm phone start), and the screen is
+   drawn between the two self-tests once they have run PIPE_SCREEN_AFTER_MS
+   (this thread is inside the driver while one compiles, so it cannot draw
+   sooner; never inside a self-test, whose frames hold the renderer's state
+   under test).  Apply's switch (drawNow) draws it at once: the old picture
+   is gone there.  The Android note "This happens once after an update..."
+   only when a set follows (setWillRun: the careful or full start; a lazy
+   run makes nothing at the start, and a switch is not an update).  The
+   watchdog is told the self-tests run (diag_host.h ico_diag_set_selftest)
+   until selftests_done, whose line says how long they took and whether
+   the screen was drawn */
+static struct {
+    uint64_t startNs;
+    int pending, drawn, once;
+} s_selftests;
+
+static void selftests_draw(void)
+{
+    const char *once = NULL;
+#ifdef __ANDROID__
+    if (s_selftests.once) {
+        once = "This happens once after an update that changes the graphics";
+    }
+#endif
+    (void)progress_present_notes(s_pipeTitle, "Preparing graphics", -1, 0, NULL, once);
+    s_selftests.pending = 0;
+    s_selftests.drawn = 1;
+}
+
+static void selftests_screen(int drawNow, int setWillRun)
+{
+    s_selftests.startNs = SDL_GetTicksNS();
+    s_selftests.pending = 1;
+    s_selftests.drawn = 0;
+    s_selftests.once = setWillRun;
+    if (drawNow) {
+        selftests_draw();
+    }
+    ico_diag_set_selftest(1);
+}
+
+/* between the blend and the VU pre-pass self-tests: the screen when they
+   have run PIPE_SCREEN_AFTER_MS */
+static void selftests_between(void)
+{
+    if (s_selftests.pending &&
+        (double)(SDL_GetTicksNS() - s_selftests.startNs) / 1e6 >= PIPE_SCREEN_AFTER_MS) {
+        selftests_draw();
+    }
+}
+
+static void selftests_done(void)
+{
+    ico_diag_set_selftest(0);
+    fprintf(stderr,
+            "window: start: the blend and VU pre-pass self-tests took %.0f ms; the start-up "
+            "screen %s\n",
+            (double)(SDL_GetTicksNS() - s_selftests.startNs) / 1e6,
+            s_selftests.drawn ? "drawn" : "not drawn (the blend self-test took under 250 ms)");
+    s_selftests.pending = 0;
+}
+
 #ifdef __ANDROID__
 static const char k_driver_next_start[] =
     "The game will use the driver package at the next start. Please close and open ICO again.";
@@ -1198,38 +1377,10 @@ static int bisect_progress(void *ctx, uint32_t done, uint32_t total)
     return pipeline_progress(ctx, done, total);
 }
 
-/* the loss dump's lost frame taken out of the zip to dump (the zip's path
-   and .rddump) with its size and aspect; false with line saying why */
 static bool bisect_dump_file(const char *zip, char *dump, size_t dumpSize, uint32_t *gw,
                              uint32_t *gh, float *aspect, char *line, size_t size)
 {
-    size_t bytes = 0;
-    void *data = ico_dump_zip_extract(zip, &bytes, NULL, 0);
-
-    if (data == NULL) {
-        snprintf(line, size, "%s cannot be read or holds no frame", zip);
-        return false;
-    }
-    snprintf(dump, dumpSize, "%s.rddump", zip);
-    FILE *f = ico_fopen(dump, "wb");
-    const int wrote = f != NULL && fwrite(data, 1, bytes, f) == bytes;
-
-    if (f != NULL && fclose(f) != 0) {
-        ico_remove(dump);
-        f = NULL;
-    }
-    free(data);
-    if (!wrote || f == NULL) {
-        snprintf(line, size, "the frame could not be written to %s", dump);
-        ico_remove(dump);
-        return false;
-    }
-    if (!rd_dump_frame_size(dump, gw, gh, aspect)) {
-        snprintf(line, size, "%s holds no frame this version reads", zip);
-        ico_remove(dump);
-        return false;
-    }
-    return true;
+    return window_bisect_dump_nth(zip, 0, ".rddump", dump, dumpSize, gw, gh, aspect, line, size);
 }
 
 /* what the first level found, for the second (window_bisect_step) */
@@ -1263,6 +1414,12 @@ static int window_loss_bisect(const char *zip, char *line, size_t size, void *us
     static PipeScreen screen;
     rd_set_pipeline_progress(bisect_progress, &screen);
     rd_loss_bisect(dump, &b);
+    /* the last step, with the renderer still up: the two frames of the zip
+       back to back with no wait between them, as the game's pictures
+       overlap (the passes above each wait for the GPU, so they never do) */
+    RdLossOverlap ov;
+    const bool overlapRan = window_bisect_overlap(zip, dump, &b, gw, gh, &ov);
+
     rd_set_pipeline_progress(NULL, NULL);
     ico_diag_set_pipelines(0, 0, 0);
     rd_shutdown();
@@ -1271,6 +1428,18 @@ static int window_loss_bisect(const char *zip, char *line, size_t size, void *us
             "window: loss bisect: frame %u, %u passes, %u replays in %.1f s; the bisect's "
             "renderer is shut down\n",
             (unsigned)b.frame, (unsigned)b.passes, (unsigned)b.replays, b.ms / 1000.0);
+    if (overlapRan && ov.result == RD_BISECT_LOST) {
+        /* no pass to narrow (the second level has nothing to replay draw by
+           draw: s_bisect1 stays empty) */
+        snprintf(line, size,
+                 "pass by pass with a wait after each, the whole frame (%u passes) did not lose "
+                 "the device, but frames %u%s%u replayed back to back %u times with no wait "
+                 "between them lost it%s (the game's pictures overlap like that)",
+                 (unsigned)b.passes, (unsigned)ov.beforeFrame,
+                 ov.beforeFrame ? " and " : " (alone) ", (unsigned)ov.lostFrame,
+                 (unsigned)ov.rounds, ov.lostAt ? "" : ", at the wait after the last");
+        return ICO_DIAG_BISECT_LOST;
+    }
     switch (b.result) {
     case RD_BISECT_LOST:
         s_bisect1.pass = b.pass;
@@ -1287,8 +1456,11 @@ static int window_loss_bisect(const char *zip, char *line, size_t size, void *us
     case RD_BISECT_CLEAN:
         snprintf(line, size,
                  "the whole frame (%u passes) ran one more pass at a time without losing the "
-                 "device",
-                 (unsigned)b.passes);
+                 "device%s",
+                 (unsigned)b.passes,
+                 overlapRan ? "; then the frames back to back with no wait between them "
+                              "(overlapping like the game's pictures) did not lose it either"
+                            : "; the overlap step did not run (the lines above say why)");
         return ICO_DIAG_BISECT_CLEAN;
     default:
         snprintf(line, size, "%s", b.line);
@@ -1609,7 +1781,7 @@ static int pipeline_set_persist_lazy(void)
    diag_host.h ICO_DIAG_END_LOSS): 0 when written */
 static int gpu_robust_persist(void)
 {
-    return ico_config_set_bool("dev.gpu_robust", 1) == 0 && ico_config_save() == 0 ? 0 : -1;
+    return window_robust_persist();
 }
 #endif
 
@@ -1629,6 +1801,45 @@ static void window_setenv(const char *name, const char *value)
 static int vu_prepass_persist(void)
 {
     return ico_config_set_bool("dev.vu_prepass", 0) == 0 && ico_config_save() == 0 ? 0 : -1;
+}
+
+/* [dev] vu_record = "targets" (the same inside a record store build) */
+static int vu_record_persist(void)
+{
+    return ico_config_set_string("dev.vu_record", "targets") == 0 && ico_config_save() == 0 ? 0
+                                                                                            : -1;
+}
+
+/* [dev] vu_skin_check = false in config.toml, for good (issue 163's skin
+   check: its start-up probe crashed, froze or lost the device; the setting
+   is a diagnostic's, the picture is the same without it): said in one line
+   with why, 0 when written */
+static int skin_check_persist_off(const char *why)
+{
+    const char *cfgName = ico_config_toml_path() ? ico_config_toml_path() : "config.toml";
+    const int ok = ico_config_set_bool("dev.vu_skin_check", 0) == 0 && ico_config_save() == 0;
+
+    fprintf(stderr,
+            "window: VU skin check: %s; [dev] vu_skin_check = false %s %s, so %s without the "
+            "check%s\n",
+            why, ok ? "is written to" : "could not be written to", cfgName,
+            ok ? "this start and every start after it run" : "this start only runs",
+            ok ? " (delete that line to try it again)" : "");
+    return ok ? 0 : -1;
+}
+
+/* after rd_vuprepass_selftest, before anything that may restart the game
+   or show the loss box: the probe's device failure written for good
+   (rd.h rd_vu_skin_probe_failed) */
+static void skin_probe_after(void)
+{
+    char why[96];
+    char line[160];
+
+    if (rd_vu_skin_probe_failed(why, sizeof why)) {
+        snprintf(line, sizeof line, "the start-up probe failed on this device (%s)", why);
+        (void)skin_check_persist_off(line);
+    }
 }
 
 /* the watchdog's GPU hang (below, beside device_lost_quit) */
@@ -1656,10 +1867,11 @@ static SDL_Window *window_create(int mode, int w, int h, int x, int y)
     return win;
 }
 
-/* Original's replay gate (window_lines.h) */
-static bool orig_gate(int keep)
+/* Original's replay gate (window_lines.h), on the game thread at the
+   frame's close */
+static int orig_gate(int keep, bool busy)
 {
-    return window_orig_gate(keep, SDL_GetTicksNS(), s_deadline, s_pres.paceHz);
+    return window_orig_gate(keep, busy, SDL_GetTicksNS(), s_deadline, s_pres.paceHz);
 }
 
 /* What hangs on a new window in mode, at the start and when the renderer
@@ -1700,6 +1912,8 @@ static void window_attach(int mode)
     /* the replay, the present and the FMV picture run on the host stack in
        the host FP mode, not on the game's 256 KB fiber stacks */
     rd_set_host_call(ico_sched_call_on_host);
+    window_pause_hook();                 /* the paused scene's hold (rd_hold.c) */
+    rd_set_probe_fn(ico_diag_set_probe); /* a probe's loss counts on no loss step */
     rd_set_replay_gate(orig_gate);
     /* the Vulkan pipeline cache in the per-user folder: a later start of a
        build with the same shaders creates the renderer's pipelines from it
@@ -1727,6 +1941,8 @@ static void window_attach(int mode)
     }
     /* the window system's answer before the size is read */
     SDL_SyncWindow(s_window);
+    window_display_rate_start(s_window); /* the refresh rate in the log (issue 123) */
+    window_stall_gpu_open();             /* Android: the kernel GPU driver's nodes (issue 123) */
     s_fullscreen = window_fullscreen();
 #if !defined(__ANDROID__) && !defined(ICO_IOS)
     if (mode == ICO_WINDOW_BORDERLESS) {
@@ -1741,12 +1957,16 @@ static void window_attach(int mode)
            (ico_window_pump) */
         fprintf(stderr, "window: fullscreen was asked for at creation; the window is windowed\n");
     }
+    /* the application icon (issue 166): the file the title screen's capture
+       made on an earlier run or this one; none yet leaves SDL's default */
+    (void)ico_app_icon_apply(s_window);
 }
 
 int ico_window_open(unsigned int gsW, unsigned int gsH)
 {
     RdSettings rs;
     int w = 0, h = 0;
+    const uint64_t openNs = SDL_GetTicksNS(); /* the last start-up step's time */
 
     ico_cdvd_host_set_windowed(1);
 
@@ -1806,10 +2026,14 @@ int ico_window_open(unsigned int gsW, unsigned int gsH)
 
         if (ico_host_logs_dir(logs, sizeof(logs)) == 0 &&
             ico_path_join(act, sizeof(act), logs, "startup-activity.txt") == 0) {
+            exit_info_begin(logs, act); /* "the previous run ended: ..." (issue 215) */
             lazyStart = ico_diag_startup_activity_begin(act, retry != STARTUP_RETRY_NONE) != 0;
         }
     }
     const char *cfgName = ico_config_toml_path() ? ico_config_toml_path() : "config.toml";
+    /* [dev] gpu_robust the game wrote turns itself off after clean starts
+       (robust_persist.h); before the device reads ICO_GPU_ROBUST */
+    window_robust_start(cfgName);
     /* a start that ended without a word inside a batch or pipeline of the
        VU vertex pre-pass or of the record path that draws from it
        (startup_retry.h startup_retry_note_has_vu_pre; the largest VU
@@ -1824,7 +2048,11 @@ int ico_window_open(unsigned int gsW, unsigned int gsH)
        (startup_retry_draws_no_prepass: the crash order's noprepass and the
        steps after it, every loss step) */
     const int preEnds = retry == STARTUP_RETRY_NONE ? ico_diag_startup_vu_prepass() : 0;
-    if (preEnds > 0) {
+    if (preEnds > 0 && ico_diag_startup_vu_store()) {
+        /* inside a record store build: the targets' record, pre-pass kept */
+        window_setenv("ICO_RD_VU_RECORD", "targets");
+        lazyStart = false;
+    } else if (preEnds > 0) {
         rd_set_vu_prepass_off(preEnds == 1 ? "for this start: the last start ended while the "
                                              "graphics driver compiled its pipelines"
                                            : "[dev] vu_prepass = false: the last two starts "
@@ -1840,6 +2068,25 @@ int ico_window_open(unsigned int gsW, unsigned int gsH)
                                               : "a graphics driver crash");
         rd_set_vu_prepass_off(why);
     }
+    /* issue 163's skin check: a previous run that ended inside its
+       start-up probe (startup_retry.h startup_retry_note_has_skin_probe: a
+       crash there, a restart after it, a freeze or the system's end, a
+       device loss) makes this start and every start after it run without
+       the check ([dev] vu_skin_check = false; ICO_RD_VU_SKIN_CHECK=0 before
+       the device is made, vk_device.c reads it); the end is not counted as
+       one while making the pipelines (diag_host.c) */
+    {
+        const char *prevNote = ico_diag_startup_activity_prev();
+
+        if (startup_retry_note_has_skin_probe(prevNote)) {
+            char line[200];
+
+            window_setenv("ICO_RD_VU_SKIN_CHECK", "0");
+            snprintf(line, sizeof line, "the previous run ended inside its start-up probe (%.120s)",
+                     prevNote);
+            (void)skin_check_persist_off(line);
+        }
+    }
     /* issues 93 and 107: the start-up set, the careful one or none. [dev]
        pipeline_set = "lazy" or "careful" (ICO_PIPELINE_SET); a previous
        start of any version that ended in the foreground without a word
@@ -1853,7 +2100,7 @@ int ico_window_open(unsigned int gsW, unsigned int gsH)
        start lazy (ICO_DIAG_PIPESET_LAZY_LOW_MEMORY). The device table's careful rule
        (RhiLimits.carefulPipelines) is read after rd_init. */
     const char *pipeSetting = getenv("ICO_PIPELINE_SET");
-    const int pipePolicy =
+    int pipePolicy =
         ico_diag_startup_pipeline_set(retry != STARTUP_RETRY_NONE, lazyStart, pipeSetting, cfgName);
 #ifdef __ANDROID__
     /* issue 158: below Android 9 there is no driver package to fall back
@@ -1930,6 +2177,7 @@ open_window:
        after: SDL's X11 backend then writes _NET_WM_STATE before the window
        is mapped, which KWin and gamescope honour (borderless at the desktop
        resolution; no exclusive mode) */
+    ico_diag_step("window: start: creating the %s window", backend);
     s_window = window_create(start.windowMode, WINDOW_W, WINDOW_H, SDL_WINDOWPOS_UNDEFINED,
                              SDL_WINDOWPOS_UNDEFINED);
     if (start.windowMode != ICO_WINDOW_WINDOWED) {
@@ -1941,6 +2189,7 @@ open_window:
         if (window_fallback_backend(backendExplicit, retry, blendExplicit, &backend)) {
             goto open_window;
         }
+        window_stall_gpu_close(); /* a sampler a failed open started */
         SDL_Quit();
         return -1;
     }
@@ -1969,6 +2218,13 @@ open_window:
             ico_diag_loss_bisect2_path(st);
         }
     }
+    /* the bisect's renderers replay under what the lost start ran (the
+       loss ladder's row one less than this start's: rhi_tile_rule.h), this
+       start's row back after them (diag_host.c loss_ladder_export) */
+    const unsigned lossRow = ico_diag_startup_loss_row();
+    char lossRowText[16];
+    snprintf(lossRowText, sizeof(lossRowText), "%u", lossRow > 1u ? lossRow - 1u : 0u);
+    window_setenv("ICO_LOSS_ROW", lossRow > 1u ? lossRowText : "");
     if (retry == STARTUP_RETRY_NONE && ico_diag_loss_bisect2_pending()) {
         /* the second level a start before left unfinished goes first; a
            newer loss dump stays in logs */
@@ -1998,6 +2254,8 @@ open_window:
                          ico_diag_loss_dump());
         }
     }
+    snprintf(lossRowText, sizeof(lossRowText), "%u", lossRow);
+    window_setenv("ICO_LOSS_ROW", lossRow ? lossRowText : "");
     /* the loss order's robust step: the device line says why robust
        access is on (ICO_GPU_ROBUST=1 came from ico_ini_export; the step's
        variable is forgotten above) */
@@ -2041,12 +2299,18 @@ open_window:
     /* before the set: the careful policy's budget reads the process's
        memory around each batch (rd_pipeline.c createKeys) */
     rd_set_memory_fn(ico_diag_process_memory);
+    rd_set_memory_clause_fn(mem_watch_batch_clause); /* issue 215 */
 #ifdef __ANDROID__
     /* issue 128: the system's low-memory signal (IcoActivity's
        onTrimMemory, diag_host.c ico_diag_note_low_memory) stops the
        start-up set between two batches; desktops never send it */
     rd_set_low_memory_fn(ico_diag_low_memory_stop);
 #endif
+    ico_diag_step("window: start: starting the renderer on %s (the device and its shaders)",
+                  backend);
+    /* a long driver call takes the window's events and is held to the GPU
+       hang limit (window_switch.h ico_window_switch_wait_hooks) */
+    ico_window_switch_wait_hooks();
     bool up = rd_init(gsW, gsH, &rs, s_window);
 #ifdef __ANDROID__
     /* not after a bisect that lost the device: the player's driver did not
@@ -2070,6 +2334,7 @@ open_window:
                                  s_window);
         SDL_DestroyWindow(s_window);
         s_window = NULL;
+        window_stall_gpu_close(); /* a sampler a failed open started */
         SDL_Quit();
         return -3;
     }
@@ -2121,6 +2386,7 @@ open_window:
         if (window_fallback_backend(backendExplicit, retry, blendExplicit, &backend)) {
             goto open_window;
         }
+        window_stall_gpu_close(); /* a sampler a failed open started */
         SDL_Quit();
 #ifdef __ANDROID__
         return -2; /* the player chose Quit, or a driver package for the next
@@ -2141,6 +2407,10 @@ open_window:
        StartupRetryRun.robustOffDefault; Direct3D 12: NULL, its own rules) */
     ico_diag_set_robust_off_default(rhi_limits() != NULL && rhi_limits()->robustDefaultOff);
     window_pipe_floor_driver(); /* the free-memory floor's rule (memory_floor.h) */
+    window_keep_block_start();  /* the loss keep's blocks from the dump worker */
+    /* issue 123: after a stop for memory, the set resumed where it stopped
+       (window_pipe_finish.h) */
+    pipePolicy = window_pipe_floor_retry(pipePolicy);
     {
         /* the watchdog's GPU hang counts as a device loss where the
            backend tracks its submissions (rhi_gpu_progress), said once */
@@ -2199,7 +2469,9 @@ open_window:
                                                  pipeline_set_persist_lazy, cfgName);
     }
     if (preEnds >= 1) {
-        (void)ico_diag_startup_end_persist(ICO_DIAG_END_VU_PRE, NULL, vu_prepass_persist, cfgName);
+        (void)ico_diag_startup_end_persist(
+            ICO_DIAG_END_VU_PRE, NULL,
+            ico_diag_startup_vu_store() ? vu_record_persist : vu_prepass_persist, cfgName);
     }
     const bool carefulPolicy = pipePolicy == ICO_DIAG_PIPESET_FULL ||
                                pipePolicy == ICO_DIAG_PIPESET_CAREFUL_ONCE ||
@@ -2207,36 +2479,20 @@ open_window:
     if (retry == STARTUP_RETRY_LAZY || !carefulPolicy) {
         char why[160];
 
-        if (retry == STARTUP_RETRY_LAZY) {
-            snprintf(why, sizeof(why), "(a restart after a graphics driver crash)");
-        } else if (pipePolicy == ICO_DIAG_PIPESET_LAZY_SETTING) {
-            snprintf(why, sizeof(why), "by the settings ([dev] pipeline_set = \"lazy\")");
-        } else if (pipePolicy == ICO_DIAG_PIPESET_LAZY_ONCE) {
-            snprintf(why, sizeof(why),
-                     "(the previous start ended while preparing them in the careful set; for "
-                     "this start only)");
-        } else if (pipePolicy == ICO_DIAG_PIPESET_LAZY_NOW && pipeSaved) {
-            snprintf(why, sizeof(why),
-                     "(the previous start ended while preparing them; [dev] pipeline_set = "
-                     "\"lazy\" from now on)");
-        } else if (pipePolicy == ICO_DIAG_PIPESET_LAZY_NOW) {
-            snprintf(why, sizeof(why),
-                     "(the previous start ended while preparing them; [dev] pipeline_set = "
-                     "\"lazy\" could not be written, so for this start only)");
-        } else if (pipePolicy == ICO_DIAG_PIPESET_LAZY_LOW_MEMORY) {
-            snprintf(why, sizeof(why),
-                     "(the previous start's set stopped when the system ran low on memory)");
-        } else {
-            snprintf(why, sizeof(why), "(the last run made them that way)");
-        }
+        window_pipe_lazy_why(why, sizeof(why), pipePolicy, retry == STARTUP_RETRY_LAZY, pipeSaved);
         /* each first-use pipeline's note in the file, for the whole run, so
            a further end names the pipeline; no further step follows */
         ico_diag_startup_activity_record(ICO_DIAG_ACTIVITY_LAZY);
         rd_pipelines_lazy(why);
         /* the blend checked on this GPU (rd.h rd_blend_selftest), then the
            VU vertex pre-pass (rd_vuprepass_selftest) */
+        ico_diag_step("window: start: the blend and VU pre-pass self-tests");
+        selftests_screen(0, 0); /* no set follows: no "once after an update" */
         rd_blend_selftest();
+        selftests_between();
         rd_vuprepass_selftest();
+        skin_probe_after();
+        selftests_done();
     } else {
         /* the careful policy: on a device of the table, by the settings, or
            after the full set's end (for this start only) */
@@ -2275,13 +2531,18 @@ open_window:
         /* which way of blending draws right on this GPU, tried before the
            set is made so the set is the chosen way's; logged ("blend: ...
            (self-test: ...)"). A crash in it is noted as the set's would be */
+        ico_diag_step("window: start: the blend and VU pre-pass self-tests");
+        selftests_screen(0, 1);
         rd_blend_selftest();
+        selftests_between();
         /* whether the VU vertex pre-pass draws right on this GPU, tried
            before the set so the set holds the pre-pass's keys or the
            programs' ("VU pre-pass: on|off (self-test: ...)"); a crash in
            it is noted as the set's would be (its pipeline's " pre" or
            vu_tri note: startup_retry.h's noprepass step) */
         rd_vuprepass_selftest();
+        skin_probe_after();
+        selftests_done();
         static PipeScreen screen;
 
         /* a start with a cold driver cache can take many seconds (a phone,
@@ -2293,11 +2554,14 @@ open_window:
            window "Not Responding" (Windows does after 5 s, Android asks
            whether to close the app) and a close asked meanwhile stops the
            set after the batch in flight and ends the run */
+        ico_diag_step("window: start: the pipeline set");
         rd_set_pipeline_progress(pipeline_progress, &screen);
-        rd_precreate_pipelines();
+        ico_render_thread_pipeline_set(true); /* its workers' cores (render_thread.h) */
+        const uint32_t setMade = rd_precreate_pipelines();
+        ico_render_thread_pipeline_set(false);
         rd_set_pipeline_progress(NULL, NULL);
         rd_set_display_progress(display_progress, &screen);
-        ico_diag_set_pipelines(0, 0, 0);
+        ico_diag_set_pipelines_over(setMade);
         if (rd_pipelines_lazy_on()) {
             /* the careful policy's budget stopped the set: the rest of the
                run is recorded as a lazy run's, for this start only; or the
@@ -2320,13 +2584,29 @@ open_window:
             (void)rhi_pipeline_cache_save();
         }
     }
+    /* this start reached the game, whichever way it prepares the
+       pipelines: after the set (full or careful) or after the self-tests
+       of a run that makes them on first use (lazy: by the settings, after
+       an end while preparing them, after a low-memory stop, a restart);
+       the next start counts it as a clean start when it ended without a
+       loss (window_robust.h, robust_persist.h) */
+    window_robust_reached();
+    /* the skin check's own background compiles under issue 161's rule */
+    window_pipe_skin_check(pipePolicy);
     /* a device loss from here takes the loss order's lossnoprepass step
        first when the run draws with the VU vertex pre-pass (its self-test
-       above may have turned it off) */
+       above may have turned it off); losstargets before it under the
+       record stores */
     ico_diag_set_vu_prepass(rd_vu_prepass_on());
+    ico_diag_set_vu_record_stores(rd_vu_prepass_on() && rd_vu_record_buffered());
     /* which way of reading the depth gives the fog its distances on this
        GPU, tried on the real scene size; logged ("fog: depth path") */
+    ico_diag_step("window: start: the fog self-test");
     rd_fog_selftest();
+    /* the device's unit costs, once per device, driver, size and version
+       (rd_ratecard.h: a diagnostic, nothing in play reads it) */
+    ico_diag_step("window: start: the rate card");
+    rd_rate_card();
     {
         IcoVideoOptions o;
         char res[32], fr[16];
@@ -2375,6 +2655,7 @@ open_window:
     /* the submits and presents on the render thread from here
        (render_thread.h): the start-up set and its screens ran on this one */
     (void)ico_render_thread_start();
+    window_perf_hint_open(); /* Android's performance hints (window_perf_hint.h) */
     s_deadline = SDL_GetTicksNS();
     s_open = 1;
     /* the port's runtime text and popups (port/ui) */
@@ -2387,6 +2668,10 @@ open_window:
 #if !defined(__ANDROID__) && !defined(__APPLE__) && !defined(ICO_PS5)
     /* Extras > Add to Steam (Windows and Linux; see steam_add_handler) */
     ui_settings_set_steam_handler(steam_add_handler);
+#endif
+#if defined(__linux__) && !defined(__ANDROID__)
+    /* Extras > Add to the applications menu (Linux only; desktop_add_handler) */
+    ui_settings_set_desktop_handler(desktop_add_handler);
 #endif
     ui_settings_set_texture_export_host(&s_texExportHost);
     /* Graphics > Graphics API lists the renderers this build links (the page
@@ -2408,6 +2693,8 @@ open_window:
 #if ICO_RC_TOOLS && defined(__ANDROID__)
     /* Main > Share a bug report, below it: an rc build on a phone alone */
     ui_settings_set_share_report_handler(share_report_arm);
+    window_capture_start(); /* and the opening's frames saved by themselves */
+    window_bench_start();   /* and measured (window_bench.h) */
 #endif
 #ifdef __ANDROID__
     /* the Graphics driver page, and "Quit game" for the
@@ -2441,7 +2728,32 @@ open_window:
     }
     ui_touch_set_source(ico_input_sdl_touch_overlay);
     ui_touch_set_layout_source(ico_input_sdl_touch_safe_layout);
+    /* the start's last step: a crash or hang report after it repeats this
+       line, not the fog self-test's (issue 123's v0.11.0 hang, 25 s into
+       the game, said "the last step: window: start: the fog self-test") */
+    ico_diag_step("window: start: up in %.1f s; the game runs",
+                  (double)(SDL_GetTicksNS() - openNs) / 1e9);
     return 0;
+}
+
+/* an OpenGL device lost inside its start in the switch (a fence past the
+   GPU hang limit: port/rhi/gl/gl_device.c gl_wait_sync): the renderer is
+   taken down again and the switch fails as a device that did not start
+   (it goes back); 1 when that happened. The other backends' losses keep
+   their path (the pump's loss box) */
+static int reopen_lost(const char *backend)
+{
+    if (rhi_backend() != RHI_BACKEND_OPENGL || !rhi_device_lost()) {
+        return 0;
+    }
+    fprintf(stderr,
+            "window: the %s device stopped while it started (the lines above say why); the "
+            "switch goes back\n",
+            backend);
+    rd_suspend();
+    SDL_DestroyWindow(s_window);
+    s_window = NULL;
+    return 1;
 }
 
 /* Options > Graphics > Apply (window_switch.h): the renderer made again on
@@ -2476,11 +2788,17 @@ int ico_window_reopen(const char *backend, bool backendExplicit)
             s_re.mode == ICO_WINDOW_WINDOWED && SDL_GetWindowPosition(s_window, &s_re.x, &s_re.y);
         s_re.clock = s_disp.clock == 1;
         s_re.disp = SDL_GetDisplayForWindow(s_window);
+        /* each step's line is written at once (diag_host.h ico_diag_step):
+           a hang in one leaves its name as the log's last line */
+        ico_diag_step("window: switch to %s: stopping the render thread", backend);
         ico_render_thread_stop(); /* the renderer on this thread alone (render_thread.h) */
+        ico_diag_step("window: switch to %s: suspending the renderer (the old device's end)",
+                      backend);
         rd_suspend();
         if (s_disp.clock != 0) {
             window_disp_clock_stop();
         }
+        ico_diag_step("window: switch to %s: destroying the old window", backend);
         SDL_DestroyWindow(s_window);
         s_window = NULL;
     }
@@ -2488,17 +2806,22 @@ int ico_window_reopen(const char *backend, bool backendExplicit)
         return 0; /* rhi said why */
     }
     const int at = (int)SDL_WINDOWPOS_CENTERED_DISPLAY(s_re.disp);
+    ico_diag_step("window: switch to %s: creating the window (%s)", backend,
+                  s_re.mode == ICO_WINDOW_WINDOWED ? "windowed" : "full screen");
     s_window = window_create(s_re.mode, s_re.w, s_re.h, s_re.place ? s_re.x : at,
                              s_re.place ? s_re.y : at);
     if (s_window == NULL) {
         fprintf(stderr, "window: SDL_CreateWindow: %s\n", SDL_GetError());
         return 0;
     }
+    ico_diag_step("window: switch to %s: attaching the window (its mode and display)", backend);
     window_attach(s_re.mode);
     SDL_GetWindowSizeInPixels(s_window, &w, &h);
     WINDOW_PIX_NOTE(w, h);
     video_settings(&rs, w, h);
     rd_set_activity_fn(window_activity);
+    ico_diag_step("window: switch to %s: starting the renderer (the device and its shaders)",
+                  backend);
     if (!rd_resume(&rs, s_window)) {
         fprintf(stderr,
                 "window: no usable %s device (rd_init failed; the rhi lines above say why)\n",
@@ -2512,24 +2835,45 @@ int ico_window_reopen(const char *backend, bool backendExplicit)
     window_pipe_floor_driver(); /* the free-memory floor's rule (memory_floor.h) */
     ico_diag_set_startup_retry((int)s_retry, window_have_d3d12(), backendExplicit, s_blendExplicit,
                                backend);
+    ico_diag_step("window: switch to %s: the blend self-test", backend);
+    s_pipeTitle = "Changing the graphics";
+    selftests_screen(1, 0);
+    s_pipeTitle = "Starting ICO";
     rd_blend_selftest();
+    ico_diag_step("window: switch to %s: the VU pre-pass self-test", backend);
     rd_vuprepass_selftest();
+    skin_probe_after();
+    selftests_done();
+    if (reopen_lost(backend)) {
+        return 0;
+    }
     if (!rd_pipelines_lazy_on()) {
         static PipeScreen screen;
 
+        ico_diag_step("window: switch to %s: the pipeline set", backend);
         s_pipeTitle = "Changing the graphics";
         rd_set_pipeline_progress(pipeline_progress, &screen);
-        rd_precreate_pipelines();
+        ico_render_thread_pipeline_set(true); /* its workers' cores (render_thread.h) */
+        const uint32_t setMade = rd_precreate_pipelines();
+        ico_render_thread_pipeline_set(false);
         rd_set_pipeline_progress(NULL, NULL);
         rd_set_display_progress(display_progress, &screen);
         s_pipeTitle = "Starting ICO";
-        ico_diag_set_pipelines(0, 0, 0);
+        ico_diag_set_pipelines_over(setMade);
         if (!s_quitLatched && !rhi_device_lost()) {
             (void)rhi_pipeline_cache_save();
         }
     }
     ico_diag_set_vu_prepass(rd_vu_prepass_on());
+    ico_diag_set_vu_record_stores(rd_vu_prepass_on() && rd_vu_record_buffered());
+    window_pipe_skin_check(-1);
+    ico_diag_step("window: switch to %s: the fog self-test", backend);
     rd_fog_selftest();
+    ico_diag_step("window: switch to %s: the rate card", backend);
+    rd_rate_card(); /* its key holds the backend: a new one is measured */
+    if (reopen_lost(backend)) {
+        return 0;
+    }
     if (s_captured != ICO_CAPTURE_OFF) {
         SDL_SetWindowRelativeMouseMode(s_window, true);
     }
@@ -2543,8 +2887,11 @@ int ico_window_reopen(const char *backend, bool backendExplicit)
     window_size_recheck("after the renderer was switched");
     fprintf(stderr, "window: %dx%d pixels, %s on %s, present mode %s\n", w, h,
             rhi_backend_kind_name(rhi_backend()), rhi_adapter_name(), rhi_present_mode_name());
+    ico_diag_step("window: switch to %s: starting the render thread", backend);
     (void)ico_render_thread_start(); /* the new backend's (render_thread.h) */
     s_pres.pausePendingNs += SDL_GetTicksNS() - t0;
+    ico_diag_step("window: switch to %s: up in %.1f s", backend,
+                  (double)(SDL_GetTicksNS() - t0) / 1e9);
     return 1;
 }
 
@@ -2679,65 +3026,6 @@ static void toggle_fullscreen(void)
 #endif
 }
 
-/* The loss dump (docs/port/RENDER.md, "The loss dump"): the frames the
-   renderer still holds, the lost one and the one before it, as one zip in
-   the logs folder, logs/loss-<date>-<time>.zip, with a copy of the log
-   (rd_dump_retained, dump_zip.h ico_loss_dump_zip), so a report carries the
-   frame the next start's loss bisect replays and the developers can replay
-   it too. The oldest loss zips go beyond ICO_LOSS_DUMP_KEEP. Its name
-   (the file name alone) into name, "" when none was written; the activity
-   file notes the loss either way (diag_host.h ico_diag_note_device_loss). */
-static void loss_dump(char *name, size_t name_size)
-{
-    char logs[ICO_PATH_MAX], zip[ICO_PATH_MAX], lost[ICO_PATH_MAX + 64], before[ICO_PATH_MAX + 64],
-        stamp[32], why[160];
-    const time_t now = time(NULL);
-    const struct tm *tm = localtime(&now);
-    uint32_t lostFrame = 0, beforeFrame = 0;
-
-    name[0] = '\0';
-    if (tm == NULL || strftime(stamp, sizeof(stamp), "%Y%m%d-%H%M%S", tm) == 0) {
-        snprintf(stamp, sizeof(stamp), "unknown");
-    }
-    if (ico_host_logs_dir(logs, sizeof(logs)) != 0 ||
-        ico_loss_dump_path(zip, sizeof(zip), logs, stamp) != 0) {
-        fprintf(stderr, "window: loss dump: no usable logs folder\n");
-        ico_diag_note_device_loss(NULL);
-        return;
-    }
-    snprintf(lost, sizeof(lost), "%s/loss-%s-lost.rddump", logs, stamp);
-    snprintf(before, sizeof(before), "%s/loss-%s-before.rddump", logs, stamp);
-    if (!rd_dump_retained(lost, before, &lostFrame, &beforeFrame)) {
-        fprintf(stderr, "window: loss dump: the renderer holds no frame to write\n");
-        ico_remove(lost);
-        ico_diag_note_device_loss(NULL);
-        return;
-    }
-    if (beforeFrame == 0) {
-        ico_remove(before);
-    }
-    ico_host_log_flush();
-    if (ico_loss_dump_zip(zip, lost, beforeFrame ? before : NULL, ico_diag_log_path(), why,
-                          sizeof(why)) < 0) {
-        fprintf(stderr, "window: loss dump: zip not written: %s\n", why);
-        ico_remove(lost);
-        ico_remove(before);
-        ico_diag_note_device_loss(NULL);
-        return;
-    }
-    const int pruned = ico_loss_dump_prune(logs, ICO_LOSS_DUMP_KEEP);
-    if (beforeFrame) {
-        fprintf(stderr, "window: loss dump: frames %u and %u (the one before) written to %s%s\n",
-                (unsigned)lostFrame, (unsigned)beforeFrame, zip,
-                pruned > 0 ? "; older loss dumps deleted" : "");
-    } else {
-        fprintf(stderr, "window: loss dump: frame %u written to %s%s\n", (unsigned)lostFrame, zip,
-                pruned > 0 ? "; older loss dumps deleted" : "");
-    }
-    snprintf(name, name_size, "loss-%s.zip", stamp);
-    ico_diag_note_device_loss(zip);
-}
-
 /* The watchdog's GPU hang (diag_host.h ico_diag_set_gpu_hang): the
    backend's submissions as the main thread last saw them (rhi.h
    rhi_gpu_progress: no call into the driver), 0 when it does not track
@@ -2763,7 +3051,7 @@ static int window_gpu_progress(IcoDiagGpu *out)
 
 /* The GPU hang's part of device_lost_quit, on the watchdog thread while
    the main thread is blocked in the driver waiting for the GPU: the index
-   span, the pass ring and the loss dump (loss_dump, which notes the loss
+   span, the pass ring and the loss dump (window_loss_dump, which notes the loss
    for the next start). CPU data only, no call into the device (it is
    hung). Nothing else writes what these read: the renderer's frames, its
    texture and mesh records and the pass ring are written by the main
@@ -2779,11 +3067,16 @@ static void window_gpu_hang(void)
 
     fprintf(stderr, "window: the graphics driver stopped responding (a GPU hang); what was being "
                     "drawn follows, as for a device loss\n");
+#ifdef __ANDROID__
+    /* within 30 s of the first present under a driver package: counted
+       against the package like a crash in it (a file write, no device call) */
+    ico_gpu_driver_android_device_lost();
+#endif
     rd_index_span_text(span, sizeof(span));
     fprintf(stderr, "window: at the hang: %s\n", span);
     rd_passring_print(stderr, rd_perf_post_name);
     ico_host_log_flush();
-    loss_dump(dumpName, sizeof(dumpName));
+    window_loss_dump(dumpName, sizeof(dumpName));
     ico_host_log_flush();
 }
 
@@ -2792,7 +3085,7 @@ static void window_gpu_hang(void)
    stopped): nothing more can be drawn. The backend logged the reason and
    its loss report (docs/port/RHI.md, "Device loss"); the renderer's pass
    ring follows it here, so the log names what was being drawn
-   (port/render/rd_passring.h). The loss dump follows (loss_dump: the
+   (port/render/rd_passring.h). The loss dump follows (window_loss_dump: the
    frames as a zip in the logs folder, noted in the activity file for the
    next start's loss bisect). Then, when startup_retry.h has a loss step
    left (diag_host.c ico_diag_device_lost_restart), the session ends
@@ -2813,6 +3106,9 @@ static int device_lost_quit(void)
     if (!s_shown) {
         s_shown = 1;
         fprintf(stderr, "window: the graphics device was lost; quitting\n");
+#ifdef __ANDROID__
+        ico_gpu_driver_android_device_lost(); /* a package's first 30 s count as a crash in it */
+#endif
         {
             /* issue 95: Mali's loss came from index spans past 2^24 - 1 */
             char span[256];
@@ -2823,7 +3119,7 @@ static int device_lost_quit(void)
         rd_passring_print(stderr, rd_perf_post_name);
         ico_host_log_flush();
         char dumpName[64];
-        loss_dump(dumpName, sizeof(dumpName));
+        window_loss_dump(dumpName, sizeof(dumpName));
         ico_host_log_flush();
         /* the report file (diag_host.h): the log, the loss dump and the
            settings in one zip, the one file a report needs */
@@ -2923,16 +3219,12 @@ static int device_lost_quit(void)
 #define REPORT_PICTURE_MAX_W 1920u
 
 /* F12, the frame on the screen for a bug report, in <pref>/dumps: a PNG
-   and a zip of the rd dump, the tick before's (rd_dump_prev_frame: with it
-   rd_replay_tool --interp rebuilds the pictures between the two, where the
-   presenter blends) and a copy of the log (GitHub issues refuse
-   .rddump files but take a .zip; the PNG stays a loose file, it is too big
-   for a zip at high scales). The dump is written first, zipped, and the
-   loose .rddump deleted by ico_frame_dump_zip once the zip is written; when the zip fails the
-   .rddump is kept. The log is logs/ico-pc.log, a file on Android too; with
-   --console there is none and the zip holds the dump alone. */
-/* forReport: Settings' bug-report capture (the presented picture goes into
-   the zip too); F12 leaves the PNG loose as ever */
+   and a zip of the rd dump, the tick before's (rd_dump_prev_frame:
+   rd_replay_tool --interp rebuilds the pictures between) and the log
+   (GitHub takes a .zip, not an .rddump; the PNGs stay loose). The loose
+   .rddump is deleted once the zip is written, kept when it fails. With
+   --console there is no log file. forReport: Settings' bug-report row
+   (the pictures go into the zip too); 2 an rc build's capture (window_capture.h), no bundle */
 static void frame_dump(int forReport)
 {
     char pref[ICO_PATH_MAX], dir[ICO_PATH_MAX], dump[ICO_PATH_MAX], png[ICO_PATH_MAX],
@@ -2972,6 +3264,7 @@ static void frame_dump(int forReport)
         s_pres.presentPng[0] = '\0';
     }
     s_pres.presentInfoPending = s_pres.presentPng[0] != '\0';
+    ico_upscale_pictures_arm(s_pres.presentPng, forReport); /* issue 203 */
     s_pres.presentInfoHave = 0;
     s_pres.presentDumpFrame = rd_frame_number();
     s_pres.presentDumpPrev = 0;
@@ -2988,6 +3281,14 @@ static void frame_dump(int forReport)
                                 sizeof(why));
     }
     s_pres.presentDumpPrev = havePrev && zr >= 0;
+    if (forReport == 1 && zr >= 0) {
+        /* the run's automatic zips still on disk, so one attachment brings
+           them (the slow-scene and skin-check zips stay on a phone) */
+        char bl[320];
+
+        (void)ico_dump_auto_bundle(zip, bl, sizeof(bl));
+        fprintf(stderr, "window: bug report: %s\n", bl);
+    }
     if (forReport && zr >= 0 && s_pres.presentPng[0] != '\0') {
         snprintf(s_pres.reportZip, sizeof(s_pres.reportZip), "%s", zip);
     }
@@ -3005,6 +3306,7 @@ static void frame_dump(int forReport)
             havePrev ? "with the tick before: rd_replay_tool --interp rebuilds the pictures between"
                      : "without the tick before",
             blended ? "; the next present's frame if between the ticks" : "");
+    ui_fps_gap(); /* the time it held the window */
     if (forReport) {
         fprintf(stderr, "window: bug report: %s\n",
                 s_pres.reportZip[0] != '\0'
@@ -3027,6 +3329,12 @@ static void report_picture_arm(void)
 
 static void report_picture_pump(void)
 {
+#if ICO_RC_TOOLS && defined(__ANDROID__)
+    if (window_capture_due()) {
+        frame_dump(2);
+        window_capture_taken();
+    }
+#endif
     if (s_reportDumpAt == 0 || SDL_GetTicksNS() < s_reportDumpAt) {
         return;
     }
@@ -3038,8 +3346,8 @@ static void report_picture_pump(void)
 #if ICO_RC_TOOLS && defined(__ANDROID__)
 /* Settings > Share a bug report (the Main page, an rc build's row alone:
    ICO_RC_TOOLS; settings.h ui_settings_set_share_report_handler): the
-   report's files (share_report.h: the log, the run before's, the newest
-   dump zip and presented picture, the newest report zip) to the system's
+   report's files (share_report.h: the log, the run before's, this run's
+   dump zips and the newest presented picture, the newest report zip) to the system's
    share menu (host_android.c ico_android_share_files), from the pump on
    SDL's main thread, whose JNI environment the call takes.  The files
    folder is out of reach on a phone without a computer.  The line naming
@@ -3069,7 +3377,7 @@ static void share_report_pump(void)
     if (ico_path_join(dumps, sizeof(dumps), pref, "dumps") != 0) {
         dumps[0] = '\0';
     }
-    ico_share_report_collect(logs, dumps, &s_files);
+    ico_share_report_collect_run(logs, dumps, window_capture_run_start(), &s_files);
     ico_share_report_names(&s_files, names, sizeof(names));
     fprintf(stderr, "window: share: %d files offered (%s)\n", s_files.count, names);
     if (s_files.count == 0) {
@@ -3137,12 +3445,14 @@ static void photo_pump(void)
             photo_capture();
         }
     }
-    window_blended_pump(); /* F12's blended present's frame into its zip */
+    window_blended_pump();       /* F12's blended present's frame into its zip */
+    ico_upscale_pictures_pump(); /* the upscaler's pictures that came later */
     {
         char path[ICO_PATH_MAX];
         const int r = rd_capture_result(path, sizeof(path));
 
         if (r != 0) {
+            ui_fps_gap(); /* the PNG written here */
             const char *base = strrchr(path, '/');
 #ifdef _WIN32
             const char *b2 = strrchr(path, '\\');
@@ -3186,6 +3496,7 @@ static void photo_pump(void)
                 }
                 fprintf(stderr, "window: F12: %s %s%s\n", r > 0 ? "wrote" : "could not write", path,
                         what);
+                ico_upscale_pictures_after_present(path, s_pres.reportZip);
                 if (s_pres.reportZip[0] != '\0') {
                     char why[160], entry[ICO_PATH_MAX];
                     size_t bytes = 0;
@@ -3544,6 +3855,9 @@ static void pump_pad_event(const SDL_Event *e, const char *name)
    gamepads have input_sdl.c's line) */
 static void pump_event_line(const SDL_Event *e, const char *name)
 {
+    if (e->type == SDL_EVENT_WINDOW_FOCUS_GAINED) {
+        ico_render_thread_place_focus(); /* the threads' cores asked again (render_thread.h) */
+    }
     switch (e->type) {
     case SDL_EVENT_WINDOW_FOCUS_GAINED:
     case SDL_EVENT_WINDOW_FOCUS_LOST:
@@ -3629,6 +3943,11 @@ int ico_window_pump(void)
        the last frames made closed as a batch once they pause (the pipeline
        cache written, the batch's line logged), the count for the
        low-memory line, and such a line waiting for the activity file */
+    /* the icon the title's capture just wrote is set in this run
+       (SDL_SetWindowIcon: the main thread, this one) */
+    if (ico_app_icon_changed_take()) {
+        (void)ico_app_icon_apply(s_window);
+    }
     rd_pipelines_lazy_tick();
     ico_diag_set_pipelines_made(rd_pipeline_count());
     ico_diag_startup_activity_poll();
@@ -3795,6 +4114,7 @@ int ico_window_pump(void)
         static int s_screenGen;
         const int gen = ico_android_screen(NULL);
 
+        window_display_rate_pump(s_window); /* Uncapped: the pin after a display report */
         if (gen != s_screenGen) {
             s_screenGen = gen;
             touch_layout_update();
@@ -3804,7 +4124,10 @@ int ico_window_pump(void)
     first_pump_recheck();
     resume_recheck();
     report_picture_pump();
+    window_dump_auto_skin_pump();
+    window_bones_pump(); /* issue 123's ladder (window_bones.c) */
 #if ICO_RC_TOOLS && defined(__ANDROID__)
+    window_bench_pump(); /* the bench holds the pump while it runs */
     share_report_pump();
 #endif
     /* the Settings menu's changes; forced when the
@@ -3835,7 +4158,15 @@ int ico_window_pump(void)
         state_thumb_pump();          /* a save state's picture */
         window_sweep_pump();         /* Shift+F12's aspect sweep */
         set_capture(capture_mode()); /* play and photo mode */
-        pointer_visibility();        /* the pointer in the menus */
+        {
+            /* Touch controls "Always, Start only in scenes": a scene's empty
+               layout or a movie, the signal the letterbox keys on too */
+            IcoCaptureState cs;
+
+            capture_state(&cs);
+            ico_input_sdl_set_touch_scene(cs.layout == ICO_CAPTURE_LAYOUT_SCENE || cs.movie);
+        }
+        pointer_visibility(); /* the pointer in the menus */
         pump_slow("captures and the pointer", t1);
     }
     {
@@ -4085,7 +4416,6 @@ int ico_window_progress_notes(const char *title, const char *phase, int pct, con
    the rate so far joins once there is a rate to go by.  Returns 1 when the
    game is closing (a quit or close request came in): the renderer stops the
    set after the batch in flight. */
-#define PIPE_SCREEN_AFTER_MS 250.0
 #define PIPE_SCREEN_EVERY_MS 100.0
 /* the estimate from this much time and this many pipelines on */
 #define PIPE_ESTIMATE_AFTER_S 3.0
@@ -4229,7 +4559,8 @@ static void perf_csv_open(void)
         fprintf(s_perf.csv, ",walk_list%d_ms", l);
     }
     fprintf(s_perf.csv, ",upload_texture_bytes,upload_uniform_bytes,upload_interp_bytes,"
-                        "upload_stream_bytes,passes,pass_timed,pass_count\n");
+                        "upload_stream_bytes,passes,pass_timed,pass_count,gpu_display_wait_ms,"
+                        "submits\n");
 }
 
 static void perf_csv_line(const RdPerfRecord *r)
@@ -4259,14 +4590,15 @@ static void perf_csv_line(const RdPerfRecord *r)
             r->vuPreDraws, r->vuPreFallbacks);
     unsigned passes = 0;
     for (int k = 0; k < RD_PERF_PASS_KIND_COUNT; k++) {
-        passes += r->passKinds[k];
+        passes += k != RD_PERF_PASS_WAIT ? r->passKinds[k] : 0u; /* the display wait is no pass */
     }
     for (int l = 0; l < RD_LIST_COUNT; l++) {
         fprintf(f, ",%.3f", r->walkListMs[l]);
     }
-    fprintf(f, ",%llu,%llu,%llu,%llu,%u,%u,%u\n", (unsigned long long)r->uploadTextureBytes,
+    fprintf(f, ",%llu,%llu,%llu,%llu,%u,%u,%u,%.3f,%u\n", (unsigned long long)r->uploadTextureBytes,
             (unsigned long long)r->uploadUniformBytes, (unsigned long long)r->uploadInterpBytes,
-            (unsigned long long)r->uploadStreamBytes, passes, r->passTimed, r->passCount);
+            (unsigned long long)r->uploadStreamBytes, passes, r->passTimed, r->passCount,
+            r->gpuDisplayWaitMs, r->submits);
 }
 
 /* ico-pc-passes.csv beside ico-pc-perf.csv, opened on the first timed
@@ -4304,7 +4636,11 @@ static void perf_passes_add(const RdPerfRecord *r)
     if (n == 0) {
         return;
     }
+    /* a stalled replay against the block's before it joins (window_stall.c) */
+    window_stall_passes(r, &s_perf.passAgg, p, n, s_perf.gpuN,
+                        s_perf.gpuN ? s_perf.gpu / s_perf.gpuN : 0.0);
     rd_perf_pass_agg_add(&s_perf.passAgg, p, n);
+    window_perf_rank_pieces(r, p, n); /* the performance lines by scene */
     if (!s_perf.passCsvTried) {
         perf_pass_csv_open();
     }
@@ -4333,7 +4669,9 @@ static void auto_res_sample(const RdPerfRecord *r)
         return;
     }
     if (r->gpuValid) {
-        ms = r->gpuMs - r->gpuUploadMs;
+        /* the GPU's own work: the span less the uploads and the display
+           wait (rd.h rd_perf_pace_gpu_ms) */
+        ms = rd_perf_pace_gpu_ms(r) - r->gpuUploadMs;
     } else if (rhi_present_mailbox()) {
         ms = r->totalMs - r->acquireMs - r->presentMs;
     } else {
@@ -4384,7 +4722,8 @@ static void slow_replay_longest(void)
 
 /* A present over 50 ms in the driver's present call (RdPerfRecord.presentMs):
    the 10 s count; the line and the FIFO fallback's count in
-   window_present_fallback.c */
+   window_present_fallback.c, the lines around it in window_stall.c (the
+   block's GPU spans so far: this record's not yet added) */
 static void present_blocked(const RdPerfRecord *r)
 {
     char fr[16];
@@ -4392,26 +4731,173 @@ static void present_blocked(const RdPerfRecord *r)
     s_perf.presentBlocked++;
     s_perf.presentBlockedMaxMs =
         r->presentMs > s_perf.presentBlockedMaxMs ? r->presentMs : s_perf.presentBlockedMaxMs;
-    window_fifo_note(r->presentMs, r->replay,
-                     ico_video_framerate_name(s_pres.framerate, fr, sizeof(fr)));
+    window_fifo_note(
+        r->presentMs, r->replay, ico_video_framerate_name(s_pres.framerate, fr, sizeof(fr)),
+        r->presentThread == RD_PRESENT_ON_SUBMIT ? "; on the submit thread"
+        : r->presentThread == RD_PRESENT_IN_STEP ? "; inside the game step"
+                                                 : "",
+        window_stall_split(r, s_perf.gpuN, s_perf.gpuN ? s_perf.gpu / s_perf.gpuN : 0.0));
+    window_stall_blocked(r);
+}
+
+/* The slow-scene dump (docs/port/ANDROID_DIAGNOSTICS.md, issue 179): up to
+   three times a run (releases too), a frame the renderer holds and the
+   log, as logs/slow-<date>-<time>.zip. The rule (window_slow_scene_due:
+   a slow scene or play block, a later dump 1.5 times the work of the one
+   before or the first slow block of another stage) runs at the end of a
+   10 s block and ARMS the dump with the block's mean CPU-side vertex work
+   a replay (window_scene_vu_invocations); the first replay after it at or
+   above that mean whose frame is still held (rd_perf_last_replay_work,
+   polled every vsync) is the frame; an arm still on at the next block's
+   end takes its stand-in or is dropped there with a line (slow_arm.h). The
+   block's dominant kind is s_blockKind, taken where the layout share is
+   written; a crash or hang report carries the zip
+   (ico_diag_note_slow_scene). */
+static SceneKind s_blockKind = SCENE_OTHER;
+
+static struct {
+    int armed;
+    SlowSceneBlock b; /* the due block's figures (count is the dumps before it) */
+    double meanWork;  /* the block's vertex work a replay, in invocations */
+    uint32_t seen;    /* the replay last looked at (the pick takes a later one) */
+    SlowArmPick pick; /* the arm's stand-in and its end (slow_arm.h) */
+} s_slowArm;
+
+static int s_slowCount;         /* the dumps this run has been made (written or not) */
+static double s_slowLastWorkMs; /* the work of the block of the last */
+static int s_slowLastStage;     /* the stage of the block of the last */
+static int s_slowPlayDone;      /* a play block's made (the dump kept for play) */
+
+/* A replay's vertex work, as the VU line counts it */
+static double slow_scene_vertex_work(uint64_t tris, uint64_t preVertices)
+{
+    return (double)window_scene_vu_invocations(tris, preVertices, rd_vu_prepass_on());
+}
+
+static void slow_scene_write(uint32_t frame, double work);
+
+static void slow_scene_check(void)
+{
+    SlowSceneBlock b;
+    RdReplayWork w;
+    double endWork;
+
+    memset(&b, 0, sizeof(b));
+    if (window_dump_auto_slow_lost(&b)) { /* a two-step dump given up: not made */
+        s_slowCount = b.count;
+        s_slowLastWorkMs = b.lastWorkMs;
+        s_slowLastStage = b.lastStage;
+        s_slowPlayDone = b.playDone;
+        memset(&b, 0, sizeof(b));
+    }
+    if (s_slowArm.armed) { /* its end: the stand-in taken, or a line */
+        const uint32_t sf = s_slowArm.pick.bestFrame;
+        const uint32_t ef = slow_arm_end(&s_slowArm.pick, sf && rd_frame_retained(sf),
+                                         s_slowArm.meanWork, &endWork);
+        if (ef) {
+            slow_scene_write(ef, endWork);
+        }
+    }
+    b.dominant = s_blockKind;
+    b.window = s_window != NULL;
+    b.movie = mpegPlay != 0;
+    b.count = s_slowCount;
+    b.lastWorkMs = s_slowLastWorkMs;
+    b.uptimeS = ico_diag_uptime();
+    b.gpuN = s_perf.gpuN;
+    b.spanSumMs = s_perf.gpu;
+    b.waitSumMs = s_perf.gpuDisplayWait;
+    b.presentSumMs = s_perf.gpuPresent;
+    b.boundMs = ico_config_get_float("dev.slow_scene_dump_ms", 40.0);
+    b.stage = stage_no;
+    b.lastStage = s_slowLastStage;
+    b.playDone = s_slowPlayDone;
+    s_slowArm.armed = 0; /* an arm lives to the next block's end */
+    if (!window_slow_scene_due(&b)) {
+        return;
+    }
+    s_slowArm.b = b;
+    s_slowArm.meanWork =
+        s_perf.ph.n ? slow_scene_vertex_work(s_perf.vuTris, s_perf.vuPreVerts) / s_perf.ph.n : 0.0;
+    s_slowArm.seen = rd_perf_last_replay_work(&w) ? w.replay : 0u;
+    slow_arm_begin(&s_slowArm.pick);
+    s_slowArm.armed = 1;
+}
+
+/* The armed dump's frame has come: a replay whose vertex work passed
+   window_slow_scene_pick, or the stand-in at the block's end */
+static void slow_scene_write(uint32_t frame, double work)
+{
+    const SlowSceneBlock b = s_slowArm.b;
+    const double mean = s_slowArm.meanWork;
+
+    s_slowArm.armed = 0;
+    s_slowCount++; /* counted whether or not the file is written */
+    s_slowLastWorkMs = window_slow_scene_work_ms(&b);
+    s_slowLastStage = b.stage;
+    s_slowPlayDone |= b.dominant == SCENE_PLAY;
+
+    /* the frame is copied here and written by the dump worker
+       (window_dump_auto.c): the old synchronous write and zip were a
+       0.8-1.5 s hitch on the phone */
+    (void)window_dump_auto_slow(frame, &b, work, mean);
+}
+
+/* Every vsync while armed: the replay the renderer finished last, when it
+   is a new one, its frame still held and its vertex work at or above the
+   block's mean */
+static void slow_scene_poll(void)
+{
+    RdReplayWork w;
+
+    if (!s_slowArm.armed || !rd_perf_last_replay_work(&w) || w.replay == s_slowArm.seen) {
+        return;
+    }
+    s_slowArm.seen = w.replay;
+    const double work = slow_scene_vertex_work(w.vuTris, w.vuPreVertices);
+    const uint32_t sf = s_slowArm.pick.bestFrame;
+
+    /* (a pick whose frame had left the ring: slow_arm.c's line) */
+    if (slow_arm_see(&s_slowArm.pick, w.frame, work,
+                     window_slow_scene_pick(work, s_slowArm.meanWork), rd_frame_retained(w.frame),
+                     sf && rd_frame_retained(sf)) == SLOW_ARM_TAKE) {
+        slow_scene_write(w.frame, work);
+    }
 }
 
 /* The finished records into the block's sums and the CSV */
 static void perf_drain(void)
 {
     RdPerfRecord r;
-    double refreshMs = -1.0; /* the slow-replay threshold, read at the first record */
+    double refreshMs = -1.0; /* the slow-replay threshold (slow_judge.h), at the first record */
 
     window_video_memory_watch();
+    window_stall_poll();       /* the kernel GPU driver around the presents that blocked */
+    window_dump_auto_report(); /* the dump worker's finished zips */
+    slow_scene_poll();
+    window_perf_hint_tick(); /* the hints' target and threads */
     while (rd_perf_pop(&r)) {
+#if ICO_RC_TOOLS && defined(__ANDROID__)
+        window_capture_picture(&r);
+        window_bench_picture(&r);
+#endif
+        window_perf_hint_picture(&r);
         auto_res_sample(&r);
         if (r.presented && r.gpuValid) {
             /* the present allowance's GPU gate and budget: a timed
-               replay's GPU span (two replays late; gpuIsSpan true), the
-               median of the last 8 (not the replays line's block mean) */
-            s_pres.gpuNs = pace_hist_add(&s_pres.gpuHist, (Uint64)(r.gpuMs * 1e6));
+               replay's GPU span less its display wait (two replays late;
+               gpuIsSpan true; rd.h rd_perf_pace_gpu_ms: the present's own
+               list waits for the window's image inside the span), the
+               median of the last 8 (not the replays line's block mean); the step
+               rule's judging of its misses (pace_policy.h pace_step_est_gpu) */
+            s_pres.gpuNs = pace_step_est_gpu(&s_pres.stepEst, &s_pres.gpuHist,
+                                             (Uint64)(rd_perf_pace_gpu_ms(&r) * 1e6));
         }
-        if (r.presented && r.presentMs > 50.0) {
+        if (r.presented) {
+            present_hist_add(&s_perf.presentHist, r.presentMs);
+        }
+        window_stall_after(&r, &s_perf.gpuGap); /* the record after a present that blocked */
+        if (r.presented && r.presentMs > WINDOW_STALL_MS) {
             present_blocked(&r);
         }
 #ifdef ICO_IOS
@@ -4448,7 +4934,7 @@ static void perf_drain(void)
                 [PERF_PH_READBACK] = r.readbackMs, [PERF_PH_FENCE] = r.fenceWaitMs};
 
             if (refreshMs < 0.0) {
-                refreshMs = (double)window_refresh_ns(0) / 1e6; /* 0: none, never over */
+                refreshMs = window_slow_replay_ms(); /* 0: none, never over */
             }
             if (perf_block_add(&s_perf.ph, ph, r.totalMs, refreshMs)) {
                 slow_replay(&r);
@@ -4460,16 +4946,22 @@ static void perf_drain(void)
             s_perf.maxGpu = r.gpuMs > s_perf.maxGpu ? r.gpuMs : s_perf.maxGpu;
             s_perf.gpuUpload += r.gpuUploadMs;
             s_perf.gpuPresent += r.gpuPresentMs;
+            s_perf.gpuDisplayWait += r.gpuDisplayWaitMs;
             s_perf.gpuPrepass += r.gpuPrepassMs;
             for (int l = 0; l < GPU_LISTS; l++) {
                 s_perf.gpuList[l] += r.gpuListMs[l];
             }
+            window_scene_vu_fit_add(
+                &s_perf.vuFit,
+                window_scene_vu_invocations(r.vuTris, r.vuPreVertices, rd_vu_prepass_on()),
+                window_scene_gpu_work_ms(r.gpuMs, r.gpuDisplayWaitMs, r.gpuPresentMs));
             for (int p = 0; p < RD_PERF_POST_COUNT; p++) {
                 s_perf.gpuPost[p] += r.gpuPostMs[p];
             }
             s_perf.gpuPostPartial += r.gpuPostPartial;
             if (r.gpuGapValid) {
-                pace_gpu_gap_add(&s_perf.gpuGap, (uint64_t)(r.gpuMs * 1e6), r.gpuGapNs);
+                pace_gpu_gap_add(&s_perf.gpuGap, (uint64_t)(r.gpuMs * 1e6), r.gpuGapNs,
+                                 r.gpuGapSkipped);
             }
         }
         s_perf.draws += r.draws;
@@ -4482,6 +4974,7 @@ static void perf_drain(void)
         s_perf.groups += r.bindGroups;
         s_perf.barriers += r.barriers;
         s_perf.copies += r.copies;
+        s_perf.submits += r.submits;
         s_perf.bytes += r.uploadBytes;
         s_perf.meshBytes += r.meshUploadBytes;
         s_perf.texUploads += r.textureUploads;
@@ -4497,6 +4990,11 @@ static void perf_drain(void)
         s_perf.snapSwaps += r.snapSwaps;
         s_perf.a1xDraws += r.a1xDraws;
         s_perf.vuPreVerts += r.vuPreVertices;
+        s_perf.vuDraws += r.vuDraws;
+        s_perf.vuTris += r.vuTris;
+        s_perf.vuLeftOut += r.vuTrisLeftOut;
+        s_perf.twinDraws += r.skinTwinDraws;
+        s_perf.twinInv += r.skinTwinInvocations;
         s_perf.vuPreDraws += r.vuPreDraws;
         s_perf.vuPreFallbacks += r.vuPreFallbacks;
         s_perf.alphaOnePass += r.alphaOnePass;
@@ -4510,6 +5008,12 @@ static void perf_drain(void)
         s_perf.constReads += r.constReads;
         s_perf.constKept += r.constKept;
         s_perf.fadesFolded += r.fadesFolded;
+        s_perf.glowFolded += r.glowFolded;
+        s_perf.glowKept += r.glowKept;
+        s_perf.glowFoldRead += r.glowFoldRead;
+        if (r.glowKept && r.glowWhy < RD_GLOW_FOLD_WHY_COUNT) {
+            s_perf.glowWhyN[r.glowWhy]++;
+        }
         s_perf.passAreas += r.passAreas;
         s_perf.passAreaTiles += r.passAreaTiles;
         s_perf.passAreaTargetTiles += r.passAreaTargetTiles;
@@ -4533,6 +5037,8 @@ static void perf_drain(void)
         s_perf.fenceWaits += r.fenceWaits;
         s_perf.waitIdles += r.waitIdles;
         s_perf.readbacks += r.readbacks;
+        window_perf_rank_record(
+            &r, (double)window_scene_vu_invocations(r.vuTris, r.vuPreVertices, rd_vu_prepass_on()));
     }
     if (s_perf.csv != NULL) {
         fflush(s_perf.csv);
@@ -4543,6 +5049,9 @@ static void perf_drain(void)
 }
 
 /* A new block's sums (the CSVs stay open) */
+/* The block's steps' time by the game's layout (window_scene.h) */
+static SceneShare s_sceneShare;
+
 static void perf_reset(void)
 {
     FILE *csv = s_perf.csv, *passCsv = s_perf.passCsv;
@@ -4555,6 +5064,11 @@ static void perf_reset(void)
     s_perf.passCsvTried = passTried;
     s_pres.stepSumMs = s_pres.stepMaxMs = 0.0;
     s_pres.stepCount = 0;
+    s_pres.stepCpuSumMs = 0.0;
+    s_pres.stepCpuCount = 0;
+    /* the layout shares start with the block's steps (stepSumMs), not at
+       the last layout line (review 2 N6) */
+    window_scene_reset(&s_sceneShare);
     rd_vu_card_counts(&s_pres.cardStrips, &s_pres.cardTris, &s_pres.cardMs);
 }
 
@@ -4568,7 +5082,7 @@ static void perf_log(void)
     const PerfBlock *b = &s_perf.ph;
     const double n = b->n ? (double)b->n : 1.0;
     const double g = s_perf.gpuN ? (double)s_perf.gpuN : 1.0;
-    char gpu[160] = "no GPU timestamps";
+    char gpu[192] = "no GPU timestamps";
     char longest[160];
 
     perf_block_max_text(b, longest, sizeof(longest));
@@ -4579,10 +5093,16 @@ static void perf_log(void)
         for (int l = 0; l < 11; l++) {
             scene += s_perf.gpuList[l];
         }
+        /* the display wait: the scene list's end to the present's own
+           list's start (rd_submit.c), where a GPU that waits whole batches
+           for the window's image waits */
         snprintf(gpu, sizeof(gpu),
-                 "GPU %.2f ms (max %.2f): uploads %.2f, lists 0-10 %.2f, 11-12 %.2f, present %.2f",
-                 s_perf.gpu / g, s_perf.maxGpu, s_perf.gpuUpload / g, scene / g,
-                 (s_perf.gpuList[11] + s_perf.gpuList[12]) / g, s_perf.gpuPresent / g);
+                 "GPU %.2f ms (max %.2f): %s %.2f, lists 0-10 %.2f, 11-12 %.2f, display wait "
+                 "%.2f, present %.2f",
+                 s_perf.gpu / g, s_perf.maxGpu,
+                 rd_perf_pass_kind_display(RD_PERF_PASS_UPLOAD, rhi_limits()->tiler),
+                 s_perf.gpuUpload / g, scene / g, (s_perf.gpuList[11] + s_perf.gpuList[12]) / g,
+                 s_perf.gpuDisplayWait / g, s_perf.gpuPresent / g);
     }
     /* the region rule's card verdicts the steps decided on the CPU
        (rd_mesh.c), a step's average */
@@ -4590,18 +5110,70 @@ static void perf_log(void)
     double cardMs;
     rd_vu_card_counts(&cardStrips, &cardTris, &cardMs);
     const double steps = s_pres.stepCount ? (double)s_pres.stepCount : 1.0;
+    char sub[96]; /* the CPU's sum takes the submit thread's submit and present */
+    (void)window_perf_rank_cpu_note(sub, sizeof(sub));
     fprintf(stderr,
             "window: %u replays: CPU %.2f ms (max %.2f): interp %.2f, wait %.2f, acquire %.2f, "
             "upload %.2f, walk %.2f, bind %.2f, submit %.2f, present %.2f, readback %.2f "
-            "(fence waits %.2f); longest: %s; %s; simulation step %.2f ms (max %.2f); strip "
+            "(fence waits %.2f%s); longest: %s; %s; simulation step %.2f ms (max %.2f); strip "
             "verdicts %.1f strips, %.1f triangles, %.3f ms a step\n",
             b->n, b->total / n, b->totalMax, b->sum[PERF_PH_INTERP] / n, b->sum[PERF_PH_WAIT] / n,
             b->sum[PERF_PH_ACQUIRE] / n, b->sum[PERF_PH_UPLOAD] / n, b->sum[PERF_PH_WALK] / n,
             b->sum[PERF_PH_BIND] / n, b->sum[PERF_PH_SUBMIT] / n, b->sum[PERF_PH_PRESENT] / n,
-            b->sum[PERF_PH_READBACK] / n, b->sum[PERF_PH_FENCE] / n, longest, gpu,
+            b->sum[PERF_PH_READBACK] / n, b->sum[PERF_PH_FENCE] / n, sub, longest, gpu,
             s_pres.stepCount ? s_pres.stepSumMs / s_pres.stepCount : 0.0, s_pres.stepMaxMs,
             (double)(cardStrips - s_pres.cardStrips) / steps,
             (double)(cardTris - s_pres.cardTris) / steps, (cardMs - s_pres.cardMs) / steps);
+    {
+        /* the VU work of a replay: where the vertex shader's time goes */
+        char vu[256], fit[192], twins[96], sh[256], zc[RD_VU_ZERO_TEXT_MAX + 1280];
+
+        (void)window_scene_vu_text(vu, sizeof(vu), s_perf.vuDraws, s_perf.vuTris, s_perf.vuPreVerts,
+                                   b->n, rd_vu_prepass_on(), s_perf.vuLeftOut);
+        /* the skin check's own share (issue 123): its twins' draws */
+        (void)window_scene_twins_text(twins, sizeof(twins), s_perf.twinDraws, s_perf.twinInv, b->n);
+        (void)rd_vu_share_text(sh, sizeof(sh), b->n); /* the shared vertices (issue 179) */
+        (void)rd_vu_zero_text(zc, sizeof(zc), b->n);  /* the zero-area cull (rd.h) */
+        (void)rd_nd_text(zc + strlen(zc), sizeof(zc) - strlen(zc), b->n); /* the twins' */
+        (void)rd_fps_text(zc + strlen(zc), sizeof(zc) - strlen(zc), b->n);
+        (void)rd_op_text(zc + strlen(zc), sizeof(zc) - strlen(zc), b->n); /* the one-pass blend */
+        /* and the GPU's work against the vertex invocations: what the vertex
+           work costs this GPU (the VU pre-pass question, docs/port/
+           ANDROID_DIAGNOSTICS.md) */
+        (void)window_scene_vu_fit_text(fit, sizeof(fit), &s_perf.vuFit);
+        /* how the record was written, the frames [dev] vu_prepass_min skipped */
+        char rec[112];
+        uint32_t minS = 0, maxS = 0;
+        const uint32_t skip = rd_vu_prepass_skips(&minS, &maxS);
+        int at = snprintf(rec, sizeof(rec), "; record %s", rd_vu_record_mode());
+        if (skip && at > 0 && (size_t)at < sizeof(rec)) {
+            snprintf(rec + at, sizeof(rec) - (size_t)at,
+                     "; pre-pass skipped %u frames under %u slots", (unsigned)skip, (unsigned)minS);
+        }
+        fprintf(stderr, "window: %s%s%s%s%s%s\n", vu, sh, zc, twins, fit, rec);
+        window_vu_compact_line(); /* the index compaction's block (window_lines.h) */
+        window_log_cost_mark("the replays and VU lines");
+    }
+    {
+        /* Vulkan: whether the display's image was already free when the
+           present's list was submitted (the acquire's fence, vk_cmd.c): the
+           block's pictures, from the counters' difference */
+        static uint64_t s_acqReadyAt, s_acqNotReadyAt;
+        char acq[160];
+        RhiStats st;
+
+        rhi_get_stats(&st);
+        /* the counters start again from 0 when the backend is made again
+           (rhi_init and rhi_shutdown clear g_vkr: Apply, the ladder's
+           restart, a loss rebuild, a switch to another backend) */
+        if (window_scene_acquire_text(
+                acq, sizeof(acq), window_scene_counter_delta(st.acquireReadyAtSubmit, s_acqReadyAt),
+                window_scene_counter_delta(st.acquireNotReady, s_acqNotReadyAt)) > 0) {
+            fprintf(stderr, "window: %s\n", acq);
+        }
+        s_acqReadyAt = st.acquireReadyAtSubmit;
+        s_acqNotReadyAt = st.acquireNotReady;
+    }
     if (s_perf.presentBlocked != 0) {
         char fr[16];
 
@@ -4610,6 +5182,18 @@ static void perf_log(void)
                 "framerate %s)%s\n",
                 s_perf.presentBlocked, s_perf.presentBlockedMaxMs, rhi_present_mode_name(),
                 ico_video_framerate_name(s_pres.framerate, fr, sizeof(fr)), window_fifo_block());
+    }
+    {
+        /* issue 123: the present call's sizes, and the screen's refresh rate */
+        char hist[200];
+
+        if (present_hist_text(&s_perf.presentHist, hist, sizeof(hist)) > 0) {
+            fprintf(stderr, "window: %s\n", hist);
+        }
+        window_stall_gpu_block(); /* Android: the kernel GPU driver's block */
+        window_perf_hint_block();
+        window_display_rate_line(s_window);
+        window_log_cost_mark("the hints and display rate lines");
     }
     if (s_perf.gpuN) {
         /* the GPU time per replay by list and by picture effect (each
@@ -4631,16 +5215,19 @@ static void perf_log(void)
             snprintf(partial, sizeof(partial), " (not all timed apart in %u replays)",
                      s_perf.gpuPostPartial);
         }
+        char pre[24]; /* an off pre-pass has no cost to print: "0.00" reads as one */
+
+        (void)window_scene_prepass_gpu_text(pre, sizeof(pre), rd_vu_prepass_on(),
+                                            s_perf.gpuPrepass / g);
         fprintf(stderr,
                 "window: GPU ms per replay: lists 0-12 %s; effects: %s%s; present %.2f; VU "
-                "pre-pass %.2f%s\n",
-                lists, posts, partial, s_perf.gpuPresent / g, s_perf.gpuPrepass / g,
-                window_tiler_words());
+                "pre-pass %s%s\n",
+                lists, posts, partial, s_perf.gpuPresent / g, pre, window_tiler_words());
     }
     if (s_perf.gpuGap.n) {
         /* whether the spans overlap (the step rule's GPU time a picture
            over the GPU's own) or the GPU waited between replays */
-        char gap[384];
+        char gap[PACE_GPU_GAP_TEXT_MAX];
 
         pace_gpu_gap_text(&s_perf.gpuGap, gap, sizeof(gap));
         fprintf(stderr, "window: GPU between replays: %s\n", gap);
@@ -4648,10 +5235,11 @@ static void perf_log(void)
     if (s_perf.passAgg.replays) {
         /* the timed replays' most expensive passes, each timed between
            stamps outside the render passes (rd_perf.c) */
-        char top[1024];
+        char top[1536];
 
-        rd_perf_pass_agg_text(&s_perf.passAgg, 5, top, sizeof(top));
+        rd_perf_pass_agg_text_ex(&s_perf.passAgg, 5, rhi_limits()->tiler, true, top, sizeof(top));
         fprintf(stderr, "window: GPU top passes: %s%s\n", top, window_tiler_words());
+        window_log_cost_mark("the GPU lines");
     }
     {
         /* what a replay begins (the passes' count, for the tilers' fixed
@@ -4684,7 +5272,7 @@ static void perf_log(void)
     fprintf(
         stderr,
         "window: per replay %.0f draws, %.0f passes, %.0f pipeline and %.0f bind group binds "
-        "(repeats skipped: %.0f pipeline, %.0f bind group, %.0f state), %.0f bind groups, %.0f barriers, %.0f copies, %.0f KB uploaded (%.0f KB meshes), "
+        "(repeats skipped: %.0f pipeline, %.0f bind group, %.0f state), %.0f bind groups, %.0f barriers, %.0f copies, submits %.1f, %.0f KB uploaded (%.0f KB meshes), "
         "%.1f textures and %.1f meshes uploaded, %.1f DATE snapshots, %.1f exact blends, "
         "%.0f destination-read draws, %.0f storage passes, %.0f pass switches for the exact "
         "blend, glow %.0f passes, %.1f snapshots copied and %.1f swapped, %.1f draws "
@@ -4695,12 +5283,12 @@ static void perf_log(void)
         "tiles loaded, %.1f ended early)%s\n",
         s_perf.draws / n, s_perf.passes / n, s_perf.pipeBinds / n, s_perf.groupBinds / n,
         s_perf.pipeSkips / n, s_perf.groupSkips / n, s_perf.stateSkips / n, s_perf.groups / n,
-        s_perf.barriers / n, s_perf.copies / n, s_perf.bytes / n / 1024.0,
-        s_perf.meshBytes / n / 1024.0, s_perf.texUploads / n, s_perf.meshUploads / n,
-        s_perf.dateSnaps / n, s_perf.exact / n, s_perf.dstDraws / n, s_perf.storagePasses / n,
-        s_perf.dstSwitches / n, s_perf.glowPasses / n, s_perf.snapshots / n, s_perf.snapSwaps / n,
-        s_perf.a1xDraws / n, s_perf.vuPreVerts / n, s_perf.vuPreDraws / n,
-        s_perf.vuPreFallbacks / n, (unsigned long long)s_perf.bufCreated,
+        s_perf.barriers / n, s_perf.copies / n, (double)s_perf.submits / n,
+        s_perf.bytes / n / 1024.0, s_perf.meshBytes / n / 1024.0, s_perf.texUploads / n,
+        s_perf.meshUploads / n, s_perf.dateSnaps / n, s_perf.exact / n, s_perf.dstDraws / n,
+        s_perf.storagePasses / n, s_perf.dstSwitches / n, s_perf.glowPasses / n,
+        s_perf.snapshots / n, s_perf.snapSwaps / n, s_perf.a1xDraws / n, s_perf.vuPreVerts / n,
+        s_perf.vuPreDraws / n, s_perf.vuPreFallbacks / n, (unsigned long long)s_perf.bufCreated,
         (unsigned long long)s_perf.texCreated, (unsigned long long)s_perf.bufDestroyed,
         (unsigned long long)s_perf.texDestroyed, (unsigned long long)s_perf.allocs,
         (unsigned long long)s_perf.pipeCreates, (unsigned long long)s_perf.fenceWaits,
@@ -4720,6 +5308,38 @@ static void perf_log(void)
             s_perf.fxAdditive / n, s_perf.fxLocal / n, s_perf.fxLocalDate / n,
             s_perf.vuNoPlanes / n, s_perf.constReads / n, s_perf.constKept / n,
             s_perf.fadesFolded / n);
+    if (s_perf.glowFolded || s_perf.glowKept) {
+        /* the glow's mask computed in its reduction (one full-frame pass
+           fewer each; of them those that read WORK2 as the sun's fans left
+           it) or drawn into WORK2, the kept ones counted by reason
+           (rd_glow_fold.c: the lamps into WORK2, ...) */
+        char why[512] = "";
+        size_t at = 0;
+        for (int k = 0; k < RD_GLOW_FOLD_WHY_COUNT; k++) {
+            if (!s_perf.glowWhyN[k]) {
+                continue;
+            }
+            const int m = snprintf(why + at, sizeof(why) - at, "%s%llu %s", at ? ", " : " (",
+                                   (unsigned long long)s_perf.glowWhyN[k],
+                                   rd_glow_fold_why_text((uint32_t)k));
+            if (m < 0 || (size_t)m >= sizeof(why) - at) {
+                break;
+            }
+            at += (size_t)m;
+        }
+        fprintf(stderr,
+                "window: glow: WORK2 fold: %llu folded (%llu reading the sun's fans' WORK2), %llu "
+                "kept%s%s\n",
+                (unsigned long long)s_perf.glowFolded, (unsigned long long)s_perf.glowFoldRead,
+                (unsigned long long)s_perf.glowKept, why, at ? ")" : "");
+    }
+    rd_glow_light_line(); /* the glow drawn where it adds light (rd_glow_light.c) */
+    rd_late_pass_line();  /* the crack fill held into the aura's pass (rd_late_pass.c) */
+    rd_hold_line();       /* the paused scene held under the menu (rd_hold.c) */
+    rd_lamps_line();      /* the lamps' pass area (rd_lamps.c) */
+    rd_aura_paste_line(); /* the aura's paste as the alpha alone (rd_aura_paste.c) */
+    rd_cpu_phase_line();  /* the CPU phases a picture (rd_cpu_phase.c) */
+    rd_even_line((double)window_refresh_ns(0) / 1e6); /* the evenness (rd_even.c) */
     window_pipeline_skip_line();
     if (s_perf.msaaSamples) {
         /* the anti-aliasing's cost: its resolves' GPU time is the effects'
@@ -4891,6 +5511,20 @@ static void disp_block_reset(void)
     s_disp.statsSeen = 0;
 }
 
+static void scene_note_step(double ms)
+{
+    const IcoRegionInfo *ri = ico_region_cur();
+    const SceneIds ids = {ri->layout_play,       ri->layout_scene, ri->layout_title_continue,
+                          ri->layout_title_new,  ri->layout_pause, ri->layout_options,
+                          ri->layout_key_config, ri->layout_vibe,  ri->layout_mc_files,
+                          ri->layout_load_files, ri->layout_load,  ri->layout_save_complete};
+    const SceneKind k = window_scene_kind(&ids, current_layout_id, mpegPlay != 0);
+
+    window_scene_note(&s_sceneShare, k, (uint64_t)(ms * 1e6));
+    window_perf_rank_step(k, stage_no, (uint64_t)(ms * 1e6));
+    ico_render_thread_place_scene(k == SCENE_PLAY); /* a 3D scene: the cores asked again */
+}
+
 /* Presents and frames per second, every 10 s of real time, in both
    presentation modes. "game frames" counts the frames shown (closed
    frames the pace saw); "frame numbers" also counts the ones the game
@@ -4914,13 +5548,16 @@ void window_pace_log(Uint64 now)
         rd_replay_time_max(1, &n);
         perf_drain();
         perf_reset();
+        window_perf_rank_block(NULL); /* the records before the first block dropped */
         return;
     }
     if (now - s_pres.statAt < ico_stats_period_ns(now, s_pres.fastUntil)) {
         return;
     }
-    perf_drain(); /* the block's last records, for its replays over a refresh */
+    window_log_cost_begin(); /* the block's prints timed (log_cost.h) */
+    perf_drain();            /* the block's last records, for its replays over a refresh */
     slow_replay_longest();
+    window_log_cost_part(LOG_COST_DRAIN);
     const double sec = (double)(now - s_pres.statAt) / 1e9;
     uint32_t replays = 0;
     const double maxMs = rd_replay_time_max(1, &replays);
@@ -5025,39 +5662,91 @@ void window_pace_log(Uint64 now)
         window_disc_block(b);
     }
     const char *ow = window_orig_words(!rd_interpolation_active());
+    /* the swapchain's images and those the game holds now (acquired, not
+       yet presented; issue 179: whether the images run out) */
+    char images[64];
+    {
+        RhiStats st;
+
+        rhi_get_stats(&st);
+        (void)window_scene_images_text(images, sizeof(images), st.swapImages, st.swapAcquired);
+    }
+    /* issue 123: a GPU-bound block's hint, the scale that would fit */
+    char hint[512];
+    {
+        float sx = 1.0f, sy = 1.0f;
+
+        rd_get_scene_scale(&sx, &sy);
+        (void)window_scene_gpu_hint_text(
+            hint, sizeof(hint), s_pres.statPresents / sec, s_pres.statFrames / sec,
+            window_scene_hint_skips(s_pres.statSkipLate, window_orig_skip_busy()),
+            (double)s_pres.gpuNs / 1e6, sy, &s_perf.vuFit);
+    }
+
+    const double slowStepMsNow = window_slow_step_ms(); /* slow_judge.h */
 
     fprintf(
         stderr,
         "window: %u presents, %u movie presents%s and %u game frames (%u frame numbers) in "
         "%.1f s: %.1f "
         "presented fps, %.1f game fps; %u vsyncs (%.1f Hz simulated), %u resyncs dropping "
-        "%.0f ms; skipped %u presents (late %u, slow %u)%s%s; longest replay %.1f ms of %u, %u "
-        "over a refresh; %u steps over %.0f ms; "
+        "%.0f ms; skipped %u presents (late %u, slow %u)%s%s; longest replay on the render "
+        "thread alone %.1f ms of %u, %u over their interval; %u steps over %.1f ms; "
         "framerate %s%s, present "
-        "%s, display %.2f Hz (%.3f presents a refresh), window %dx%d%s; step late max %.1f "
-        "ms; pump max %.1f ms; %s\n",
+        "%s%s, display %.2f Hz (%.3f presents a refresh), window %dx%d%s; step late max %.1f "
+        "ms; pump max %.1f ms; %s%s\n",
         s_pres.statPresents, movie - s_pres.statMovie, movieFailed, s_pres.statFrames,
         fn - s_pres.statFrameNo, sec, s_pres.statPresents / sec, s_pres.statFrames / sec,
         s_pres.statVsyncs, s_pres.statVsyncs / sec, s_pres.statResyncs,
         (double)s_pres.statDropped / 1e6, s_pres.statSkipLate + s_pres.statSkipSlow,
         s_pres.statSkipLate, s_pres.statSkipSlow, ow, budget, maxMs, replays, s_perf.ph.over,
-        s_pres.slowSteps, s_pres.slowMs, ico_video_framerate_name(s_pres.framerate, fr, sizeof(fr)),
-        held, rhi_present_mode_name(), dm != NULL ? (double)dm->refresh_rate : 0.0,
+        s_pres.slowSteps, slowStepMsNow, ico_video_framerate_name(s_pres.framerate, fr, sizeof(fr)),
+        held, rhi_present_mode_name(), images, dm != NULL ? (double)dm->refresh_rate : 0.0,
         dm != NULL && dm->refresh_rate > 1.0f ? s_pres.statPresents / sec / dm->refresh_rate : 0.0,
         pw, ph, window_fullscreen() ? " fullscreen" : "", (double)s_pres.lateMaxNs / 1e6,
-        s_pres.pumpMaxMs, lock);
+        s_pres.pumpMaxMs, lock, hint);
+    {
+        /* which part of the game the block's steps were in */
+        char layouts[160];
+
+        (void)window_scene_text(&s_sceneShare, layouts, sizeof(layouts));
+        fprintf(stderr, "window: %s\n", layouts);
+        window_log_cost_mark("the presents and layout lines");
+        s_blockKind = window_scene_dominant(&s_sceneShare);
+        window_scene_reset(&s_sceneShare);
+    }
     window_hold_block(s_pres.stepSumMs, s_pres.stepCount, s_pres.stepMaxMs, s_pres.paceHz,
                       s_perf.ph.total, s_perf.ph.n, !rd_interpolation_active(), fr);
+    window_log_cost_mark("the hold line");
     /* the game thread's parts and the render thread's (render_thread.h) */
     ico_render_thread_block_line(s_pres.stepCount ? s_pres.stepSumMs / s_pres.stepCount : 0.0,
+                                 s_pres.stepCpuCount ? s_pres.stepCpuSumMs / s_pres.stepCpuCount
+                                                     : 0.0,
                                  s_perf.ph.n ? s_perf.ph.total / s_perf.ph.n : 0.0,
                                  s_pres.pumpCount ? s_pres.pumpSumMs / s_pres.pumpCount : 0.0);
     /* the audio's 10 s line (out_sdl.c; the pull path's only) */
     ico_audio_sdl_log_summary();
+    window_log_cost_mark("the audio line");
     if (s_pres.lockN > 0) {
         disp_log(sec, s_pres.lock.refreshNs);
     }
     disp_block_reset();
+    slow_scene_check();
+    {
+        /* the performance lines by scene (window_perf_rank.h), before
+           perf_log empties the block's step sums */
+        const WindowPerfBlock pb = {sec,
+                                    s_pres.statPresents / sec,
+                                    window_block_game_fps(sec),
+                                    stage_no,
+                                    s_blockKind,
+                                    s_pres.paceHz,
+                                    !rd_interpolation_active(),
+                                    dm != NULL ? (double)dm->refresh_rate : 0.0,
+                                    s_pres.stepCpuCount ? s_pres.stepCpuSumMs / s_pres.stepCpuCount
+                                                        : 0.0};
+        window_perf_rank_block(&pb);
+    }
     perf_log();
     s_pres.statAt = now;
     s_pres.statPresents = s_pres.statFrames = s_pres.statVsyncs = s_pres.statResyncs = 0;
@@ -5070,6 +5759,7 @@ void window_pace_log(Uint64 now)
     s_pres.lateMaxNs = 0;
     s_pres.pumpMaxMs = s_pres.pumpSumMs = 0.0;
     s_pres.pumpCount = 0;
+    window_log_cost_end();
 }
 
 /* The start-up's presents, one log line each: the boot shows black (keep
@@ -5118,7 +5808,7 @@ void window_boot_log(float alpha)
 /* A step (ico_host_step to this pace) over [dev] slow_step_ms: what ran
    in it.  "other" is the host loop's work between the step and the pump:
    the trace line, the pad recording and the log flush. */
-static void slow_step(double ms)
+static void slow_step(double ms, double cpuMs)
 {
     IcoStepProfile p;
     const RdTexCacheStats *tc = rdtex_stats();
@@ -5136,15 +5826,30 @@ static void slow_step(double ms)
     uint64_t cardStrips, cardTris;
     double cardMs;
     rd_vu_card_counts(&cardStrips, &cardTris, &cardMs);
+    /* the longest fiber switch and the core the game thread ended on, then
+       Frame rate Original's picture of the step (rd.h rd_frame_post_last_text) */
+    char threads[288], tmp[80];
+    const size_t at = window_scene_threads_text(
+        threads, sizeof(threads), p.threadsMs, p.switches, p.longestMs,
+        ico_diag_thread_name(p.longestId, tmp, sizeof(tmp)), cpu_place_now());
+
+    if (s_pres.postHave) {
+        rd_frame_post_last_text(&s_pres.post, threads + at, sizeof(threads) - at);
+    }
+    /* the CPU time of the whole span and the time off the CPU ("" when
+       not known; slow_judge.h) */
+    char cpu[112];
+
+    (void)slow_judge_step_cpu_text(cpu, sizeof(cpu), ms, cpuMs);
     fprintf(
         stderr,
-        "window: slow step %.1f ms at vsync %u (Main tick %u, stage %d%s): step %.1f "
-        "(vsync callbacks %.1f, audio %.1f, game threads %.1f in %lu switches, strip verdicts "
+        "window: slow step %.1f ms%s at vsync %u (Main tick %u, stage %d%s): step %.1f "
+        "(vsync callbacks %.1f, audio %.1f, %s, strip verdicts "
         "%llu strips, %llu triangles, %.2f ms, achievements "
         "%.1f), pump %.1f (events %.1f in %u, settings %.1f, input %.1f), other %.1f; %u "
         "disc reads (%u sectors), disc wait %.1f ms, %u texture decodes, %u pipelines created, memory card %s\n",
-        ms, ico_host_vsync_count(), ico_host_main_ticks(), p.stage, p.loading ? ", loading" : "",
-        p.totalMs, p.hooksMs, p.audioMs, p.threadsMs, p.switches,
+        ms, cpu, ico_host_vsync_count(), ico_host_main_ticks(), p.stage,
+        p.loading ? ", loading" : "", p.totalMs, p.hooksMs, p.audioMs, threads,
         (unsigned long long)(cardStrips - s_pres.stepCardStrips),
         (unsigned long long)(cardTris - s_pres.stepCardTris), cardMs - s_pres.stepCardMs, p.achMs,
         s_pres.pumpMs, s_pres.pumpEventsMs, s_pres.pumpEvents, s_pres.pumpSettingsMs,
@@ -5180,7 +5885,11 @@ void ico_window_pace(int hz)
     /* the simulation step that ran since the last pace (the host loop
        calls ico_host_step, then this) */
     const Uint64 now = SDL_GetTicksNS();
+    const uint64_t cpuNow = cpu_place_thread_cpu_ns();
 
+    /* Frame rate Original's picture the step made (handed over, replayed
+       inside it, or left out), for the slow-step line and the pacing */
+    s_pres.postHave = rd_frame_post_last_take(&s_pres.post);
     if (s_pres.paceEnd != 0 && now > s_pres.paceEnd) {
         const double ms = (double)(now - s_pres.paceEnd) / 1e6;
 
@@ -5188,9 +5897,18 @@ void ico_window_pace(int hz)
         s_pres.stepSumMs += ms;
         s_pres.stepMaxMs = ms > s_pres.stepMaxMs ? ms : s_pres.stepMaxMs;
         s_pres.stepCount++;
+        /* its CPU time: the game thread's own between the two reads */
+        const double cpuMs = s_pres.paceEndCpuNs != 0 && cpuNow > s_pres.paceEndCpuNs
+                                 ? (double)(cpuNow - s_pres.paceEndCpuNs) / 1e6
+                                 : 0.0;
+        if (cpuMs > 0.0) {
+            s_pres.stepCpuSumMs += cpuMs;
+            s_pres.stepCpuCount++;
+        }
+        scene_note_step(ms);
         ico_render_thread_note_game_core(); /* the 10 s line's cores */
-        if (s_pres.slowMs > 0.0 && ms > s_pres.slowMs) {
-            slow_step(ms);
+        if (s_pres.slowMs > 0.0 && ms > window_slow_step_ms()) {
+            slow_step(ms, cpuMs);
         }
         /* a late step the audio held sound back in: what it was doing */
         window_hold_line(ms - 1000.0 / (hz > 0 ? hz : 60), ico_audio_sdl_held_ms(), s_pres.decodes,
@@ -5231,6 +5949,7 @@ void ico_window_pace(int hz)
         s_pres.pipeCreates = rs != NULL ? rs->pipelineCreates : 0;
     }
     s_pres.paceEnd = SDL_GetTicksNS();
+    s_pres.paceEndCpuNs = cpu_place_thread_cpu_ns();
     /* the step starts now: how late against when it was due (the
        deadline, or under the vsync lock the vblank it follows) */
     if (s_pres.paceEnd > s_deadline && s_pres.paceEnd - s_deadline > s_pres.lateMaxNs) {
@@ -5244,7 +5963,13 @@ void ico_window_close(void)
         return;
     }
     s_open = 0;
-    ico_render_thread_stop(); /* every picture handed over finished, the thread ended */
+    ico_render_thread_stop();   /* every picture handed over finished, the thread ended */
+    window_perf_hint_close();   /* the hint thread joined, its session closed */
+    window_dump_auto_stop();    /* the dump worker joined, its last zip reported */
+    window_stall_run_summary(); /* issue 123: stalls a minute by display rate */
+    window_perf_rank_run_end(); /* the run's performance profile by scene */
+    window_display_rate_stop(s_window);
+    window_stall_gpu_close(); /* Android: the kernel GPU driver's sampler joined */
     /* a clean exit: a lazy run keeps the start-up activity file, so the
        next start of this version is lazy too; any other deletes it
        (diag_host.h) */
@@ -5265,6 +5990,9 @@ void ico_window_close(void)
     ui_settings_set_touch_edit_host(NULL);
 #if !defined(__ANDROID__) && !defined(ICO_IOS)
     ui_settings_set_steam_handler(NULL);
+#endif
+#if defined(__linux__) && !defined(__ANDROID__)
+    ui_settings_set_desktop_handler(NULL);
 #endif
     ui_settings_set_texture_export_host(NULL);
     texpack_export_shutdown(); /* joins its worker, before rd_shutdown */
@@ -5290,5 +6018,10 @@ void ico_window_close(void)
         SDL_DestroyWindow(s_window);
         s_window = NULL;
     }
-    SDL_Quit();
+    if (ico_audio_sdl_open_left()) { /* audio_host.h */
+        fprintf(stderr, "window: SDL's audio left to the process's end\n");
+        SDL_QuitSubSystem(SDL_WasInit(0) & ~SDL_INIT_AUDIO);
+    } else {
+        SDL_Quit();
+    }
 }

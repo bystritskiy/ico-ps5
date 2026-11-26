@@ -120,7 +120,9 @@ output pixels at 2x. That reaches the screen on a cropped frame too: issue 26's 
 260 of 964, where the present already leaves the columns out. So the fog of a frame on SCENE arms
 a repeat (`rd__scene_border_arm`, the last line of `doFog`), done before the frame's first post
 sprite that samples SCENE (`sceneRepeatDue` in `rd__blur_post_sprite`: the glow's first
-reduction, the depth of field's, at the latest the reduction into DISPLAY), where SCENE's pass
+reduction, the depth of field's, at the latest the reduction into DISPLAY; at a present that
+holds the glow, the mask's `RDC_NOP` in its place: `rd__scene_border_due`,
+[WORK_BUFFERS.md](WORK_BUFFERS.md#the-glow-between-ticks)), where SCENE's pass
 ends anyway, so the repeat adds no pass on a tiler's local fog read and an open MSAA epoch closes
 where it would have (`port/render/rd_blur_border.c` (`sceneRepeat`)). The repeat copies SCENE's
 texels of GS column 2 into those of columns 0 and 1, and of column W - 3 into W - 2 and W - 1,
@@ -138,8 +140,9 @@ monitor's or a 2532 x 1170 phone's window holds texels of columns 0 and 1, which
 `columnTexel(2) <= 0` nothing is), and the border closed on a frame wider than 512 GS pixels
 (`RD_BORDER_CLOSED` at 2340 x 1080 or 48:9 with Full pixel off: the reduction shows black there,
 the glow reads SCENE). Only the closed border of the 4:3 frame (512, the GS's own DISPLAY with its
-border) leaves SCENE as the game drew it, the PS2's picture, which the native-frame gate's 4:3
-hashes hold. The strips stay with it: the
+border) leaves SCENE as the game drew it (the camera's picture: the console's except inside
+triangles it dropped, [DIVERGENCES.md](DIVERGENCES.md) VD-29), which the native-frame gate's 4:3
+hashes hold under `[dev] region_rule = ps2`. The strips stay with it: the
 reduction's column 2 blends a quarter of column 3 (the PS2's +0.75), so DISPLAY's outer columns
 drawn from SCENE's repeat alone would be column 2 without that quarter, not DISPLAY's column 2.
 One line the first time, `rd: border: the frame's outer two columns a side repeat columns 2 and
@@ -158,7 +161,7 @@ which draws it inside the open pass, without the snapshot, where the same bytes 
 | cleanUpFB's two sprites into SCENE, the glow's WORK0 fill | untextured, blending, no DATE, no AFAIL RGB_ONLY, and each colour channel's blend the destination for every Cd and Ad or one value for every Cd and Ad (`rd__fx_fold`, over the 256 values of each) | `fx_sprite_ps` without the blend and the destination read, the constant channels as RGBAQ, the destination channels masked (the colour mask A alone or whole), the depth state the sprite's; the alpha alone without a Z test in the open pass with that pass's depth attached, its test ALWAYS and no Z write (`fxAttachDepth`), where the open pass is on the sprite's target with the state's depth: cleanUpFB's sprites stay in the fog's pass |
 | the glow's paste WORK3 into SCENE | Cs * FIX + Cd, Cs * As + Cd, Cd - Cs * FIX or Cd - Cs * As, COLCLAMP 1, no PABE, no DATE, no AFAIL RGB_ONLY | `fx_frame_ps` writing the magnitude of `(A - B) C >> 7` (`FXF_OUT_PREMUL`) through the premultiplied add (ONE, ONE) or reverse subtract, alpha ONE, ZERO: the UNORM8 sum is the GS's clamped integer sum, the subtract's term the GS's `ceil(Cs C / 128)` |
 | the motion blur DISPLAY into SCENE, any other destination read | `RdProfile.fxDstLocal` and the target's passes readable (the scene class under `dateStencil`), not sampling its own target | `fx_local_ps`, the destination as the input attachment (`SubpassLoad`) inside the open pass after a by-region barrier (`RHI_LOCAL_READ_COLOR`; `RHI_LOCAL_READ_BACK` after it); `fx_rect_vs` draws one triangle, so the texel read is the one before the sprite |
-| the glow's mask SCENE into WORK2 | MODULATE with RGBAQ's RGB 0, no blend, no destination read | `fx_frame_ps` computing the alpha alone (`FXF_ALPHA_ONLY`): RGB is `(t * 0) >> 7`, 0 |
+| the glow's mask SCENE into WORK2 | MODULATE with RGBAQ's RGB 0, no blend, no destination read | `fx_frame_ps` computing the alpha alone (`FXF_ALPHA_ONLY`): RGB is `(t * 0) >> 7`, 0; where the glow's chain allows, not drawn at all: its reduction computes it ([The glow's mask in its reduction](#the-glows-mask-in-its-reduction)) |
 
 DATE and AFAIL RGB_ONLY read the destination's alpha: the constant fold and the premultiplied
 blend do not take a sprite under them, the local read does, and `fx_local_ps` tests DATE
@@ -201,6 +204,671 @@ rd: fx plan: a staticBlur sprite without a Z test drawn by the constant fold in 
 rd: fx local read: on (self-test: local ok 4, snapshot ok 4) on SCENE 512x512 at 1024x1024 texels
 ```
 
+### The glow's mask in its reduction
+
+List 7's glow (`ico2/sugipon/src/staticBlur.c` `makeFullScreenFlareBefore` and `After`) fills
+WORK2 (`fillWork2`: one untextured sprite over the frame), draws the mask into it
+(`makeMaskPatternToWork2`: SCENE 1:1, MODULATE by RGBAQ (0, 0, 0, 128), the GS bilinear of SCENE's
+alpha, ATST LESS AREF 129 AFAIL KEEP, no blend; the fx plan's alpha alone above), then reduces
+WORK2 into WORK0 (`reduceWork2ToWork0`: the box above 1x, the GS bilinear at 1x). WORK2 has the
+frame's size, so at the PowerVR phone's 2364 x 1080 the mask's pass stores 10.2 MB that the
+reduction loads again and nothing else reads (the title's `glow WORK2 1 draw 1.23 ms`, glow rooms
+up to 4.7 ms). The fold draws neither the fill nor the mask: the reduction is drawn with SCENE as
+its texture through `fx_frame_ps` with `FXF_GLOW_MASK` (`port/shaders/fx_sprite.hlsl`
+`fx_glow_texel`, `fx_glow_mask`), which computes every WORK2 texel its kernel loads as the mask's
+sprite stored it over the fill, where it loads it (`port/render/rd_glow_fold.c`, file comment):
+
+- the mask's fragment at that texel (its `SV_Position`, the texel's centre) through
+  `fx_sprite_ps`'s own lines in WORK2's FrameCB (the scale, the Full pixel crop's left-out texels,
+  XYOFFSET as `frameRefresh` gives the mask's pass), the coverage test against the mask's rect (the
+  fill outside it), U and V (`u0 + (X - x0)`: the mask's UV span is its rect's, and
+  `gs_div_trunc_rcp` of `n d` by `d` is `n`), the GS bilinear of SCENE's alpha times RGBAQ's alpha
+  (`fx_alpha_only`'s arithmetic, its taps in one loop), the alpha test (AFAIL KEEP and ZB_ONLY
+  leave the fill, FB_ONLY writes) and FBA;
+- then the reduction's own kernel over those texels (`fx_sprite_texel`'s: the above-1x box or
+  B-spline, the GS bilinear or nearest; integer sums in the same order), its TFX and its tail.
+
+The same operations on the same operands, so the same integers: what is left out is the RGBA8 store
+and load between the two draws (the mask wrote `k / 255`, the reduction read
+`floor(x * 255 + 0.5)`, which is `k` for every `k`). The half texel the pixel centre adds is read
+from the DrawCB (`g_tex.y`), so no compiler folds it with the 0.5 the sprite's lines take off
+after it; the sums before the divides are the mask's own, in its order. The mask's words ride in
+DrawCB fields the reduction does not read (`aux0`, `blend.xyz`, `tex.xy`;
+`port/render/rd_fx_plan.c` `fxGlowFold`). The key is the alpha alone's (the start-up set has it):
+no new pipeline. One full-frame pass fewer a glow picture on a tile-based GPU (the fill is the
+mask's CLEAR load there), two on a desktop (the fill's clear is a pass of its own), and WORK2 is
+neither stored nor read.
+
+**With the sun's fans.** Whenever the sun is on screen, `dispSun` draws two fans of triangles into
+WORK2 between the fill and the mask (blended, Z-tested against SCENE's depth): 6 of the 14 corpus
+glow frames, and most of a reporter's PC session of 2026-11-04 (its 10 s lines name the fans). The fans' texels are the
+rasteriser's (their coverage and Gouraud colours), which no shader recomputes bit for bit, so they
+are not folded: the fill and the fans are drawn as without the fold, only the mask is not, and the
+reduction binds WORK2 in the destination's slot (t2, `FXF_GLOW_KEPT`) and loads its texel where
+the mask's sprite would have kept it (outside the rect, the alpha test failing): the bytes the
+reduction would have loaded there. Elsewhere it computes the mask's texel as above. The mask's
+pass is the one gone (WORK2's 10.2 MB loaded and stored again for it), so one full-frame pass
+fewer there too; WORK2 is drawn and read.
+
+Where it holds (the scan, in `rd__store_plan_scan`'s one walk of the lists; `rd__glow_fold_plan`
+over a frame of its own for the tests):
+
+- the frame touches WORK2 (a draw into it or on its depth, its texture, a copy or exact blend
+  naming it, a command the scan does not know) with the fill, the mask and the reduction in that
+  order, a clear or a draw before the fill (which the fill covers) and any command between the
+  fill and the mask (the fans: then the mask alone is folded) aside;
+- the fill: a post sprite into WORK2, untextured, no blend, no alpha test that can fail, no DATE,
+  the colour mask whole, no Z test or Z write, the scissor whole, every texel's GS pixel inside its
+  rect: WORK2 holds its colour (with FBA's MSB) everywhere the mask leaves;
+- the mask: a post sprite into WORK2 textured from SCENE's colour (RGBA32), MODULATE with RGBAQ's
+  RGB 0, no blend, no DATE, AFAIL not RGB_ONLY, the colour mask whole, no Z test or Z write, the
+  scissor whole, its UV span its rect's on both axes, WORK2 and SCENE of one size, scale and crop
+  (so the mask is at the GS's own filter), no glow edge strip;
+- nothing between the mask and the reduction writes SCENE's colour (a draw into it, a clear, a
+  copy or exact blend naming it, a command the scan does not know; draws into other targets may
+  come between): SCENE is read by the reduction as the mask read it (its
+  border repeat is done at the mask, as without the fold; the crack fill is placed before the
+  mask, its first reader of SCENE);
+- the reduction: a post sprite (not the display's reduction) from WORK2's colour (RGBA32) into
+  another target, no destination read, the mask's TEX0 size, no glow edge strip;
+- the switch on (by default on the immediate-mode device classes only, below), the fx plan on
+  with `fx_frame_ps`, a device, no MSAA, no pass window.
+
+In 3 of the 14 corpus glow frames (the issue 163 rooms) the lamps' meshes draw into WORK2 after
+the mask, blending over its texels: the chain is drawn there, and the frame counted kept with its
+reason. The replay: `blurPostSprite` (`port/render/rd_blur_border.c`) leaves the planned fill
+(not with the fans) and mask undrawn (`rd__glow_fold_skip`, after SCENE's border repeat), their state kept; at the reduction
+`rd__fx_plan_draw` takes the fold (`rd__glow_fold_due`). A reduction that cannot take it (no
+pipeline, a target made again) has the fill and the mask drawn first with their states
+(`rd__glow_fold_undo`) and reads WORK2: the same bytes, and the fold off from then on.
+
+WORK2's own bytes are then not the mask. Nothing in the frame reads them, and the next frame's fill
+covers them; a frame that reads WORK2 before its fill after a folded one turns the fold off from
+then on (logged). A reader outside the replay (`rd__read_target`: the tests, `rd_replay_tool
+--target` and `--pass-dump`) would see them too, so without an output (a renderer whose targets
+its caller reads) the fold is off unless `ICO_RD_GLOW_FOLD=1` asks for it, and a read of WORK2
+after a folded replay is logged once. `[dev] glow_fold = true|false` (`ICO_RD_GLOW_FOLD=1|0`) is
+the A/B ([CONFIG.md](CONFIG.md#dev)); not set, the fold follows the device profile's `glowFold`
+wherever the frame is presented: on on the immediate-mode classes (desktop Vulkan, D3D12, D3D11,
+OpenGL), off on every tile-based one (Adreno, Mali, PowerVR, Apple, another tiler;
+[RENDER.md](RENDER.md#the-device-profile)). The profile's start line and the summary say `glow
+fold on` or `glow fold off` (`([dev])` after it where the key set it).
+
+**Why not on a tile-based GPU.** The fold trades a full-frame pass for arithmetic in a small one.
+On a tile-based GPU the mask's pass is cheap: 2.55 M fragments at 2364 x 1080, each four reads of
+SCENE's alpha, its tiles written on the chip and stored once. The folded reduction is a 424 x 128
+pass (54 K fragments) whose box loads about 7 x 10 WORK2 texels a WORK0 texel (5.58 x 8.44 texels
+of WORK2 each), and runs the mask at every one of them: about 3.8 M mask evaluations (each texel
+of WORK2 about 1.5 times, the boxes overlapping), each with its four dependent SCENE reads, in a
+loop with branches, over too few fragments to hide their latency. On the PowerVR phone (DXT-48,
+2364 x 1080 Enhanced) every 10 s block that folded without the sun's fans has `glow WORK0
+424x128 12.0 passes` at 10.42 to 11.41 ms, against 2.28 to 3.27 ms for 9.5 to 11.3 passes before
+the fold and about 0.25 ms a WORK0 pass in the blocks that kept the chain: the folded reduction
+pass alone about 8 ms, against the mask's pass's 1.2 to 3.7 ms it saved (`glow WORK2` before the
+fold and on the title). Lavapipe, which has no tiles, shows the trade the other
+way on the phone's dump of a glow room (frame 2426 at 2364 x 1080, `ICO_VK_FAKE_LIMITS=moltenvk`): the folded
+reduction 66.2 ms against the mask's 50.5 ms and the plain reduction's 24.5 ms, the presented
+picture the same bytes.
+
+```
+rd: glow: WORK2 fold: the glow's mask computed inside its reduction from SCENE's alpha (fx_frame_ps), WORK2 neither drawn nor read: one full-frame pass fewer (frame N; reported once)
+rd: glow: WORK2 fold: the glow's mask computed inside its reduction from SCENE's alpha (fx_frame_ps), WORK2 as the fill and the sun's fans left it read where the mask keeps a texel: the mask's pass not drawn, one full-frame pass fewer (frame N; reported once)
+rd: glow: WORK2 fold: the mask drawn into WORK2 and read by its reduction: <reason> (<detail>; frame N; reported once for this reason)
+rd: glow: WORK2 fold: <why>: the fill and the mask drawn before the reduction after all (frame N); the fold is off from now on
+window: glow: WORK2 fold: N folded (F reading the sun's fans' WORK2), M kept (K <reason>, ...)
+```
+
+The 10 s line counts the replays of its window (`RdPerfRecord.glowFolded`, `glowFoldRead`,
+`glowKept`, `glowWhy`, the kept ones by reason); `rd_replay_tool --stats` prints `glow: WORK2 fold
+on|off: N folded (F reading the sun's fans' WORK2), M kept (reason)`; the glow pass count (`glow N passes`, the 10 s `passes per replay`) is one fewer
+where it folds. The reasons (`rd.h` `RD_GLOW_FOLD_WHY_*`): the lamps, SCENE drawn
+between the mask and the reduction, WORK2 drawn or read elsewhere, the chain not in the fold's form, MSAA, the fx plan off, a reduction that
+could not take it. Tests: `rd_blur` (k) and its (r) scan, `rd_glow_cheap_ab`
+([TESTING_PROGRAMS.md](TESTING_PROGRAMS_RENDER.md)).
+
+### The glow where it adds light
+
+List 7's glow (`ico2/sugipon/src/staticBlur.c` `makeFullScreenFlareBefore`, `After`,
+`pasteFullScreenFlare`) fills WORK2 (and its band WORK2_PAD) with RGBAQ (0, 0, 0, 192) in
+postEffect 1, 3, 6 and 7, draws the sun's fans into it when the sun is on screen (`dispSun`), the
+mask (SCENE's alpha, MODULATE by RGB 0), the lamps' meshes in the issue 163 rooms, reduces WORK2
+into WORK0, blurs WORK0 through WORK1 ten times, copies WORK0 into WORK3 (`eyeBlur`, with the
+sun's ghosts, shrink and tint when the sun is up), sets WORK0's alpha (`pasteWork0ToFB`) and adds
+WORK3 to SCENE (Cs * FIX + Cd, FIX 128). Every sprite after the fill is MODULATE or HIGHLIGHT with
+RGBAQ's alpha 0 per channel, so with RGB 0 in WORK2 every buffer's RGB stays 0 and the paste adds
+0. Only the fans and the lamps put light into WORK2. On the PowerVR phone the chain is 11.6 ms of
+a 32 ms picture in such a room (the mask's 2366 x 1080 pass 5.3 ms, the paste 3.1, twelve small
+passes 2.9); with the paste not drawn (`rd_replay_tool --nop 7:311`) the phone's own frame
+replays to the same bytes in every target and the present. What the chain does carry is an
+alpha: WORK2's is the mask's (192 on the background `cleanUpFB` marks, where the mask's alpha
+test keeps the fill; 0 elsewhere), and it reaches WORK1, WORK3 and, through the paste, SCENE.
+
+At every scale, Original's 1x included (the owner's choice: at 1x too the picture is the PS2's
+byte for byte in RGB and only the glow's buffers' alpha differs, VD-30), on every device class
+and backend,
+a scan in the store plan's walk of the lists (`port/render/rd_glow_light.c`, file comment) reads
+the chain in its known form, every command from the band's fill to the paste contiguous (band,
+fill, fans, mask, lamps, reduction, the blur pairs, the eye blur, the sun's sprites, the glow
+hold's copy, WORK0's alpha, the paste) and picks one plan:
+
+- **dark** (the fill RGB 0, no fan on the picture, no lamp): nothing of the chain is drawn. Each
+  buffer is left with the RGB the chain leaves: WORK2, its band and WORK3 as lazy clears (their
+  colours kept until something reads them: a later replay that touches them before covering
+  them, or a read outside a replay such as the replay tool's pictures, which draws the clear
+  first), WORK3 a clear instead when the glow hold copies it; WORK1 0 over the first blur pass's
+  rect and its glow edge strip (every later pass into WORK1 lies inside it) and over the sun's
+  shrink, those two sprites drawn untextured in the colour their source holds in the chain
+  (`rd_const_read.c`, the planned source), and not even drawn when a dark plan before left that
+  region zero and no replay wrote WORK1 since (a steady dark room); WORK0 (0, 0, 0, A) as a
+  small clear at the chain's place (the last blur pass covers WORK0; the aura blends over WORK0 in
+  play, and a lazy clear drawn at its sprite would flush AURA_WORK's clear, which the clear skip
+  keeps undrawn). A lazy clear is drawn only for its own target: before a sprite that reads or
+  partly writes it (as that sprite's pending clear), at a later replay that touches it before
+  covering it, at a read outside a replay; a buffer a command other than a sprite touches later in
+  the frame (the glow hold's copy of WORK3) gets its clear at the chain's place instead (the
+  upscale point reads SCENE alone). So a dark room's chain begins no render pass once WORK1 is
+  zero, one (WORK1's) after a frame that drew the chain. The fans whose box misses the picture are not
+  drawn. SCENE is as the paste leaves it in RGB; its alpha is `cleanUpFB`'s (0, and 192 on the
+  marked background) where the paste wrote WORK3's;
+- **lamps** (the fill RGB 0, no fan on the picture, lamps drawn into WORK2 after the mask without
+  DATE or a blend on the destination's alpha): the fill drawn as (0, 0, 0, 0) and the mask not
+  drawn (it writes RGB 0 over a fill of RGB 0); the lamps and the rest of the chain as before;
+- **whole** (the chain as before), counted by reason: a grey fill (postEffect 4 and 5, the bloom),
+  any other form, the MSAA epoch, the sun's fans on the picture, the sun's branch with the lamps,
+  the sun's glare onto SCENE, a later command reading WORK1, WORK2 or WORK3, a command reading
+  SCENE's alpha (a texture of SCENE, DATE, a blend on Ad, a copy) before a sprite rewrites it whole
+  (the aura's paste or list 11's full-frame sprite does in every corpus frame), SCENE's alpha not
+  rewritten in the frame.
+
+The fans keep the chain whole: the sun's tint (the eye blur's last sprite, Cs * As + Cd) takes As
+from one texel of WORK1 at the sun, which the shrink copies from WORK3, the eye blur from WORK0,
+the blur pairs from the reduction of WORK2's alpha over their reach: so the mask decides WORK3's
+RGB wherever the blur reaches the sun, not only inside the fans' box, and a mask cut to that box
+would change the tint. The same holds for the lamps with the sun up.
+
+So every target's RGB is the chain's, byte for byte, and the alpha of WORK1, WORK2, WORK3,
+WORK3_HELD and SCENE (until it is rewritten) differs only where WORK2's alpha was not 0: on the
+marked background and its bilinear rim ([DIVERGENCES.md](DIVERGENCES.md), VD-30). A later frame
+that reads WORK1, WORK2 or WORK3 before the chain writes them, after a frame the plan left
+undrawn, turns the plan off from then on (logged). The WORK2 fold (above) stands down in a frame
+the plan takes. Skipping a draw does not move the crack fill, which the list loop places from
+the recorded commands. In the 55 glow dumps on the maintainer's machine the scan's rules, applied to
+their command lists by hand, take dark in 32 (the phone's frame among them), lamps in 6, and
+keep 17 whole: 15 for the sun's fans on the picture, 2 (the issue 189 frame and the one before
+it) because the anti-aliasing's copy reads SCENE before list 11's sprite rewrites its alpha;
+`rd_glow_light_ab` counts the plans the code takes. `ICO_RD_GLOW_LIGHT=0` draws the chain whole, the tests' A/B
+([TESTING.md](TESTING.md#environment-switches)); there is no setting.
+
+Nothing in the plan reads the scale. At 1x the chain's sprites take the GS's own filters (the
+reduction and the blur pairs the GS bilinear, the eye blur and its sun sprites point or bilinear at
+GS resolution): each still a weighted sum of texels of RGB 0 under MODULATE or HIGHLIGHT with
+RGBAQ's alpha 0, so 0, which the scan checks per sprite (`tfxRgbZero`) as above 1x. The readers
+the plan refuses are found by the same scan at every scale: the aura's feedback (its copy of SCENE
+comes after its paste rewrote SCENE's alpha), the motion blur (it reads DISPLAY), the depth of
+field (it writes WORK0 and WORK1 before it reads them), the present's own paths (CRT, softening,
+the Original presenter, the display layer: they read DISPLAY or SCENE's RGB, never the work
+buffers; FSR is off at 1x) and keep frames (lists 11 and 12 only: no glow chain). No crack fill
+is drawn at 1x, and the plan never depended on it. Measured at Original 1x with the paste not
+drawn (`--nop 7:311`, the chain drawn otherwise): the phone's frame v3677 and the issue 189 frame
+(its marked background) replay to the same bytes in every target and the present, all channels.
+
+Lines: `rd: glow: light plan: at every scale nothing in frame N puts light into the glow ...` and
+`... frame N's light in the glow is the lamps' ...` once each, `rd: glow: light plan: the chain
+drawn whole: <reason> (<detail>; frame N; reported once for this reason)`, `rd: glow: light plan:
+frame N reads WORK1, WORK2 or WORK3 before ...: the plan is off from now on`; the 10 s block's
+`window: glow: light (every scale): N dark (P passes in their chains), L lamps (mask not drawn), K whole
+(counts by reason); lazy clears drawn: N (target n, ...)` (0 in a dark room of play);
+`rd_replay_tool --stats` `stats: glow: light plan on|off: <plan> (<reason>); P passes in the
+chain, lazy clears drawn: N (targets)` (the tool's own reads of the targets draw them too).
+
+### The lamps' glow for less
+
+In a frame whose light plan is lamps (the title's castle, issue 163's rooms) the light is the
+lamps' meshes: list 7 draws them into WORK2 under a GEQUAL test of SCENE's depth (writing it),
+after WORK2's fill drawn as (0, 0, 0, 0). On the PowerVR phone (the opening's first three 10 s
+blocks of its log, 318 of 358 glow pictures lamps) that pass is WORK2 at 2366 x 1080 with its colour
+cleared (the fill: a pending clear taken as the pass's load op, 9.7 MB) and stored (9.7 MB) and
+SCENE's depth loaded (9.6 MB) for a dozen small draws, and WORK2_PAD's band a pass of its own
+(424 x 64, no draw). `port/render/rd_lamps.c` (file comment) cuts them, with three more cuts of the chain's
+passes, the same bytes in every target:
+
+- **the area** (`RD_LAMPS_AREA`): the lamps' pass gets a render area, the union of the lamps'
+  screen boxes and of the region the last lamps frame left lit, aligned out to 32 x 32 tiles.
+  A lamp's box is the hull of its stream's vertices through its matrix, each one projected
+  (`rd__lamps_vertex_box`: every vertex in front of the eye by the shader's float error, its x / w
+  and y / w bounded over that error; the points the GPU draws of a triangle whose corners are in
+  front lie in that hull, clipped or not), widened by the occlusion test's margins and two GS
+  pixels and taken through the target's texel scale and Full pixel's crop (past a budget of
+  16,384 vertices a picture the occlusion test's box of the stream's bound instead; code 34's
+  draws only where no corner can wrap); the RHI cuts every scissor to the area. (The first
+  version took the occlusion test's box of the bound's eight corners alone: on the phone's
+  opening it refused 214 to 338 lamps pictures in 10 s and took 11, a mesh across the picture
+  near the eye putting a corner of its bound behind it.) A lamp whose box is not known names its
+  part once (`rd: lamps: a lamp's screen box not known: <why> (command type T at ordinal O, mesh
+  "N" of V vertices, program P code C clip mode M, B vertices behind the eye; frame F) ...`) and
+  in the 10 s line's last clause (`boxes not known: k <why>, ...`). Outside it WORK2 already holds (0, 0, 0, 0): the tracker
+  holds the region a confirmed lamps pass may have lit (its lamps' boxes), every other texel
+  stored as (0, 0, 0, 0) by that pass, and the area covers that region, so the texels it leaves
+  are the fill's colour before and after. SCENE's depth outside the area is untouched by the
+  lamps: the whole pass loads and stores it unchanged (or drops a store nothing reads), the area
+  pass leaves it as memory holds it. The tracker forgets the region at a new renderer or WORK2
+  texture, after a replay that writes WORK2 any other way (a whole frame's mask, any command
+  into WORK2 but the lamps plan's fill, mask and lamps, or the dark plan's undrawn chain), at any
+  other pass on WORK2's colour, and when the planned pass does not begin with the fill's clear
+  to (0, 0, 0, 0) and a colour store; a dark frame keeps it (its chain draws nothing into WORK2).
+  So the first lamps picture after anything else is drawn whole and the area is taken from the
+  second. A clear over a render area smaller than its attachment is a form no other pass took
+  (the pass area gives none to a clearing pass), so the area is on only where its start-up
+  self-test passed (a 64 x 64 colour target and its depth cleared whole, then a pass over a
+  32 x 32 area with the colour cleared and the depth loaded, read back: the area 0, the rest and
+  the depth as the first clear left them), on the PowerVR and desktop classes under Vulkan where
+  the profile's pass area is on (by default the PowerVR phone alone); off on the Arm, Qualcomm
+  and Apple classes and the other tile-based phones, and on OpenGL, Direct3D 11 and 12, which
+  ignore a render area;
+- **the band** (`RD_LAMPS_PAD`): WORK2_PAD's band (read by nothing) is left a lazy clear, as the
+  dark plan leaves it (drawn where something reads it, at a later replay's begin or a read
+  outside a replay), not a pass of its own: on every class and backend, where the dark plan's
+  lazy clears already run.
+
+- **two blur pairs a pass** (`RD_LAMPS_FOLD4`, every plan that draws the chain): the blur fold
+  draws each `blur(n)` pair but a chain's last as one WORK0 pass through `fx_blur2_ps`; where the
+  next pair folds too, `fx_blur4_ps` (`port/shaders/fx_sprite.hlsl`) draws both as one pass: for
+  a pixel of pair B's pass 2 it computes pair B's pass 1 at its four WORK1 taps, each of those
+  from pair A's pass 2 at its four WORK0 taps, each of those from pair A's pass 1 at its four
+  WORK1 taps from WORK0 as it was before pair A; every texel by `fx_blur2_ps`'s own functions,
+  the passes' integers in their order, each evaluated once over two windows (pass 1A's texels a
+  window of at most 6 x 6, pass 2A's at most 4 x 4); a WORK0 texel pass 2A does not cover keeps
+  the snapshot's, as without the fold. `rd_replay_tiler.c` takes two pairs only where each folds
+  as a pair does (`blurFoldPair`, `blurFoldOk`, no glow edge strip after pass 2B, the pair after
+  B holding pass 1B's texels so WORK1 ends as the chain leaves it), where pair A differs from
+  pair B in no more than the chain's shrink (pass 1A's x0, x1, y1, pass 2A's u0, u1, v1: packed
+  in the DrawCB's blend words, which a fold does not read) and where the windows hold at every
+  covered pixel (`rd__lamps_fold4_axis`, the shader's index arithmetic on the CPU). WORK1 is
+  written by neither pair either way, WORK0 whole by the last pass. A chain of ten pairs at 4:3
+  and 16:9 (nine fold) draws four passes of two pairs, one of one pair and the last pair as two
+  passes: four render passes fewer. **Off by default on every class and backend**: on the owner's
+  PowerVR phone (2026-11-12) it made the lamps pictures slower, 28.3 to 30.9 ms of GPU work
+  against 25.7 to 26.0 ms without, and `GPU top passes` gave `glow WORK0 424x128 9.0 passes 9 draws
+  8.80 ms` against 12 passes in 3.2 ms: a small pass costs about 0.27 ms there, and the folded
+  shader's loads (about 64 a texel) cost far more than the passes it removes. `ICO_RD_LAMPS=...+fold4`
+  turns it on (the tests), on Vulkan only, after its start-up self-test (two pairs of the chain's
+  form on a 64 x 32 WORK0 of random bytes as two `fx_blur2_ps` passes and as one `fx_blur4_ps`
+  pass, read back, every texel compared); never on the Arm, Qualcomm and Apple classes, OpenGL,
+  Direct3D (the module is made on Vulkan alone). The fold measured 8 ms worse a picture on the
+  PowerVR phone and kept off there is the WORK2 fold (the mask computed inside the reduction from
+  SCENE's alpha: about 70 taps a WORK0 texel over a full-size source; "The glow's mask in its
+  reduction" above), not the blur fold, which is on there and which this extends: `fx_blur2_ps`
+  and `fx_blur4_ps` both run on the 424 x 128 WORK0 and read only WORK0's snapshot, about 32
+  loads a texel for two passes of one pair (16 each) against about 64 for one pass of two at the
+  chain's drift (pass 1A's window 4 x 4 typically); the phone's measurement above says the pass
+  saved does not pay for those loads there. Its 1 pipeline
+  key (`fx_blur4_ps` over RGBA8 at the fold's state) is in the start-up set where it is asked
+  for. `ICO_RD_LAMPS_POISON=1` clears WORK0's swapped-in colour to magenta before each such pass;
+- **the band under the whole plan** (`RD_LAMPS_WHOLEPAD`): WORK2_PAD's band left a lazy clear in
+  whole pictures too (the sun's fans), the same argument (nothing reads it; drawn where something
+  does): one small pass fewer each;
+- **WORK0's alpha sprite owed** (`RD_LAMPS_OWED`, the dark plan): `pasteWork0ToFB` (Cs * 0 + Cd:
+  WORK0's RGB kept, alpha A) is under the dark plan the clear (0, 0, 0, A), drawn at the chain's
+  place as a small pass of its own (the aura's WORK0 sprite blends over WORK0 in play, and a lazy
+  clear drawn at that sprite would flush AURA_WORK's own pending clear). Where the scan sees no
+  later command of the frame touching WORK0 (the opening's frames, which have no aura), it is
+  left a lazy clear of the same colour in WORK0's slot instead: drawn first by a later replay
+  whose first touch of WORK0 does not cover it, or by a read outside a replay; the next frame's
+  reduction covers WORK0 first and drops it. The bytes are the clear's wherever anything reads
+  them. One pass fewer each dark picture of the opening; every class and backend (the dark plan's
+  lazy clears run there). Under the lamps plan the sprite keeps WORK0's RGB, so it is no clear:
+  drawn as before (an owed draw would need the sprite drawn outside a replay for a read there).
+
+The lamps' writes into WORK2 make the crack fill's hold impossible in these frames (the late
+passes above: the fill reads SCENE's depth at its draw and the lamps write it, so a fill moved
+past them would read other depths; `rd: late pass: ... N fills not held (no paste in the frame
+takes them)`), and the glow's paste already shares list 11's pass (drawn early there, list 11's
+draws joined to it). Under the low resolution below the lamps write WORK2's own depth instead, so
+the hold may pass them (`RD_LAMPS_FILLHOLD`, `rd__lamps_fill_hold_ok`, the word `fillhold`): the same
+bytes as the fill drawn where it was due, given the low resolution (the fill reads SCENE's depth and
+writes none). Off by default: on the PowerVR phone every held fill was then flushed by a later draw
+before the paste's pass (the glow's paste deferred to list 11's aura pass), drawn early in a pass of
+its own with the snapshot copy back (`423 drawn early in a pass of their own (423 a draw)`), a loss.
+
+**The lamps' glow at the PS2's resolution** (`RD_LAMPS_LOWRES`, `ICO_RD_LAMPS=...+lowres`; the
+owner's choice for this release: identical to the eye, not byte-identical, [DIVERGENCES.md](DIVERGENCES.md)
+VD-32). Above 1x WORK2 is the GS frame's size (848 x 448 at the phone's Auto, not 2366 x 1080), a
+work buffer (`rd_core.c` `sceneClass`), with a depth of its own (`namedTargetDesc`): the glow's fill,
+the sun's fans, the mask (SCENE's alpha box-averaged over each GS pixel, the scene-to-work-buffer
+rule of [RENDER.md](RENDER.md#the-replay)) and the lamps' meshes are drawn at the PS2's own
+resolution, and the reduction WORK2 -> WORK0 is the PS2's own GS bilinear, as at 1x: the GS-size
+WORK2 and its reduction are the original's, so the glow is the original's (the goal-first rule's
+reference; today's above-1x box over a scaled WORK2 approximates it). The word `lowresbox`
+(implying `lowres`) takes the above-1x box over each WORK0 texel's GS footprint instead
+(`rd__lamps_lowres_box`, from `blurAbove1xSteps`: 2 x 4 GS texels), for the measurement. A draw
+into WORK2 on SCENE's depth takes WORK2's own (`rd__lamps_lowres_depth`, from `prepareDrawEx`):
+before the first such draw of a replay, and again after any draw that wrote SCENE's depth, a
+depth-only pass of WORK2's size writes every texel with SCENE's depth at the texel nearest the
+GS pixel's sample point less a slope bias (`depth_down_ps`, `port/shaders/blit.hlsl`; the lamps
+test GEQUAL, so a smaller depth passes more). The sample point: the port draws a GS integer
+coordinate on a pixel's centre at 1x and on the centre of its block's first texel on a scaled
+target (`rd__frame_group_ex`, origin 0.5 / scale), so GS pixel p is SCENE texel index p x scale
+less the crop, plus a jittered frame's jitter in texels (an upscaler's: SCENE's content moves by
+it while WORK2 at the GS size is not jittered, `rd__lamps_lowres_gs` in `rd__frame_jitter_of`, so the
+lamps keep the original's sample points). Where that is a texel's own centre on both axes (a
+whole-number scale and crop, no jitter) the texel's depth is the original's test exactly (round 8:
+WORK3 the Original 1x's byte for byte at 2x, 3x and 4x on issue 163's gate and the title). At a
+fractional point (the phone's 2.81 x 2.41) by default SCENE's depth interpolated bilinearly there
+(a plane interpolates exactly, so a lamp on its own surface compares equal but for rounding; at an
+occluder's edge the taps mix two surfaces over under one SCENE texel), less `RD_LAMPS_BIAS_UNITS`
+(4 GS Z units). The measurement's other forms there: `lowresbias` the nearest texel less a slope
+bias (the surface's slope, the smaller of the forward and backward differences, times that
+texel's distance plus `RD_LAMPS_BIAS_REACH`, 1/16 GS pixel; round 8 at the phone: the gate 290
+texels from the Original, largest 4, the title 1256, largest 98, today's 1458, 69), `lowreshy`
+bilinear where the texels around lie on one plane (second differences within 8 GS Z units) and
+the nearest texel off it, `lowres4` the farthest of the four texels around, `lowresp` the nearest
+texel everywhere (round 8 at the phone: the gate's lamp lost, 5763 texels, largest 166). With every depth test passing, the GS-size WORK2 is the Original 1x WORK2 byte for
+byte (issue 163's gate at 2x and 3x): the raster is the original's, only the depth differs. Issue 163's
+gate needs it: its lamp is the gate's own plane drawn again, which the original passes by the
+equality of the two at the same sample points; at the scaled size the plane's depth was taken
+at other points. A point sample failed every lamp pixel (190 levels on 15 % of the picture); the
+smallest of the whole GS footprint let the title's small lamps through occluders (79 to 94
+levels); the smallest of the four texels around the point passed the gate at 2x only (41,382 of
+its 51,725 pixels; 30,367 at 2.2x, 20,641 at 2.5x, 0 at 3x and 4x): the four taps reach 0.25 GS
+pixels on each side at 2x, 0 on one side at 3x and 0.125 at 4x: those forms took the sample point
+at (p + 0.5) x scale - 0.5, (0.5 - 0.5 / scale) GS pixels off the true one, which a bias of
+0.25 GS pixels past the half texel then covered (round 7). **Twice the GS size**
+(`lowres2x`, `RD_LAMPS_LOWRES_SS_DEFAULT` for a build's default): the original's 1x raster shimmers
+on thin lamps (a quarter GS pixel's move changed the title's glow by up to 134 levels at Original
+1x, 26 with today's scaled raster), so WORK2 at twice the GS size (at most the scene's scale;
+`rd__target_scale_of`), four samples a GS pixel by supersampling, reduced by the above-1x box as
+today's scaled WORK2 is: the lamps' coverage anti-aliased as today's, its depth SCENE's at each
+WORK2 texel's sample point (SCENE's texels per WORK2 texel, scale over 2). At the phone's Auto WORK2
+is 1696 x 896 (6.1 MB a load or store, today's 10.2, the GS size's 1.5) with a 7.6 MB depth of its
+own: about 35 MB of attachment traffic a lamps picture against today's 43, so little saving there.
+A jittered frame (an upscaler's) moves WORK2 at either size by the same GS distance as SCENE
+(`rd__frame_jitter_of`: the jitter in WORK2's own texels), so the sample point needs none.
+Multisampling WORK2 instead is not built: the RHI resolves a multisampled colour only outside a
+pass (`rhi_cmd_resolve_color`), which on a tile-based GPU stores every sample (6.1 MB at 4
+samples, the supersampled size's traffic) and reads them back, the lamps' VU pipelines would need
+four-sample keys, and its per-sample depth sample-rate shading: a new kind of GPU work on the
+phone for no traffic below twice the GS size's (round 10). **Four samples resolved in the pass**
+(`lowresms`, `RD_LAMPS_MS_DEFAULT` for a build's default): the owner saw the GS-size raster shimmer
+on the phone, so WORK2 at the GS size is the resolve target of a 4-sample colour and depth that live
+inside the lamps' pass only (`RHI_TEX_TRANSIENT`, `RhiColorAttachment.resolve`: tile memory on a
+tiler, resolved in the pass, never stored, [RHI.md](RHI.md)): a pass on WORK2 that clears it is drawn
+into the pair (`msConvert`, from `rd__lamps_pass`, before the pass begins; its pipelines with 4
+samples, `rd__lamps_pass_samples`), its depth filled first per sample (`depth_down_ms_ps` at the
+standard 4-sample locations, sample-rate shading, the depth forms above at each sample's point,
+`rd__lamps_pass_begun`), the colour resolved into WORK2 (each pixel the mean of its 4 samples, as
+today's box averages a GS pixel's scale-squared texels) and reduced by the box. A pass that loads
+WORK2 or reads its destination is drawn single-sampled (counted, said once), WORK2's own depth then
+filled first by `msConvert`. Under `lowresms` the single-sampled depth fill is not drawn from
+`prepareDrawEx`: that pass of its own ended the open pass and flushed WORK2's pending fill clear into
+a pass of its own, so the lamps' pass loaded WORK2 and stayed single-sampled (round 11: on the gate
+and the title every lamp drawn so, `1 passes with 4 samples, 1 single-sampled`; on the phone 2 a
+picture), and the clear carry (`rd_pass_cut.c`, exact, on on the tile class) is on wherever
+`lowresms` is (`rd__pass_cut_on`): without it the mask's and SCENE's border repeat's ends of the open
+pass flushed WORK2's fill clear on lavapipe's desktop class (round 12's measurement there: every lamp
+still single-sampled). The once-line of a pass drawn single-sampled names the light plan's role of
+its first command (the fans, the mask, a lamp). `lowresms8`: the same with 8 samples (the standard 8-sample locations; the phone reports
+counts 0xf). Only where the RHI has
+the in-pass resolve, sample-rate shading, the standard locations and 4 samples, on the PowerVR and
+desktop classes (never the Arm, Qualcomm and Apple ones in this release: issues 123, 179, 182, 211),
+the MSAA scene not blocked, and its start-up self-test passed (the lamps' pass in small: a 32 x 16
+depth holding an occluder whose edge cuts a GS pixel of a 16 x 8 WORK2 in half, the per-sample fill
+from it and a lamp quad under GEQUAL in a transient multisampled pass resolved in the pass, read
+back against a CPU reference of each sample's test at its standard location, within a level); otherwise the lamps keep today's full-size path,
+never the aliased one (`rd: lamps: low resolution with 4 samples refused: <why>`). Its 4-sample
+pipelines for the lamps' and fill's draws are made at first use but the depth fill's, which is in the
+start-up set. Traffic at the phone's Auto: WORK2 1.5 MB resolved, nothing loaded or stored for the
+pair, the GS size's 1.9 MB single-sampled depth fill kept for the single-sampled fallback;
+SCENE's depth sampled in place outside any pass, a copy only where the device cannot sample a
+depth: the fog path's copy on the local read is for reads beside SCENE's own pass), so lamp against lamp and
+lamp against the scene order as the PS2 orders them at its resolution. The fans' and lamps' depth
+writes stay in WORK2's depth: under the lamps plan nothing reads SCENE's depth after them by value
+(the store plan dropped that store), under the whole plan a later Z test of SCENE (the aura's
+sprites) no longer sees the sun's fans' depth. What differs is the glow's light alone: WORK0's
+texels are the PS2's reduction of a GS-size mask and lamps, not the box of a scaled one, and the
+ten blur pairs, the eye blur and the paste (all unchanged) carry the difference to SCENE; the
+measured bound is VD-32's (`rd_lamps_lowres_ab`). At 1x nothing changes by construction: WORK2
+and SCENE are one size, the draws keep SCENE's depth, no fill is drawn (the test's 1x row, every
+PNG the same bytes). The self-tests that used WORK2 as a frame-sized scratch beside SCENE (the
+stencil cut's, the shadow count's under MSAA, the shadow tiles') take AURA_WORK instead. A draw
+that cannot take WORK2's depth (its DATE on SCENE's stencil, no pipeline, no copy) goes without one
+(counted, said once). The saving at the phone's Auto: WORK2's colour 10.2 MB each way becomes 1.5
+MB, SCENE's depth (12.8 MB loaded by the lamps' pass) is sampled at 380,000 texels into WORK2's 1.9
+MB depth, the mask's and lamps' fragments 6.7 times fewer; about 33 MB of attachment traffic less a
+lamps picture for one small pass more (the depth fill), about 3 ms at the phone's 1 ms per 10 MB.
+**What ships**: `lowresms` with 4 samples by default on the PowerVR class under Vulkan
+alone, where its checks and self-test pass (`RD_LAMPS_MS_DEFAULT` 1 in `rd_lamps.h`,
+`rd__lamps_default_bits`): the owner accepted it on the phone (2026-11-12: no shimmer seen, lamps pictures
+22.7 to 24.0 ms against 25 to 26.5). Every other class, desktop included, keeps today's full-size
+lamps (it never ran on desktop hardware); the tests' word gives any eligible class the form. The plain
+`lowres` (single-sampled: it shimmers), `lowres2x` (little saving on the phone), `lowresms8` and the
+depth and reduction variants stay off by default (`RD_LAMPS_LOWRES_DEFAULT` 0: 1 would turn the plain
+form on everywhere). Every form is read once (`rd__lamps_lowres_on`: WORK2's size is fixed when the
+target is made); the start line `rd: lamps: low resolution on|off (<who>; RD_LAMPS_MS_DEFAULT N,
+RD_LAMPS_LOWRES_DEFAULT N): ...` says which form is in force or why none is. `ICO_RD_LAMPS_POISON=1` clears WORK2's depth to
+0.375 before the fill writes it. Lines: once `rd: lamps: low resolution: WORK2 WxH (the GS frame's
+size) under SCENE SWxSH: ...`, once `rd: lamps: low resolution: a draw into WORK2 WxH drawn without
+a depth (<why>; ...)`, the 10 s `window: lamps low resolution: N pictures with WORK2 WxH under SCENE
+SWxSH, D draws into WORK2 on its own depth, F depth fills (depth_down_ps), X draws without a depth;
+H pictures whose lamps let the crack fill's hold pass (fillhold)`, and `rd_replay_tool --stats`
+`stats: lamps lowres on|off: WORK2 WxH under SCENE SWxSH, D draws into WORK2 on its own depth, F
+depth fills, X draws without a depth`.
+
+`ICO_RD_LAMPS=0|1|area|pad|owed|wholepad|fold4|lowres|lowresbox|lowresbias|lowreshy|lowres4|lowresp|lowres2x|lowresms|lowresms8|fillhold|glowblur` (the tests only,
+[TESTING.md](TESTING.md#environment-switches); words joined by `,` or `+`) turns every part off,
+every part on, or the parts named on whatever the class (the self-tests still decide the area and
+the fold of two pairs);
+`ICO_RD_LAMPS_POISON=1` clears WORK2 to magenta before every lamps pass drawn whole, so a pass
+that relied on WORK2's earlier contents where it should not would show it (`rd_lamps_ab`). Lines:
+`rd: lamps: area on|off (<why>); band lazy on|off: ...` when it changes, `rd: lamps: area
+self-test passed|failed|not run ...`, once `rd: lamps: WORK2's lamps pass loads, clears and
+stores WxH at X,Y of TWxTH ...` and `rd: lamps: the lamps' pass on WORK2 drawn whole: <why>
+(reported once for this reason)`; the 10 s `window: lamps: N lamps passes on WORK2 with an area
+(P % of their texels loaded and stored; X MB not cleared, Y MB of colour and Z MB of depth not
+stored, W MB of depth not loaded), M whole (counts by why); B bands left lazy (WORK2_PAD: a pass
+fewer each)`; `rd_replay_tool --stats` `stats: lamps <bits> (self-test <state>): N passes with
+the lamps' area (WxH at X,Y of TWxTH: A of T texels; C bytes not cleared, S colour bytes not
+stored, L depth bytes not loaded, D not stored), M whole (<why>); B bands left lazy (WORK2_PAD
+WxH)`.
+
+### The glow's blur in two passes
+
+On by default (`RD_GLOW_BLUR_DEFAULT` 1 in `port/render/rd_glow_blur.h`; the tests' word
+`glowblur` of `ICO_RD_LAMPS` asks for it alone, `noglowblur` leaves it out of the class's defaults);
+not byte-identical: [DIVERGENCES.md](DIVERGENCES.md) VD-33, "to check".
+
+The glow's ten blur pairs (`ico2/sugipon/src/staticBlur.c` `blur(10)` .. `blur(19)`) are twenty
+dependent passes on WORK0 and WORK1 (424 x 128 on the PowerVR phone; the blur fold draws nine of
+the pairs as one pass each: eleven, `glow WORK0 424x128 11.8 passes` in its log). Each pass is a GS
+bilinear resample (4-bit fractions, every step truncated) whose rect or UVs are shrunk by n + 6
+sixteenths, anchored at the 4:3 part's left edge, and pass 2's colour (139, 136, 132) under
+HIGHLIGHT multiplies by 1.086, 1.0625 and 1.031 a pair (2.28, 1.83 and 1.36 over the chain).
+Measured on the corpus title's and issue 163's frames (the evidence's Python model of the chain,
+which gives the replay's WORK0, WORK1 and WORK3 RGB byte for byte):
+
+- the chain is separable and, but for its truncations, linear: per axis one kernel a position,
+  the composition of the passes' two-tap filters, at most 14 texels wide (a weight above 1e-3);
+- the kernel changes across the picture: at the 4:3 part's left edge and top every fraction is 0
+  (no blur at all), its spread rises to 2.2 texels near column 100 and row 50 and falls to 1.4
+  around column 200 (the shrinks' phases), its centre shifted by up to 1.5 texels; one kernel for
+  every texel misses the chain's WORK3 by up to 81 levels, the per-position kernels by 14 to 18;
+- the truncations leave the chain 20 to 33 levels darker than its float form in a lit texel
+  (about 0.5 a colour multiply and 0.4 a bilinear axis whose fraction is not 0, each carried
+  through the later passes' gains): over the whole buffer WORK3's mean error of the float form is
+  1.6 levels (title) and 4.8 (issue 163), its largest 46 and 45; a constant correction (1.9
+  levels a pair, carried through the gains) takes them to 0.13 and 0.58, at most 17 and 18; a
+  correction per column and row from the fractions' pattern (the model below) to 0.09 and 0.35,
+  at most 14 and 18;
+- the alpha travels with the same kernels and no gain (HIGHLIGHT adds RGBAQ's 0), through the eye
+  blur (MODULATE 128) into WORK3 and, by the paste (alpha ONE, ZERO), into SCENE's alpha.
+
+`port/render/rd_glow_blur.c` draws such a chain as two passes. At the chain's first pass 1
+(`rd_blur_border.c` `blurPostSprite`, before the blur fold) it reads the pairs through to the eye
+blur as the fold reads a pair (`rd_replay_tiler.c` `rd__replay_blur_chain`: the fold's conditions
+on every pass), composes each axis's kernel row per WORK0 position on the CPU in floats from the
+recorded rects, UVs, clamps and coverage (with the glow's edge strip on a wide frame), turns each
+row into 7 hardware-bilinear taps (adjacent texels merged; a row wider than 14 texels keeps its
+heaviest 14 when at most 1 % of its weight is left out), and keeps the loss model's levels per
+column and row and the common part. The taps and losses go into a small RGBA8 table (WORK0's
+width by 18 rows: per axis 7 rows of a 16-bit weight and a 16-bit offset in 1/256 texel, then
+the loss's whole levels and its 1/256ths), uploaded through the ring when the chain's form
+changes (the same every frame of a resolution). `fx_glowblur_ps` then draws across (WORK0 ->
+WORK1, the column's taps; WORK0's height of WORK1) and down (WORK1 -> WORK0, the row's taps, the
+gains, the column's, the row's and the common loss subtracted, at least 0), through the replay's
+own pass set-up (each pass begun with LOAD, the glow's timing class). The eye blur, WORK0's alpha
+sprite and the paste are drawn as recorded. Plain float filtering with 7 taps and 9 table reads a
+texel: no new kind of GPU work, on every class and backend where the module is made.
+
+Neither pass takes a DONT_CARE load: across writes only WORK0's height of WORK1 (256 rows at 4:3);
+down writes every texel of WORK0 (a condition: every pass 2 covers WORK0) and could, but keeps the
+LOAD (0.2 MB on the phone). `ICO_RD_LAMPS_POISON=1` clears WORK0 to magenta between the two
+passes, so a texel the down pass did not write would show.
+
+Where: `RD_LAMPS_GLOWBLUR` asked for; a frame whose glow light plan is lamps, or whole for the
+sun's fans, the sun's branch, a grey fill or the MSAA epoch (a whole plan drawn so for a later
+reader of WORK1, WORK2, WORK3 or SCENE's alpha, or for an unknown form, keeps the chain: WORK1
+ends holding the across pass, not the chain's last pass 1); every scale and preset, Original
+1x included (the owner's rule: not a difference a player sees, and faster; as the light plan,
+which applies at 1x too; at Original 1x the model is as exact and the fit the same: WORK3 at most
+16 levels on the title and on issue 163's frame, a mean of 0.11 and 0.36); every pass of the fold's form, pairs crossing WORK0 and WORK1 to the eye blur, pass
+1's colour 128, no constant added, TCC, 32-bit textures, every pass 2 covering WORK0, WORK1 as
+wide; no row weighing WORK1's bytes from before the chain; no pass window. Anything else is drawn
+as recorded, each reason said once.
+
+Expected on the PowerVR phone (not measured): the chain's eleven passes become two, the glow's
+WORK0 group from about 12 passes to 3 (the reduction, down, the alpha sprite) and WORK1's from 1
+to 1 (across): nine passes fewer, about 2.4 ms at the phone's 0.27 ms a small pass, less the two
+passes' own work (7 taps and 9 table reads on 54 K texels each, against the fold's 16 loads and
+integer arithmetic): about 2 ms off a lamps picture's 23 to 25.5 ms. The phone's lines that
+decide: `GPU top passes` `glow WORK0 424x128 N passes ... ms` (N about 3 where it is on) and
+`glow WORK1 ...`, the lamps pictures' ms in their per-class blocks, and the 10 s line below.
+
+Lines: once a run `rd: glow blur: on|off: the glow's blur pairs drawn as two passes ...`, the
+first chain drawn `rd: glow blur: the glow's N blur pairs drawn as two passes on WORK0 WxH
+(fx_glowblur_ps, 7 taps a texel; kernels up to K texels wide, at most L of a row's weight left
+out; colour gains ...; reported once)`, each reason once `rd: glow blur: a chain drawn as
+recorded: <why> (reported once a reason)`; the 10 s `window: glow blur: N pictures with the
+glow's blur in two passes (P pairs, about Q passes fewer), R chains drawn as recorded (counts by
+why)`; `rd_replay_tool --stats` `stats: glow blur on|off: C chains in two passes (P pairs)[,
+drawn as recorded: <why>]; the run: ...`. Tests: `rd_glow_blur` (the operator, the table, the
+two passes emulated against the chain's integers), `rd_glow_blur_ab` and `rd_glow_blur_gl`
+([TESTING_PROGRAMS_RENDER.md](TESTING_PROGRAMS_RENDER.md)).
+
+### The glow's paste by its own entry
+
+On by default (`RD_PASTE_SPEC_DEFAULT` 1 in `port/render/rd_paste_spec.h`) on every class under
+Vulkan whose start-up self-test passes; the same bytes.
+
+The glow's paste (`staticBlur.c` `pasteFullScreenFlare`: WORK3 over the whole of SCENE through FIX
+128) is drawn by the fx plan's premultiplied add (above): one full-size draw of `fx_frame_ps`.
+That module is `fx_sprite_ps`'s frame-size build for every post sprite: the above-1x kernel's two
+loops, the alpha-only and glow-mask paths, the alpha test, DATE and the destination read are all
+in it and chosen at run time from DrawCB words. On the PowerVR phone that one draw is about 3 ms
+of a lamps picture (list 11's pass costs about 4.3 ms a lamps picture against the crack fill's
+own 1.2 to 1.5 ms in a picture without lamps).
+
+`fx_paste_ps` is the same source built with `ICO_FX_PASTE` (`port/shaders/fx_sprite.hlsl`): the
+words the paste never changes are constants, the words it does change stay run-time values, and
+every function is called as `fx_frame_ps` calls it, in the same order:
+
+| word | in `fx_paste_ps` |
+| --- | --- |
+| flags: TEXTURED, OUT_PREMUL | set |
+| flags: ABOVE1X, ALPHA_ONLY, GLOW_MASK, FOLD, ABE, PABE, DATE, DATM, DST | clear (their branches and loads not in the module) |
+| flags: TFX, TCC, LINEAR, CLAMP_S, CLAMP_T, FBA | read from `g_mode.x` |
+| TEXFMT | RGBA32 (TEXA leaves the texel as it is, so its mode word is not read) |
+| the alpha test | off |
+| the source's scale and crop | 1 and none (a work buffer) |
+| the colour, the ALPHA register and FIX, the rect, the UVs, TEX0's size, the target's scale, origin, crop and jitter | run-time values, as in `fx_frame_ps` |
+
+The two modules (SPIR-V, `tools/check_spirv.py --sizes`):
+
+| | words | instructions | blocks | loops | texel loads in the module | loads a texel on the paste's path |
+| --- | --- | --- | --- | --- | --- | --- |
+| `fx_frame_ps` | 17985 | 4403 | 810 | 5 | 15 | 4 (the GS bilinear) |
+| `fx_paste_ps` | 3430 | 765 | 72 | 0 | 5 | 4 |
+
+So the draw does the same loads and the same arithmetic; what goes is the module's size and the
+registers its other paths hold (the saving on the phone is an estimate: about 0.8 to 2 ms of the
+3 ms; not measured on a device).
+
+**Exact.** `port/render/rd_paste_spec.c` draws a premultiplied add through `fx_paste_ps` only when
+its DrawCB holds the constants' values and its key is the start-up set's (the premultiplied add at
+Z ALWAYS without the Z write, no depth, RGBA8, the colour mask whole, single-sampled):
+`rd__paste_spec_why`, pure, with a reason for each refusal. Every value the module computes is then
+the one `fx_frame_ps` computes from the same words. A driver could still lower the two modules'
+float arithmetic apart (the coverage test's and the UVs' divides), so a start-up self-test
+(`rd__paste_spec_selftest`, with the crack fill's swap test: `rd_fog_selftest`'s first run, and the
+replay tool after each start) draws pastes both ways from a random source of the glow's shape over
+a random destination, reads both back and compares every byte:
+
+- at SCENE's own texture size, GS size, scale, origin, Full pixel crop and jitter (FrameCB as the
+  replay makes it for the paste, under the exact viewport), from a source half the frame's width by
+  128 rows;
+- at 1x, 2x, 2.8125 x 2.41071 (the phone's) and 2x with the half-line offset on a 96 x 56 frame;
+- each in five bands of rows with five DrawCB forms: the paste itself (CLAMP, bilinear, MODULATE
+  with TCC, FIX 128), the As form without the clamp, nearest DECAL with FBA, HIGHLIGHT with a
+  clamp on one axis, nearest HIGHLIGHT2 with REPEAT; TEXA mode words RGBA32 ignores.
+
+Any difference (or a case that cannot run) keeps `fx_frame_ps` for the run, with the first texel
+apart in the log. The module is made on Vulkan alone (OpenGL and Direct3D keep `fx_frame_ps`, said
+once). The MSAA epoch never draws the paste by the fx plan, so the paste has no 4-sample form. Its
+one pipeline key is in the start-up set wherever the module is made, so no draw makes a pipeline on
+first use.
+
+**Start-up set: the mask's 4-sample key.** Where the lamps' 4-sample pass is in force
+(`rd__lamps_lowres_ms`), `fx_frame_ps`'s alpha-only key (the glow's mask drawn in that pass) at 4
+samples is in the start-up set too: the PowerVR phone made it on first use in list 7 (594.6 ms). The
+lamps' and the sun's fans' own 4-sample keys (`vu_merge_main_vs` with `vu_ps`, `sprite_ps_planes`)
+stay made on first use: their states are the game's draws, and the start-up set would need every
+VU and 2D key at 4 samples to hold them.
+
+**Switch and lines.** The tests' `ICO_RD_PASTE_SPEC=0` (off) and `1` (on whatever the build's default;
+the module and the self-test still decide), and `ICO_RD_PASTE_SPEC=sabotage` (the self-test's own
+`fx_paste_ps` draw given another FIX, so it must refuse). No setting. Lines:
+
+```
+rd: paste: the glow's paste by its own entry (fx_paste_ps, fx_frame_ps's paste path alone): on (the build's default; self-test passed: 2640114 texels the same at 2366x1080, SCENE's scale and Full pixel crop, and at 1x, 2x, 2.8125x2.41071 and the half-line)
+rd: paste: the glow's paste by its own entry (fx_paste_ps; self-test: 2640114 texels the same at 2366x1080 and four more scales, five DrawCB forms each): the same bytes
+rd: paste: self-test failed at texel N (x, y) of case own (2366x1080): RRGGBBAA for RRGGBBAA: fx_frame_ps draws the paste
+rd: paste: the glow's paste drawn by fx_paste_ps, frame F (a premultiplied add into an RGBA8 target; reported once)
+rd: paste: a premultiplied add kept fx_frame_ps: <why> (frame F, flags 0x..., TEXA word 0x...; reported once for this reason)
+window: paste: P pastes by fx_paste_ps of Q, K kept on fx_frame_ps (counts by why)
+```
+
+`rd_replay_tool --stats`: `stats: paste spec on|off (self-test <words>): P pastes by fx_paste_ps of
+Q; the run: ...`. The attempt ledger's row `the glow's paste by its own entry` counts the pastes
+drawn by it and those kept on `fx_frame_ps` in each 10 s block
+([ANDROID_DIAGNOSTICS.md](ANDROID_DIAGNOSTICS_LEDGERS.md#the-attempt-ledger)). Tests: `rd_paste_spec`,
+`rd_paste_spec_ab`, `rd_paste_spec_sabotage`, `rd_paste_spec_gl`
+([TESTING_PROGRAMS_RENDER.md](TESTING_PROGRAMS_RENDER.md)).
+
+### The glow chain in three passes (measured, not built)
+
+After the glow's blur in two passes, a lamps picture's chain on the PowerVR phone is five small
+passes on 424 x 128 buffers: the reduction R (WORK2 -> WORK0, a box over 2 x 3.5 WORK2 texels a
+texel), across (WORK0 -> WORK1), down (WORK1 -> WORK0), the eye blur E (WORK0 -> WORK3, the GS
+bilinear) and WORK0's alpha sprite A (WORK0's RGB kept, alpha 128). Folding R into across and E and
+A into down (two outputs, WORK0 and WORK3) would leave three. It is not built, for two reasons:
+
+- **Not exact by construction.** Across samples WORK0 through the hardware's bilinear filter
+  (`fx_glowblur_ps`: 7 `SampleLevel` taps). With R folded in, those taps would read R's values
+  computed in the shader, so the shader would have to reproduce the texture unit's weighting of
+  two 8-bit texels, which Vulkan leaves to the device (`subTexelPrecisionBits` at least 4, the
+  rounding of the weights and the sum unspecified). E reads down's output as stored: an 8-bit
+  write of a float whose rounding is the device's.
+- **More work a texel than the passes it would save.** Today: R about 6 to 15 loads a texel (2 to
+  3 by 4 to 5 WORK2 texels), across 14 (7 taps, 7 table reads), down 18 (7, 7 and 4 for the loss),
+  E 4, A none. Folded: across would compute R at each of the 8 to 14 WORK0 texels its 7 taps
+  cover, 6 to 15 loads each: about 50 to 210 loads a texel besides its 7 table reads; down would
+  compute its value at E's 4 bilinear taps as well as its own, 4 x 18 = 72 to 5 x 18 = 90 loads a
+  texel (`fx_glowblur_ps` is 470 SPIR-V instructions; four to five copies of its body about 1900 to
+  2350). The two-pairs blur fold, which doubled the loads a texel (about 64 against 32)
+  to save three of the twelve WORK0 passes, measured slower on the phone: 8.80 ms for the glow's
+  WORK0 passes against 3.2 ms ([the lamps' glow for less](#the-lamps-glow-for-less), two blur pairs
+  a pass). Three passes at about 0.22 ms each would not pay for four to ten times the loads.
+
+The attempt ledger's row `the glow chain in three passes` says `not in this build`.
+
 ### The fades fold
 
 List 11 ends with the game's full-frame post sprites (`ico2/seki/src/GsBase.c`'s post pass order:
@@ -236,7 +904,17 @@ the reduction is SCENE's only reader after the sprites (the border's column repe
 columns before it, which the steps, the same on every column, commute with). No fold under a pass
 window, in a frame with MSAA (the epoch's resolve is not the lerp's), past four steps, or above 1x
 for a bar while the reduction resamples SCENE through the above-1x kernels (foreseen as
-`doBlurSpriteDraw` picks them, `rd__set_a1x_gs_keep` included).
+`doBlurSpriteDraw` picks them, `rd__set_a1x_gs_keep` included). No fold while a temporal upscaler
+is in force ([RENDER.md](RENDER.md#the-upscale-point): the split, `rd__upscale_point_on`): the plan
+is not made, `rd__fades_fold_skip` draws every sprite and the reduction applies none. Under the
+display layer ([DISPLAY_LAYER.md](DISPLAY_LAYER.md)) the fades, the brightness and the bars are drawn
+into the display-scale composite after the upscale, and the reduction reads the composite (`fades
+fold: off while a temporal upscaler is in force; lists 11-12's sprites are drawn into the
+display-scale composite after the upscale (the display layer)`, once a run); with `[dev]
+display_layer = false` the upscaler must see them in SCENE and the reduction reads its output
+(`fades fold: off while a temporal upscaler takes SCENE at the reduction; list 11's sprites are
+drawn into SCENE`). Folding them over the composite is not done: the fold's list-12 rule fails on
+the game's text in list 12 there.
 
 The rounding (`roundingRefusal`): a step whose factor is 0 (Cd kept) or 0x80 (Cs) stores the same
 level under every blend and every filter, one value over the rows it covers; a step between them
@@ -314,11 +992,279 @@ rd: fades fold: the reduction took another way (the hardware sprite, not as plan
 
 ctest `rd_fades_fold` (the step against the GS blend, rd_gsbase's fade, brightness and letterbox
 cases stepped texel by texel against the sprites' bytes, the plan on recorded frames) and
-`rd_fades_fold_ab` (the fade dumps with and without the fold,
+`rd_fades_fold_ab` (the fade fixtures with and without the fold,
 [TESTING_PROGRAMS.md](TESTING_PROGRAMS.md)). Not built:
 a frame differing from the last only in a fade's level could rerun the reduction and the present
 alone (the still re-present shows a picture again only on an unchanged frame hash,
 `port/render/rd_reshow.c`).
+
+### The present from SCENE (off by default until measured)
+
+Not byte for byte, so committed off: `RD_PRESENT_SCENE_DEFAULT` (`port/render/rd_present_scene.c`,
+the one constant) is 0 and the owner turns it on after seeing the measurement of the corpus
+(`build-host/tmp/v0115/present_scene_measure.sh`, machine-local, its report beside it);
+`ICO_RD_PRESENT_SCENE=0|1` is the A/B's override ([TESTING.md](TESTING.md)), no config key. It
+has no [DIVERGENCES.md](DIVERGENCES.md) row while it is off.
+
+**What it saves.** Above 1x the reduction (list 12: DISPLAY's black clear, then SCENE's textured
+sprite, [The fades fold](#the-fades-fold)) is the hardware sprite (`port/render/rd_blur.c`
+`rd__blur_screen_fallback`), and at a scale that is not whole its sample is moved onto a SCENE
+texel's centre (`rd__blur_snap_verts`). With full height DISPLAY has SCENE's texels, so there the
+reduction stores DISPLAY(x, y) = g(SCENE(x + dx, y + dy)): g its own arithmetic on one texel (the
+fades fold's steps, `sprite.hlsl` `sprite_fold` without bars, then the texture function with the
+tint), (dx, dy) whole texels. Measured on the PowerVR phone's dump at 2364 x 1080 (frame v3677 of
+`build-host/tmp/v0115/evidence/pixel`): (1, 0), on every texel, the edges as the sprite's CLAMP holds
+them, g the brightness's white at 7/128. The present's box blit then samples DISPLAY with the
+hardware filter (2343 texels onto 2364 pixels there). The reduction's pass, 9.7 MB stored at that
+size (1.32 ms a picture in the phone's log of 2026-11-10), is the cost: where nothing but that box blit
+reads DISPLAY before DISPLAY is written again, the reduction is not drawn and the box blit samples
+SCENE through g instead (`port/shaders/blit.hlsl` `blit_scene_ps`): the place in DISPLAY it would
+have sampled, clamped to DISPLAY's texel centres (its CLAMP), moved by (dx, dy), SCENE's taps with
+the same filter, then g. DISPLAY is then owed.
+
+**The map** (`rd__present_scene_axis`, each axis): DISPLAY texel x's centre is GS coordinate
+(x + od) / sd (the exact viewport puts GS coordinate g at texel g sd - od + 1/2, `rd_replay.c`
+`rd__frame_group_ex`); the sprite's U there less the sample shift (sd - 1) / (2 sd) GS pixels
+(`setUvShift`, `snapAxis`) lands at SCENE's texel coordinate u ss - os (`common.hlsli`
+`gs_uv_norm`). For the reduction's pair (corners a quarter pixel before pixel 0, U 0.5 there, one
+GS texel a pixel; V two a row) that is x + round(s / 4) + 1/2 across at a scale s that is not whole
+(x + s / 4 + 1/2 at a whole one: half a texel at 2x, so 2x is not taken) and y + 1/2 down at full
+height (one SCENE row a DISPLAY row; two at half height, not taken). The pair is taken when every
+DISPLAY texel's centre is covered and samples a SCENE centre within 1/1024 of a texel (the float
+error of the corners' UVs is about 2 x 10^-4 there: a neighbour's weight that small moves a sample
+less than a quarter level), the offset the same at both ends.
+
+**The bound.** Today's present is R(sum w_i g(S_i)), the present from SCENE g(R(sum w_i S_i)): R
+the filter's rounding to a level, w_i its weights (summing to 1), S_i SCENE's taps. A step is g(c) =
+A(c) + e(c) with A affine (slope a = 1 - k / 128 for the step's k) and e its rounding, in (-1/2,
+1/2] under the fixed-function blend's nearest level, in (-1, 0] under an exact blend's floor: an
+interval one level long either way. Then the old present is A(x) + e1 + r1 with x = sum w_i S_i, e1
+the weighted mean of the taps' e (in the same interval) and |r1| <= 1/2; the new one is A(x + r2) +
+e2 = A(x) + a r2 + e2 with |r2| <= 1/2 and e2 in the interval. The difference a r2 + (e2 - e1) - r1
+is under a / 2 + 1 + 1/2 < 2: at most one level, wherever the sampler weighs SCENE's taps as it
+weighed DISPLAY's. A step of k 0 or 128 (and the tint 0x80, the texture function's identity) has e 0
+and a 0 or 1: the same level. Above 1x the fades fold takes at most one step between levels a row,
+so the bound holds for every fold it makes. The moved coordinate is computed in floats: where the
+sampler's weight then rounds to another step (8-bit fractions: 1/256 of a texel), the filtered
+value moves by up to |S_i - S_j| / 256, under one more level: two levels at most on such hardware.
+A Picture tone row scales a difference by its slope. `rd_present_scene_test` checks the model (one
+level, every pair of levels and weight; a bilinear's four taps at random weights);
+`rd_present_scene_ab` holds the corpus to two.
+
+The conditions (each keeps the reduction, counted with its reason, `rd_present_scene.h`
+`RD_PS_WHY_*`; when in doubt the reduction is drawn):
+
+- the switch; a device and `blit_scene_ps` in the shader table (`g_rd.fs`); no pass window
+  (`g_rdWin.first`: the tool's bisect reads targets mid-frame);
+- the hardware sprite (scale 1, the Original preset and 1x keep the GS sprite model); no MSAA
+  (`rd_aa_samples`); no GS state as shader data (`rd__uber_on`); no upscaler set
+  (`RdSettings.upscale`: FSR 1.0 reads DISPLAY, a temporal one takes SCENE at the reduction,
+  `rd__upscale_point_on`); not the display layer in force (`rd__layer_active`: SCENE lent to the
+  composite this replay; `rd__layer_on` is only its switch, and the layer runs only under a
+  temporal upscaler);
+- the present reads DISPLAY in its box blit alone (`rd_present.c`
+  `rd__present_scene_present_why`): no CRT filter, no Downsampling, no doubled lines (full height),
+  no effects depth, no capture armed or pending, no box average of DISPLAY into the window
+  (`reduceApplies`);
+- the border open (`rd__replay_border_open`: the scissor the whole target, CLAMP on both axes)
+  without the exact width's repeated outer columns (`rd_blur_border.c` `drawStrips`);
+- the pair's form (`planPair`): the black sprite, then only state, NOPs and deferred text, then
+  the textured sprite into DISPLAY reading SCENE's colour (PSMCT32), MODULATE or DECAL with a flat
+  tint of 0x80, no blend, DATE, alpha test or FBA, the colour mask whole, no Z test or write, no
+  field or UV offset, over every GS pixel (`extendFullFrame` leaves it) and every DISPLAY texel;
+  the map above on both axes; the fades fold, if planned, at the textured sprite and without bars;
+- nothing after the textured sprite in the frame touches DISPLAY or SCENE (a draw into or from
+  either, a copy, a clear, a command not known; the deferred text's quads aside).
+
+**The owed DISPLAY.** Every other reader gets DISPLAY drawn first from the same SCENE by the same
+arithmetic (`blit_scene_ps` one texel a pixel by Load: the reduction's bytes, which
+`rd_present_scene_ab` holds DISPLAY to): a later replay's frame read once at its start
+(`rd__present_scene_begin`, from `replayFrame` after the store plan's scan, `rd__present_scene_settle`)
+draws it in the replay's list when a command reads DISPLAY before DISPLAY is written whole (a keep
+frame's KEEP sprite, the motion blur's DISPLAY, the interpolation's held copy at the head, the
+water's block of FBP 0) or when the frame draws on SCENE without writing DISPLAY again; the
+reduction's black sprite over the whole of DISPLAY, or a clear of it, first drops the debt; a frame
+touching neither (the still re-present's empty keep frame, `rd_reshow.c`) keeps it, and its
+present samples SCENE again. A read outside a replay (`rd__read_target`: the F12 dump, a save
+state's picture, the tests and the replay tool's PNGs; `rd_display_probe`) draws it in a frame of
+its own; a present that cannot read SCENE after all (a capture armed since the replay) draws it in
+the present's list first. SCENE is that frame's then: only a replay draws on it and every replay
+settles the debt before its first command; its texture and generation are checked, and a SCENE
+made again with DISPLAY kept loses the picture (said; the switch off from then on). The crack
+fill's swap ([The crack fill's snapshot by the swap](#the-crack-fills-snapshot-by-the-swap)) is no such recreation and takes no refusal from
+it: it swaps SCENE's colour before the reduction, the plan records the colour SCENE holds at the
+reduction, the present reads SCENE's record's colour when it draws, nothing after the reduction may
+touch SCENE, and a later replay settles the debt before its own swap. A new context
+owes nothing (`rd__present_scene_init`). The pipelines (`blit_scene_ps` on both outputs) are in
+the start-up set while the switch is on; every backend draws it from the shared module (SPIR-V on
+Vulkan and MoltenVK, DXIL on Direct3D 12, FXC's run-time compile of `blit.hlsl` on Direct3D 11, the
+SPIRV-Cross GLSL on OpenGL). No new pass kind.
+
+The record counts it (`RdPerfRecord.presentSceneSkipped`, `presentSceneShown`, `presentSceneKept`
+and `presentSceneWhy`, `presentSceneDrawn` and `presentSceneDrawWhy`); `rd_replay_tool --stats`
+prints `stats: present from SCENE on|off: S reductions not drawn, P presents from SCENE, K kept
+(why), D drawn on demand (why)`; the log says:
+
+```
+rd: present from SCENE: off (the default until it is measured): the reduction is drawn into DISPLAY and the present reads DISPLAY
+rd: present from SCENE: the reduction not drawn (frame N): DISPLAY is SCENE through the reduction's steps at a whole offset (1, 0) texels (SCENE 2364x1080 at 2.788x2.411, 2 fold steps); the present samples SCENE, every other reader gets DISPLAY drawn on demand (reported once)
+rd: present from SCENE: the reduction drawn into DISPLAY: <why> (frame N; reported once for this reason)
+rd: present from SCENE: DISPLAY drawn on demand from SCENE (frame N's): <why> (the first 8, then every 100th: K so far)
+rd: present from SCENE: 0.98 a replay (0.98 presents from SCENE), 0.02 through DISPLAY (<n why>, ...); D drawn on demand (<n why>, ...) (M replays, 10 s)
+```
+
+the last every 10 s while the switch is on. Tests: `rd_present_scene` (the map, the bound's model,
+every reason, the debt's verdicts on recorded frames) and `rd_present_scene_ab` (the corpus,
+[TESTING_PROGRAMS_RENDER.md](TESTING_PROGRAMS_RENDER.md)).
+
+### The turn in the present's blit (off by default until a phone rc)
+
+On a pre-rotated swapchain (a phone held sideways: [DISPLAY.md](DISPLAY.md#the-turned-swapchain),
+`port/render/rd_prerotate.c`) the present draws its picture upright into a texture of the window's
+size, and one more full-size pass turns that texture into the swapchain image. When the present is
+the box blit alone, that blit draws into the turned image itself and the turn pass is not drawn
+(`port/render/rd_turn_fold.c`, `rd_turn_fold.h`):
+
+- `blit_vs` already turns its source position by `DrawCB.aux1.w` (the turn pass's own mechanism);
+- the viewport and the scissor (the box, the border mask's inset) are turned in whole pixels by
+  `rd__turn_rect`, the table of `rd_prerotate.c` (90: (X, Y) = (h - 1 - y, x); 180:
+  (w - 1 - x, h - 1 - y); 270: (y, w - 1 - x));
+- the bars are the same cleared black; the colour adjustment and the mirror stay in the blit.
+
+**Why it is exact, and where it is not.** Where every output pixel is one source texel (the
+snapped Full pixel window, or the supersampling's reduce and FSR 1.0's output drawn one texel a
+pixel), the turned triangle's interpolated source position differs from the upright one by rounding
+only, half a texel from any texel edge, so nearest takes the same texel and a linear tap at the
+texel centre returns that texel. Every other draw of the present cannot be turned with a proof:
+
+| draw of the present | turned identically? | the fold |
+| --- | --- | --- |
+| the box blit, one texel a pixel (`blit_ps`, `blit_tone_ps`) | yes (above) | folds |
+| FSR 3.1's display layer (the 2D drawn after the upscale, `rd_layer.c`) | drawn into DISPLAY and COMPOSITE in the replay, before the present: the box blit carries it | folds with the blit |
+| FSR 1.0's EASU and RCAS, the supersampling's reduce | their own textures, at the box's size, before the blit (then one texel a pixel, nearest) | folds with the blit |
+| the box blit scaled (1x into a larger window, Downsampling, the line doubling) | no: a linear weight from the interpolated position can move by its last bit | keeps the turn pass |
+| the box blit from SCENE (`blit_scene_ps`) | no: it reads its own pixel position | keeps it |
+| the effects depth's blit | no: it reads the scene's depth at its pixel | keeps it |
+| the CRT filter | no: its scanlines are pixel positions | keeps it |
+| the deferred text (its halo too), the overlay (touch controls, the fps corner, popups) | no: triangles with edges inside the picture (the fill rule's ties fall on other edges once turned), linear taps at scaled positions, DATE and dither reads of the pixel position | keeps it |
+| a capture, a shot, the icon hold | they copy the upright picture | keeps it |
+| films (`rd_video.c`), the blank frame | their own paths | unchanged |
+
+So a present that draws any of the rows marked "keeps" draws as today. The reasons are counted
+(`rd__turn_fold_why`).
+
+**Self-test.** `rd__turn_fold_selftest` runs with the start-up self-tests (`rd_fog_path.c`; the
+replay tool runs it too) when the fold is asked for. It draws an 11x7 pattern (one cleared area a
+texel, each channel a different function of both coordinates) into a 48x30 picture at two odd
+places, nearest with a scissor inset and linear mirrored, both ways for 90, 180 and 270 degrees (the
+blit then the turn pass, and the blit drawn turned) in the swapchain's format, and compares the
+turned images byte for byte. A difference refuses the fold for the run, with the first differing
+pixel in the log.
+
+**What it saves.** One full-size pass a present on a turned swapchain that draws the box blit
+alone: the pass writes the window's 2364x1080 once more and reads the texture once (the present's
+`colour 0.0/19.3 MB` stores at the title in the Pixel's log are the two writes). **Expected effect
+on the phones' game pictures: none.** Their frames are wider than their exact width (the opening's
+848 GS pixels for 840.53, the Mali's 912 for 910.22: `rd: display: ... cropped`), so at Full pixel
+the visible columns are stretched to the box (2343 texels into 2364 pixels on the Pixel's opening)
+and the box blit is not one texel a pixel; the fold keeps the turn pass there (measured with the
+replay tool on the three opening dumps and the three Mali dumps, at 2364x1080 and 1280x720). It
+folds where the frame is at its exact width and fills the window, as rd_pixel's 4:3 frame at
+1024x768 does, and with no touch controls, text or overlay drawn. Not measured on a device.
+
+**Switch and lines.** `RD_TURN_FOLD_DEFAULT` 0 in `rd_turn_fold.h`: off on every device until a phone
+rc; the tests' `ICO_RD_TURN_FOLD=1` (the self-test still decides) or `0`. No setting. Lines:
+
+```
+rd: present: turn in the blit: self-test passed (6 cases: 90, 180 and 270 degrees, nearest with a scissor inset and linear mirrored, one texel a pixel, the turned blit byte for byte the turn pass's; format 37)
+rd: present: turn in the blit: refused by its self-test (<why>): every present on a turned swapchain keeps the turn pass
+rd: present: turn in the blit: the 2364x1080 picture's box blit drawn turned 90 degrees into the 1080x2364 image, no turn pass (reported once)
+rd: present: turn in the blit: a present keeps the turn pass: the port's overlay or the deferred text drawn (reported once for each reason)
+```
+
+The attempt ledger's row `turn in the present's blit` counts the presents folded and those that kept the turn
+pass in each 10 s block ([ANDROID_DIAGNOSTICS.md](ANDROID_DIAGNOSTICS_LEDGERS.md#the-attempt-ledger)).
+Tests: `rd_smallcuts` (the turned rects against the table, the reasons) and `rd_turn_fold_ab` (the
+headless twin, every PNG byte for byte).
+
+### The VU record by compute on the PowerVR D-Series DXT
+
+`[dev] vu_record = auto` takes the vertex shaders' stores wherever the device offers them
+(`port/render/rd_vu_record.c`), and the PowerVR phone offers both kinds of store (its start line), so its
+record is written by two render passes begun without an attachment. The class rule
+(`port/render/rd_vu_class.c`, `rd_vu_class.h`) writes it by compute dispatches instead on the PowerVR
+class under Vulkan where both are offered, and by default only on the one PowerVR it ran on: the
+owner's phone's D-Series DXT-48-1536 (`rd__vu_class_measured`, the Vulkan device name), whose
+release candidate with it (and the screen's rule, the own timer and the no-volume break) was the
+fastest opening measured there, the picture judged right. The class is wider: every Imagination
+device under Vulkan, the B-Series (no `dualSrcBlend`, no GPU timestamps) and the older Rogue parts
+among them, none of which ran the compute record. The start-up self-test judges the record's bytes,
+but a device lost inside it on a driver never tried is not something a self-test can refuse, so the
+rest of the class keeps the vertex stores, off by default with that reason. With the compute record
+the index compaction runs there too ([PIPELINES.md](PIPELINES.md#the-index-compaction)). Every
+other class keeps auto's order.
+
+**What differs in the GPU's work on an opening picture**, from the code
+(`rd_replay_vu.c` `vuRecPassBegin`, `vuRecPassEnd`, `recDrawGap`; `vk_cmd.c` the store and compute
+brackets):
+
+| | the stores (today) | the compute dispatches |
+| --- | --- | --- |
+| render passes | 2 a picture (the vertex records, then the triangle records), no attachment | none |
+| work items | one batched point draw a run of up to 64 entries (17 to 21 a picture in the Pixel's opening) through pipelines without rasterization | one dispatch for each of those draws, (points + 63) / 64 groups of 64 |
+| barriers | each pass's bracket (vertex stage writes) folded into the next pass's or copy's barrier | the same bracket with the compute stage writing, flushed at the first dispatch |
+| bytes written | the record's three planes | the same bytes at the same places (`rd_vu_record.h`) |
+
+So the expected effect is the two passes' fixed cost, about 0.5 ms a picture at most (two small
+passes at about 0.27 ms each on this GPU; NEXT_CUTS's estimate), against any cost of compute work
+between graphics passes on this driver. The release candidate measured the four defaults together,
+not this one alone.
+
+**The gates.** The start-up self-test judges the compute record as it judges any start mode
+(`rd_vuprepass_selftest.c`). A compute record that fails goes back to the vertex stores (the path
+auto takes without the rule), not to the render targets; the ledger's row then says `refused by its
+self-test`. `rd_vurecord_ab_compute_class` and `_opening` compare the two writes' targets byte for
+byte.
+
+**Switch and lines.** `RD_VU_COMPUTE_CLASS_DEFAULT` 1 in `rd_vu_class.h` (its reach
+`RD_VU_CLASS_MEASURED_NAME`); the tests' `ICO_RD_VU_COMPUTE_CLASS=1` takes the rule on any device
+that offers both stores, `0` keeps it off;
+a `[dev] vu_record` asked for by name always wins. Lines:
+
+```
+rd: VU record: the PowerVR class's rule: the compute dispatches in place of the vertex stores (the PowerVR D-Series DXT-48-1536: compute dispatches in place of the vertex stores; RD_VU_COMPUTE_CLASS_DEFAULT 1)
+rd: VU record: the PowerVR class's rule: the record as auto takes it (not the PowerVR D-Series DXT-48-1536 it was shown on: the vertex stores (its self-test judges the record's bytes, not a device lost on a driver not tried); RD_VU_COMPUTE_CLASS_DEFAULT 1)
+rd: VU record: stored by the vertex shaders into the frame slot's record buffer: no render targets, no copies (the PowerVR class's compute record off: they failed the start-up self-test)
+```
+
+The attempt ledger's row `VU record by compute on the PowerVR` counts the dispatches in each 10 s
+block.
+
+### WORK2's second lamps pass (a finding, no cut)
+
+The Pixel's opening log says `a pass on WORK2 drawn single-sampled (the pass loads WORK2; it begins at list 7
+command ordinal 2104, the mask ...)` and `... ordinal 1287, a lamp ...`: with the
+lamps' 4-sample pass (`rd_lamps.c` `msConvert`) a second and third WORK2 pass begin in some pictures.
+The replay of v2278 (the sun's whole chain) on lavapipe with the phone's lamps, pass area and pass
+cut words shows it: WORK2 passes 15 (the fill's clear carried as its load, the sun's fans, 4
+samples), 16, 17 and 18 (`4 single-sampled` over two replays). With the mask (7:66) turned into a NOP
+the run is one 4-sample pass of 10 draws and none single-sampled; v746 (the lamps plan, the mask not
+drawn) is one 4-sample pass too. So the cause is the mask: it samples SCENE's colour, which is in its
+render-target state after list 7's first pass, and its transition to a shader read ends WORK2's pass
+(`rd_replay.c` `resolveTexture`, `endPassFor`), so the mask and the lamps after it begin passes that
+load WORK2, which the 4-sample form refuses. Only pictures whose glow chain is drawn whole (the sun's
+tint or glare) have it: 91 of 472, 0 of 456, 23 of 433 and 0 of 538 pictures in that log's
+opening blocks.
+
+- No standalone clear of WORK2 is drawn in this form: the clear carry already takes the fill's clear
+  as the first pass's load (`2 clears taken by the next pass`). The clear-only pass of NEXT_CUTS's
+  v746 listing belongs to the single-sampled low-resolution form, which no class runs by default.
+- No exact remedy was built. Drawing the mask and the lamps inside the 4-sample pass (SCENE made
+  readable before it begins) changes the picture: the lamps would take 4 samples where today they
+  take one, and the mask would blend into each sample before the resolve instead of into the
+  resolve. Keeping today's bytes with one pass fewer (WORK2's depth filled before the mask's pass
+  and that pass carrying the depth) needs a mask pipeline with a depth format the start-up set does
+  not make, for at most one small pass in a fifth of the first block's pictures.
 
 ### The motion blur under Smooth
 
@@ -332,12 +1278,18 @@ between ticks the trail stands still while the picture moves. Under Smooth `rd__
 hands the sprite to `rd__blur_smooth_sprite` (`port/render/rd_blur_smooth.c`, file comment),
 which per present i keeps
 
-    A_i = S_i + a' (A_i-1 - S_i),   a' = FIX' / 128,   FIX' = clamp(round(128 (FIX / 128)^(1 / k)), FIX, 127)
+    A_i = S_i + a' (A_i-1 - S_i),   a' = FIX' / 128,   FIX' = clamp(round(128 (FIX / 128)^(dt / tick)), FIX, 127)
 
 with S_i SCENE just before the sprite, A an RGBA16F ping-pong pair at SCENE's texture size (its
-scale, its Full pixel crop; an 8-bit running blend would stall up to 7 levels short at k = 10,
-its floor step `(A - S) FIX' >> 7` being 0 below `128 / (128 - FIX')`), and k the presents a
-tick. Each present: the sprite's pass ends; SCENE goes to a shader read (an open MSAA epoch
+scale, its Full pixel crop; an 8-bit running blend would stall up to 7 levels short at 10 presents
+a tick, its floor step `(A - S) FIX' >> 7` being 0 below `128 / (128 - FIX')`), dt the time since
+the present before and tick the game's tick, dt held to [tick / 64, tick]
+(`rd__blur_smooth_fix_dt`). The presents of any span keep `(FIX / 128)^(span / tick)` of the
+trail, the PS2's share a tick, whatever their count or spacing (1.7 presents a tick, uneven gaps,
+Uncapped); the first present after a pause (dt held to the tick) draws the game's FIX. Without a
+time dt is tick / k, k the presents a tick: `FIX' = clamp(round(128 (FIX / 128)^(1 / k)), FIX,
+127)` (`rd__blur_smooth_fix`, equal to the time form at dt = tick / k for every FIX and k). Each
+present: the sprite's pass ends; SCENE goes to a shader read (an open MSAA epoch
 resolves into it there); `fx_acc_resolve_ps` rounds A_i-1 into RES, an RGBA8 scene-class
 temporary target (`rd__temp_target_alloc(gsW, gsH, 0, 1)`); `fx_acc_ps` writes A_i into the
 pair's other texture from A_i-1 and SCENE (both `blit_vs`, one triangle, each texel by Load);
@@ -351,13 +1303,22 @@ fraction. The two pipelines are a private cache (`RD_BLUR_SMOOTH_PIPES`, as the 
 and `RD_PIPELINE_REACHABLE_MAX` do not change; the sprite's own key is the recorded one (FIX and
 the texture are not in it).
 
-k comes from the presenters (`rd__blur_smooth_arm`, before each replay that presents): on the timer
-path `rd_present_clock_alpha`'s tick over its step (kept in `rd_interp.c` statics), under the vsync
-lock the presents the tick before counted (`rd_present`), 1 for the first tick and for the
-presenter without interpolation (`rd_core.c` (`replayOnHost`)); clamped to 1..64
-(`RD_BLUR_SMOOTH_K_MAX`); FIX' is taken at each sprite from the tick's k. A replay nobody armed
-(a self-test, a dump's, the replay tool's `--time`) draws the sprite as Original and leaves A
-alone. `feedback` makes no DISPLAY / DISPLAY_HELD head copy while `rd__blur_smooth_active` (the
+dt and k come from the presenters (`rd__blur_smooth_arm`, before each replay that presents). On the
+timer path `rd_present` hands every present the present clock's time since the present before and
+its tick (`rd_present_clock_alpha` notes them with its alpha, `rd__present_clock_take`; the render
+thread gets them with the posted picture, `rd__thread_clock`), and FIX' is the time form. Under
+the vsync lock no clock runs: k is the presents the tick before counted (`rd_present`), so dt =
+tick / k is the refresh period; k is 1 for the first tick, for the presenter without interpolation
+(`rd_core.c` (`replayOnHost`), `rd_thread.c` (`replayJob`)) and for the replay tool's replays
+except `--presents N` (k = N), clamped to 1..64 (`RD_BLUR_SMOOTH_K_MAX`, also the time form's
+floor). k is also taken on the timer path at a tick's first present, the clock's tick over its
+step (`rd__present_clock_k`, `port/render/rd_present_clock.c`), for the block line. FIX' from that
+k on the timer path is what issue 193 showed (an Adreno 740 at Frame rate 60): a clock step stuck
+at 0.5 ms (a reset that took one doubled present's interval as the step, with nothing to learn it
+again) gave k 64, FIX 32 drawn as 125 at 1.7 presents a tick, a trail keeping 96 % of itself a
+tick instead of 25 % (the clock's step: [DISPLAY.md](DISPLAY.md#interpolation-between-ticks), "The
+alpha"). A replay nobody armed (a self-test, a dump's, the replay tool's `--time`) draws the
+sprite as Original and leaves A alone. `feedback` makes no DISPLAY / DISPLAY_HELD head copy while `rd__blur_smooth_active` (the
 sprite does not read DISPLAY; FEED128's copies are unchanged).
 
 The trail ends where an armed replay that is not a keep frame's drew no motion blur sprite (the
@@ -392,8 +1353,21 @@ motion blur: smooth: the accumulator WxH freed (why)
 motion blur: smooth: the trail starts again at frame N (why): this present's scene is its first picture, no old frame in it      (the first 3 a block)
 motion blur: smooth at one present a tick (FIX F as recorded): ...      (once)
 motion blur: smooth: the sprite of frame N is drawn as Original: why (reported once)
-motion blur: smooth: P presents, K1 to K2 presents a tick, FIX F drawn as F' (the last); D sprites through the accumulator, R restarts (M not named above), O drawn as Original (no accumulator)      (with the interp summary, when it drew)
+motion blur: smooth: P presents, K1 to K2 presents a tick (by time; the present clock's step S ms, N resets), FIX F drawn as F' (the last); D sprites through the accumulator, R restarts (M not named above), O drawn as Original (no accumulator)      (with the interp summary, when it drew; "(counted; no present clock)" when no present of the block was timed: the vsync lock)
+motion blur: smooth: the trail is held much longer than the game's: FIX F drawn as F' for 32 presents in a row at C presents a tick (counted; k K at the tick's first present, the present clock's step S ms, this present D ms after the one before, the tick T ms), to frame N: the trail keeps X % of itself a tick where the game keeps Y % (run R)      (FIX' at least 120 for 32 presents in a row at under 8 presents a tick counted, the game's FIX under 120; a line a run, the first 8 then every 100th)
 ```
+
+The block line's K1 to K2 are the ticks' k (the clock's tick over its step on the timer path), its
+step and resets the present clock's (its resets in the 10 s block): a step near the presents'
+real interval and k near the presented fps over the game fps of the window's line of the same
+block is the healthy reading, with a reset or two a block (a pause, a change of rate). The clock
+learns any slower rate (a 120 Hz FIFO at 25 presented fps: one reset, then none) and a doubled
+present moves it by its own interval, so a reset at nearly every present means presents so
+irregular that the clock is over half a tick from the measured time at each one (the measured
+alpha passes on, unsmoothed); a step far below the interval with it would be issue 193's stuck
+clock, which the step's lower bound rules out. The held line names the fault directly: under the time form FIX' 120 or more needs a present
+under a 20th of a tick after the one before (at FIX 32), and 32 of those in a row do not happen at
+under 8 presents a tick.
 
 `RdPerfRecord.blurSmoothPasses` counts the passes a replay. The replay tool's `--motion-blur
 smooth` sets it (its replays armed; the `--prev` dumps feed the trail) and `--presents N` (with
@@ -533,7 +1507,16 @@ the next eight bits interpolate `LUT[n]`..`LUT[n + 1]`, MODULATE (or DECAL) appl
 fixed point, and a one-unit 8x8 ordered dither carries the fraction the 8-bit alpha cannot hold,
 `floor(ramp * factor / 128 + (bayer + 0.5) / 64)`, at most 255 (`port/shaders/common.hlsli`
 (`gs_fog_channel`), `port/shaders/fog_lut.hlsl` (`fog_lut_ps`)). The dither is indexed from the
-target's centre texel, so the 4:3 columns of a wide frame carry the pattern of the 4:3 frame. At
+target's centre texel, so the 4:3 columns of a wide frame carry the pattern of the 4:3 frame, and
+its phase moves with the frame's jitter (`g_jitter`, [Jitter](RENDER.md#jitter)) in sixteenths of
+a texel: the cell is the pixel's plus `floor(g_jitter * 16 + 0.5)` (a jitter of 0.25 texel moves
+the pattern 4 cells, 0.125 two). Under a temporal upscaler the pattern then changes frame to frame
+and the accumulation averages it out (issue 203: one pattern fixed on the render grid under a
+picture that moves a fraction of a texel a frame is the thin lines FSR 3.1 picks out). Indexing at
+the pixel less the jitter does not do it: a pixel centre `k + 0.5` less any jitter under half a
+texel floors to `k`. `g_jitter` is exactly 0.0 without an upscaler, where the term is 0, so every
+other picture is the same byte for byte (`rd_fog`'s case j, the fog self-tests and the pass-dump
+corpus unchanged). At
 an entry (`f = 0`) with factor 128 the value is the entry's own. Every fog variant (the dual-source,
 `_nodual`, `_dstrov` and `_dstatt` entries, `FOG_BUFFER`, `FOG_MS`) shares the code before the
 output. At scale 1 `param[3]` is 0 and the entry is read as the GS reads it; so it is for the fog
@@ -548,10 +1531,97 @@ skips texels), never at scale 1 (`port/render/rd_present.c` (`reduceRecord`)); d
 **Left as they are.** The work buffers' chains run at the PS2's sizes and their draws back onto the
 frame take the GS's filter ([The glow size](RENDER.md#the-glow-size)). The reduction SCENE to DISPLAY is never above 2:1 in texels
 (`port/render/rd_blur.c` (`rd__blur_screen_fallback`)), where the GS's bilinear is already the area
-average, so it keeps the GS's filter. The shadow levels stay at scale 1 (their resolution is the
-penumbra, `port/render/rd_core.c` (`shadowLevel`)), and the first level reads the count already
-box-averaged to its GS size (`port/render/rd_replay.c` (`shadowReduce`)), so the chain between them
-is the PS2's at every scale; only the composites back into SCENE resample.
+average, so it keeps the GS's filter. The shadow's levels are not among them: above 1x they
+follow the picture's resolution ([below](#the-shadows-levels-above-1x)).
+
+### The shadow's levels above 1x
+
+Not an option: the rule whenever the scene's scale is above 1 on an axis, in every preset and at
+every aspect (`port/render/rd_shadowres.c`, its header the full account; DIVERGENCES.md VD-34). The
+named levels SHADOW0..2 keep their GS sizes at scale 1 (`port/render/rd_core.c` (`shadowLevel`))
+and are still drawn from the count box-averaged to its GS size (`port/render/rd_replay.c`
+(`shadowReduce`)); at 1x on both axes that is all, nothing more is made or run, the PS2's chain byte
+for byte. Above 1x the PS2's levels were the penumbra's resolution: a level texel 6, 12 and 24
+SCENE texels at 3x, so where an edge fell against their grid changed the penumbra (10-90 width
+11.3 to 24.3 SCENE texels at 3x over the grid's phase, its middle wandering 3.8 texels: the
+staircase along a slanted edge). Now, up to the release's cap of 3 texels a GS pixel on each axis
+(`RD_SR_LEVEL_CAP`: the largest scale a device ran, issue 123's tablet at 3x and the owner's Pixel
+at 2.8125 x 2.41, and the tests' 3 x 3; the levels' cost grows about as the scale's fourth power
+and nothing above it was measured on hardware; above it the PS2's sizes, the release before's shadow, the
+reason `scale` and `rd: shadow levels: the PS2's sizes: the scene at CxC texels a GS pixel, above
+the cap of 3 ...` at each change; `rd_shadow_fine_ab` check 8):
+
+1. the count is also kept at its full size (after the one draw the first level's step reads it from
+   the stencil, or a pass draws it again at the count target's own texels, as the device's own
+   timing chose: [The count from the stencil](WORK_BUFFERS.md#the-count-from-the-stencil); the
+   seven draws and the MSAA epoch's covered-majority resolve, `rd_msaa_shadow.c`,
+   leave it there already);
+2. at each of the game's three level sprites (`rd_shadow_box.c` `rd__shadow_box_screen`, before the
+   sprite's pass) the level is drawn again into a texture of its own at S texels a GS pixel on each
+   axis, S the smallest odd whole number at or above the scene's scale on that axis (3 at 2x, 2.41x,
+   2.8125x and 3x, 5 at 4x and 2160 rows; 1 on an axis at scale 1, whose step and tent are then the
+   identity: 1 x 2 keeps the PS2's columns), `shadowres_step_ps`: the game's own step, the GS's two
+   taps 0.75 / 0.25 one PS2 texel apart, at every fine texel (the first level's taps the box of count
+   texels its GS pixel covers), MODULATEd by the sprite's colour. The sprite is recognised by its
+   form, not by a fixed state: any sprite colour (shadowDepth), any whole or sub-texel offset of its
+   2:1 map (the taps then weighted as the GS weights them), CLAMP or REPEAT (the game leaves the
+   wrap as the draw before set it: REPEAT on the main gate, where a recogniser that wanted CLAMP
+   refused every shadow), every frame width and height;
+3. after the third, each level takes the tent its bilinear magnification supplied, across then
+   down (`shadowres_tent_ps`, weights S - |t - c|, c = S / 2 - 1/2);
+4. the composites, the game's own, read the fine levels (`resolveTexture` -> `rd__shadow_fine`).
+
+The composite's one bilinear tap of the tent-blurred fine level is exactly the mean of the PS2's
+picture over the level grid's S x S placements: the same width and darkness, without the grid. An
+odd S keeps every stage exact (at an even S the tent's centre would sit half a texel off the tap:
+10 % wider at 2x in the edge model). The edge model (24 phases across a SHADOW2 texel,
+`rd_shadow_fine`): 10-90 width 17.2 against the PS2 chain's 18.1 mean at 3x (spread 0.60 against
+3.78), the middle's wander 0.43 against 3.96, the darkness within 0.2 %. Passes: the full-size
+count (one-draw path only), three levels, six tent passes, all between the count and the
+composites, where SCENE's pass is ended already: no SCENE pass more on a tiler. Memory at 3x on a
+576-wide frame: 7.1 MB (the levels and their temporaries), made at the first shadow above 1x.
+Every backend draws it (Vulkan, OpenGL, Direct3D 12, Direct3D 11's run-time HLSL); a backend that
+cannot make its shaders or pipelines keeps the PS2's sizes for the run, logged. MSAA: the count
+from the epoch's covered-majority resolve, as the PS2-size chain reads it. The volumes' box, the
+empty composites and the one DATE set-up hold (the named levels' boxes, inside the composites'
+margin); the shadow tiles step aside for a composite that reads a fine level; `[dev]
+shadow_bspline` does nothing to one.
+
+The cuts (each the same bytes as the chain drawn whole; `ICO_RD_SHADOW_FINE_CUTS=0` draws it
+whole for the A/B). Each level pass clears its target and draws only the box its count can reach
+(the volumes' box from `rd_shadow_box.c`, carried through each step's reach, 2 x + offset .. + 3
+source GS pixels, and the tent's c - L + 1 .. c + L - 1: `rd_sr_step_box`, `rd_sr_tent_box`; the
+whole axis where a REPEAT tap can wrap the far side in), so outside it every texel is the 0 it
+holds anyway, every frame. The first level's step returns 0 at once where every GS pixel its taps
+touch holds alpha 0 in the count box-reduced to its GS size (a nonzero count texel makes its GS
+pixel at least 0x20 / (S.x S.y), below a scale product of 64; never where a tap leaves the count's
+texels). The tent is one pass (`shadowres_tent2_ps`): the two passes' bytes in integers, an odd L
+making every weight whole and no quotient a half. An empty count draws no step or tent and clears
+each final level once. So 6 passes a shadow (7 with the one draw's full-size count) instead of 9
+(10). At the main gate the volumes' box is the whole frame (the volumes sweep open space), so there
+the step's empty areas are the cut that counts: the reporter's frame has 0.83 % of its count's
+texels nonzero. The render area: each texture is 0 outside the box its last pass drew, so a pass's
+render area is the union of that box and its own (`rd_sr_area`), cleared by its CLEAR load and
+drawn inside its box; a tile-based GPU loads, shades and stores those tiles alone (the RHI's
+`RhiRenderPassDesc.area`; backends without tiles clear the whole, the same bytes), and a texture
+that is 0 with an empty box takes no pass. The 10 s clause adds the render areas' share of the
+targets.
+
+Lines: at start `rd: shadow levels: at the scene's scale above 1x (the smallest odd whole one at or
+above it on each axis: ...); at 1x the PS2's sizes`; at each change `rd: shadow levels: at the
+scene's scale: SHADOW0 864x768, SHADOW1 432x384, SHADOW2 216x192 (3x3 texels a GS pixel) from the
+count's 3x3 texels a GS pixel, 10 passes a shadow, 7.1 MB, on vulkan (reported at each change)` or
+`rd: shadow levels: the PS2's sizes: the scene at 1x1 texels a GS pixel (reported at each
+change)`; a refusal `rd: shadow levels: a shadow above 1x drawn at the PS2's size: <why>: <the
+field and its values> (replay R, command C; refusal N, after M shadows at the scene's scale; ...)`,
+logged the first 8 times, at the first refusal after shadows at the scene's scale (a scene that
+falls back) and every 100th; the 10 s clause `; shadow levels: 412 shadows at the scene's scale, 0
+at the PS2's size in 412 replays (10.0 passes a replay)`, a fallback's reasons with counts after
+"size" (`(filter 3, map 1)`; the words prim, flags, texfn, blend, test, filter, colour, map,
+count, pipes, textures, scale); `rd_replay_tool --stats` `stats: shadow levels: 1 shadows at the
+scene's scale, 10 passes, 0 at the PS2's size` with the same reasons. The tests' switch `ICO_RD_SHADOW_FINE=0` (the
+PS2's sizes above 1x) and `=force` (the fine chain at 1x too), no config key
+([TESTING.md](TESTING.md)).
 
 ## Shadows
 
@@ -573,10 +1643,354 @@ decrements (`port/render/rd_shadow.c`; `port/render/rd.h` (`rd_shadow_count_targ
 
 The stencil's bits: 0-5 the count (`RD_SHADOW_STENCIL_MASK`, the only bits the count writes and
 the resolve reads), 6 DATE's (`RD_DATE_STENCIL_BIT`: its setup writes it alone and its draws read
-it alone, [The replay](RENDER.md#the-replay)), 7 unused. A count's INCR_WRAP or DECR_WRAP through the write
+it alone, [The replay](RENDER.md#the-replay)), 7 the shadow tiles' mark (below). A count's INCR_WRAP or DECR_WRAP through the write
 mask 0x3F leaves bit 6 as it was and gives bits 0-5 the same value whatever bit 6 holds, so the
 two never meet; the shadow reset clears the whole stencil, which DATE's setup writes again in the
-pass that needs it (`port/render/rd_pipeline.c` (`shadowStencil`)).
+pass that needs it (`port/render/rd_pipeline.c` (`shadowStencil`)). So outside the shadow window
+nothing reads a stencil a pass before it stored: where its passes load and store it (inside the
+window only, or with the depth on every pass on most tile-based GPUs) is
+[WORK_BUFFERS.md](WORK_BUFFERS.md#the-stencil-outside-the-shadow-window); the count and the
+composites drawn over the volumes' box alone are
+[there too](WORK_BUFFERS.md#the-shadows-over-the-volumes-box).
+
+### The shadow tiles
+
+The volumes' box is the volumes' extent; they sweep open space, so on the owner's phone it is the
+whole picture at the bridge and in the cage while the shadow that lands is small: the bridge
+frame v2809's pass dump (the phone's recipe) has alpha above 0 in SHADOW0 (144,82)-(262,192) of 424 x 256,
+SHADOW1 (72,41)-(130,96) of 212 x 128, SHADOW2 (37,21)-(64,47) of 106 x 64. Where a shadow lands is
+known only on the GPU once the levels are drawn, so `port/render/rd_shadow_tile.c` culls each
+composite there with the stencil:
+
+- **The masks.** Once a replay, at the first composite that takes the tiles and while no pass on
+  its target is open (the levels' passes are on SHADOW0-2), one pass a level the replay's boxed
+  composites read (`shadow_tile_mask_ps`, `port/shaders/blit.hlsl`): a texel per 2 x 2 level
+  texels, 1 where any level texel within 3 texels of the block (5 with the B-spline composites)
+  holds alpha above 0, by integer loads (an 8-bit alpha above 0 reads above 0.0 exactly; 64 loads
+  a mask texel), the indices clamped, or wrapped where the first composite's sampler state repeats
+  (taken as wrapped even where the replay clamps a screen copy: that only widens the mask).
+- **The set-up** (`rd__shadow_tile_take`, in place of `rd__replay_date_take` for such a composite,
+  in its own pass, over the same area): `RD_STENCIL_DATE_CLEAR2` writes 0 into bits 6 and 7;
+  `RD_STENCIL_TILE_MARK` writes 1 into bit 7 where `shadow_tile_mark_ps` finds the mask block of the
+  pixel's UV 0 (the composite's sprite map at the pixel's centre: `g_param`); after the colour
+  barrier `RD_STENCIL_DATE_SET_T` writes 1 into bit 6 where the alpha's MSB is set and bit 7 is 0.
+  The composite's passes test `RD_STENCIL_DATE_TEST0_T` / `TEST1_T` (read mask 0xC0, the reference
+  0x40: GREATER holds for 0 alone, EQUAL for 0x40 alone), which is TEST0's or TEST1's verdict where
+  bit 7 is 0. The set-up is always taken whole and never reused (`dateStFor` 0): every later DATE
+  draw takes its own, which writes bit 6 over its area again.
+
+**The same bytes.** A dead tile's pixel: the mark's UV is the affine the GPU interpolates for the
+composite (up to rounding and FrameCB's half texel, under a level texel); the composite's bilinear
+taps lie within one texel of its UV (two with the B-spline, plus the GS pixel's snap above 1x), all
+inside the block's margin, all alpha 0, so As is 0 and its alpha test (GREATER 0, AFAIL KEEP, no Z
+write: the box's composite form) writes nothing; the stencil culls it, which writes nothing either.
+A live tile's pixel: bit 7 is 0, bit 6 as before, the composite's own geometry, interpolation and
+shader. Bit 6 in a dead tile is 0 rather than the MSB: only that composite reads it, and it is culled
+there. Bits 0-5 are never touched. So no `DIVERGENCES.md` row. The composite's geometry is not
+split into tile quads: interpolated UVs at a pixel are not provably the same bits in another
+triangle, so the cull is the stencil's, before the fragment shader where the device tests early.
+
+**Where.** Off on every device by default (`RD_SHADOW_TILE_DEFAULT` 0 in
+`port/render/rd_shadow_tile.c`; no start-up work, no keys, no self-test then). With that constant 1
+it would be on for the PowerVR class and the desktop classes where the start-up self-test passes,
+and off on the Adreno and Mali classes (issues 179, 211, 123), Apple and other tile-based GPUs.
+Only where DATE takes the stencil bit (Vulkan with the local read): the snapshot path's composites
+are drawn whole; the shaders are made on Vulkan alone. A composite whose box is empty, outside the
+MSAA epoch's rule, or not boxed (rd_shadow_box.c refuses it) is drawn as before. Drawn whole and
+counted (`RdPerfRecord.shadowTileWhy`): off on the device, a pass on the composite's target open (no
+mask can be drawn without breaking it), no mask, not one sprite or a degenerate map or another wrap
+than the mask's, the tiled set-up's pipelines missing. `ICO_RD_SHADOW_TILE=0|1`: the tests' switch
+([TESTING.md](TESTING.md)); no setting.
+
+**The self-test** (`rd__shadow_tile_selftest`, from `rd_fog_selftest` once a renderer after the
+stencil's): a frame at SCENE's size: list 0 a ground (its top half's alpha MSB 1, its bottom
+half's 0), list 3 a volume's count on WORK2, SHADOW0 from it, one composite into SCENE (the TEST
+word 0x3400D, LERP_AS FIX 0), list 4 a DATE DATM 1 sprite (a later reader of bit 6); replayed with
+the tiles off and on, MSAA held off: SCENE byte for byte, the composite drawn over a mask with dead
+tiles. A failure keeps the tiles off.
+
+**The lines.** Once at start: `rd: shadow tiles: off (<why>)` (by default: not measured to help) or,
+with the tests' switch, `rd: shadow tiles: on (ICO_RD_SHADOW_TILE=1; self-test ok: ...)`; once: `rd: shadow tiles: the first composite over the tile mask
+(...)`; a composite drawn whole: `rd: shadow tiles: a composite drawn whole: <why> ...` (first 8,
+every 100th). The 10 s `window: per replay` line: `; shadow tiles: C composites a replay over the
+tile mask (M masks), K whole (<why> n)`. `rd_replay_tool --stats`: `stats: shadow tiles on|off: C
+composites over the tile mask (M masks), K whole (...); tiles live SHADOW2 l of n SHADOW1 ...
+SHADOW0 ...` (the masks read back after the replay; the device's own log has no tile count, which
+would need a readback a frame).
+
+**Why it is off.** On the bridge frame at most 3717 of SHADOW0's 27136 mask texels, 1023 of
+SHADOW1's 6784 and 289 of SHADOW2's 1696 are live, so most of the composites' and set-ups'
+fragments are culled. On the owner's PowerVR phone (the self-test passed: `400 of 16384 mask
+texels live`) the bridge's list 3 class was 1.7 ms slower with it. The dead fragments it culls
+were already cheap there: the composite rejects its fragment after one bilinear tap (the alpha
+test), and the set-up's bit-6 draw after one local read, on a GPU whose tiles stay on the chip; the
+cull adds, a composite, a full-area mark draw (a texture load, a discard, a stencil write) and, for
+every fragment of the clear, the set-up and the composite, a stencil test against a value the same
+pass just wrote, and the mask passes. The same tiles drawn as quads whose vertex shader collapses
+the dead ones would remove the fragments instead of testing them, but not exactly: a pixel's
+interpolated UV in a tile's triangle is not provably the bits the whole sprite's triangle gives
+(the interpolator's arithmetic is the implementation's), and a UV computed from the pixel position
+in the fragment shader is not the interpolated one either, so either form can move a bilinear
+weight's last bit. Nothing exact is left to cut here on such a GPU.
+
+**The tests.** `rd_shadow_tile` and `rd_shadow_tile_selftest` (`port/render/test/rd_shadow_tile_test.c`)
+and `rd_shadow_tile_ab` (the fixtures of `test/fixtures/lists/shadow_tile.txt`, each one's live
+texels under the bounds its own alpha boxes give) ([TESTING_PROGRAMS_RENDER.md](TESTING_PROGRAMS_RENDER.md)).
+
+### A shadow window with no volume
+
+Many title pictures hold a shadow window with no volume in it: the corpus boot frames rd-00400 and
+rd-00600 (the castle behind the title menu) reset the stencil at list 3 command 6 and resolve it at
+command 13 with no `RDC_SHADOW_STRIP` between, then draw the three levels and the three composites
+as every frame does. Drawn as they are, the resolve ends SCENE's pass (the count's own pass, the
+three levels' passes) and the first composite begins it again: SCENE's colour, depth and stencil
+stored and loaded again for nothing. On rd-00400 at the phone's recipe (lavapipe,
+`ICO_VK_FAKE_LIMITS=moltenvk ICO_RD_LATE_PASS=1`, Enhanced 2364x1080), the chain left out by
+`--nop` measured 4 passes and about 44 MB a picture (colour 9.7 MB stored and 10.1 loaded, depth
+and stencil 12.2 each way), every pass-dump target byte for byte
+(`build-host/tmp/v0115/design/OPENING_SPLIT.md` A.4). `port/render/rd_no_volume.c` keeps the pass
+open there:
+
+- **The scan** (the store plan's walk, after the box's roles: `rd__no_volume_scan_cmd`): one window
+  in the replay (a reset, then its resolve on the same count target and depth, nothing but state
+  between), no strip in it; after the resolve, the levels and composites
+  [the box's scan](WORK_BUFFERS.md#the-shadows-over-the-volumes-box) named (a level also writing no
+  depth), and nothing else touching the count target or a level: no draw on them, no texture of
+  them (a screen-prim command's with TME on, any other command's on or off), no clear, copy, exact
+  blend, upscale point or post record naming them, no second window, no command the scan does not
+  know; neither the count target nor a level cleared earlier in the replay (a clear still pending
+  would land after the zero).
+- **The walk.** The reset and the resolve record nothing and end nothing (`rd__no_volume_reset`,
+  `rd__no_volume_resolve`); the levels and composites are not drawn (`rd__no_volume_skip`, at the
+  top of `doScreen`: the open screen run flushed, the write serial moved as a drawn one's may); the
+  count (the reduced count above 1x, the count target at 1x) and each level's target are owed a
+  zero, recorded at the next end of a pass the walk makes anyway (`rd__no_volume_flush` from
+  `endPass`, after the pending clears, and at the walk's end) as a pass with a CLEAR (0, 0, 0, 0)
+  load and no draw, each target then put in SHADER_READ. The volumes' merge does not arm a pass
+  for such a window ([WORK_BUFFERS.md](WORK_BUFFERS.md#the-shadow-volumes-in-the-scenes-pass): its
+  stencil store, 2.4 MB at 2364x1080, reads nothing). Lists 0 to 6 then draw in one pass on SCENE
+  where they drew in two.
+
+**The same bytes.** With no strip the stencil's bits 0-5 are what the reset left, 0, so every count
+texel is (0, 0, 0, 0) on every path (the one draw's average, the boxed one draw's CLEAR, the seven
+draws' CLEAR with no texel passing, the reduction of a zero count). A level in the box's form (one
+sprite over its whole target at scale 1, no blend, FBA 0, every channel, MODULATE or DECAL with TCC
+1, no alpha test, DATE or Z test, no depth written) whose taps all read 0 writes (0, 0, 0, 0)
+everywhere: (0 x Cv) >> 7, or 0. A composite (an alpha test failing on As 0, AFAIL KEEP, no Z
+write) whose taps read alpha 0 writes nothing. So the chain's whole effect is those targets at 0
+and SCENE untouched, which the zero clears write; nothing reads those targets between the resolve
+and the clears (the scan), so every reader after (the pass dumps, the readbacks, the next replay)
+sees the same bytes. Skipping the reset leaves the stencil's bits 0-5 unwritten; only a window's
+volumes and resolve read them, and the next window resets them first (DATE's set-ups and AA1's
+pairs write bit 6 alone). The next DATE draw takes its own snapshot or set-up (the write serial
+moved), from the alpha as it is. No `DIVERGENCES.md` row.
+
+**Where.** Off by default on every device (`RD_NO_VOLUME_DEFAULT` 0 in
+`port/render/rd_no_volume.c`): with it on, two release candidates on the owner's PowerVR phone
+flickered black over the right part of the picture at the title and on the pause menu, the
+pictures where such windows are taken; the cause is not found (lavapipe gives the same bytes on the
+pause menu's F12 frame, also under `ICO_RD_STORE_POISON=1`, the stencil outside the window and the
+validation layer's synchronisation checks). With the constant 1 it is on for the PowerVR class and
+MoltenVK under Vulkan, off on the Mali and Adreno classes (issues 123, 179, 211), Direct3D, OpenGL
+and the desktop. Not taken where a composite's DATE would take the R8
+snapshot or the shader's read (DATE's passes without the depth,
+[WORK_BUFFERS.md](WORK_BUFFERS.md#dates-passes-without-the-depth), predict their runs from the
+composites), under MSAA, the tool's pass window, the exact blend or GS state as shader data.
+`ICO_RD_NO_VOLUME=0|1`: the tests' switch ([TESTING.md](TESTING.md)); no setting. No start-up
+self-test: it adds no kind of GPU work (a colour pass with a CLEAR load and no draw is what
+`flushClear` and the boxed empty count record on every device today) and otherwise begins fewer
+passes of the kinds already drawn.
+
+**The lines.** Once a renderer: `rd: shadows: no volume: on|off (<why>): a shadow window without a
+volume keeps SCENE's pass open, ...`; once: `rd: shadows: no volume: frame F, the window at commands
+R..S has no volume: its count (the reduced count) and levels owed as zero clears, SCENE's pass kept
+open (the same bytes; reported once)`; a window not taken (other than off or the class):
+`rd: shadows: no volume: a window not taken in frame F (reset at command N): <why> (...)`, the first
+8 then every 100th. The 10 s `window: per replay` line: `; no volume: K windows a replay without a
+volume kept SCENE's pass open (O with it open, up to M MB not stored and loaded again), V with
+volumes, R not taken (<why> n)` (M: the open pass's colour and depth and stencil at 4 + 5 bytes a
+texel each way, a bound). `rd_replay_tool --stats`: `stats: no volume on|off: K kept (O with the
+pass open over WxH, depth yes|no; C zero clears, L level texels; D draws not drawn), V with
+volumes, R not taken (...)`.
+
+**The tests.** `rd_no_volume` (`port/render/test/rd_no_volume_test.c`, the scan, the gate and the
+lines on the CPU) and `rd_no_volume_ab` / `_gl` (the fixtures of `lists/no_volume.txt`)
+([TESTING_PROGRAMS_RENDER.md](TESTING_PROGRAMS_RENDER.md)).
+
+**The break mode.** The same window, taken with SCENE's pass ended where the count ends
+it today: the reset is recorded as before (the merged pass's stencil store armed as before), and
+the resolve records no count but ends the open pass (`rd__replay_end_pass`, as
+`rd__shadow_one_draw` does: the reset's pending stencil clear recorded as before) and closes the
+shadow window as `doShadowResolve` does after the count; the levels and composites are skipped
+and the zeros owed as in the open mode. So the only difference from the window drawn is the count's
+pass, the three levels' passes, the composites' DATE set-ups (on the Pixel 3 set-ups of two draws
+and two by-region barriers each over the whole area) not drawn and the owed zero clears drawn
+(DATEPROOF Q3, `build-host/tmp/v0116/design/DATEPROOF.md`); list 3's pass on SCENE is begun by its
+next draw on SCENE (the fog), with LOAD, as the first composite began it. A target that holds zero
+already is owed no clear: the zero clears the replay before recorded (and the targets it found
+holding zero) are kept with their textures; the next replay alone (the replay counter one more: no
+own frame or other replay between) reads them, and only for a target no command before its window's
+resolve names (the scan marks it), whose texture is the same and still in SHADER_READ as the
+clear's pass left it. So on the title, picture after picture, the four small clears are not drawn
+either. `RD_NO_VOLUME_BREAK_DEFAULT` 1 in `port/render/rd_no_volume.c`: two phone release
+candidates showed the owner's PowerVR D-Series DXT-48-1536's title and pause menu clean with it (the
+open mode, its relative, had flickered there). Its classes are the open mode's (the PowerVR class
+and MoltenVK under Vulkan, DATE through the stencil bit), but the default reaches only that device
+(`rd__vu_class_measured`); the rest of the PowerVR class and MoltenVK never ran it and stay off by
+default, the ledger's row saying so. It goes before the open mode. `ICO_RD_NO_VOLUME_BREAK=0|1` and `ICO_RD_NO_VOLUME_POISON=1` (the owed clears written
+magenta, none left out: a reader of a target the walk does not draw shows) are the tests'
+switches ([TESTING.md](TESTING.md)). Its lines: once a renderer `rd: shadows: no volume: on with
+SCENE's pass ended at the resolve (ICO_RD_NO_VOLUME_BREAK=1 | the PowerVR D-Series DXT-48-1536,
+RD_NO_VOLUME_BREAK_DEFAULT 1): ...`; once `rd: shadows: no volume: frame F, the window at commands
+R..S has no volume: SCENE's pass ended at the resolve, its count (the reduced count) and levels
+owed as zero clears or holding zero already (...)`; the 10 s clause above ends `, B with SCENE's
+pass ended at the resolve (C zero clears, H targets holding zero already)`; `--stats` adds `; break
+on|off: B taken (C zero clears, H targets holding zero)` to the no-volume line. The test:
+`rd_no_volume_break_ab` (`port/render/test/rd_shadow_cuts_ab.cmake`).
+
+### One DATE set-up for the shadow composites
+
+Shadow.c composites its three levels into SCENE with three sprites under TEST 0x3400D (DATE, DATM 0,
+ATST GREATER 0, AFAIL KEEP), FBA 0, vertex alpha `shadowBlend[3]`, `[2]`, `[1]` for SHADOW2, 1, 0.
+Each wrote alpha, so the replay took a DATE set-up for each: on the snapshot path (no in-pass read:
+the Mali-G52, Qualcomm's driver, the PowerVR B class, Direct3D 11, OpenGL) an R8 snapshot that ends
+SCENE's pass and begins it again, three a picture; on the stencil path (the Pixel, the Adreno 710)
+three clear-and-set set-ups. `port/render/rd_date_one.c` keeps the first for the next composite
+when the one between cannot set the alpha's top bit (DATEPROOF Q1,
+`build-host/tmp/v0116/design/DATEPROOF.md`):
+
+- **The bound** (`rd_date_one.h`). A composite in the box scan's form
+  ([WORK_BUFFERS.md](WORK_BUFFERS.md#the-shadows-over-the-volumes-box)) with DATM 0 and FBA 0 draws
+  only where the bit is 0 and stores As, never reading the destination's alpha on any blend path
+  (dual source: alpha factors ONE/ZERO; the two-pass fallback's colour pass RGB only, its alpha
+  pass As with blending off). As is at most the level's largest alpha times the composite's largest
+  vertex alpha, >> 7 (rounded up here), under MODULATE with TCC 1, the level's under DECAL; a
+  level's alpha is at most its source's times its vertex alpha the same way (the filters are
+  convex), the count's 0x80. Under 0x80 the bit is the same at every texel after the composite, so a
+  set-up taken again would hold the bits of the one before. The retail discs' stage data
+  (`shadowDepth` 45 to 80, `shadowBlend` up to 128, every `.ssb` of every disc) keep the written
+  alpha at 56 or under; the stage-setting debug menu reaches 128 x 128, exactly 0x80. The scan
+  computes the bound a picture from the chain's own vertex alphas (`rd__date_one_scan_cmd`, from
+  `rd_shadow_box.c`'s scan in the store plan's walk) and marks a composite that follows one in the
+  form on its target, nothing but state between, every composite before it under the bound.
+- **The walk.** `rd__date_snapshot` and `rd__replay_date_take` ask `rd__date_one_held` which serial
+  the held set-up stands for: for a marked composite whose predecessor took its set-up this replay
+  (the same target and path, the stencil's in the same pass), no write since but the predecessor's
+  own draw, the current one, so `rd__date_retake` reuses it where its area holds the draw's (an area
+  not held still takes the whole target again). Not under MSAA or the exact blend, nor after a
+  level or composite replayed with a brighter vertex than the scan read (`rd__shadow_box_screen`
+  checks). On the snapshot path the DATE cut's runs do not end at a shared composite
+  (`RdDateCutCmd.shared`), so composites 1 and 2 draw in the pass list 4 uses, with the depth, by
+  the screen key composite 3 uses (in the start-up set).
+- **What it saves.** The snapshot path: 2 R8 passes and 2 breaks of SCENE's pass a picture with
+  volumes (at the Mali's 912x512 about 12.5 MiB of attachment traffic). The stencil path: 2 of the
+  3 set-ups (4 draws, 4 by-region barriers).
+
+**The empty composites.** A composite whose level's box this replay is empty (no volume, or none in
+its reach: `rd__shadow_box_empty_skip`, at the top of `doScreen` through `rd__no_volume_skip`)
+draws nothing; it was drawn with its DATE set-up and then an empty scissor. It is skipped with the
+set-up: the open run flushed, the write serial moved (the next DATE draw takes its own set-up from
+the alpha as it is, as after the drawn one), a share it held passed on (`rd__date_one_passed`).
+Nothing reads what the skipped set-up would have left: the R8 snapshot is read only at a DATE draw's
+own texels inside the area its retake copies, the stencil's bit 6 only by DATE draws inside their
+own set-up's area (the count masks it off, the volumes' INCR and DECR write bits 0-5 alone), and a
+pass on SCENE not begun is begun by the next draw on SCENE with LOAD. Where no window has a volume
+this is 3 R8 passes and up to 3 empty SCENE passes a picture on the snapshot path (6 on the Mali's
+v746) and the 3 whole-area set-ups on the Pixel; on every device and backend, the classes the
+no-volume window refuses included.
+
+**Where.** Both on by default on every device and backend (`RD_DATE_ONE_DEFAULT` 1,
+`RD_EMPTY_SKIP_DEFAULT` 1): fewer passes and draws of the kinds drawn today, no new pipeline or pass
+kind, so no start-up self-test. `ICO_RD_DATE_ONE=0|1|force` and `ICO_RD_EMPTY_SKIP=0|1` are the
+tests' switches ([TESTING.md](TESTING.md)). Nothing differs in the picture: no `DIVERGENCES.md` row.
+
+**The lines.** Once a renderer: `rd: DATE one set-up: on: the shadow composites share one DATE
+snapshot or stencil set-up where none can set the alpha's top bit (...); the same picture` (or `off
+(ICO_RD_DATE_ONE=0)`) and `rd: shadows: empty composites: on: a composite whose level the volumes'
+box leaves empty draws nothing and is skipped with its DATE snapshot or stencil set-up (the same
+picture)`; once each: `rd: DATE one set-up: the first shared (frame F, command C with command P's
+snapshot|stencil set-up): ...` and `rd: shadows: empty composites: the first skipped (command C,
+...)`; the first 8 then every 100th: `rd: DATE one set-up: a composite could write alpha X (level
+alpha up to L x vertex alpha A, frame F, command C): the next one's set-up retaken as before` and
+`rd: DATE one set-up: command C retakes its set-up as before: <why>`. The 10 s `window: per replay`
+line: `; DATE one set-up: S composites a replay shared the set-up before them, K kept their own`
+after the DATE clause and `; empty composites: K a replay skipped (D with their DATE set-up)` after
+the shadow box's (each only when it counted anything). `rd_replay_tool --stats` (the no-volume
+line): `; empty composites on|off: K skipped (D with DATE); DATE one set-up on|off|force: S shared
+(T texels), K kept their own`.
+
+**The tests.** `rd_date_one` (`port/render/test/rd_date_one_test.c`: the bound and the rule on the
+CPU, then frames in the shadow's shape on lavapipe), `rd_date_one_ab`, `rd_empty_skip_ab` and their
+`_gl` twins (`port/render/test/rd_shadow_cuts_ab.cmake`, the fixtures of `lists/shadow_cuts.txt`)
+([TESTING_PROGRAMS_RENDER.md](TESTING_PROGRAMS_RENDER.md)).
+
+### The shadow volumes' stencil-only entry
+
+On by default (`RD_VOLUME_FS_DEFAULT` 1 in `port/render/rd_volume_fs.h`) on every class under Vulkan whose start-up self-test passes, in single-sampled passes; the same bytes.
+
+**What it changes.** The volumes (`RDC_SHADOW_STRIP`, `doShadowStripIn` in `port/render/rd_replay.c`) write the stencil alone: INCR_WRAP or DECR_WRAP on both faces where the depth test passes, write mask 0x3F, colour mask 0, no depth write, no blending (`rd__shadow_volume_key` and `shadowStencil` in `port/render/rd_pipeline.c`). Their pipeline was `sprite_world_vs` with `sprite_ps`, the screen prims' general fragment entry (`port/shaders/sprite.hlsl`): two dual-source outputs, the texture, fold and TEXA paths and two discards (DATE's and the alpha test's). The volume's DrawCB is zero, so none of those paths is taken, but all of them are in the module, and a fragment shader that can discard keeps the depth and stencil tests and the stencil write after the shader. On a PowerVR that makes every volume a punch-through object inside SCENE's pass: each covered fragment is shaded, and its stencil written only after the shader answers. The volumes now draw with `date_clear_ps` (void, no output, no read, no discard; DATE's stencil set-up already draws it under colour mask 0): the key's fragment entry `RD_FS_DATE_CLEAR` in place of `RD_FS_SPRITE`, every other field the same (`rd__volume_fs_twin`). No new module and no new shader build.
+
+**What it cost.** The rc bench on the PowerVR phone (a Pixel 10 Pro Fold, `bench-20261113-065800.csv`) left the volumes' draws out of two kept frames of the opening: 8 draws cost 5.50 ms of an 18.76 ms lamps picture, 20 draws 7.19 ms of a 22.46 ms dark picture, the largest single part found. Those figures hold the composites too: without a volume the box is empty and the composites are skipped with their DATE set-up, so the volumes' own share is about 1.2 and 2.3 ms ([The shadow composites by their own entry](#the-shadow-composites-by-their-own-entry)). On lavapipe the same 10 draws of the opening's v2278 frame are 398 of the 552 ms of list 0's SCENE pass (the Pixel's recipe, `--stats --pass-times`: 551.69 ms with them, 153.73 ms with `--nop 3:15-31`; llvmpipe also runs the depth and stencil tests after a shader that can discard). How much of the 5.5 to 7.2 ms the stencil-only entry takes back is not measured: what stays is the rasterizing and the stencil operations themselves.
+
+**Exact.** The vertex entry, its positions and the rasterizer state are unchanged, so the fragments covered are the same; the stencil operation, its masks and the depth test are fixed-function state, unchanged; `sprite_ps` writes nothing a volume keeps and never discards one. By the Vulkan rules (early fragment tests allowed exactly where the shader neither discards nor writes depth, with the same results) the stencil after the volumes is the same bit for bit. The check on the device: a start-up self-test (`rd__volume_fs_selftest`, from `rd_fog_selftest`'s first run after the shadow count's own self-test) builds the shadow count's self-test frame (`rd_shadow_selftest.c`: 70 bands of volume rectangles at sub-pixel edges, every count 0 to 63 of both signs) twice, under Z ALWAYS and under the game's Z GEQUAL (SCENE's depth cleared to GS Z 0x8000, the odd bands at Z 0 behind it, the even bands at 0x10000), replays each with the volumes by `sprite_ps` and by `date_clear_ps`, reads the count back at its GS size and compares every byte. It passes when both frames' counts are the same both ways, every volume draw of the second replays took `date_clear_ps` and none of the first, and the Z GEQUAL frame's count differs from the Z ALWAYS frame's (the depth test acted). Anything else keeps `sprite_ps` for the run. The targets still owed their first clear when it starts are owed it again when it ends (its first replay took that clear for them, and each still holds the zero it wrote), so the next replay, the game's first frame or the replay tool's dump, begins and stores the same passes with the self-test as without it. The count is the stencil's only reader (the resolve, by the one draw or the seven draws), so its bytes are the volumes' whole effect.
+
+**Where.** Vulkan alone (OpenGL and Direct3D keep `sprite_ps`, said once); a multisampled pass (the MSAA epoch) keeps `sprite_ps`, as its count is not in the self-test; the volume draw keeps `sprite_ps` too when the twin's pipeline cannot be made. The twins of the four volume keys (INCR and DECR under Z GEQUAL and Z ALWAYS) are in the start-up set beside `sprite_ps`'s (`rd__volume_fs_keys`), so no volume draw makes a pipeline on first use. The volumes' own pass, the shadow window, the count, the levels and the composites are unchanged.
+
+**Switch and lines.** The tests' `ICO_RD_VOLUME_FS=0` (off), `1` (on whatever the build's default; the backend, the self-test and the pass's samples still decide) and `sabotage` (the self-test's own `date_clear_ps` replays draw each increment as a decrement, so it must refuse). `rd_replay_tool` runs the self-test only where `ICO_RD_VOLUME_FS` is set (its replays are then left out of every other test's run); the game runs it at every start. No setting. Lines:
+
+```
+rd: shadow volumes: the stencil-only entry (date_clear_ps in place of sprite_ps: no colour output, no discard): on (the build's default; self-test passed: the count the same at 379904 texels of 848x448 under Z ALWAYS and Z GEQUAL, 2 and 2 volume draws each way)
+rd: shadow volumes: the stencil-only entry (self-test: the count the same at 379904 texels of 848x448 at 2366x1080 texels under Z ALWAYS and Z GEQUAL, step 4; the Z GEQUAL frame differs from the Z ALWAYS one at N texels): the same bytes
+rd: shadow volumes: self-test failed: the Z GEQUAL frame's count differs at N of M texels, the first (x,y): RRGGBBAA for RRGGBBAA: sprite_ps draws the volumes
+rd: shadow volumes: drawn by date_clear_ps (no output, no discard: the stencil written in the depth and stencil tests, before any shading), frame F (reported once)
+rd: shadow volumes: a volume draw kept sprite_ps: <why> (frame F, S samples; reported once for this reason)
+window: shadow volumes: V volume draws by the stencil-only entry of W, K kept on sprite_ps (counts by why)
+```
+
+`rd_replay_tool --stats`: `stats: volume fs on|off (self-test <words>): V volume draws by date_clear_ps of W; the run: ...`. The attempt ledger's row `the shadow volumes by the stencil-only entry` counts the volume draws by it and those kept on `sprite_ps` where it is offered, in each 10 s block ([ANDROID_DIAGNOSTICS.md](ANDROID_DIAGNOSTICS_LEDGERS.md#the-attempt-ledger)). The rc bench has a variant for it each way (`the shadow volumes by sprite_ps (not the stencil-only entry)`), and one for the glow's paste by its own entry (`the glow paste by fx_frame_ps (not its own entry)`). Tests: `rd_volume_fs`, `rd_volume_fs_selftest`, `rd_volume_fs_selftest_sabotage`, `rd_volume_fs_ab`, `rd_volume_fs_sabotage` ([TESTING_PROGRAMS_RENDER.md](TESTING_PROGRAMS_RENDER.md)).
+
+### The shadow composites by their own entry
+
+On by default (`RD_COMP_SPEC_DEFAULT` 1 in `port/render/rd_comp_spec.h`) on every Vulkan class with the dual-source fixed-function blend whose start-up self-test passes, in single-sampled passes; the same bytes.
+
+**What the volumes' cost was.** The bench's second phone run (`bench-20261113-081245.csv`, the stencil-only entry above on) left the volumes' draws out of a lamps picture with a volume and saved 4.93 ms of 18.00, out of a dark picture 6.36 of 21.11, while leaving the composites out saved 3.73 and 4.06 ms and leaving the whole shadow window out (reset, volumes, count, levels) only 0.52 and 1.19. The draw counts say why: without the volumes the lamps picture drew 8 draws fewer (221 to 213: its strip's two, the count's one draw over an empty box, the DATE set-up's two and the three composites), the dark one 20 (seven strips' fourteen and the same six). With no volume the count's box is empty (`rd_shadow_box.c`: the box is the strips' own vertices), every level's box with it, and the empty composites are skipped with their DATE set-up (`rd__shadow_box_empty_skip`). So the volumes' knock-out measured the composites too, and the volumes themselves cost about 4.93 - 3.73 = 1.2 ms and 6.36 - 4.06 = 2.3 ms there (one strip and seven). The window's knock-out leaves the composites drawn (their levels hold an earlier replay's shadow, the box is not held, so they are drawn whole) and joins list 3's work to list 0's pass. The composites and their DATE set-up are the volume-dependent cost: five full-picture draws a picture with a volume.
+
+**What each draw shades** (the phone's shape; the replay tool at the Pixel's recipe on v2278, `--stats`: `shadow box on: 1 counts and 3 composites over the volumes' box (... 7659360 of 7659360 texels)`):
+
+| draw | area | each fragment |
+| --- | --- | --- |
+| the DATE set-up, `date_clear_ps` | the take, the whole of SCENE (2364x1080 texels) | nothing shaded: the stencil's bit 6 cleared |
+| the DATE set-up, `date_stencil_ps` | the same | a local read of SCENE's alpha, a discard where its top bit is clear, bit 6 written where it is set; a local-read barrier before it and after it |
+| each composite (`sprite_ps`, three) | the volumes' box: the whole of SCENE in every volume picture measured | the bilinear tap of SHADOW2, SHADOW1 or SHADOW0 (106x64 to 424x256) magnified to SCENE, MODULATE with TCC, ATST GREATER 0 (a discard where the level is 0), the LERP As in the dual-source blend, under the stencil's test of bit 6 |
+| the count (`shadow_count_ps`, one) | the volumes' box at the GS size, 848x448 | a box of the stencil over 2.79 x 2.41 texels, four texels a gather |
+| the levels (`sprite_ps`, three) | 424x256, 212x128, 106x64 | the composite's sampling without blend or alpha test |
+
+Without a volume nothing of the composites is drawn (skipped). With the box off and no volume the composites are drawn over the whole picture and every fragment is discarded (the levels hold zero); the bench's rows below measure that.
+
+**The bench's rows for the split.** Knock-outs: `without the shadow count's draw (the levels read the count as it was)`, `without the shadow level SHADOW0` (1, 2), `without the shadow composite of SHADOW2 (the first)` (SHADOW1 the second, SHADOW0 the third: the one after takes DATE's shared set-up). Switches: `without DATE's stencil set-ups (each DATE draw tests the bit as it was)` (`rd__date_setup_bench_skip`, read by `rd__replay_date_take`), `the shadow box off (the count and the composites drawn whole)` (`rd__shadow_box_bench_force`), `without the shadow volumes' draws, the composites drawn whole (the box off)` (the composites over levels of zeros: their cost with every fragment discarded), and `the shadow composites by sprite_ps (not their own entry)`. None is in the parts' sum.
+
+**What it changes.** The composites and the levels drew with `sprite_ps`, the screen prims' general entry (9942 SPIR-V words, 2377 instructions, 378 blocks, three loops: the above-1x kernels, the fades fold, the GS levels, DATE by the snapshot), of which they take one path. `sprite_comp_ps` (`port/shaders/sprite.hlsl`, built with `ICO_SPRITE_COMP=1`; 1014 words, 246 instructions, 31 blocks, no loop) is that path alone: the vertex colour rounded, the sampler's texel (what `gs_sample` returns without `DF_GS_LOD` and `DF_NEAREST`), MODULATE with TCC (`gs_texture_function` with the flags `DF_TEXTURED | DF_TCC_RGBA` as constants), the alpha test from the DrawCB (a real one: its words stay run-time), the two outputs (`gs_dual_out`: the LERP needs the factor As / 128 in the second). The draw's pipeline is its general key's with the fragment entry `RD_FS_SPRITE_COMP` in place of `RD_FS_SPRITE` (`rd__comp_spec_twin`), so the blend, the depth and stencil tests and the masks are the same state.
+
+**Exact.** A draw takes the entry only when its key is of the composite's form (a LERP, no Z write, the alpha test left out of the key as the planner leaves it: its words are the DrawCB's, colour mask RGBA, the stencil off or DATE's test of the bit) or the level's (no blend, no alpha test, no depth, no stencil), sprite_ps's dual-source plain build of a triangle list into RGBA8, single-sampled, without the exact blend (`rd_comp_spec_key_form`), and its final DrawCB holds, of the flags `sprite_ps` reads, exactly TEXTURED and TCC and an RGBA32 texel (`rd_comp_spec_flags_why`; a UI sprite of the same key under DECAL, DATE by the snapshot, above 1x, the GS levels, nearest, FBA, PABE or the FIX factor keeps `sprite_ps`). On that DrawCB `sprite_ps` runs the same statements in the same order. The check on the device: a start-up self-test (`rd__comp_spec_selftest`, from `rd_fog_selftest`'s first run after the volumes' own) draws a frame on SCENE at its real size and scale: a random destination (DECAL, nearest, both ways by `sprite_ps`), then in bands the composites' form from random sources with a third of their alphas 0 (the game's vertex colour and a 106x64 source from a quarter texel, another vertex colour clamped, AREF 40 from a 424x256 source, the same under DATE) and the levels' form, by `sprite_ps` and by `sprite_comp_ps`, reads SCENE back and compares every byte. It passes when every byte is the same, the second replay took the entry for every draw the gate took (at least the four bands without DATE) and the first none. Anything else keeps `sprite_ps` for the run.
+
+**Where.** Vulkan alone (OpenGL and Direct3D keep `sprite_ps`, said once); not without the dual-source blend (the two-pass blend: the Mali reporter's class, said once) or with the exact blend; a multisampled pass keeps `sprite_ps`. How: `rd_pixel_plan.c` `rd__fill_draw_cb_extra` notes a draw the gate takes (the DrawCB is final there, `rd__comp_spec_note`); `rd_pipeline.c` `rd__set_pipeline` binds the twin's pipeline when the screen run that command opened is drawn (`rd__comp_spec_turn`: the run's owner, the same key); the twins of every enumerated key of the two forms are in the start-up set (`rd__comp_spec_keys`). A command drawn outside a run of its own keeps `sprite_ps` (none in the shadow chain).
+
+**What it may save.** Not measured on a device. The paste's own entry saved 0.94 and 1.36 ms on its one full-picture draw (the bench's `the glow paste by fx_frame_ps (not its own entry)` row) for a module 5.2 times smaller; this one is 9.8 times smaller for three full-picture draws, so the composites' 3.7 to 4.1 ms (with the DATE set-up's share, not split yet) is the ceiling and up to about 1 ms a composite the hope. The levels draw 0.14 M texels in all: about nothing. The bench's row `the shadow composites by sprite_ps (not their own entry)` says it.
+
+**Not built, with their ceilings.** The DATE set-up's draws are already their own entries (`date_clear_ps` 43 words, `date_stencil_ps` a load and a discard); the count's is `shadow_count_ps`, its own entry too: no specialisation left. The DATE set-up's two full-picture draws and two barriers could go if each composite read SCENE's alpha by local read and discarded where its top bit is set (exact while no composite can set that bit, the DATE one set-up's rule): a new kind of work in the composites (an input attachment in a blended draw), so a proposal; its ceiling is the bench's `without DATE's stencil set-ups` row.
+
+**Switch and lines.** The tests' `ICO_RD_COMP_SPEC=0` (off), `1` (on whatever the build's default; the module, the device's blend and the self-test still decide) and `sabotage` (the self-test's second arm draws one band with its vertex alpha one lower, so it must refuse). `rd_replay_tool` runs the self-test only where `ICO_RD_COMP_SPEC` is set; the game runs it at every start. No setting. Lines:
+
+```
+rd: composites: the shadow composites and levels by their own entry (sprite_comp_ps, sprite_ps's path for them alone): on (the build's default; self-test passed: SCENE the same at 2553120 texels of 2364x1080, 5 draws of the two forms by each entry)
+rd: composites: the shadow composites and levels by their own entry (self-test: SCENE the same at 2553120 texels, 848x448 at 2364x1080 texels, 5 composite and level draws each way): the same bytes
+rd: composites: self-test failed: SCENE differs at N of M texels, the first (x,y): RRGGBBAA for RRGGBBAA: sprite_ps draws the shadow composites and levels
+rd: composites: a shadow composite or level drawn by sprite_comp_ps, frame F (command C; reported once)
+rd: composites: a shadow composite or level kept sprite_ps: <why> (frame F, command C; reported once for this reason)
+window: composites: T shadow composites and levels by sprite_comp_ps of S, K kept on sprite_ps (counts by why)
+```
+
+`rd_replay_tool --stats`: `stats: comp spec on|off (self-test <words>): T composites and levels by sprite_comp_ps of S; the run: ...`. The attempt ledger's row `the shadow composites by their own entry` counts the draws by it and those kept on `sprite_ps` where it is offered ([ANDROID_DIAGNOSTICS.md](ANDROID_DIAGNOSTICS_LEDGERS.md#the-attempt-ledger)). Tests: `rd_comp_spec`, `rd_comp_spec_selftest`, `rd_comp_spec_selftest_sabotage`, `rd_comp_spec_ab`, `rd_comp_spec_sabotage` ([TESTING_PROGRAMS_RENDER.md](TESTING_PROGRAMS_RENDER.md)).
 
 ## Water and render-to-texture blocks
 
@@ -600,27 +2014,34 @@ out after `tex_ResetVramPri`, TBP 0x2800 in their lists, which the register deco
 The records live per frame slot and are cleared when the slot is reused
 (`port/render/rd_water.c` (`rd__water_frame_reset`)).
 
-**Water reflections** (`[video] effect_water_sharp`, `RdSettings.waterSharp`, issue 97). A block
+**The blocks' scale** (issue 97; the retired Water reflections row). A block
 the game sizes as the native frame (the dark volume's, `gsFrame.w x ScreenHeight`) is scene-class
-and takes the scene's scale whatever the option. Every other block, the puddle's and the pool's
-reflection (`bw x 256`, `ico2/sugipon/src/puddle.c` (`puddleHostBlockBegin`), `pool.c`
-(`poolHostBlockBegin`)) and the queen barrier's copy of the frame (`gsFrame.w x 256`,
-`ico2/ito/src/queen_barrier_disp.c` (`barrierHostBlock`)), is drawn at its own GS size under
-Original, the PS2's texels and the default, so above 1x the reflection is softer than the scene
-around it. Under Sharp such a block takes the scene's scale, both ways as SCENE has it
-(`sceneSx`, `sceneSy`) (`port/render/rd_core.c` (`rd__target_scale_of`)). Its depth buffer
-is made at the same texture size, the clears and scissors are in GS pixels through the target's
-`sx`/`sy` as on any scaled target, and what samples it (the reflecting grid's GS-texel STs, pool.c's
-screen STs normalised by the screen size, the barrier mesh's UVs, the copy sprites) addresses it
-in GS texels, so only the texel count changes. The queen barrier's copy follows the same rule: it
-is the frame seen through the barrier, as soft as the reflections under Original for the same
-reason. A block at the scene's scale that does not fit comes down with the scene
-(`rd__note_target_pressure`). Off, `rd__target_scale_of` takes the branch it always did, so the
-picture is byte for byte the one before the option. A change applies to the blocks made from the
-next frame (they are per-frame temporaries) and logs `water reflections: sharp|original`; a
-Sharp start logs the line once at `rd_init`. Dumps carry the mark in the temporary target's keep
-word (bit 1); the replay tool's `--water-sharp` draws them at the scene's scale, and without it they
-replay at their GS size (`port/render/rd_dump.c`, header comment).
+and takes the scene's scale. Every other block, the puddle's and the pool's reflection (`bw x 256`,
+`ico2/sugipon/src/puddle.c` (`puddleHostBlockBegin`), `pool.c` (`poolHostBlockBegin`)) and the
+queen barrier's copy of the frame (`gsFrame.w x 256`, `ico2/ito/src/queen_barrier_disp.c`
+(`barrierHostBlock`)), takes the scene's scale too, in every preset and at every aspect, both ways
+as SCENE has it (`sceneSx`, `sceneSy`) (`port/render/rd_core.c` (`rd__target_scale_of`)): drawn at
+its own GS size, the PS2's texels, the reflection above 1x was softer than the scene around it.
+Its depth buffer is made at the same texture size, the clears and scissors are in GS pixels
+through the target's `sx`/`sy` as on any scaled target, and what samples it (the reflecting
+grid's GS-texel STs, pool.c's screen STs normalised by the screen size, the barrier mesh's UVs,
+the copy sprites) addresses it in GS texels, so only the texel count changes. The queen barrier's
+copy follows the same rule: it is the frame seen through the barrier. At scale 1 the scene's scale
+is the GS size, so the 1x picture is the PS2-size one byte for byte. This is the retired row's Sharp, the
+same branch of `rd__target_scale_of`; its Original (the GS size at every scale) is
+`ICO_RD_WATER_SCALE=0`, the tests' switch ([TESTING.md](TESTING.md)), read at `rd_init`
+(`g_rd.waterPs2`). `rd_init` logs `water reflections: the blocks at the scene's scale (at 1x their
+GS size)` (or `water reflections: the blocks at their GS size, the PS2's (ICO_RD_WATER_SCALE=0,
+the tests' switch)`). A block at the scene's scale that does not fit comes down with the scene
+(`rd__note_target_pressure`). Cost: at the scene's scale a block is `tw x th` RGBA8 plus its
+`D32F_S8` depth where it has one (the puddle's and the pool's; the barrier's copy has none), drawn only in
+the rooms with a puddle, a pool, the mill's water or the queen's barrier; on a tile-based phone the
+scene cap ([DEVICE_TABLE.md](DEVICE_TABLE.md), 4096) bounds the scene's scale and with it every
+block. Dumps carry the mark in the temporary target's keep word (bit 1), not the option a dump
+was made with: the replay tool draws marked blocks at the scene's scale as the game does now, and
+`--water-ps2` (`ICO_RD_WATER_SCALE=0`) replays a dump made under the row's Original as it was
+drawn (`--water-sharp` is accepted and is the default); a dump from before the mark replays at the
+GS size either way (`port/render/rd_dump.c`, header comment).
 
 **What the log says about the water** (issue 106). The puddles are four steps in list 4
 (`ico2/sugipon/src/puddle.c` (`PuddleDL`)): `baseSetup` clears SCENE's alpha with a full-frame
@@ -655,7 +2076,7 @@ checks the line on the puddle's frame and the count at 2x under Original (the co
 The MSAA part (or `no MSAA: the last replay's DATE snapshots of SCENE S, of other targets O`)
 tests the first of issue 106's two candidates: with MSAA a DATE draw on SCENE reads the alpha bit
 through the snapshot of SCENE as the epoch resolved it, the colour the mean of the samples, so an
-edge pixel's bit can differ from what each sample drew (`rd_replay.c` `dateSnapshot`, `rd_core.c`
+edge pixel's bit can differ from what each sample drew (`rd_date_cut.c` `rd__date_snapshot`, `rd_core.c`
 `rd__date_msaa_last`). `P of them DATE draws` tests the second: a texture pack's picture sampled
 by the puddle's mask readers themselves.
 
@@ -827,7 +2248,7 @@ Under the Enhanced preset, with SCENE's scale above 1 on either axis, SCENE's ow
 (`doFog` calls `rd__crack_fill`) and the walk draws it after lists 4-6, from the start of list 7
 on where `rd__crack_fill_place` puts it (`rd__crack_fill_at` before each command of the list loop,
 `port/render/rd_crack_fill.c`; [its place](#the-fills-place-after-list-7)): the pass open there ends
-with SCENE's colour copied into its snapshot texture (`rd__replay_take_snap`), and one triangle is
+with SCENE's colour copied into its snapshot texture (`rd__replay_take_snap`; swapped with it where the start-up self-test passed, [below](#the-crack-fills-snapshot-by-the-swap)), and one triangle is
 drawn over SCENE's colour alone: `crack_fill_ps` (`port/shaders/blit.hlsl`, behind `blit_vs`, key
 `rd__crack_fill_key(RD_CRACK_KEY_FILL)`: no depth attached, no blend) reads that copy and SCENE's depth itself,
 sampled where it is (`RHI_STATE_DEPTH_READ`), and gives a crack the colour of the nearer end of
@@ -887,8 +2308,8 @@ picture, the glow's mask flipping at the cracks (above); at the PowerVR phone's
 Resolution Auto (2364 x 1080, its profile's fakes) the phone's seven F12 frames hold 112 to 285
 cracks (0.004 to 0.011 %), 98 to 99.6 % of them the same bytes, at most three a frame apart, by up
 to 20 levels; the deja vu 48:9 frame 469 cracks (0.018 %), most of them one to seven levels apart,
-the largest 14 ([DIVERGENCES.md](DIVERGENCES.md) VD-20). ctest `rd_crack_late_ab` measures the
-whole picture against the earlier build's pass dumps.
+the largest 14 ([DIVERGENCES.md](DIVERGENCES.md) VD-20). ctest `rd_crack_late_ab` holds the late
+fill's whole picture on committed fixtures to the release before's, byte for byte.
 
 ### The fill's place after list 7
 
@@ -910,7 +2331,8 @@ store the fill reads is kept up to that command, `PlanDepth.late`):
   wherever it lay. The fill then waits past both sprites and is drawn with RGB alone (the colour
   mask, `RD_CRACK_KEY_RGB`): the same bytes as at the start of list 7. The two sprites stay in the
   fog's pass ([RENDER.md](RENDER.md#the-glows-passes): `fxAttachDepth`), so the glow keeps its cut.
-  After them the fill waits for nothing else (the mask that reads SCENE follows).
+  After them the fill waits for nothing else (the mask that reads SCENE follows), unless the late
+  pass holds its draw ([below](#the-late-passes-on-scene)).
 - **the aura's paste** (`pasteFeedBackAreaToFB`: FEED128 blended over SCENE through its
   destination, no Z test): the fill is the first draw of the paste's own pass. Where the fx plan
   draws the paste by the local read (`rd_fx_plan.c` `fxDraw`), `rd__crack_fill_in_pass` copies
@@ -1000,9 +2422,425 @@ in G), which is copied into a readback buffer and summed once the GPU is past th
   A fills after the MSAA resolve; K fills in the aura's paste pass; G fills after the glow's
   alpha)` (P counts the fill's own passes: 0 for a fill in the paste's pass).
 
+### The crack fill's snapshot by the swap
+
+`rd_crack_fill.c` (FILLSWAP): where the fill takes its snapshot it does not copy SCENE's colour
+into the snapshot texture: `fillTakeSwap` calls `rd__replay_blur_swap` (`rd_replay.c`
+`blurSwapTarget`, the staticBlur sprites' swap), so the old colour texture is the snapshot (the
+picture before the fill, all of it, as the copy was) and the snapshot texture SCENE's colour. The
+fill's pass (its own, or the aura's paste pass when the fill is that pass's first draw) then begins
+SCENE's colour not loaded (`RHI_LOAD_DONT_CARE`), and the fill writes every texel: `crack_fill_ps`
+and `crack_fill1_ps` with `DrawCB.g_mode.x` bit 0 (COPY) give a texel that is no crack its own
+snapshot texel instead of discarding it, and with bit 1 (KEEP_A, a fill after the glow's alpha,
+which writes RGB alone) every texel's alpha its own snapshot texel's; the pipeline is the fill's
+with the colour mask whole (`rd__crack_fill_key(RD_CRACK_KEY_FILL)` or `FILL1`). The detector, the
+reach, the snapshot's moment, the colour each crack takes and SCENE's depth are unchanged; a texel
+that is no crack is its own value read with `Load` and stored into the RGBA8_UNORM attachment. That
+round trip is exact only where the device keeps a UNORM8 value through the float and the store, so
+the swap is on only where the start-up self-test (`rd__crack_swap_selftest`, run with the other
+self-tests from `rd_fog_selftest`, and by `rd_replay_tool` at its start) passes: a 256 x 2 source of
+every level in every channel (each row a permutation of 0-255 a channel), made with SCENE's usage,
+drawn through both fill shaders' no-crack path (the dummy texture as the depth: no texel a crack)
+with COPY, one with KEEP_A, into targets of the same usage, read back and compared texel for texel;
+any difference or a part that cannot run leaves the copy (`rd: crack fill: swap: off (self-test
+failed at texel N: ... for ...)` or `(self-test not run: <why>)`; passed: `rd: crack fill: swap: on
+(self-test: 256 levels a channel through both fill shaders read back unchanged) ...`).
+
+The snapshot texture has SCENE's usage (`snapEnsure` makes it as `rd__target_create_gpu` makes
+SCENE's colour: the destination-read and input-attachment usage too); `rd_reshow.c` compares SCENE's
+two textures as a pair (the smaller id in `Snap.tex[3]`, the larger in `sceneOther`), so a swap is
+not a recreation; the fill's pass stays whole (it has no pass area; `pasteWhyNot` and `glowWhyNot`
+refuse one). Refused, the snapshot copied, and counted by reason: a draw the late pass holds past
+the snapshot (SCENE's colour would be the stale texture while the border repeat and the mask read
+it), the upscaler's split (the display layer reads SCENE's snapshot), an
+MSAA epoch wanted, the exact blend, the whole-mask pipeline missing, `ICO_RD_CRACK_SWAP=0` (the
+tests only, [TESTING.md](TESTING.md); no config key). What it saves where it swaps: the colour copy
+(about 9.7 MB read and as many written at 2364 x 1080) and the fill pass's colour load.
+
+The general shader's early leave (CRACKTAP): at a reach of at most 2 on both axes `crack_fill_ps`
+is drawn with `g_mode.x` bit 2 (EARLY): a texel with neither immediate neighbour in front of it
+(`crack_front`) on an axis whose reach is at least 1 is no crack at once, without the run's other
+taps. The verdict is the same: a run of at most 2 texels with an end at each side has one end at
+distance 1 (l + r - 1 <= 2 with l, r >= 1), so a texel with no neighbour in front on an axis has no
+run on it. The reach-1 shader (`crack_fill1_ps`) reads its four neighbours first already and is not
+changed. `ICO_RD_CRACK_TAP2=0` turns it off (the tests only).
+
+Counters: `RdPerfRecord.crackSwaps`, `crackSwapTexels` (SCENE's texels not copied and as many not
+loaded), `crackSwapCopied`, `crackSwapWhy`, `crackTap2`. The lines: once a run `rd: crack fill:
+SCENE's colour swapped with its snapshot texture where the fill takes its snapshot ...`; the 10 s
+crack fill line's `; N snapshots by the swap, M copied (K <why>)`; `--stats`: `<dump>: stats: crack
+fill swap on|off (self-test passed|failed|not run): N snapshots by the swap (X MB of colour not
+copied and as many not loaded), M copied (last: <why>); early leave on|off: T draws`. `rd_crack_test`
+(every `rd_crack_*` mode where the filler draws: `checkWork`), `rd_crack_work_ab` and
+`rd_crack_work_gl` (dumps) check it ([TESTING_PROGRAMS_RENDER.md](TESTING_PROGRAMS_RENDER.md)).
+
+### The late passes on SCENE
+
+`port/render/rd_late_pass.c` (`rd_late_pass.h`): fewer full-size passes on SCENE after list 7. The
+fill's hold and the deferred glow paste give the same bytes; list 11's join is an accepted "looks the
+same" divergence ([DIVERGENCES.md](DIVERGENCES.md) VD-31, below). Every part is on by default on a
+tile-based GPU (`RdProfile.tiler`) under Vulkan (MoltenVK too; `RD_LATE_DEFAULT`), where a pass loads
+and stores the whole picture (10 MB each way at 2364 x 1080); on the other classes and backends the
+join alone, which applies only where the fx plan reads destinations by the local read (the hold and
+the deferral save a load and a store an immediate-mode GPU hardly pays for; the join's picture is then
+the same on every device it can apply to). `ICO_RD_LATE_PASS=0|1|all|fill|defer|join` (the tests
+only, [TESTING.md](TESTING.md); no config key) switches it off, every part (`1`, `all`) or one part
+on anywhere.
+
+**The crack fill's draw held** (`fill`). In a glow room the fill is placed after `cleanUpFB` at the
+first sprite into another target (the glow's `WORK2_PAD` band), because the glow's mask, which samples
+SCENE, follows; so it has a pass of its own (the PowerVR phone's cage rooms at Resolution Auto: 0.9
+passes and 1.8 ms a picture, "after the glow's alpha" in its 10 s line). Under the glow's DARK plan
+([The glow where it adds light](#the-glow-where-it-adds-light)) the mask and the paste are not
+drawn, and nothing until the aura's paste draws on SCENE or reads its RGB; under LAMPS and WHOLE
+the glow's paste (WORK3 added over SCENE by the fx plan's premultiplied add) is the next draw on
+SCENE, after the lamps' meshes into `WORK2`. There `rd__crack_fill_place` says TAKE: the fill's snapshot is taken where it was (the same bytes read, the
+detector, reach and arithmetic unchanged) and its draw waits, each command classed by
+`rd__late_pass_class`, until it is the first draw of the aura's paste pass (`rd__crack_fill_in_pass`,
+as in a room without the glow) or, where the plan draws the glow's paste (LAMPS, WHOLE), of that
+paste's pass (`RD_LATE_LAND_GLOW`: `rd_fx_plan.c` `fxDraw`'s premultiplied add begins it with the
+fill; `glowWhyNot` refuses it without the fx plan's add, under the exact blend or an MSAA epoch, with
+a pass on SCENE open or a pass area). It waits past: state (not the upscale point), NOPs, overlay
+text, a clear or a copy of another target, a staticBlur sprite into another target that writes no
+depth of SCENE, takes no DATE and samples SCENE only in the alpha-only form (`rd__fx_alpha_only`:
+MODULATE by RGBAQ's RGB 0 without a blend, the glow's mask: the alpha, which the fill, RGB alone
+after the glow's alpha, does not write), a draw (screen prims, a VU draw) into another target that
+samples no SCENE, writes no depth of SCENE and takes no DATE or PRIM.AA1 (the lamps' meshes into
+`WORK2` under a Z test of SCENE's depth, which the fill reads after them: it takes the depth back to
+its sampled state outside any pass), and a sprite on SCENE the light plan does not draw
+(`rd__glow_light_skips`: the DARK plan's paste). The sun's fans write SCENE's depth: a fill held to
+them is drawn before them (a WHOLE frame with the fans on the picture gains nothing). Anything else has the held fill drawn before it in
+a pass of its own (the cost without the hold); so do SCENE's snapshot taken again or swapped
+(`rd_replay.c` `takeSnap`, `blurSwapTarget`), an MSAA epoch, an aura paste whose pass cannot take
+it, and the walk's end. Not held under the upscaler's split (the upscale point, the display layer),
+with an MSAA epoch wanted, under the exact blend, or under the tool's pass window, nor where no
+paste pass on the device can take the fill (`landPossible`: the aura's needs the fx plan's local
+read, the glow's the fx plan's premultiplied add and a plan that draws it; on OpenGL the aura's
+paste reads a snapshot, so in a DARK room the fill is drawn where it was due, as without the late
+pass, not held to be drawn in a pass of its own later; once a run `rd: late pass: the crack fill
+not held on this device: ...`). A held fill drawn past SCENE's border repeat draws the middle and
+each repeated block (below): `RdPerfRecord.latePassBlockDraws` counts the draws more than one.
+Nor is it held in a replay whose scan (`rd__late_pass_scan_end`, below) finds that the place it
+would be held to is no paste (a draw it must go before, the walk's end: the opening cutscene has no
+aura, and its lamps write SCENE's depth, so every held fill there was drawn early in its own pass
+and kept its snapshot's copy, which FILLSWAP refuses for a held fill): the walk then draws it where
+it is due (`rd__late_pass_no_land`; counted `RdPerfRecord.latePassNoLand`, the 10 s line's `; N
+fills not held (no paste in the frame takes them)`, once a run `rd: late pass: the crack fill not
+held in a frame where no paste takes it ...`). A held fill drawn early ends the open pass with
+`endPassFor`: a clear pending on another target stays pending for that target's next pass to take
+as its load op (the commands it was held past touch none of SCENE's textures), where `endPass` had
+recorded it as a pass of its own in the crack fill's class (the opening's lamps rooms: 0.6 passes
+and 6 MB cleared a picture).
+
+One write of SCENE falls between the snapshot and the draw: SCENE's border repeat
+([RENDER.md](RENDER.md), `rd_blur_border.c` `sceneRepeat`, before the first sprite that samples
+SCENE: the mask, whose draw the plan skips and whose repeat it keeps), which copies GS columns 2 and
+W - 3 over the outer two a side. Without the hold it copied the filled columns, and the fill had read
+the outer columns, as the fog and lists 4-6 left them, as neighbours. With it the fill reads the same
+snapshot, taken before the repeat; its draw is scissored to the columns the repeat left, and each
+block the repeat copied (`rd__scene_border_blocks`: up to 16, more and the held fill is drawn before
+the repeat) is drawn again with the test made at the block's source texel (`crack_fill_ps`'s
+`DrawCB.g_param.w`, a whole number of columns; 0 for every other draw): a crack there writes its
+source's fill, any other texel keeps the copy. The alpha is the copy's either way (the fill writes RGB
+alone there).
+
+The store plan's scan (`rd_store_plan.c`) asks `rd__late_pass_scan` where the fill reads SCENE's
+depth; the glow's plan is decided at the scan's end, so `rd__late_pass_scan_end` then gives the
+place the walk takes (the landing past the skipped paste under DARK, the first command a plan that
+skips nothing on SCENE does not wait past under LAMPS and WHOLE, the snapshot's place under any
+other plan) and the depth's touch (`PlanDepth.late`) lands there, every pass before it keeping the
+depth's store: under LAMPS the lamps' pass keeps the depth store the last store's cut took before
+(up to 5 bytes a texel stored, against the fill pass's 8 of colour loaded and stored).
+
+What it saves: the fill's own pass, SCENE's colour loaded and stored, in each DARK room picture with
+a crack fill and the aura (about 1.2 to 1.5 ms a picture estimated for the phone's cage rooms;
+UNVERIFIED), and in each LAMPS picture less the lamps' depth store. Counters
+`RdPerfRecord.latePassHeld` (`latePassGlowHeld` of them in the glow's paste pass), `latePassTexels`,
+`latePassFlushed`, `latePassWhy` (`RD_LATE_WHY_*`). The lines:
+
+- `rd: late pass: on (a tile-based GPU's default): the crack fill's draw held from its snapshot to
+  the aura's paste pass in a frame whose glow draws nothing, to the glow's paste pass in one that
+  draws the paste; the glow's paste in the aura's paste pass; list 11's draws that use no depth in
+  the open pass without it (the same bytes but the join's: a looks-the-same divergence,
+  DIVERGENCES.md VD-31)`, `rd: late pass: join (not a tile-based GPU: list 11's join alone, where it
+  applies): ...`, or `rd: late pass: off (<why>)`, at the start and
+  when it changes;
+- `rd: late pass: the crack fill's draw held from its snapshot to the aura's paste pass (the glow
+  drew nothing between), not in a pass of its own (reported once)`, and the same `to the glow's
+  paste pass (the lamps' or the sun's draws into WORK2 between)`;
+- the 10 s `window: late pass: N crack fills held into the aura's paste pass, G into the glow's, M
+  drawn early in a pass of their own (K <why>, ...); D glow pastes in the aura's paste pass, E drawn
+  early; J list 11 draws joined the open pass without SCENE's depth (P passes not begun)` (when any) and the crack fill's own `..., B held past SCENE's
+  border repeat (its columns filled from their source columns)`;
+- `--stats`: `<dump>: stats: late pass on|off|fill|join: N crack fills held into a paste pass (G
+  the glow's; X MB of colour not loaded and as many not stored), M drawn early in a pass of their
+  own (<why>); D glow pastes in the aura's paste pass (Y MB ...), E drawn early; J list 11 draws
+  joined ...; K draws more for the border's blocks; L fills not held (no paste in the frame takes
+  them)`.
+
+**The glow's paste in the aura's pass** (`defer`). Under LAMPS and WHOLE the glow's paste begins a
+pass on SCENE of its own, and the aura's paste another after the aura's sprites into its own buffers.
+Where the device has the local read (the aura's paste is drawn in its pass by `fx_local_ps`), the
+glow's paste is not drawn where it comes: `rd_fx_plan.c` `fxDraw` copies its arguments and inputs
+(`fxDeferTake`, its source WORK3 made readable first) and `rd__fx_defer_draw` draws it in the aura's
+paste pass, after a held crack fill and before the aura's paste, under its own state and with the
+command order set back to its own (`g_rdStoreOrd`: the pass area and the store plan read a pass it
+begins as begun at the paste; `rd_pass_area.c` names the exception). The frame's order of writes to
+SCENE is kept (fill, glow's paste, aura's paste; the aura's local read sees the glow's writes after
+its barrier), so the same bytes. While deferred it waits past what the fill's class waits past less
+draws (their passes may bind SCENE's depth, which a held fill reads after them), sprites with a Z test
+of SCENE's depth, any read of SCENE (the paste wrote its RGB and alpha) and anything on its source; any
+of those, SCENE's snapshot taken or swapped, an aura's pass that is not the local read's, has an area
+or follows an open pass on SCENE, and the walk's end draw it before them (a held fill first; counted
+as drawn early). A held fill armed for the glow's paste waits on to the aura's paste with it
+(`rd__crack_fill_unarm_glow`). Counted: `RdPerfRecord.latePassDeferred`, `latePassDeferTexels`,
+`latePassDeferEarly`; once a run `rd: late pass: the glow's paste deferred to the aura's paste pass
+...`; the 10 s line's `; D glow pastes in the aura's paste pass, E drawn early`; the `--stats` line's
+`; D glow pastes in the aura's paste pass (X MB ...), E drawn early`. The glow's GPU time is then
+counted in the aura's class.
+
+**List 11's draws in the open pass** (`join`; [DIVERGENCES.md](DIVERGENCES.md) VD-31, accepted
+2026-11-11). Not byte for byte: on lavapipe the joined replay's SCENE differs from the late pass off
+on a few hundred texels inside list 11's text sprites (bilinear, blended, the sheet font's shaders):
+issue 164's paused frame 235 texels by 1 level at the phone's setting and 92 at Enhanced 2x 4:3, issue
+102's frame 537 by up to 2 at the phone's setting (DISPLAY 515 by up to 3, PRESENT 478 by up to 2);
+OpenGL the same kind; `LP_PERF=no_linear,no_rast_linear` gives the same texels. The joined draws'
+keys differ from their own pass's only in the depth format and the Z state (`rd_pipeline.c`
+`rd__plan_screen_draw_ex`): the driver's sampling of the same shader in a pipeline without the depth
+attachment lands those texels apart (the DATE cut found the same on lavapipe). List 11's screen prims bind SCENE's depth wherever
+SCENE has one (`rd_replay.c` `prepareDrawEx`), so after the aura's paste, whose pass has no depth
+(the local read), the first of them began a pass of its own with the depth, SCENE's colour loaded
+and stored again: in a paused picture (no feedback read of SCENE between, `staticBlur.c`) the pause
+menu's draws, on the phone 2.8 ms of a picture in a block 70 % paused. A list 11 screen prim whose
+draw uses no depth (its Z test off or ALWAYS, its Z write off, no DATE, no PRIM.AA1, no depth view,
+no shadow window on the depth, the same Z scale without it) takes no depth target
+(`rd__late_pass_join`, after the DATE cut's depth: `tdId` 0, `depthFmt` UNKNOWN) when the pass open on
+its target has none (no MSAA, no exact blend, no GS state as shader data) and the fx plan reads
+destinations by the local read (the profile the join's A/B ran on byte for byte; on OpenGL the
+joined passes' pictures differed in issue 102's and 164's frames, cause not found, so it is not
+joined there: once a run `rd: late pass: list 11's draws not joined ...`), so it is drawn in that
+pass: the mirror of `fxAttachDepth` (a sprite without a Z test drawn in a pass with the depth it
+does not use). The colour bytes are the same: the key with the depth had Z ALWAYS and no write,
+the key without it is given the same (`rd_pipeline.c` `rd__plan_screen_draw_ex`); the depth is not
+read or written either way. Its keys are the screen family's no-depth twins, in the start-up set
+beside each key with the depth (`rd__enumerate_reachable_screen`): no pipeline is made during play.
+A draw after it that needs the depth begins its pass with the depth (`bindDrawEx`), as before. An
+unpaused picture's list 11 cannot join: the aura's feedback read of SCENE ends the paste's pass.
+Counted: `RdPerfRecord.latePassJoined` (the draws), `latePassJoinPasses` (the passes joined, each one
+the pass the first such draw began before) and `latePassJoinTexels`; once a run `rd: late pass:
+list 11's draws that use no depth drawn in the open pass on SCENE without its depth ...`; the 10 s
+line's `; J list 11 draws joined the open pass without SCENE's depth (P passes not begun)`; the
+`--stats` line's `; J list 11 draws joined the open pass without SCENE's depth (P passes not begun,
+X MB of colour at most each way)`.
+
+`rd_late_pass` (the predicate and the scan, CPU), `rd_crack_held` and `rd_crack_heldglow` (a crack
+in the repeat's source column, held to the aura's or the glow's paste against the late pass off),
+`rd_crack_defer` (the glow's paste deferred to the aura's paste pass), `rd_crack_join` (two list 11
+commands after the aura's paste), `rd_late_pass_ab` and `rd_late_pass_gl` (dumps) check it
+([TESTING_PROGRAMS_RENDER.md](TESTING_PROGRAMS_RENDER.md)).
+
 `rd_crack_test` (`rd_crack`, `rd_crack_4x`, `rd_crack_frac`, `rd_crack_backdrop`,
 `rd_crack_backdrop_4x`, `rd_crack_backdrop_frac`, `rd_crack_1x`, `rd_crack_original`,
 `rd_crack_msaa`, `rd_crack_off`, `rd_crack_depth_copy`, `rd_crack_buffer`, `rd_crack_d24s8`,
 `rd_crack_nodual`, `rd_crack_tiler`, `rd_crack_tiler_on`, `rd_crack_tiler_fold`,
 `rd_crack_tiler_fold_mali`), `rd_replay_tool_crack` and `rd_crack_late_ab` check it
 ([TESTING_PROGRAMS.md](TESTING_PROGRAMS.md)).
+
+### The crack fill in list 11's pass
+
+`port/render/rd_fill11.c` (`rd_fill11.h`; the held draw in `rd_crack_fill.c`): on the title's
+pictures without glow (the light plan's DARK) and without an aura, the crack fill had a full-size pass
+of its own on SCENE (SCENE's colour alone, not loaded by the swap, stored: 9.75 MB at 2366 x 1080)
+and list 11 another (SCENE's colour loaded and stored, SCENE's depth attached for draws under Z ALWAYS
+without a Z write). Where nothing that runs on the GPU reads or writes SCENE's colour, its depth or
+its snapshot between the fill's place and list 11's first screen draw on SCENE, the fill's snapshot
+(by the swap where allowed) and its count are taken at its place as before and its draw is held to
+that draw, which begins one pass on SCENE's colour with a **scratch depth** attached in place of
+SCENE's ([WORK_BUFFERS.md](WORK_BUFFERS.md#the-crack-fills-scratch-depth)): the fill is its first draw,
+list 11's draws follow with their own pipelines. The fill's own store and list 11's load go: 19.5 MB a
+DARK title picture at 2366 x 1080. This is not list 11's join (VD-31): list 11 keeps drawing with a
+depth attachment and the pipelines it has today.
+
+Why the bytes are the same: the fill reads the snapshot and SCENE's depth it read at its place
+(nothing between touched them) and writes the same texels; its pipeline is its own with a D32F_S8
+depth attachment, Z ALWAYS and no Z write (`rd__fill11_twin`: no test can fail, nothing is written to
+the depth, the shader does not read it), checked on the device by a start-up self-test; list 11's
+draws keep their pipelines (the scratch has SCENE's depth format, size and one sample) and their
+FrameCB (their depth target stays SCENE's for the Z scale), and each one neither tests nor writes the
+depth (Z test off or ALWAYS, no Z write, no DATE by the stencil, the snapshot or the shader's read, no
+PRIM.AA1, no shadow window live on SCENE's depth, not the COLCLAMP 0 wrap path), so its colour does
+not depend on what the attached depth holds. SCENE's depth is not attached to the merged pass: it keeps
+what its last pass stored (the store plan keeps that store for the fill's read at its place; no pass
+between binds it); the fill samples it as in its own pass (`rhi.h` forbids sampling a depth bound
+read-only, hence the scratch). The pass is whole, single-sampled, not a storage pass, its colour
+readable as `beginPass` would begin list 11's.
+
+The walk (`rd__fill11_take`, `rd__fill11_at`, `rd__fill11_draw`):
+
+- **The take.** Where `rd__crack_fill_place` draws the fill in a pass of its own before command c of
+  lists 7 to 11 (the late pass holds nothing there: no paste in the frame takes it), the draw is held
+  when the switch is on (below), no MSAA epoch is wanted, the fixed-function blend draws (no exact
+  blend, no GS state as shader data), the upscaler's split is off, no pass window and no deferred glow
+  paste, c itself is waited past or is the landing, the scratch can be made and the fill's depth twin
+  exists. Else the fill is drawn where it is due, as before (counted, `RD_FILL11_NOT_*`).
+- **The wait.** Each later command (`classOf`): waited past are state (not the upscale point), NOPs,
+  overlay text, a screen draw the replay does not draw (deferred text, a fan the light plan skips, a
+  sprite the fades fold applies at the reduction), a sprite the light plan leaves undrawn
+  (`rd__glow_light_undrawn`: skipped, or a lazy clear of its target), and what `rd__late_pass_class`
+  waits past that also binds no SCENE depth at all (a pass that binds it may drop its store) and
+  samples no SCENE in any form (the swap left SCENE's colour texture undefined until the fill: the
+  glow's mask in its alpha-only form is not waited past here, unlike the late pass's hold). SCENE's
+  border repeat (`rd_blur_border.c` `sceneRepeat`, at the first sprite that samples SCENE, drawn or
+  not) draws the held fill first (`rd__fill11_border`): on a frame of the PS2's 512 GS pixels with the
+  border open (Full pixel at its exact width) the title's mask brings it; the PowerVR phone's own
+  title is 848 GS pixels wide and cropped, whose repeat copies nothing, and a 4:3 frame with the
+  border closed repeats nothing.
+- **The landing.** List 11's first screen draw on SCENE with SCENE's depth bound whose state
+  qualifies, where `rd_pass_area.c` would not give list 11's pass an area, and where the look ahead
+  (`laterOk`) finds every later command up to the one that ends list 11's pass anyway (a draw, sprite
+  or copy on another target, the reduction, the walk's end) to be state, a NOP, overlay text, an
+  undrawn screen draw or a qualifying screen draw of list 11 on SCENE (a clear, any other draw on
+  SCENE, any other command: today's passes kept). In `prepareDrawEx`, after the draw's texture is
+  resolved, its draw qualifying at its own level too (no DATE through the stencil or the shader, no
+  shadow tile), the open pass ends (its pending clears recorded as `beginPass` records them), the
+  merged pass begins (`r->passDepth` SCENE's id, so `bindDrawEx` keeps list 11's draws in it) and the
+  fill is drawn first. The merged pass holds state, NOPs, overlay text and list 11's screen draws on
+  SCENE; before any other command it ends, which the look ahead makes the command that ends list 11's
+  pass today; a draw in it on SCENE with its depth that does not qualify ends it first (counted;
+  never in the dumps' forms).
+- **Drawn in its own pass after all** (`rd_crack_fill.c` `rd__crack_fill11_own`, why
+  `RD_FILL11_WHY_*`): before the first command not waited past, before SCENE's border repeat, before
+  SCENE's snapshot taken again, at a landing refused (the pass area, a later draw that uses SCENE's
+  depth, the draw itself) and at the walk's end; the pass the fill would have had (`endPassFor`: a
+  clear pending on another target keeps its carry), the same bytes as at its place.
+
+The switch: **off by default in this release** (`RD_FILL11_DEFAULT 0`): on the owner's PowerVR phone
+the build with this alone on (the no-volume shadow window off) drew the bottom right quarter of the
+picture wrong, and the cause was not found by reading the code; the black flicker of the title's
+right part in the earlier candidates was the no-volume shadow window's, not this (the start line
+says it is off; nothing of it runs, not the self-test nor the start-up set's twins, without `ICO_RD_FILL11`). With the default
+on it would be on where the start-up self-test passed and the device's class is the PowerVR phone's or a
+desktop one (`rd__profile_tile_class` 1, or 2 on a GPU that is not a tile-based phone's,
+`RhiLimits.tilePhone`: Vulkan, OpenGL, Direct3D 11 and 12 on a PC); off on the Arm, Qualcomm and
+Apple classes and other tile-based phones in this release (issues 123, 179, 211: no new kind of GPU
+work there). `ICO_RD_FILL11=0|1` (the tests only, [TESTING.md](TESTING.md); no config key) keeps it
+off or tries it on any class (the self-test still decides); `rd__fill11_force` is the tests'. On
+OpenGL it would be on with the default where the self-test passes (llvmpipe: `rd_fill11_gl`), as on
+the other desktop classes; the saving there is the passes' work, not tile memory.
+
+The self-test (`rd__fill11_selftest`, from `rd__crack_swap_selftest`, once a renderer from
+`rd_fog_selftest`; where the class or `ICO_RD_FILL11` lets it be tried): a 256 x 2 source of every
+level in every channel (the swap's) drawn through each of the four depth twins in a pass with a
+scratch D32F_S8 depth attached, loaded and stored DONT_CARE: the general and the reach-1 fill with
+COPY (every texel written: the source read back), and each with RGB alone without COPY over a target
+loaded with another pattern (every texel discarded: that pattern read back); compared texel for
+texel. The dummy texture is uploaded on its own command list first (as the swap's self-test). The
+pipeline keys it adds to the start-up set (`rd_pipeline.c` `rd__enumerate_reachable_fog` through
+`rd__fill11_enumerate`, where it may be tried): the depth twins of the four fill keys, `FILL`,
+`FILL | RGB`, `FILL1`, `FILL1 | RGB` (four; two without the reach-1 shader). No shader changes.
+
+The tests run it with `ICO_RD_FILL11_POISON=1` ([TESTING.md](TESTING.md)): lavapipe keeps a
+DONT_CARE load's old bytes where a tile-based GPU leaves them undefined (black or garbage), so a
+texel the fill does not write, or a draw that depends on the scratch depth's contents, would pass
+a byte test there and show on a phone; the poison clears the merged pass's and the held fill's own
+pass's DONT_CARE colour to magenta and the scratch to depth 0.5, stencil 0x5A.
+
+State that survives `rd_shutdown` is freed there (`rd__crack_fill_shutdown` calls
+`rd__fill11_shutdown`): the scratch depth destroyed and its handle forgotten, the self-test's verdict
+and the merged pass's serial reset (the next renderer starts its replay counter again).
+
+The lines: `rd: crack fill: with list 11: on (self-test passed: 4 draws of 512 texels through the
+fill's depth twins read back unchanged; the PowerVR class|a desktop class|ICO_RD_FILL11=1): ...` or
+`... off (<why>)` (start, a change); once `rd: crack fill: with list 11: the scratch depth made
+(WxH, D32F_S8, X MB; never loaded or stored)` and `rd: crack fill: drawn as the first draw of list
+11's pass on SCENE over a scratch depth (frame F) ...`; the 10 s `rd: crack fill: with list 11: N
+drawn in list 11's pass over the scratch depth (X MB of colour not loaded and as many not stored), K
+held and drawn in a pass of their own after all (<why counts>), J kept in their own pass (<why
+counts>); S merged passes ended by a draw that uses SCENE's depth` (after the crack fill's own 10 s
+line, when any); `--stats`: `<dump>: stats: crack fill with list 11 on|off (self-test
+passed|failed|not run): N drawn in list 11's pass (X MB of colour not loaded and as many not
+stored), K drawn in a pass of their own (<why counts>), J kept in their own pass (<why counts>); S
+merged passes ended by a draw that uses SCENE's depth`. The merged pass's GPU time is list 11's
+class (the crack fill's effect time falls by the fill's pass). `rd_crack_fill11`,
+`rd_crack_fill11_later`, `rd_crack_fill11_tiler`, `rd_crack_fill11_area` (`rd_crack_test`),
+`rd_fill11_ab` and `rd_fill11_gl` (dumps) check it
+([TESTING_PROGRAMS_RENDER.md](TESTING_PROGRAMS_RENDER.md)). No DIVERGENCES.md row: the same bytes.
+
+### The aura's paste as its constant part
+
+`port/render/rd_aura_paste.c` (`rd_aura_paste.h`): in a room with no aura object on screen AURA_WORK
+holds only its clear, and the aura's paste into SCENE (`pasteFeedBackAreaToFB`, list 8 command 55
+in the phone's frames: FEED128 over SCENE through (Cs - Cd) * As + Cd, MODULATE by RGBAQ (64, 64, 64,
+128)) changes SCENE's RGB nowhere but its bottom band: As is 0 wherever its kernel reads FEED128's
+rows 0-111, which hold alpha 0, and FEED128's rows 112-127 hold WORK0's alpha the aura's sprite left
+(measured at 128; the paste's B-spline reaches row 112 near SCENE's last rows). The paste is drawn
+there as the alpha alone (`rd_fx_plan.c` `fxAuraSplit`: the constant fold of the sprite untextured
+with RGBAQ's alpha 0, the blend proved the identity on RGB at every Cd and Ad, the alpha 0 written:
+the bytes the paste writes where As is 0, without its texture's taps or the destination's read) and
+as the paste over the other rows, scissored, both in the paste's own local-read pass (after a held
+crack fill and a deferred glow paste, which the band's first draw takes as the whole paste's draw
+did). No new pipeline: the constant fold's key (the alpha alone, `rd__fx_enumerate`) and the paste's.
+
+The proof is a chain of records, each a target's rows (across every column) proven alpha 0:
+- started by a sprite drawn in a cleared source's colour (`rd_const_read.c` `rd__const_took`: command
+  39, AURA_WORK into WORK0) whose colour's alpha is 0: the rows it covers (fx_sprite_ps's coverage at
+  scale 1, in the scissor, every column);
+- carried by the next action's sprite reading that target at scale 1 (command 47, WORK0 into FEED128:
+  V = 16 y to the bit, the GS's bilinear taps, a fraction of 0 weighing the second tap 0, addressed as
+  `fx_axis` addresses them): the rows whose taps all lie in proven rows;
+- taken by the next action's sprite into SCENE reading it (the paste): each SCENE texel row's window
+  Y a step either way (the float's rounding of (t + 0.5) / scale; a step lower again above the rect),
+  its V, the kernel's taps (`rd__ap_taps`: the box, the B-spline or the GS's taps of FXF_ABOVE1X's
+  steps), addressed (CLAMP to the TEX0 rows then the texture's; a row REPEAT moves proven only when
+  every row is); the longest run of rows reading proven rows only is drawn as the alpha alone.
+Each link needs its alpha written whole (no alpha test, no DATE, FBA 0, the colour mask's A, no
+FBMSK), its alpha 0 at an alpha 0 texel (`rd__const_tfx`), RGBA32; the paste besides RGB kept at As 0
+(`rd__fx_fold`: PABE refuses), the scissor whole and the local read (the profile's fx plan and
+fxDstLocal, no exact blend, no MSAA, no GS state as shader data). Any action between two links (the
+action count of `rd_const_read.c`) ends the chain. Anything not proven: the paste whole, counted by
+reason (`RD_AP_WHY_*`). On the Pixel's frames (both WRAP on CLAMP): FEED128 rows 0-111, SCENE rows
+[0, 1062) of 1080 as the alpha alone, 18 band rows (`rd_aura_paste_test`'s geometry; the cage frame's
+measured band, rows 1072-1079, lies in it). `ICO_RD_AURA_PASTE=0` draws the paste whole (the tests;
+no config key).
+
+Counters `RdPerfRecord.auraPasteSplit`, `auraPasteRows`, `auraPasteBand`, `auraPasteKept`,
+`auraPasteWhy`; once a run `rd: aura paste: the aura's paste drawn as the alpha alone over SCENE's
+rows A-B (...), as the paste over the other N rows`; the 10 s line `window: aura paste: P drawn as
+the alpha alone (B band rows each), K read whole (why)` (when any aura paste was seen); `--stats`
+`stats: aura paste on|off: S split (R rows as the alpha alone, B band rows), K drawn whole (why)`.
+`rd_aura_paste` (CPU) and `rd_aura_paste_ab` (committed fixtures) check it
+([TESTING_PROGRAMS_RENDER.md](TESTING_PROGRAMS_RENDER.md)).
+
+## Start-up
+
+What the renderer decides or prepares before play, and the lines that show it, beside
+[RENDER.md](RENDER.md#made-at-start-up)'s allocations.
+
+**One log line, one write.** The log streams are unbuffered (Android: fds 1 and 2 are a pipe the
+log thread drains; Linux and macOS: each write goes to the file), so a line written in three calls
+(its `rd: `, its text, its newline) could have another thread's line land inside it.
+`rd__log` and `rd__log_once` format the whole line into one buffer (`rd_log_line.c`: on the stack
+up to 2 KB, else on the heap) and hand it to the stream in one `fwrite`, which an unbuffered stream
+passes on as one write; only where the heap refuses a long line are the three calls made.
+`rd_log_line` checks the bytes and the one write (glibc's `fopencookie`).
+
+**What play makes outside the key cache, named.** The slow-replay line counts a replay's
+creations (`N pipelines created, A allocations, B buffers and T textures created`) and a key-cache
+pipeline made on first use has its own line (`rd: pipelines: made on first use in ...`), but the
+rest had no name: the Mali of issue 179 made 5 pipelines at replay 1 and the Adreno 710 of issue 211
+3 at replay 47 with no first-use line, and one buffer of the Mali's first 3D picture was not the
+upload ring by its size. Once the window says play begins (`rd_made_outside_watch`, at the end of
+`window_pipe_skin_check`: after the start-up set, its self-tests and the start-up allocations; the
+fog self-test, which follows, is watched too), the
+RHI's create hook (`rhi_set_create_hook`, called after every `rhi_create_pipeline` and
+`rhi_create_buffer` that made one) names each pipeline made one at a time outside the key cache
+and each buffer (`rd_made_outside.c`): `rd: made in play outside the key cache in replay R (list
+L | the vertex pre-pass | no draw list: the present, a check or the game thread): pipeline "NAME"
+(its 1st; pipelines so far P, of N names)`, a buffer's with its size (`buffer "rd ring" of 8192
+KB`). The first of each name always, then that name's first 8 and every 100th (32 names kept,
+the rest counted on the last); at the end of the run `rd: made in play outside the key cache, at
+the end of the run: P pipelines (N names), B buffers (M names): pipeline "NAME" C, ...`. Not here:
+the batches (the start-up set, the background finisher, the skin check's background compiles: their
+own lines) and textures (the stage's own and the work targets, whose `named targets made` line
+says them). No GPU work, no picture change; a line only where something was made in play.
+`rd_made_outside` checks the words and the limiter.

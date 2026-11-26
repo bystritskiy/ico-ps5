@@ -22,6 +22,7 @@
 #include <dxgi1_6.h>
 #include <stdio.h>
 #include "../rhi.h"
+#include "../rhi_native.h"
 #include "d3d12_enums.h"
 #include "d3d12_plan.h"
 
@@ -33,6 +34,7 @@ typedef struct DxBuffer {
     void *mapped;
     D3D12_GPU_VIRTUAL_ADDRESS gpu;
     D3dpBufferTrack track; /* RHI_MEM_DEVICE only */
+    bool uav;              /* made with RHI_BUF_STORAGE_WRITE: a UAV can view it */
 } DxBuffer;
 
 typedef struct DxTexture {
@@ -130,6 +132,7 @@ typedef struct DxCmdList {
     uint32_t vbSize[RHI_MAX_VERTEX_ATTRS];
     uint32_t vbDirty;
     bool inPass;
+    bool externalOpen; /* between rhi_cmd_external_begin and _end */
     /* timestamp indices written in this list (rhi_cmd_write_timestamp) */
     uint32_t tsMask[RHI_TIMESTAMP_WORDS];
     /* The bind cache (d3d12_cmd.c; docs/port/RHI.md "The bind cache"): the
@@ -182,6 +185,7 @@ typedef struct DxGarbageOverflow {
 typedef struct DxState {
     bool initialised;
     RhiLimits limits;
+    RhiComputeCaps compute; /* external compute (rhi_native.h): dx_probe_compute */
     char adapterName[128];
 
     HMODULE d3d12Dll, dxgiDll;

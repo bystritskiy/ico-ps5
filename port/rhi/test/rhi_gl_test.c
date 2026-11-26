@@ -60,7 +60,7 @@ static int copyCell(void)
     if (!rhi_create_backend("opengl")) {
         return 0;
     }
-    RhiDeviceDesc dd = {NULL, false, true, "rhi_gl_test copies"};
+    RhiDeviceDesc dd = {NULL, false, true, "rhi_gl_test copies", NULL};
     if (!rhi_init(&dd)) {
         return 0;
     }
@@ -204,7 +204,7 @@ static int busyCell(void)
     if (!rhi_create_backend("opengl")) {
         return 0;
     }
-    RhiDeviceDesc dd = {NULL, false, true, "rhi_gl_test busy clock"};
+    RhiDeviceDesc dd = {NULL, false, true, "rhi_gl_test busy clock", NULL};
     if (!rhi_init(&dd)) {
         return 0;
     }
@@ -342,7 +342,7 @@ static int swapchainPass(void)
         return 77;
     }
     int failures = 0;
-    RhiDeviceDesc dd = {win, true, true, "rhi_gl_test swapchain"};
+    RhiDeviceDesc dd = {win, true, true, "rhi_gl_test swapchain", NULL};
     if (!rhi_create_backend("opengl") || !rhi_init(&dd)) {
         rhi_test_log("FAIL swapchain: rhi_init with a window failed (see above)\n");
         SDL_DestroyWindow(win);
@@ -397,9 +397,20 @@ static int swapchainPass(void)
     return failures ? 1 : 0;
 }
 
-int main(void)
+int main(int argc, char **argv)
 {
     const RhiTestConfig cfg = {"opengl", "rhi_gl_test", true, NULL, rhi_gl_debug_error_count};
+    if (argc > 1 && strcmp(argv[1], "stores") == 0) {
+        /* rhi_gl_stores: the vertex shaders' stores (rhi_test_stores.c): 77
+           until the OpenGL backend reports them (RhiLimits.vertexStores) */
+        return rhi_test_vertex_stores(&cfg);
+    }
+    if (argc > 1 && strcmp(argv[1], "compute") == 0) {
+        /* rhi_gl_compute: the compute stores (rhi_test_compute.c): 77 after
+           checking that the bracket refuses and a dispatch counts nothing,
+           until the OpenGL backend reports them (RhiLimits.computeStores) */
+        return rhi_test_compute_stores(&cfg);
+    }
     const int rc = rhi_test_run_cells(&cfg);
     if (rc == 77) {
         rhi_test_log("SKIP rhi_gl_test: no OpenGL context\n");

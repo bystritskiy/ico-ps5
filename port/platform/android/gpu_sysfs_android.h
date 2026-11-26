@@ -1,0 +1,46 @@
+/*
+ * port/platform/android/gpu_sysfs_android.h
+ *
+ * The kernel GPU driver's nodes read on Android (gpu_sysfs.h has what they
+ * are and the pure part): probed once, then sampled every 250 ms on a
+ * thread of its own ("ico-gpu-sysfs", not the watchdog's, so a node that
+ * blocks cannot hold the GPU hang limit; nothing read while the app is in
+ * the background) into a ring the window reads on its own thread under a
+ * lock held only for the copy.
+ */
+#ifndef ICO_PLATFORM_GPU_SYSFS_ANDROID_H
+#define ICO_PLATFORM_GPU_SYSFS_ANDROID_H
+
+#include <stdbool.h>
+#include "gpu_sysfs.h"
+
+/* The nodes probed (the first call; later calls give the same answer:
+   KGSL's directory, else the GPU's devfreq entry, else the candidates'
+   paths; and the CPU cores' scaling_cur_freq) and, when any sampled node
+   or a CPU clock is readable, the sampler thread started (again after a
+   stop). Main thread. */
+void gpu_sysfs_android_start(GpuSysfsInfo *info);
+/* The sampler thread stopped and joined (the window's close); the ring
+   keeps its samples. Main thread. */
+void gpu_sysfs_android_stop(void);
+/* The ring's samples after sinceMs, and around [t0Ms, t1Ms] (gpu_sysfs.h
+   gpu_sysfs_ring_block, gpu_sysfs_ring_around: core the game thread's,
+   -1 none); false when nothing is
+   sampled (no readable node, not started) */
+bool gpu_sysfs_android_block(double sinceMs, GpuSysfsBlock *out);
+bool gpu_sysfs_android_around(double t0Ms, double t1Ms, int core, GpuSysfsAround *out);
+/* A copy of the ring (the worst second's clock samples, clock_trap.h);
+   false when nothing is sampled */
+bool gpu_sysfs_android_ring(GpuSysfsRing *out);
+/* What the start found of this process's GPU memory in the kernel driver
+   (/sys/class/kgsl/kgsl/proc/<pid>/, last-run.txt's field), one line
+   without "window: "; "" before gpu_sysfs_android_start */
+const char *gpu_sysfs_android_proc_text(void);
+/* The GPU memory the kernel's driver holds for this process now, MB
+   (/sys/class/kgsl/kgsl/proc/<pid>/kernel, bytes; read at the call, with
+   or without the sampler started): 0 read, else the errno (ENOENT: no
+   KGSL here; EACCES: the device's policy denies it).  set_size.h's GPU
+   room (issue 215) */
+int gpu_sysfs_android_proc_kernel_mb(long *mb);
+
+#endif /* ICO_PLATFORM_GPU_SYSFS_ANDROID_H */

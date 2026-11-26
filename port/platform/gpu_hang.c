@@ -41,6 +41,32 @@ int ico_gpu_hang_step(IcoGpuHangWatch *w, double limit_s, unsigned long long wai
     return 0;
 }
 
+int ico_gpu_reset_step(IcoGpuResetWatch *w, unsigned long long waiting_for,
+                       unsigned long long finished, double dt_s, int count, int resets)
+{
+    if (resets < 0 || waiting_for == 0 || waiting_for <= finished) {
+        /* no count to read, no wait, or its submission finished */
+        w->waiting_for = 0;
+        w->counted_s = 0.0;
+        return 0;
+    }
+    if (waiting_for != w->waiting_for || resets < w->resets0) {
+        w->waiting_for = waiting_for;
+        w->counted_s = 0.0;
+        w->resets0 = resets;
+        return 0;
+    }
+    if (count && dt_s > 0.0) {
+        w->counted_s += dt_s;
+    }
+    if (!w->fired && w->counted_s >= ICO_GPU_RESET_STOP_S &&
+        resets - w->resets0 >= ICO_GPU_RESET_STOP_N) {
+        w->fired = 1;
+        return 1;
+    }
+    return 0;
+}
+
 int ico_render_hang_step(IcoRenderHangWatch *r, double limit_s, unsigned long long seq,
                          unsigned long long done, unsigned mark, int creating, double dt_s,
                          int count)
@@ -75,6 +101,9 @@ int ico_pipe_note_creating(const char *note, unsigned bg_left)
 double ico_pipe_stall_step(IcoPipeStallWatch *w, double now, int creating, int counted, int on,
                            unsigned seq, unsigned done, unsigned bg_done)
 {
+    if (!creating || !on || seq != w->seq || done != w->done || bg_done != w->bg_done) {
+        w->held_s = 0.0; /* another creation, or none: the memory rule's hold anew */
+    }
     if (!creating || !counted || !on || seq != w->seq || done != w->done || bg_done != w->bg_done) {
         w->seq = seq;
         w->done = done;
@@ -83,4 +112,41 @@ double ico_pipe_stall_step(IcoPipeStallWatch *w, double now, int creating, int c
         return 0.0;
     }
     return now - w->since;
+}
+
+double ico_pipe_stall_limit_s(int in_play, int serial_compiler)
+{
+    if (in_play) {
+        return ICO_PIPE_STALL_PLAY_S;
+    }
+    return serial_compiler ? ICO_PIPE_STALL_START_SERIAL_S : ICO_PIPE_STALL_START_S;
+}
+
+int ico_pipe_mem_moving(long prev_kb, long now_kb)
+{
+    return prev_kb >= 0 && now_kb >= 0 && now_kb - prev_kb >= ICO_PIPE_MEM_MOVING_KB;
+}
+
+int ico_pipe_mem_hold(IcoPipeStallWatch *w, double now, int creating, int moving, int on,
+                      int memory_low, double limit_s)
+{
+    const double dt = w->last > 0.0 && now > w->last ? now - w->last : 0.0;
+    int hold;
+
+    w->last = now;
+    hold =
+        creating && moving && on && !memory_low && w->held_s < ICO_PIPE_MEM_HOLD_LIMITS * limit_s;
+    if (hold) {
+        w->held_s += dt;
+    }
+    return hold;
+}
+
+int ico_pipe_stall_next_differs(int in_selftest, int lazy_run, int skip_family, int vu_note,
+                                int vu_plain_already)
+{
+    if (skip_family || (vu_note && !vu_plain_already)) {
+        return 1;
+    }
+    return !in_selftest && !lazy_run;
 }

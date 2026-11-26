@@ -108,6 +108,19 @@ bool pace_original_present(bool keep, uint64_t nowNs, uint64_t dueNs, uint64_t p
     return nowNs - dueNs < periodNs;
 }
 
+PaceOrig pace_original_gate(bool keep, bool busy, uint64_t nowNs, uint64_t dueNs, uint64_t periodNs)
+{
+    if (keep) {
+        return PACE_ORIG_PRESENT; /* drawn over the picture before: always */
+    }
+    if (!pace_original_present(false, nowNs, dueNs, periodNs)) {
+        return PACE_ORIG_LATE;
+    }
+    /* the picture before still walked or presented: this one would wait for
+       its present inside its reads, and the step with it */
+    return busy ? PACE_ORIG_BUSY : PACE_ORIG_PRESENT;
+}
+
 uint64_t pace_next_present(uint64_t nextPresent, uint64_t startNs, uint64_t gap)
 {
     const uint64_t n = nextPresent + gap;
@@ -162,26 +175,123 @@ PaceRtHold pace_rt_further_hold(uint64_t nowNs, uint64_t deadlineNs, uint64_t st
                : PACE_RT_GO;
 }
 
+/* A record over 7/4 of its typical (the median of the 8 before it) */
+static bool step_outlier(uint64_t ns, uint64_t typNs)
+{
+    return typNs != 0 && ns * PACE_STEP_OUTLIER_DEN > typNs * PACE_STEP_OUTLIER_NUM;
+}
+
+/* The latest two counted misses within PACE_STEP_MISS_WINDOW steps of
+   step now (0-2) */
+static unsigned step_recent_at(const PaceStepEst *e, unsigned now)
+{
+    unsigned n = 0;
+
+    for (unsigned i = 0; i < e->recent && i < 2u; i++) {
+        n += now - e->cnt[i].at <= PACE_STEP_MISS_WINDOW ? 1u : 0u;
+    }
+    return n;
+}
+
+unsigned pace_step_est_recent(const PaceStepEst *e)
+{
+    return step_recent_at(e, e->steps);
+}
+
+/* Judge the pending miss m (its step's records from PACE_STEP_JUDGE_BEFORE
+   steps before to PACE_STEP_JUDGE_AFTER after are in): an outlier miss, or
+   counted (a third within the window begins a back-off) */
+static void step_judge(PaceStepEst *e, PaceStepMiss m)
+{
+    uint64_t overNs = 0, overTyp = 0;
+
+    m.picNs = m.typNs = 0;
+    for (unsigned d = 0; d <= PACE_STEP_JUDGE_BEFORE + PACE_STEP_JUDGE_AFTER; d++) {
+        /* the steps m.at - BEFORE .. m.at + AFTER (none before the first) */
+        if (m.at + d < PACE_STEP_JUDGE_BEFORE) {
+            continue;
+        }
+        const unsigned at = m.at + d - PACE_STEP_JUDGE_BEFORE;
+        const PaceStepPic *p = &e->pic[at % PACE_STEP_PICS];
+
+        if (p->at != at) {
+            continue; /* no record came after that step */
+        }
+        if (p->maxNs > m.picNs) {
+            m.picNs = p->maxNs;
+            m.typNs = p->maxTypNs;
+        }
+        if (p->overNs > overNs) {
+            overNs = p->overNs;
+            overTyp = p->overTypNs;
+        }
+    }
+    e->ev.miss = m;
+    if (overNs != 0) {
+        /* a picture the GPU took far longer than the ones before it: not
+           the plan's doing */
+        e->ev.judged = PACE_STEP_OUTLIER;
+        e->ev.miss.picNs = overNs;
+        e->ev.miss.typNs = overTyp;
+        e->outliers++;
+        {
+            /* nor the margin: its widening by this miss taken back, as it
+               decayed since (an eighth a step) */
+            uint64_t left = m.lateNs;
+
+            for (unsigned i = m.at; i != e->steps; i++) {
+                left -= left / 8u;
+            }
+            e->widenNs = e->widenNs > left ? e->widenNs - left : 0;
+            e->widenNs = e->widenNs < 1000u ? 0u : e->widenNs;
+        }
+        return;
+    }
+    e->ev.judged = PACE_STEP_COUNTED;
+    e->counted++;
+    /* the plan's doing: evidence against the pictures fitting */
+    e->fitRun = 0;
+    /* the two before it within the window of its own step */
+    const bool third = step_recent_at(e, m.at) == 2u;
+
+    e->cnt[2] = e->cnt[1];
+    e->cnt[1] = e->cnt[0];
+    e->cnt[0] = m;
+    e->recent = e->recent < 3u ? e->recent + 1u : 3u;
+    if (third) {
+        /* the third counted within the window: the whole period, at most
+           PACE_STEP_BACKOFF_STEPS steps (again from the start when backed
+           off already) */
+        e->backoffs++;
+        e->backoff = PACE_STEP_BACKOFF_STEPS;
+        e->backoffRun = 0;
+        e->judgedFrame = 0;
+        e->ev.began = true;
+    }
+}
+
 PaceStepAct pace_step_est_note(PaceStepEst *e, uint64_t ownNs, bool missed, uint64_t lateNs,
                                bool byPictures)
 {
     const bool over = missed && byPictures && lateNs >= PACE_STEP_MISS_FLOOR_NS;
-    bool third = false;
 
+    memset(&e->ev, 0, sizeof(e->ev));
+    e->steps++;
     if (ownNs != 0) {
         e->estNs = pace_rt_estimate(e->estNs, ownNs);
     }
-    /* the widening decays an eighth a step; the misses in the window age */
+    /* the widening decays an eighth a step */
     e->widenNs -= e->widenNs / 8u;
     e->widenNs = e->widenNs < 1000u ? 0u : e->widenNs;
-    for (unsigned i = 0; i < 2u && i < e->recent; i++) {
-        e->since[i] += e->since[i] <= PACE_STEP_MISS_WINDOW ? 1u : 0u; /* saturated past it */
-    }
-    if (e->recent == 2u && e->since[1] > PACE_STEP_MISS_WINDOW) {
-        e->recent = 1u;
-    }
-    if (e->recent == 1u && e->since[0] > PACE_STEP_MISS_WINDOW) {
-        e->recent = 0u;
+    /* the misses whose records are in: the oldest first (one a step, so at
+       most one is due; a full queue judges its oldest early) */
+    while (e->pending != 0 &&
+           (e->steps - e->pend[0].at > PACE_STEP_JUDGE_AFTER || e->pending == PACE_STEP_PENDING)) {
+        const PaceStepMiss m = e->pend[0];
+
+        e->pending--;
+        memmove(&e->pend[0], &e->pend[1], e->pending * sizeof(e->pend[0]));
+        step_judge(e, m);
     }
     if (missed) {
         e->misses++;
@@ -194,35 +304,78 @@ PaceStepAct pace_step_est_note(PaceStepEst *e, uint64_t ownNs, bool missed, uint
         }
     }
     if (over) {
-        /* the margin wider by the lateness; the third in the window falls
-           back to the whole period */
+        /* the margin wider by the lateness at once; whether it counts
+           toward the back-off once the records around it are in */
         e->widens++;
         e->widenNs += lateNs;
         e->widenNs = e->widenNs > PACE_STEP_WIDEN_MAX_NS ? PACE_STEP_WIDEN_MAX_NS : e->widenNs;
-        third = e->recent == 2u;
-        e->since[1] = e->since[0];
-        e->since[0] = 0;
-        e->recent = e->recent < 2u ? e->recent + 1u : 2u;
-        e->clean = 0;
+        e->pend[e->pending].at = e->steps;
+        e->pend[e->pending].lateNs = lateNs;
+        e->pend[e->pending].picNs = e->pend[e->pending].typNs = 0;
+        e->pending++;
     }
-    if (third) {
-        e->backoffs++;
-        e->backoffLen = e->backoffLen == 0                           ? PACE_STEP_BACKOFF_MIN
-                        : e->backoffLen >= PACE_STEP_BACKOFF_MAX / 2 ? PACE_STEP_BACKOFF_MAX
-                                                                     : 2u * e->backoffLen;
-        e->backoff = e->backoffLen;
-        return PACE_STEP_STRICT;
-    }
-    if (e->backoff != 0) {
-        /* a step, the game's own misses and the small ones among them: the
-           back-off counts down */
-        e->backoff--;
-    } else if (!over && ++e->clean >= PACE_STEP_BACKOFF_CLEAN && e->backoffLen != 0) {
-        /* a clean spell: the next back-off shorter, from the least none */
-        e->backoffLen = e->backoffLen > PACE_STEP_BACKOFF_MIN ? e->backoffLen / 2u : 0u;
-        e->clean = 0;
+    if (e->backoff != 0 && !e->ev.began) {
+        /* a step of the back-off: at its limit it ends */
+        e->backoffRun++;
+        if (--e->backoff == 0) {
+            e->limitEnds++;
+            e->ev.ended = PACE_STEP_END_LIMIT;
+            e->ev.endSteps = e->backoffRun;
+            e->ev.endFrames = e->fitRun;
+            e->fitRun = 0;
+            e->judgedFrame = 0;
+        }
     }
     return over ? PACE_STEP_WIDEN : missed && byPictures ? PACE_STEP_SMALL : PACE_STEP_NONE;
+}
+
+unsigned pace_step_fit_frames(uint64_t tickNs)
+{
+    const uint64_t t = tickNs != 0 ? tickNs : 33366667ull; /* two NTSC steps */
+    const uint64_t n = (PACE_STEP_FIT_NS + t - 1u) / t;
+
+    return n != 0 ? (unsigned)n : 1u;
+}
+
+void pace_step_est_judge(PaceStepEst *e, bool fits)
+{
+    if (e->backoff != 0 && e->judgedFrame == 0) {
+        /* the frame's first: the picture the back-off holds.  A later ask
+           of the same frame comes only because it was held, with the GPU
+           drained by the hold, a state the normal plan never reaches: the
+           model's sustained 20 ms overload ended 27 back-offs in 30 s by
+           such asks, each followed by new misses, 1.3 % fewer pictures than
+           v0.11.4 (pace_loop_test testBackoffEvidence) */
+        e->judgedFrame = fits ? 1u : 2u;
+    }
+}
+
+bool pace_step_est_frame(PaceStepEst *e, uint64_t tickNs)
+{
+    const unsigned v = e->judgedFrame;
+
+    e->judgedFrame = 0;
+    if (e->backoff == 0) {
+        e->fitRun = 0;
+        return false;
+    }
+    if (v == 1u) {
+        e->fitRun++;
+    } else if (v == 2u) {
+        e->fitRun = 0;
+    }
+    if (e->fitRun < pace_step_fit_frames(tickNs)) {
+        return false;
+    }
+    /* the pictures between frames would have fitted half a second of
+       frames in a row: the normal plan again */
+    e->fitEnds++;
+    e->ev.ended = PACE_STEP_END_FIT;
+    e->ev.endSteps = e->backoffRun;
+    e->ev.endFrames = e->fitRun;
+    e->backoff = 0;
+    e->fitRun = 0;
+    return true;
 }
 
 uint64_t pace_step_start_late(uint64_t startNs, uint64_t dueNs, uint64_t prevEndNs)
@@ -368,10 +521,18 @@ bool pace_step_closes(unsigned sinceClose, unsigned ahead, unsigned frameSteps)
 
 uint64_t pace_step_plan_ns(const PaceStepEst *e, bool closes, uint64_t periodNs)
 {
+    if (e->backoff != 0) {
+        return pace_step_est_ns(e, periodNs);
+    }
+    return pace_step_plan_normal_ns(e, closes, periodNs);
+}
+
+uint64_t pace_step_plan_normal_ns(const PaceStepEst *e, bool closes, uint64_t periodNs)
+{
     const PaceStepTyp *t = &e->typ[closes ? 1 : 0];
 
-    if (t->n == 0 || e->backoff != 0) {
-        return pace_step_est_ns(e, periodNs);
+    if (t->n == 0) {
+        return e->estNs == 0 ? periodNs : e->estNs + e->widenNs;
     }
     return pace_step_typ_ns(t) + e->widenNs;
 }
@@ -470,13 +631,61 @@ bool pace_rt_step_trace(const PaceRtAsk *q, const PaceRtPipe *p, uint64_t busyLe
     t->fenceBefore = behind;
     const uint64_t readsEnd = pace_rt_pipe_reads_end_parts(p, post, q, behind, &t->reads);
     const uint64_t tail = q->pictureNs > q->readsNs ? q->pictureNs - q->readsNs : 0;
-    const uint64_t pictureEnd = readsEnd + tail;
+    /* The idle ask (q->slotAhead): the picture in flight before the further one
+       (gpuDoneNs[1]) may run past the pipe's plan by the GPU's typical time
+       over it, or, with a GPU that a frame's own pictures fill (a frame of
+       two periods shorter than the typical picture and a slow picture's
+       excess), by its longest lately over it: there a further picture
+       leaves the GPU a picture behind for many frames and a slow picture
+       among them lands on a step (pace_loop_test testFill) */
+    const uint64_t longNs = q->gpuLongNs > q->gpuNs ? q->gpuLongNs : q->gpuNs;
+    const uint64_t typNs = q->gpuTypNs > q->gpuNs ? q->gpuTypNs : q->gpuNs;
+    const bool gpuFull = 2u * period < typNs + (longNs - q->gpuNs);
+    const uint64_t gpuEnd =
+        q->gpuNs != 0 ? p->gpuDoneNs[1] + (gpuFull ? longNs : typNs) - q->gpuNs : 0;
+    /* its job's end: with the slot ahead the later of its reads' and the
+       GPU's end of the picture before it (the wait for the slot the next
+       picture takes), not the typical job's, which mixes jobs that waited
+       for a full GPU with jobs that did not */
+    const uint64_t pictureEnd =
+        q->slotAhead ? (readsEnd > gpuEnd ? readsEnd : gpuEnd) : readsEnd + tail;
 
     t->tailNs = tail;
     /* the next step starts when the reads end */
     if (readsEnd > due + slack) {
         t->test = PACE_RT_TEST_NEXT;
         return true;
+    }
+    if (q->slotAhead && q->gpuNs != 0) {
+        /* The idle ask: with the slot ahead a new frame's present waits in its
+           drain for the job before it, which ends with the GPU's end of the
+           picture before that one.  The further picture's job ends at
+           pictureEnd; the GPU ends the further picture itself at gpuF (at the
+           GPU's longest lately).  The first closing step from here (due, or
+           the one after a step between) posts its new frame's picture after
+           the further picture's job: the step between after it starts no
+           sooner (when the next step is between frames: the test below for
+           a closing next step is the one after it).  The closing step after
+           that posts the next new frame's picture after that picture's job,
+           which ends no sooner than gpuF: the step between after that one
+           starts no sooner.  Each must start within its own slack (the step
+           between's plan).  A GPU nearly full with the new frames' pictures
+           (30 ms of its 33.4) otherwise carries a further picture's 30 ms
+           into the frames after it, and the next slow GPU picture lands on a
+           step (pace_loop_test testFill) */
+        const uint64_t closeAt = q->nextBetween ? due + period : due;
+        const uint64_t slackBetween = q->nextBetween ? slack : slackB;
+        const uint64_t gpuF = pictureEnd + longNs;
+
+        t->gpuAsked = true;
+        t->jobEndNs = pictureEnd;
+        t->gpuEndNs = gpuF;
+        t->limitANs = closeAt + period + slackBetween;
+        t->limitBNs = closeAt + 3u * period + slackBetween;
+        if ((q->nextBetween && pictureEnd > t->limitANs) || gpuF > t->limitBNs) {
+            t->test = PACE_RT_TEST_GPU;
+            return true;
+        }
     }
     if (q->nextBetween) {
         /* the next step closes no frame: no new frame's picture after it,
@@ -545,6 +754,17 @@ PaceRtHold pace_rt_further_ask(const PaceRtAsk *q, const PaceRtPipe *p)
     PaceRtTrace t;
 
     return pace_rt_further_trace(q, p, &t);
+}
+
+bool pace_step_normal_fits(const PaceStepEst *e, const PaceRtAsk *q, const PaceRtPipe *p,
+                           bool nextCloses, bool afterCloses)
+{
+    PaceRtAsk n = *q;
+    PaceRtTrace t;
+
+    n.stepNs = pace_step_plan_normal_ns(e, nextCloses, q->periodNs);
+    n.afterNs = pace_step_plan_normal_ns(e, afterCloses, q->periodNs);
+    return pace_rt_further_trace(&n, p, &t) == PACE_RT_GO;
 }
 
 /* the trace's text: a time against the due time, signed ms */
@@ -650,6 +870,17 @@ int pace_rt_trace_text(const PaceRtAsk *q, const PaceRtTrace *t, unsigned n, cha
     if (t->test == PACE_RT_TEST_NEXT) {
         trace_put(out, len, &at, "; held: its start past that by %.1f ms",
                   rel_ms(t->reads.endNs, due + t->slackNs));
+    } else if (t->test == PACE_RT_TEST_GPU) {
+        trace_put(out, len, &at,
+                  "; its job would end at %+.1f (a new frame's picture after it waits for "
+                  "that), the GPU end it at %+.1f at its longest lately (%.1f ms a picture; the "
+                  "new frame's picture after the next waits for that): the steps between frames "
+                  "after them may start by %+.1f and %+.1f; held: past them by %.1f ms",
+                  rel_ms(t->jobEndNs, due), rel_ms(t->gpuEndNs, due),
+                  ns_ms(q->gpuLongNs > q->gpuNs ? q->gpuLongNs : q->gpuNs),
+                  rel_ms(t->limitANs, due), rel_ms(t->limitBNs, due),
+                  t->gpuEndNs > t->limitBNs ? rel_ms(t->gpuEndNs, t->limitBNs)
+                                            : rel_ms(t->jobEndNs, t->limitANs));
     } else if (t->afterAsked) {
         trace_put(out, len, &at,
                   "; the step after: the next step ends at %+.1f (%+.1f without the "
@@ -703,6 +934,25 @@ void pace_rt_trace_sum_add(PaceRtTraceSum *s, const PaceRtAsk *q, const PaceRtTr
         s->byAfter++;
         s->bound[t->newReads.bound]++;
         s->overAfterNs += t->startBNs - (q->dueNs + q->periodNs + t->slackBNs);
+    } else if (t->test == PACE_RT_TEST_GPU) {
+        s->byGpu++;
+        s->overGpuNs +=
+            t->gpuEndNs > t->limitBNs ? t->gpuEndNs - t->limitBNs : t->jobEndNs - t->limitANs;
+    }
+}
+
+void pace_rt_trace_sum_fill(PaceRtTraceSum *s, uint64_t waitNs, bool late)
+{
+    s->fillWaits++;
+    s->fillLate += late ? 1u : 0u;
+    s->fillWaitNs += waitNs;
+}
+
+void pace_rt_trace_sum_fix(PaceRtTraceSum *s, uint64_t fixNs)
+{
+    if (fixNs != 0) {
+        s->fixes++;
+        s->fixNs += fixNs;
     }
 }
 
@@ -716,6 +966,12 @@ int pace_rt_trace_sum_text(const PaceRtTraceSum *s, double seconds, char *out, u
     }
     trace_put(out, len, &at, "in %.0f s %u further presents asked of the rule", seconds, s->asks);
     if (s->asks == 0) {
+        if (s->fillWaits != 0) {
+            trace_put(out, len, &at,
+                      "; %u waits for the render thread before an ask (%.1f ms on average), "
+                      "%u not idle by the step's deadline",
+                      s->fillWaits, ns_ms(s->fillWaitNs) / s->fillWaits, s->fillLate);
+        }
         return at;
     }
     trace_put(
@@ -737,12 +993,80 @@ int pace_rt_trace_sum_text(const PaceRtTraceSum *s, double seconds, char *out, u
         ns_ms(s->busyLeftNs) / n, ns_ms(s->readsNs) / n, ns_ms(s->cpuNs) / n,
         ns_ms(s->interpNs) / n, ns_ms(s->submitNs) / n, ns_ms(s->gpuNs) / n,
         ns_ms(s->presentNs) / n, ns_ms(s->stepNs) / n, ns_ms(s->afterNs) / n);
+    if (s->byGpu != 0) {
+        /* The idle ask's test (pace_rt_step_trace PACE_RT_TEST_GPU) */
+        trace_put(out, len, &at,
+                  "; %u more held by the GPU's ends behind the next new frames' pictures, by "
+                  "%.1f ms on average",
+                  s->byGpu, ns_ms(s->overGpuNs) / s->byGpu);
+    }
+    if (s->fillWaits != 0 || s->fixes != 0) {
+        /* The idle ask (pace_rt_fill, pace_rt_pipe_idle) */
+        trace_put(out, len, &at,
+                  "; asked with the render thread idle: %u waits for it before an ask (%.1f "
+                  "ms on average; %u not idle by the step's deadline, none asked), the pipe's "
+                  "ends corrected by what had ended in %u asks (%.1f ms on average)",
+                  s->fillWaits, s->fillWaits != 0 ? ns_ms(s->fillWaitNs) / s->fillWaits : 0.0,
+                  s->fillLate, s->fixes, s->fixes != 0 ? ns_ms(s->fixNs) / s->fixes : 0.0);
+    }
     return at;
 }
 
 bool pace_rt_as_made(bool vsync, bool uncapped, bool fifoLock, bool renderThread)
 {
     return !vsync && uncapped && !fifoLock && renderThread;
+}
+
+uint64_t pace_rt_gpu_long(uint64_t estNs, uint64_t sampleNs)
+{
+    if (sampleNs >= estNs) {
+        return sampleNs;
+    }
+    return estNs - (estNs - sampleNs) / PACE_RT_GPU_LONG_DECAY;
+}
+
+PaceFill pace_rt_fill(uint64_t nowNs, uint64_t sinceNs, uint64_t deadlineNs)
+{
+    if (nowNs >= deadlineNs) {
+        return PACE_FILL_NONE;
+    }
+    return sinceNs != 0 ? PACE_FILL_WAIT : PACE_FILL_ASK;
+}
+
+/* |a - b| */
+static uint64_t abs_diff(uint64_t a, uint64_t b)
+{
+    return a > b ? a - b : b - a;
+}
+
+uint64_t pace_rt_pipe_idle(PaceRtPipe *p, const PaceRtAsk *q, uint64_t jobEndNs, bool byFence)
+{
+    const uint64_t end = jobEndNs != 0 && jobEndNs <= q->nowNs ? jobEndNs : q->nowNs;
+    const PaceRtPipe was = *p;
+
+    if (q->submitNs == 0 && p->submitFreeNs > end) {
+        /* the reads of the picture before ended with its job (no submit
+           thread's job before the next picture) */
+        p->submitFreeNs = end;
+    }
+    if (q->slotAhead) {
+        if (byFence) {
+            /* its job ended when the GPU ended the picture whose slot the
+               next picture takes: that end is known, and the picture after
+               it (the one before the next, gpuDoneNs[1]) ends a picture's
+               time later at the earliest */
+            p->gpuDoneNs[0] = end;
+            if (q->gpuNs != 0 && p->gpuDoneNs[1] < end + q->gpuNs) {
+                p->gpuDoneNs[1] = end + q->gpuNs;
+            }
+        } else if (p->gpuDoneNs[0] > end) {
+            /* its slot was free when its reads ended: that GPU end is past */
+            p->gpuDoneNs[0] = end;
+        }
+    }
+    return abs_diff(was.submitFreeNs, p->submitFreeNs) +
+           abs_diff(was.gpuDoneNs[0], p->gpuDoneNs[0]) +
+           abs_diff(was.gpuDoneNs[1], p->gpuDoneNs[1]);
 }
 
 /* the median of n costs (n <= PACE_AUTO_SAMPLES; 0 with none) */
@@ -809,9 +1133,51 @@ uint64_t pace_hist_add(PaceHist *h, uint64_t costNs)
     return median(h);
 }
 
-void pace_gpu_gap_add(PaceGpuGap *g, uint64_t spanNs, int64_t gapNs)
+uint64_t pace_hist_mean(const PaceHist *h)
+{
+    uint64_t sum = 0;
+
+    for (unsigned i = 0; i < h->count; i++) {
+        sum += h->cost[i];
+    }
+    return h->count != 0 ? sum / h->count : 0;
+}
+
+uint64_t pace_rt_fill_gpu_ns(const PaceHist *h)
+{
+    const uint64_t med = median(h), mean = pace_hist_mean(h);
+
+    return mean > med ? mean : med;
+}
+
+uint64_t pace_step_est_gpu(PaceStepEst *e, PaceHist *h, uint64_t gpuNs)
+{
+    /* the typical: the median of the full history before this record */
+    const uint64_t typ = h->count >= PACE_HIST_LEN ? median(h) : 0;
+    PaceStepPic *p = &e->pic[e->steps % PACE_STEP_PICS];
+
+    if (p->at != e->steps) {
+        memset(p, 0, sizeof(*p));
+        p->at = e->steps;
+    }
+    if (gpuNs > p->maxNs) {
+        p->maxNs = gpuNs;
+        p->maxTypNs = typ;
+    }
+    if (step_outlier(gpuNs, typ) && gpuNs > p->overNs) {
+        p->overNs = gpuNs;
+        p->overTypNs = typ;
+    }
+    /* The idle ask's GPU times (PaceRtAsk.gpuTypNs, gpuLongNs) */
+    pace_rt_typ_note(&e->gpuTyp, gpuNs);
+    e->gpuLongNs = pace_rt_gpu_long(e->gpuLongNs, gpuNs);
+    return pace_hist_add(h, gpuNs);
+}
+
+void pace_gpu_gap_add(PaceGpuGap *g, uint64_t spanNs, int64_t gapNs, unsigned skipped)
 {
     g->n++;
+    g->across += skipped != 0;
     g->spanNs += spanNs;
     if (gapNs > PACE_GPU_IDLE_NS) {
         g->idle++;
@@ -825,8 +1191,18 @@ void pace_gpu_gap_add(PaceGpuGap *g, uint64_t spanNs, int64_t gapNs)
     }
 }
 
+void pace_gpu_gap_stall(PaceGpuGap *g, int64_t gapNs)
+{
+    if (g->stalls < PACE_GPU_GAP_STALLS) {
+        g->stallNs[g->stalls] = gapNs;
+    }
+    g->stalls++;
+}
+
 int pace_gpu_gap_text(const PaceGpuGap *g, char *out, unsigned len)
 {
+    char across[64] = "", stalls[224] = "";
+
     if (len != 0) {
         out[0] = '\0';
     }
@@ -835,15 +1211,45 @@ int pace_gpu_gap_text(const PaceGpuGap *g, char *out, unsigned len)
     }
     const double n = (double)g->n;
 
+    if (g->across != 0) {
+        snprintf(across, sizeof across, "; %u of them timed across untimed replays", g->across);
+    }
+    if (g->stalls != 0) {
+        const unsigned kept = g->stalls < PACE_GPU_GAP_STALLS ? g->stalls : PACE_GPU_GAP_STALLS;
+        size_t at;
+
+        if (g->stalls > PACE_GPU_GAP_STALLS) {
+            snprintf(
+                stalls, sizeof stalls,
+                "; after the first %u of the %u presents blocked over 50 ms: the GPU was idle ",
+                kept, g->stalls);
+        } else {
+            snprintf(stalls, sizeof stalls,
+                     "; after the %u present%s blocked over 50 ms: the GPU was idle ", g->stalls,
+                     g->stalls == 1 ? "" : "s");
+        }
+        at = strlen(stalls);
+        for (unsigned i = 0; i < kept && at < sizeof stalls; i++) {
+            const int w = snprintf(stalls + at, sizeof stalls - at, "%s%.1f", i ? ", " : "",
+                                   (double)g->stallNs[i] / 1e6);
+            if (w < 0) {
+                break;
+            }
+            at += (size_t)w;
+        }
+        if (at < sizeof stalls) {
+            snprintf(stalls + at, sizeof stalls - at, " ms before the next replay");
+        }
+    }
     return snprintf(out, len,
                     "%u timed replays after the one before: the GPU idle before %u of them (%.1f "
                     "ms on average, the longest %.1f ms), %u begun before the one before ended "
                     "(by %.1f ms on average: their spans count that end too); the GPU's time a "
-                    "replay past the one before's end %.2f ms, its span %.2f ms",
+                    "replay past the one before's end %.2f ms, its span %.2f ms%s%s",
                     g->n, g->idle, g->idle != 0 ? ns_ms(g->idleNs) / g->idle : 0.0,
                     ns_ms(g->idleMaxNs), g->overlap,
                     g->overlap != 0 ? ns_ms(g->overlapNs) / g->overlap : 0.0,
-                    ns_ms(g->spanNs - g->overlapNs) / n, ns_ms(g->spanNs) / n);
+                    ns_ms(g->spanNs - g->overlapNs) / n, ns_ms(g->spanNs) / n, across, stalls);
 }
 
 /* the present allowance (pace_policy.h PaceBudget) */
@@ -1242,7 +1648,7 @@ int pace_budget_block_text(const PaceBudget *b, unsigned refusedAt, unsigned dro
                            unsigned climbsAt, unsigned climbRefusalsAt, uint64_t gpuNs,
                            bool gpuIsSpan, const char *noGpu, char *out, unsigned size)
 {
-    char held[144], lowest[24], gpu[48];
+    char held[144], lowest[24], gpu[72];
 
     /* the timer path before its first drop, or back where it started:
        unbound, nothing held */
@@ -1273,8 +1679,11 @@ int pace_budget_block_text(const PaceBudget *b, unsigned refusedAt, unsigned dro
         snprintf(lowest, sizeof(lowest), "%u", b->lowest);
     }
     if (gpuNs != 0) {
-        snprintf(gpu, sizeof(gpu), "%s %.1f ms a timed replay", gpuIsSpan ? "GPU span" : "GPU busy",
-                 ms_of(gpuNs));
+        /* gpuNs is the median of the last PACE_HIST_LEN timed replays
+           (pace_hist_add): not the block's mean the replays line gives
+           (issue 179's v0.11.13 log: 7.9 ms here, 26.71 ms a replay there) */
+        snprintf(gpu, sizeof(gpu), "%s %.1f ms (the median of the last %u timed replays)",
+                 gpuIsSpan ? "GPU span" : "GPU busy", ms_of(gpuNs), (unsigned)PACE_HIST_LEN);
     } else {
         snprintf(gpu, sizeof(gpu), "%s", noGpu);
     }
@@ -1382,6 +1791,11 @@ int pace_auto_resolution_step(const PaceSamples *s, int currentScale, float wind
         return 3;
     }
     return currentScale > 1 ? currentScale - 1 : 1;
+}
+
+float pace_auto_window_scale(float windowScale, float upscaleRatio)
+{
+    return upscaleRatio >= 1.0f ? windowScale / upscaleRatio : windowScale;
 }
 
 /* ------------------------------------------------------------ the vsync lock */

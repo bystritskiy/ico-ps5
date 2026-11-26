@@ -41,6 +41,12 @@ ICO_REPLAY_LOCK) so two runs never compete for the GPU/CPU.
 gates run on that renderer (vulkan, opengl; the build's default without it); an opengl run
 sets LIBGL_ALWAYS_SOFTWARE=1 and SDL_VIDEO_DRIVER=offscreen unless they are already set.
 
+The replays run under the PS2's region rule (ICO_RD_REGION_RULE=ps2, set unless the
+environment names a rule): the manifest is the console's picture, and the camera rule (the
+renderer's default, [dev] region_rule = camera) differs from it only inside triangles the PS2
+dropped, which tools/region_camera_report.py measures and holds (docs/port/DIVERGENCES.md VD-29).
+With ICO_RD_REGION_RULE=camera gate-a reports the camera rule's targets that differ.
+
 Exit: 0 pass, 1 mismatch or error, 2 usage, 77 skipped (nothing to run).
 Needs Python 3 and Pillow.  Run it as `python3 -I tools/native_frame_check.py`.
 """
@@ -171,8 +177,15 @@ def backend_args():
 
 
 def tool_env():
-    """The environment of a tool run: Mesa's software GL on SDL's offscreen driver for opengl."""
+    """The environment of a tool run: Mesa's software GL on SDL's offscreen driver for opengl;
+    the PS2's region rule unless ICO_RD_REGION_RULE says otherwise (the manifest holds its
+    pictures; tools/region_camera_report.py measures the camera rule against it)."""
     env = os.environ.copy()
+    env.setdefault("ICO_RD_REGION_RULE", "ps2")
+    # the glow's exact chain: the glow blur in two passes (port/render/rd_glow_blur.c,
+    # docs/port/DIVERGENCES.md VD-33) pinned off whatever the build's default, the
+    # lamps' other parts at the class's default
+    env.setdefault("ICO_RD_LAMPS", "noglowblur")
     if BACKEND in ("opengl", "gl"):
         env.setdefault("LIBGL_ALWAYS_SOFTWARE", "1")
         env.setdefault("SDL_VIDEO_DRIVER", "offscreen")
@@ -731,10 +744,15 @@ def allowed_cont(allow, name, asp, label):
 
 
 def cmd_gate_b(args):
-    ctest_guard(args)
+    # the ctest native_frame_gate_b is local-only validation: the sweeps are the game's own
+    # captures, kept outside the repository (docs/port/TESTING.md)
+    env = os.environ.get("ICO_SWEEPS")
+    if args.ctest and not env and not args.sweep:
+        print("native_frame_check: SKIP: local-only validation: ICO_SWEEPS names no aspect sweep "
+              "(0 sweeps to check)")
+        sys.exit(EXIT_SKIP)
     need_pillow()
     srcs = list(args.sweep)
-    env = os.environ.get("ICO_SWEEPS")
     if not srcs and env:
         srcs = [p for p in env.split(os.pathsep) if p]
     srcs = [s for s in srcs if os.path.exists(s)]
@@ -862,7 +880,7 @@ def main():
     common(p)
     p = sub.add_parser("gate-b", help="centre columns of an aspect sweep against its 4:3 picture")
     p.add_argument("sweep", nargs="*", help="zip, folder or PNG files of one state (default: ICO_SWEEPS)")
-    p.add_argument("--ctest", action="store_true", help="skip (77) unless ICO_DUMPS is set (the ctests)")
+    p.add_argument("--ctest", action="store_true", help="skip (77) unless ICO_SWEEPS is set (the ctest)")
     p.add_argument("--effects", type=int, default=0, metavar="R",
                    help="Effects on: allow a band of R pixels at each old edge (a kernel radius)")
     p.add_argument("--allow", help="allow-list json: {\"diffs\": [{group, aspect, cols, rows, reason}], "

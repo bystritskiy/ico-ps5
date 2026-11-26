@@ -1,0 +1,502 @@
+/* rd_interp_test.c's cases for the present clock's step
+ * (rd_present_clock.c) and Motion blur: Smooth's FIX' from time
+ * (rd_blur_smooth.c rd__blur_smooth_fix_dt), issue 193: the reporter's
+ * Smooth at Frame rate 60 read 64 presents a tick (a clock step stuck at
+ * 0.5 ms) and drew FIX 32 as 125 at 1.7 presents a tick.  Included after
+ * testPresentClock. */
+
+/* FIX' from time (rd__blur_smooth_fix_dt, issue 193): at dt = tick / k
+ * the k form for every FIX and k 1..64; 1.7 presents a tick keep the
+ * game's FIX / 128 a tick within the rounding, uneven gaps (the
+ * reporter's 0.5 ms present among 14..20 ms ones) the share their span
+ * keeps; dt held to [tick / 64, tick], no tick: FIX as recorded */
+static void testSmoothFixDt(void)
+{
+    const double tick = 33.3667;
+    uint32_t badFix = 0, badK = 0, bad = 0;
+    for (uint32_t fix = 0; fix <= 128; fix++) {
+        for (uint32_t k = 1; k <= RD_BLUR_SMOOTH_K_MAX; k++) {
+            if (rd__blur_smooth_fix_dt(fix, tick / (double)k, tick) !=
+                rd__blur_smooth_fix(fix, k)) {
+                bad++;
+                badFix = fix;
+                badK = k;
+            }
+        }
+    }
+    CHECK(bad == 0, "FIX' from time at dt = tick / k: %u differ from the k form (FIX %u, k %u)",
+          bad, badFix, badK);
+    double worst = 0.0;
+    for (uint32_t fix = 8; fix <= 96; fix += 8) {
+        const uint8_t fp = rd__blur_smooth_fix_dt(fix, tick / 1.7, tick);
+        const double share = pow((double)fp / 128.0, 1.7), want = (double)fix / 128.0;
+        worst = fabs(share / want - 1.0) > worst ? fabs(share / want - 1.0) : worst;
+    }
+    CHECK(rd__blur_smooth_fix_dt(32, tick / 1.7, tick) == 57 && worst < 0.02,
+          "FIX' from time at 1.7 presents a tick: FIX 32 drawn as %u, the share a tick "
+          "within %.2f %% of the game's for FIX 8..96",
+          rd__blur_smooth_fix_dt(32, tick / 1.7, tick), worst * 100.0);
+    const double gaps[] = {0.5, 19.0, 14.0, 20.0, 17.5, 0.5, 16.0, 18.4};
+    double keep = 1.0, span = 0.0;
+    for (size_t i = 0; i < sizeof(gaps) / sizeof(gaps[0]); i++) {
+        keep *= (double)rd__blur_smooth_fix_dt(32, gaps[i], tick) / 128.0;
+        span += gaps[i] < tick / 64.0 ? tick / 64.0 : gaps[i];
+    }
+    const double want = pow(0.25, span / tick);
+    CHECK(fabs(keep / want - 1.0) < 0.05,
+          "FIX' from time over uneven gaps: the trail keeps %.5f over %.1f ms (the game's "
+          "share %.5f)",
+          keep, span, want);
+    CHECK(rd__blur_smooth_fix_dt(32, 0.1, tick) == rd__blur_smooth_fix(32, 64) &&
+              rd__blur_smooth_fix_dt(32, -1.0, tick) == rd__blur_smooth_fix(32, 64) &&
+              rd__blur_smooth_fix_dt(32, 500.0, tick) == 32 &&
+              rd__blur_smooth_fix_dt(32, tick, tick) == 32 &&
+              rd__blur_smooth_fix_dt(32, 10.0, 0.0) == 32 &&
+              rd__blur_smooth_fix_dt(0, 10.0, tick) == 0 &&
+              rd__blur_smooth_fix_dt(128, 10.0, tick) == 128,
+          "FIX' from time held: dt 0.1 %u, -1 %u, 500 %u, a tick %u, no tick %u, FIX 0 %u, "
+          "128 %u",
+          rd__blur_smooth_fix_dt(32, 0.1, tick), rd__blur_smooth_fix_dt(32, -1.0, tick),
+          rd__blur_smooth_fix_dt(32, 500.0, tick), rd__blur_smooth_fix_dt(32, tick, tick),
+          rd__blur_smooth_fix_dt(32, 10.0, 0.0), rd__blur_smooth_fix_dt(0, 10.0, tick),
+          rd__blur_smooth_fix_dt(128, 10.0, tick));
+}
+
+/* The present clock's step after a doubled present and a stuck step (issue
+ * 193): the step is learnt again, and Motion blur: Smooth's presents a tick
+ * (rd__present_clock_k) follow the real rate, never the cap. */
+static void testPresentClockStep(void)
+{
+    const double tick = 33.3667, cadence = 16.6833, nominal = 1000.0 / 60.0;
+    double gap[2];
+    /* (1) a steady 60 Hz cadence, one present 0.5 ms after its neighbour,
+     * then the cadence again: the step within 10 % of the cadence inside
+     * 32 presents, at most 2 resets for it */
+    RdPresentClock c;
+    memset(&c, 0, sizeof(c));
+    double now = 1000.0;
+    for (int i = 0; i < 200; i++, now += cadence) {
+        (void)rd_present_clock_alpha(&c, now, floor(now / tick) * tick, tick, nominal);
+    }
+    const uint32_t before = c.resets;
+    const double last = now - cadence;
+    (void)rd_present_clock_alpha(&c, last + 0.5, floor(last / tick) * tick, tick, nominal);
+    const double stepDoubled = c.stepMs;
+    int within = -1;
+    for (int i = 0; i < 32; i++, now += cadence) {
+        (void)rd_present_clock_alpha(&c, now, floor(now / tick) * tick, tick, nominal);
+        if (within < 0 && fabs(c.stepMs - cadence) < 0.1 * cadence) {
+            within = i;
+        }
+    }
+    const double raw = rd__present_clock_take(gap);
+    CHECK(within >= 0 && fabs(c.stepMs - cadence) < 0.1 * cadence && c.resets - before <= 2u &&
+              fabs(stepDoubled - cadence) < 0.1 * cadence,
+          "present clock: a doubled present in a 60 Hz cadence: the step %.3f ms after it, %.3f "
+          "ms 32 presents on (back within 10 %% at present %d), %u resets",
+          stepDoubled, c.stepMs, within, c.resets - before);
+    CHECK(rd__present_clock_k(raw, 0u) == 2u && fabs(gap[0] - cadence) < 1e-6 && gap[1] == tick,
+          "present clock: 2 presents a tick at 60 Hz against a 30 Hz tick (%u), the time since "
+          "the present before %.4f ms and the tick %.4f ms noted",
+          rd__present_clock_k(raw, 0u), gap[0], gap[1]);
+    CHECK(isnan(rd__present_clock_take(gap)) && gap[0] == 0.0 && gap[1] == 0.0,
+          "present clock: taken once (then no value, no time)");
+
+    /* (2) the reporter's timing (Frame rate 60, FIFO: 49.7 presented fps
+     * against 28.8 game fps, a slow replay of 116 ms): presents 18..22 ms
+     * apart, one 0.5 ms after its neighbour every 7th (none next to the
+     * pause), and every 50th a
+     * 120 ms one with a present 0.5 ms after it (the clock reset at the
+     * measured time, then a doubled present over half a tick from it: the
+     * reset that took 0.5 ms as the step before v0.10.4, k 66 held to 64).
+     * At every tick's first present k is 2, the step stays in the cadence
+     * and no more than the pause and the doubled present reset in a row */
+    memset(&c, 0, sizeof(c));
+    uint32_t seed = 193u, kMin = 1000u, kMax = 0u, run = 0u, runMax = 0u;
+    double tickAt = -1.0;
+    now = 5000.0;
+    for (int i = 0; i < 600; i++) {
+        seed = seed * 1664525u + 1013904223u;
+        const double u = (double)(seed >> 8) / 16777216.0;
+        const bool doubled = i % 50 == 49 || (i % 7 == 6 && i % 50 != 0 && i % 50 < 47);
+        now += i % 50 == 48 ? 120.0 : (doubled ? 0.5 : 18.0 + 4.0 * u);
+        const double at = floor(now / tick) * tick;
+        const uint32_t r0 = c.resets;
+        (void)rd_present_clock_alpha(&c, now, at, tick, nominal);
+        run = c.resets != r0 ? run + 1u : 0u;
+        runMax = run > runMax ? run : runMax;
+        const double rv = rd__present_clock_take(NULL);
+        if (at != tickAt && i >= 8) {
+            const uint32_t k = rd__present_clock_k(rv, 0u);
+            kMin = k < kMin ? k : kMin;
+            kMax = k > kMax ? k : kMax;
+        }
+        tickAt = at;
+    }
+    CHECK(kMin == 2u && kMax == 2u && runMax <= 2u && c.stepMs > 18.0 && c.stepMs < 22.0,
+          "present clock: the reporter's timing: %u to %u presents a tick, the step %.3f ms, "
+          "%u resets in a row at most",
+          kMin, kMax, c.stepMs, runMax);
+
+    /* (3) a step already stuck at 0.5 ms (the v0.10.2 state), with the
+     * Frame rate's gap and without one (Uncapped): one present at the
+     * cadence learns it again */
+    for (int nom = 0; nom < 2; nom++) {
+        memset(&c, 0, sizeof(c));
+        (void)rd_present_clock_alpha(&c, 9000.0, 9000.0, tick, nom ? nominal : 0.0);
+        c.stepMs = 0.5;
+        (void)rd_present_clock_alpha(&c, 9018.0, 9000.0, tick, nom ? nominal : 0.0);
+        const double rv = rd__present_clock_take(NULL);
+        CHECK(fabs(c.stepMs - 18.0) < 1e-9 && rd__present_clock_k(rv, 0u) == 2u,
+              "present clock: a stuck 0.5 ms step learnt again %s (%.3f ms, %u presents a tick)",
+              nom ? "with the frame rate's gap" : "without one", c.stepMs,
+              rd__present_clock_k(rv, 0u));
+    }
+    /* (4) a pause keeps the step; the vsync lock (no clock value) counts */
+    memset(&c, 0, sizeof(c));
+    now = 20000.0;
+    for (int i = 0; i < 40; i++, now += cadence) {
+        (void)rd_present_clock_alpha(&c, now, floor(now / tick) * tick, tick, nominal);
+    }
+    const double stepKept = c.stepMs;
+    (void)rd_present_clock_alpha(&c, now + 500.0, floor((now + 500.0) / tick) * tick, tick,
+                                 nominal);
+    (void)rd__present_clock_take(gap);
+    CHECK(c.stepMs == stepKept && gap[0] > 500.0 && rd__present_clock_k(NAN, 3u) == 3u,
+          "present clock: a 500 ms pause keeps the step (%.3f ms, was %.3f), its time %.1f ms "
+          "noted; no clock value: the counted presents (%u)",
+          c.stepMs, stepKept, gap[0], rd__present_clock_k(NAN, 3u));
+}
+
+/* The present clock across doubled presents (the v0.10.4 review): presents
+ * 18..22 ms apart (the issue 193 reporter's rate) at Frame rate 60, one
+ * 0.5 ms after its neighbour every 7th or every 50th, over 3000 presents.
+ * The clock never goes back and the alpha never drops within a tick, with
+ * at most 2 resets.  Before the fix a doubled present moved the clock a
+ * whole step, ahead of the measured time, and the next one reset it back:
+ * 413 resets and 156 steps back (9.25 ms at worst) at every 7th. */
+static void testPresentClockDoubled(void)
+{
+    const double tick = 33.3667, nominal = 1000.0 / 60.0;
+    static const int every[] = {7, 50};
+    for (size_t e = 0; e < sizeof(every) / sizeof(every[0]); e++) {
+        RdPresentClock c;
+        memset(&c, 0, sizeof(c));
+        uint32_t seed = 193u;
+        double now = 5000.0, lastClock = -1.0, lastAt = -1.0, worst = 0.0;
+        float lastA = -1.0f;
+        int back = 0, dropped = 0;
+        for (int i = 0; i < 3000; i++) {
+            seed = seed * 1664525u + 1013904223u;
+            const double u = (double)(seed >> 8) / 16777216.0;
+            now += i % every[e] == every[e] - 1 ? 0.5 : 18.0 + 4.0 * u;
+            const double at = floor(now / tick) * tick;
+            const float a = rd_present_clock_alpha(&c, now, at, tick, nominal);
+            if (lastClock >= 0.0 && c.clockMs < lastClock) {
+                back++;
+                worst = lastClock - c.clockMs > worst ? lastClock - c.clockMs : worst;
+            }
+            if (at == lastAt && a < lastA) {
+                dropped++;
+            }
+            lastClock = c.clockMs;
+            lastAt = at;
+            lastA = a;
+        }
+        (void)rd__present_clock_take(NULL);
+        CHECK(back == 0 && dropped == 0 && c.resets <= 2u,
+              "present clock: a doubled present every %d of 3000 at 18..22 ms: the clock went "
+              "back %d times (%.3f ms at worst), the alpha dropped within a tick %d times, %u "
+              "resets",
+              every[e], back, worst, dropped, c.resets);
+    }
+}
+
+/* The present clock at a rate slower than four nominals (the v0.10.4
+ * review): a 120 Hz FIFO phone at 60 then 25 presented fps, a 60 Hz
+ * display at 30 then 12, and Uncapped (no nominal) at 25 from the start,
+ * each present +-1 ms.  The step is learnt (within 10 % of the interval)
+ * and the last 250 of 600 presents reset at most twice.  Before the fix
+ * the step was held to four nominals (a tick without one) and every one
+ * of them reset: the raw measured alpha, read in the log as issue 193's
+ * stuck clock. */
+static void testPresentClockSlow(void)
+{
+    const double tick = 33.3667;
+
+    static const struct {
+        double nominal, fast, slow;
+    } cases[] = {
+        {1000.0 / 120.0, 16.6833, 40.0},
+        {1000.0 / 60.0, 33.3667, 83.0},
+        {0.0, 40.0, 40.0},
+    };
+
+    for (size_t n = 0; n < sizeof(cases) / sizeof(cases[0]); n++) {
+        RdPresentClock c;
+        memset(&c, 0, sizeof(c));
+        uint32_t seed = 194u, r0 = 0u;
+        double now = 1000.0;
+        for (int i = 0; i < 600; i++) {
+            seed = seed * 1664525u + 1013904223u;
+            const double u = (double)(seed >> 8) / 16777216.0;
+            now += (i < 300 ? cases[n].fast : cases[n].slow) + 2.0 * (u - 0.5);
+            (void)rd_present_clock_alpha(&c, now, floor(now / tick) * tick, tick, cases[n].nominal);
+            r0 = i == 349 ? c.resets : r0;
+        }
+        (void)rd__present_clock_take(NULL);
+        CHECK(c.resets - r0 <= 2u && fabs(c.stepMs - cases[n].slow) < 0.1 * cases[n].slow,
+              "present clock: nominal %.3f ms, %.1f then %.1f ms a present: the step %.3f ms, "
+              "%u resets in the last 250 presents",
+              cases[n].nominal, cases[n].fast, cases[n].slow, c.stepMs, c.resets - r0);
+    }
+}
+
+/* The present clock within a frame pair (v0.11.5, the owner's 120 Hz
+ * phone uncapped under mailbox: the nominal 15/16 of a refresh, 7.8125 ms):
+ * the clock never goes back while tickAt and tick stay, and over any span
+ * its content moves at real time's speed within the bound the code gives,
+ * a rate, not a sequence of values.
+ *   (1) the shape behind rc14's step back (frame 2096 at alpha 0.78 then
+ *       0.68): a steady 14.8 ms cadence, then two presents 2.5 ms apart in
+ *       one pair; the first pulls the clock 10.09 ms ahead of the measured
+ *       time (an error of -11.53 ms, 7/8 of it kept), the second's error of
+ *       -20.9 ms is over half a tick and resets: before, to the measured
+ *       time, 7.59 ms back; now held at its value, counted (the clock's
+ *       held, the evenness line's held and its largest, its reset back);
+ *   (2) 30 s of bursty presents (a quarter of them 2 to 4 ms after the one
+ *       before, the rest 12 to 20 ms): within a pair the clock never goes
+ *       back; at every present it is within 7/16 of a tick of the measured
+ *       time (a pull keeps 7/8 of an error of at most half a tick, a reset
+ *       puts it on the measured time, a held clock's lead only shrinks);
+ *       so a step is at most its interval plus 7/8 of a tick and over every
+ *       span of a second or more the content's speed is within 7/8 of a
+ *       tick over the span of real time's;
+ *   (3) time gone back within a pair: reset to the measured time as
+ *       before (no hold). */
+#include "rd_even.h"
+
+static RdEvenWindow s_evenW;
+
+static void testPresentClockPair(void)
+{
+    const double tick = 33.3667, nominal = 7.8125;
+    RdPresentClock c;
+    memset(&c, 0, sizeof(c));
+    rd_even_take(&s_evenW); /* the tests before noted into it */
+    double now = 1000.0;
+    for (int i = 0; i < 200; i++, now += 14.8) {
+        (void)rd_present_clock_alpha(&c, now, floor(now / tick) * tick, tick, nominal);
+    }
+    now -= 14.8; /* the last present's time */
+    const double atA = floor((now + 2.5) / tick) * tick;
+    const float aA = rd_present_clock_alpha(&c, now + 2.5, atA, tick, nominal);
+    const double clockA = c.clockMs, leadA = c.clockMs - (now + 2.5);
+    const uint32_t resetsA = c.resets;
+    const float aB = rd_present_clock_alpha(&c, now + 5.0, atA, tick, nominal);
+    const double clockB = c.clockMs;
+    (void)rd__present_clock_take(NULL);
+    rd_even_take(&s_evenW);
+    CHECK(leadA > 10.0 && leadA < 10.2 && c.resets == resetsA + 1u && clockB == clockA &&
+              aB >= aA && c.held == 1u && s_evenW.held == 1u && s_evenW.heldMaxUs >= 7500u &&
+              s_evenW.heldMaxUs <= 7700u && s_evenW.resetBack == 1u,
+          "present clock: a reset in a frame pair %.3f ms ahead of the measured time: the clock "
+          "%.3f then %.3f (alpha %.4f then %.4f), %u held (%u in the evenness line, the most "
+          "%u us), %llu resets back",
+          leadA, clockA, clockB, aA, aB, c.held, (unsigned)s_evenW.held,
+          (unsigned)s_evenW.heldMaxUs, (unsigned long long)s_evenW.resetBack);
+
+    /* (2) bursty presents */
+    memset(&c, 0, sizeof(c));
+    uint32_t seed = 115u;
+    now = 5000.0;
+    double lastClock = 0.0, lastAt = -1.0, lastNow = 0.0, worstLead = 0.0, worstStep = -1e9;
+    double worstRate = 0.0;
+    int back = 0, n = 0;
+    static double s_now[4096], s_clock[4096];
+    while (now < 35000.0 && n < 4096) {
+        seed = seed * 1664525u + 1013904223u;
+        const double u = (double)(seed >> 8) / 16777216.0;
+        seed = seed * 1664525u + 1013904223u;
+        const double v = (double)(seed >> 8) / 16777216.0;
+        now += u < 0.25 ? 2.0 + 2.0 * v : 12.0 + 8.0 * v;
+        const double at = floor(now / tick) * tick;
+        (void)rd_present_clock_alpha(&c, now, at, tick, nominal);
+        const double lead = fabs(c.clockMs - now);
+        worstLead = lead > worstLead ? lead : worstLead;
+        if (n > 0) {
+            if (at == lastAt && c.clockMs < lastClock) {
+                back++;
+            }
+            const double over = (c.clockMs - lastClock) - (now - lastNow);
+            worstStep = over > worstStep ? over : worstStep;
+        }
+        s_now[n] = now;
+        s_clock[n] = c.clockMs;
+        for (int j = n - 1; j >= 0; j--) {
+            if (now - s_now[j] >= 1000.0) {
+                /* the latest present a second or more before this one */
+                const double rate = (c.clockMs - s_clock[j]) / (now - s_now[j]);
+                const double dev = fabs(rate - 1.0) * (now - s_now[j]);
+                worstRate = dev > worstRate ? dev : worstRate;
+                break;
+            }
+        }
+        lastClock = c.clockMs;
+        lastAt = at;
+        lastNow = now;
+        n++;
+    }
+    (void)rd__present_clock_take(NULL);
+    CHECK(back == 0 && worstLead <= 7.0 / 16.0 * tick + 1e-9 &&
+              worstStep <= 7.0 / 8.0 * tick + 1e-9 && worstRate <= 7.0 / 8.0 * tick + 1e-9 &&
+              n > 1500,
+          "present clock: %d bursty presents over 30 s: %d steps back within a pair, the clock "
+          "at most %.3f ms from the measured time (bound %.3f), a step at most %.3f ms over its "
+          "interval, over a second or more the content %.3f ms from real time at most (bound "
+          "%.3f), %u resets, %u held",
+          n, back, worstLead, 7.0 / 16.0 * tick, worstStep, worstRate, 7.0 / 8.0 * tick, c.resets,
+          c.held);
+
+    /* (3) time gone back in a pair: today's reset to the measured time */
+    const double at = c.pairAtMs, then = c.lastMs - 3.0;
+    (void)rd_present_clock_alpha(&c, then, at, tick, nominal);
+    (void)rd__present_clock_take(NULL);
+    CHECK(c.clockMs == then, "present clock: time gone back 3 ms: the clock at the measured time "
+                             "(%.3f, want %.3f)",
+          c.clockMs, then);
+    rd_even_take(&s_evenW);
+}
+
+/* The alpha from the hand-over when pictures are made as fast as the GPU
+ * allows (rd_rebase.h): the measured ask plus (drain - the drain's running
+ * mean).  A model of the window's loop, 30 s: a frame every 33.37 ms, its
+ * closing step due at the frame's tickAt, 0 to 12 ms late and 7 ms long
+ * (presents are asked only between that close and the next closing
+ * deadline, less a ms); pictures handed over every 13 to 20 ms, the drain
+ * 1 to 2.2 ms before a frame's first picture and 5 to 9 ms before a
+ * further one.  Bounds only, each from the code (rd_rebase.c):
+ *   - within a frame the content never goes back, and the alpha stays in
+ *     [0, 0.999] (never past the newest frame);
+ *   - no repeat: no picture shows the same moment as the one before while
+ *     the hand-over moved on;
+ *   - between two pictures neither clamped the content moves by the
+ *     hand-overs' interval within (the largest drain - the smallest) / 16
+ *     (the mean's change), across a frame's switch too; with a clamp,
+ *     within that plus twice the largest drain and a thousandth of a tick;
+ *   - over every span of a second or more the content's advance is the
+ *     hand-overs' within the drains' range plus twice that clamp bound.
+ * The present clock's alpha over the same asks is printed beside it (its
+ * repeats and its worst step against the gap), not asserted. */
+#include "rd_rebase.h"
+
+static void testPresentRebase(void)
+{
+    const double T = 33.3667;
+    RdRebase r;
+    RdPresentClock c;
+    double shift;
+    bool held;
+    memset(&r, 0, sizeof(r));
+    memset(&c, 0, sizeof(c));
+    uint32_t seed = 117u;
+#define RB_U() (seed = seed * 1664525u + 1013904223u, (double)(seed >> 8) / 16777216.0)
+    static double s_hand[2400], s_cont[2400], s_drain[2400], s_clk[2400];
+    static uint32_t s_k[2400];
+    static uint8_t s_clamped[2400];
+    int n = 0;
+    double prevHand = 0.0;
+    for (uint32_t k = 0; k < 900u && n < 2390; k++) {
+        const double at = 1000.0 + (double)k * T;
+        const double close = at + 12.0 * RB_U() + 7.0;
+        /* the frame's first: after the close, at least 13 to 20 ms after
+           the hand-over before (never during the drain: the drain is under
+           the gap less 0.2 ms) */
+        const double d0 = 1.0 + 1.2 * RB_U(), g0 = 13.0 + 7.0 * RB_U();
+        const double after = n > 0 ? prevHand + g0 - d0 : close + 0.1;
+        double ask = close + 0.1 > after ? close + 0.1 : after;
+        double hand = ask + d0;
+        for (;;) {
+            const double raw = rd_rebase_raw(&r, (ask - at) / T, T, hand - ask, k, &shift, &held);
+            const float a = rd_rebase_alpha(raw);
+            const float ac = rd_present_clock_alpha(&c, ask, at, T, 7.8125);
+            s_hand[n] = hand;
+            s_cont[n] = at - T + (double)a * T;
+            s_clk[n] = at - T + (double)ac * T;
+            s_drain[n] = hand - ask;
+            s_k[n] = k;
+            s_clamped[n] = (uint8_t)(raw <= 0.0 || raw >= 0.999);
+            n++;
+            prevHand = hand;
+            const double g = 13.0 + 7.0 * RB_U();
+            const double d = 5.0 + 4.0 * RB_U();
+            hand = prevHand + g;
+            ask = hand - d;
+            if (ask >= at + T - 1.0 || n >= 2390) {
+                break;
+            }
+        }
+    }
+#undef RB_U
+    (void)rd__present_clock_take(NULL);
+    double dMin = 1e9, dMax = 0.0;
+    for (int i = 0; i < n; i++) {
+        dMin = s_drain[i] < dMin ? s_drain[i] : dMin;
+        dMax = s_drain[i] > dMax ? s_drain[i] : dMax;
+    }
+    const double delta = (dMax - dMin) / 16.0, clampB = dMax + 0.001 * T;
+    int back = 0, repeats = 0, clkRepeats = 0, outside = 0, wide = 0;
+    double worstFree = 0.0, worstAny = 0.0, worstSpan = 0.0, clkWorst = 0.0;
+    for (int i = 1; i < n; i++) {
+        const double gap = s_hand[i] - s_hand[i - 1], step = s_cont[i] - s_cont[i - 1];
+        const double dev = fabs(step - gap), cs = s_clk[i] - s_clk[i - 1];
+        back += s_k[i] == s_k[i - 1] && step < 0.0 ? 1 : 0;
+        repeats += gap > 1.0 && fabs(step) < 0.001 ? 1 : 0;
+        clkRepeats += gap > 1.0 && fabs(cs) < 0.001 ? 1 : 0;
+        clkWorst = fabs(cs - gap) > clkWorst ? fabs(cs - gap) : clkWorst;
+        worstAny = dev > worstAny ? dev : worstAny;
+        if (!s_clamped[i] && !s_clamped[i - 1]) {
+            worstFree = dev > worstFree ? dev : worstFree;
+            outside += dev > delta + 1e-9 ? 1 : 0;
+        } else {
+            wide += dev > delta + 2.0 * clampB + 1e-9 ? 1 : 0;
+        }
+        for (int j = i - 1; j >= 0; j--) {
+            if (s_hand[i] - s_hand[j] >= 1000.0) {
+                const double sd = fabs((s_cont[i] - s_cont[j]) - (s_hand[i] - s_hand[j]));
+                worstSpan = sd > worstSpan ? sd : worstSpan;
+                break;
+            }
+        }
+    }
+    CHECK(n > 1500 && back == 0 && repeats == 0 && outside == 0 && wide == 0 &&
+              worstSpan <= (dMax - dMin) + 2.0 * clampB + 1e-9,
+          "hand-over alpha: %d pictures (drains %.2f to %.2f ms): %d steps back in a frame, %d "
+          "repeats (the clock's alpha %d), a step at most %.3f ms off its gap unclamped (bound "
+          "%.3f) and %.3f with a clamp (the clock's %.3f), over a second or more %.3f ms",
+          n, dMin, dMax, back, repeats, clkRepeats, worstFree, delta, worstAny, clkWorst,
+          worstSpan);
+    printf("rd_interp_test: hand-over alpha: worst step off its gap %.3f ms unclamped, %.3f with "
+           "a clamp; the present clock's over the same asks %.3f ms, %d repeats\n",
+           worstFree, worstAny, clkWorst, clkRepeats);
+
+    /* the edges */
+    memset(&r, 0, sizeof(r));
+    const double same = rd_rebase_raw(&r, NAN, T, 3.0, 1u, &shift, &held);
+    CHECK(isnan(same) && r.n == 0 && !r.have && shift == 0.0,
+          "hand-over alpha: no clock value: unchanged, nothing folded");
+    (void)rd_rebase_raw(&r, 0.2, T, 2.0, 1u, &shift, &held); /* the mean 2 ms */
+    const double big = rd_rebase_raw(&r, 0.3, T, 500.0, 1u, &shift, &held);
+    CHECK(fabs(shift - 0.25 * T) < 1e-9 && fabs(big - 0.55) < 1e-9 && !held &&
+              fabs(r.meanMs - (2.0 + (T - 2.0) / 16.0)) < 1e-9,
+          "hand-over alpha: a 500 ms drain taken as a tick, its shift held to a quarter (%.4f "
+          "ms), %.4f",
+          shift, big);
+    const double low = rd_rebase_raw(&r, 0.1, T, r.meanMs, 1u, &shift, &held);
+    CHECK(held && low == big, "hand-over alpha: below the frame's last value: held (%.4f)", low);
+    (void)rd_rebase_raw(&r, 0.1, T, r.meanMs, 2u, &shift, &held);
+    CHECK(!held, "hand-over alpha: a new frame: not held");
+    CHECK(rd_rebase_alpha(-0.2) == 0.0f && rd_rebase_alpha(1.4) == 0.999f &&
+              rd_rebase_alpha(0.5) == 0.5f && rd_rebase_alpha(NAN) == 0.0f,
+          "hand-over alpha: the alpha clamped to [0, 0.999]");
+}

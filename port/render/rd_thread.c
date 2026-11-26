@@ -1,11 +1,17 @@
 /* rd_thread.c: the renderer on the window's render thread (rd_thread.h). */
 #include "rd_thread.h"
 
+#include <math.h>
 #include <stdio.h>
 #include <stdlib.h>
 #include <string.h>
 #include "ico_thread.h"
+#include "rd_even.h"
 #include "rd_internal.h"
+#include "rd_pace_even.h"
+#include "rd_pace_gpu.h"
+#include "rd_pace_rules.h"
+#include "rd_rebase.h"
 #include "rd_submit.h"
 #include "rd_submit_thread.h"
 
@@ -28,6 +34,9 @@ static _Thread_local uint64_t t_presentNs;
  * and the submit thread, and the acquire) and its interpolation
  * (rd_thread_take_reads_parts; the render thread's own) */
 static _Thread_local uint64_t t_waitNs, t_interpNs;
+/* the slot ahead's wait at the end of the render thread's last job (ns; 0:
+ * none made), for rd_thread_take_ahead_ns */
+static _Thread_local uint64_t t_aheadNs;
 /* a picture's job: the textures to retire still kept for its first
  * graphics call (rd__thread_retire_kept; the render thread's own) */
 static _Thread_local bool t_retireKept;
@@ -43,6 +52,19 @@ static int s_phase;
 static int s_aheadSlot = -1;
 static bool s_aheadOff;
 static void (*s_testHook)(int at);
+/* the display's wait ahead (rd__room_ahead_take): the next picture's wait
+ * for room in the present queue made at the end of the picture before,
+ * after its present, outside the hand-over (rhi_wait_present_room).
+ * s_roomAhead: made and not yet taken by an acquire (atomic: any thread's
+ * acquire takes it); s_roomKnown: the backend has that wait (an answer
+ * true since the host came; the render thread's); s_roomOff:
+ * ICO_RD_ACQUIRE_AHEAD=0; s_roomT0/T1: the last one's span (rd__now_ms),
+ * written in the job and read by the game thread after its drain; the
+ * tests' seam in place of the backend's call */
+static int s_roomAhead;
+static bool s_roomKnown, s_roomOff;
+static double s_roomT0, s_roomT1;
+static bool (*s_roomHook)(void);
 
 /* the hand-over's lock: the count of pictures whose reads have not ended,
  * the game thread's waits for them, the textures to retire, the block's
@@ -63,12 +85,17 @@ typedef struct Tramp {
     void (*fn)(void *arg);
     void *arg;
     bool handed;
+    /* set to 0 at the job's very end (its slot ahead and display's wait
+     * ahead included): rd__thread_picture_busy's flag; NULL none */
+    int *busy;
 } Tramp;
 
+/* armSmooth: Motion blur: Smooth armed at one present a tick before the
+ * replay, as rd_end_frame's replay inside the step arms it (rd_core.c) */
 typedef struct ReplayArgs {
     const RdFrame *f;
     int keep;
-    bool present, ok;
+    bool present, ok, armSmooth;
 } ReplayArgs;
 
 static ReplayArgs s_picReplay;
@@ -76,7 +103,13 @@ static ReplayArgs s_picReplay;
 typedef struct PresentArgs {
     float alpha;
     double raw;
+    double gap[2]; /* rd__present_clock_take's */
     bool ok;
+    /* the drain's start (the alpha's sample) and end (the hand-over) for
+     * the evenness line (rd_even.h), 0 when not handed over */
+    double askMs, handMs;
+    /* the three rules' alphas for the on-glass line (rd_pace_rules.h) */
+    RdRuleNote rules;
 } PresentArgs;
 
 static PresentArgs s_picPresent;
@@ -88,6 +121,26 @@ static uint64_t s_waitedNs;
  * line's split of the waits (RdThreadBlock.freshWaits) */
 static uint32_t s_lastPresentFrame;
 static uint32_t s_failedPresents; /* rd_thread_failed_presents */
+/* Frame rate Original's hand-over (rd__replay_frame_post): its picture's
+ * job not yet ended (atomic; set by the game thread as it posts, cleared
+ * by the render thread at the job's end); [dev] original_async = false
+ * (ICO_RD_ORIGINAL_ASYNC=0, read with the host); the replay inside the
+ * game's step running on this thread (rd__thread_in_step) */
+static int s_picBusy;
+static bool s_origOff;
+static _Thread_local bool t_inStep;
+/* the render thread's job is Frame rate Original's picture (its Tramp's
+ * busy flag s_picBusy: rd__thread_original_job, the submit thread's GPU's
+ * end first); the frames handed over while the picture before waited for
+ * its GPU end on the submit thread (rd_thread_gpu_wait_posts_take; the game
+ * thread adds, the window's thread takes) */
+static _Thread_local bool t_origJob;
+static unsigned s_gpuWaitPosts;
+/* the render thread's picture job in its end's waits (its slot ahead and
+   the display's wait ahead, after its post to the submit thread): the
+   gate's reason for its busy (rd.h RD_BUSY_SLOT; atomic: set and cleared
+   by the render thread, read by the game thread) */
+static int s_picAhead;
 
 static void lk(void)
 {
@@ -183,11 +236,96 @@ static void slotAhead(void)
     rd__bind_epoch_next(); /* as rd__wait_frame's: the slot's bind groups anew */
     s_aheadSlot = (int)rhi_frame_slot();
     const double ms = rd__now_ms() - t0;
+    t_aheadNs = (uint64_t)(ms * 1e6);
     lk();
     s_block.aheads++;
     s_block.aheadMs += ms;
     s_block.aheadMaxMs = ms > s_block.aheadMaxMs ? ms : s_block.aheadMaxMs;
     ulk();
+}
+
+/* The display's wait ahead (rd_thread.h rd__room_ahead_take): at the end
+ * of a picture's job handed over that presented, its reads ended, its
+ * submit and present done (no submit thread: rd__submit_frame made both
+ * in this job) and the next picture's slot waited for (slotAhead), the
+ * wait for room in the present queue the next acquire would make, made
+ * here: Direct3D 11's frame latency wait.  Outside the hand-over: the game
+ * thread's calls go on meanwhile (this reads nothing of theirs; the
+ * backend's swap chain is this job's, a game-thread graphics call waits
+ * for the job through the call guard as for any job).  The next post's
+ * drain waits for what is left of it: the present's own wait, counted as
+ * the display's (rd_submit_waited_ns, the window's present_once).  Not with
+ * the submit thread on (the present is that thread's, after this job),
+ * not for a picture that presented nothing, not under
+ * ICO_RD_ACQUIRE_AHEAD=0. */
+static void roomAhead(void)
+{
+    if (s_roomOff || t_presentNs == 0 || !g_rd.hasDevice || rhi_device_lost() ||
+        rd_thread_submit_on()) {
+        return;
+    }
+    const double t0 = rd__now_ms();
+    const bool made = s_roomHook != NULL ? s_roomHook() : rhi_wait_present_room();
+    const double t1 = rd__now_ms();
+    if (!made) {
+        return; /* no such wait (Vulkan, OpenGL), or none to make now */
+    }
+    if (!s_roomKnown) {
+        /* the first on this host: the backend has the wait (an event, the
+           first 8 then every 100th) */
+        static unsigned s_lines;
+        s_roomKnown = true;
+        if (++s_lines <= 8 || s_lines % 100 == 0) {
+            rd__log("render thread: the display's wait for room in the present queue made at the "
+                    "end of a picture, after its present (%.1f ms): the next picture's acquire "
+                    "does not wait inside its reads",
+                    t1 - t0);
+        }
+    }
+    s_roomT0 = t0;
+    s_roomT1 = t1;
+    __atomic_store_n(&s_roomAhead, 1, __ATOMIC_RELEASE);
+    const double ms = t1 - t0;
+    lk();
+    s_block.roomAheads++;
+    s_block.roomAheadMs += ms;
+    s_block.roomAheadMaxMs = ms > s_block.roomAheadMaxMs ? ms : s_block.roomAheadMaxMs;
+    ulk();
+}
+
+void rd__room_ahead_take(void)
+{
+    const int had = __atomic_exchange_n(&s_roomAhead, 0, __ATOMIC_ACQ_REL);
+    if (!had && s_on && t_onR != 0 && t_handed && s_roomKnown && !s_roomOff) {
+        lk();
+        s_block.roomInside++; /* the wait in this picture's reads, as before */
+        ulk();
+    }
+}
+
+void rd__thread_room_hook(bool (*fn)(void))
+{
+    s_roomHook = fn;
+}
+
+/* a drain of the game thread's present (d0 its start, ns its wait): the
+ * part of it that waited for the display's wait ahead of the picture
+ * before (the span the job recorded; one that ended before d0 was an
+ * earlier job's) */
+static void noteRoomDrain(double d0, uint64_t ns)
+{
+    if (ns == 0 || !(s_roomT1 > d0)) {
+        return;
+    }
+    const double d1 = d0 + (double)ns / 1e6;
+    const double a = s_roomT0 > d0 ? s_roomT0 : d0;
+    const double b = s_roomT1 < d1 ? s_roomT1 : d1;
+    if (b > a) {
+        lk();
+        s_block.roomDrains++;
+        s_block.roomDrainMs += b - a;
+        ulk();
+    }
 }
 
 bool rd__slot_ahead_take(void)
@@ -235,6 +373,7 @@ static void runTramp(Tramp *t, bool picture)
     if (outer) {
         t_jobStartMs = rd__now_ms();
         t_presentNs = 0; /* this job's presents only */
+        t_aheadNs = 0;   /* and its slot ahead */
         t_waitNs = t_interpNs = 0;
         if (picture) {
             /* a picture's interpolation makes no graphics call: the
@@ -248,7 +387,13 @@ static void runTramp(Tramp *t, bool picture)
             retireDrain();
         }
     }
+    if (outer) {
+        t_origJob = t->busy == &s_picBusy;
+    }
     t->fn(t->arg);
+    if (outer) {
+        t_origJob = false; /* its list kept for the submit thread already */
+    }
     rd__reads_done();
     if (outer && t_retireKept) {
         /* a picture that made no graphics call (nothing to blend) */
@@ -267,7 +412,17 @@ static void runTramp(Tramp *t, bool picture)
         }
         ulk();
         if (picture && t->handed) {
+            if (t->busy != NULL) {
+                __atomic_store_n(&s_picAhead, 1, __ATOMIC_RELEASE);
+            }
             slotAhead(); /* the next picture's slot, the hand-over ended */
+            roomAhead(); /* and its room in the present queue */
+        }
+        if (t->busy != NULL) {
+            __atomic_store_n(&s_picAhead, 0, __ATOMIC_RELEASE);
+            /* the last read of t: the game thread may post the next
+               picture into it from here */
+            __atomic_store_n(t->busy, 0, __ATOMIC_RELEASE);
         }
     }
     t_handed = handed;
@@ -301,7 +456,10 @@ void rd_set_thread_host(const RdThreadHost *host)
     s_on = false;
     s_host = (RdThreadHost){0};
     s_aheadSlot = -1; /* the next replay waits for its own slot */
-    retireDrain();    /* here: nothing is posted any more */
+    __atomic_store_n(&s_roomAhead, 0, __ATOMIC_RELAXED);
+    s_roomKnown = false;
+    s_roomT0 = s_roomT1 = 0.0;
+    retireDrain(); /* here: nothing is posted any more */
     if (host != NULL && host->post != NULL && host->drain != NULL) {
         if (!s_lk) {
             s_lk = ico_mutex_create();
@@ -338,13 +496,63 @@ void rd_set_thread_host(const RdThreadHost *host)
                                      "as before; ICO_RD_SLOT_AHEAD=0 keeps it inside)");
             }
         }
+        {
+            /* the display's wait ahead's switch ([dev] acquire_ahead), its
+               line on each start (the first 8, then every 100th) */
+            static unsigned s_roomLines;
+            const char *e = getenv("ICO_RD_ACQUIRE_AHEAD");
+            s_roomOff = e != NULL && strcmp(e, "0") == 0;
+            if (++s_roomLines <= 8 || s_roomLines % 100 == 0) {
+                rd__log("render thread: %s",
+                        s_roomOff ? "the next picture waits for room in the present queue inside "
+                                    "its reads (ICO_RD_ACQUIRE_AHEAD=0, [dev] acquire_ahead = "
+                                    "false: the game thread's calls wait through the display)"
+                                  : "the next picture's wait for room in the present queue "
+                                    "(Direct3D 11's frame latency wait) is made at the end of "
+                                    "the picture before, after its present, outside the "
+                                    "hand-over (the game thread's calls that change the "
+                                    "renderer's state no longer wait through the display; the "
+                                    "present after waits for what is left, as the display's "
+                                    "wait; with the submit thread on, or where the acquire "
+                                    "makes the wait itself, nothing changes; "
+                                    "ICO_RD_ACQUIRE_AHEAD=0 keeps it inside)");
+            }
+        }
         s_async = false;
         s_lastOk = true;
         s_lastPresentFrame = 0;
+        __atomic_store_n(&s_picBusy, 0, __ATOMIC_RELAXED);
         s_on = true;
         if (host->submit && !host->sync) {
             /* the pictures' submit and present on a thread of their own */
             (void)rd__submit_thread_start(host->submitBegin, host->user);
+        }
+        {
+            /* Frame rate Original's hand-over (rd__replay_frame_post), its
+               escape ([dev] original_async = false), its line on each start
+               (the first 8, then every 100th) */
+            static unsigned s_origLines;
+            const char *e = getenv("ICO_RD_ORIGINAL_ASYNC");
+            s_origOff = e != NULL && strcmp(e, "0") == 0;
+            if (++s_origLines <= 8 || s_origLines % 100 == 0) {
+                if (s_origOff || host->sync) {
+                    rd__log("render thread: with Frame rate Original each game frame's picture is "
+                            "replayed and presented inside the game step, the game thread "
+                            "waiting (%s)",
+                            host->sync ? "[dev] render_thread = sync"
+                                       : "[dev] original_async = false");
+                } else {
+                    rd__log("render thread: with Frame rate Original each game frame's picture "
+                            "is handed over as the other frame rates' are: its submit and "
+                            "present run on the %s; the game step waits for the picture "
+                            "before's reads only, and skips a picture when the render thread is "
+                            "still busy, but a kept frame (a fade, a load) still waits for the "
+                            "picture before, its present included (counted in the 10 s line's "
+                            "\"waited for the picture before\") ([dev] original_async = false "
+                            "replays it inside the step as before)",
+                            rd_thread_submit_on() ? "submit thread" : "render thread");
+                }
+            }
         }
     }
 }
@@ -448,6 +656,20 @@ uint64_t rd_thread_take_present_ns(void)
     return sub > ns ? sub : ns;
 }
 
+uint64_t rd_thread_take_ahead_ns(void)
+{
+    const uint64_t ns = t_aheadNs;
+    t_aheadNs = 0;
+    return ns;
+}
+
+bool rd_thread_slot_ahead_on(void)
+{
+    /* as slotAhead: not under ICO_RD_SLOT_AHEAD=0, and not with the submit
+       thread on and the frame slots not apart */
+    return !s_aheadOff && (!rd_thread_submit_on() || rd_thread_submit_apart());
+}
+
 void rd__thread_note_present(double ms)
 {
     if (!s_on || !t_onR) {
@@ -494,11 +716,22 @@ void rd_thread_read_waits_text(const RdThreadBlock *b, char *out, size_t cap)
         }
     }
     if (n < cap) {
+        n += (size_t)snprintf(out + n, cap - n,
+                              "; the next picture's frame slot waited for at the end of the one "
+                              "before %u times (%.1f ms in all, longest %.1f ms), %u pictures "
+                              "waited for their slot inside their reads",
+                              b->aheads, b->aheadMs, b->aheadMaxMs, b->fenceInside);
+    }
+    if (n < cap && (b->roomAheads != 0 || b->roomInside != 0 || b->roomDrains != 0)) {
+        /* the display's share: where its wait was made (left out where the
+           backend has none to make ahead) */
         (void)snprintf(out + n, cap - n,
-                       "; the next picture's frame slot waited for at the end of the one before "
-                       "%u times (%.1f ms in all, longest %.1f ms), %u pictures waited for their "
-                       "slot inside their reads",
-                       b->aheads, b->aheadMs, b->aheadMaxMs, b->fenceInside);
+                       "; the display's wait for room in the present queue made at the end of "
+                       "the picture before %u times (%.1f ms in all, longest %.1f ms; the "
+                       "presents waited for it %u times, %.1f ms, as the display's wait), %u "
+                       "pictures waited for it inside their reads",
+                       b->roomAheads, b->roomAheadMs, b->roomAheadMaxMs, b->roomDrains,
+                       b->roomDrainMs, b->roomInside);
     }
 }
 
@@ -527,6 +760,17 @@ void rd__texlock_wait(void)
     s_block.readWaitBy[phase]++;
     s_block.readWaitByMs[phase] += ms;
     ulk();
+}
+
+uint64_t rd_thread_reads_wait(void)
+{
+    if (!s_on || t_onR || __atomic_load_n(&s_owned, __ATOMIC_ACQUIRE) == 0) {
+        return 0;
+    }
+    const double t0 = rd__now_ms();
+    rd__texlock_wait();
+    const double ms = rd__now_ms() - t0;
+    return ms > 0.0 ? (uint64_t)(ms * 1e6) : 1u;
 }
 
 void rd__thread_retire_kept(void)
@@ -592,25 +836,81 @@ bool rd__render_call(void (*fn)(void *arg), void *arg)
         fn(arg);
         return true;
     }
-    Tramp t = {fn, arg, false};
+    Tramp t = {fn, arg, false, NULL};
     return s_host.post(s_host.user, callTramp, &t, false, true);
 }
 
 /* ---------------------------------------------------------- the replays */
 
+/* the ring's sent flags (rd_internal.h rd__frame_sent), a slot each */
+static uint32_t s_frameSent[RD_FRAME_RING];
+
+/* f's slot in the ring, -1 for a frame outside it (compared as addresses:
+   f may be any frame) */
+static int ringSlot(const RdFrame *f)
+{
+    const uintptr_t a = (uintptr_t)f, b = (uintptr_t)&g_rd.frames[0];
+    if (f == NULL || a < b || a >= b + sizeof(g_rd.frames) || (a - b) % sizeof(RdFrame) != 0) {
+        return -1;
+    }
+    return (int)((a - b) / sizeof(RdFrame));
+}
+
+bool rd__frame_sent(const RdFrame *f)
+{
+    const int i = ringSlot(f);
+    return i >= 0 && __atomic_load_n(&s_frameSent[i], __ATOMIC_RELAXED) != 0;
+}
+
+void rd__frame_sent_clear(const RdFrame *f)
+{
+    const int i = ringSlot(f);
+    if (i >= 0) {
+        __atomic_store_n(&s_frameSent[i], 0u, __ATOMIC_RELAXED);
+    }
+}
+
+/* rd__frame_sent (rd_loss_pick.h rd_loss_keep_needed): the ring's closed
+ * frame of f's number (f itself, or a frame made from its head with its
+ * number: the reshow's, the paused hold's) has had a picture handed to a
+ * replay.  Called where a replay is asked for, before it runs: on the game
+ * thread, or on the render thread inside a call the game thread waits for
+ * or a picture's job before its reads end, so the slots' numbers and
+ * closed flags, which the game thread changes only after rd__texlock_wait,
+ * are read here as they stand; the flag is __atomic (the game thread and a
+ * job may mark the same frame).  A frame of another number (a self-test's,
+ * a dump loaded) marks nothing, or a ring frame of the same number: one
+ * more copy kept, as before the flag */
+static void noteSent(const RdFrame *f)
+{
+    if (f == NULL || f->number == 0) {
+        return;
+    }
+    for (int i = 0; i < RD_FRAME_RING; i++) {
+        RdFrame *r = &g_rd.frames[i];
+        if (r->closed && r->number == f->number) {
+            __atomic_store_n(&s_frameSent[i], 1u, __ATOMIC_RELAXED);
+        }
+    }
+}
+
 static void replayJob(void *arg)
 {
     ReplayArgs *r = arg;
+    if (r->armSmooth) {
+        rd__blur_smooth_arm(1, 1, 0.0, 0.0); /* Motion blur: Smooth at one present a tick */
+    }
     r->ok = rd__replay_frame_here(r->f, r->keep, r->present);
 }
 
 bool rd__replay_frame(const RdFrame *f, int keep, bool present)
 {
+    noteSent(f);
     if (!s_on || t_onR) {
         return rd__replay_frame_here(f, keep, present);
     }
-    ReplayArgs r = {f, keep, present, false};
-    Tramp t = {replayJob, &r, false};
+    ReplayArgs r = {f, keep, present, false, false};
+    Tramp t = {replayJob, &r, false, NULL};
     if (present) {
         (void)rd_thread_drain();
         rd__overlay_hand_over(); /* the UI's layers on this thread (rd_present.c) */
@@ -637,11 +937,15 @@ void rd__thread_picture_begin(void)
 {
     /* the render thread's picture before: its submit and present may go on
      * on the submit thread (rd_submit_thread.h) */
-    s_waitedNs += renderDrain();
+    const double d0 = rd__now_ms();
+    const uint64_t ns = renderDrain();
+    s_waitedNs += ns;
+    noteRoomDrain(d0, ns);
 }
 
 bool rd__replay_frame_async(const RdFrame *f, int keep, bool present)
 {
+    noteSent(f);
     if (!s_on || t_onR) {
         return rd__replay_frame_here(f, keep, present);
     }
@@ -650,8 +954,8 @@ bool rd__replay_frame_async(const RdFrame *f, int keep, bool present)
     if (present) {
         rd__overlay_hand_over(); /* the UI's layers on this thread (rd_present.c) */
     }
-    s_picReplay = (ReplayArgs){f, keep, present, false};
-    s_picTramp = (Tramp){replayJob, &s_picReplay, !wait};
+    s_picReplay = (ReplayArgs){f, keep, present, false, false};
+    s_picTramp = (Tramp){replayJob, &s_picReplay, !wait, NULL};
     if (!wait) {
         handOver();
     }
@@ -673,42 +977,273 @@ bool rd__replay_frame_async(const RdFrame *f, int keep, bool present)
     return s_lastOk;
 }
 
+/* ------------------------------------------ Frame rate Original's post */
+
+bool rd__replay_frame_post_ok(void)
+{
+    return s_on && t_onR == 0 && !s_origOff && !pictureWaits();
+}
+
+/* The rule's input (rd.h RdReplayGate busy), what was busy (rd.h
+ * RD_BUSY_*): the render thread has not ended the job of the picture before
+ * (its walk, or its acquire waiting behind a present: RD_BUSY_RENDER; its
+ * slot ahead waiting for the GPU's picture two before: RD_BUSY_SLOT), or
+ * the submit thread has not ended that picture's submit and present
+ * (RD_BUSY_SUBMIT: the swapchain's lock is held through the driver's
+ * present call, vk_swapchain.c, and the next acquire takes it: a picture
+ * posted now would wait for that present inside its reads, and the game
+ * step's next renderer call with it) */
+int rd__thread_picture_busy(void)
+{
+    if (!rd__replay_frame_post_ok()) {
+        return RD_BUSY_NONE;
+    }
+    if (__atomic_load_n(&s_picBusy, __ATOMIC_ACQUIRE) != 0) {
+        return __atomic_load_n(&s_picAhead, __ATOMIC_ACQUIRE) != 0 ? RD_BUSY_SLOT : RD_BUSY_RENDER;
+    }
+    if (!rd_thread_submit_unfinished()) {
+        return RD_BUSY_NONE;
+    }
+    if (rd_thread_submit_ahead_now()) {
+        /* the ahead order (rd_submit_thread.h): a picture posted now is
+           submitted as soon as it is recorded, and the submit thread's
+           present of the one before is short (its GPU work ended first;
+           the present-call guard turns the order off where it is not) */
+        return RD_BUSY_NONE;
+    }
+    /* the GPU's end first (rd_submit_thread.h): a job that waits for its
+       picture's GPU end with none behind it holds no lock the next picture
+       takes.  Read last: the render thread's post of a job behind it
+       (rd__submit_post_pending: alone cleared under the queue's lock)
+       comes before its release of s_picBusy, which the acquire above
+       read as 0, so a post that made the queue two deep is always seen
+       here, and a stale "alone" of the job before cannot pass.  What is
+       left: the wait ends just after this read; the hand-over then reads
+       alone again and waits for that job's present alone (rd__replay_frame_post) */
+    return rd_thread_submit_gpu_wait_alone() ? RD_BUSY_NONE : RD_BUSY_SUBMIT;
+}
+
+bool rd__thread_original_job(void)
+{
+    return t_onR != 0 && t_origJob;
+}
+
+unsigned rd_thread_gpu_wait_posts_take(void)
+{
+    return __atomic_exchange_n(&s_gpuWaitPosts, 0u, __ATOMIC_ACQ_REL);
+}
+
+bool rd__thread_picture_busy_render(void)
+{
+    return __atomic_load_n(&s_picBusy, __ATOMIC_ACQUIRE) != 0;
+}
+
+bool rd__replay_frame_post(const RdFrame *f, int keep, double *waitMs)
+{
+    *waitMs = 0.0;
+    if (!rd__replay_frame_post_ok()) {
+        return false;
+    }
+    noteSent(f);
+    /* the picture before ended, its present too: a no-op unless the gate
+       presented this frame while busy (a keep frame), or there is none */
+    const double d0 = rd__now_ms();
+    const uint64_t ns = renderDrain();
+    noteRoomDrain(d0, ns);
+    if (ns != 0) {
+        lk();
+        s_block.freshWaits++; /* the 10 s line's slot waits by a new frame's present */
+        s_block.freshWaitMs += (double)ns / 1e6;
+        ulk();
+    }
+    /* the submit thread's job: waited for, its present too, unless it waits
+       for its picture's GPU end with none behind it (the GPU's end first,
+       rd_submit_thread.h): this picture is walked, acquired and recorded
+       beside that wait, its own job queued after that present */
+    /* (and with the ahead order in effect, rd_submit_thread.h "ahead": its
+       job is posted behind the submit thread's work and submitted at once,
+       the present of the one before not waited for here) */
+    const bool besideGpu = rd_thread_submit_gpu_wait_alone() ||
+                           (rd_thread_submit_ahead_now() && rd_thread_submit_unfinished());
+    if (besideGpu) {
+        rd_thread_submit_reap();
+    } else {
+        (void)rd_thread_submit_drain();
+    }
+    *waitMs = rd__now_ms() - d0;
+    /* rd_last_present_info names this frame only now: the picture before's
+       job may still present inside the wait above, and its screenshot
+       check (rd_present.c shotTake) would read this newer frame and drop a
+       shot armed for it as later than armed */
+    rd__note_frame_present(f);
+    /* the UI's layers on this thread, before the hand-over (rd_present.c
+       s_pre), as rd__replay_frame_async */
+    rd__overlay_hand_over();
+    s_picReplay = (ReplayArgs){f, keep, true, false, true};
+    s_picTramp = (Tramp){replayJob, &s_picReplay, true, &s_picBusy};
+    __atomic_store_n(&s_picBusy, 1, __ATOMIC_RELEASE);
+    handOver();
+    if (s_host.post(s_host.user, pictureTramp, &s_picTramp, true, false)) {
+        s_async = true;
+        s_asyncPresent = false;
+        if (besideGpu) {
+            __atomic_add_fetch(&s_gpuWaitPosts, 1u, __ATOMIC_RELAXED);
+        }
+        return true;
+    }
+    /* refused (parked, the queue full): nothing posted holds the state;
+       the caller replays it inside the step on the host's stack */
+    __atomic_store_n(&s_picBusy, 0, __ATOMIC_RELEASE);
+    giveBack();
+    rd__overlay_hand_over_drop();
+    return false;
+}
+
+void rd__thread_in_step(bool on)
+{
+    t_inStep = on;
+}
+
+bool rd__thread_in_step_now(void)
+{
+    return t_inStep;
+}
+
 /* ------------------------------------------------------- the presents */
 
-/* the present clock's value the poster took, for rd_present on the
- * render thread (rd__thread_clock_raw) */
+/* the present clock's value the poster took, and its time since the
+ * present before and its tick, for rd_present on the render thread
+ * (rd__thread_clock) */
 static _Thread_local bool t_rawSet;
-static _Thread_local double t_raw;
+static _Thread_local double t_raw, t_gap[2];
 
 static void presentJob(void *arg)
 {
     PresentArgs *p = arg;
     const bool set = t_rawSet;
-    const double raw = t_raw;
+    const double raw = t_raw, gap0 = t_gap[0], gap1 = t_gap[1];
     t_rawSet = true;
     t_raw = p->raw;
+    t_gap[0] = p->gap[0];
+    t_gap[1] = p->gap[1];
+    rd_even_hand_note(p->askMs, p->handMs); /* for the replay's record */
+    rd_pace_rules_note(&p->rules);
     p->ok = rd_present(p->alpha);
+    rd_even_hand_note(0.0, 0.0);
+    rd_pace_rules_note(NULL);
     t_rawSet = set;
     t_raw = raw;
+    t_gap[0] = gap0;
+    t_gap[1] = gap1;
 }
 
-double rd__thread_clock_raw(void)
+double rd__thread_clock(double gap[2])
 {
     if (t_rawSet) {
         const double r = t_raw;
+        gap[0] = t_gap[0];
+        gap[1] = t_gap[1];
         t_rawSet = false; /* taken: a second present in the job finds none */
+        t_gap[0] = t_gap[1] = 0.0;
         return r;
     }
-    return rd__present_clock_raw_take();
+    return rd__present_clock_take(gap);
 }
 
 /* rd_present_post's wait for the picture before: counted as
  * rd__thread_picture_begin does, and by whose it is, a new frame's present
- * (fresh) or a further one's */
+ * (fresh) or a further one's; its start and end for the evenness line
+ * (s_drainAtMs, s_drainEndMs: the clock read it makes and the time it
+ * waited, no other read) */
+static double s_drainAtMs, s_drainEndMs;
+
+/* the alpha re-based to the hand-over (rd_rebase.h): the poster's state,
+ * and whether the window presents pictures as made (rd_present_as_made) */
+static RdRebase s_rebase;
+static bool s_asMade;
+
+double rd_present_even_hold(double untilDeadlineMs, double tickMs, double untilRuleMs)
+{
+    /* the poster's thread, as made only (rd_pace_even.h) */
+    return s_asMade ? rd_pace_even_hold_at(rd__now_ms(), untilDeadlineMs, tickMs, untilRuleMs)
+                    : 0.0;
+}
+
+void rd_present_as_made(bool on)
+{
+    s_asMade = on;
+    /* the display's times chained and read only as made (rhi.h: the one
+       mode the screen's rule and the on-glass line serve; capped and vsync
+       presents as v0.11.5's) */
+    rhi_present_glass_use(on);
+    if (!on) {
+        rd_pace_gpu_paced();   /* the GPU queue's model off (rd_pace_gpu.h) */
+        rd_pace_rules_paced(); /* and the own timer (rd_pace_rules.h) */
+    }
+}
+
+/* the handed-over present's alpha moved by its drain's difference from the
+ * drain's running mean, on the timer path only (the clock timed it: raw not
+ * NAN; not under ICO_RD_S2_LEGACY=1, whose alpha is the raw time); its
+ * figures into the evenness line.  No clock read: the drain's stamps */
+static void presentRebase(PresentArgs *p, uint32_t frame, bool kept)
+{
+    const double tick = p->gap[1];
+    if (isnan(p->raw) || rd__s2_legacy() || !(tick > 0.0)) {
+        s_rebase.have = false;
+        return;
+    }
+    const double drain = s_drainEndMs - s_drainAtMs;
+    const double lead = rd__present_clock_lead_ms();
+    /* the measured ask against the frame's close, in ticks: the clock's
+       value less its lead over the time it was asked at */
+    const double atAsk = p->raw - lead / tick;
+    double raw = p->raw;
+    if (s_asMade) {
+        /* pictures as made: the measured hand-over less the drain's
+           running mean (rd_rebase.h), not the clock's smoothed moment */
+        double shift = 0.0;
+        bool held = false;
+        /* moved by the GPU queue's predicted wait for this picture less its
+           running mean (rd_pace_gpu.h) only where that rule is drawn
+           (ICO_RD_PACE_GPU=1; off by default: queue 0 and the value the
+           hand-over rule's to the bit); the model computed either way */
+        double would = 0.0;
+        /* a kept frame's present (a fade, a load: rd_interp.c rd_present's
+           keep path, no alpha drawn and no measurement back) is not stepped
+           through the queue model: its predicted end was a scene picture's
+           GPU time late and chained into the next (v0.11.6-rc5) */
+        const double queue = kept ? 0.0 : rd_pace_gpu_shift(s_drainEndMs, frame, &would);
+        raw = rd_rebase_raw(&s_rebase, queue != 0.0 ? atAsk + queue / tick : atAsk, tick, drain,
+                            frame, &shift, &held);
+        /* the three rules side by side; the own timer's value drawn where
+           it is on (rd_pace_rules.h), raw untouched otherwise */
+        raw = rd_pace_rules_pick(raw, queue, would, s_drainAtMs - atAsk * tick, tick, s_drainEndMs,
+                                 frame, kept, &p->rules);
+        p->raw = raw;
+        p->alpha = rd_rebase_alpha(raw);
+        /* the content's moment to the hand-over: at the clock's moment
+           d - L, now d less both shifts (or the hold's) */
+        rd_even_rebase_note(drain - lead, drain - (raw - atAsk) * tick, shift + queue, held);
+    } else {
+        s_rebase.have = false;
+    }
+    /* the content drawn on rd's clock against the hand-over (the frame's
+       close at the drain's start less the ask's ticks; the content one tick
+       behind it, at the clamped alpha), for the line's repeats and its step
+       over the real gap */
+    const double closeAt = s_drainAtMs - atAsk * tick;
+    rd_even_content_note(closeAt - tick + (double)rd_rebase_alpha(raw) * tick, s_drainEndMs);
+}
+
 static void presentDrain(bool fresh)
 {
+    const double d0 = rd__now_ms();
     const uint64_t ns = renderDrain(); /* the submit thread's job may go on */
+    s_drainAtMs = d0;
+    s_drainEndMs = d0 + (double)ns / 1e6;
     s_waitedNs += ns;
+    noteRoomDrain(d0, ns);
     if (ns != 0) {
         lk();
         if (fresh) {
@@ -724,6 +1259,15 @@ static void presentDrain(bool fresh)
 
 bool rd_present_post(float alpha)
 {
+    {
+        /* the frame rd_present replays (blended or as it is), as its own
+           test says (rd_interp.c): sent */
+        const RdFrame *c = rd__last_frame();
+        if (rd_interpolation_active() && g_rd.hasDevice && !g_rd.videoShown && c != NULL &&
+            c->closed) {
+            noteSent(c);
+        }
+    }
     if (!s_on || t_onR) {
         return rd_present(alpha);
     }
@@ -746,8 +1290,11 @@ bool rd_present_post(float alpha)
      * callbacks share port/ui's font state with the step's own text
      * (rd_present.c s_pre) */
     rd__overlay_hand_over();
-    s_picPresent = (PresentArgs){alpha, rd__present_clock_raw_take(), false};
-    s_picTramp = (Tramp){presentJob, &s_picPresent, !wait};
+    s_picPresent =
+        (PresentArgs){alpha, 0.0, {0.0, 0.0}, false, s_drainAtMs, s_drainEndMs, RD_RULE_NOTE_NONE};
+    s_picPresent.raw = rd__present_clock_take(s_picPresent.gap);
+    presentRebase(&s_picPresent, cur->number, cur->keep != 0u);
+    s_picTramp = (Tramp){presentJob, &s_picPresent, !wait, NULL};
     if (!wait) {
         handOver();
     }

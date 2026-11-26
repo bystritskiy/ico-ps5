@@ -44,6 +44,32 @@ typedef struct IcoGpuHangWatch {
 int ico_gpu_hang_step(IcoGpuHangWatch *w, double limit_s, unsigned long long waiting_for,
                       unsigned long long finished, double dt_s, int count);
 
+/* The reset stop (issue 215): on Qualcomm's driver 512.676.53 a submission
+   that never finished went with the kernel's GPU driver resetting the GPU
+   again and again (KGSL's reset_count, gpu_sysfs.h), and the whole device
+   restarted about 10 s into the wait, before the limit above (15 s).  One
+   wait for one unfinished submission seen for ICO_GPU_RESET_STOP_S during
+   which the reset count rose by ICO_GPU_RESET_STOP_N or more ends the run
+   as the GPU hang at once.  A stall the driver recovers from (about 350 ms
+   and one reset there; issue 217's phone once had two resets in a 269 ms
+   wait that went on) is under both figures. */
+#define ICO_GPU_RESET_STOP_S 1.0
+#define ICO_GPU_RESET_STOP_N 3
+
+/* Zero-initialise before the first step. */
+typedef struct IcoGpuResetWatch {
+    unsigned long long waiting_for; /* the submission the wait is for, 0 none */
+    double counted_s;               /* the time it was seen unfinished, counted */
+    int resets0;                    /* the reset count when the wait was first seen */
+    int fired;                      /* stopped (once a run) */
+} IcoGpuResetWatch;
+
+/* One poll, as ico_gpu_hang_step's, with the kernel driver's reset count
+   now (below 0: not readable, never a stop; a count that went down, as
+   after the reader's restart, starts the wait's figure again).  1 once. */
+int ico_gpu_reset_step(IcoGpuResetWatch *w, unsigned long long waiting_for,
+                       unsigned long long finished, double dt_s, int count, int resets);
+
 /* The render thread's watch (diag_host.c, the window's render thread):
    the same count over its picture in progress (seq, 0 none: a call between
    pictures is not counted, render_thread.c) and the last one finished
@@ -83,13 +109,70 @@ int ico_pipe_note_creating(const char *note, unsigned bg_left);
    own heartbeat, each compile that returns); any of them moving, no
    creation, the time not counted (counted 0) or the limit off (on 0)
    starts it again.  Returns the stalled seconds (0 while it moves).
-   Zero-initialise. */
+   held_s: the time the memory rule held this creation
+   (ico_pipe_mem_hold), back to 0 when the creation changes (no creation,
+   the limit off, or seq, done or bg_done moving); last: the time of the
+   last hold asked.  Zero-initialise. */
 typedef struct IcoPipeStallWatch {
     unsigned seq, done, bg_done;
     double since;
+    double held_s, last;
 } IcoPipeStallWatch;
 
 double ico_pipe_stall_step(IcoPipeStallWatch *w, double now, int creating, int counted, int on,
                            unsigned seq, unsigned done, unsigned bg_done);
+
+/* The pipeline limit's length (diag_host.c, issues 161 and 188): before the
+   game starts (in_play 0: the self-tests and the start-up set) 10 s, or 60 s
+   on a driver whose compiles run one at a time (serial_compiler: rhi.h
+   RhiLimits.serialPipelines, a PowerVR B-Series driver: Imagination's own
+   thread on that driver has a set taking 84 s without its cache, and the
+   issue 188 phone's did not return within 10 s from a 70k-word shader,
+   slow or hung, the log cannot tell); in play 30 s on every driver. */
+#define ICO_PIPE_STALL_START_S 10.0
+#define ICO_PIPE_STALL_START_SERIAL_S 60.0
+#define ICO_PIPE_STALL_PLAY_S 30.0
+double ico_pipe_stall_limit_s(int in_play, int serial_compiler);
+
+/* The heartbeat's memory rule (diag_host.c, issue 188): the process's
+   resident memory at this heartbeat against the last one's (KB, -1
+   unknown); 1 when it grew by ICO_PIPE_MEM_MOVING_KB or more, the driver's
+   compiler at work (the issue 188 phone: 147, 251, 275, 296 MB at the
+   heartbeats while its compile ran), so the pipeline limit does not count
+   that heartbeat's time; an unknown reading never moves. */
+#define ICO_PIPE_MEM_MOVING_KB 2048L
+int ico_pipe_mem_moving(long prev_kb, long now_kb);
+
+/* Whether the memory rule holds the limit at this poll (the watchdog's
+   thread, before ico_pipe_stall_step, whose counted it then clears): a
+   creation in progress whose memory moves (ico_pipe_mem_moving), the
+   limit on, and neither memory_low (the free memory under the floor or a
+   low-memory level from the system: diag_host.c ico_diag_background_memory,
+   read here at every poll, since the set's own checks between batches
+   cannot interrupt a creation inside the driver) nor the hold used up:
+   the time held in this creation (w->held_s, the polls' time added while
+   held) under ICO_PIPE_MEM_HOLD_LIMITS times limit_s.  Without the cap a
+   driver call that never returns and grows 2 MB a heartbeat would hold
+   the limit until Android's low-memory killer ended the process (no box,
+   no stall mark).  A creation that grows all along thus ends at three
+   times the limit held plus the limit itself at the latest (40 s before
+   the game starts, 240 s on a serial compiler, 120 s in play).  1 held. */
+#define ICO_PIPE_MEM_HOLD_LIMITS 3.0
+int ico_pipe_mem_hold(IcoPipeStallWatch *w, double now, int creating, int moving, int on,
+                      int memory_low, double limit_s);
+
+/* Whether the next start prepares the graphics another way after the
+   pipeline limit ended this one (the box's and the line's words, issue
+   188): a note naming only a family the renderer can draw another way
+   (skip_family: pipeline_skip.h pipeline_skip_family_of_note), or a VU
+   shader (vu_note) while the plain VU shaders are not in force yet
+   (vu_plain_already: the stall mark of an earlier end), changes what it
+   makes; else the next start's set policy does (careful, then on first
+   use), except where nothing of it runs before the creation that stalled:
+   the self-tests run first at every start whatever the set (in_selftest),
+   and a run already on first use has no later step (lazy_run).  1: another
+   way. */
+int ico_pipe_stall_next_differs(int in_selftest, int lazy_run, int skip_family, int vu_note,
+                                int vu_plain_already);
 
 #endif /* ICO_PLATFORM_GPU_HANG_H */

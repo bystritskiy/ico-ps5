@@ -25,6 +25,15 @@
    camera, a hard cut for the presenter's interpolation
    (port/game/video_options.c; a counter no game state reads) */
 extern void ico_video_camera_cut(void);
+/* PC port: Zoom type
+   (port/game/zoom_toggle.h): the June 2001 demo's look-around stops while
+   the camera is zoomed in, R2 held or toggled */
+extern int ico_zoom_wanted(int held);
+/* PC port: Camera reset
+   (port/game/camera_reset.h): with the option on, R3 (pad bit 0x400) puts
+   the look-around back to rest at once and holds the stick until it is
+   back in its dead zone; off, the stick passes through */
+extern int ico_cam_reset(int r3, int live, float *sx, float *sz);
 static void *ReadCameraSet(struct CamSetFile *f, int stage);
 
 /* a loaded camera set: the file header, then the group records */
@@ -1591,6 +1600,11 @@ static void SetCameraMatrix_Ico2_ntsc(int flag)
                 sz = dir.f[2] * mag;
             }
         }
+        /* PC port: Camera reset (camera_reset.h) */
+        if (ico_cam_reset(pad[0].now & 0x400,
+                          systemStatus[5] == 0 && IsAbleBoyControl() != 0 && mode != 0, &sx, &sz)) {
+            ClearHandCameraCorrect();
+        }
         if (systemStatus[5] != 0 || IsAbleBoyControl() == 0 || mode == 0) {
             ClearHandCameraCorrect();
         } else {
@@ -1610,6 +1624,7 @@ static void SetCameraMatrix_Ico2_jun26(int flag)
     int cut;
     int enable;
     int mode = 1;
+    int zoomStop = 0; /* PC port: the look-around stopped by the zoom alone (Camera reset) */
     int changed = 0;
     unsigned char f8;
     int group;
@@ -1692,7 +1707,8 @@ static void SetCameraMatrix_Ico2_jun26(int flag)
            the bodies' two temporaries and the shared -0.4f), and the clamp
            (its label puts the dead zone's first 0.0f in $f0). aug6's TRFILE
            has no code on the lines of the clamp and of the response. */
-        if (pad[0].now & 2) {
+        if (ico_zoom_wanted(pad[0].now & 2)) { /* PC port: R2 held or toggled */
+            zoomStop = mode != 0;
             mode = 0;
         }
         if (mode) {
@@ -1735,6 +1751,14 @@ static void SetCameraMatrix_Ico2_jun26(int flag)
                 sx = dir.f[0] * mag;
                 sz = dir.f[2] * mag;
             }
+        }
+        /* PC port: Camera reset (camera_reset.h); live too while only the
+           zoom stops the look-around, so R3 ends a toggled zoom here as well */
+        if (ico_cam_reset(pad[0].now & 0x400,
+                          systemStatus[5] == 0 && IsAbleBoyControl() != 0 &&
+                              (mode != 0 || zoomStop != 0),
+                          &sx, &sz)) {
+            ClearHandCameraCorrect();
         }
         if (systemStatus[5] != 0 || IsAbleBoyControl() == 0 || mode == 0) {
             ClearHandCameraCorrect();
@@ -1889,6 +1913,11 @@ static void SetCameraMatrix_Ico2_aug6(int f8)
             sz = dir.f[2] * mag;
         }
     }
+    /* PC port: Camera reset (camera_reset.h) */
+    if (ico_cam_reset(pad[0].now & 0x400,
+                      systemStatus[5] == 0 && IsAbleBoyControl() != 0 && mode != 0, &sx, &sz)) {
+        ClearHandCameraCorrect();
+    }
     if (systemStatus[5] != 0 || IsAbleBoyControl() == 0 || mode == 0) {
         ClearHandCameraCorrect();
     } else {
@@ -1989,6 +2018,11 @@ void SetCameraMatrix_Ico2(int flag)
         float mag;
 
         GetHandCameraStickInfo(&sx, &sz, &mag);
+        /* PC port: Camera reset (camera_reset.h) */
+        if (ico_cam_reset(pad[0].now & 0x400,
+                          systemStatus[5] == 0 && IsAbleBoyControl() != 0 && mode != 0, &sx, &sz)) {
+            ClearHandCameraCorrect();
+        }
         if (systemStatus[5] != 0 || IsAbleBoyControl() == 0 || mode == 0) {
             ClearHandCameraCorrect();
         } else {
@@ -2273,3 +2307,23 @@ static int cameraIco2Word0 = 0; /* derived name */
 int current_group = 0;
 
 static int cameraIco2Word1 = 0; /* derived name */
+
+/* PC port: the monitor camera as port/game/unused_live.c's test-room lines
+   log it: the group the zone search last found (-1 none since the stage's
+   init: a frame with no zone keeps the last), the eye and the look-at in
+   the roots' space (the work holds them negated, as the groups are), the
+   camera mode (camera-root.c CameraGetMode) and whether a camera has been
+   computed since the stage's init (CameraCalclated_f: GetCameraPos's
+   test).  Reads only. */
+int ico_host_camera_view(float *eye, float *at, int *mode, int *computed);
+
+int ico_host_camera_view(float *eye, float *at, int *mode, int *computed)
+{
+    for (int k = 0; k < 3; k++) {
+        eye[k] = 0.0f - monitorCamera.work.eye.f[k];
+        at[k] = 0.0f - monitorCamera.work.at.f[k];
+    }
+    *mode = CameraGetMode();
+    *computed = CameraCalclated_f != 0;
+    return cameraGroupCurrent;
+}

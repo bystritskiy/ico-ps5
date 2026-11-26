@@ -31,6 +31,13 @@ endif()
 # string literals and the font corpus lies in the subset's unicode ranges
 if(Python3_FOUND)
     add_test(NAME font_audit COMMAND "${Python3_EXECUTABLE}" "${CMAKE_SOURCE_DIR}/tools/font_audit.py")
+    # strings_sync: every string id has a line in every community translation table
+    # (tools/strings_sync.py --check): a new id appended to the enum without its
+    # `[UI_STR_X] = NULL` line in the end block of each table fails here, and so does a
+    # block's quoted English that differs from strings_en.c (--refresh-comments renews it);
+    # strings_sync_selftest checks the tool's parse rules on fixed inputs
+    add_test(NAME strings_sync COMMAND "${Python3_EXECUTABLE}" -I "${CMAKE_SOURCE_DIR}/tools/strings_sync.py" --check)
+    add_test(NAME strings_sync_selftest COMMAND "${Python3_EXECUTABLE}" -I "${CMAKE_SOURCE_DIR}/tools/strings_sync.py" --self-test)
 endif()
 
 # font_subset_arimo: the port's main font (tools/subset_font_arimo.py --check):
@@ -89,6 +96,25 @@ if(Python3_FOUND)
              COMMAND "${Python3_EXECUTABLE}" -I "${CMAKE_SOURCE_DIR}/tools/content_table_check.py"
                      --version kor --disc "${ICO_DISC_IMAGE_KOR}" chains)
     set_tests_properties(content_table_chains_kor PROPERTIES SKIP_RETURN_CODE 77)
+endif()
+
+# unused_content_audit_<disc>: docs/port/UNUSED_CONTENT_AUDIT.md's section for the disc against the
+# disc's image (tools/unused_content_audit.py --check): the DATA.DF entries no table names, the
+# stage rows no exit leads to, the models no row names, the loose items; skipped (77) without the
+# image
+if(Python3_FOUND)
+    foreach(uca_slug IN ITEMS pal jpn kor ntsc aug6 jun26 cn)
+        if(uca_slug STREQUAL "pal")
+            set(uca_image "${ICO_DISC_IMAGE}")
+        else()
+            string(TOUPPER "${uca_slug}" uca_upper)
+            set(uca_image "${ICO_DISC_IMAGE_${uca_upper}}")
+        endif()
+        add_test(NAME unused_content_audit_${uca_slug}
+                 COMMAND "${Python3_EXECUTABLE}" -I "${CMAKE_SOURCE_DIR}/tools/unused_content_audit.py"
+                         --slug ${uca_slug} --disc "${uca_image}" --check)
+        set_tests_properties(unused_content_audit_${uca_slug} PROPERTIES SKIP_RETURN_CODE 77)
+    endforeach()
 endif()
 
 # offset_audit: every raw EE-offset access the host

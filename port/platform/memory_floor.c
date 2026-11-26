@@ -5,38 +5,34 @@
  */
 #include "memory_floor.h"
 
+#include "rhi_device_table.h" /* port/rhi: the driver class's rows */
+
+#include <stdio.h>
 #include <stdlib.h>
 #include <string.h>
 
-/* word anywhere in s, any case (the driver texts' own spelling varies:
-   "turnip Mesa driver", "Mesa 25.1.0") */
-static int has_word(const char *s, const char *word)
+/* The class is the device table's MEMORY_FLOOR_CLASS (port/rhi/
+   rhi_device_table.c: the rows vendor-unknown and qualcomm-text, another
+   driver the default) on an identity of the arguments; the rule this
+   function held before, vendor 0 unknown, vendor 0x5143 with a driver id
+   other than 18 (Turnip's) and neither "mesa" nor "turnip" in the driver
+   text Qualcomm's own, is those rows' match, and
+   port/rhi/test/rhi_device_table_equiv_test.c compares the two on every
+   identity of its matrix */
+_Static_assert((int)ICO_MEMORY_FLOOR_DRIVER_UNKNOWN == (int)RHI_DT_FLOOR_UNKNOWN &&
+                   (int)ICO_MEMORY_FLOOR_DRIVER_QUALCOMM == (int)RHI_DT_FLOOR_QUALCOMM &&
+                   (int)ICO_MEMORY_FLOOR_DRIVER_OTHER == (int)RHI_DT_FLOOR_OTHER,
+               "the table's floor classes are IcoMemoryFloorDriver's values");
+
+int ico_memory_floor_driver(unsigned vendor_id, unsigned driver_id, const char *driver_text)
 {
-    const size_t n = strlen(word);
+    RhiDeviceId id;
 
-    for (; s != NULL && *s != '\0'; s++) {
-        size_t i = 0;
-
-        while (i < n && s[i] != '\0' && (s[i] | 0x20) == (word[i] | 0x20)) {
-            i++;
-        }
-        if (i == n) {
-            return 1;
-        }
-    }
-    return 0;
-}
-
-int ico_memory_floor_driver(unsigned vendor_id, const char *driver_text)
-{
-    if (vendor_id == 0u) {
-        return ICO_MEMORY_FLOOR_DRIVER_UNKNOWN;
-    }
-    if (vendor_id == 0x5143u && !has_word(driver_text, "mesa") &&
-        !has_word(driver_text, "turnip")) {
-        return ICO_MEMORY_FLOOR_DRIVER_QUALCOMM;
-    }
-    return ICO_MEMORY_FLOOR_DRIVER_OTHER;
+    memset(&id, 0, sizeof id);
+    id.vendorId = vendor_id;
+    id.driverId = driver_id;
+    id.driverText = driver_text;
+    return (int)rhi_device_table_choice(&id, RHI_DC_MEMORY_FLOOR_CLASS, NULL);
 }
 
 const char *ico_memory_floor_driver_words(int driver)
@@ -106,4 +102,44 @@ long ico_memory_floor_setting(const char *text)
         return -2;
     }
     return v;
+}
+
+int ico_memory_floor_line_is_floor(const char *line)
+{
+    return line != NULL && strstr(line, " MB available of ") != NULL &&
+           strstr(line, ", floor ") != NULL;
+}
+
+int ico_memory_floor_line_retried(const char *line)
+{
+    return line != NULL && strstr(line, ")" ICO_MEMORY_FLOOR_RETRIED_MARK) != NULL;
+}
+
+int ico_memory_floor_retry(int prev_floor_stop, int prev_retried, int driver, long long cache_bytes,
+                           int cache_loaded, char *why, size_t size)
+{
+    const char *words;
+    int retry = 0;
+
+    if (!prev_floor_stop) {
+        words = "the previous start did not stop at the free-memory floor";
+    } else if (prev_retried) {
+        words = "the previous start was already a retry that stopped at the floor again (at most "
+                "one retry in a row)";
+    } else if (driver != ICO_MEMORY_FLOOR_DRIVER_QUALCOMM) {
+        words = "not Qualcomm's own driver";
+    } else if (cache_bytes <= 0) {
+        words = "the pipeline cache file for this shader set is missing or empty (the driver's "
+                "compiler would run)";
+    } else if (!cache_loaded) {
+        words = "the renderer did not load the pipeline cache file (the driver refused it: another "
+                "driver or shader set; the driver's compiler would run)";
+    } else {
+        words = "the pipeline cache file for this shader set is on disk";
+        retry = 1;
+    }
+    if (why != NULL && size > 0) {
+        snprintf(why, size, "%s", words);
+    }
+    return retry;
 }

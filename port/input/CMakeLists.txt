@@ -3,8 +3,9 @@
 # test source), the virtual pad's arithmetic (vpad.c), the binding layer
 # (bindings.c, input_config.c), the touch overlay's mapper (touch.c) and the
 # mouse camera's capture rule and photo look accumulator (mouse_look.c), the
-# camera speed and range the game's hand camera asks for (mouse_camera.c) and
-# the menus' mouse pointer (pointer.c). The SDL3 device layer
+# camera speed and range the game's hand camera asks for (mouse_camera.c),
+# the menus' mouse pointer (pointer.c) and the kind of controller pressed last
+# for the button pictures (pad_kind.c). The SDL3 device layer
 # (input_sdl.c) is part of the window build only; the headless build has no
 # SDL dependency.
 add_library(ico_input STATIC
@@ -14,6 +15,7 @@ add_library(ico_input STATIC
     mouse_camera.c
     mouse_look.c
     pad_host.c
+    pad_kind.c
     pad_script.c
     pointer.c
     touch.c
@@ -31,6 +33,9 @@ target_link_libraries(ico_input PRIVATE ico_host_fs)
 if(NOT ICO_HEADLESS AND TARGET SDL3::SDL3)
     target_sources(ico_input PRIVATE input_sdl.c)
     target_link_libraries(ico_input PUBLIC SDL3::SDL3)
+    # input_sdl.c's rate-limited lines (diag_host.h ico_log_limited), so
+    # they join the end-of-run summary's counts
+    target_link_libraries(ico_input PRIVATE ico_platform)
 endif()
 
 # binding resolution, quantisation, the stick fix, merging, the libpad buffer
@@ -52,6 +57,16 @@ target_compile_options(input_record_test PRIVATE ${ICO_SEMANTIC_OPTIONS} ${ICO_P
 target_link_libraries(input_record_test PRIVATE ico_input)
 if(ICO_RUN_TESTS)
     add_test(NAME input_record COMMAND input_record_test "${CMAKE_CURRENT_BINARY_DIR}")
+endif()
+
+# the kind of controller pressed last (pad_kind.c): every SDL gamepad type's
+# kind (input_sdl.c checks the mirrored values against SDL's), out-of-range
+# values, the kind the presses leave and the changes counted
+add_executable(pad_kind_test test/pad_kind_test.c)
+target_compile_options(pad_kind_test PRIVATE ${ICO_SEMANTIC_OPTIONS} ${ICO_PORT_WARNINGS})
+target_link_libraries(pad_kind_test PRIVATE ico_input)
+if(ICO_RUN_TESTS)
+    add_test(NAME pad_kind COMMAND pad_kind_test)
 endif()
 
 # the touch overlay's mapper (touch.c): layouts, the floating
@@ -83,6 +98,17 @@ target_compile_options(touch_gap_test PRIVATE ${ICO_SEMANTIC_OPTIONS} ${ICO_PORT
 target_link_libraries(touch_gap_test PRIVATE ico_input)
 if(ICO_RUN_TESTS)
     add_test(NAME touch_gap COMMAND touch_gap_test)
+endif()
+
+# Touch controls "Always, Start only in scenes" (touch.c
+# ico_touch_scene_alpha): the other modes unchanged, every control without the
+# Start bit fading out over 300 ms in a scene, Start kept (or kept hidden), the
+# mapper's layout untouched, the Frame rate counter's place on the faded copy
+add_executable(touch_scene_test test/touch_scene_test.c)
+target_compile_options(touch_scene_test PRIVATE ${ICO_SEMANTIC_OPTIONS} ${ICO_PORT_WARNINGS})
+target_link_libraries(touch_scene_test PRIVATE ico_input)
+if(ICO_RUN_TESTS)
+    add_test(NAME touch_scene COMMAND touch_scene_test)
 endif()
 
 # the mouse camera's speed and range for the hand camera: the step arithmetic

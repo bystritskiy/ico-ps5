@@ -301,6 +301,13 @@ static char *read_text(const char *path)
         got = fread(text + len, 1, cap - len - 1, f);
         len += got;
     } while (got != 0);
+    if (ferror(f)) {
+        /* a read error mid-file: no text (a caller that rewrites the file
+           must not write back a cut copy) */
+        free(text);
+        fclose(f);
+        return NULL;
+    }
     fclose(f);
     text[len] = '\0';
     return text;
@@ -488,6 +495,9 @@ static const struct {
        ico_dev_switch_stage) */
     {"dev.switch_to", "switch_to"},
     {"dev.switch_at", "switch_at"},
+    /* Options > Graphics > Apply to each renderer in turn, the window
+       build's switch test (port/platform/window_switch.c) */
+    {"dev.backend_switch_test", "backend_switch_test"},
     /* Settings > Extras > Credits unlocked whatever the achievements say
        (port/game/credits.c) */
     {"dev.unlock_credits", "unlock_credits"},
@@ -551,6 +561,15 @@ static const struct {
     {"dev.gpu_robust", "gpu_robust"},
     {"dev.pass_split", "pass_split"},
     {"dev.attachment_read", "attachment_read"},
+    /* the render passes as VkRenderPass objects: true on any device, false
+       dynamic rendering wherever offered; unset, the Intel driver row
+       (port/rhi/rhi_pass_row.h) */
+    {"dev.legacy_passes", "legacy_passes"},
+    /* the Vulkan VkRenderPass path's subpass read: unset, the device's
+       first-start probe decides (port/rhi/rhi_subpass_verdict.h); on forces
+       it without the probe, still gated by DATE's self-test; off forces it
+       off */
+    {"dev.subpass_read", "subpass_read"},
     {"dev.storage_pass_merge", "storage_pass_merge"},
     /* retired: the VU vertex shaders' plain variants only and the override
        of the device table (one module set on every device now); read so a
@@ -587,11 +606,46 @@ static const struct {
     {"dev.clear_skip", "clear_skip"},
     {"dev.last_store", "last_store"},
     /* false: the VU vertex pre-pass off, every VU draw the old way (an
-       A/B; port/render/rd_replay_vu.c rd__vu_prepass_init) */
+       A/B; port/render/rd_replay_vu.c rd__vu_prepass_init); true written
+       here: on over the device table's row (issue 123) */
     {"dev.vu_prepass", "vu_prepass"},
     /* false: the VU pre-pass's draws one an entry and stage instead of one a
        batch (an A/B; port/render/rd_replay_vu.c preBatchInit) */
     {"dev.vu_prepass_batch", "vu_prepass_batch"},
+    /* auto (the default: stored by the vertex shaders where the device
+       can, else by compute dispatches where it can), targets, stores or
+       compute: how the VU pre-pass writes its record (an A/B; issue 179;
+       port/render/rd_vu_record.c) */
+    {"dev.vu_record", "vu_record"},
+    /* N: a frame whose pre-pass would record fewer than N vertex and
+       triangle slots draws every VU command the old way (0, the default:
+       never; port/render/rd_vu_record.c rd__vu_record_skip) */
+    {"dev.vu_prepass_min", "vu_prepass_min"},
+    /* true: the temporal upscaler's motion vectors drawn (VELOCITY; a
+       developer switch, FSR 3.1 turns them on by itself), and -1 or 1: the sign the
+       upscaler takes them with (port/render/rd_velocity.c) */
+    {"dev.velocity_test", "velocity_test"},
+    {"dev.velocity_sign", "velocity_sign"},
+    /* true: the upscale point's test: the scene drawn below the display's
+       scale and upscaled at the reduction by a plain bilinear pass (a
+       developer switch; port/render/rd_upscale.c) */
+    {"dev.upscale_test", "upscale_test"},
+    /* false: under a temporal upscaler the game's 2D (lists 11-12: the text,
+       the save tile, the fades) drawn into the scene and upscaled with it,
+       and keep frames upscaled again, as before the display layer (an A/B;
+       port/render/rd_layer.c) */
+    {"dev.display_layer", "display_layer"},
+    /* on: FSR 3.1's context takes the device's fp16, the half-precision
+       speed path; off (the default; auto, the old default's word, is the
+       same): every pass in full precision (issue 203: thin vertical lines
+       from the fp16 maths on a GTX 1660; tools/ffx/patches/0004,
+       port/render/rd_fsr3.c) */
+    {"dev.fsr3_fp16", "fsr3_fp16"},
+    /* true: FSR 3.1 draws its debug view in place of the picture, and
+       checks its inputs with its messages in the log (Upscaling = FSR 3.1;
+       port/render/rd_fsr3.c) */
+    {"dev.upscale_debug_view", "upscale_debug_view"},
+    {"dev.upscale_debug_checks", "upscale_debug_checks"},
     /* false: every VU draw one GPU draw instead of consecutive ones with the
        same state merged into one (an A/B; port/render/rd_replay_vu.c
        vuMergeInit) */
@@ -601,6 +655,41 @@ static const struct {
        so the merge joins them (an A/B; port/render/rd_replay_vu.c
        vuFuseVerdict) */
     {"dev.vu_fuse", "vu_fuse"},
+    /* false: the skinned draws' bone-block check off (issue 163: one
+       skinned draw every 100 ms drawn again as a probe beside the picture
+       and compared with the CPU; on by default only on an Adreno with a
+       window; an A/B; port/render/rd_vu_skin_check.c); true: on where it
+       is off by default */
+    {"dev.vu_skin_check", "vu_skin_check"},
+    /* ring: the skinned draws' bones read through the ring (a storage
+       buffer) instead of a uniform block, issue 123's ladder step 1; cbuffer
+       (absent: the default) the uniform block (port/render/rd_pipeline.c
+       rd__vu_policy_init).  The skin check writes it with its mark,
+       vu_bones_by (port/platform/window_bones.c, bones_ladder.h) */
+    {"dev.vu_bones", "vu_bones"},
+    {"dev.vu_bones_by", "vu_bones_by"},
+    /* the scene draws' visibility test: frustum (the default: a draw wholly
+       off its target or behind the eye is not replayed, the same picture),
+       full (the occlusion test too: a list-0 draw wholly behind the depth
+       the opaque draws before it wrote, port/render/rd_vis_hiz.c) or off
+       (port/render/rd_vis.c) */
+    {"dev.cull", "cull"},
+    /* what the VU draws of a triangle its region test fails: camera (the
+       default: the camera decides; a triangle the PS2 drops is drawn
+       clipped when it faces the eye, in every preset) or ps2 (the PS2's
+       drops, the side bands beside a wide picture: the A/B and the escape;
+       port/render/rd_pipeline.c rd__region_camera) */
+    {"dev.region_rule", "region_rule"},
+    /* "x,y": the scene's sub-pixel jitter in texels, each -0.5..0.5, on
+       every frame (a developer A/B of the temporal upscaler's jitter;
+       port/render/rd_jitter.c) */
+    {"dev.jitter_test", "jitter_test"},
+    /* false: the Vulkan swapchain keeps identity on a surface the system
+       shows turned (an Android phone held sideways), the compositor turning
+       every image, instead of being made in the surface's own turn with the
+       present turning the picture (port/rhi/vk/vk_swapchain.c,
+       port/render/rd_prerotate.c) */
+    {"dev.prerotate", "prerotate"},
     /* false: a post sprite whose source target holds only its last clear
        reads the target as before instead of being drawn in the clear's
        colour (an A/B; port/render/rd_const_read.c) */
@@ -621,6 +710,11 @@ static const struct {
     /* true: every between-tick present draws the glow's chain again instead
        of pasting the tick's (an A/B; port/render/rd_glow_hold.c) */
     {"dev.glow_redraw", "glow_redraw"},
+    /* false: the glow's mask drawn into WORK2 and read by its reduction (the
+       tile-based GPUs' default); true: computed in the reduction (the
+       immediate-mode ones'); an A/B either way (port/render/rd_profile.c
+       glowFold, rd_glow_fold.c rd__glow_fold_on) */
+    {"dev.glow_fold", "glow_fold"},
     /* false: SDL's DirectInput controller scan off (issue 105; window_host.c
        joystick_scan_hints) */
     {"dev.joystick_directinput", "joystick_directinput"},
@@ -629,11 +723,20 @@ static const struct {
        with vsync off, off keeps mailbox, fifo presents FIFO from the start
        (port/platform/present_fallback.h, window_host.c present_blocked) */
     {"dev.present_fallback", "present_fallback"},
+    /* Android: auto (the default) asks the system to hold the Frame rate
+       row's cap as a fixed rate, off never asks (display_rate.h,
+       window_display_rate.c window_frame_rate_pin) */
+    {"dev.frame_rate_pin", "frame_rate_pin"},
     /* the window's render thread: auto (the default: on with Vulkan and
        Direct3D 12), on, off (the submit and the present on the game thread,
        as before) or sync (on, the game thread waiting for each picture: the
        A/B; port/platform/render_thread.c, frame_mailbox.c fm_mode_choose) */
     {"dev.render_thread", "render_thread"},
+    /* false: the render thread submits and presents its pictures itself
+       instead of handing them to the submit thread (issue 123's A/B: the
+       pictures' queue one shorter; port/render/rd_submit_thread.c
+       rd__submit_thread_start) */
+    {"dev.submit_thread", "submit_thread"},
     /* false: on Android the render thread and the submit thread are left
        where the system places them instead of kept to the faster cores (a
        diagnostic escape, not a performance switch; port/platform/
@@ -688,14 +791,24 @@ static const struct {
        blend static, 0 as the device offers */
     {"dynamic_state", "ICO_VK_FAKE_NO_DYNAMIC"},
     {"bind_cache", "ICO_RHI_BIND_CACHE"},          /* port/rhi/rhi_bind_cache.c: 1 (on), 0 */
+    {"prerotate", "ICO_VK_PREROTATE"},             /* port/rhi/vk/vk_swapchain.c: 1 (on), 0 */
     {"gpu_checkpoints", "ICO_GPU_CHECKPOINTS"},    /* port/rhi vk_device.c, d3d12_device.c */
     {"gpu_robust", "ICO_GPU_ROBUST"},              /* port/rhi/vk/vk_device.c */
     {"pass_split", "ICO_RD_PASS_SPLIT"},           /* port/render/rd_replay_vu.c passSplit */
     {"attachment_read", "ICO_VK_ATTACHMENT_READ"}, /* port/rhi/vk/vk_device.c */
+    /* port/rhi/vk/vk_device.c vkr_pass_row_apply (port/rhi/rhi_pass_row.h):
+       1 the render passes as VkRenderPass objects on any device, 0 dynamic
+       rendering wherever offered (the Intel driver row off) */
+    {"legacy_passes", "ICO_VK_LEGACY_PASSES"},
+    /* port/rhi/vk/vk_device.c vkr_subpass_read_decide: 1 the subpass read
+       on any VkRenderPass path without its probe, 0 off; unset, the probe's
+       verdict */
+    {"subpass_read", "ICO_VK_SUBPASS_READ"},
     /* port/render/rd_dst_read.c rd__dst_merge_ok, rd_core.c rd_init */
     {"storage_pass_merge", "ICO_RD_PASS_MERGE"},
     /* port/render/rd_replay_vu.c rd__vu_prepass_init: 0 draws without the
-       vertex pre-pass */
+       vertex pre-pass; on (true written in the file) draws with it on a
+       device the device table keeps it off (issue 123) */
     {"vu_prepass", "ICO_RD_VU_PREPASS"},
     /* port/render/rd_pipeline.c rd__vu_policy_init: auto, plain or
        extended (the program entries' set) */
@@ -703,6 +816,14 @@ static const struct {
     /* port/render/rd_core.c rd_init: 1 draws every menu text page through
        font_sheet_ps (no bake) */
     {"sheet_shader", "ICO_RD_SHEET_SHADER"},
+    /* port/render/rd_thread.c rd_set_thread_host: 0 makes the next
+       picture's wait for room in the present queue inside its reads (no
+       display's wait ahead) */
+    {"acquire_ahead", "ICO_RD_ACQUIRE_AHEAD"},
+    /* port/render/rd_thread.c rd_set_thread_host: 0 replays Frame rate
+       Original's pictures inside the game step, the game thread waiting
+       (no hand-over to the render thread) */
+    {"original_async", "ICO_RD_ORIGINAL_ASYNC"},
     /* port/render/rd_aura_kernel.c rd__aura_kernel_steps: gs or box */
     {"aura_kernel", "ICO_RD_AURA_KERNEL"},
     /* port/render/rd_aura_box.c rd__aura_box_init: auto, 1 or 0 */
@@ -716,12 +837,47 @@ static const struct {
     /* port/render/rd_replay_vu.c preBatchInit: 0 draws the pre-pass one
        draw an entry and stage */
     {"vu_prepass_batch", "ICO_RD_VU_PREPASS_BATCH"},
+    /* port/render/rd_vu_record.c rd__vu_record_init: auto, targets, stores or compute */
+    {"vu_record", "ICO_RD_VU_RECORD"},
+    /* port/render/rd_vu_record.c rd__vu_record_init: a count of record slots */
+    {"vu_prepass_min", "ICO_RD_VU_PREPASS_MIN"},
+    /* port/render/rd_velocity.c rd__velocity_on: 1 draws the motion
+       vectors; rd__velocity_sign: -1 or 1 */
+    {"velocity_test", "ICO_RD_VELOCITY"},
+    {"velocity_sign", "ICO_RD_VELOCITY_SIGN"},
+    /* port/render/rd_upscale.c readSwitch: 1 draws the scene at the display
+       scale over 1.5 and upscales it at the reduction */
+    {"upscale_test", "ICO_RD_UPSCALE_TEST"},
+    /* port/render/rd_layer.c rd__layer_on: 0 draws lists 11-12 into SCENE
+       under a temporal upscaler (the path before the display layer) */
+    {"display_layer", "ICO_RD_DISPLAY_LAYER"},
+    /* tools/ffx/patches/0004 (GetDeviceCapabilitiesVK) and rd_fsr3.c
+       rd__fsr3_fp16_dev_on: 1 gives FSR 3.1's context the device's fp16,
+       anything else (0, unset) full precision */
+    {"fsr3_fp16", "ICO_RD_FSR3_FP16"},
+    /* port/render/rd_fsr3.c readDebug: 1 sets FSR 3.1's
+       FFX_UPSCALE_FLAG_DRAW_DEBUG_VIEW, and FFX_UPSCALE_ENABLE_DEBUG_CHECKING */
+    {"upscale_debug_view", "ICO_RD_UPSCALE_DEBUG_VIEW"},
+    {"upscale_debug_checks", "ICO_RD_UPSCALE_DEBUG_CHECKS"},
     /* port/render/rd_replay_vu.c vuMergeInit: 0 draws every VU draw as a
        GPU draw of its own, through the programs' plain builds */
     {"vu_merge", "ICO_RD_VU_MERGE"},
     /* port/render/rd_replay_vu.c vuMergeInit: 0 draws code 36's kicks
        under their own pipeline (no fused pair) */
     {"vu_fuse", "ICO_RD_VU_FUSE"},
+    /* port/render/rd_vu_skin_check.c skMode: 0 leaves the skinned draws'
+       bone-block check off (1 turns it on on any device, headless too) */
+    {"vu_skin_check", "ICO_RD_VU_SKIN_CHECK"},
+    /* port/render/rd_pipeline.c rd__vu_policy_init: ring or cbuffer; its
+       mark as it is, for the start line (rd_vu_bones.c) */
+    {"vu_bones", "ICO_RD_VU_BONES"},
+    {"vu_bones_by", "ICO_RD_VU_BONES_BY"},
+    /* port/render/rd_vis.c rd__vis_init: off, frustum or full */
+    {"cull", "ICO_RD_CULL"},
+    /* port/render/rd_pipeline.c rd__region_camera: camera or ps2 */
+    {"region_rule", "ICO_RD_REGION_RULE"},
+    /* port/render/rd_jitter.c rd__frame_jitter_get: x,y */
+    {"jitter_test", "ICO_RD_JITTER_TEST"},
     /* port/render/rd_const_read.c rd__const_reads_on: 0 reads a cleared
        source as before */
     {"constant_reads", "ICO_RD_CONSTANT_READS"},
@@ -739,12 +895,21 @@ static const struct {
     {"still_represent", "ICO_RD_STILL_REPRESENT"},
     /* port/render/rd_glow_hold.c redrawOn: 1 draws the glow at every present */
     {"glow_redraw", "ICO_RD_GLOW_REDRAW"},
+    /* port/render/rd_glow_fold.c rd__glow_fold_on: 0 draws the glow's mask
+       into WORK2, 1 computes it in the reduction even without an output */
+    {"glow_fold", "ICO_RD_GLOW_FOLD"},
     /* port/platform/window_host.c joystick_scan_hints: 0 sets
        SDL_HINT_JOYSTICK_DIRECTINPUT to 0 before SDL_Init */
     {"joystick_directinput", "ICO_JOYSTICK_DIRECTINPUT"},
     /* port/platform/window_host.c ico_window_open: auto, off or fifo
        (present_fallback.c ico_present_fallback_mode) */
     {"present_fallback", "ICO_PRESENT_FALLBACK"},
+    /* port/platform/window_display_rate.c: auto or off (display_rate.h
+       display_pin_mode) */
+    {"frame_rate_pin", "ICO_FRAME_RATE_PIN"},
+    /* port/render/rd_submit_thread.c rd__submit_thread_start: 0 submits and
+       presents on the render thread */
+    {"submit_thread", "ICO_RD_SUBMIT_THREAD"},
     /* port/platform/window_host.c: "lazy" skips the start-up set,
        "careful" makes it under the careful policy */
     {"pipeline_set", "ICO_PIPELINE_SET"},
@@ -801,9 +966,14 @@ const char *ico_dev_env_value(const char *key, const char *value)
     static const char *const datePaths[] = {"stencil", "snapshot", NULL};
     static const char *const sets[] = {"full", "careful", "lazy", NULL};
     static const char *const fallbacks[] = {"auto", "off", "fifo", NULL};
+    static const char *const pins[] = {"auto", "off", NULL};
     static const char *const readers[] = {"thread", "sync", NULL};
     static const char *const vuSets[] = {"auto", "plain", "extended", NULL};
+    static const char *const vuRecords[] = {"auto", "targets", "stores", "compute", NULL};
     static const char *const auraKernels[] = {"box", "gs", NULL};
+    static const char *const culls[] = {"off", "frustum", "full", NULL};
+    static const char *const regionRules[] = {"camera", "ps2", NULL};
+    static const char *const vuBones[] = {"ring", "cbuffer", NULL};
 
     if (key == NULL || value == NULL || ico_dev_env_name(key) == NULL) {
         return NULL;
@@ -817,6 +987,9 @@ const char *ico_dev_env_value(const char *key, const char *value)
     }
     if (strcmp(key, "fog_path") == 0) {
         return value_is(value, paths) ? value : NULL;
+    }
+    if (strcmp(key, "fsr3_fp16") == 0 && strcmp(value, "auto") == 0) {
+        return "0"; /* the old default's word: the default, full precision */
     }
     if (strcmp(key, "uber") == 0 && strcmp(value, "auto") == 0) {
         return "auto"; /* else on/off as 1/0 below (rd_uber.c rd__uber_asked_env) */
@@ -853,6 +1026,63 @@ const char *ico_dev_env_value(const char *key, const char *value)
         /* auto, plain or extended as they are (no boolean form) */
         return value_is(value, vuSets) ? value : NULL;
     }
+    if (strcmp(key, "vu_record") == 0) {
+        /* auto, targets, stores or compute as they are (no boolean form) */
+        return value_is(value, vuRecords) ? value : NULL;
+    }
+    if (strcmp(key, "vu_prepass_min") == 0) {
+        /* a whole count of record slots, 0 (never) to 2^31; false/off/no is 0 */
+        char *end = NULL;
+        const long n = strtol(value, &end, 10);
+        if (end != value && *end == '\0' && n >= 0 && n <= 2147483647L) {
+            return value;
+        }
+        return value_is(value, off) ? "0" : NULL;
+    }
+    if (strcmp(key, "vu_bones") == 0) {
+        /* ring or cbuffer as they are (no boolean form) */
+        return value_is(value, vuBones) ? value : NULL;
+    }
+    if (strcmp(key, "vu_bones_by") == 0) {
+        /* the skin check's mark, any words (the start line repeats them) */
+        return value[0] != '\0' ? value : NULL;
+    }
+    if (strcmp(key, "region_rule") == 0) {
+        /* camera or ps2 as they are (no boolean form) */
+        return value_is(value, regionRules) ? value : NULL;
+    }
+    if (strcmp(key, "jitter_test") == 0) {
+        /* two numbers -0.5..0.5, a comma between, as they are (the renderer
+           parses them again: rd_jitter.c rd__frame_jitter_parse) */
+        char *end = NULL;
+        const double x = strtod(value, &end);
+        if (end == value) {
+            return NULL;
+        }
+        while (*end == ' ') {
+            end++;
+        }
+        if (*end != ',') {
+            return NULL;
+        }
+        const char *t = end + 1;
+        const double y = strtod(t, &end);
+        if (end == t) {
+            return NULL;
+        }
+        while (*end == ' ') {
+            end++;
+        }
+        return *end == '\0' && x >= -0.5 && x <= 0.5 && y >= -0.5 && y <= 0.5 ? value : NULL;
+    }
+    if (strcmp(key, "cull") == 0) {
+        /* off, frustum or full as they are; false/0/no is off, true/1/on/yes
+           the default, frustum */
+        if (value_is(value, culls)) {
+            return value;
+        }
+        return value_is(value, off) ? "off" : value_is(value, on) ? "frustum" : NULL;
+    }
     if (strcmp(key, "aura_kernel") == 0) {
         /* box (the default) or gs as they are */
         return value_is(value, auraKernels) ? value : NULL;
@@ -860,6 +1090,13 @@ const char *ico_dev_env_value(const char *key, const char *value)
     if (strcmp(key, "present_fallback") == 0) {
         /* auto, off or fifo as they are; false/0/no is off */
         if (value_is(value, fallbacks)) {
+            return value;
+        }
+        return value_is(value, off) ? "off" : NULL;
+    }
+    if (strcmp(key, "frame_rate_pin") == 0) {
+        /* auto or off as they are; false/0/no is off */
+        if (value_is(value, pins)) {
             return value;
         }
         return value_is(value, off) ? "off" : NULL;
@@ -898,6 +1135,17 @@ const char *ico_dev_env_value(const char *key, const char *value)
         }
         return value_is(value, off) ? "0" : NULL;
     }
+    if (strcmp(key, "velocity_sign") == 0) {
+        /* 1 (current to previous, the default) or -1 as they are */
+        return strcmp(value, "1") == 0 || strcmp(value, "-1") == 0 ? value : NULL;
+    }
+    if (strcmp(key, "vu_prepass") == 0) {
+        /* written in the file (the default, true, is never written): true
+           exports "on", which also passes the device table's no-pre-pass
+           row (rd_replay_vu.c rd__vu_prepass_init, the row
+           adreno-740-qualcomm's VU_PREPASS_OFF, issue 123); false "0" */
+        return value_is(value, on) ? "on" : value_is(value, off) ? "0" : NULL;
+    }
     if (strcmp(key, "pass_split") == 0) {
         /* a count of VU draws, 1..65536; 0 or off: none */
         char *end = NULL;
@@ -926,6 +1174,12 @@ const char *ico_dev_env_export_value(const char *key, const char *value, const c
        startup_retry_value_no_prepass): its pictures are the same */
     if (key != NULL && strcmp(key, "vu_prepass") == 0 && startup_retry_value_no_prepass(retry)) {
         return "0";
+    }
+    /* ... and a run at the crash order's targets step or the loss order's
+       losstargets draws the pre-pass's record into render targets
+       (startup_retry.h startup_retry_value_targets): the same pictures */
+    if (key != NULL && strcmp(key, "vu_record") == 0 && startup_retry_value_targets(retry)) {
+        return "targets";
     }
     /* ... and the loss order's robust step draws with robust access on
        (startup_retry.h startup_retry_value_robust) */
@@ -1042,9 +1296,12 @@ void ico_ini_export(const IcoIni *ini, const char *path, int r)
            prepared the graphics (window_host.c): an old fallback still in
            force shows in the log */
         {
-            static const char *const kept[] = {"dev.pipeline_set", "dev.vu_prepass",
-                                               "dev.gpu_robust", "dev.pipeline_skip"};
-            char line[384] = "";
+            /* and issue 123's ladder: the bones through the ring, TU_DEBUG
+               on a Turnip package, each with the skin check's mark */
+            static const char *const kept[] = {
+                "dev.pipeline_set", "dev.vu_prepass",  "dev.gpu_robust",   "dev.pipeline_skip",
+                "dev.vu_bones",     "dev.vu_bones_by", "dev.turnip_debug", "dev.turnip_debug_by"};
+            char line[768] = "";
             size_t i;
 
             for (i = 0; t != NULL && i < sizeof(kept) / sizeof(kept[0]); i++) {
@@ -1132,6 +1389,11 @@ void ico_ini_export(const IcoIni *ini, const char *path, int r)
         v = ico_dev_env_export_value("vu_prepass", NULL, getenv(STARTUP_RETRY_ENV));
         if (v != NULL) {
             put_env("ICO_RD_VU_PREPASS", v);
+        }
+        /* ICO_RD_VU_RECORD=targets at the targets and losstargets steps */
+        v = ico_dev_env_export_value("vu_record", NULL, getenv(STARTUP_RETRY_ENV));
+        if (v != NULL) {
+            put_env("ICO_RD_VU_RECORD", v);
         }
         /* ICO_GPU_ROBUST=1 at the loss order's robust step */
         v = ico_dev_env_export_value("gpu_robust", NULL, getenv(STARTUP_RETRY_ENV));

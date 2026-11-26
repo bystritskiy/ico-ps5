@@ -1,0 +1,1548 @@
+# Test programs: port/render/test, continued
+
+The renderer's test programs, one entry each, continued from
+[TESTING_PROGRAMS_RENDER.md](TESTING_PROGRAMS_RENDER.md) (the repo keeps every file under 256 KiB):
+the store plan, the pass cuts, the late pass, the lamps, the glow and shadow families and the pacing
+tests, from `rd_store_plan_test.c` to `rd_glow_light_ab.cmake`. The entries read as that page's do
+([Reading the entries](TESTING_PROGRAMS.md#reading-the-entries)).
+
+- `rd_store_plan_test.c` (`rd_store_plan`, lavapipe, 77 without a device): the store plan's keep
+  (`rd_store_plan.c`, [WORK_BUFFERS.md](WORK_BUFFERS.md#the-store-plan)) at Enhanced 16:9 2x: after
+  the start's self-tests (`rd_fog_selftest`: DATE, the fx local read, the shadow count, the fog) and
+  again at a new scene size (`rd_reset_scene`), SCENE's depth is not kept (the shadow count's frame
+  reads it with no clear of its own and once kept it for the whole run); a new SCENE
+  (`clearPending`) read in list 3 before any clear is not kept, and the next frame (list 0's clear
+  and a Z-tested draw, then list 7 on WORK3 and on SCENE without touching the depth) drops at least
+  one depth store; a frame reading SCENE's depth with no clear keeps it, the cleared frame then drops
+  none and its record says `storeKept` 1, SCENE, since that frame and the reason
+  `RD_STORE_WHY_KEEP`; no validation error. Between those, the PowerVR phone's frame 5354 in shape
+  (list 0's Z-tested draws, the fog's touch in a pass of its own, the aura's passes on WORK3, list
+  11's two screen sprites on SCENE without a Z test or Z write) with [video] effects_depth on and no
+  effects program, as on the phone: exactly one depth store dropped (list 11's SCENE pass), as a whole
+  frame and as a keep frame; with `rd__force_effects_depth` (an effects program's stand-in) none, the
+  record's reason `RD_STORE_WHY_EFFECTS`, and no keep left after it; replayed with its presents,
+  every record `rd_perf_pop` returns holds the drops its replay counted and `rd_perf_backend_text`
+  says `stores: 1 depth` (with the effects depth `stores: 0 depth` and `nothing dropped in N
+  replays, N of them: kept for an effects program`). The drops' bytes are `rd_store_plan_ab`'s
+  (next).
+- `rd_pass_cut_test.c` (`rd_pass_cut`, lavapipe, 77 without a device): the passes cut
+  (`rd_pass_cut.c`, [WORK_BUFFERS.md](WORK_BUFFERS.md#passes-cut)) at Enhanced 16:9 2x under
+  `ICO_RD_STORE_POISON=1`, each forced on against off (`rd__pass_cut_force`): a clear of WORK3 then
+  a sprite on it textured from WORK2 (drawn just before): the clear taken by WORK3's pass
+  (`clearsCarried` 1, one walk pass fewer), WORK3 and WORK2 byte for byte; the clear skip's
+  decision on a frame's scan (AURA_WORK cleared, WORK0's sprite reading it, the constant read's note
+  for it): skipped, but not with a later read, a depth or the cut off; after a skip a read of
+  AURA_WORK shows the clear's colour (its green fill gone), a later replay drawing its left half
+  leaves the right half the clear's colour, a later replay clearing it first leaves that clear; the
+  last store: list 0 clears SCENE and draws Z-tested, list 4 draws on WORK3, then on SCENE a sprite,
+  the depth's last touch and another sprite: `storeLastDropped` 1 on, 0 off, one depth store more
+  dropped, SCENE byte for byte; a copy or a draw on another target between: 1 (the pass begun at
+  the touch), a DATE draw between: 0 with one last store counted as kept for a DATE draw
+  (`lastStoreWhy`, its words `1 last stores kept (1 a DATE draw)`), none counted for the others; a
+  draw textured from WORK3 between while WORK3 is not readable: 1 (the pass begun at that draw); the
+  pass's first draw and one between textured from WORK3 (readable from the first on): 1, the pass
+  begun at the first draw, and the guard's frame after it drops it again; post sprites
+  (`cellPost`): the glow's `cleanUpFB` pair into SCENE (constant fold; the second Z GEQUAL at Z 1,
+  the depth's last touch in a pass of its own) drops that pass's store (1 on, 0 off, no reason
+  counted), the same pair as a motion blur's keeps it (0, one reason: a post sprite), the aura's
+  DATE sprite (TEST 0x34000) after a Z GEQUAL screen sprite leaves that sprite the last touch (1,
+  no reason), SCENE byte for byte in each; the pass area forced on:
+  list 0's pass (it takes SCENE's clear) and list 4's (full-frame sprites, one the frame's height)
+  counted as kept whole (`passAreaWhy`: `2 passes kept whole (1 a clear as its load, 1 its draws
+  cover the picture)`), none with the area off, SCENE byte for byte; no validation error.
+- `rd_pass_cut_ab.cmake`: the fixtures of `test/fixtures/lists/pass_cut.txt`
+  ([TESTING_FIXTURES.md](TESTING_FIXTURES.md); the word `phone` marks the PowerVR phone's frames;
+  an absent one FAILS) replayed with `--pass-dump --stats` under
+  `ICO_RD_BLEND=fixed`, `ICO_RD_STORE_PLAN=1`, `ICO_RD_STORE_POISON=1` and `ICO_RD_FADES_FOLD=0`
+  (list 11's sprites drawn, as the gate draws them: with the fold list 11's pass goes and the
+  reduction's DISPLAY clear has no barrier left to be carried past) five times: every cut off
+  (`ICO_RD_CLEAR_CARRY=0`, `ICO_RD_CLEAR_SKIP=0`, `ICO_RD_LAST_STORE=0`), each alone on, all on; at
+  the phone's Resolution Auto with its paths (`ICO_RD_VU_PREPASS=0`, `ICO_RD_FOG_PATH=local`,
+  `ICO_RD_DATE_PATH=stencil`; a narrower dump skips it) and at Enhanced 2x 4:3: every PNG
+  (`PRESENT.png` and every named target) byte for byte against the off run, the off run cutting
+  nothing, the same draws, the passes fewer by the clears carried and skipped, the depth stores
+  dropped more by those at the last touch and fewer by at most one a clear carried or skipped (a
+  cleared pass whose depth store the plan dropped goes with its carry: queen rd-00100 at Enhanced
+  2x, 2 dropped with every cut off and 1 with its two clears carried); over the phone's frames at
+  its setting each cut must cut something, the last touch counted on two more runs of those frames
+  with `ICO_RD_CRACK_FILL=0` (every cut off, the last store alone on; compared byte for byte with
+  each other), as the crack fill's read of SCENE's depth at list 7 keeps the fog's pass's depth
+  store wherever it is drawn. The path ran: each fixture's declared `clear_carried` and
+  `clear_skipped` on the all-on run, `last_store_dropped` on the `lastnf` run of a phone frame and
+  on the all-on run of any other; a fixture no setting checked fails (`rd_pass_cut_ab`). No
+  device: SKIP.
+- `rd_date_cut_test.c` (`rd_date_cut`, lavapipe, 77 without a device after its CPU cases): DATE's
+  passes without the depth (`rd_date_cut.c`, `rd_date_cut.h`): the rule on made-up commands (the
+  shadow's three composites then a mesh draw: two depth-free runs, the third undecided; a draw that
+  tests the depth between two DATE draws; a DATE draw after no alpha write in the run; a post
+  sprite, a copy, a VU draw elsewhere; no run without a depth target, a depth-using or AA1 draw;
+  integer scales only, `rd_date_cut_scale_ok`);
+  every screen-family key with an unused depth has its no-depth twin in the start-up set; a frame in
+  the composites' shape and two variants (a Z GEQUAL draw after the third composite in its pass, one
+  between the first two) (`ICO_RD_DATE_PATH=snapshot`, `ICO_RD_BLEND=fixed`,
+  `ICO_RD_STORE_POISON=1`) with the cut off and on (`rd__date_cut_force`): SCENE byte for byte, the
+  scan's runs by ordinal (`rd__date_cut_last_runs`: 2, 2 and 1), a pass without the depth a run,
+  none begun again, the same passes, 3 snapshots (1 the first, 2 after an alpha write) and store-plan
+  drops, the passes with a depth fewer by the runs, the depth and stencil bytes asked lower by 4 to 5
+  bytes a texel each way of each cut pass, the 10 s text's `; DATE: 2.0 passes`; no validation error.
+- `rd_aura_paste_test.c` (`rd_aura_paste`, CPU): the aura's paste split's row proof
+  (`rd_aura_paste.c`): the kernels' taps (nearest, bilinear with a fraction of 0 and 8, the B-spline,
+  the box), the GS's V truncated toward 0, the addressing (CLAMP, REPEAT, the backing clamp), and the
+  chain on the Pixel frame's geometry: WORK0 rows 0-111 carried into FEED128 rows 0-111 (CLAMP; 1-111
+  under REPEAT), the paste's rows [0, 1062) of 1080 (CLAMP both), [11, 1062) (the paste on REPEAT),
+  [21, 1062) (command 47 on REPEAT), the measured band rows 1072-1079 inside the band.
+- `rd_aura_paste_ab.cmake` (`rd_aura_paste_ab`): the fixtures of
+  `port/render/test/fixtures/lists/aura_paste.txt` ([TESTING_FIXTURES.md](TESTING_FIXTURES.md); a
+  listed fixture that is absent FAILS) with `ICO_RD_AURA_PASTE=0` and `1`,
+  `--pass-dump --stats`, `ICO_RD_VU_PREPASS=0`, at the phone's Resolution Auto and Enhanced 2x 4:3
+  (both `ICO_VK_FAKE_LIMITS=moltenvk`) and a desktop 16:9 window: every PNG byte for byte, the same
+  passes and attachment MB, the off run splitting nothing; at the phone's setting each fixture's
+  declared `aura_paste_split` (the path ran: 1 on the PowerVR phone's, the Pixel's, issue 164's and
+  issue 163's frames, 0 on a 4:3 capture whose paste is drawn whole) and every split with at most
+  32 band rows; at least one split over the list. No device: SKIP.
+- `rd_late_pass_test.c` (`rd_late_pass`, CPU, record-only): the late passes' predicate
+  (`rd_late_pass.c` `rd__late_pass_class`) on made-up commands: state, NOPs, overlay text, a clear
+  or copy of another target, a sprite into another target (untextured, from another target, the
+  glow's mask from SCENE in the alpha-only form) and a sprite on SCENE the light plan skips (or, in
+  the scan, may skip) wait; the upscale point, a clear or copy of SCENE, SCENE's colour or depth view
+  sampled otherwise, DATE, SCENE's depth written, a drawn sprite on SCENE, the reduction, the fog, a
+  screen prim, a VU draw and a shadow command do not, each with its reason; the aura's paste lands.
+  The store plan's scan (`rd__late_pass_scan`, `rd__late_pass_scan_end`) over a DARK room's order:
+  the fill's read at the aura's paste held (the plan ignored, `RD_LATE_ANY_PLAN`), at the band with
+  no DARK plan and switched off, at the walk's end with no paste, at a screen prim before the
+  paste; `rd__fx_alpha_only`.
+- `rd_crack_held` (`rd_crack_test 2 held`, `ICO_VK_FAKE_LIMITS=moltenvk`; registered by
+  `rd_late_pass.cmake`): the glow's `cleanUpFB`, a sprite into WORK0 (the fill's snapshot there), the
+  glow's mask (SCENE's alpha into WORK2: SCENE's border repeat before it on the 640 GS pixel frame)
+  and the aura's paste, with a crack 1/16 GS pixel wide at GS x 2.5 (texel 5 at 2x, the repeat's
+  source column); the late pass forced with the plan ignored: one fill held into the paste's pass,
+  none early, no fill pass of its own; against the late pass off (`rd__late_pass_force(0)`) SCENE's
+  colour and depth byte for byte, one render pass fewer, the crack filled and each copy the repeat
+  laid of it the filled texel's bytes; the main checks leave out the repeat's outer columns.
+- `rd_crack_heldglow` (`rd_crack_test 2 heldglow`, the same fakes): `rd_crack_held`'s frame with a
+  sprite into WORK2 under a Z GEQUAL test of SCENE's depth after the mask (a lamp's stand-in, no Z
+  write) and the glow's paste (WORK0 added over SCENE, Cs * FIX + Cd at FIX 128, the fx plan's
+  premultiplied add) in place of the aura's: the fill held into the glow's paste pass
+  (`latePassGlowHeld` 1), the same checks.
+- `rd_crack_defer` (`rd_crack_test 2 defer`, the same fakes): `rd_crack_heldglow`'s frame with the
+  aura's paste (list 8) after the glow's, and the aura's own sprite into WORK1 between them (without
+  it the late pass off draws both pastes in one pass on SCENE): the glow's paste deferred to the aura's paste pass
+  (`latePassDeferred` 1, none early) and the fill held on to it (`latePassHeld` 1, none in the
+  glow's pass), the same checks with two render passes fewer than the late pass off.
+- `rd_crack_join` (`rd_crack_test 2 join`, `ICO_VK_FAKE_LIMITS=moltenvk`; `rd_late_pass.cmake`; its
+  untextured flat sprites at 2x come out the same bytes, the dumps' textured menu text within
+  [DIVERGENCES.md](DIVERGENCES.md) VD-31's bound):
+  `rd_crack_aura`'s frame with two list 11 commands after the paste (a blended sprite each into
+  SCENE, Z ALWAYS, no Z write, right of the slit): with the late pass both drawn in the paste's pass
+  without SCENE's depth (2 draws, 1 pass joined); against the join off
+  (`rd__late_pass_force(RD_LATE_FILL)`) SCENE's colour and depth byte for byte, one render pass
+  fewer.
+- `rd_late_pass_ab.cmake` (`rd_late_pass_ab`, `rd_late_pass_gl`): the fixtures of
+  `port/render/test/fixtures/lists/late_pass.txt` ([TESTING_FIXTURES.md](TESTING_FIXTURES.md); a
+  listed fixture that is absent FAILS; after a name `heldN` and `joinN`, re-derived from a run of the
+  fixture, and `none` for a fixture the late pass must leave alone) with `ICO_RD_LATE_PASS=0` and `1`, `--pass-dump --stats`, `ICO_RD_VU_PREPASS=0`, at the
+  PowerVR phone's Resolution Auto (2364x1080, Full height and pixel) and at Enhanced 2x 4:3, both under
+  `ICO_VK_FAKE_LIMITS=moltenvk`; the `_gl` twin the phone's setting on OpenGL (llvmpipe, the aura's
+  paste through a snapshot: no fill held in a DARK room, one held into the glow's paste pass in a
+  LAMPS room, no list 11 join). Each pair: every PNG byte for
+  byte, the same draws but the border's block draws the stats name, the passes fewer by exactly the fills held, the glow pastes deferred to the
+  aura's pass and the passes list 11's draws joined, the crack fill's own passes by the fills held, the colour MB loaded and stored each fewer
+  by at least the MB the stats name for the held fills and the deferred pastes and at most that and
+  the joined passes' MB
+  (within 0.02), the depth and stencil MB loaded not higher, stored not higher but by up to 1.25
+  times the held fills' MB where a fill went into the glow's paste pass (the lamps' pass keeps its
+  depth store), the same without a join or a glow pass fill, the copy MB the same,
+  the off run holding and joining nothing; the fixtures the list marks hold that many fills at the
+  phone's setting (on OpenGL none held or drawn early) and join as many passes (`joinN`); where the
+  on run joined a pass, SCENE, DISPLAY and PRESENT may
+  differ by at most 3 levels on at most 800 pixels (`png_level_diff.py`; [DIVERGENCES.md](DIVERGENCES.md)
+  VD-31, measured at most 537 pixels and 3 levels), every other target the same bytes; at least one
+  fill held and one pass joined over the list on Vulkan. The path ran: on the on run of every pair
+  the fixture's declared `crack_pixels` (the cracks are where the generated geometry leaves gaps, so
+  each fixture declares the fill drawn at the settings it runs at), at the phone's setting the late
+  pass acting on every fixture (a fill held or drawn early, a glow paste deferred or a pass joined;
+  none at all on a `none` fixture), a fixture the phone's setting (OpenGL: its one setting) did not
+  replay failing. No device: SKIP.
+- `rd_lamps_test.c` (`rd_lamps`; `rd_lamps.cmake`, CPU): the lamps' glow for less's pure parts
+  (`rd_lamps.c`): `ICO_RD_LAMPS`'s words, the class's default (the band everywhere, the area on the
+  PowerVR and desktop classes under Vulkan with the pass area, never another class, a faked phone
+  vendor, OpenGL or D3D), the rects' union and 32 x 32 tiles, a GS box's texels on the boot
+  corpus's 512 x 512 frame at 2364 x 1080 and on the phone's 848 x 448 frame under Full pixel's
+  crop (every texel centre of the box inside the rect, a box off the target none), a lamp's box
+  from its stream's bound through an orthographic and a perspective matrix
+  (`rd__vis_hiz_occludee`, then the texels: every vertex's and every point's between two vertices
+  inside; a corner behind the eye refused), the switch's words (owed, wholepad, fold4, lowres,
+  fillhold; lowres and fillhold outside `1` and `all`) and the defaults (the band, owed and wholepad
+  everywhere, fillhold nowhere; the fold of two pairs nowhere since the phone's 2026-11-12 measurement;
+  lowres asked for by its word alone), the lamps' per-vertex box (`rd__lamps_vertex_box`: a
+  diagonal stream whose bound's corner is behind the eye, which the corners' box refuses, boxed
+  with every point between its vertices inside; a vertex behind the eye and a lane not finite
+  refused), and the area's pick (the region unknown, nothing lit, WORK2 but a tile, the tiles
+  round both).
+- `rd_lamps_ab.cmake` (`rd_lamps_ab`, `rd_lamps_gl`; `rd_lamps.cmake`): the fixtures of
+  `port/render/test/fixtures/lists/lamps_ab.txt` ([TESTING_FIXTURES.md](TESTING_FIXTURES.md); a
+  listed fixture that is absent fails: the title's castle with its lamps, 512 x 512 GS, and the
+  Pixel's opening lamps frame, 848 x 448, both with the lamps generated on WORK2 by the placement
+  rules; the title with the sun off the picture and the opening's dark room; the title's and the
+  opening's sun; the visibility test at its default), each
+  replayed twice in one run (`--repeat 2`: the first lamps replay of a renderer is whole, the area
+  from the second) with `ICO_RD_LAMPS=0` and with the parts on (the Mali and OpenGL rows' "on" the
+  class's defaults as `ICO_RD_LAMPS=noglowblur`: the glow blur, on by default, is not
+  byte-identical and has its own A/B), `--pass-dump --stats`, at the
+  PowerVR phone's profile (`ICO_VK_FAKE_LIMITS=moltenvk`, `ICO_RD_VU_PREPASS=0`,
+  `ICO_RD_LATE_PASS=1`, Enhanced 2364x1080, Full height and pixel, `ICO_RD_LAMPS=1`), the same
+  under `ICO_RD_LAMPS_POISON=1` and `ICO_RD_STORE_POISON=1`, lavapipe's desktop profile at
+  Enhanced 2x 4:3 (`ICO_RD_LAMPS=1`) and the Mali fakes (`ICO_VK_FAKE_LIMITS=mali`,
+  `ICO_VK_FAKE_VENDOR=0x13B5`, the class's default: no area); and two sequences on the title's
+  frames, named by the list's `seq=` words (`--prev` the whole frame, then the lamps frame twice;
+  `--prev` the lamps frame `--prev` the dark frame, then the lamps frame: the area on the last
+  replay of each); the
+  `_gl` twin the desktop setting on OpenGL (llvmpipe, the area off, the band lazy). Each pair:
+  every PNG byte for byte, the same draws, the passes fewer by the bands left lazy exactly, the
+  colour loaded the same, the colour stored and cleared fewer by the stats' saved bytes and the
+  bands' (WORK2_PAD's texels x 4), the depth and stencil loaded and stored fewer by the saved
+  bytes (two hundredths of a MB; not under the poison), the saved colour bytes 4 x the texels the
+  area left; the off run no area and no band; one planned lamps pass a lamps replay, never whole
+  for the region unknown; an area at least once at the phone, poison and desktop settings and in
+  both sequences, none at the Mali and OpenGL settings, a band at every setting; the path ran:
+  each fixture's declared `glow_plan`, `lamps_bands_lazy` and `lamps_owed` on the run with the
+  parts on at every setting, and its `lamps_area_passes` where the area is on. The dark and whole
+  frames: the passes fewer also by the dark
+  plan's WORK0 alpha sprites owed and by the passes of two blur pairs (`fx_blur4_ps`), the same
+  pairs folded as the off run, four passes of two where the off run folded nine pairs (at the
+  phone, poison, desktop settings and the sequences; none at Mali and OpenGL), the colour loaded
+  fewer by a WORK0 a pass of two pairs and stored fewer by that and the owed sprites' WORK0, an
+  owed sprite at every setting. No device: SKIP.
+- `rd_lamps_fillpaste_ab.cmake` (`rd_lamps_fillpaste_ab`; `rd_lamps.cmake`): the crack fill drawn
+  in the glow's paste pass against a pass of its own, on the fixtures of
+  `port/render/test/fixtures/lists/lamps.txt` ([TESTING_FIXTURES.md](TESTING_FIXTURES.md); a listed
+  fixture that is absent fails; the word `nocull` after a name replays it with `ICO_RD_CULL=off`
+  in every arm, which keeps the generated lamps in the glow's chain), `--pass-dump --stats` at the
+  PowerVR phone's profile (`ICO_VK_FAKE_LIMITS=moltenvk`, `ICO_RD_VU_PREPASS=0`,
+  `ICO_RD_LATE_PASS=1`, `ICO_RD_CRACK_SWAP=1`, Enhanced 2364x1080, Full height and pixel) with
+  `ICO_RD_LAMPS=pad+owed+wholepad+lowres`, the same `+fillpaste`, and that under
+  `ICO_RD_LAMPS_POISON=1`: every PNG byte for byte, each fill drawn in the paste's pass one pass
+  fewer or (in an aura's paste pass) at least 9 MB of colour less loaded, never more colour
+  loaded; the path ran: each fixture's declared `lamps_fillpaste_fills` on the `+fillpaste` run
+  (`>=1` on the three lamps frames, `=0` where the chain is drawn whole), at least one fill landed
+  over the list. No device: SKIP.
+- `rd_glow_blur_test.c` (`rd_glow_blur`; `rd_glow_blur.cmake`, CPU): the glow's blur in two
+  passes, its pure parts (`rd_glow_blur.c`): the word `glowblur` of `ICO_RD_LAMPS` (alone, with
+  others, not in `1`), its text, the default bits by `RD_GLOW_BLUR_DEFAULT`, every reason's text;
+  the operator of the ten pairs as recorded at 4:3 (the boot corpus's `rd-00400`, WORK0 256 x 128)
+  and on the phone's 848 x 448 (`v3677`, 424 x 128): rows summing to 1, offsets within 8 texels,
+  nothing above 1 % left out of a row's taps, the gains (139/128)^10, (136/128)^10,
+  (132/128)^10 and 1, the texel itself on the top row and (4:3) the left column, a spread above
+  1 texel somewhere, the table's round trip; the two passes emulated as the shader computes them
+  (the table decoded, hardware bilinear with 8-bit fractions, the across pass stored to 8 bits,
+  the gains and the loss) against the chain in the GS's integers on a fixed picture of lamp-like
+  blobs: WORK0's RGB at most 25 levels apart and 0.40 on average, alpha at most 8 (the evidence's
+  Python mirror gave 21, 0.12 and 5); the refusals (a pass 1's colour, a pass 2 not covering
+  WORK0, one pair, a constant added).
+- `rd_glow_blur_ab.cmake` (`rd_glow_blur_ab`, `rd_glow_blur_gl`; `rd_glow_blur.cmake`): the glow's
+  blur in two passes (DIVERGENCES.md VD-33) on the fixtures of `test/fixtures/lists/glow_blur.txt`
+  ([TESTING_FIXTURES.md](TESTING_FIXTURES.md): two frames with the sun's fans, a white ribbon; two lamps rooms replayed with the cull off, the list's
+  `nocull` word, whose chain carries no light; four dark frames),
+  `ICO_RD_LAMPS=pad+owed+wholepad` against `...+glowblur`, `--pass-dump --stats`,
+  `ICO_RD_VU_PREPASS=0 ICO_RD_LATE_PASS=1`, at the phone's Resolution Auto under
+  `ICO_VK_FAKE_LIMITS=moltenvk`, Enhanced 2x, 3x and 4x at 4:3, the Mali fakes (no blur fold),
+  Original 4:3 at 1x (`--aspect 4:3`), Enhanced 1x and the poison; a fixture the phone's setting leaves as recorded is checked there (every
+  PNG the same bytes) and not run at the others. Where a chain was drawn in two passes: the passes
+  fewer by the chain's as today draws them less two (2 P less the pairs folded), SHADOW0..2 and
+  WORK2_PAD the same bytes, WORK0 within 48 levels of today's, WORK3 within 36, DISPLAY and PRESENT
+  within 26 (RGB; the bounds are the game's frames', the sun frame v2278 46, 34 and 23; printed per fixture, `glow blur measure:`, and as each setting's maxima), the
+  shimmer at the phone's setting, 2x, Original 1x and Enhanced 1x (WORK3's change under `--jitter 0.5,0.5`) at most 5/4 of
+  today's + 4 (every scale takes it, Original 1x included); the poison every PNG the
+  same bytes; a chain in two passes over the list at each measured setting. The path ran: at every
+  measured setting it runs at, the glowblur arm shows each fixture's declared `glow_chains` (on the
+  fixture or its list line); a fixture no setting checked fails. `rd_glow_blur_gl`:
+  the phone's setting on OpenGL (llvmpipe). No device: SKIP.
+- `rd_paste_spec_test.c` (`rd_paste_spec`; `rd_paste_spec.cmake`, CPU): the glow's paste by its own
+  entry (`port/render/rd_paste_spec.c`): the bits `fx_paste_ps` holds and reads; the gate on the
+  phone's paste DrawCB taken, with any TFX, FBA, the As form, AREF without ATE and an unset source
+  scale; each held flag, TEXFMT not RGBA32, ATE, a scaled or cropped source refused with its reason;
+  a key with a depth, the subtract, another entry, format or sample count refused; the general key
+  `rd__fx_enumerate`'s premultiplied add, its twin added by the module's stand-in (one key more);
+  `ICO_RD_PASTE_SPEC`'s words; the attempt ledger's row through its decider.
+- `rd_paste_spec_ab.cmake` (`rd_paste_spec_ab`, `rd_paste_spec_sabotage`, `rd_paste_spec_gl`;
+  `rd_paste_spec.cmake`): the fixtures of `test/fixtures/lists/paste_spec.txt`
+  ([TESTING_FIXTURES.md](TESTING_FIXTURES.md): three frames with the sun's fans, two lamps rooms
+  replayed with the cull off, three dark frames),
+  `ICO_RD_PASTE_SPEC=0` against `=1`, `--pass-dump --stats`, at the phone's Resolution Auto under
+  `ICO_VK_FAKE_LIMITS=moltenvk` with `ICO_RD_LATE_PASS=1`, Enhanced 2x at 16:9 and
+  Original 4:3 at 1x: every PNG the same bytes, the same draws and passes and pastes seen, arm 0 off,
+  arm 1 on with its self-test passed, at least one paste by `fx_paste_ps` at the phone's setting and
+  2x. The path ran: at the phone's setting arm 1 shows each fixture's declared `paste_spec_seen` and
+  `paste_spec_taken` (on the fixture or its list line); a fixture that setting did not check fails.
+  `_sabotage`: the phone's setting with `=sabotage`: the self-test failed at a
+  texel, no paste by it, the same bytes, the declared `paste_spec_seen` shown. `_gl` (label gl): the
+  phone's setting on OpenGL: off (the module is Vulkan's alone), the same bytes, the declared
+  `paste_spec_seen` shown.
+- `rd_volume_fs_test.c` (`rd_volume_fs`; `rd_volume_fs.cmake`, CPU): the shadow volumes' stencil-only entry (`rd_volume_fs.c`): the gate's reasons in order, the `date_clear_ps` twin (the fragment entry alone differs), the volume key without a device (`sprite_ps`, seen, none taken), no twin in the start-up set there, `ICO_RD_VOLUME_FS`'s words, the bench's force, the ledger's row.
+- `rd_comp_spec_test.c` (`rd_comp_spec`; `rd_comp_spec.cmake`, CPU): the composites' own entry (`rd_comp_spec.c`): the planner's composite and level keys take their forms, each held field refused alone; the DrawCB's flags (each one `sprite_ps` reads refused, the others taken, the TEXA word); the twin; no device: seen, kept, none taken, no twin; the words; the ledger.
+- `rd_comp_spec_ab.cmake` (`rd_comp_spec_ab`, `rd_comp_spec_sabotage`; `rd_comp_spec.cmake`): the fixtures of `test/fixtures/lists/comp_spec.txt` ([TESTING_FIXTURES.md](TESTING_FIXTURES.md); the frames of `rd_volume_fs_ab`), `ICO_RD_COMP_SPEC=0` against `=1` at the phone's setting, Enhanced 2x 16:9, the Mali class (off) and MSAA 4x: every PNG, draws, passes and traffic the same, arm 1 on, a draw by it at the phone on each fixture whose run shows volume draws. The path ran: at the phone's setting arm 1 shows each fixture's declared `shadow_volume_draws`, `comp_spec_seen` and `comp_spec_taken`; a fixture the phone's setting did not check fails. `_sabotage`: the phone's setting: refused, the same bytes, the declared `shadow_volume_draws` and `comp_spec_seen` shown. `rd_comp_spec_selftest`, `_selftest_sabotage`: as the volumes'.
+- `rd_volume_fs_ab.cmake` (`rd_volume_fs_ab`, `rd_volume_fs_sabotage`; `rd_volume_fs.cmake`): the fixtures of `test/fixtures/lists/volume_fs.txt` ([TESTING_FIXTURES.md](TESTING_FIXTURES.md): a character's shadow at 21:9, the opening's lamps view with no volume, the opening's sun, the Mali-G52's frame, the main gate at 32:9; an absent one FAILS), `ICO_RD_VOLUME_FS=0` against `=1` at the phone's setting, Enhanced 2x 16:9, the Mali class at 1x and MSAA 4x at 2x: every PNG, the draws, passes and traffic the same, arm 1's self-test passed, every single-sampled volume draw by `date_clear_ps`. The path ran: at the three single-sampled settings arm 1 shows each fixture's declared `shadow_volume_draws` (none on the lamps view) and `volume_fs_taken`; a fixture no setting checked fails. `_sabotage`: the phone's setting: refused, the same bytes, the declared `shadow_volume_draws` shown. `rd_volume_fs_selftest` and `_selftest_sabotage` (`test/rd_shadow_selftest.cmake` through `rd_fog_selftest_test`): the device self-test's passed line and the entry on; sabotaged, the Z ALWAYS frame differs and it stays off.
+- `rd_vu_compact_test.c` (`rd_vu_compact`; `rd_vu_compact.cmake`, CPU): the index compaction's pure
+  parts (`rd_vu_compact.c`): the plan's places (two calls one after the other in the plane, their
+  workgroups), its raises (the first call's values from 0, the next one's past them, mod 2^32),
+  its refusals (an empty list, a count not of triangles, no list, the plane's room for the lists
+  and a counts texel a workgroup, the device's largest index value raised and not), 65 triangles
+  two workgroups, the counts' base (the texel after the lists); the counts summed by list
+  (`w` 1 list 0) and a picture with no workgroup; the window's line word for word, cut in a short
+  buffer, 0 % with nothing judged; `ICO_RD_VU_COMPACT` unset, 0, `off`, 1, `on` and another word;
+  the Mali-G52's form ([PIPELINES.md](PIPELINES.md#the-mali-g52s-form)): its lists as the CPU
+  writes them (raised mod 2^32), its own test's read-back check of each kind of triangle (as
+  written, the filler, mixed, a filler never written, a value of neither, fillers past the
+  workgroup's count, counts not its triangles, against the test's geometry both ways, 65 triangles
+  two workgroups) and its words, the window's line's CPU clause (KB and ms a picture).
+- `rd_vu_compact.cmake`'s self-test rows (`rd_vuprepass_selftest_compact`, `_compact_refused`,
+  `_compact_mali`, `_compact_stores`; `test/rd_vuprepass_selftest.cmake`, lavapipe): the start-up
+  self-test with the record by compute (`ICO_RD_VU_RECORD=compute`) passes with the compaction, the
+  frame's copy of the prelit mesh past the target's right edge named in the verdict and the
+  compaction's line `on: passed its start-up self-test`; with `ICO_RD_VU_COMPACT_SABOTAGE=1` the run
+  with it fails, the run without it passes and the compaction is refused, the pre-pass on with the
+  compute record; under the phone's limits and Arm's vendor id (`ICO_VK_FAKE_LIMITS=mali
+  ICO_VK_FAKE_VENDOR=0x13B5`, `ICO_VK_FAKE_NO_DYNAMIC=1`, synchronisation validation with the
+  submit-time checks) the Arm class (`ICO_RD_VU_COMPACT_ARM=1`) takes its own form: the record's
+  frame without the copy, its own test passing (6 replays, 193536 triangles read back as written or
+  as fillers where the GPU counted them, the pictures byte for byte, every stamp written), on after
+  it, its mark `counting` with the tests' version; with the vertex stores the compaction is not applicable and the
+  frame has no copy. The verdict's compaction words name the play record's rows, the fourth
+  plane's value the lists began at and the test's pictures whose stamps were all written. The
+  form's ways back, each asserted taken: `_compact_mali_lists` (`ICO_RD_VU_COMPACT_SABOTAGE=lists`:
+  the CPU's lists written one triangle off; refused by the lists' check, values neither the CPU's nor a
+  filler in replay 1's centre draw, the ledger's refusal, the mark `failed`),
+  `_compact_mali_readback` (`=readback`: one filler of the read-back taken back to its corner 0;
+  refused, 1 mixed and 1 filler write missing in replay 1's draw past the edge at triangle 0, the
+  third cause named), `_compact_mali_stamps` (`ICO_RD_HEALTH_FAKE=selftest`: refused by the stamps
+  with the lists and the pictures right), `_compact_mali_unchecked` (`=unchecked`: its lists never
+  copied back; not checked, off for the run, the ledger's "could not check it", the mark removed),
+  `_compact_mali_marked` (`ICO_COMPACT_BLOCK`: off on this
+  install with the mark's words, no own test, no copy).
+- `rd_health.cmake`'s self-test row (`rd_vuprepass_selftest_compact_stamps`; lavapipe): with
+  `ICO_RD_HEALTH_FAKE=selftest` every record collected inside the compaction's run reads as a hang,
+  so the record's test with it fails (`the GPU's own sign of a reset in N of the test's M
+  pictures`), again without it passes, the compaction refused for the run, the pre-pass on.
+- `rd_health_test.c` (`rd_health`; `rd_health.cmake`, CPU): the picture-health report's rule
+  (`rd_health.c`) fed the four logs' patterns: issue 179's two Mali-G52 runs meet it at replay 164,
+  once (restarts alone too, at the 16th); its earlier run, the Adreno 740's 13 isolated hangs and 13
+  restarts in 16,300 pictures, an idle GPU's restarts and unjudged pictures never do; every other
+  picture unfinished meets it at the 31st (15 of 32 never, the 16th does).
+- `shadow_clip_test.c` (`shadow_clip`; `shadow_clip.cmake`, CPU, no game code): the box the shadow
+  volumes' edges are clipped to (`port/include/ico_shadow_clip.h`; [GS.md](GS.md#primitives-and-shadows)):
+  each disc's own box at the 4:3 frame (512 by 448 or 512 on the European, Japanese, Korean and
+  Asian discs, 768 by 672 or 768 on the North American disc and the two 2001 previews); at every
+  native width from 512 to 2560 the box across is the width times 1 or 3 / 2, at most 2046, never
+  inside the disc's own, never inside the width itself, past the picture's side, not narrower than
+  at the width before, and an end moved onto it passes `Shadow.c`'s range test on both axes; the
+  widths of 16:9, 32:9 and 48:9; a number that is no row of `config/regions.txt` takes the European
+  disc's box.
+- `rd_inames_test.c` (`rd_inames`; `rd_inames.cmake`, CPU): the draws left at their tick's position by name (`rd_inames.h`): the tally by name and reason, the top five of each reason and `interp names: ...` word for word, a NULL or empty name `a draw`, a name cut to the record's 23 bytes, the table of 128 names full and the rest counted, a short buffer; the line counted at each frame's first present; the stair test's verdict bits (moved every other tick over ten ticks: 9 judged, 5 moved, a step at each of the four still ticks after a move, alternating at the six ticks from the fourth judged one; two keys of a name summed and the window zeroing the counts, not the keys; moved every tick or never: no step, no alternation; stopped once: one; a key twice in a tick judged once; a skipped tick not judged and the run broken; the table emptied at three quarters); the line's cadence `[moved 5 of 9, alternating 6]`; the name hash (NULL and empty `a draw`, a long name cut); the tick before's rows carried to this tick's view (`rd_inames_carry`, `rd_inames_moved`: the camera's motion cancels, a model moved 2 units moves, the bound at 2^-17 of the row's larger lane: 1 apart at 131072 still and 2 apart moved, the GS Z lane left out, an axis turned moved, the kept carry the same, a singular view none). An unmatched name's texture scroll beside its count (`cage 5 [scroll 3]`; a name not in the table nothing).
+- `rd_list_draws_test.c` (`rd_list_draws`; `rd_list_draws.cmake`, CPU): a list's draws by fragment entry and DATE mode (`rd_list_draws.h`, issue 179's list 3 in the deja scene): the stencil modes' DATE words (the tests of DATE 0 and DATE 1 with their pairs and tile twins, the set-ups and clears, none), the table with the out-of-range look-ups counted apart, the list picked (the most expensive, not list 0, none above 0, list 0 first among equals), the line word for word (four replays: `vu_ps no DATE in the key 62.0, sprite_ps DATE 0 by the stencil 21.0, ...`, an entry without a name `entry 9`), the rest summed past eight kinds, a list with nothing counted, a short buffer.
+- `rd_glow_offset_test.c` (`rd_glow_offset`; `rd_glow_offset.cmake`, CPU): how far the held glow's camera is from the present's (`rd_glow_offset.h`, issue 123's right wall): a screen-view of focal 512 against itself 0, a yaw of tan 0.75 384 GS pixels, its eye moved alone 0, a pitch of tan 0.25 128, the centre direction behind the other's eye and a view with none refused; the median and largest over the held presents with the refused counted, the line word for word, past the window's 512 every one counted.
+- `rd_vu_compact_play.cmake` (`rd_vu_compact_play`; `rd_vu_compact.cmake`): the Mali-G52 form's
+  way back in play ([PIPELINES.md](PIPELINES.md#the-mali-g52s-form)): issue 179's Mali-G52 fixture
+  under the Arm fakes and the class (`ICO_RD_VU_COMPACT_ARM=1 ICO_RD_VU_COMPACT=1`), `--repeat 6`,
+  with `ICO_RD_HEALTH_FAKE=play`: the line `off for the run (in play: ...)`, the stats line's state
+  refused, the mark file `failed`; the same replay without the fake: on, the mark not failed.
+- `rd_vu_compact_ab.cmake` (`rd_vu_compact_ab`, `rd_vu_compact_ab_pixel`; `rd_vu_compact.cmake`):
+  the index compaction ([PIPELINES.md](PIPELINES.md#the-index-compaction)) on against off,
+  `ICO_RD_VU_COMPACT=1` against `=0`, the record by compute in both (`ICO_RD_VU_RECORD=compute`),
+  `--pass-dump --stats`, on every fixture of `port/render/test/fixtures/lists/vu_flat0.txt`
+  ([TESTING_FIXTURES.md](TESTING_FIXTURES.md); a listed fixture that is absent FAILS): the corpus
+  profile (Original 4:3 at 1x, Enhanced 16:9 at 2x, at 16:9 with MSAA 4x, at 16:9 and 1280x720),
+  the Arm fakes on issue 179's two Mali-G52 frames at their settings (with the Mali-G52's class,
+  `ICO_RD_VU_COMPACT_ARM=1`: its form, the lists written by the CPU first), the Pixel's three opening
+  frames at its setting; with the draw merge, and without it at the first two corpus settings and
+  the phones'. Every target's PNG the same bytes, the off run's `stats: VU index compaction off by
+  default: not run`, the on run's `stats: VU index compaction on: N of M list 0 triangles left out
+  (drop D, outside O)` with M above 0 on the phones' frames and N above 0 on the Mali's; every
+  pair's counts equal to its line of `port/render/test/fixtures/lists/vu_compact_counts.txt`
+  (fixture, profile, setting, merge, then N M D O, each re-derived from a run of the fixture): a
+  pair without a line prints it (`rd_vu_compact_ab: count ...`) and fails, a line no pair took
+  fails. The path ran: `vu_compact_left_out` (N) and `region_rule_draws` against each fixture's
+  declared bounds on every on run compared; a fixture with no pair compared under one of its
+  profiles fails. `rd_vu_compact_ab_pixel`: rd_pixel's frames (a list of build-tree names), the
+  corpus profile, the counts printed. No device: SKIP.
+- `rd_vu_audit.cmake` (`rd_vu_audit`; `port/render/rd_vu_audit.cmake`): the VU record path's bounds
+  audit (`ICO_RD_VU_AUDIT=1`, `port/render/rd_vu_audit.h`; issue 179) on committed fixtures
+  (`test/fixtures/lists/vu_audit.txt`, [TESTING_FIXTURES.md](TESTING_FIXTURES.md)): the reporter's
+  two loss dumps' frames of 2026-11-14 (`fx-mali-loss`, `fx-mali-loss-before`) and two captures of 2026-11-12
+  (`fx-mali-frame`, `fx-mali-slow541`) under
+  the Arm fakes at the reporter's settings (21:9, presented at 1612x720, the record by compute made at
+  start-up, the volumes' stencil-only entry), four replays each, the compaction on (merged and not)
+  and off: every recorded command's slots and index values, every compacted list read back after its
+  fence (each triangle its source raised, or the filler) and every draw of the fourth plane (offset,
+  range, values) checked on the CPU; 0 violations in every run, the run lines printed. The Arm
+  estimate (a render pass's indexed VU draws' index ranges summed, in vertices, times 164 bytes a
+  vertex and Arm's 64, against Mali's 180 MB intermediate geometry region: Khronos Vulkan-Samples
+  [memory_limits.adoc](https://github.com/KhronosGroup/Vulkan-Samples/blob/main/docs/memory_limits.adoc))
+  is printed for the worst pass of each run; the compaction's arms must not pass the off arm's
+  worst pass sum, nor its largest span over a draw's indices, by more than 1 %. The path ran, per
+  fixture: every run's declared `vu_audit_entries` and `vu_audit_violations`, the on arms'
+  `vu_audit_lists` and `vu_audit_plane_draws`. The slow captures 195621 and 195651 are not
+  carried (`fx-mali-slow541` is the heaviest of the three). No device: SKIP.
+- `rd_vu_flat0_test.c` (`rd_vu_flat0`; `rd_vu_flat0.cmake`, CPU): the main vertex shader's flat
+  outputs at the provoking corner, its pure parts (`rd_vu_flat0.c`): `ICO_RD_VU_FLAT0` unset, empty
+  and 1 the shipped build, 0 the twins, any other word the shipped build and named; the start line
+  in both forms (`VU flat outputs: provoking corner only (9 loads a corner-0 invocation, 4 at the
+  others`, `VU flat outputs: every corner (ICO_RD_VU_FLAT0=0` naming both twins) and with a twin
+  that could not be made, cut in a short buffer; the counts (corner 0 the 3 + 1 + 5 loads every
+  corner read before, the others 5 fewer).
+- `rd_vu_flat0_ab.cmake` (`rd_vu_flat0_ab`, `rd_vu_flat0_ab_pixel`, `rd_vu_flat0_gl`;
+  `rd_vu_flat0.cmake`): `vu_main_vs` and `vu_merge_main_vs` reading the planes at corner 0 alone
+  ([PIPELINES.md](PIPELINES.md#flat-outputs-at-the-provoking-corner)) and returning after the
+  drop verdict on a culled triangle ([the drop verdict first](PIPELINES.md#the-drop-verdict-first))
+  against their twins with every corner computing them and no early return but the hidden flag's
+  (the shader before both), `ICO_RD_VU_FLAT0=1` against `=0`, `--pass-dump --stats`, each with
+  the draw merge and without it (`ICO_RD_VU_MERGE=0`), on every fixture of
+  `port/render/test/fixtures/lists/vu_flat0.txt` ([TESTING_FIXTURES.md](TESTING_FIXTURES.md); each
+  line a fixture, its profiles and its properties; a listed fixture that is absent FAILS): the
+  corpus profile (Original 4:3 at 1x, Enhanced 16:9 at 2x) on a Mac reporter's 16:9 frame and issue
+  179's two Mali-G52 frames; those two again under the Arm fakes (`ICO_VK_FAKE_LIMITS=mali
+  ICO_VK_FAKE_VENDOR=0x13B5`, the record by compute, 1x, 21:9, half height); the Pixel's three
+  opening frames at its setting (`ICO_VK_FAKE_LIMITS=moltenvk`, Enhanced 2364x1080, full height,
+  full pixel). Every target's PNG (SCENE and DISPLAY among them) the same bytes, each run's line
+  (`rd: VU flat outputs: every corner`, `... provoking corner only (9 loads ...`), `merge on)` or
+  `merge off)`, a frame drawing nothing through the record (no `stats: VU pre-pass on: [1-9]`)
+  skipped, a 4:3 frame the 16:9 setting cannot show skipped, targets compared under every profile
+  with a frame. The path ran: the fixture's `prepass_vertices` (the mesh and grid vertices the
+  record holds, every one drawn by the provoking corner's shader) against its declared bound on
+  every `=1` run compared; a fixture with no pair compared under one of its profiles fails.
+  `rd_vu_flat0_ab_pixel`: rd_pixel's `rd_pixel_vu`, `rd_pixel_vu36` and `rd_pixel_frame` (a list of
+  build-tree names; every machine; CI's Direct3D 11 job runs the same on WARP,
+  `tools/ci_d3d11_warp.sh`, `-DBACKEND=d3d11`, the debug layer's errors failing it).
+  `rd_vu_flat0_gl`: the list on OpenGL (llvmpipe), every fixture at the corpus settings (the fakes
+  are Vulkan's). No device: SKIP.
+- `rd_vu_share_test.c` (`rd_vu_share`; `rd_vu_share.cmake`, CPU): shared vertices for clip-mode-none
+  strips, the pure parts (`rd_vu_share.c`, synthetic meshes): `ICO_RD_VU_SHARE` unset, empty and 1
+  on, 0 and `off` off. A strip of four triangles gets its hand-worked shared list (six distinct
+  values of twelve) and two batches get each batch's distinct count. Every list keeps the invariants
+  that make it exact: the same vertex at every place, a triangle's first value its own, every value
+  a kick of its batch. No list for three separate triangles, a kick twice, a corner outside its
+  batch, corners out of order, batches not back to back, or a sheet. A draw's verdict: shared with
+  its saved count; kept on the original list for the form, a chain plane, the later mark, the hide
+  mark, a probe draw, a range off the batches, rule modes region and scissor (named first) and a
+  draw the pre-pass did not record; no candidate for a skinned command; the joined and flip marks
+  change nothing. The device bytes are the original list, then the shared one. The run's stats
+  line word for word (its draws by every reason), the block's text and its return to zero, the
+  block's kept triangles a picture by reason word for word (each verdict's own triangles, the
+  compaction's after a shared verdict that draw's, none after a command that is no mesh, in
+  thousands past 10 000) and their return to zero, cut in a short buffer. The list only where a draw can take it: none
+  for a lit or a skinned mesh, none made for a command that is no candidate (skinned, lit, prelit
+  at codes 32 and 36, a chain plane) or for a scratch mesh, made once for a candidate with its
+  device copy marked for upload. The marks are decided once: 1000 draws scan none. The ring's
+  estimate of a mesh covers both upload paths' writes at their worst alignment, the same before
+  the list is made (the estimate runs first) and after.
+- `rd_vu_share_ab.cmake` (`rd_vu_share_ab`, `rd_vu_share_gl`; `rd_vu_share.cmake`): shared vertices
+  for clip-mode-none strips ([PIPELINES.md](PIPELINES.md#shared-vertices-for-clip-mode-none)).
+  Compares `ICO_RD_VU_SHARE=1` against `=0` with `--pass-dump --stats`, each with the draw merge
+  and without it (`ICO_RD_VU_MERGE=0`), on every fixture of
+  `port/render/test/fixtures/lists/vu_share.txt` (issue 179's stage 42 capture, `fx-mali-slow541`,
+  under the corpus settings and the Arm fakes with the record by compute at 1x and 21:9; a listed
+  fixture that is absent FAILS).
+  - Every target's PNG must be the same bytes.
+  - Each run's line must show: `stats: VU shared vertices off (ICO_RD_VU_SHARE=0): 0 triangles`,
+    or `stats: VU shared vertices on: ` on the `=1` runs; and `merge on)` or `merge off)`.
+  - The path ran: the triangles drawn with shared vertices meet the fixture's declared
+    `vu_shared_triangles` on every `=1` run compared.
+  - `rd_vu_share_gl`: the list on OpenGL (llvmpipe), at the corpus settings.
+  - No device: SKIP.
+- `rd_vu_zero_test.c` (`rd_vu_zero`; `rd_vu_zero.cmake`, CPU): the zero-area cull's pure parts
+  ([PIPELINES.md](PIPELINES.md#the-zero-area-cull)): the lattice word of the run's targets (1x, 2x
+  and 3x at 16:9, the field's half line, an odd width, the Full pixel crop at an even and an odd
+  width, a smaller viewport limit) worked out by hand, and every refusal with its reason; the test
+  against a brute-force rasteriser on three lattices (3,000 random small triangles each, every
+  corner moved by every combination of -1, 0 and 1 sixteenth, every point on an edge covered): no
+  culled triangle covers a sample point, some are culled, some kept by the margin; the self-test's
+  cases at 1x and the half line; the record check (an agreeing record, a flipped flag, a flag
+  without a word, a corner without its GS position, the region and scissor modes); `vu_ftoi4`'s
+  edges; the run's state (held until the self-test, `ICO_RD_VU_ZERO` 0 and 1, the loss ladder and
+  the install's mark over both, a failed self-test kept at a renderer made again), the words a
+  velocity, skinned or probe entry gives up, and the VU line's clause word for word, its reset and a
+  short buffer.
+- `rd_vu_zero_ab.cmake` (`rd_vu_zero_ab`, `rd_vu_zero_gl`, `rd_vu_zero_fault`; `rd_vu_zero.cmake`):
+  the zero-area cull on every fixture of `port/render/test/fixtures/lists/vu_zero.txt`
+  (`fx-mali-slow541`, `fx-adreno`; a listed fixture that is absent FAILS). `ICO_RD_VU_ZERO=1` (on,
+  every entry of every replay checked) against `=0` with `--pass-dump --stats`, each with the draw
+  merge and without it, under the corpus settings (4:3 at 1x, Enhanced 16:9 and 4:3 at 2x, 4:3 with
+  `--velocity` and its picture), the Arm fakes with the record by compute at 1x and 21:9, and the
+  same at 16:9 with half height.
+  - Every target's PNG must be the same bytes, the motion vectors' included.
+  - The lines: `stats: VU zero-area cull off (ICO_RD_VU_ZERO=0)`, and on the `=1` runs `stats: VU
+    zero-area cull on (ICO_RD_VU_ZERO=1): C of S triangle slots culled over P pictures checked, 0
+    differ` with P at least 1; `merge on)` or `merge off)`.
+  - Each `=1` run's cull line is printed (slots culled, draws culling, refusals by reason), and each
+    fixture's profile its sums over its runs.
+  - The path ran: each fixture's profile's culled slots, summed over its runs, meet the fixture's
+    `vu_zero_culled` (one lattice may find nothing in a frame: 2x samples twice as finely as 1x),
+    and at least one slot is culled at 2x (the Enhanced runs) over the list.
+  - `rd_vu_zero_gl`: the list on OpenGL (llvmpipe), at the corpus settings.
+  - `rd_vu_zero_fault`: each fixture once under the Arm fakes (a fixture not listed for them: the
+    corpus 4:3 setting) with `ICO_RD_VU_ZERO_SABOTAGE=check`:
+    `rd: VU zero-area cull: off for the run: the GPU's answer differs from the CPU's` logged and
+    the stats line off.
+  - No device: SKIP.
+- `rd_ab_test.c` (`rd_ab`; `rd_ab.cmake`, CPU): the in-play judge
+  ([PIPELINES.md](PIPELINES.md#the-zero-area-cull-timed-in-play)) over made-up streams of replays
+  whose GPU times come back two or three replays later, each span from its arm:
+  - the verdicts: 5 % cheaper with the attempt on (the early verdict line word for word), 3 %
+    dearer off, no difference off at 32 pairs, 40 % of the pictures 3 to 5 times as long with a
+    5 % saving still on (pairs dropped by a long picture), the work rising 1 % a picture with a
+    fixed part no false on (and a 5 % saving still found), three pictures in flight;
+  - the trial's cost: the early verdict's eight replays without the attempt (and the two begun
+    before it came back); with no pair to make (the work swinging 30 %) the trial ends at 600
+    replays, at most 300 of them without it, no verdict, no more trials in the stage;
+  - the stages: no trial before 2 s into a stage or before the subject had work there, a keep
+    frame left out of the trial at the on arm, the arms with, without, without, with, a stage that
+    ends mid-trial not judged (timed again in the next stage); the run's one verdict taken by a
+    later stage where the other arm would be faster, with no new trial, and by the judged stage
+    again; trials with no answer in each next stage up to the 12-trial cap and its line;
+  - a fake second subject: one trial at a time (the other at its default or its verdict), each its
+    own verdict; a subject not allowed or never in use never tried;
+  - the way back: `rd_ab_stop` mid-trial: every later replay at every subject's off arm, keep frames
+    too, no trial, its line word for word, once;
+  - the modes `on`, `off` and `alt` (with, without, without, with) with no stage, their stats line;
+    the judge with no stage never trying; the start line; the registry's bound; a short buffer;
+  - the measure: the scene's GPU work (the span less the present's pass and the display wait,
+    `rd_ab_scene_ms`): a stream held by the display (every span 40 ms, the wait taking up what
+    the scene saves) judged on with it, off with the whole span; the verdict line's words;
+  - a renderer made again (`rd_ab_forget`): a second subject's trial past 16 pairs ended
+    unjudged, every verdict forgotten, a record of the earlier renderer not measured, the trials
+    run still counted, the subject timed again on the new renderer;
+  - once a run, in scenery (`rd_ab_set_scenery`): no trial in 20 s of the title and the logo; in
+    the opening's stage none before 2 s of scenery (the stage's first pictures still the title's
+    count for nothing), the cull's trial at them and its verdict; the boat stage, where the other
+    arm would be faster, on the run's arm with no trial; a second subject with work only in a later
+    stage: its one trial there, then both judged, no trial running and none after; a renderer made
+    again: both verdicts forgotten, both timed once more and judged again;
+  - the boot logo and title's stage (`rd_ab_scenery_of`): never scenery on any layout, the
+    opening and the boat scenery, a menu not; 4 s of that stage on the scene layout start no trial
+    with the renderer's word, and do start one with the layout's word alone (the case of issue
+    179's report, which the test refuses);
+  - the scenery ending mid-trial: a trial past 16 pairs ends with no verdict and its line word
+    for word, no verdict kept for the stage; back in scenery none before 2 s, then the trial and
+    its verdict in the same stage; the broken trial not counted toward the run's 12 (0 counted
+    and 1 begun after the break, 1 and 2 at the end);
+  - the scenery broken during trials (`testSceneryBreaks`): the renderer's five subjects with
+    work, the one-pass blend last; 15 pauses each 2.32 s into play (more than the cap): no trial
+    counted, the subject on trial going round them in turn (the fewest trials begun first), each
+    with 3 begun; then a long stretch: all five judged, the one-pass blend too, 5 trials counted
+    and no cap line;
+  - the twins' camera rule class (`RD_AB_ND_CAMERA`) beside the twins: the four subjects in the
+    renderer's order and a fifth place; no trial of the class in a stage where it had no work, its
+    own trial where it had; its verdict and the twins' independent both ways (twins on, class off
+    and the reverse), each later replay with only the class judged off at its off arm;
+  - the rate requirement, 72 cases (the registry full, five subjects, the others without work): a GPU-bound stream at a 40 ms tick for 60 s, pictures of 33,
+    37.5, 48 and 60 ms, the attempt saving or costing 3, 5 and 10 %, in one stage, in four stages
+    of that effect and in four stages whose effect changes sign each stage; each case beside its
+    two fixed-arm runs, restated for one verdict a run: the target is the arm faster in the first
+    stage (where both present alike, the arm the judge chose), its run's pictures the target's
+    count; the verdict is that arm; the judge at least the target's less the pictures its
+    undecided time cost (its other-arm pictures before the verdict and in the trial, at the two
+    runs' rates), less 1; after the verdict, the target's pictures over the same span within 1;
+    for the streams of one sign also at least the worse fixed arm. Each case's numbers and bound
+    are printed.
+- `rd_ab_zero_ab.cmake` (`rd_ab_zero_ab`, `rd_ab_zero_stop`; `rd_ab.cmake`): the judge's two arms
+  of the zero-area cull on every fixture of `port/render/test/fixtures/lists/vu_zero.txt` under its
+  profiles (corpus at 4:3 1x and Enhanced 4:3 2x; the Arm fakes with the record by compute at 1x
+  21:9 and at 16:9), `ICO_RD_VU_ZERO=1` and `ICO_RD_AB=on`, `off` and `alt` at `--repeat 2`, `on`
+  and `alt` at `--repeat 4`:
+  - every target's PNG the same bytes across the three at 2 and the two at 4;
+  - both arms ran: the judge's stats line (`stats: A/B (alt): zero-area cull: N replays with it, M
+    without`) with N above 0 for `on` and `alt`, M above 0 for `off` and `alt`, 0 for the arm the
+    mode leaves out; the cull's draws refused for the `trial` above 0 on `off` and `alt`, 0 on
+    `on`, no slot culled on `off`; every check 0 differ; the alternating runs of each fixture and
+    profile culled at least one slot;
+  - `rd_ab_zero_stop`: each fixture once at its first profile's first setting with `ICO_RD_AB=alt`
+    and `ICO_RD_AB_FAKE_LOSS=1`, `--repeat 4`: `rd: A/B: every trial stopped for the run
+    (ICO_RD_AB_FAKE_LOSS` logged, every replay without the cull, its trial refusals, no slot culled;
+  - No device: SKIP.
+- `rd_vuprepass_selftest_zero`, `_zero_plain`, `_zero_mali`, `_zero_lattice`, `_zero_missing`,
+  `_zero_lossrow`, `_zero_marked`, `_zero_never`, `_zero_refused`, `_zero_picture`, `_zero_switch`
+  (`rd_vu_zero.cmake`, through
+  `rd_vuprepass_selftest_test` and `test/rd_vuprepass_selftest.cmake`): the zero-area cull's
+  start-up self-test after the pre-pass's (which must still be on), each run's start line saying
+  what of it exists: on in the extended variant (Enhanced 16:9 at 2x, Full pixel), the plain one
+  and under the Arm fakes with the record by compute, its line naming the culled slots and the
+  lattice, one module and one pipeline; off for the run with the zero build given a lattice half a
+  texel off (the answers differ) and with no record copied (no answer read back), the module and
+  pipeline released; off for this start after a lost one (`ICO_LOSS_ROW=1`), off on the install
+  (`ICO_VU_ZERO_BLOCK`, the mark the platform hands over) and off by `ICO_RD_VU_ZERO=0`, no
+  module or pipeline of it made and no try logged; a refusal by the settings (`ICO_RD_VU_OFFGRID=1`:
+  no lattice) not tried, no module made and the install's mark (`ICO_VU_ZERO_MARK` in the build
+  folder) not written; the picture compare's way back (`ICO_RD_VU_ZERO_SABOTAGE=picture`): off,
+  released, the mark `failed <the test's version>`; the renderer made again in the process as a Graphics API
+  switch makes it (`switch`: `rd_suspend`, `rd_resume`, the self-test again): on both times, its
+  read back buffers made again for the second try and none alive after either, the mark `counting
+  <the test's version>` after each.
+- `rd_fastps_test.c` (`rd_fastps`; `rd_fastps.cmake`, CPU): the fast pixel build's pure part
+  ([PIPELINES.md](PIPELINES.md#the-fast-pixel-build)): the eligibility of a pass at its DrawCB (the
+  set's forms through it: opaque, the two-pass lerp's passes, the premultiplied forms, FIX, FBA,
+  PABE, C1_DST, bits vu_ps never reads, a discard-free twin's key, TEXA's mode with an RGBA32
+  texel, any atst, split and AREF with the test off, scale.z -0; every refusal in its order:
+  texture (untextured, DECAL, TCC off), texel, levels (GS levels, nearest, the grid), DATE (DATE,
+  DATM, DATE_DST), plane, alpha, crop; the tests' sabotage letting DECAL through), the passes it
+  does not exist for (vu_texa_ps, vu_np_ps, sprite_ps, destination reads, nodual 0, a fast key
+  already, the discard-free bit alone), the held bits against `common.hlsli`'s own
+  `VU_FAST_FIXED_MASK` and `VU_FAST_FIXED` lines (its argument) and each of the 32 bits flipped
+  alone, the reasons' and modules' names, the judge's use of a replay, and the run's state
+  without a device (held, on after a passed self-test, `ICO_RD_VU_FASTPS=0` and `=1`, the loss
+  ladder and the install's mark over `=1`, a failed self-test kept off for the run, a short buffer
+  cut).
+- `rd_fastps_ab.cmake` (`rd_fastps_ab`, `rd_fastps_ab_gl`; `rd_fastps.cmake`): every fixture of
+  `port/render/test/fixtures/lists/fastps.txt` under its profiles (corpus at 4:3 1x, mali at 21:9,
+  mali169 at 16:9, desktop: the corpus device at 4:3 without dual-source blending) replayed with
+  the build off (`ICO_RD_VU_FASTPS=0`) and on without its self-test (`=1`), `--pass-dump --stats
+  --repeat 2`: every target byte for byte, nothing of it on the run without it, on the run with it
+  the second replay drawing every pass the first asked for, above 0 passes through it over the list
+  under each profile without dual-source blending (each fixture's count printed), and under corpus
+  0 passes and "not applicable here". `rd_fastps_ab_gl`: the same on OpenGL at the corpus setting
+  without dual-source blending. `rd_fastps_ab_nd`: the same frames with the discard-free twins on in
+  both runs (`ICO_RD_VU_NODISCARD=1`, `--repeat 3`), so `vu_ps_nodual_fast_nd` is compared against
+  `vu_ps_nodual_nd` byte for byte, above 0 passes through it over the list under each profile
+  without dual-source blending (the stats line counts them apart: `(N of them through
+  vu_ps_nodual_fast_nd)`). A profile that drew no frame fails. No device: SKIP.
+- `rd_vuprepass_selftest_fastps`, `_fastps_sabotage`, `_fastps_marked` (`rd_fastps.cmake`, through
+  `rd_vuprepass_selftest_test` and `test/rd_vuprepass_selftest.cmake`, the Mali fakes without
+  dual-source blending, the mark in a file of each test's own): the self-test's on line (at least
+  six passes through `vu_ps_nodual_fast`, the refusals counted, the colours and the depth byte for
+  byte, its pipelines released), the start line and the mark `counting` with the test's version; the sabotage
+  (`ICO_RD_VU_FASTPS_SABOTAGE=decal`) caught: the pictures differ, off for the run, released, the
+  mark `failed`; the install's mark (`ICO_FASTPS_BLOCK`): off, no module made, the mark
+  not written.
+- `rd_onepass_test.c` (`rd_onepass`; `rd_onepass.cmake`, CPU): the one-pass blend's pure part
+  and its run's state without a device ([PIPELINES.md](PIPELINES.md#the-one-pass-blend)): the
+  blender model (the carried alpha against the alpha pass's for every As 0..255 at 13 precisions of
+  the source, the constant and the product, rounded to nearest: equal for As 0..128, 128 above; the
+  directed-rounding models that differ printed), the proof on the planner's own pair and each
+  refusal alone (As 129, FBA, PABE, LERP FIX, Cd*FIX + Cs, Z GREATER with Z write, another format, a
+  destination read, two samples, a pass taken already), the classes (a plain draw, a cut and a kick
+  drawn apart, a fused kick, a fused command's cut) and the classes in use from the arms' verdicts
+  (the plain class wherever A passes, whatever B and C say; A fails: nothing; never the cut class),
+  the draws the plain class may take (`rd_op_safe_draw`: clip mode none and a kick drawn apart,
+  a camera rule draw only when proven in front of the eye, never particles or a cut), the run's choice under `ICO_RD_ONEPASS=full` and
+  `=plain` and under the check's arms (the alpha pass dropped, the passes after it moved down; REF
+  and B take nothing; the unfuse under each arm; without a device the check's pipelines not made,
+  counted for its retry), the fast pixel build taking a one-pass key and the dynamic blend state
+  folding its bit, the ways back (held, `=0`, the loss ladder and the install's mark over `=full`, a
+  background fault kept off for the run), the 10 s clause's and the stats line's words.
+- `rd_onepass_ab.cmake` (`rd_onepass_ab`; `rd_onepass.cmake`): every fixture of
+  `port/render/test/fixtures/lists/onepass.txt` (the Mali-G52's two frames with every VU texture
+  `date_split`) under the Mali fakes with every state in the pipeline keys and with lavapipe's
+  dynamic blend state, every pair in two passes (`ICO_RD_ONEPASS=0`) against both classes in one
+  pass without the check (`=full`): every target byte for byte, the same traffic, pairs in one pass
+  over the list at each setting with code 36's among them (each fixture's counts printed), none on
+  the run without it; a third run with the in-play judge at its off arm on every replay
+  (`ICO_RD_AB=off`): on, no pair in one pass, nothing unfused, every pair the second run took kept
+  as "timed without it" (the judge's way back taken), every target the first run's. No device: SKIP.
+- `rd_vuprepass_selftest_onepass`, `_onepass_dynamic`, `_onepass_sabotage`, `_onepass_cut`,
+  `_onepass_unchecked`, `_onepass_sliver`, `_onepass_readfail`, `_onepass_marked` (`rd_onepass.cmake`, through
+  `rd_vuprepass_selftest_test` and `test/rd_vuprepass_selftest.cmake`, the Mali fakes without
+  dual-source blending, the mark in a file of each test's own): the device check with every state
+  in the pipeline keys and with dynamic blend state: a code 36 frame fused today and unfused under B and C with pairs in one pass (the reporter's
+  pattern drawn), the code 32 frames refused for A (not proven in front of the eye) and the code
+  34 frames taken, A and B the same bytes, C measured ("the same bytes" or "differs": its form is
+  inexact by construction where a corner reaches the GPU behind the eye, lavapipe measures
+  "differs" at case 7), arm D none, the plain class alone in use and the mark `counting`; a texel
+  added to C on the frames today's drew nothing on (`sliver`): C differs first at case 5 at 36 (a
+  frame empty through two passes, compared); the first reference read failed without a loss (`read`): A not
+  checked, no verdict, the mark removed; the
+  constant 127/255 in A and C caught: nothing in use, the mark `failed`; 127/255 in C alone: the
+  plain class alone in use; every one-pass pipeline not made: A and C not checked, no verdict, the
+  mark removed; the install's mark (`ICO_ONEPASS_BLOCK`): off, no check, the mark not written.
+- `rd_nodiscard_test.c` (`rd_nodiscard`; `rd_nodiscard.cmake`, CPU): the discard-free twins' pure
+  part ([PIPELINES.md](PIPELINES.md#the-discard-free-twins)): the eligibility of a VU pass (a vu_ps
+  or vu_texa_ps pass through its *_nodual build given its twin; every refusal reason and the order
+  they are taken in: plane by the draw's chain plane and by the pass's flag, DATE by the snapshot
+  with either DATM and by the stencil bit, band at the region test and the scissor without
+  `ICO_VU_NO_BESIDE` but never at clip mode none or for particles, alpha with the ate bit of
+  AFAIL KEEP and of both split passes but not the ATST byte alone, clipped on every device for
+  every clip mode but none (the camera rule's region test, the scissor) and for particles; the
+  tests' sabotage letting the alpha
+  test through; on a clean clipper verdict the forms table: prelit 32 and 36 under the camera
+  rule, extended or not, the cut and the fused kick draws take the twin, and lit, skinned 24,
+  lit 36, the drops kept, two-sided, mirrored, photo mode's free camera and the ticks' cameras are
+  refused as `form`, every one `clipped` when not clean and given the twin at clip mode none;
+  proven in front of the eye (EYEBOX, `inFront`) the checked forms take the twin clean or not
+  (class "proven in front of the eye"), `box` without the proof when not clean, the other forms
+  never past their own refusal, particles never, and plane, DATE, band and alpha still refused
+  over the proof; each twin's class, `rd_nd_twin_class`), the passes no twin exists for (other entries, the planes' twins, no *_nodual
+  build, a destination read by storage and by attachment), the reasons' and modules' names, the
+  key bits in the key's one byte; the judge's use of a replay (in use only when a pass drew
+  through a twin and none found its twin not made yet, in either order; the off arm with every
+  twin made counts); the run's state without a device: held
+  until the self-test (no 10 s clause; the stats line word for word), on after a passed one (the
+  clause with every reason), `ICO_RD_VU_NODISCARD=0` and `=1`, the loss ladder and the install's
+  mark over `=1`, a failed self-test kept off for the run through a renderer made again, a short
+  buffer cut.
+- `rd_nodiscard_ab.cmake` (`rd_nodiscard_ab`, `rd_nodiscard_ab_gl`; `rd_nodiscard.cmake`): every
+  fixture of `port/render/test/fixtures/lists/nodiscard.txt` under its profiles (corpus at 4:3 1x;
+  the Arm fakes with the record by compute and no dual-source blending, `ICO_VK_FAKE_NO_DUAL=1`,
+  at 1x 21:9 and 16:9), `ICO_RD_VU_NODISCARD=0` and `=1` at `--repeat 2`: every target's PNG the
+  same bytes; the run without them says off with 0 draws and 0 modules; the run with them says on
+  with its draws through them printed and above 0 over the list under each Arm profile (they ran),
+  and equal to its `not made yet` count (the first replay asks for every pass's twin, the second
+  draws each through it: none found its twin not made there),
+  and under corpus 0 draws and "not applicable here" (dual-source blending). `rd_nodiscard_ab_gl`:
+  OpenGL (llvmpipe), every fixture at 4:3 1x with `ICO_GL_FAKE_NO_DUAL=1`, above 0 over the list.
+  Without the self-test no clipper check runs (`not checked`, as a device measured not clean), so
+  clip mode none and the camera rule's passes the CPU proved in front of the eye take a twin there
+  ([PIPELINES.md](PIPELINES.md#the-discard-free-twins)); the run with them must have no draw of the
+  clipper check's class, and under each Arm profile over the list draws proven in front of the eye
+  through a twin and draws refused as `box` (both above 0: the proof's two outcomes), the targets
+  byte for byte all the same on lavapipe, which is not clean. `rd_nodiscard_clean`: the clean verdict's path,
+  the run with them under `ICO_RD_VU_NODISCARD_CLIPPER=clean` (lavapipe measures its clipper not
+  clean), so the camera rule's passes of the checked forms take a twin: every target byte for byte (these
+  fixtures hold no eye-crossing triangle whose pixels differ under Mesa 25.0.7, measured; another
+  rasteriser may differ, and the test then names the target), and per fixture and profile at
+  least its list line's `clean_min` of that class, and the judge's stats line counting the camera
+  rule class (its own subject, `discard-free twins, camera rule`) at its on arm on every replay;
+  without the clean verdict (`rd_nodiscard_ab`) that subject counts no replay at either arm. No
+  device: SKIP.
+- `rd_vuprepass_selftest_nodiscard`, `_nodiscard_clipper`, `_nodiscard_empty`,
+  `_nodiscard_clean`, `_nodiscard_sabotage`, `_nodiscard_marked`, `_nodiscard_dual`,
+  `_nodiscard_fallback`, `_nodiscard_nodynamic`, `_nodiscard_unchecked` (the clipper check: `_nodiscard` requires that it ran (cases 1 and 13's
+  lines, its cost line), no frame undrawn (a frame counts as drawn through either entry), the
+  trace (case 1's code 32 draw under the camera rule with a facing table, its code 36 draw the
+  scissor), and either well-formed verdict with its consequence in the run's state (`clean`: the
+  camera rule's class on; `not clean` naming the differing cases: off); whichever the
+  rasteriser measures (Mesa 25.0.7: not clean at cases 2 and 5), the verdict and the cost are
+  printed in the test's output; `_nodiscard_empty` its other positive control,
+  `ICO_RD_VU_NODISCARD_SABOTAGE=empty` (the first case off the frame): case 1's line expected 0 and
+  drawn 0 in all four frames and without the probe, every case still run (case 13's line), `not
+  clean (drew nothing (not tested): case 1 at 32, 32t, 36, 36t...)`, clip mode none alone, the
+  mark `counting`; `_nodiscard_clipper` its positive control, `ICO_RD_VU_NODISCARD_SABOTAGE=clipper`
+  (the first case's picture through the twins with one byte altered): every case still run, case
+  1's line with 1 texel differing at code 32, `not clean (... case 1 differs at 32 ...)`, clip
+  mode none alone, the mark `counting`, never `failed`; `_nodiscard_clean` the verdict taken as
+  clean, `ICO_RD_VU_NODISCARD_CLIPPER=clean`, logged as the tests' fake: the camera rule's class
+  on, whatever was measured; `_nodiscard_nodynamic` the same check with every state in the
+  pipeline keys, `ICO_VK_FAKE_NO_DYNAMIC=1` (`rd: pipelines: dynamic state: none`, as on every
+  Android GPU): its cost line with above 0 twin pipelines made for it and 0 frames still without
+  one, either measured verdict with its consequence, never `no pipeline of its twin` or `not
+  checked` (the code before the one gathering around all frames said `not clean (case 1 at 36:
+  no pipeline of its twin)` there and had no made count); `_nodiscard_unchecked` the third
+  outcome, `ICO_RD_VU_NODISCARD_SABOTAGE=unmade`: all 52 frames drawn again and still without
+  their twin, each logged `not checked`, case 1's line with 0 through the twins and 0 differing,
+  the verdict `not checked (no pipeline of their twin after a retry: ...)` with clip mode none
+  alone, never `not clean` or `a property of this device`, the camera rule's class off, the mark
+  `counting`)
+  (`rd_nodiscard.cmake`, through `rd_vuprepass_selftest_test` and
+  `test/rd_vuprepass_selftest.cmake`; the Arm fakes without dual-source blending): the twins'
+  start-up self-test after the cull's (the pre-pass still on), each run's start line saying what
+  of them exists: on (the plain case through vu_ps_nodual_nd and a textured TEXA case through
+  vu_texa_ps_nodual_nd, each counted, neither entry "drew nothing", each shown to draw by the frame
+  without it differing; a prelit code 32 strip under the camera rule wholly in front of the eye
+  through its twin by the proof alone, counted "proven in front of the eye"; the alpha test's (untextured
+  and textured), the clip plane's and a code 32 eye-plane crossing's cases refused; the clipper
+  check's frames in both entries, the rule refusing the band and DATE, the pictures byte for byte; 2 modules, its own
+  pipelines released after it, none of the twins' alive; the mark `counting <the test's
+  version>`); with the CPU's proof not looking at the
+  alpha test (`ICO_RD_VU_NODISCARD_SABOTAGE=alpha`) the broken twin's picture caught: off for the
+  run, the modules and pipelines released, the mark `failed <the test's version>`; off on the
+  install (`ICO_NODISCARD_BLOCK`, the mark the platform hands over): no module made, no try
+  logged; a device with dual-source blending (lavapipe as it is): not applicable, nothing tried
+  or made, the mark not written; the same device after the blend's self-test fell back to the
+  two-pass blend (`_nodiscard_fallback`: `ICO_RD_BLEND_SABOTAGE=fixed`, under which
+  `rd_vuprepass_selftest_test` runs `rd_blend_selftest` first as the game does): still not
+  applicable, `the device has dual-source blending (the two-pass blend is its fallback)`, nothing
+  tried or made, the mark not written.
+- `rd_ratecard_test.c` (`rd_ratecard_rule`; `rd_ratecard.cmake`, CPU): the rate card's pure part
+  ([RENDER_PERF.md](RENDER_PERF.md#the-rate-card)): the median, least and largest of synthetic
+  timings (0 and NaN left out, an even count), a unit as the medians' difference over a count with
+  its spread the measured frame's extremes against the subtracted frame's median (one slow replay of
+  the subtracted frame does not widen it), too few times, nothing to divide by and a difference at
+  or below 0 refused with their words, the ratio (its spread over the divisor's median, a divisor
+  not measured); a new item without its line in the sample does not compile; the printed block word for word (a measured item in each unit, "not measured" with its
+  reason), read back (`rd_rc_parse`: every item's numbers, unit and reason), a short buffer; the
+  results file's decision: no file and another key measured, `done` reprinted with its lines and
+  date, `measuring` and `blocked` skipped, a text it does not know or without its key line measured.
+- `rd_ratecard.cmake` (`rd_ratecard_mali`, `rd_ratecard_lavapipe`, `rd_ratecard_end`;
+  `test/rd_ratecard.cmake`, through `rd_vuprepass_selftest_test` on its plain variant, SCENE
+  640x448 at 1x, `ICO_RD_RATECARD=1` and a results file of its own): `_mali` under the Arm fakes
+  without dual-source blending and `_lavapipe` as lavapipe is: the head line (with the spread's
+  words) and one item line an item of `rd_ratecard.h`'s enum (the script reads it), each a finite
+  number in its unit with its min and max or "not measured (...)"; the shaded fragments of both
+  builds, the hidden one with discard, a vertex, a triangle, the quad factor, the blended fragment
+  and its ratio measured or "not measured (a difference not above 0)" (a loaded runner's noise),
+  a pass measured; the twins' two (the hidden one against one layer through the twin) measured or
+  not above 0 under the Arm fakes, never "did not draw through the twin", and "not measured (the
+  twins ..." on lavapipe; the fast pixel build and the MB "not measured"; the file
+  `done` with its key and block; a second run reprints the block "(from the run of <date>)",
+  measures nothing and leaves the file as it was. Whether a hidden fragment costs less through the
+  twin is not asserted: lavapipe tests depth early either way. `_end`: the first run ends inside
+  the card (exit 87) with the file `measuring`, the next two say "rate card: skipped (the run of
+  ..." and the file `blocked`. No device: SKIP.
+- `rd_smallcuts_test.c` (`rd_smallcuts`; `rd_smallcuts.cmake`, CPU): the pure parts of the turn in
+  the present's blit and the VU record by compute on the PowerVR class: `rd__turn_rect` for every
+  quarter turn against `rd_prerotate.c`'s pixel table (every pixel of the rect lands inside the
+  turned rect, the sizes swapped for odd turns) at the phone's window (2364x1080: the whole box, a
+  4:3 box with bars, the border mask's inset) and odd sizes and corners, and the self-test's own
+  90-degree case by value (7,5 11x7 in 48x30 is 18,7 7x11); `rd__turn_fold_why`'s reasons in the
+  present's order (the CRT filter first, the box blit alone folds); `rd__vu_class_measured` (the
+  Pixel's `PowerVR D-Series DXT-48-1536 MC1` yes; a B-Series, a Rogue and no name no) and
+  `rd__vu_class_pick` through the ledger's decider (on by the build's default on the measured
+  PowerVR, off by default on the rest of the class with its reason and with the define 0, on by
+  `ICO_RD_VU_COMPUTE_CLASS=1`, off by `=0`, not applicable with a mode asked by name, without vertex
+  stores or compute stores, or on another class).
+- `rd_bench_test.c` (`rd_bench`; `rd_bench.cmake`, CPU): the rc bench's classes over a frame built
+  by hand (a command of every class, list by list): `rd_bench_classify` against the test's table,
+  each class's mask making NOPs of exactly its commands, list 7's mask its seven actions and none of
+  its state, the baseline's mask the lists whole again, and `rd_bench_variants` without a device
+  (the baseline, the six lists, the parts in order with the shadow chain's count, level and
+  composite rows, no switch).
+- `rd_bench_ab.cmake` (`rd_bench_ab`; `rd_bench.cmake`): `rd_replay_tool --bench 1` on lavapipe over
+  rd_pixel's dump (640x480) and the fixtures of `port/render/test/fixtures/lists/bench.txt` (the
+  Pixel's opening lamps and sun frames at the phone's setting; a listed fixture that is absent
+  FAILS): every variant ran (the path ran: each fixture's declared `bench_variants`), a baseline's presented picture after the bench byte for byte the one
+  before it (unless two baselines before it already differ: a feedback effect, said so), and each
+  variant line the list names. No device: SKIP.
+- `rd_turn_fold_ab.cmake` (`rd_turn_fold_ab`; `rd_smallcuts.cmake`): the present's turn drawn by its
+  box blit (`ICO_RD_TURN_FOLD=1`) against the turn pass (unset) through the headless twin
+  (`ICO_VK_FAKE_TRANSFORM=90`, `180`, `270`), rd_pixel's dump and the fixtures of
+  `port/render/test/fixtures/lists/turn_fold.txt` (the Pixel's three opening frames, issue 179's two
+  Mali-G52 frames, a 4:3 capture also at 1024x768 where it must fold; a listed fixture that is
+  absent FAILS; the path ran: `turn_fold_cases` on every fold run, `turn_fold_turned` where a line
+  declares the fold): the phone's setting
+  (`ICO_VK_FAKE_LIMITS=moltenvk`, Enhanced 2364x1080, full height, full pixel) and a 16:9 window at
+  its own resolution (1280x720, full pixel) fold or keep the turn pass for drawn text where the
+  scene fills the box one texel a pixel, and keep it (`the box blit not one texel a pixel`) where
+  the tool's display line says the frame is cropped (every listed dump) or its aspect is not the
+  window's (rd_pixel's 4:3 frame); rd_pixel's dump at 1024x768, full pixel, folds; 640x480 at 1x
+  keeps it; rd_pixel's dump with `--overlay-test` at 1024x768 keeps it (`the port's overlay or the
+  deferred text drawn`); the fold's runs say its self-test passed
+  (`6 cases`), the turn pass's runs never fold, every PNG pair the same bytes, at least one present
+  folded. No device: SKIP.
+- `rd_vuprepass_selftest_compute_class`, `_back`, `_off` (`rd_smallcuts.cmake`, through
+  `test/rd_vuprepass_selftest.cmake`): the VU record by compute on the PowerVR class on lavapipe
+  by the tests' switch: with `ICO_RD_VU_COMPUTE_CLASS=1` the rule's line (`the compute dispatches
+  in place of the vertex stores (ICO_RD_VU_COMPUTE_CLASS=1: the tests' switch on another class`)
+  and the self-test's `record compute`; under the stale sabotage the compute record goes back to the
+  vertex stores first (`(the PowerVR class's compute record off: they failed the start-up
+  self-test)`) before the verdict; with `=0` the rule's `the record as auto takes it` and no compute
+  record.
+- `rd_vurecord_ab_compute_class`, `_opening` (`rd_smallcuts.cmake`, through
+  `test/rd_vu_env_ab.cmake`): `ICO_RD_VU_COMPUTE_CLASS=0` (the stores) against `=1` (the compute
+  dispatches by the rule), every named target byte for byte, A's stats `VU record stores`, B's
+  `VU record compute: ... (the PowerVR class's rule`, each fixture's `prepass_vertices` on both
+  runs and `vu_record_dispatches` on B; on rd_pixel's dump and the fixtures of
+  `port/render/test/fixtures/lists/vustage.txt`, and on those of `lists/vu_opening.txt` (the
+  Pixel's opening: lamps, dark, sun; [TESTING_FIXTURES.md](TESTING_FIXTURES.md)). No device: SKIP.
+- `rd_lamps_lowres_ab.cmake` (`rd_lamps_lowres_ab`; `rd_lamps.cmake`): the lamps' glow at the GS
+  frame's size above 1x (`RD_LAMPS_LOWRES`, DIVERGENCES.md VD-32) on the fixtures of
+  `test/fixtures/lists/lamps_lowres.txt` ([TESTING_FIXTURES.md](TESTING_FIXTURES.md): two frames
+  with the sun's fans and a lamps room replayed with the cull off; thirty settings a fixture, so the
+  list is short and the test is in no merge check),
+  `ICO_RD_LAMPS=pad+owed+wholepad` against `...+lowres`, `--pass-dump --stats`,
+  `ICO_RD_VU_PREPASS=0`, `ICO_VK_FAKE_LIMITS=moltenvk`, at the phone's Resolution Auto
+  (2364x1080, Full height and pixel; again with `lowresbox`, `lowresbias`, `lowreshy`, `lowres4` and `lowresp`,
+  printed only) Enhanced 2x, 2.5x (1440x1280), 3x and 4x at 4:3 and the Full height on a 16:9 window (1920x1080), and each fixture once at Original 1x: the stats line
+  `lamps lowres on|off`, no draw into WORK2 without a depth, a depth fill where a draw took
+  WORK2's own, one such draw at least over the list at each setting, SHADOW0..2 and WORK2_PAD the
+  same bytes; WORK3 (the glow the paste adds, one size at every scale) against Original 1x's
+  (`lowres original: <setting> <fixture> WORK3 ...`): with lowres's default form no farther than
+  today's in its largest level difference and texels apart (margin 2 levels, 16 texels and 5 %),
+  FAILING otherwise at the phone's, 2x, 3x and 4x; DISPLAY and PRESENT against today printed per
+  fixture (`lowres measure: ...`, `lowres maxima: ...`), no bound; at Enhanced 1x every PNG the
+  same bytes and no draw on WORK2's own depth; at the phone's setting `...+lowres` against
+  `...+lowres2x` (WORK2 at twice the GS size) at each of those settings against today's: WORK3
+  at most 32 levels from today's (`lowres2x today: ...`), and at the phone's setting and 2x its
+  WORK3's change under half a SCENE texel's shift (`--jitter 0.5,0.5`) at most twice today's plus 4
+  levels (`lowres2x shimmer: ...`; at most 48 levels from today's and twice today's shimmer plus
+  4), FAILING otherwise; `...+lowresms` (and `...+lowresms8` at the phone's
+  setting and 2x) the same at the same settings
+  on lavapipe's own desktop class (no fake), its stats `lowresms on` with a pass of 4 samples at
+  least, and at Enhanced 1x and under `ICO_RD_LAMPS_POISON=1` every PNG the same bytes; the WORK3-against-Original lines printed for
+  information only; at the phone's setting `...+lowres` against
+  `...+lowres+fillhold` every PNG the same bytes with as many crack fills held at least (one
+  more over the list), and `...+lowres` against it under `ICO_RD_LAMPS_POISON=1` every
+  PNG the same bytes. The path ran: at every measured setting the lowres arm shows each fixture's
+  declared `lamps_own_depth_draws` (on the fixture or its list line); a fixture no setting checked
+  fails. No device: SKIP.
+- `rd_crack_work_ab.cmake` (`rd_crack_work_ab`, `rd_crack_work_gl`; `rd_crack_work.cmake`): the
+  crack fill's snapshot by the swap and its early leave (`rd_crack_fill.c` FILLSWAP, CRACKTAP). The
+  fixtures of `port/render/test/fixtures/lists/crack_work.txt` ([TESTING_FIXTURES.md](TESTING_FIXTURES.md);
+  a listed fixture that is absent FAILS; after each name `swapN` and `tapN`, re-derived from a run of
+  the fixture)
+  with `ICO_RD_CRACK_SWAP` and `ICO_RD_CRACK_TAP2` both `0` and both `1`, `--pass-dump --stats`,
+  `ICO_RD_VU_PREPASS=0`, at the PowerVR phone's Resolution Auto (`ICO_VK_FAKE_LIMITS=moltenvk` and `ICO_RD_LATE_PASS=1`, the
+  phone's default: the fake leaves `RhiLimits.tiler` false on lavapipe) and
+  on lavapipe's own profile at 1344x1008, 3x and 4x (4:3; scales 2.1 to 4, the fill in a pass of its
+  own); the `_gl` twin the phone's setting on OpenGL. Each pair: every PNG byte for byte, the same
+  draws, passes, fill passes and pixels filled, the off run swapping and leaving early nothing, the
+  swap's self-test passed in both runs where the fill drew, the colour MB copied and loaded each
+  fewer by the swapped snapshots' MB (within 0.02), the rest the same; each fixture's swaps
+  (`swapN`: 0 where the fill is held or its snapshot is an MSAA epoch's) and early-leave draws
+  (`tapN`) at the phone's setting; at least one of each over the list. The path ran: on the on run
+  of every pair the fixture's declared `crack_pixels` (the cracks are where the generated geometry
+  leaves gaps, so each fixture declares the fill drawn at the settings it runs at), a swap or an
+  early leave on every fixture over its settings, a fixture the phone's setting (OpenGL: its one
+  setting) did not replay failing. No device: SKIP.
+- `rd_crack_fill11`, `rd_crack_fill11_later`, `rd_crack_fill11_tiler`, `rd_crack_fill11_area`
+  (`rd_crack_test 2 fill11`, `2 fill11z`, `2 fill11` under `ICO_VK_FAKE_LIMITS=moltenvk
+  ICO_RD_PASS_AREA=0`, `2 fill11 area` under `ICO_VK_FAKE_LIMITS=moltenvk`; `rd_fill11.cmake`): the
+  crack fill in list 11's pass (`rd_fill11.c`; the self-test's ctest twin). The fill's depth twins'
+  start-up self-test is run (`rd__crack_swap_selftest` runs it) and must pass (its state line
+  matched), then with the switch forced on (`rd__fill11_force(1)`) the frame draws the glow's
+  `cleanUpFB`, a sprite into WORK0 (the fill's place, its snapshot there) and list 11's two blended
+  sprites into SCENE under Z ALWAYS without a Z write (`fill11z`: a third with a Z write). Against the
+  switch off: SCENE's colour and depth byte for byte, the off run with one fill pass and nothing held;
+  `fill11` (lavapipe's desktop profile, and the tile class's fakes without the pass area): one fill
+  drawn in list 11's pass (`RdFill11Counts.landed`), no fill pass of its own, one render pass fewer,
+  the once line `drawn as the first draw of list 11's pass` matched; `fill11z` and `fill11 area`
+  (the pass area on: list 11's pass would hold its sprites' tiles alone): the held fill drawn in a pass
+  of its own at list 11's first draw (`RD_FILL11_WHY_LATER`, `RD_FILL11_WHY_AREA`), the same passes,
+  the once line absent. Every `rd_crack_test` check of the filler holds too (the cracks filled, the
+  count, the swap's `checkWork`).
+- `rd_pass_objects_ab.cmake` (`rd_pass_objects_ab`; `rd_pass_objects.cmake`): the fixtures of
+  `test/fixtures/lists/pass_objects.txt` ([TESTING_FIXTURES.md](TESTING_FIXTURES.md): issue 163's
+  lamps room, the Pixel's opening, issue 179's two Mali-G52 frames; an absent one FAILS) replayed
+  with `--pass-dump --stats` twice: dynamic rendering (`ICO_VK_LEGACY_PASSES=0`) and lavapipe
+  put on Qualcomm's driver row (`ICO_VK_FAKE_PASS_ROW=qualcomm`: every pass a `VkRenderPass` object),
+  at the 123 tablet's setting (Enhanced 3x, Full height, Full pixel, 3048x2032; `ICO_VK_FAKE_VENDOR=
+  0x5143`, `ICO_RD_VU_PREPASS=0`) and the 179 phone's (1x at 21:9, 2400x1080; the Arm fakes): every
+  PNG byte for byte, the same draws and passes, each run's device line naming its path (`render
+  passes dynamic`, `render passes legacy (Qualcomm's own driver`); a dump drawn narrower than a
+  setting's aspect is skipped there; at least one target compared. No device: SKIP.
+- `rd_fill11_ab.cmake` (`rd_fill11_ab`, `rd_fill11_gl`; `rd_fill11.cmake`): the fixtures of
+  `port/render/test/fixtures/lists/fill11.txt` ([TESTING_FIXTURES.md](TESTING_FIXTURES.md); a listed
+  fixture that is absent or listed twice FAILS; a line gives `phoneN`, `deskN` and `glN`, re-derived
+  from a run of the fixture and required at each setting the fixture runs at, and may give
+  `nop SPEC`, the tool's `--nop` for both runs)
+  passes dynamic`, `render passes legacy (Qualcomm's own driver`); a fixture drawn narrower than a
+  setting's aspect is skipped there; at least one target compared; the stats line `render passes:
+  N begun, M as VkRenderPass objects` with M 0 on dynamic rendering and M = N on the row (a pass is
+  counted begun only once `vkr_pass_begin` succeeded, and every begin on the legacy path is one
+  object, `vk_renderpass.c`). The path ran: the row's run shows the `pass_objects` its list line
+  declares; a fixture no setting checked fails.
+  No device: SKIP.
+- `rd_fill11_ab.cmake` (`rd_fill11_ab`, `rd_fill11_gl`; `rd_fill11.cmake`): the dumps of
+  `tools/fill11_dumps.txt` (machine-local; a listed dump that is absent FAILS, a glob that matches none
+  too; a line may give `phoneN`, `deskN`, `glN` and `nop SPEC`, the tool's `--nop` for both runs)
+  with `ICO_RD_FILL11=0` against the switch on, `--pass-dump --stats`, `ICO_RD_VU_PREPASS=0`: at the
+  PowerVR phone's Resolution Auto (2364x1080, Full height and pixel) under `ICO_VK_FAKE_LIMITS=moltenvk
+  ICO_RD_LATE_PASS=1`, at Enhanced 2x 4:3 on lavapipe's own profile (both on runs with
+  `ICO_RD_FILL11=1`: off by default in this release), and at the phone's setting on a Mali-G68's
+  limits and an Arm phone's vendor (`ICO_VK_FAKE_LIMITS=mali ICO_VK_FAKE_VENDOR=0x13B5`: the on run
+  sets nothing and must draw no fill in list 11's pass, its self-test not run); the `_gl` twin
+  Enhanced 2x 4:3 on OpenGL (llvmpipe, `ICO_RD_FILL11=1`). Each pair: every PNG byte for byte, the same draws, the passes and the crack fill's own
+  passes each fewer by the fills drawn in list 11's pass exactly, the colour MB loaded and stored each
+  fewer by the MB the stats name for them (within 0.02), the depth and stencil MB not more, the copies
+  the same, the off run drawing and holding nothing, the self-test passed in every run that ran it;
+  each fixture's counts at each setting; at least one fill drawn in list 11's pass over the list
+  (desk or gl). The path ran: on the on run of every pair the fixture's declared `crack_pixels`, and
+  on every fixture at least one on run where the switch decided its fill (drawn in list 11's pass,
+  in a pass of its own after all, or kept in its own pass: `rd_fill11.c` counts each); a fixture no
+  setting replayed fails. No device: SKIP.
+- `rd_date_cut_ab.cmake` (`rd_date_cut_ab`, `rd_date_cut_ab_gl`): the fixtures of
+  `port/render/test/fixtures/lists/date_cut.txt` ([TESTING_FIXTURES.md](TESTING_FIXTURES.md); each
+  line a fixture and the passes the cut takes on it, re-derived from a run of the fixture; a listed
+  fixture that is absent FAILS) with `ICO_RD_DATE_CUT=0` and `1`, `--pass-dump --stats`, under `ICO_RD_BLEND=fixed`,
+  `ICO_RD_STORE_PLAN=1`, `ICO_RD_STORE_POISON=1`, `ICO_RD_DATE_PATH=snapshot`,
+  `ICO_RD_VU_PREPASS=0`, `ICO_RD_DATE_ONE=0` (with one DATE set-up for the composites the cut has
+  no run on them; `rd_date_one_ab` checks the two together), at the Mali-G52's setting (1x, 21:9, 1612x720; `ICO_VK_FAKE_LIMITS=mali`,
+  `ICO_VK_FAKE_NO_DST=1`), the Adreno 740's (3x, 3:2, Full height and pixel, 3048x2032;
+  `ICO_VK_FAKE_ADRENO=1`, `ICO_VK_FAKE_NO_DST=1`) and the PowerVR phone's Resolution Auto without
+  its in-pass read (`ICO_VK_FAKE_NO_DST=1`: a fractional scale, 0 passes cut expected); the `_gl`
+  twin the Mali's setting on OpenGL (llvmpipe).
+  Each pair: every PNG byte for byte, the same draws, passes, snapshots, colour and copy MB; the
+  off run cuts nothing, the on run begins no pass again, cuts the passes the list names (2 for the
+  composites), and its depth and stencil MB loaded and
+  stored each fall by 0.8 to 1.0 of the "at most" its stats line names; Vulkan also `--keys` at the
+  Mali's present size without an aspect: the cut adds no key the start-up set lacks. The path ran:
+  on the on run of every pair the fixture's declared `date_snapshots`, and `date_cut_passes` where
+  the cut acts (not at the phone's setting); a fixture no setting could show fails. No device: SKIP.
+- `rd_date_one_test.c` (`rd_date_one`, lavapipe, 77 without a device after its CPU cases): one
+  DATE set-up for the shadow composites (`rd_date_one.c`, `rd_date_one.h`) and the empty
+  composites (`rd_shadow_box.c` `rd__shadow_box_empty_skip`). CPU: the bound and the group rule on
+  the retail stage data (shadowDepth 72 with blends 40/80/120, 80 with 90/100/128: two shared), the
+  debug menu's 128 x 128 (0x80 at every composite: two refused; 128 with shadowBlend[1] alone: the
+  SHADOW0 composite is the last, two shared), the bound rounded up, DATM 1, FBA 1, COLCLAMP 0's
+  wrap and a draw in no composite form (none kept), no alpha written (kept), force; a draw or a
+  composite without DATE between, another target; the 10 s clause and the `--stats` words. On the
+  device (`ICO_RD_DATE_PATH=snapshot`, `ICO_RD_BLEND=fixed`, `ICO_RD_STORE_POISON=1`, 1x, 512x448)
+  frames in the shadow's shape built by hand (list 0 SCENE's depth and the alpha's top bit over its
+  left half; list 3 a reset, a rectangle's volume, the resolve, SHADOW0 from the count, three
+  composites of SHADOW0 under 0x3400D; list 4 a Z GEQUAL sprite over the bottom eighth, clear of
+  the composites' pixels): d1 (shadowDepth 72, blends 40/80/120)
+  off against on (`rd__date_one_force`): SCENE byte for byte, snapshots 3 (1 first, 2 written) against
+  1 with 2 shared and 2 reused, 4 render passes and 4 draws fewer (2 R8 draws; the three composites,
+  here all reading SHADOW0, one screen run once no snapshot ends their pass: 2 screen draws fewer),
+  the DATE cut's passes 2 against 0,
+  none begun again, the shared texels 2 x SCENE's; d2 (128 x 128): on refuses both (3 snapshots, 2
+  refused, SCENE byte for byte), forced past the bound 2 shared, 1 snapshot and SCENE different (the
+  test sees a wrong share); d3 (no volume, one DATE set-up off) the empty composites off against on
+  (`rd__shadow_box_empty_force`): SCENE byte for byte, 3 skipped with DATE, snapshots 3 against 0,
+  5 passes and 3 draws fewer; no validation error.
+- `rd_shadow_cuts_ab.cmake` (`rd_date_one_ab`, `rd_empty_skip_ab`, `rd_no_volume_break_ab` and their
+  `_gl` twins, `-DITEM=dateone|emptyskip|novolbreak`): the fixtures of `lists/shadow_cuts.txt`
+  ([TESTING_FIXTURES.md](TESTING_FIXTURES.md): `fx-shadow-wide`, `fx-opening-dark`,
+  `fx-opening-sun`, `fx-mali-frame` and `fx-mali-slow541`, each "volume", and `fx-lamps-novolume`,
+  "novolume", with the Mali setting's passes fewer under the empty composites, 6; a listed
+  fixture that is absent FAILS), each item
+  off against on with the other two items and the no-volume window's open mode off in both runs,
+  `--pass-dump --stats` under `ICO_RD_STORE_PLAN=1`, `ICO_RD_VU_PREPASS=0`. Settings: dateone the
+  Mali-G52's (`ICO_VK_FAKE_LIMITS=mali ICO_VK_FAKE_NO_DST=1 ICO_VK_FAKE_NO_DUAL=1`, 1x), the Adreno
+  740's (3x, Full height and pixel), the PowerVR phone's Resolution Auto without its in-pass read
+  (fractional) each by the snapshot (`ICO_RD_DATE_PATH=snapshot ICO_RD_BLEND=fixed
+  ICO_RD_STORE_POISON=1`), and the phone's stencil path (`ICO_VK_FAKE_LIMITS=moltenvk
+  ICO_RD_LATE_PASS=1`); emptyskip the Mali's and the phone's; novolbreak the phone's, lavapipe 1x with
+  `ICO_RD_DATE_PATH=stencil`, the phone's with `ICO_RD_NO_VOLUME_POISON=1` (every PNG but SHADOW0-2
+  compared), the phone's with `--repeat 2` (the second replay's targets holding the first's zeros)
+  and the Mali's (not taken); the `_gl` twins at 1x on OpenGL. Every pair: every PNG byte for byte;
+  from the code: dateone: off shares nothing, on keeps none to its own, begins no pass again; by
+  the snapshot S shared means S snapshots and S draws fewer, 2 S passes fewer, the colour loaded and
+  stored each S x 5 bytes a texel of the shared targets fewer, the depth and stencil the same at the
+  integer scales and 4 to 5 bytes a texel fewer at the fractional one; by the stencil bit S set-ups
+  and 2 S draws fewer, the same passes and traffic; "volume" and "novolume" fixtures share 2;
+  `--keys` at the Mali's: no key more missing; emptyskip: K skipped, D with DATE: by the snapshot D
+  snapshots and draws fewer and D to 2 D passes fewer (`fx-lamps-novolume` at the Mali's: 6), by the stencil bit D
+  set-ups and 2 D draws fewer, the passes the same or one fewer (a "novolume" fixture the same, and
+  its traffic); "novolume" fixtures skip 3, "volume" none; novolbreak: the listed windows taken at
+  the stencil settings, none by the snapshot; a taken window: the passes off's less 4 a window plus
+  the zero clears it recorded, less the passes of the levels' chain at the scene's scale that off
+  draws above 1x and on does not (the stats' "shadow levels: ... P passes"), at lavapipe 1x one fewer again (its fog reads the depth outside the pass:
+  list 3's SCENE pass of the skipped composites is begun by nothing), the set-ups 3 fewer a
+  "novolume" window, at `--repeat 2` no clear and
+  the targets holding zero counted, none counted in a first replay; nothing taken: the same passes
+  and traffic. The path ran (`rd_fixture_require`, the fixtures' declared properties): on the on
+  run `date_one_shared`, `empty_composites_skipped` or (at the stencil settings)
+  `no_volume_break_taken`, each with `shadow_volume_draws`; on the off run `date_snapshots` at the
+  snapshot settings and `date_stencil_draws` at the stencil ones where the fixture declares them;
+  a fixture no setting checked FAILS. Each item does something over the fixtures. No device: SKIP.
+- `rd_shadow_tile_test.c` (`rd_shadow_tile` with `frames`, `rd_shadow_tile_selftest` with
+  `startup` and `ICO_RD_SHADOW_TILE=1`; both `ICO_RD_DATE_PATH=stencil`, lavapipe; 77 without a
+  device, DATE's stencil bit or the one-draw count, after the CPU words): the shadow tiles
+  (`rd_shadow_tile.c`): the 10 s clause and the `--stats` words from a made-up record; at a 640x448
+  Enhanced scale-2 Full pixel 16:9 scene, `frames` replays the self-test's frames (a shadow in a
+  corner, shadows at the frame's edges, no shadow), each with the B-spline composites off and on:
+  SCENE byte for byte with the tiles off and on (a later DATE DATM 1 sprite included), the corner's
+  and the edges' composite over a mask with dead tiles; `startup` runs `rd_fog_selftest`, whose
+  first run takes the tiles' self-test, and checks it passed; no validation error.
+- `rd_shadow_tile_ab.cmake` (`rd_shadow_tile_ab`): the fixtures of
+  `test/fixtures/lists/shadow_tile.txt` ([TESTING_FIXTURES.md](TESTING_FIXTURES.md): a character's
+  shadow at 21:9, the bridge capture, the main gate at 32:9, the PowerVR phone's F12 frame; an
+  absent one FAILS) with `ICO_RD_SHADOW_TILE=0` and `1`, `--pass-dump --stats`,
+  under `ICO_RD_STORE_PLAN=1`, `ICO_RD_VU_PREPASS=0`, at the PowerVR phone's profile
+  (`ICO_VK_FAKE_LIMITS=moltenvk`), the Mali-G52's (`ICO_VK_FAKE_LIMITS=mali`, `ICO_VK_FAKE_NO_DST=1`:
+  nothing tiled) and the B-spline composites at Enhanced 2x, 3x and 4x (`ICO_RD_SHADOW_BSPLINE=1`,
+  `ICO_RD_DATE_PATH=stencil`). Each pair: every PNG byte for byte, `=0` off with nothing, the
+  passes more by at most the masks; at the phone setting each fixture draws its list's 3 composites
+  over the mask with its mask texels live under the list's bounds (from the fixture's own alpha
+  boxes; the list says how). The path ran: the `=1` run at the phone setting shows each fixture's
+  declared `shadow_volume_draws` and `shadow_tile_composites`; a fixture that setting could not
+  show fails. No OpenGL twin: the path needs DATE's stencil bit. No device: SKIP.
+- `rd_shadow_box_test.c` (`rd_shadow_box`, CPU): the shadows over the volumes' box
+  (`rd_shadow_box.c`): the count's box from 12.4 vertices (margins, a clamped vertex, clipping);
+  one axis through a sprite (the Pixel frame's level 0 across and down, its rows past the count's
+  448 under a clamp, a repeated edge taken whole, a repeated axis inside, a box no UV reaches, a
+  constant UV, a flipped sprite); a level's whole cover and one pixel short; a composite's box from
+  SHADOW2 over the 848x448 frame, an empty source, the UV offset; union and clip; the 10 s clause
+  and the `--stats` words from a made-up record.
+- `rd_shadow_box_ab.cmake` (`rd_shadow_box_ab`, `rd_shadow_box_ab_gl`): the fixtures of
+  `port/render/test/fixtures/lists/shadow_box.txt` (committed frames,
+  [TESTING_FIXTURES.md](TESTING_FIXTURES.md); a listed fixture that is absent or does not expand
+  to its pin FAILS: `fx-shadow-wide`, the Pixel's stage 4 frame with a character's shadow at 21:9,
+  and `fx-lamps-novolume`, the opening's lamps frame, a shadow window with no volume) with
+  `ICO_RD_SHADOW_BOX=0` and `1`, `--pass-dump --stats`, under `ICO_RD_STORE_PLAN=1`,
+  `ICO_RD_VU_PREPASS=0`, `ICO_RD_EMPTY_SKIP=0` (with the box on an empty composite would be
+  skipped, which the box off cannot; `rd_empty_skip_ab` checks the skip), at the PowerVR phone's
+  profile (`ICO_VK_FAKE_LIMITS=moltenvk`, Enhanced 2364x1080, Full height and pixel), the
+  Mali-G52's (`ICO_VK_FAKE_LIMITS=mali`, `ICO_VK_FAKE_NO_DST=1`), the B-spline composites at
+  Enhanced 2x (`ICO_RD_SHADOW_BSPLINE=1`) and MSAA 4x at Enhanced 2x; the `_gl` twin at 1x on
+  OpenGL (llvmpipe). Each pair: every PNG byte for byte, the same draws and passes (a fixture that
+  declares no volume: the empty box only takes work away: never more draws or passes, fewer draws
+  where it boxed the count, every boxed composite with nothing to draw, no texel boxed), `=0` off with
+  nothing boxed, `=1` on; the path ran: on the `=1` replay at the phone setting (`_gl`: its one
+  setting) each fixture's declared `shadow_volume_draws`, `shadow_box_counts` and
+  `shadow_box_composites` hold (`fx-shadow-wide` at least one volume draw, count and composite
+  boxed; `fx-lamps-novolume` no volume draw), every fixture is checked once, and the phone setting
+  boxes at least one count and one composite over the fixtures. No device: SKIP.
+- `rd_fixture_test.c` (`rd_fixture_format`, CPU; `rd_fixture.cmake`): the fixture format on a
+  version 17 frame built in memory with pseudo-random art (a CPU-projected triangle, a sprite, an
+  alpha-tested and an additive texture with a GS level, a prelit mesh with card verdicts and a
+  facing table, a shadow volume, a text item): made, checked (no art), expanded twice to the same
+  bytes and the pinned SHA-256; the head, lists (the mesh draw's size without its cards), sprite,
+  VU block and materials kept byte for byte; the alpha ramp and the bright patch with its level at
+  8x8, the mesh lattice at 2^-2 with its strip flags from the index list, the colour, `m0001`, the
+  volume's front faces at the farthest Z and back faces at 0 with their tags, the text `xxxxx`, the
+  cards and the facing bits zero; the window check clean (and full on the source against itself);
+  art in a generated range and a changed pin refused; the file round trip with its notes; SHA-256 on
+  FIPS 180-2's three vectors; exact float bits. `rd_fixtures_check` (`rd_fixture_tool check-dir`,
+  CPU): every committed fixture holds no art, declares a property, expands to its pin, and
+  `fixtures.txt` names exactly them with the same properties. `rd_fixtures_selfcheck`
+  (`selfcheck-dir`): the window check against each source in `ICO_FIXTURE_SOURCES`; unset: SKIP.
+- `rd_shadow_fine_test.c` (`rd_shadow_fine`, CPU): the shadow's levels at the scene's scale above
+  1x (`rd_shadowres.c`): the count's scale (`tw / w`, or `sx` under Full pixel's crop), the levels'
+  odd whole scale (3 at 2x, 2.41x and 3x, 5 at 4x and 4.82x, 1 at or under 1x), the step's box
+  weights summing to 1, the tent (1 2 3 2 1 at 3, the identity at 1, S^2 at whole S), the step and
+  the tent at scale 1 being the GS's sprite and the identity (at any whole or sub-texel offset of
+  the sprite's map, CLAMP and REPEAT); a straight edge swept across one
+  SHADOW2 texel in 24 phases at 2x, 2.41x, 2.8125x, 3x and 4x across with the rows at 1x (the
+  non-uniform case), the three composites' darkening of the PS2-size chain against the fine one:
+  the fine 10-90 width within 8 % of the PS2 chain's phase mean, its spread under 1 SCENE texel,
+  its middle's wander under 1.5 texels and under half the PS2 chain's, its darkness within 1 %
+  (a float model of the same arithmetic: 3 to 6 % under, 0.36 to 0.68, 0.43 to 0.98 against 2.6
+  to 5.5, under 0.2 %); the recogniser over the 22 distinct real level sprites of the dumps
+  (`test/rd_shadow_fine_vectors.h`); the cuts: the one-pass tent against the two passes at every
+  texel (scales 1, 3, 5 each axis), the step's empty-area mask never skipping a nonzero texel (a
+  sparse count at 2.8125 x 2.41 with a Full pixel crop), every nonzero texel of a full chain from a
+  boxed count inside the step's and the tent's boxes (clamp and repeat, boxes at the corners), the
+  render area over 200 pictures of moving boxes (0 outside each box, the draw's bytes inside, the
+  area cleared alone or the whole); the
+  10 s clause and the `--stats` words; the full-size count's forms (`rd_shadow_count.c`):
+  the trial's order, the median, the choice by table (the margin: a marginal or noisy win keeps
+  the stencil step), the check's texel comparison, list 3's time from a timed replay's pieces (an
+  unstamped piece no sample), the `--stats` words.
+- `rd_shadow_count_check.cmake` (`rd_shadow_count_check`, `rd_shadow_count_check_sabotage`):
+  `fx-adreno` at the tablet's 3x path, four presented replays: the check drawn by the first and
+  compared at the third, the line `the first level from the stencil equal to the full-size pass's
+  at all N texels` (N > 0); with `ICO_RD_SHADOW_COUNT_SABOTAGE=1` `differs ... at N of M texels`
+  (N > 0) and `the full-size pass for this run`. No device: SKIP. The pure half (`rd_shadowres_math.c`)
+  links alone.
+- `rd_shadow_fine_ab.cmake` (`rd_shadow_fine_ab`, `rd_shadow_fine_ab_gl`): the fixtures of
+  `port/render/test/fixtures/lists/shadow_fine.txt` ([TESTING_FIXTURES.md](TESTING_FIXTURES.md); a
+  listed fixture that is absent FAILS: issue 123's three main gate frames, the owner's three and
+  three more of his from a later build), the default against `ICO_RD_SHADOW_FINE=0`, at the
+  settings each fixture's line names (the tablet's 3x path, Enhanced and Original at 1x, the phone's
+  4.10 x 2.41, MSAA 4x at 2x, the B-spline at 2x, the owner's Resolution window 2.8125 x 2.41071, 1 x 2,
+  the owner's Pixel as its own settings run it (2364x1080 over the 848-wide frame, Full height, Full pixel,
+  anisotropic: 2.79 x 2.41) on his two main gate captures, the forced chain at 1x; the `_gl` twin 1x
+  and 2x on OpenGL): `=0` every PNG the goldens'
+  (`port/render/test/fixtures/lists/shadow_fine_goldens.txt`: the release before's pictures of the
+  fixtures, every golden of the list matched); at 1x the default the same bytes, passes and draws;
+  above the release's cap of 3 (the phone's 4.10 x 2.41) the default the PS2's sizes: every PNG
+  the same bytes, the same passes and draws, one shadow drawn at the PS2's size for `scale`, the
+  cap's line; above 1x up to the cap
+  one shadow at the scene's scale and none at the PS2's size on every fixture (any reason in the stats
+  line fails; the path ran: the fixture's declared `shadow_levels` and `shadow_level_texels` on the
+  default run, and on the forced run at 1x), its 9 or 10 passes and 9 draws and nothing else, the
+  levels' scale the setting's, the change confined (with lists 4-12 left out) to within reach of
+  the texels the PS2's levels darken (`test/shadow_fine_check.py`; the darkness ratio it prints is
+  not judged: the PS2-size chain's darkness on a shadow a few texels thin swings with where its 2:1
+  grid falls, 0.73 to 1.36 of its mean for a bar 2 GS rows tall, and the composites darken only the
+  texels DATE lets them), the levels themselves the CPU reference's on the same count
+  (`rd_replay_tool --fine-check`, `tools/rd_replay_fine.c`: every tent texel the reference's bytes,
+  every step texel the reference's byte or the one beside it where the value lies within the float
+  bound of a rounding boundary), the
+  B-spline doing nothing to it, the cuts against `ICO_RD_SHADOW_FINE_CUTS=0` every PNG the same
+  bytes (6 passes against 9), three replays in a row with and without the cuts the same presented
+  bytes; the forced chain at 1x within a level of the default on SCENE
+  (`test/png_level_diff.py`); the full-size count's three forms (check 9: where the count
+  is the one draw above 1x, `ICO_RD_SHADOW_COUNT_FORM` `full`, `stencil`, `seven` and the default,
+  every PNG the full-size pass's bytes, each form RAN by `--stats`' `shadow count above 1x:` line,
+  the default (a `--pass-dump` replay: no check) the full-size pass, the passes and draws from the
+  code; the guard's run
+  `ICO_RD_SHADOW_COUNT_TOUCH=1` drawing the pass after all with the same bytes; `fx-123-blended`
+  at the tablet's path for the forms alone, `forms`). No device: SKIP.
+- `rd_even_test.c` (`rd_even`, CPU): the pictures' evenness line (`rd_even.c`): ten made-up
+  presents with GPU ends at the middles of their quarter-ms bins (1, 2, 3, 5 and under half a
+  refresh of 8 ms apart, one end a bound, one present with none, a frame number that went back),
+  their content steps (one back), four handed over (the sample to the GPU's end 10, 18, 20 and 28
+  ms, the hand-over to it 9, 16, 19 and 27, drains of 1, 2, 1 and 1 ms) and five present-clock notes (clamps below 0 and above 0.999,
+  resets forward and back): the sums and the line word for word; a short buffer cut and
+  terminated; taken twice: no line; one more present with the refresh unknown, word for word; the
+  hand-over's stamps taken once; the steps over gaps not on the grid (2: mean 0.375, deviation
+  0.125) and two re-base notes (the shift, the hold, both spreads) in the line; five content notes (a step
+  equal to its gap, two repeats in a row, a step over twice its gap: 4 pairs, 2 repeats in 1 run,
+  ratios 0 to 2.125, 3 outside 0.5 to 2). Linked with `rd_pace_gpu.c` for the line's last clause
+  (left out with no picture as made).
+- `rd_pace_gpu_test.c` (`rd_pace_gpu`, CPU): each in-between picture drawn for its GPU work's
+  predicted end (`rd_pace_gpu.c`, `rd_pace_gpu_live.c`, `rd_pace_gpu.h`, with `rd_rebase.c`): the
+  share and the median; the model's edges, each figure from the code: before its windows are full
+  (0), an empty queue (q 0 and the shift 0 to the bit at every picture), one a tick with a full
+  queue (0), two a tick with the second queued (q 3, shift 3), the mean's sixteenth, the bound from
+  the latencies 24 to 33 (4.5), the ratio hold above (to twice the gap) and below (to half of it)
+  after exact ends re-anchor the chain, a bound end, the prediction's error, the four restarts and
+  a frame 8 on kept; 10 s simulations at 120 Hz (a frame every 33.37 ms; the window asks when the
+  render thread is free, a further picture held when its reads would end past the next closing
+  step; the GPU's start the later of the first submit and the end before; each end stamped where
+  the render thread's slot wait for it blocked, collected at that wait) of the cage at two a tick,
+  the brief's cage pattern (0.15-0.35 and max(0.506, that + 0.29-0.45) of a tick, the GPU 14.8-15.6
+  ms), stages 3 and 5 at two to three a tick, three a tick, a GPU-bound one to two, one a tick and
+  an idle GPU, the moments through `rd_rebase_raw` with and without the model: the same pictures
+  and hand-overs, never back, no repeat, the mean shift within 16 times q's range over the
+  pictures plus the held ones, every step's, the 2-refresh class's and the GPU's ends' deviation
+  under half of today's (the cage .210 to .040, the brief's .149 to .068, stages 3 and 5 .101 to
+  .039, three .119 to .048, one to two .170 to .066), one a tick and an idle GPU today's moments
+  to the bit; the owner's cage log's runs (lines 3846-3851, 4109-4113 and 4275-4280 of its first candidate's log) (frame, alpha and GPU ms) after
+  a warm cage: today's steps the log's alphas', the uneven two under half of today's distance from
+  the GPU's ends, every step within the two shifts' bounds; the queue capped at one picture's G
+  over unmeasured pictures; the renderer's side: paced (not applicable), 600 measurements without
+  a clock (not applicable, the clause word for word), the ring's measurements, the row off by
+  default (on under `ICO_RD_PACE_GPU=1`) with the shift drawn 0 and the model's computed, the
+  clause word for word with an exact end's error of -2 ms and one shift at the bound, the block
+  line's counts, a full ring's drop, the start line word for word and cut; the shipped defaults
+  off Android (the screen's rule and the own timer not drawn), the rules picked as `presentRebase`
+  does over 600 cage pictures, once with no display times and once with them faked on (a 120 Hz
+  grid, the latch 2.5 ms after the predicted end, the times back three pictures late: the screen's
+  rule fits and places, its row off by default with `not Android`): the hand-over rule's value to
+  the bit both times (skipped under a tests' switch or on an Android build).
+- `rd_as_made_timer_test.c` (`rd_as_made_timer`, CPU): the own timer (`rd_as_made_timer.c`): its
+  edges (the first picture on the target, a steady interval exactly, the quarter pull, a held
+  slot taken whole, an error over half a tick, the minimum step, the restarts, the decision
+  `rd_as_made_timer_decide` (on by default on Android, the hand-over rule elsewhere, the define 0,
+  the tests' switch both ways, each with its words) and the switch against it); 10 s
+  simulations with a 120 Hz mailbox display of the cage, the brief's cage pattern, stages 3 and 5,
+  three a tick, the GPU-bound opening, one a tick, two to three a tick and back, a 200 ms stall,
+  the three rules over the same pictures (every step, clamps, largest step, speed against the
+  hand-overs, the GPU's ends and the display): the timer never back, no repeat, no clamp, held in
+  its frame's tick at most 20 times in 10 s, within half a tick of the hand-over rule, evener than
+  the hand-over wherever two or more a tick; the owner's cage log's three runs.
+- `rd_glass_test.c` (`rd_glass`, CPU): the on-glass line (`rd_glass.c`): a pair per rule against the
+  display's gap, its class, the hand-overs and the GPU's ends, the shares; not steps; the join of
+  pictures and display times by id in either order with a present never shown; the line word for
+  word; the screen's rule's measure, its score (on it, late, early, further), its ring, the display's own figures; a tick that moves between two pictures (33.3667 then 33.4667 ms at frame 6000): the step in the newer picture's tick, 1.00 where each frame number times its own tick would read 19.9 (issue 123's deviations of 84 to 1040), a's tick or the default where b's is not known.
+- `rd_pace_screen_test.c` (`rd_pace_screen`, CPU): the screen's predicted refresh (`rd_pace_screen.c`): the expected time on the glass, the latch's and the grid's fits, the score; the placement's edges and fall-backs (the value drawn otherwise to the bit); 10 s simulations of the owner's phone's regimes with a display model (grid, latch lead, mailbox, late times): the four rules' speed on the glass, the holds, never back, the content's rate over the glass; the log's later regimes (kept frames in runs, the cage's slow tail, a latch or GPU time that moves) with each refinement on in turn; the even cadence (`rd_pace_even.c`): N, its band, the hold, a late hand-over, the bias, and its simulations (shown a second, deviation, N's changes); the start lines (the screen's on and off, the even
+  cadence's short off line and its full on line), the clauses, the ledger's rows (the screen's on by
+  default on Android); `rd_pace_screen_decide` (on by default on Android only, the define 0, the
+  tests' switch both ways, each with its words) and the switch against it; the even cadence off: no
+  hold, no aim, no desired time, no clause, its row never on.
+- `rd_cpu_phase_test.c` (`rd_cpu_phase`, CPU): the render thread's CPU phases (`rd_cpu_phase.c`):
+  two pictures of one frame folded (2 pictures, 1 tick, 1 hashed, 6 clock reads, the look-ups
+  folded once and `g_rdCpu` emptied), taken twice (empty), no line without a picture, and the
+  line's words from a made-up window, character by character.
+- `rd_hash_test.c` (`rd_hash`, CPU): the per-draw lookups' hash (`rd_hash.c` `rd__hash_words`,
+  the uniform blocks' cache and the pipeline index): seven values on a little-endian host worked
+  from its steps (no bytes under two seeds, 3, 8, 15 with a seed, a DrawCB's 144 under two seeds;
+  a big-endian host skips them), the same 144 bytes at every alignment 0..7 the same value, the
+  bytes past the length never read (lengths 0..40), two seeds two values.
+- `rd_no_volume_test.c` (`rd_no_volume`, CPU): a shadow window with no volume (`rd_no_volume.c`):
+  the scan on the corpus title frame rd-00400's list 3 (taken; the three levels and three
+  composites left undrawn, nothing else), a strip in the window (a volume), a foreign reader of
+  SHADOW1, a sprite of the chain the box scan named neither a level nor a composite, a clear of
+  SHADOW2 and a draw into the count target after the resolve, a level into a chain target twice
+  (the chain); a draw inside the window, a second window, a resolve on another target, a window
+  never resolved, a resolve with no reset, a level writing a depth (the form); a composite's DATE by
+  the snapshot (DATE); an unknown command after the resolve (unknown) and before the window (no
+  matter); SHADOW0 or the count target cleared before the window (the chain); no window; the gate
+  (the class, `ICO_RD_NO_VOLUME=0|1`, MSAA, the pass window, the exact blend, GS state as shader
+  data, DATE); the 10 s clause and the `--stats` words from made-up records.
+- `rd_no_volume_ab.cmake` (`rd_no_volume_ab`, `rd_no_volume_ab_gl`): the fixtures of
+  `lists/no_volume.txt` ([TESTING_FIXTURES.md](TESTING_FIXTURES.md); a listed fixture that is
+  absent FAILS: `fx-boot-0400`, `fx-boot-0600` and `fx-lamps-novolume`, a window with no volume
+  (declared `no_volume_kept>=1`), and `fx-boot-0200` and `fx-shadow-wide`, windows with volumes
+  (`no_volume_kept=0`)) with `ICO_RD_NO_VOLUME=0` and
+  `1`, `--pass-dump --stats`,
+  under `ICO_RD_STORE_PLAN=1`, `ICO_RD_VU_PREPASS=0`, at the PowerVR phone's profile with its late
+  passes (`ICO_VK_FAKE_LIMITS=moltenvk ICO_RD_LATE_PASS=1`, Enhanced 2364x1080, Full height and
+  pixel), lavapipe at 1x (DATE by the snapshot: not taken), lavapipe at 1x with
+  `ICO_RD_DATE_PATH=stencil` (taken, the count target at scale 1) and the Mali-G52's
+  (`ICO_VK_FAKE_LIMITS=mali`, `ICO_VK_FAKE_NO_DST=1`: not taken); the `_gl` twin at 1x on OpenGL
+  (llvmpipe: not taken). Each pair: every PNG byte for byte; `=0` off with none kept; where nothing
+  is taken the same passes and traffic figures; where a window is taken, from the code: a pass less
+  a window at the phone setting (the count's, the three levels' and list 3's SCENE pass not begun,
+  four zero clears begun) and two at the stencil row (the reset's own stencil pass too) less one a
+  window whose composites `=0` skips as empty too (its fog reads the depth outside the pass: list
+  3's SCENE pass begun in neither run), the colour stored down by the kept pass's W x H x 4 (not
+  for those windows), the colour loaded by that and the levels' texels x 4,
+  at the phone setting the cleared up by the levels' and the depth and stencil each way down by W x
+  H x 5 (the Apple class loads and stores the stencil with the depth), each within the 0.01 MB
+  rounding of two printed figures; the path ran (`rd_fixture_require` on the `=1` run): the
+  declared `no_volume_kept` and `shadow_volume_draws` at the phone setting and the stencil row,
+  `shadow_volume_draws` at the others; a fixture no setting checked FAILS; the phone setting takes
+  at least one window. No device: SKIP.
+- `rd_stencil_selftest_test.c` (`rd_stencil_selftest`, `rd_stencil_selftest_poison`, lavapipe with
+  `ICO_RD_FOG_PATH=local` and `ICO_RD_STENCIL_PACKED=0`, the second also `ICO_RD_STORE_POISON=1`;
+  77 without a device or the local read, after its CPU cases): the stencil outside the shadow window
+  (`rd_stencil_selftest.c`): the 10 s clause and the `--stats` words from a made-up record; at a
+  640x448 Enhanced scale-2 Full pixel 16:9 scene, `rd_fog_selftest` on the local path, the stencil
+  self-test passed (its eight texels the GS arithmetic and the forced replay's), the stencil not
+  forced, the cut's replay with 2 or more stencil stores and 1 or more loads not asked (each at most
+  a SCENE of texels); the decision on the desktop class: `=1` forced, unset with the local path
+  forced (not the PowerVR class), the in-place path not, the copy and buffer paths forced, `=0` not;
+  no validation error.
+- `rd_stencil_ab.cmake` (`rd_stencil_ab`): the fixtures of `lists/stencil.txt`
+  ([TESTING_FIXTURES.md](TESTING_FIXTURES.md); a listed fixture that is absent FAILS:
+  `fx-shadow-wide`, `fx-opening-dark`, `fx-opening-sun`, `fx-mali-frame`, `fx-maingate`, `fx-phone-4657`) with `ICO_RD_STENCIL_PACKED=1` and `0`,
+  `--pass-dump --stats`, under `ICO_RD_STORE_PLAN=1`, `ICO_RD_STORE_POISON=1`,
+  `ICO_RD_VU_PREPASS=0`, at the PowerVR phone's profile (`ICO_VK_FAKE_LIMITS=moltenvk`, Enhanced
+  2364x1080, Full height and pixel) and the Mali-G52's (`ICO_VK_FAKE_LIMITS=mali`,
+  `ICO_VK_FAKE_NO_DST=1`, 1x at 1612x720). Each pair: every PNG byte for byte, the same draws,
+  passes, colour and copy MB; `=1` with the depth and nothing not asked; `=0` inside the window
+  only; the depth and stencil MB stored and loaded fall by exactly the `=0` run's stats (MB
+  stored, MB loaded) within two hundredths, the MB cleared rise by at most its MB loaded (the
+  poisoned loads); the path ran (`rd_fixture_require` on the `=0` run, each setting): the declared
+  `shadow_volume_draws` and `stencil_window_stores`; each setting that compared a pair leaves out
+  a stencil store. No device: SKIP.
+- `rd_store_plan_ab.cmake`: the fixtures of `port/render/test/fixtures/lists/store_plan.txt` (each
+  dropping a depth store under the plan at every setting it shows) three times under
+  `ICO_RD_BLEND=fixed` and `ICO_RD_STORE_POISON=1` (a depth or stencil load the plan leaves
+  undefined clears to 0.5 and 0x5A instead: lavapipe keeps an attachment's contents whatever its
+  load and store ops say, measured on Mesa 25.0.7, so without the poison a wrong plan draws the same
+  bytes there): every depth store kept (`ICO_RD_STORE_PLAN=0`), the store plan, and every depth
+  store dropped (`ICO_RD_STORE_PLAN=all`, a wrong plan), at three settings: the phone's profile
+  (`ICO_RD_VU_PREPASS=0`, `ICO_RD_FOG_PATH=local`, `ICO_RD_DATE_PATH=stencil`, `--enhanced
+  --resolution 2x --aspect 2.189 --present 2364x1080`; a narrower dump skips it) and the record at
+  Enhanced 4:3 and 16:9 2x: with the plan every named target's PNG (and `PRESENT.png`) byte for
+  byte against every store kept, `store plan off` with nothing dropped, `on` and `all` with the same
+  passes and passes with a depth and the same colour stores dropped (the shadow count's colour,
+  poisoned to 0x5A: no named target may show it), `all` dropping every depth store, the plan dropping some over the
+  whole list, and the wrong plan changing at least one target over the whole list (the poison shows
+  a dropped store that a later pass reads), each fixture's declared `store_depth_dropped` on the
+  planned run; each run's counts printed (`rd_store_plan_ab`;
+  [WORK_BUFFERS.md](WORK_BUFFERS.md#the-store-plan)). SKIP as `rd_vustage_ab`.
+- `rd_cull_ab.cmake`: the fixtures of `test/fixtures/lists/cull.txt`
+  ([TESTING_FIXTURES.md](TESTING_FIXTURES.md): `fx-scene-gate102`, `fx-scene-4657`,
+  `fx-scene-boot0200`, made with `@scene place`, and `fx-issue91-1279` as every family makes it)
+  under `ICO_RD_BLEND=fixed` with `--pass-dump --stats`
+  three times, `ICO_RD_CULL=off`, `frustum` and `full`, at Original 4:3 presented at 640x480,
+  Enhanced 4:3 2x, Enhanced 2x at the frame's own aspect where `--no-device --list` says it is wider
+  than 4:3, and with `--aa msaa4` (Enhanced 4:3 2x) on the first fixture and on the list's lines
+  with the word `msaa` (issue 102's gate, whose MSAA epoch closes at list 3 by a read of SCENE):
+  the path ran: on the full run at every setting the fixture's declared `frustum_culled` and
+  `occluded` (`fx-issue91-1279`'s line: `occluded=0`) and at msaa `msaa_epoch_kept=0` (the
+  epoch closes at list 3, after the lists the test walks), every named target's PNG (and
+  `PRESENT.png`) of the frustum and the full runs byte for byte the off run's, the off run's `cull
+  off: 0 of 0`, the frustum run's `cull frustum: N of M` with N at most M, the full run's `cull
+  full: N of M (F frustum, O occluded)` with the frustum run's M, F its N and N = F + O, and draws
+  skipped and draws hidden over the list; each run's counts printed;
+  `-DMAX_DUMPS=n` takes the first n fixtures (`rd_cull_ab`, TIMEOUT 5400, and its OpenGL twin
+  `rd_cull_ab_gl`; [RENDER.md](RENDER_PERF.md#culling)). SKIP without a device.
+- `rd_vis_hiz_corpus.cmake`: the rows of `test/rd_vis_hiz_corpus.txt` (the fixtures of the
+  visibility test, `fx-scene-gate102`, `fx-scene-4657`, `fx-scene-boot0200`, at Original 4:3
+  640x480, Enhanced 4:3 2x and Enhanced 4:3 2x with `--repeat 3`, the last replay's counts, so
+  the collect cache's; expanded into the build tree) through `rd_replay_tool --cull full --stats` under `ICO_RD_BLEND=fixed`, once with
+  `ICO_RD_CULL_HIZ_FAST=0` (the plain pass) and once with the fast collect and
+  `ICO_RD_CULL_HIZ_CHECK=1`: the 26 counts of `stats: cull full:` (draws skipped, walked, frustum,
+  occluded, occluder triangles, past the budget, cells, tested, resets) and `stats: cull
+  occlusion:` (the 17 reasons) of the fast run equal to the plain run's and to the table's,
+  `stats: cull occlusion cost:`'s `check: N checked, 0 wrong`, `fast off` and `fast on` as set;
+  each row's cull, occlusion and collect ms of both runs printed, and their sums (the table made by
+  the plain pass; made again only when the culler's rules change)
+  (`rd_vis_hiz_corpus`, TIMEOUT 1800; [RENDER.md](RENDER_PERF.md#culling)). SKIP as `rd_vustage_ab`.
+- `rd_thread_ab.cmake`: the fixtures of `lists/thread.txt` (the VU family's and two phone frames)
+  through `rd_replay_tool --render-thread off`, `sync` and `on` (every replay, the interpolation
+  and the renderer's calls on a thread of the renderer's own, `port/render/rd_thread.h`), with
+  `--pass-dump --stats` at Original (640x480) and Enhanced 4:3 2x (1280x960), and for the fixture
+  whose list words name the tick before's (`fx-gate prev=fx-gate-prev`; an F12 zip in a list of
+  paths) the blended present at 0.5 between its two frames: every target's PNG of `sync` and `on`
+  byte for byte `off`'s, the threaded runs saying `render thread: sync` / `on`, and each fixture's
+  declared `prepass_vertices` on the `on` run at both settings; the blended present is
+  made three times in a row in every mode (`--repeat 3`), the `on` run handing the three over
+  back to back as the window does, and must say `submit thread: ended (N` with N at least 3
+  (their submit and present on the submit thread, `port/render/rd_submit_thread.h`) and, where
+  the device says `rhi_vk: frame slots: apart`, `submit thread: the frame slots apart` (the second
+  and third recorded while the one before is submitted, RHI.md "Frame slots and the submit
+  thread"); the last picture's PNG byte for byte `off`'s
+  (`rd_thread_ab`; [PLATFORM.md](PLATFORM.md#the-render-thread)). SKIP as `rd_vustage_ab`.
+- `rd_constant_reads_ab.cmake`: the fixtures of `lists/constant_reads.txt` (the PowerVR phone's
+  three frames marked `extra`, issue 164's Mali-G52 frame and the deja vu frame: the aura with no
+  aura object) twice, every post sprite reading
+  its source (`ICO_RD_CONSTANT_READS=0`) and a source holding only its clear drawn as its colour, at
+  four settings under `ICO_RD_BLEND=fixed`: the phone's profile (`ICO_RD_VU_PREPASS=0`) at 2x
+  (`--enhanced --resolution 2x --aspect 2.189 --present 2364x1080`) and at its Resolution Auto size
+  (`--resolution 2364x1080 --full-height --full-pixel`, the same aspect and present; a narrower dump
+  skips both), and the record at Enhanced 4:3 and 16:9 2x: every named target's PNG (and
+  `PRESENT.png`) byte for byte, `constant reads off` with none served against `on`, the same target
+  reads counted by both (served plus kept against the other's kept), every phone frame served at
+  both phone settings, and each fixture's declared `constant_reads_served` on every default run;
+  each pair's counts printed (`rd_constant_reads_ab`;
+  [WORK_BUFFERS.md](WORK_BUFFERS.md#a-cleared-source-read-as-its-colour)). SKIP as `rd_vustage_ab`.
+- `rd_fades_fold_ab.cmake`: the fixtures of `port/render/test/fixtures/lists/fades_fold.txt`
+  ([TESTING_FIXTURES.md](TESTING_FIXTURES.md): the PowerVR phone's F12 frame, issue 106's drained
+  room, issue 164's paused frame, a 4:3 capture; the path ran: each fixture's declared
+  `fades_folded` on every folded run), each first listed (`--list
+  --no-device`: list 11's last twelve commands in the log, so it shows which dumps end with the
+  fade, the letterbox or the brightness), then replayed with `--pass-dump --stats` with list 11's
+  last full-frame lerp sprites drawn into SCENE (`ICO_RD_FADES_FOLD=0`, the tests' way to draw
+  them as before) and with the fold (the default; its log line must name the GS's floor under the exact blend and the
+  nearest level under the fixed-function one, and a reduction that did not take a planned fold
+  fails), under
+  `ICO_RD_BLEND=attachment` and `fixed`, at Original (`--present 640x480`), Enhanced 2x
+  (`--present 1280x960`) and the phone's Resolution Auto (`--resolution 2364x1080 --full-height
+  --full-pixel --aspect 2.189`, `ICO_RD_VU_PREPASS=0`; a narrower dump skips it): `fades fold off`
+  with none folded against `on`; every target's PNG but SCENE's (which holds the picture without
+  the sprites by design) byte for byte where nothing folded and under the exact blend where the log
+  says the steps met SCENE's texels before the GS filter, elsewhere within two levels on every
+  channel (the measured bound, [DIVERGENCES.md](DIVERGENCES.md) VD-27), the channels a level apart
+  printed per target by `port/render/test/png_level_diff.py`;
+  some fixture must fold (`rd_fades_fold_ab`; [RENDER_POST.md](RENDER_POST.md#the-fades-fold),
+  [DIVERGENCES.md](DIVERGENCES.md) VD-27). SKIP as `rd_vustage_ab`.
+- `rd_present_scene_ab.cmake`: the present from SCENE against the reduction drawn: the fixtures of
+  `port/render/test/fixtures/lists/present_scene.txt` ([TESTING_FIXTURES.md](TESTING_FIXTURES.md):
+  a character's shadow at 21:9, the PowerVR phone's frame, the bridge capture, and the main gate
+  at 32:9, whose reduction is kept for its open border; a listed fixture that is absent fails) replayed by `--pass-dump --stats` with `ICO_RD_PRESENT_SCENE=0` and
+  `=1` at the phone's Resolution Auto under its profile fakes (`ICO_VK_FAKE_LIMITS=moltenvk
+  ICO_RD_VU_PREPASS=0`), a 16:9 window (1920 x 1080) and Enhanced 2x 4:3: every target's PNG but
+  `PRESENT.png` byte for byte (DISPLAY drawn on demand for its read), `PRESENT.png` within two
+  levels (`port/render/test/png_level_diff.py`, its counts printed), the off run `off` with none
+  skipped, a run with the reduction not drawn one pass and some colour MB stored fewer, 2x kept;
+  on the first fixture at the phone's setting the CRT filter, FSR 1.0, the test's temporal upscaler
+  and Downsampling keep the reduction with their reasons and every PNG byte for byte, and the
+  mirror takes it; the crack fill's swap as often in the on run as in the off run, and at the
+  phone's setting some fixture with the reduction not drawn and the swap taken in one replay (the
+  display layer's switch on, its default: the layer needs a temporal upscaler); the first fixture
+  presented 31 times (`--time 30`) prints the 10 s `present from SCENE: N a replay` line with N
+  above 0; some run must leave it undrawn; the path ran: each fixture's declared
+  `present_scene_skipped` on the `=1` run at the phone's setting
+  (`rd_present_scene_ab`). SKIP without a device.
+- `rd_crack_late_ab.cmake`: the crack fill after lists 4-6 on the fixtures of
+  `port/render/test/fixtures/lists/crack_late.txt` ([TESTING_FIXTURES.md](TESTING_FIXTURES.md); a
+  fixture and its settings a line: `enh2x43`, the gate's Enhanced 2x 4:3, and `phone`, the PowerVR
+  phone's Resolution Auto, 2364x1080 at 2.189 under its profile's fakes) replayed with `--pass-dump
+  --stats` under `ICO_RD_BLEND=fixed ICO_RD_FADES_FOLD=0 ICO_RD_GLOW_LIGHT=0 ICO_RD_CRACK_SWAP=0
+  ICO_RD_CULL=off` (and `ICO_RD_SHADOW_FINE=0`, `rd_shadowres.cmake`): the stats line says `crack fill
+  on: P passes` (P 0 where the fill was the first draw of the aura's paste pass, else 1) and `1 fills
+  after lists 4-6`, the fixture's declared `crack_pixels` (the path ran); every PNG the release
+  before's picture of the fixture byte for byte (`lists/crack_late_goldens.txt`, `<fixture>
+  <setting> <png> <sha256>`, made by the release before's `rd_replay_tool` with the same environment
+  and arguments through the script's `-DMAKE_GOLDENS=FILE`; a PNG without a golden, a golden no run
+  wrote, a fixture no setting replayed: each a failure). Every run is replayed again with
+  `ICO_RD_CRACK_PLACE=7` (the fill at the start of list 7, the place before `rd__crack_fill_place`
+  moved it after the glow's `cleanUpFB` or into the aura's paste pass): every PNG that replay's
+  bytes, the run's passes no more than its, and at the phone's setting a run whose stats place the
+  fill later (`1 fills in the aura's paste pass` or `1 fills after the glow's alpha`) at least one
+  pass fewer. The fill against the fill before the fog on the game's own frames is the measurement of
+  [DIVERGENCES.md](DIVERGENCES.md) VD-20, not this test's. No device: SKIP.
+- `rd_aura_box_ab.cmake`: the fixtures of `test/fixtures/lists/aura_box.txt`
+  ([TESTING_FIXTURES.md](TESTING_FIXTURES.md); an absent one FAILS) replayed with `--pass-dump
+  --stats` under `ICO_RD_BLEND=fixed` with the aura's
+  read of the picture into FEED128 in one pass (`ICO_RD_AURA_BOX=0`) and in two
+  (`ICO_RD_AURA_BOX=1`, `rd_aura_box.c`), at the phone's Resolution Auto (`--enhanced --resolution
+  2364x1080 --full-height --full-pixel --aspect 2.189 --present 2364x1080`,
+  `ICO_RD_VU_PREPASS=0`; a narrower dump skips it) and at Enhanced 2x 4:3 (`--present 1280x960`):
+  every PNG (FEED128, SCENE, `PRESENT.png` and the other named targets; ROWBOX is the renderer's
+  own texture, never written) byte for byte, `aura box off: 0` against `on`, the two-pass run's
+  passes and draws the other's plus one each a read in two passes; some fixture must read in two
+  passes. The path ran: each fixture's declared `aura_box_reads` on the two-pass run of every
+  setting it shows; a fixture no setting checked fails (`rd_aura_box_ab`). No device: SKIP.
+- `rd_shadow_merge_ab.cmake`: the fixtures of `test/fixtures/lists/shadow_merge.txt`
+  ([TESTING_FIXTURES.md](TESTING_FIXTURES.md): the PowerVR phone's F12 frame of 2026-10-28, the
+  main gate at 32:9, the bridge capture; an absent one FAILS) replayed with `--pass-dump
+  --stats` under `ICO_RD_BLEND=fixed` and `ICO_RD_STORE_POISON=1` with the shadow volumes in a pass
+  of their own (`ICO_RD_SHADOW_MERGE=0`) and in the scene's open pass (`=1`, `rd_shadow_merge.c`),
+  at the phone's Resolution Auto under the MoltenVK fakes (a tile-based class) and at Enhanced 2x
+  4:3: every PNG byte for byte (the count targets' clears the on run leaves undrawn are drawn with
+  the poison's 0x5A there, so a reader would show), `shadow volumes in the scene's pass off: 0 of R
+  counts, 0 passes armed; 0 count targets' clears not drawn` against `on: M of R`, the same draws,
+  the on run's passes the off run's less M. The path ran: the on run of each setting shows each
+  fixture's declared `shadow_volume_draws` and `shadow_merge_counts` (a reset taken, so one pass
+  fewer); a fixture no setting checked fails (`rd_shadow_merge_ab`). No device: SKIP.
+- `rd_pass_area_ab.cmake`: the fixtures of `test/fixtures/lists/pass_area.txt`
+  ([TESTING_FIXTURES.md](TESTING_FIXTURES.md); the word `phone` marks the PowerVR phone's frames;
+  an absent one FAILS) replayed with `--pass-dump --stats` under `ICO_RD_BLEND=fixed` with the
+  passes' render areas off (`ICO_RD_PASS_AREA=0`) and on (`=1`, `rd_pass_area.c`, on whatever the
+  device: lavapipe clips every draw to the area, so an area that misses a texel shows), at the
+  phone's Resolution Auto (as `rd_aura_box_ab`) and at Enhanced 2x 4:3: every PNG byte for byte,
+  `pass area off: 0 passes` against `on`, the same draws, the on run's passes the off run's plus
+  at most its passes ended early; the phone's frames at the phone's setting must give some pass an
+  area or name `its draws cover the picture` among the passes kept whole (the tool's `--stats`
+  clause; the aura's paste and list 11's fades are full-frame sprites, so the stage 6 frames have
+  no area to give); over the list some pass takes an area (`fx-pass-area`, the frame
+  `rd_pass_area_frame` records: the game's frames measured take none). The path ran: each
+  fixture's declared `pass_area_passes` and `pass_area_covered` on the on run of every setting it
+  shows; a fixture no setting checked fails (`rd_pass_area_ab`). No device: SKIP.
+- `rd_pass_area_frame.c` (`rd_pass_area_frame`; `rd_pass_area.cmake`, CPU, no device): records a
+  frame without a device (`rd__init_record_only`, 512x448 GS) whose passes on SCENE take render
+  areas by `rd_pass_area.c`'s rule: SCENE's clear taken by a full-frame flat sprite, a sprite on
+  WORK0, two overlapping flat sprites on SCENE (one pass, their union's tiles), a sprite on WORK0
+  again and one more on SCENE (a second pass); no texture, no art. It writes
+  `rd_pass_area_frame.rddump` into its folder argument; `fx-pass-area` is made from that dump
+  ([TESTING_FIXTURES.md](TESTING_FIXTURES.md)).
+- `rd_glow_cheap_ab.cmake`: the glow's cheaper passes ([RENDER.md](RENDER.md#the-glows-passes):
+  WORK2's fill in the mask's pass, cleanUpFB in the fog's) against the passes drawn without them:
+  the fixtures of `test/fixtures/lists/glow_cheap.txt` ([TESTING_FIXTURES.md](TESTING_FIXTURES.md):
+  three frames with the sun's fans, two without) replayed with `--pass-dump --stats` under
+  `ICO_RD_BLEND=fixed ICO_RD_FADES_FOLD=0` three times: a count run (`--stats` alone) with
+  `ICO_RD_FX_PLAN=0 ICO_RD_CLEAR_CARRY=0` (the post sprites' plan and the clear carry off, what the
+  two cuts ride on: cleanUpFB's sprites each a pass of their own, a pending fill flushed as one; the
+  plan's own pictures differ by a few levels on a frame with the fans, so this run gives the passes
+  only), the before run with `ICO_RD_CLEAR_CARRY=0` (the fill's pass back), and the defaults, at
+  the PowerVR phone's profile on lavapipe (`ICO_VK_FAKE_LIMITS=moltenvk ICO_RD_VU_PREPASS=0`,
+  2364x1080, Full height, Full pixel, the frame's own aspect, presented at 2364x1080) and at
+  Original and Enhanced 2x 4:3: every PNG of the before run the same bytes or within `-DBOUND` levels
+  (0, `png_level_diff.py`), the `glow N passes` count at least two fewer than the count run's at the
+  phone's setting (three on a frame without the fans, the fill's own pass, and one such run at least
+  over the list) and no more at the others; each run's line prints the passes before and after
+  and its largest difference. The run's own count meets the rule with the crack fill drawn (it
+  is drawn after `cleanUpFB`'s two sprites, which stay in the fog's pass: [the fill's
+  place](RENDER_POST.md#the-fills-place-after-list-7)), and at the phone's setting a run whose
+  stats say the fill was drawn says `1 fills after the glow's alpha`. Those runs hold the glow's
+  mask fold off (`ICO_RD_GLOW_FOLD=0`), and each fixture at each setting runs again with it on
+  (`ICO_RD_GLOW_FOLD=1`, into `<name>-<setting>-fold`): every PNG but `WORK2.png` (which the fold
+  leaves undrawn) the same bytes as the run without it, `PRESENT.png` too at the phone's setting;
+  a run whose stats say `glow: WORK2 fold on: 1 folded` has at least one glow pass fewer, a kept
+  one (only the lamps drawn into WORK2 after the mask may keep it: any other reason fails) as
+  many; the folds reading the sun's fans' WORK2 counted; at each setting at least
+  one run folded ([RENDER_POST.md](RENDER_POST.md#the-glows-mask-in-its-reduction)). Its runs
+  set `ICO_RD_GLOW_LIGHT=0` (the chain drawn whole, as the cuts and the fold need it; so do
+  `rd_crack_late_ab`'s). The path ran: at every setting the run at the defaults shows each
+  fixture's declared `glow_passes` and the fold's run its `glow_fold_folded` (`rd_glow_cheap_ab`;
+  SKIP without a device).
+- `rd_glow_light_ab.cmake`: the glow's light plan
+  ([RENDER_POST.md](RENDER_POST.md#the-glow-where-it-adds-light)) against the chain drawn whole
+  (`ICO_RD_GLOW_LIGHT=0`) on the fixtures of `test/fixtures/lists/glow_light.txt`
+  ([TESTING_FIXTURES.md](TESTING_FIXTURES.md): two frames with the sun's fans, the whole plan; four
+  dark ones; two lamps rooms replayed with the cull off, the list's `nocull` word, the lamps
+  plan), each replayed
+  twice with `--pass-dump --stats` at the PowerVR phone's profile on lavapipe
+  (`ICO_VK_FAKE_LIMITS=moltenvk ICO_RD_VU_PREPASS=0`, 2364x1080, Full height, Full pixel,
+  presented at 2364x1080), at Original 4:3 and at Enhanced 2x 4:3 presented at 1280x960, each pair
+  with the other packages' pass-dependent switches pinned off in both runs (`ICO_RD_LATE_PASS`,
+  `ICO_RD_AURA_PASTE`, `ICO_RD_CRACK_SWAP`, `ICO_RD_PRESENT_SCENE`, `ICO_RD_SHADOW_BOX`,
+  `ICO_RD_STENCIL_PACKED` = 0: without the glow's chain another pass is open at list 11, so the late
+  pass's join, VD-31, would apply in one run and not the other), plus the phone's setting with every
+  switch at its default, where SCENE, DISPLAY and PRESENT may differ within VD-31's bound (3 levels,
+  800 pixels) and every other target's RGB not at all: every
+  PNG's RGB 0 levels apart (`png_level_diff.py --channels RGB`), the alpha 0 levels on DISPLAY,
+  PRESENT and every target but WORK1, WORK2, WORK3, WORK3_HELD and SCENE, and on those too where
+  the whole run's WORK2 holds no alpha 192 (`--count-alpha 192`: no fill the mask kept), at every
+  row (Original 4:3 at 1x, Enhanced 1x at the phone's profile, Enhanced 1x under a Mali device's
+  identity `ICO_VK_FAKE_VENDOR=0x13B5 ICO_VK_FAKE_LIMITS=mali`, and an Original 1x row at the
+  defaults with the VD-31 bound, besides the phone's and Enhanced 2x); at least one dark run at
+  every row but the defaults'; under dark the stats' `N passes in the
+  chain` at most 1 (WORK1's zero draw in a fresh renderer) and `glow N passes` fewer than the
+  whole run's, one fewer under lamps, no more otherwise. The path ran: at every row the plan's run
+  shows each fixture's declared `glow_plan` (on the fixture or its list line), and each of the five
+  pinned rows has a dark, a lamps and a whole run (`rd_glow_light_ab`; SKIP without a device).
+- `rd_draw_pattern.cmake` (`rd_draw_pattern_mali`, `rd_draw_pattern_powervr`,
+  `rd_draw_pattern_adreno`, `rd_draw_pattern_desktop`; `rd_draw_pattern.cmake`; issue 179): the
+  draw pattern gate ([TESTING.md](TESTING.md#the-draw-pattern-gate)): the fixtures of
+  `test/fixtures/lists/draw_pattern.txt` ([TESTING_FIXTURES.md](TESTING_FIXTURES.md)) once each
+  under the profile's fakes with `rd_replay_tool --stats --game-selftests`, every count of each
+  fixture's line in `test/draw_pattern/<profile>.txt` equal (the GPU draws and passes, the VU draw
+  merge's draws, GPU draws, merged and alone, code 36's pairs fused, kept apart and each reason,
+  under one pipeline already, the two-pass blend's draws drawn twice, their VU triangles and its
+  colour pass alone, the pipelines made); a change fails with each count's old and new value and
+  the sentence to update the table and name the change in the release's device checklist; a table
+  marked `ungenerated` fails with the command that writes it (the target `rd_draw_pattern_tables`,
+  `-DWRITE=1`). The path ran: the profile's fakes in each run's log, the game self-tests' line,
+  every count's line, each fixture's declared `prepass_vertices` under `mali` and `desktop`, the
+  two-pass blend's draws over the list under `mali`; SKIP without a device.
+
+- `rd_diag_notes_test.c` (`rd_diag_notes`; `rd_diag_notes.cmake`, CPU): the display line's width
+  note and the upload ring's grow words (`rd_diag_notes.c`, issue 179): the line at the start, the
+  frame's width changed alone written once more with ` (written again: the frame's width changed
+  from 512)`, later changes alone not, a change with another reason written without the words;
+  the ring's words with no ring before, made and never used, made and used (`; the 32 MB ring it
+  replaces was made 41.2 s before, last used 0.08 s before for 31 MB`), a new ring's note; short
+  buffers cut and ended.
+- `rd_ledger_test.c` (`rd_ledger`; `rd_ledger.cmake`, CPU; [SCENE_LEDGER.md](SCENE_LEDGER.md)):
+  the scene ledger's tally and text from synthetic scenes. A model left out by each reason in
+  ten ticks, twice in each, five of them between ticks: its row reads `never drawn; left out by
+  <the reason's words> in 10 ticks (5 with the cameras between ticks), 20 draws or parts` (the
+  port's tests in pictures, between ticks; the whole object's box `times`), and the header's
+  counts. A model built and never drawn nor left out reads `never drawn, no reason recorded, 1
+  mesh built`, before the drawn rows, counted in the header; carried into the next stage it reads
+  `built before the stage began` while a drawn or left out row is not carried. A drawn row reads
+  back with `sscanf` as put in (831 ticks, 1662 draws, two a tick counted as one tick). The
+  replay's half added into the game's (one row a name). The table full: 256 rows in order, five
+  names past it counted, a known name still found, stray rows and reasons ignored; a long name cut
+  to 23 bytes, no name `(no name)`. The effects line (`none`; fog's last strength, shadow
+  volumes' triangles). The text's bounds: 58 rows, 48 listed and `10 more models not listed`,
+  every line the ledger's and under 1500 bytes, a 40-byte buffer cut and ended, no buffer
+  nothing. The kept stages: the last four, oldest first, then the stage in play. The cost: a
+  draw's tally over 4 million calls under 40 ns on average or within six times a control loop of
+  the same additions in the same run. One model one row from the call sites' name sources (the
+  mesh's name cut to 23 bytes, a model pack's `<model> part 12` cut inside `part`, the box cull's
+  and the hide's whole name, for names of 10, 18 and 30 bytes); the row cache looked up only at a
+  new id or epoch. A row hidden by the game's flag reads `hidden by the game's flag (its display
+  flag off) in 3 ticks` and the header counts it apart from rows with no reason; a drawn row's
+  triangles hidden by the content table and drawn over an overlap; an unnamed `(a grid)` row of
+  the draw filter. The rows listed (issue 221): past 60 rows the game hid, a model built in the
+  stage and never drawn (10790 triangles, then one of 12) and a model left out at times are
+  listed, in that order before the hidden ones, and 15 rows counted. Textures: the counts line, the failed ones by name with why, the replaced ones
+  by name, the table bounded at 256. The cost of a busy tick (3000 draws of 300 meshes, 60 box
+  drops, 100 skips) over 2000 ticks, printed and under 250 us.

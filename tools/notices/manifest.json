@@ -118,6 +118,15 @@
       ]
     },
     {
+      "name": "AMD FidelityFX SDK (the FSR 3.1 upscaler)",
+      "version": "v1.1.4 (c6efa6bf7f2027b3ec94f28578bb5965eabb9e55), FSR 3.1.4, with the port's patches (tools/ffx/patches)",
+      "licence": "MIT",
+      "used_for": "the FSR 3.1 temporal upscaler (Vulkan), compiled into the program with the SPIR-V shaders built from its GLSL",
+      "platforms": ["linux", "windows"],
+      "arch": ["x64"],
+      "texts": [{"file": "tools/toolchain/deps/fidelityfx/v1.1.4/src/LICENSE.txt"}]
+    },
+    {
       "name": "Zstandard decoder (libchdr's bundled zstd)",
       "version": "1.5.7 (zstddeclib.c), unmodified",
       "licence": "BSD-3-Clause OR GPL-2.0; BSD-3-Clause chosen",
@@ -188,11 +197,25 @@
       "texts": [{"file": "port/assets/fonts/NotoSansTC-OFL.txt"}]
     },
     {
+      "name": "Controller button pictures (Xbox, Nintendo, Wii Classic Controller)",
+      "version": "the contributor's SVG files of November 2026 (ICO PC issue 187), unchanged",
+      "licence": "contributed to ICO PC by MesaBlack, shipped with the contributor's credit",
+      "used_for": "the button pictures shown for a non-PlayStation controller (Options > Controls > Button pictures), embedded in the program",
+      "texts": [{"file": "port/assets/buttons/CREDIT.txt"}]
+    },
+    {
       "name": "minicoro",
       "version": "v0.2.0, unmodified",
       "licence": "Unlicense or MIT-0",
       "used_for": "the game's fibers (context switch); neither licence asks for a notice, it is included anyway",
       "texts": [{"file": "port/third_party/minicoro/LICENSE"}]
+    },
+    {
+      "name": "AMD FidelityFX Super Resolution 1.0 (EASU, RCAS shader code)",
+      "version": "v1.0.2 (GPUOpen-Effects/FidelityFX-FSR commit a21ffb8f6c13233ba336352bdff293894c706575), ffx_a.h and ffx_fsr1.h unmodified",
+      "licence": "MIT",
+      "used_for": "Options > Picture > Upscaling: FSR 1.0, compiled into the program's shaders",
+      "texts": [{"file": "port/third_party/fsr1/LICENSE"}]
     },
     {
       "name": "newlib libm (fdlibm single-precision functions)",

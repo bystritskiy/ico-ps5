@@ -34,11 +34,8 @@ const char *const ui_strings_de[UI_STR_COUNT] = {
         "Für ein entspannteres Spiel. Einige geskriptete Szenen zeigen die Entführung weiterhin.",
     [UI_STR_OPT_PIT_TIME] = "Zeit zur Rettung Yordas",
     [UI_STR_OPT_PIT_TIME_NOTE] =
-        "Wie lange ein Schatten braucht, um Yorda in eine Grube zu ziehen. Die Yorda-Zeile darüber verhindert es ganz.",
-    [UI_STR_VAL_PIT_HALF] = "Halb",
-    [UI_STR_VAL_PIT_LONGER] = "Länger",
-    [UI_STR_VAL_PIT_DOUBLE] = "Doppelt",
-    [UI_STR_VAL_PIT_TRIPLE] = "Dreifach",
+        "Sekunden vom Versinken eines Schattens mit Yorda, bis sie fort ist; in manchen Szenen "
+        "anteilig kürzer. Entfällt, wenn Yorda nie entführt wird.",
     [UI_STR_OPT_SHADOW_SPEED] = "Tempo der Schatten",
     [UI_STR_OPT_SHADOW_SPEED_NOTE] =
         "Wie schnell Schatten gehen, rennen und fliegen. Wie oft sie angreifen, ändert sich nicht.",
@@ -154,6 +151,7 @@ const char *const ui_strings_de[UI_STR_COUNT] = {
     [UI_STR_OPT_TOUCH_SIZE] = "Touch-Größe",
     [UI_STR_OPT_TOUCH_OPACITY] = "Touch-Deckkraft",
     [UI_STR_VAL_ALWAYS] = "Immer",
+    [UI_STR_VAL_ALWAYS_SCENES] = "Immer, Start nur in Szenen",
     [UI_STR_VAL_SMALL] = "Klein",
     [UI_STR_VAL_MEDIUM] = "Mittel",
     [UI_STR_VAL_LARGE] = "Groß",
@@ -205,9 +203,17 @@ const char *const ui_strings_de[UI_STR_COUNT] = {
         "Das ganze Spiel wird seitenverkehrt gespielt. Jeder Spielstand behält die Wahl.",
     [UI_STR_OPT_NEWGAME_PLUS] = "Neues Spiel +",
     [UI_STR_NEWGAME_PLUS_SCREEN] =
-        "Neues Spiel + spielt die zweite Reise: Yordas Worte übersetzt, Ende und Gegenstände verändert. Aus spielt die erste Reise, auch nach dem Durchspielen.",
+        "Neues Spiel + spielt die zweite Reise: Yordas Worte übersetzt, Ende und Gegenstände verändert. Aus: die erste Reise, auch nach dem Durchspielen.",
+    [UI_STR_NEWGAME_START] = "Starten",
+    [UI_STR_NEWGAME_START_SCREEN] = "Beginnt das neue Spiel mit den obigen Einstellungen.",
     [UI_STR_OPT_CRT] = "CRT-Filter",
     [UI_STR_OPT_CRT_STRENGTH] = "CRT-Stärke",
+    [UI_STR_OPT_TONE_GAMMA] = "Gamma",
+    [UI_STR_OPT_TONE_BRIGHTNESS] = "Bildhelligkeit",
+    [UI_STR_OPT_TONE_CONTRAST] = "Kontrast",
+    [UI_STR_OPT_TONE_SATURATION] = "Sättigung",
+    [UI_STR_OPT_TONE_NOTE] =
+        "50 ist das Bild, wie das Spiel es zeichnet. Quadrat setzt auf 50 zurück. Der CRT-Filter folgt; scharfer Menütext nicht.",
     [UI_STR_VAL_CRT_SCANLINES] = "Bildzeilen",
     [UI_STR_VAL_CRT_CONSUMER] = "Fernseher",
     [UI_STR_VAL_CRT_TRINITRON] = "Trinitron",
@@ -407,6 +413,20 @@ const char *const ui_strings_de[UI_STR_COUNT] = {
     [UI_STR_VAL_HOLD_DISC_B] = "Wie die Disc (B)",
     [UI_STR_HOLD_TYPE_NOTE] =
         "A: R1 gedrückt halten, um Yordas Hand zu halten. B: R1 einmal drücken, um ihre Hand zu nehmen, erneut drücken zum Loslassen.",
+    [UI_STR_OPT_ZOOM_TYPE] = "Zoom-Typ",
+    [UI_STR_VAL_ZOOM_HOLD] = "Halten",
+    [UI_STR_VAL_ZOOM_TOGGLE] = "Umschalten",
+    [UI_STR_ZOOM_TYPE_NOTE] =
+        "Halten: Die Kamera zoomt, solange R2 gedrückt bleibt. Umschalten: R2 einmal drücken zum Heranzoomen, erneut drücken zum Herauszoomen.",
+    [UI_STR_OPT_CAMERA_RESET] = "Kamera zurücksetzen",
+    [UI_STR_CAMERA_RESET_NOTE] =
+        "Ein: Den rechten Stick drücken (R3), um die Kamera sofort wieder auf Ico zu richten.",
+    [UI_STR_OPT_YORDA_LOOK] = "Zu Yorda schauen",
+    [UI_STR_YORDA_LOOK_NOTE] =
+        "Ico und die Kamera wenden sich Yorda zu, ohne sie zu rufen. Halten: solange L3 gedrückt bleibt. Umschalten: L3 startet und beendet es.",
+    [UI_STR_OPT_BUTTON_PICTURES] = "Tastenbilder",
+    [UI_STR_BUTTON_PICTURES_NOTE] =
+        "Die Tasten in Menüs und im Fotomodus. Automatisch folgt dem zuletzt benutzten Controller.",
     [UI_STR_STICK_FIX_ALSO_NOTE] = "Auch unter Spiel.",
     [UI_STR_ACH_POPUPS_ALSO_NOTE] = "Auch unter Erfolge.",
     [UI_STR_PLAYERS_NOTE] = "2: Ein zweiter Controller steuert Yorda.",
@@ -449,7 +469,6 @@ const char *const ui_strings_de[UI_STR_COUNT] = {
     [UI_STR_STATS_CAPTURES] = "Yorda entführt",
     [UI_STR_STATS_SAVES] = "Speicherungen dieser Reise",
     [UI_STR_STATS_ENEMIES] = "Besiegte Gegner dieser Reise",
-    [UI_STR_STATS_ASSISTS] = "Hilfen",
     [UI_STR_STATS_AREA] = "Ort",
     [UI_STR_PHOTO_ACT_MOVE] = "bewegen",
     [UI_STR_PHOTO_ACT_LOOK] = "umschauen",
@@ -520,10 +539,6 @@ const char *const ui_strings_de[UI_STR_COUNT] = {
     [UI_STR_VAL_WINDOWED] = "Fenster",
     [UI_STR_VAL_BORDERLESS] = "Randlos",
     /* Effects > Cinematic bars */
-    [UI_STR_OPT_EFFECT_WATER] = "Wasserspiegelungen",
-    [UI_STR_VAL_SHARP] = "Scharf",
-    [UI_STR_EFFECT_WATER_NOTE] =
-        "Scharf zeichnet die Spiegelungen im Wasser in der gewählten Auflösung; Original behält die weicheren Spiegelungen der PS2.",
     [UI_STR_VAL_SMOOTH] = "Flüssig",
     [UI_STR_OPT_SHOW_FPS] = "Bildraten-Anzeige",
     [UI_STR_EFFECT_MOTION_BLUR_NOTE] =
@@ -560,14 +575,13 @@ const char *const ui_strings_de[UI_STR_COUNT] = {
         "Der gewählte Treiber startete beim letzten Mal nicht. Der Treiber des Telefons ist in Gebrauch.",
     [UI_STR_GPU_DRIVER_NOSPACE] = "Nicht genug Speicherplatz für diesen Treiber.",
     [UI_STR_GPU_DRIVER_NO_PICKER] =
-        "Die Dateiauswahl konnte nicht geöffnet werden. Sie können die Zip-Datei des Treibers stattdessen in den Ordner drivers des Spiels kopieren: %s",
+        "Die Dateiauswahl ließ sich nicht öffnen. Kopieren Sie die Zip-Datei des Treibers in den Ordner drivers: %s",
     [UI_STR_GPU_DRIVER_NO_PICKER_APP] =
-        "Auf diesem Gerät gibt es keine App zum Auswählen einer Datei. Kopieren Sie die Zip-Datei des Treibers in den Ordner drivers des Spiels: %s",
-    [UI_STR_GPU_DRIVER_UNREADABLE] =
-        "Die gewählte Datei konnte nicht gelesen werden. Kopieren Sie sie zuerst auf dieses Gerät und wählen Sie sie dann erneut.",
+        "Keine App kann hier eine Datei wählen. Kopieren Sie die Zip-Datei des Treibers in den Ordner drivers: %s",
+    [UI_STR_GPU_DRIVER_UNREADABLE] = "Nicht lesbar: zuerst aufs Gerät kopieren",
     [UI_STR_GPU_DRIVER_ADD_FILE] = "Aus dem Ordner drivers hinzufügen",
     [UI_STR_GPU_DRIVER_CANCELLED] =
-        "Es wurde keine Datei gewählt. Erscheint die Dateiauswahl auf diesem Gerät nicht, kopieren Sie die Zip-Datei des Treibers in den Ordner drivers des Spiels und nutzen Sie Aus dem Ordner drivers hinzufügen: %s",
+        "Keine Datei gewählt. Erscheint keine Dateiauswahl, kopieren Sie die Zip-Datei des Treibers in den Ordner drivers und nutzen Sie Aus dem Ordner drivers hinzufügen: %s",
     [UI_STR_GPU_DRIVER_NOTE_LOST] =
         "Die Grafik hat mit dem Qualcomm-Treiber dieses Geräts nicht mehr reagiert. Ein Turnip-Treiberpaket kann helfen: Fügen Sie eines hier hinzu oder kopieren Sie seine Zip-Datei in den Ordner drivers des Spiels (%s). Gilt ab dem nächsten Start.",
     [UI_STR_QUIT_GAME] = "Spiel beenden",
@@ -595,6 +609,9 @@ const char *const ui_strings_de[UI_STR_COUNT] = {
     [UI_STR_OPT_SECOND_CARD] = "Zweite Memory Card",
     [UI_STR_OPT_SECOND_CARD_NOTE] =
         "Aus: eine Memory Card, wie im Original. Ein: eine zweite Karte mit zehn weiteren Spielständen; Speichern und Laden bieten beide an.",
+    [UI_STR_OPT_SHADOWS_TOGETHER] = "Schatten greifen gemeinsam an",
+    [UI_STR_OPT_SHADOWS_TOGETHER_NOTE] =
+        "Aus: wie im Original greifen die Schatten nacheinander an. Ein: mehrere Schatten können gleichzeitig angreifen.",
     [UI_STR_OPT_AA] = "Kantenglättung",
     [UI_STR_OPT_AA_NOTE] =
         "Glättet gezackte Kanten. Supersampling zeichnet 4mal (2x) oder 16mal (4x) so viele Pixel; wähle weniger, wenn die Anzeige auf 30 fällt.",
@@ -602,6 +619,17 @@ const char *const ui_strings_de[UI_STR_COUNT] = {
     [UI_STR_VAL_DOWNSAMPLE_BOX] = "Auf Originalgröße",
     [UI_STR_OPT_DOWNSAMPLE_NOTE] =
         "Zeichnet in der Auflösung oben, dann verkleinert aufs Originalformat. Braucht 2x oder mehr; nicht mit CRT-Filter oder bei Fenster.",
+    [UI_STR_OPT_UPSCALE] = "Hochskalierung",
+    [UI_STR_VAL_UPSCALE_FSR1] = "FSR 1.0",
+    [UI_STR_VAL_UPSCALE_FSR3] = "FSR 3.1",
+    [UI_STR_OPT_UPSCALE_QUALITY] = "Skalierungsqualität",
+    [UI_STR_VAL_UPSCALE_Q_NATIVE] = "Native AA",
+    [UI_STR_VAL_UPSCALE_Q_QUALITY] = "Qualität",
+    [UI_STR_VAL_UPSCALE_Q_BALANCED] = "Ausgewogen",
+    [UI_STR_VAL_UPSCALE_Q_PERFORMANCE] = "Leistung",
+    [UI_STR_OPT_UPSCALE_SHARPNESS] = "Schärfe",
+    [UI_STR_OPT_UPSCALE_NOTE] =
+        "FSR (AMD) schärft ein kleiner gezeichnetes Bild. Nicht mit CRT-Filter oder Fenster. 3.1: ohne Verkleinern, Kantenglättung aus.",
     [UI_STR_AA_OFF] = "Aus",
     [UI_STR_AA_SSAA2] = "Supersampling 2x",
     [UI_STR_AA_SSAA4] = "Supersampling 4x",
@@ -609,6 +637,7 @@ const char *const ui_strings_de[UI_STR_COUNT] = {
     [UI_STR_AA_MSAA4] = "MSAA 4x",
     [UI_STR_AA_MSAA8] = "MSAA 8x",
     [UI_STR_AA_UNAVAILABLE] = " (aus: nicht verfügbar)",
+    [UI_STR_AA_FSR3] = " (aus: FSR 3.1)",
     [UI_STR_EXTRAS_STEAM] = "Zu Steam hinzufügen",
     [UI_STR_STEAM_ADDED] = "Zu Steam hinzugefügt",
     [UI_STR_STEAM_ADDED_BODY] = "Steam starten und ICO\nin der Bibliothek suchen.",
@@ -621,8 +650,13 @@ const char *const ui_strings_de[UI_STR_COUNT] = {
     [UI_STR_STEAM_NO_USER] = "Kein Steam-Konto gefunden",
     [UI_STR_STEAM_NO_USER_BODY] = "Einmal in Steam anmelden,\ndann noch einmal versuchen.",
     [UI_STR_STEAM_FAILED] = "Hinzufügen zu Steam fehlgeschlagen",
-    [UI_STR_STEAM_FAILED_BODY] =
-        "Die Verknüpfungsliste ließ sich nicht ändern.\nDie README zeigt das Hinzufügen von Hand.",
+    [UI_STR_STEAM_FAILED_BODY] = "Die README zeigt das Hinzufügen von Hand.",
+    [UI_STR_EXTRAS_DESKTOP] = "Zum Anwendungsmenü hinzufügen",
+    [UI_STR_DESKTOP_ADDED] = "Zum Menü hinzugefügt",
+    [UI_STR_DESKTOP_ADDED_BODY] = "Das Spiel ist jetzt im\nAnwendungsmenü.",
+    [UI_STR_DESKTOP_FAILED] = "Hinzufügen zum Menü fehlgeschlagen",
+    [UI_STR_DESKTOP_FAILED_BODY] =
+        "Der Menüeintrag ließ sich nicht\nin den Benutzerordner schreiben.",
     [UI_STR_EXTRAS_EXPORT_TEXTURES] = "Texturen exportieren",
     [UI_STR_EXPORT_TEXTURES_STOP] = "Export anhalten",
     [UI_STR_EXPORT_TEXTURES_NOTE] =
@@ -647,9 +681,7 @@ const char *const ui_strings_de[UI_STR_COUNT] = {
     [UI_STR_RESTORE_AGAIN] = "Erneut drücken zum Auswählen",
     [UI_STR_RESTORE_CONFIRM_TITLE] = "Aus Sicherung wiederherstellen?",
     [UI_STR_RESTORE_CONFIRM_BODY] =
-        "Memory Card, Spielzustände, Einstellungen und Erfolge hier werden durch die der "
-        "Sicherung ersetzt, und das Spiel startet neu.\nErneut drücken, um die Sicherung zu "
-        "wählen.",
+        "Ersetzt Memory Card, Spielzustände,\nEinstellungen und Erfolge hier und startet neu.\nErneut drücken, um die Sicherung zu wählen.",
     [UI_STR_RESTORE_CHOOSING] = "Wähle die Sicherung zum Wiederherstellen.",
     [UI_STR_RESTORE_READING] = "Sicherung wird gelesen…",
     [UI_STR_RESTORE_PROGRESS] = "Wiederherstellen: %d von %d Dateien",
@@ -665,23 +697,21 @@ const char *const ui_strings_de[UI_STR_COUNT] = {
     [UI_STR_BACKUP_DONE_BODY] = "%d Dateien gespeichert in\n%s",
     [UI_STR_BACKUP_FAILED] = "Daten konnten nicht gesichert werden",
     [UI_STR_RESTORE_DONE] = "Daten werden wiederhergestellt",
-    [UI_STR_RESTORE_DONE_RESTART] = "Das Spiel startet jetzt neu und setzt die Sicherung ein.",
+    [UI_STR_RESTORE_DONE_RESTART] = "Neustart, um die Sicherung einzusetzen.",
     [UI_STR_RESTORE_DONE_CLOSE] =
-        "Das Spiel wird jetzt beendet. Starte es erneut: Beim Start setzt es die Sicherung ein.",
+        "Das Spiel wird beendet. Starte es erneut,\num die Sicherung einzusetzen.",
     [UI_STR_RESTORE_FAILED] = "Sicherung konnte nicht wiederhergestellt werden",
-    [UI_STR_BACKUP_WHY_BUSY] = "Jetzt nicht: Das Spiel speichert. Versuche es gleich noch einmal.",
+    [UI_STR_BACKUP_WHY_BUSY] = "Das Spiel speichert. Versuche es gleich noch einmal.",
     [UI_STR_BACKUP_WHY_NOTHING] = "Es gibt noch nichts zu sichern.",
     [UI_STR_BACKUP_WHY_WRITE] =
-        "Die Daten konnten nicht geschrieben werden. Prüfe den freien Speicher und versuche es "
-        "erneut.",
+        "Schreiben fehlgeschlagen. Prüfe den\nfreien Speicher und versuche es erneut.",
     [UI_STR_BACKUP_WHY_READ] = "Die Datei konnte nicht gelesen werden.",
     [UI_STR_BACKUP_WHY_NOT_BACKUP] = "Diese Datei ist keine Sicherung dieses Spiels.",
     [UI_STR_BACKUP_WHY_NEWER] =
-        "Diese Sicherung stammt aus einer neueren Version. Aktualisiere das Spiel, um sie "
-        "wiederherzustellen.",
+        "Aus einer neueren Version. Aktualisiere\ndas Spiel, um sie wiederherzustellen.",
     [UI_STR_BACKUP_WHY_DAMAGED] = "Diese Sicherung ist beschädigt.",
     [UI_STR_BACKUP_WHY_UNSAFE] =
-        "Diese Sicherung enthält Dateien außerhalb der Ordner des Spiels und wird nicht verwendet.",
+        "Sie enthält Dateien außerhalb der\nSpielordner und wird nicht verwendet.",
     [UI_STR_BACKUP_WHY_TOO_BIG] = "Diese Sicherung ist größer, als das Spiel annimmt.",
     [UI_STR_BACKUP_WHY_NO_DIALOG] = "Es konnte keine Dateiauswahl geöffnet werden.",
     [UI_STR_BACKUP_WHY_NO_SPACE] = "Auf dem Gerät ist nicht genug Speicher frei.",
@@ -724,18 +754,18 @@ const char *const ui_strings_de[UI_STR_COUNT] = {
     [UI_STR_ISO_COPYING] = "Das Disc-Image wird in die App kopiert",
     [UI_STR_ISO_COPYING_LONG] =
         "Das Disc-Image wird in die App kopiert. Es ist groß: Das dauert einige Minuten",
-    [UI_STR_SECTION_VARIANTS] = "Spielvarianten",
+    [UI_STR_SECTION_CHAINS] = "Ketten",
+    [UI_STR_SECTION_SHADOWS] = "Schatten",
+    [UI_STR_SECTION_CUTSCENES] = "Zwischensequenzen",
     [UI_STR_OPT_VAR_TOUGHNESS] = "Härte der Schatten",
     [UI_STR_OPT_VAR_TOUGHNESS_NOTE] =
-        "Amerikanisch: alle Schatten so zäh wie auf der nordamerikanischen Disc, in späteren Durchgängen nicht zäher. Erfolge bleiben aktiv.",
+        "Amerikanisch: alle Schatten so zäh wie auf der nordamerikanischen Disc, in späteren Durchgängen nicht zäher.",
     [UI_STR_VAL_VAR_AMERICAN] = "Amerikanisch",
     [UI_STR_VAL_VAR_NOT_TOUGHER] = "Ohne Verschärfung",
     [UI_STR_OPT_VAR_ONE_HIT] = "Ein Treffer pro Schlag",
-    [UI_STR_OPT_VAR_ONE_HIT_NOTE] =
-        "Jeder Schlag kann einen Schatten nur einmal treffen. Schaltet die Erfolge ab.",
+    [UI_STR_OPT_VAR_ONE_HIT_NOTE] = "Jeder Schlag kann einen Schatten nur einmal treffen.",
     [UI_STR_OPT_VAR_NEVER_DODGE] = "Schatten weichen nie aus",
-    [UI_STR_OPT_VAR_NEVER_DODGE_NOTE] =
-        "Die Schatten weichen Icos Schlägen nie aus. Schaltet die Erfolge ab.",
+    [UI_STR_OPT_VAR_NEVER_DODGE_NOTE] = "Die Schatten weichen Icos Schlägen nie aus.",
     [UI_STR_OPT_VAR_AGGRESSION] = "Angriffslust der Schatten",
     [UI_STR_VAL_VAR_AGG_OWN] = "Eigene",
     [UI_STR_VAL_VAR_AGG_BOLD_PATIENT] = "Mutig, geduldig",
@@ -743,15 +773,15 @@ const char *const ui_strings_de[UI_STR_COUNT] = {
     [UI_STR_VAL_VAR_AGG_WARY_PATIENT] = "Vorsichtig, geduldig",
     [UI_STR_VAL_VAR_AGG_WARY_QUICK] = "Vorsichtig, schnell",
     [UI_STR_OPT_VAR_AGGRESSION_NOTE] =
-        "Wie die Schatten kämpfen: mutig oder vorsichtig, geduldig oder schnell. Die Erfolge bleiben aktiv.",
+        "Wie die Schatten kämpfen: mutig oder vorsichtig, geduldig oder schnell.",
     [UI_STR_OPT_VAR_NO_HINTS] = "Keine Hinweise",
     [UI_STR_OPT_VAR_NO_HINTS_NOTE] =
-        "Yorda gibt keine Hinweise, wohin es weitergeht, wie auf der nordamerikanischen Disc. Die Erfolge bleiben aktiv.",
+        "Yorda gibt keine Hinweise, wohin es weitergeht, wie auf der nordamerikanischen Disc.",
     [UI_STR_OPT_VAR_BARRIER] = "Barriere der Königin",
     [UI_STR_VAL_VAR_HITS_5] = "5 Treffer",
     [UI_STR_VAL_VAR_HITS_7] = "7 Treffer",
     [UI_STR_OPT_VAR_BARRIER_NOTE] =
-        "Wie viele Treffer nötig sind, um die Barriere der Königin zu brechen. Die Erfolge bleiben aktiv.",
+        "Wie viele Treffer nötig sind, um die Barriere der Königin zu brechen.",
     [UI_STR_OPT_VAR_NO_LOOK] = "Zwischensequenzen ohne Umsehen",
     [UI_STR_OPT_VAR_NO_LOOK_NOTE] =
         "Der rechte Stick dreht die Kamera in Zwischensequenzen nicht mehr. Die Erfolge bleiben aktiv.",
@@ -762,9 +792,9 @@ const char *const ui_strings_de[UI_STR_COUNT] = {
     [UI_STR_OPT_VAR_DEBUG_MENU_NOTE] =
         "Das Debug-Menü des Spiels, für Entwickler. Schaltet die Erfolge ab.",
     [UI_STR_OPT_VAR_TOUGHNESS_NOTE_DEMO] =
-        "Amerikanisch gibt es auf dieser Demo nicht: ihre Schatten sind nicht die der nordamerikanischen Disc. Ohne Verschärfung: in späteren Durchgängen nicht zäher. Die Erfolge bleiben aktiv.",
+        "Amerikanisch gibt es auf dieser Demo nicht: ihre Schatten sind nicht die der nordamerikanischen Disc. Ohne Verschärfung: in späteren Durchgängen nicht zäher.",
     [UI_STR_OPT_VAR_NO_HINTS_NOTE_2001] =
-        "Diese Version des Spiels gibt keine Hinweise, also ändert das nichts. Die Erfolge bleiben aktiv.",
+        "Diese Version des Spiels gibt keine Hinweise, also ändert das nichts.",
     [UI_STR_OPT_VAR_NO_LOOK_NOTE_2001] =
         "In dieser Version des Spiels kann man sich in Zwischensequenzen nicht umsehen, also ändert das nichts. Die Erfolge bleiben aktiv.",
     [UI_STR_GPU_HANG_TURNIP] =
@@ -782,23 +812,26 @@ const char *const ui_strings_de[UI_STR_COUNT] = {
     [UI_STR_STATES_NOTE] =
         "Ein Zustand gehört zu dieser Disc. Spätere Versionen können ihn auch laden. Links und Rechts wählen die Aktion.",
     [UI_STR_STATES_PAUSE_FIRST] = "Pausiere das Spiel, um einen Zustand zu speichern",
+    [UI_STR_STATES_PAUSE_FIRST_LOAD] = "Pausiere das Spiel, um diesen Zustand zu laden",
     [UI_STR_STATES_REFUSED_BUILD] = "Von einer anderen Version des Spiels gespeichert",
     [UI_STR_STATES_REFUSED_DISC] = "Von einer anderen Disc gespeichert",
-    [UI_STR_STATES_REFUSED_SETTINGS] = "Eine Spieleinstellung weicht ab: %s",
     [UI_STR_STATES_REFUSED_BUSY] = "Jetzt nicht: Das Spiel lädt oder speichert gerade",
-    [UI_STR_STATES_REFUSED_CHECK] =
-        "Der Zustand konnte nicht wiederhergestellt werden; das Spiel läuft weiter",
+    [UI_STR_STATES_REFUSED_CHECK] = "Laden nicht möglich; das Spiel läuft weiter",
     [UI_STR_STATES_OFF] = "Spielzustände sind in dieser Version aus",
     [UI_STR_STATES_TITLE_HINT] = "Gespeichert wird im Pausenmenü",
     [UI_STR_STATES_SAVE_FAILED] = "Der Zustand konnte nicht gespeichert werden",
     [UI_STR_STATES_XB_OLD] =
-        "Dieser Spielzustand stammt aus Version %s,\nbevor Spielzustände in neuere Versionen\nübernommen werden konnten.\nDeine Speicherstände auf der Memory Card\nfunktionieren weiterhin.",
+        "Aus Version %s, zu alt zum Laden.\nDeine Memory-Card-Speicherstände\nfunktionieren weiterhin.",
     [UI_STR_STATES_XB_CODE] =
-        "Dieser Spielzustand stammt aus Version %s.\nVersion %s hat den Teil des Spiels geändert,\nin dem er gespeichert wurde, deshalb kann er\nnicht fortgesetzt werden.\nDeine Speicherstände auf der Memory Card\nfunktionieren weiterhin.",
+        "Aus Version %s; Version %s hat diese Stelle\ndes Spiels geändert, er lässt sich nicht laden.\nDeine Memory-Card-Speicherstände\nfunktionieren weiterhin.",
     [UI_STR_STATES_XB_DATA] =
-        "Dieser Spielzustand stammt aus Version %s.\nVersion %s hat geändert, wie das Spiel seinen\nFortschritt im Speicher hält, deshalb kann er\nnicht fortgesetzt werden.\nDeine Speicherstände auf der Memory Card\nfunktionieren weiterhin.",
+        "Aus Version %s; Version %s hält den Fortschritt\nanders, er lässt sich nicht laden.\nDeine Memory-Card-Speicherstände\nfunktionieren weiterhin.",
     [UI_STR_STATES_XB_PINNED] =
-        "Dieser Spielzustand stammt aus Version %s\nund kann nur mit dieser Version\nfortgesetzt werden.\nDeine Speicherstände auf der Memory Card\nfunktionieren weiterhin.",
+        "Nur Version %s kann ihn laden.\nDeine Memory-Card-Speicherstände\nfunktionieren weiterhin.",
+    [UI_STR_STATES_CKPT_ROW] = "Lädt ab seinem letzten Kontrollpunkt",
+    [UI_STR_STATES_CKPT_LOADED] = "Am letzten Kontrollpunkt fortgesetzt\n(aus Version %s).",
+    [UI_STR_STATES_CKPT_NONE] =
+        "Aus Version %s: Er kann nicht fortgesetzt\nwerden und hat keinen Kontrollpunkt.",
     [UI_STR_OPT_EFFECT_GLOW_SMOOTH] = "Leuchten zwischen Bildern",
     [UI_STR_EFFECT_GLOW_SMOOTH_NOTE] =
         "Original behält das Leuchten des Spielbildes zwischen den Bildern. Flüssig berechnet es für jedes gezeigte Bild neu; das kostet mehr Grafikzeit.",
@@ -807,7 +840,97 @@ const char *const ui_strings_de[UI_STR_COUNT] = {
     [UI_STR_OPT_EFFECT_MOTION_BLUR_STRENGTH] = "Stärke der Unschärfe",
     [UI_STR_EFFECT_MOTION_BLUR_STRENGTH_NOTE] =
         "Niedrigere Werte lassen die Spur schneller verblassen; 100 ist die Spur der PS2.",
+    [UI_STR_SECTION_UNUSED] = "Unbenutzte Inhalte",
+    [UI_STR_UNUSED_ARENA] = "Testraum: Arena",
+    [UI_STR_UNUSED_ARENA_NOTE] =
+        "Testraum für Kämpfe mit den Schatten; ohne Ausgang: Start, dann Spiel beenden.",
+    [UI_STR_UNUSED_CLIMB] = "Testraum: Klettern",
+    [UI_STR_UNUSED_CLIMB_NOTE] =
+        "Testraum für Klettern und Kisten; ohne Ausgang: Start, dann Spiel beenden.",
+    [UI_STR_UNUSED_MOVIE] = "Vorspannfilm (576 Zeilen)",
+    [UI_STR_UNUSED_MOVIE_NOTE] =
+        "Zweite Fassung des Titel-Vorspannfilms, für europäische Fernseher, nie gezeigt.",
+    [UI_STR_UNUSED_ART] = "Titelbilder einer frühen Messeversion",
+    [UI_STR_UNUSED_ART_NOTE] = "Bilder vom Titelbildschirm einer frühen Messeversion, nie gezeigt.",
+    [UI_STR_UNUSED_ART_VER] = "Messeversion: Versionszeichen",
+    [UI_STR_UNUSED_ART_START] = "Messeversion: Press Start",
+    [UI_STR_UNUSED_ART_COPYRIGHT] = "Messeversion: Copyright",
+    [UI_STR_STATES_REFUSED_UNUSED] = "Nicht in einem Testraum",
+    [UI_STR_SECTION_COMBAT] = "Kampf",
+    [UI_STR_OPT_VAR_AUTO_GUARD] = "Automatische Abwehr",
+    [UI_STR_OPT_VAR_AUTO_GUARD_NOTE] =
+        "Aus: Ico wehrt den Angriff eines Schattens von vorn nicht mehr ab; er trifft wie von hinten.",
+    [UI_STR_OPT_VAR_ATTACK_TURN] = "Schatten ansehen",
+    [UI_STR_OPT_VAR_ATTACK_TURN_NOTE] =
+        "Aus: Ico schlägt geradeaus, statt sich zum nächsten Schatten zu drehen; die Reichweite bleibt.",
+    [UI_STR_OPT_VAR_SHADOWS_WAIT_DOWN] = "Schatten warten bei Icos Sturz",
+    [UI_STR_OPT_VAR_SHADOWS_WAIT_DOWN_NOTE] =
+        "Aus: Die Schatten halten sich nicht zurück, und ihre Hiebe treffen Ico am Boden und beim Aufstehen.",
+    [UI_STR_OPT_VAR_SWORD_COLOUR] = "Farbe des Lichtschwerts",
+    [UI_STR_OPT_VAR_SWORD_COLOUR_NOTE] =
+        "Rot: Das Lichtschwert zieht eine rote Spur wie sein ungenutzter Zwilling; sonst ändert sich nichts. Ab dem nächsten Raum.",
+    [UI_STR_OPT_VAR_WEAPON] = "Stock",
+    [UI_STR_VAL_VAR_INSECT_NET] = "Insektennetz",
+    [UI_STR_OPT_VAR_WEAPON_NOTE] =
+        "Insektennetz: Jeder Stock ist das ungenutzte Netz; nicht schwingbar, nicht entzündbar, trifft keine Schatten. Ab dem nächsten Raum.",
+    [UI_STR_VAL_VAR_THIRD_JOURNEY] = "Dritte Reise",
+    [UI_STR_OPT_VAR_TOUGHNESS_NOTE_THIRD] =
+        "Schatten so zäh wie in einem dritten Durchgang, den das Spiel nie erreicht (doppelt so zäh wie auf der ersten Reise).",
+    [UI_STR_OPT_VAR_PEACEFUL] = "Friedliche Schatten",
+    [UI_STR_OPT_VAR_PEACEFUL_NOTE] =
+        "An: Schatten bleiben, wo sie erscheinen, und gehen nie auf Ico oder Yorda los.",
+    [UI_STR_OPT_VAR_CHAIN_SPEED] = "Kettenschwung-Tempo",
+    [UI_STR_OPT_VAR_CHAIN_SPEED_NOTE] =
+        "Wie schnell eine Kette mit Ico daran schwingt. 1 am langsamsten, 10 am schnellsten, 4 wie im Spiel. Erfolge bleiben an.",
+    [UI_STR_OPT_VAR_CHAIN_DAMPING] = "Kettenschwung-Abklingen",
+    [UI_STR_OPT_VAR_CHAIN_DAMPING_NOTE] =
+        "Wie schnell der Schwung nachlässt, wenn Ico nicht nachhilft. 1 am langsamsten, 10 am schnellsten, 4 wie im Spiel. Erfolge bleiben an.",
+    [UI_STR_VAL_VAR_CHAIN_ORIGINAL] = "4 (Original)",
     [UI_STR_LANG_RU_BOBTTZ] = "Русский (bob-ttz)",
     [UI_STR_LANG_RU_COBRA838] = "Русский (cobra838)",
     [UI_STR_LANG_PT_BR] = "Português (Brasil) (ichagas7)",
+    [UI_STR_OPT_FREE_MOVEMENT] = "Freie Bewegung",
+    [UI_STR_OPT_FREE_MOVEMENT_NOTE] =
+        "Mit L2 steuerst du Ico frei mit den Sticks: links bewegt ihn, rechts hoch und runter, L3 setzt ihn auf den Boden. Schaltet die Erfolge ab.",
+    [UI_STR_REMAP_ASK_HINT] = "Yorda um einen Hinweis bitten",
+    [UI_STR_DIFF] = "Schwierigkeit",
+    [UI_STR_DIFF_NOTE] =
+        "Legt Schatten, Rettungszeit und Regeln für diese neue Reise fest. Der Spielstand behält die Wahl.",
+    [UI_STR_DIFF_EASY] = "Leicht",
+    [UI_STR_DIFF_NORMAL] = "Normal",
+    [UI_STR_DIFF_HARD] = "Schwer",
+    [UI_STR_DIFF_CUSTOM] = "Angepasst",
+    [UI_STR_DIFF_EASY_NOTE] =
+        "Langsamere, mildere Schatten, die Yorda nie packen und nie ausweichen, und mehr Zeit, sie zu retten.",
+    [UI_STR_DIFF_NORMAL_NOTE] = "Das Spiel, wie es erschienen ist.",
+    [UI_STR_DIFF_HARD_NOTE] =
+        "Schnellere, zähere Schatten, die gemeinsam angreifen, keine Auto-Abwehr, weniger Rettungszeit, Game Over nach 3 Niederschlägen pro Raum.",
+    [UI_STR_DIFF_CUSTOM_NOTE] = "Deine eigenen Regeln. Ändere jede Zeile unter Anpassen.",
+    [UI_STR_DIFF_CUSTOMIZE] = "Anpassen",
+    [UI_STR_DIFF_CUSTOMIZE_NOTE] =
+        "Ändere jede Regel einzeln. Eine Mischung, die zu keiner Vorgabe passt, heißt Angepasst.",
+    [UI_STR_DIFF_RULES] = "Regeln",
+    [UI_STR_DIFF_NO_SHADOWS] = "Keine Schatten",
+    [UI_STR_DIFF_NO_SHADOWS_NOTE] =
+        "An: Es erscheinen nie Schatten. Manche Momente der Geschichte gehen verloren oder laufen anders ab.",
+    [UI_STR_DIFF_KNOCK_LIMIT] = "Grenze für Niederschläge",
+    [UI_STR_DIFF_KNOCK_LIMIT_NOTE] =
+        "Game Over, sobald Ico so oft niedergeschlagen wurde. Aus: keine Grenze.",
+    [UI_STR_DIFF_KNOCK_SCOPE] = "Niederschläge zählen",
+    [UI_STR_DIFF_KNOCK_SCOPE_NOTE] =
+        "Pro Raum (die Zählung beginnt bei jedem Betreten neu) oder über die ganze Reise. Ohne Wirkung, solange die Grenze Aus ist.",
+    [UI_STR_DIFF_SCOPE_ROOM] = "Pro Raum",
+    [UI_STR_DIFF_SCOPE_JOURNEY] = "Ganze Reise",
+    [UI_STR_DIFF_PERMADEATH] = "Permadeath",
+    [UI_STR_DIFF_PERMADEATH_NOTE] =
+        "An: Jedes Game Over beendet diese Reise. Weiterspielen über Laden gibt es nicht mehr, und der Spielstand lässt sich nicht mehr laden.",
+    [UI_STR_DIFF_LOCKED_NOTE] = "Zu Beginn der Reise gewählt",
+    [UI_STR_DIFF_LINE] = "Schwierigkeit",
+    [UI_STR_DIFF_LINK] = "Schwierigkeit",
+    [UI_STR_DIFF_TOAST_ENDED] = "Diese Reise ist zu Ende.",
+    [UI_STR_DIFF_STATES_LOCKED] =
+        "Spielzustände lassen sich auf einer Permadeath-Reise nicht laden.",
+    [UI_STR_DIFF_WORD_PERMADEATH] = "Permadeath",
+    [UI_STR_DIFF_STATES_SAVE_LOCKED] =
+        "Auf einer Permadeath-Reise lassen sich keine Spielzustände speichern.",
 };

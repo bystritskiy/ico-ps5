@@ -1,0 +1,680 @@
+/*
+ * port/platform/dump_auto.c
+ *
+ * The automatic dumps' worker (dump_auto.h).
+ */
+#include "dump_auto.h"
+#include <stdio.h>
+#include <stdlib.h>
+#include <string.h>
+#include "dump_zip.h"
+#include "host_fs.h"
+#include "ico_thread.h"
+
+#define RECORD_MAX 16
+
+/* the prepared block's state (ico_dump_auto_prepare) */
+enum {
+    PREP_NONE = 0,
+    PREP_ASKED,  /* the worker is to make it (or is making it) */
+    PREP_READY,  /* made: prepBlock waits for the game thread */
+    PREP_HELD,   /* the game thread took it: busy until its submit or give-up */
+    PREP_CANCEL, /* given up while the worker made it: the worker frees it */
+    PREP_FAILED  /* the worker could not allocate it */
+};
+
+typedef struct Auto {
+    IcoMutex *mu;
+    IcoCond *cv;
+    IcoThread *thread;
+    int started, quit;
+    int hasJob;  /* a job waits or is being written */
+    int hasDone; /* a result waits for the game thread */
+    int gate;
+    int prep;       /* PREP_* */
+    int prepMaking; /* the worker took the ask and is making the block */
+    size_t prepBytes;
+    void *prepBlock;
+    double prepMs;
+    /* the loss keep's block (ico_dump_auto_keep_ask): PREP_NONE, _ASKED,
+       _READY, _CANCEL or _FAILED (never _HELD: taken, it leaves) */
+    int kprep;
+    int kprepMaking;
+    size_t kprepBytes;
+    void *kprepBlock;
+    IcoDumpJob job;
+    IcoDumpDone done;
+    unsigned dropped;
+    void (*flush)(void);
+    char recorded[RECORD_MAX][ICO_PATH_MAX];
+    int nrecorded;
+} Auto;
+
+static Auto g;
+
+static void record_locked(const char *zip)
+{
+    if (g.nrecorded == RECORD_MAX) {
+        memmove(g.recorded[0], g.recorded[1], sizeof(g.recorded[0]) * (RECORD_MAX - 1));
+        g.nrecorded--;
+    }
+    snprintf(g.recorded[g.nrecorded++], sizeof(g.recorded[0]), "%s", zip);
+}
+
+void ico_dump_auto_record(const char *zip)
+{
+    if (g.mu == NULL) {
+        g.mu = ico_mutex_create();
+        g.cv = ico_cond_create();
+    }
+    ico_mutex_lock(g.mu);
+    record_locked(zip);
+    ico_mutex_unlock(g.mu);
+}
+
+void ico_dump_auto_forget(void)
+{
+    if (g.mu == NULL) {
+        return;
+    }
+    ico_mutex_lock(g.mu);
+    g.nrecorded = 0;
+    ico_mutex_unlock(g.mu);
+}
+
+void ico_dump_auto_game_text(const IcoDumpDone *d, char *out, size_t cap)
+{
+    if (cap == 0) {
+        return;
+    }
+    out[0] = '\0';
+    if (d->drainMs < 0.0) {
+        return;
+    }
+    const double rest = d->gameMs > d->drainMs ? d->gameMs - d->drainMs : 0.0;
+    if (d->readsOnly) {
+        snprintf(out, cap, " (copy %.1f ms, reads wait %.1f ms)", rest, d->drainMs);
+    } else {
+        snprintf(out, cap,
+                 " (the render thread's work in flight %.1f ms of it, the frame's bytes %.1f ms)",
+                 d->drainMs, rest);
+    }
+}
+
+/* the job, on the worker thread, no lock held */
+static void write_job(IcoDumpJob *j, IcoDumpDone *d)
+{
+    const double t0 = ico_thread_now_ms();
+    IcoZipMem e[2];
+    int n = 0;
+
+    memset(d, 0, sizeof(*d));
+    snprintf(d->tag, sizeof(d->tag), "%s", j->tag);
+    snprintf(d->zip, sizeof(d->zip), "%s", j->zip);
+    snprintf(d->text, sizeof(d->text), "%s", j->text);
+    d->gameMs = j->gameMs;
+    d->drainMs = j->drainMs;
+    d->readsOnly = j->readsOnly;
+    d->prepMs = j->prepMs;
+    d->measureMs = j->measureMs;
+    d->copyMs = j->copyMs;
+    snprintf(d->how, sizeof(d->how), "%s", j->how);
+    d->bytes = j->dumpLen;
+    e[n].name = j->dumpName;
+    e[n].data = j->dump;
+    e[n++].size = j->dumpLen;
+    if (j->prev != NULL && j->prevLen > 0) {
+        e[n].name = j->prevName;
+        e[n].data = j->prev;
+        e[n++].size = j->prevLen;
+    }
+    /* the entries carry their file names only, as the loose files' did */
+    for (int i = 0; i < n; i++) {
+        const char *b = e[i].name + strlen(e[i].name);
+
+        while (b > e[i].name && b[-1] != '/' && b[-1] != '\\') {
+            b--;
+        }
+        e[i].name = b;
+    }
+    if (g.flush != NULL) {
+        g.flush();
+    }
+    d->result = ico_zip_mem_files(j->zip, e, n, j->logPath, j->stored, d->why, sizeof(d->why));
+    if (d->result < 0) {
+        /* the frame is kept loose, as F12's is: the capture is not lost */
+        FILE *f = ico_fopen(j->dumpName, "wb");
+        const int kept = f != NULL && fwrite(j->dump, 1, j->dumpLen, f) == j->dumpLen;
+
+        if (f != NULL) {
+            fclose(f);
+        }
+        if (!kept) {
+            ico_remove(j->dumpName);
+        }
+    } else {
+        if (j->sidecar[0] != '\0') {
+            char swhy[160] = "";
+            const char *b = j->sidecar + strlen(j->sidecar);
+
+            while (b > j->sidecar && b[-1] != '/' && b[-1] != '\\') {
+                b--;
+            }
+            if (ico_zip_add_file(j->zip, j->sidecar, b, swhy, sizeof(swhy), NULL) != 0) {
+                size_t u = strlen(d->why);
+                snprintf(d->why + u, sizeof(d->why) - u, "the sidecar is not in the zip: %s", swhy);
+            }
+        }
+        if (j->pruneSlow) {
+            char dir[ICO_PATH_MAX];
+            const char *z = j->zip + strlen(j->zip);
+
+            while (z > j->zip && z[-1] != '/' && z[-1] != '\\') {
+                z--;
+            }
+            snprintf(dir, sizeof(dir), "%.*s", (int)(z - j->zip), j->zip);
+            (void)ico_slow_dump_prune(dir, ICO_SLOW_DUMP_KEEP);
+        }
+    }
+    d->workerEndMs = ico_thread_now_ms();
+    d->workerMs = d->workerEndMs - t0 + j->prepMs;
+}
+
+/* the prepared block, on the worker thread, no lock held: allocated and
+   every page touched, so the game thread's copy into it writes to pages
+   already there; NULL when it could not be allocated */
+static void *prep_make(size_t n)
+{
+    unsigned char *b = n > 0 ? malloc(n) : NULL;
+
+    for (size_t i = 0; b != NULL && i < n; i += 4096u) {
+        ((volatile unsigned char *)b)[i] = 0;
+    }
+    if (b != NULL) {
+        ((volatile unsigned char *)b)[n - 1] = 0;
+    }
+    return b;
+}
+
+static void worker_main(void *arg)
+{
+    (void)arg;
+    ico_mutex_lock(g.mu);
+    for (;;) {
+        while (!g.quit && !(g.hasJob && !g.hasDone) && g.prep != PREP_ASKED &&
+               g.kprep != PREP_ASKED) {
+            ico_cond_wait(g.cv, g.mu);
+        }
+        if (g.prep == PREP_ASKED) {
+            if (g.quit) {
+                g.prep = PREP_NONE;
+            } else {
+                const size_t n = g.prepBytes;
+                const double t0 = ico_thread_now_ms();
+                void *b;
+
+                g.prepMaking = 1;
+                ico_mutex_unlock(g.mu);
+                b = prep_make(n);
+                ico_mutex_lock(g.mu);
+                g.prepMaking = 0;
+                if (g.prep == PREP_CANCEL || g.quit) {
+                    free(b);
+                    g.prep = PREP_NONE;
+                } else {
+                    g.prepBlock = b;
+                    g.prepMs = ico_thread_now_ms() - t0;
+                    g.prep = b != NULL ? PREP_READY : PREP_FAILED;
+                }
+                ico_cond_broadcast(g.cv);
+                continue;
+            }
+        }
+        if (g.kprep == PREP_ASKED) {
+            /* the loss keep's block, as the slow-scene dump's above */
+            if (g.quit) {
+                g.kprep = PREP_NONE;
+            } else {
+                const size_t n = g.kprepBytes;
+                void *b;
+
+                g.kprepMaking = 1;
+                ico_mutex_unlock(g.mu);
+                b = prep_make(n);
+                ico_mutex_lock(g.mu);
+                g.kprepMaking = 0;
+                if (g.kprep == PREP_CANCEL || g.quit) {
+                    free(b);
+                    g.kprep = PREP_NONE;
+                } else {
+                    g.kprepBlock = b;
+                    g.kprep = b != NULL ? PREP_READY : PREP_FAILED;
+                }
+                ico_cond_broadcast(g.cv);
+                continue;
+            }
+        }
+        if (!g.hasJob) {
+            break; /* quit with nothing to write */
+        }
+        while (g.gate) {
+            ico_cond_wait(g.cv, g.mu);
+        }
+        ico_mutex_unlock(g.mu);
+        IcoDumpDone d;
+        write_job(&g.job, &d);
+        free(g.job.dump);
+        free(g.job.prev);
+        g.job.dump = g.job.prev = NULL;
+        ico_mutex_lock(g.mu);
+        g.done = d;
+        g.hasDone = 1;
+        if (d.result >= 0) {
+            record_locked(d.zip);
+        }
+        g.hasJob = 0;
+        if (g.quit) {
+            break;
+        }
+    }
+    ico_mutex_unlock(g.mu);
+}
+
+size_t ico_dump_auto_held_bytes(void)
+{
+    size_t held = 0;
+
+    if (g.mu == NULL) {
+        return 0;
+    }
+    ico_mutex_lock(g.mu);
+    if (g.prep != PREP_NONE) {
+        held += g.prepBytes; /* asked, being made, made or taken */
+    }
+    if (g.kprep == PREP_ASKED || g.kprep == PREP_READY || g.kprep == PREP_CANCEL) {
+        held += g.kprepBytes; /* asked, being made (or freed when made) or made */
+    }
+    if (g.hasJob) {
+        held += g.job.dumpLen + g.job.prevLen;
+    }
+    ico_mutex_unlock(g.mu);
+    return held;
+}
+
+int ico_dump_auto_busy(void)
+{
+    int busy;
+
+    if (g.mu == NULL) {
+        return 0;
+    }
+    ico_mutex_lock(g.mu);
+    busy = g.hasJob || g.hasDone || g.prep != PREP_NONE;
+    ico_mutex_unlock(g.mu);
+    return busy;
+}
+
+static void drop_line(const char *tag, const char *why)
+{
+    const unsigned n = ++g.dropped;
+
+    if (n <= 8u || n % 100u == 0u) {
+        fprintf(stderr,
+                "window: %s: dropped, %s (%u dropped so far; one dump is written at a time)\n", tag,
+                why, n);
+    }
+}
+
+int ico_dump_auto_submit(const IcoDumpJob *job)
+{
+    if (g.mu == NULL) {
+        g.mu = ico_mutex_create();
+        g.cv = ico_cond_create();
+    }
+    ico_mutex_lock(g.mu);
+    if (g.hasJob || g.hasDone || g.quit || (g.prep != PREP_NONE && g.prep != PREP_HELD)) {
+        drop_line(job->tag, "the worker is still writing the one before");
+        ico_mutex_unlock(g.mu);
+        return -1;
+    }
+    if (!g.started) {
+        g.thread = ico_thread_create(worker_main, NULL);
+        if (g.thread == NULL) {
+            drop_line(job->tag, "no thread could be made");
+            ico_mutex_unlock(g.mu);
+            return -2;
+        }
+        g.started = 1;
+    }
+    g.prep = PREP_NONE; /* a held block comes back as the job's dump */
+    g.job = *job;
+    g.hasJob = 1;
+    ico_cond_broadcast(g.cv);
+    ico_mutex_unlock(g.mu);
+    return 0;
+}
+
+int ico_dump_auto_prepare(size_t bytes)
+{
+    if (g.mu == NULL) {
+        g.mu = ico_mutex_create();
+        g.cv = ico_cond_create();
+    }
+    ico_mutex_lock(g.mu);
+    if (g.hasJob || g.hasDone || g.quit || g.prep != PREP_NONE || bytes == 0) {
+        ico_mutex_unlock(g.mu);
+        return -1;
+    }
+    if (!g.started) {
+        g.thread = ico_thread_create(worker_main, NULL);
+        if (g.thread == NULL) {
+            ico_mutex_unlock(g.mu);
+            return -2;
+        }
+        g.started = 1;
+    }
+    g.prep = PREP_ASKED;
+    g.prepBytes = bytes;
+    g.prepBlock = NULL;
+    g.prepMs = 0.0;
+    ico_cond_broadcast(g.cv);
+    ico_mutex_unlock(g.mu);
+    return 0;
+}
+
+int ico_dump_auto_prepared(void **block, size_t *size, double *ms)
+{
+    int r = -1;
+
+    *block = NULL;
+    *size = 0;
+    *ms = 0.0;
+    if (g.mu == NULL) {
+        return -1;
+    }
+    ico_mutex_lock(g.mu);
+    if (g.prep == PREP_READY) {
+        *block = g.prepBlock;
+        *size = g.prepBytes;
+        *ms = g.prepMs;
+        g.prepBlock = NULL;
+        g.prep = PREP_HELD;
+        r = 1;
+    } else if (g.prep == PREP_ASKED) {
+        r = 0;
+    } else if (g.prep == PREP_FAILED) {
+        g.prep = PREP_NONE;
+    }
+    ico_mutex_unlock(g.mu);
+    return r;
+}
+
+void ico_dump_auto_unprepare(void *block)
+{
+    if (g.mu != NULL) {
+        ico_mutex_lock(g.mu);
+        if (g.prep == PREP_READY) {
+            free(g.prepBlock);
+            g.prepBlock = NULL;
+            g.prep = PREP_NONE;
+        } else if (g.prep == PREP_ASKED) {
+            /* being made: the worker frees it when done; not taken up yet:
+               nothing to free */
+            g.prep = g.prepMaking ? PREP_CANCEL : PREP_NONE;
+        } else if (g.prep == PREP_HELD || g.prep == PREP_FAILED) {
+            g.prep = PREP_NONE;
+        }
+        ico_cond_broadcast(g.cv);
+        ico_mutex_unlock(g.mu);
+    }
+    free(block);
+}
+
+int ico_dump_auto_keep_ask(size_t bytes)
+{
+    if (g.mu == NULL) {
+        g.mu = ico_mutex_create();
+        g.cv = ico_cond_create();
+    }
+    ico_mutex_lock(g.mu);
+    if (g.quit || g.kprep != PREP_NONE || bytes == 0) {
+        ico_mutex_unlock(g.mu);
+        return -1;
+    }
+    if (!g.started) {
+        g.thread = ico_thread_create(worker_main, NULL);
+        if (g.thread == NULL) {
+            ico_mutex_unlock(g.mu);
+            return -2;
+        }
+        g.started = 1;
+    }
+    g.kprep = PREP_ASKED;
+    g.kprepBytes = bytes;
+    g.kprepBlock = NULL;
+    ico_cond_broadcast(g.cv);
+    ico_mutex_unlock(g.mu);
+    return 0;
+}
+
+int ico_dump_auto_keep_take(void **block, size_t *size)
+{
+    int r = -1;
+
+    *block = NULL;
+    *size = 0;
+    if (g.mu == NULL) {
+        return -1;
+    }
+    ico_mutex_lock(g.mu);
+    if (g.kprep == PREP_READY) {
+        *block = g.kprepBlock;
+        *size = g.kprepBytes;
+        g.kprepBlock = NULL;
+        g.kprep = PREP_NONE;
+        r = 1;
+    } else if (g.kprep == PREP_ASKED) {
+        r = 0;
+    } else if (g.kprep == PREP_FAILED) {
+        g.kprep = PREP_NONE;
+    }
+    ico_mutex_unlock(g.mu);
+    return r;
+}
+
+void ico_dump_auto_keep_give_back(void *block)
+{
+    if (g.mu != NULL) {
+        ico_mutex_lock(g.mu);
+        if (g.kprep == PREP_READY) {
+            free(g.kprepBlock);
+            g.kprepBlock = NULL;
+            g.kprep = PREP_NONE;
+        } else if (g.kprep == PREP_ASKED) {
+            /* being made: the worker frees it when done; not taken up yet:
+               nothing to free */
+            g.kprep = g.kprepMaking ? PREP_CANCEL : PREP_NONE;
+        } else if (g.kprep == PREP_FAILED) {
+            g.kprep = PREP_NONE;
+        }
+        ico_cond_broadcast(g.cv);
+        ico_mutex_unlock(g.mu);
+    }
+    free(block);
+}
+
+int ico_dump_auto_poll(IcoDumpDone *out)
+{
+    int r = 0;
+
+    if (g.mu == NULL) {
+        return 0;
+    }
+    ico_mutex_lock(g.mu);
+    if (g.hasDone) {
+        *out = g.done;
+        g.hasDone = 0;
+        r = 1;
+        ico_cond_broadcast(g.cv);
+    }
+    ico_mutex_unlock(g.mu);
+    return r;
+}
+
+void ico_dump_auto_shutdown(void)
+{
+    IcoThread *t;
+
+    if (g.mu == NULL) {
+        return;
+    }
+    ico_mutex_lock(g.mu);
+    g.gate = 0;
+    g.quit = 1;
+    t = g.started ? g.thread : NULL;
+    g.thread = NULL;
+    g.started = 0;
+    ico_cond_broadcast(g.cv);
+    ico_mutex_unlock(g.mu);
+    if (t != NULL) {
+        ico_thread_join(t);
+    }
+    ico_mutex_lock(g.mu);
+    if (g.prep == PREP_READY) {
+        free(g.prepBlock); /* made and never taken */
+        g.prepBlock = NULL;
+    }
+    if (g.prep != PREP_HELD) {
+        g.prep = PREP_NONE; /* a held block is still the caller's to hand back or give up */
+    }
+    if (g.kprep == PREP_READY) {
+        free(g.kprepBlock); /* the loss keep's, made and never taken */
+        g.kprepBlock = NULL;
+    }
+    g.kprep = PREP_NONE;
+    g.quit = 0; /* a later start (the tests) may begin again */
+    ico_mutex_unlock(g.mu);
+}
+
+void ico_dump_auto_set_flush(void (*flush)(void))
+{
+    g.flush = flush;
+}
+
+unsigned ico_dump_auto_dropped(void)
+{
+    return g.dropped;
+}
+
+void ico_dump_auto_test_gate(int closed)
+{
+    if (g.mu == NULL) {
+        g.mu = ico_mutex_create();
+        g.cv = ico_cond_create();
+    }
+    ico_mutex_lock(g.mu);
+    g.gate = closed;
+    ico_cond_broadcast(g.cv);
+    ico_mutex_unlock(g.mu);
+}
+
+/* ------------------------------------------------------------ the bundle */
+
+typedef struct Cand {
+    char path[ICO_PATH_MAX];
+    unsigned long long size;
+    long long mtime;
+} Cand;
+
+static const char *base_of(const char *p)
+{
+    const char *b = p + strlen(p);
+
+    while (b > p && b[-1] != '/' && b[-1] != '\\') {
+        b--;
+    }
+    return b;
+}
+
+int ico_dump_auto_bundle(const char *reportZip, char *line, size_t lineSize)
+{
+    Cand c[RECORD_MAX];
+    int nc = 0;
+    char note[2048] = "";
+    size_t nu = 0;
+    const char *add[ICO_BUNDLE_MAX_FILES];
+    int na = 0;
+    unsigned long long total = 0;
+    char why[160] = "";
+
+    if (g.mu == NULL) {
+        snprintf(line, lineSize, "no automatic capture was made this run");
+        return 0;
+    }
+    ico_mutex_lock(g.mu);
+    for (int i = 0; i < g.nrecorded; i++) {
+        unsigned long long sz = 0;
+        long long mt = 0;
+
+        if (ico_path_kind(g.recorded[i], &sz, &mt) == 0) {
+            snprintf(c[nc].path, sizeof(c[nc].path), "%s", g.recorded[i]);
+            c[nc].size = sz;
+            c[nc].mtime = mt;
+            nc++;
+        }
+    }
+    const int inFlight = g.hasJob;
+    ico_mutex_unlock(g.mu);
+    if (nc == 0) {
+        snprintf(line, lineSize, "no automatic capture of this run is still on disk%s",
+                 inFlight ? " (one is still being written)" : "");
+        return 0;
+    }
+    /* newest first: the recorded order is the order written */
+    nu +=
+        (size_t)snprintf(note + nu, sizeof(note) - nu,
+                         "The automatic captures of this run still on disk, newest first (at most "
+                         "%d, %u bytes together):\n",
+                         ICO_BUNDLE_MAX_FILES, (unsigned)ICO_BUNDLE_MAX_BYTES);
+    for (int i = nc - 1; i >= 0; i--) {
+        const char *why1 = NULL;
+
+        FILE *probe = NULL;
+
+        if (na >= ICO_BUNDLE_MAX_FILES) {
+            why1 = "left out: only the newest three go in";
+        } else if (c[i].size == 0 || total + c[i].size > ICO_BUNDLE_MAX_BYTES) {
+            why1 = c[i].size == 0 ? "left out: empty" : "left out: over the size limit";
+        } else if ((probe = ico_fopen(c[i].path, "rb")) == NULL) {
+            /* gone or unreadable since it was listed: the others still go in */
+            why1 = "left out: gone";
+        }
+        if (probe != NULL) {
+            fclose(probe);
+        }
+        if (nu < sizeof(note)) {
+            nu += (size_t)snprintf(note + nu, sizeof(note) - nu, "%s: %llu bytes, %s\n",
+                                   base_of(c[i].path), c[i].size, why1 != NULL ? why1 : "included");
+        }
+        if (why1 == NULL) {
+            add[na++] = c[i].path;
+            total += c[i].size;
+        }
+    }
+    if (inFlight && nu < sizeof(note)) {
+        snprintf(note + nu, sizeof(note) - nu, "one more capture was still being written\n");
+    }
+    int gone = 0;
+
+    if (na == 0 || ico_zip_add_bundle(reportZip, add, na, "automatic-captures.txt", note, &gone,
+                                      why, sizeof(why)) != 0) {
+        snprintf(line, lineSize, "%d on disk, none added to the report: %s", nc,
+                 na == 0 ? "all over the limits or gone" : why);
+        return 0;
+    }
+    snprintf(line, lineSize,
+             "%d of %d automatic captures added (%llu bytes; the rest named in "
+             "automatic-captures.txt%s)",
+             na - gone, nc, total, gone ? ", those gone as it was made among them" : "");
+    return na - gone;
+}

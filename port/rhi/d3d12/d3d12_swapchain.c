@@ -237,12 +237,60 @@ void rhi_surface_poll_restart(void)
     /* D3D12 learns a size change from DXGI; nothing to poll */
 }
 
+/* rhi.h: the images are never turned here (the desktop's surfaces are not) */
+uint32_t rhi_swapchain_rotation(void)
+{
+    return 0;
+}
+
 /* the last present reached the display (rhi_present_shown) */
 static bool s_presentShown;
 
 bool rhi_present_shown(void)
 {
     return s_presentShown;
+}
+
+/* rhi.h: the present is not timed apart here */
+bool rhi_present_split(RhiPresentSplit *out)
+{
+    memset(out, 0, sizeof(*out));
+    return false;
+}
+
+/* rhi.h: the frame latency wait stays in the acquire (the submit thread
+ * presents here, port/render/rd_submit_thread.h) */
+bool rhi_wait_present_room(void)
+{
+    return false;
+}
+
+/* rhi.h: no wait before the present (the frame slots are one at a time on
+ * this backend, port/render/rd_submit_thread.h "the GPU's end first") */
+bool rhi_wait_submitted(void)
+{
+    return false;
+}
+
+/* rhi.h: not known here (the GPU's end first stays off) */
+int rhi_submitted_finished(uint64_t *value)
+{
+    (void)value;
+    return -1;
+}
+
+/* rhi.h: no submission numbers here */
+uint64_t rhi_last_submitted(void)
+{
+    return 0;
+}
+
+/* rhi.h: no such wait here (the GPU's end first stays off) */
+int32_t rhi_wait_value_ns(uint64_t value, uint64_t *ns)
+{
+    (void)value;
+    *ns = 0;
+    return RHI_WAIT_NONE;
 }
 
 static RhiTexture dx_acquire_backbuffer_locked(void)

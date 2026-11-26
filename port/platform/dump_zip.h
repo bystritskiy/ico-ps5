@@ -12,6 +12,14 @@
 
 #include <stddef.h>
 
+/* The scene ledger's text (port/render/rd_ledger.h rd_ledger_report_text:
+   the last stages played and the stage in play so far): every zip here
+   that takes the log (F12's, the Settings picture's, the slow-scene and
+   skin-check captures', the loss dumps') takes it beside the log as
+   scene-ledger.txt; fn writes at most cap - 1 bytes and returns the
+   length.  NULL (the default; a build without the renderer) leaves it out. */
+void ico_dump_zip_set_ledger(size_t (*fn)(char *out, size_t cap));
+
 /* Writes zip_path holding the file dump_path under its own name, then
    prev_path (NULL or "": none; the tick before, second so a zip's first
    .rddump stays the frame) and, when it can be read, the file log_path under
@@ -36,15 +44,45 @@ int ico_zip_add_file(const char *zip_path, const char *file_path, const char *en
 int ico_zip_move_file(const char *zip_path, const char *path, char *why, size_t why_size,
                       size_t *added_size);
 
+/* A zip from entries held in memory (the automatic dumps' worker,
+   dump_auto.c: the rddump was copied on the game thread, the zip is built on
+   the worker): the entries e[0..n) (n at most ICO_ZIP_MEM_MAX, the first is
+   the frame so rd_replay_tool takes it) and, when it can be read, log_path
+   under its own name. The same result as ico_loss_dump_zip (0 both, 1 the
+   entries alone, -1 nothing written); no file is deleted. */
+#define ICO_ZIP_MEM_MAX 4
+
+typedef struct IcoZipMem {
+    const char *name;
+    const void *data;
+    size_t size;
+} IcoZipMem;
+
+int ico_zip_mem_files(const char *zip_path, const IcoZipMem *e, int n, const char *log_path,
+                      int stored, char *why, size_t why_size);
+
+/* Adds the n files paths (each under its own name, stored: they are zips
+   already) and, when note is not NULL, a text entry note_name holding note
+   to the zip zip_path in one rebuild (the bug report's bundled captures,
+   dump_auto.c).  A file that cannot be read (gone since it was listed) is
+   left out, a line "<name>: left out: gone ..." added to the note, and
+   counted in *gone (NULL: not asked); the others still go in.  0: added;
+   -1: the zip is as it was, why holding the reason. */
+int ico_zip_add_bundle(const char *zip_path, const char *const *paths, int n, const char *note_name,
+                       const char *note, int *gone, char *why, size_t why_size);
+
 /* The device-loss dump (window_host.c device_lost_quit): zip_path holding
    lost_path, then before_path (NULL or "": none), then log_path, each under
    its own name, as ico_frame_dump_zip writes its one dump (the same
    result, and the loose dumps deleted after a 0 or 1).  The lost frame is
    the first .rddump, so rd_replay_tool and the loss bisect
-   (ico_dump_zip_extract) take it. */
+   (ico_dump_zip_extract) take it.  stored: the entries stored, not
+   deflated (the loss dump: written on the watchdog's thread after a GPU
+   hang, issue 123, where a deflate's seconds delay the run's end); 0
+   deflated at F12's level (the slow-scene dump). */
 #define ICO_LOSS_DUMP_FILES 2
 int ico_loss_dump_zip(const char *zip_path, const char *lost_path, const char *before_path,
-                      const char *log_path, char *why, size_t why_size);
+                      const char *log_path, int stored, char *why, size_t why_size);
 /* dir/loss-<stamp>.zip into out; 0, or -1 when it does not fit */
 int ico_loss_dump_path(char *out, size_t size, const char *dir, const char *stamp);
 /* Deletes the oldest loss-*.zip files in dir until keep remain (a device
@@ -52,6 +90,29 @@ int ico_loss_dump_path(char *out, size_t size, const char *dir, const char *stam
    when dir cannot be read. */
 #define ICO_LOSS_DUMP_KEEP 3
 int ico_loss_dump_prune(const char *dir, int keep);
+
+/* The same, the zip just written (zip_path, as the walk names it: dir, '/'
+   and the name) counted among the kept and never deleted: by name alone a
+   zip written after the clock went back (a set clock, a time zone, the
+   hour a daylight saving change repeats) sorts before older ones and was
+   the first deleted, and the activity file then named a zip that was gone.
+   info (may be NULL): found zips before, removed, their names (up to what
+   fits), and saved: 1 when the plain name order would have deleted zip_path. */
+typedef struct IcoPruneInfo {
+    int found, removed, saved;
+    char names[400];
+} IcoPruneInfo;
+
+int ico_loss_dump_prune_except(const char *dir, int keep, const char *zip_path, IcoPruneInfo *info);
+
+/* The slow-scene dump (window_host.c slow_scene_write, issue 179): one
+   frame and the log, written with ico_loss_dump_zip (no frame before), as
+   dir/slow-<stamp>.zip; kept to ICO_SLOW_DUMP_KEEP by the same walk as the
+   loss zips'. Path: 0, or -1 when it does not fit; prune: the number
+   deleted, or -1 when dir cannot be read. */
+#define ICO_SLOW_DUMP_KEEP 3
+int ico_slow_dump_path(char *out, size_t size, const char *dir, const char *stamp);
+int ico_slow_dump_prune(const char *dir, int keep);
 
 /* The first entry of zip_path whose name ends in ".rddump", in a malloc
    block (free it) with its size in *size and, when name is not NULL, its
@@ -62,6 +123,17 @@ void *ico_dump_zip_extract(const char *zip_path, size_t *size, char *name, size_
    an F12 or loss zip's tick before) */
 void *ico_dump_zip_extract_nth(const char *zip_path, int nth, size_t *size, char *name,
                                size_t name_size);
+
+/* The same, saying why it returned NULL in why (why_size bytes; may be
+   NULL): "cannot open <zip>: <errno text> (errno N)" (the file is gone or
+   not readable), "cannot read ..." (a read broke), "<zip> is not a zip:
+   <bytes>, <the reader's error>" (empty, truncated or another file's bytes),
+   "<zip> is a zip (...) with no frame number N (.rddump) inside ...; it
+   holds: <the entries and their sizes>", or "... whose frame entry <name>
+   could not be extracted: <error>" (a damaged entry).  why is "" on
+   success.  The bisect's start-up line (window_host.c bisect_dump_file). */
+void *ico_dump_zip_extract_why(const char *zip_path, int nth, size_t *size, char *name,
+                               size_t name_size, char *why, size_t why_size);
 
 /* The aspect sweep (Shift+F12 in photo mode, window_host.c): one paused
    frame captured at ICO_SWEEP_COUNT aspects.  Aspect i has the name

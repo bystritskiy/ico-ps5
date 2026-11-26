@@ -9,14 +9,22 @@
  * device arena (rd__upload_meshes), and the first clear of a target with a
  * new texture (rd__clear_new_targets).  Everything is recorded into the
  * replay's command list (rd__replay_cl) on the ring of its frame slot
- * (rd__ring_slot).
+ * (rd__ring_slot).  The texture uploads and the fog's table go after the VU
+ * pre-pass, in a window of the ring reserved before it (rd_upload_late.h).
  */
 #include <stdio.h>
 #include <stdlib.h>
 #include <string.h>
 #include "rd_internal.h"
+#include "rd_diag_notes.h" /* the grow line's words */
+#include "rd_layer.h"
+#include "rd_velocity.h"
+#include "rd_vu_skin_check.h"
+#include "rd_vu_share.h"
 #include "rd_mesh.h"
+#include "rd_stencil_selftest.h"
 #include "rd_tex.h"
+#include "rd_upload_late.h"
 #include "shader_consts.h"
 #include "texpack.h"
 
@@ -133,18 +141,29 @@ uint64_t rd__estimate_ring(const RdFrame *f, int keep)
                  * table, and its index list once more in its run's (a
                  * grid's from its shape, a mesh's at most its whole list) */
                 total += (passes / 4u + 1u) * 32u + 256u;
+                if (c->type != RDC_PARTICLES && (c->u[3] & RD_VU_PREV) != 0u) {
+                    /* the velocity (rd_velocity.h; rd_replay_vu.c "the
+                     * velocity pass"): the second record's VuCB, bones,
+                     * stream and batch entry, a VuCB a velocity draw, the
+                     * pass's DrawCB */
+                    total += sizeof(IcoVuCB) + sizeof(IcoVuBoneCB) + (uint64_t)p.streamQw * 16 +
+                             4 * align + 32;
+                    total += (passes / 4u + 1u) * (sizeof(IcoVuCB) + align) + sizeof(IcoDrawCB);
+                }
                 total += (uint64_t)p.batchCount * (p.vertsPerBatch + 1) * 12 + 16;
                 const RdMeshRec *m = c->type <= RDC_SKINNED ? rd__mesh_rec(c->u[0]) : NULL;
                 if (m) {
-                    total += (uint64_t)m->vertexCount * m->qwPerVertex * 16 +
-                             (uint64_t)rd__mesh_mark_qw(m) * 16 + (uint64_t)m->indexCount * 4 +
-                             2 * align;
+                    /* its upload: stream, marks and index lists, the shared
+                       vertices' list wherever the upload below may write it
+                       (rd_vu_share.h: the same count the writes take) */
+                    total += rd__mesh_ring_bytes(m, c, &p, align);
                     total += (uint64_t)m->indexCount * 4 + 16; /* its run's copy */
                 }
             }
         }
     }
-    return total + rd__texture_ring_bytes();
+    /* the skin check's probes and copies (rd_vu_skin_check.c rd__vu_skin_end) */
+    return total + rd__texture_ring_bytes() + rd__vu_skin_ring_bytes();
 }
 
 uint64_t rd__texture_ring_bytes(void)
@@ -180,6 +199,10 @@ uint64_t rd__texture_ring_bytes(void)
 
 uint64_t g_rdRingFailOver; /* rd_internal.h: a test's refusal of larger rings */
 
+/* each slot's ring: when it was made, when last asked for (the grow
+   line's words, rd_diag_notes.h) */
+static RdRingNote s_ringNote[RHI_FRAMES_IN_FLIGHT];
+
 static bool newRing(uint64_t cap)
 {
     if (g_rdRingFailOver && cap > g_rdRingFailOver) {
@@ -203,6 +226,7 @@ static bool newRing(uint64_t cap)
     g_rd.ring[rd__ring_slot()] = b;
     g_rd.ringMap[rd__ring_slot()] = map;
     g_rd.ringCap[rd__ring_slot()] = cap;
+    rd_ring_note_made(&s_ringNote[rd__ring_slot()], rd__now_ms());
     return true;
 }
 
@@ -221,6 +245,7 @@ bool rd__ensure_ring(uint64_t need)
            in a row of this slot needing under a quarter of it, it is
            remade at half (newRing's deferred destroy covers the old one's
            frames in flight) */
+        rd_ring_note_use(&s_ringNote[slot], rd__now_ms(), need); /* two stores a replay */
         if (need >= have / 4u) {
             g_rd.ringSmall[slot] = 0;
         } else if (++g_rd.ringSmall[slot] >= RD_RING_SHRINK_REPLAYS) {
@@ -244,7 +269,9 @@ bool rd__ensure_ring(uint64_t need)
        named in the log, and the ring shrinks again when the need stays low
        (above) */
     const uint64_t exact = (need + (1u << 20) - 1) & ~(uint64_t)((1u << 20) - 1);
+    const RdRingNote old = s_ringNote[slot]; /* the ring it replaces (rd_diag_notes.h) */
     if (!newRing(cap) && !(exact < cap && newRing(exact))) {
+        rd_ring_note_use(&s_ringNote[slot], rd__now_ms(), need);
         rd__log("the upload ring of frame slot %d could not grow to %llu MB (this frame needs "
                 "%llu MB; it keeps %llu MB)",
                 (int)rd__ring_slot(), (unsigned long long)(cap >> 20),
@@ -253,10 +280,13 @@ bool rd__ensure_ring(uint64_t need)
         return false;
     }
     if (g_rd.ringCap[rd__ring_slot()] >= (64ull << 20)) {
-        rd__log("the upload ring of frame slot %d grows to %llu MB (this frame needs %llu MB)",
+        char was[128];
+        (void)rd_ring_note_text(&old, have, rd__now_ms(), was, sizeof was);
+        rd__log("the upload ring of frame slot %d grows to %llu MB (this frame needs %llu MB%s)",
                 (int)rd__ring_slot(), (unsigned long long)(g_rd.ringCap[rd__ring_slot()] >> 20),
-                (unsigned long long)(need >> 20));
+                (unsigned long long)(need >> 20), was);
     }
+    rd_ring_note_use(&s_ringNote[slot], rd__now_ms(), need);
     return true;
 }
 
@@ -459,9 +489,10 @@ static int uploadReplacement(RdTexRec *t)
     return 1;
 }
 
-void rd__upload_dirty_textures(void)
+/* the 1x1 white dummy's one upload (once a device: it is never in
+ * SHADER_READ before it, so no barrier of it waits for fragment work) */
+static void uploadDummy(void)
 {
-    rdtex_settle(); /* no texture is uploaded before its decode is in it */
     const uint32_t pitchA = rhi_limits()->copyRowPitchAlign;
     const uint32_t offA = rhi_limits()->copyOffsetAlign;
     /* a full ring gives ~0, whose write would land past the map: the
@@ -477,6 +508,14 @@ void rd__upload_dirty_textures(void)
                                        (RhiRect){0, 0, 1, 1});
         rd__transition(rd__replay_cl(), g_rd.dummy, &g_rd.dummyState, RHI_STATE_SHADER_READ);
     }
+}
+
+void rd__upload_dirty_textures(void)
+{
+    rdtex_settle(); /* no texture is uploaded before its decode is in it */
+    const uint32_t pitchA = rhi_limits()->copyRowPitchAlign;
+    const uint32_t offA = rhi_limits()->copyOffsetAlign;
+    uploadDummy();
     /* the table is walked only while a texture is dirty or the filter
      * option changed since the last walk */
     if (g_rd.texDirtyCount == 0 && g_rd.texLevelsFilter == (int)g_rd.filterUpgrade) {
@@ -501,8 +540,8 @@ void rd__upload_dirty_textures(void)
             continue;
         }
         const uint8_t levels = texLevels(t);
-        /* a sheet's texels baked at 1x and 2x (rd__sheet_baked), its
-         * coverage at 3x and 4x */
+        /* a sheet's texels baked at 1x, and 2x on the tile-based
+         * classes (rd__sheet_baked), its coverage above */
         const uint8_t baked = (uint8_t)rd__sheet_baked(t);
         if (t->rhi.id && (t->mipLevels != levels || t->sheetBaked != baked)) {
             /* the filter option changed, or a sheet's layout (its scale,
@@ -611,6 +650,119 @@ void rd__upload_dirty_textures(void)
     g_rd.texDirtyCount = stillDirty;
 }
 
+static uint64_t s_lateBytes; /* the window's size (rd__upload_late_reserve) */
+/* the wide scopes' replay: the late uploads were recorded at the reserve,
+ * in v0.11.2's place (rd__upload_late then records nothing) */
+static bool s_lateDone;
+
+/* the ring bytes rd__upload_dirty_textures will take now, as it lays them
+ * out (the changed rectangle of a texture uploaded in place, a whole one
+ * with its levels, a small replacement), so the window the late uploads
+ * take wastes no ring bytes on a replay that re-uploads a rectangle (the
+ * Direct3D 11 backend writes every byte up to the ring's end at a submit,
+ * and the uploads' figure counts them); one it misses takes the ring's
+ * end */
+static uint64_t lateTextureBytes(void)
+{
+    const uint64_t pitchA = rhi_limits()->copyRowPitchAlign ? rhi_limits()->copyRowPitchAlign : 1u;
+    const uint64_t offA = rhi_limits()->copyOffsetAlign ? rhi_limits()->copyOffsetAlign : 1u;
+    if (g_rd.texDirtyCount == 0 && g_rd.texLevelsFilter == (int)g_rd.filterUpgrade) {
+        return 0;
+    }
+    uint64_t total = 0;
+    for (uint32_t i = 0; i < RD_MAX_TEXTURES; i++) {
+        const RdTexRec *t = &g_rd.textures[i];
+        if (!t->live || t->kind != RD_TEXKIND_IMAGE) {
+            continue;
+        }
+        if (t->replacement) {
+            const uint64_t b = t->dirty && t->pending ? replacementBytes(t) : 0;
+            total += b <= RD_REPLACEMENT_RING_MAX ? b : 0;
+            continue;
+        }
+        const uint8_t levels = texLevels(t);
+        const uint8_t baked = (uint8_t)rd__sheet_baked(t);
+        const bool remade = t->rhi.id && (t->mipLevels != levels || t->sheetBaked != baked);
+        if (!t->dirty && !remade) {
+            continue;
+        }
+        const uint32_t bpp = rd__tex_device_bytes(t);
+        const uint32_t dw = rd__tex_device_w(t), dh = rd__tex_device_h(t);
+        uint32_t rx = 0, ry = 0, rw = dw, rh = dh;
+        if (t->rhi.id && !remade && levels <= 1 && t->dirtyX1 > t->dirtyX0 &&
+            t->dirtyY1 > t->dirtyY0 && t->dirtyX1 <= t->w && t->dirtyY1 <= t->h) {
+            rx = t->dirtyX0;
+            ry = t->dirtyY0;
+            rw = t->dirtyX1 - t->dirtyX0;
+            rh = t->dirtyY1 - t->dirtyY0;
+            if (baked) {
+                rd__sheet_bake_grow(t, dw, dh, &rx, &ry, &rw, &rh);
+            }
+        }
+        total += ((uint64_t)rw * bpp + pitchA - 1) / pitchA * pitchA * rh + offA;
+        uint32_t w = t->w, h = t->h;
+        for (uint32_t l = 1; l < levels; l++) {
+            w = w > 1 ? w / 2 : 1;
+            h = h > 1 ? h / 2 : 1;
+            total += ((uint64_t)w * 4u + pitchA - 1) / pitchA * pitchA * h + offA;
+        }
+    }
+    return total;
+}
+
+uint64_t rd__upload_late_reserve(const RdFrame *f, int keep)
+{
+    const RhiLimits *lim = rhi_limits();
+    s_lateDone = false;
+    if (lim->wideBarriers) {
+        /* v0.11.2's order (rhi.h RhiLimits.wideBarriers, rhi_tile_rule.h: a
+           tile-based phone GPU by default, or a start after a lost one): the
+           texture uploads and the fog's table here, first, before the
+           meshes; the same bytes at the same ring offsets as v0.11.2 */
+        const uint64_t texOff = rd__ring_alloc(0, 1);
+        rd__upload_dirty_textures();
+        g_rdPerf.uploadTextureBytes = rd__ring_alloc(0, 1) - texOff;
+        rd__fog_lut_upload(f, keep); /* the fog's table, outside any pass (doFog) */
+        s_lateDone = true;
+        return ~0ull;
+    }
+    const uint64_t pitchA = lim->copyRowPitchAlign ? lim->copyRowPitchAlign : 1u;
+    const uint64_t offA = lim->copyOffsetAlign ? lim->copyOffsetAlign : 1u;
+    /* the dummy's 4 bytes and the fog's 256 texels, each at its alignment */
+    const uint64_t lut = (256u * 4u + pitchA - 1u) / pitchA * pitchA;
+    rdtex_settle(); /* the decodes in flight into their textures first, as the uploads do */
+    s_lateBytes = lateTextureBytes() + (4u + offA) + (lut + offA);
+    const uint64_t win = rd__ring_alloc(s_lateBytes, 256);
+    uploadDummy(); /* the dummy's first upload stays first in the list */
+    return win;
+}
+
+void rd__upload_late(const RdFrame *f, int keep, uint64_t win)
+{
+    if (s_lateDone) {
+        s_lateDone = false; /* recorded before the meshes (the wide scopes) */
+        return;
+    }
+    /* their GPU time in the uploads' (rd_perf.c), the record's held-back
+       end sent before their barriers */
+    rd__perf_stamp(rd__replay_cl(), RD_PERF_TS_LATE);
+    const uint64_t end0 = rd__ring_alloc(0, 1); /* the ring's end (no window yet) */
+    const bool haveWin = win != ~0ull;
+    const uint64_t winEnd = haveWin ? win + s_lateBytes : 0u;
+    if (haveWin) {
+        (void)rd__ring_window(win, winEnd);
+    }
+    rd__upload_dirty_textures();
+    const uint64_t winNext = rd__ring_window(0, 0); /* off: the end below is the ring's */
+    /* the window's bytes taken and any it could not hold (the ring's end) */
+    g_rdPerf.uploadTextureBytes = (haveWin ? winNext - win : 0u) + (rd__ring_alloc(0, 1) - end0);
+    if (haveWin) {
+        (void)rd__ring_window(winNext, winEnd);
+    }
+    rd__fog_lut_upload(f, keep); /* the fog's table, outside any pass (doFog) */
+    (void)rd__ring_window(0, 0);
+}
+
 /* The static meshes a frame draws live in the device arena
  * (rd_mesh.c): uploaded the first time a replay draws them and again only
  * after rd_update_vu_mesh rewrote them (gpuDirty, the morphs), through the
@@ -620,6 +772,22 @@ void rd__upload_dirty_textures(void)
 void rd__upload_meshes(const RdFrame *f, int keep)
 {
     const uint64_t ua = rhi_limits()->uniformAlign;
+    /* the shared vertices' lists first, every command before any upload
+       (rd_vu_share.h: a list made marks its device copy for the upload
+       below; rd__estimate_ring counted it) */
+    for (int l = rd__first_list(keep); l < RD_LIST_COUNT; l++) {
+        const RdCmdList *cl = &f->lists[l];
+        for (uint32_t i = 0; i < cl->count; i++) {
+            const RdCmd *c = &cl->cmds[i];
+            RdMeshRec *m = c->type == RDC_MESH ? rd__mesh_rec(c->u[0]) : NULL;
+            if (m && m->vu && !m->shareTried &&
+                (uint64_t)c->u[1] + sizeof(RdVuPayload) <= f->payloadSize) {
+                RdVuPayload p;
+                memcpy(&p, f->payload + c->u[1], sizeof(p));
+                rd__vu_share_consider(m, c, &p);
+            }
+        }
+    }
     for (int l = rd__first_list(keep); l < RD_LIST_COUNT; l++) {
         const RdCmdList *cl = &f->lists[l];
         for (uint32_t i = 0; i < cl->count; i++) {
@@ -637,7 +805,8 @@ void rd__upload_meshes(const RdFrame *f, int keep)
              * vu_kick_marks), then the indices */
             const uint64_t vb = (uint64_t)m->vertexCount * m->qwPerVertex * 16;
             const uint64_t sb = vb + (uint64_t)rd__mesh_mark_qw(m) * 16;
-            const uint64_t ib = (uint64_t)m->indexCount * 4;
+            /* the list, and its shared vertices' list after it (rd_vu_share.h) */
+            const uint64_t ib = rd__mesh_index_bytes(m);
             if (!rd__mesh_gpu_reserve(m, sb, ib, ua)) {
                 m->replaySeen = 0; /* doVuDraw's ring path */
                 continue;
@@ -657,8 +826,8 @@ void rd__upload_meshes(const RdFrame *f, int keep)
             }
             rd__mesh_write_marks(m, g_rd.ringMap[rd__ring_slot()] + off + vb);
             if (ib) {
-                memcpy(g_rd.ringMap[rd__ring_slot()] + off + (m->gpuIndexOff - m->gpuOff), m->index,
-                       ib);
+                rd__mesh_write_indices(m, g_rd.ringMap[rd__ring_slot()] + off +
+                                              (m->gpuIndexOff - m->gpuOff));
             }
             rhi_cmd_copy_buffer(rd__replay_cl(), g_rd.ring[rd__ring_slot()], off,
                                 rd__mesh_gpu_buffer(m->gpuChunk), m->gpuOff, span);
@@ -723,6 +892,7 @@ void rd__clear_new_targets(void)
         }
         p.width = t->tw;
         p.height = t->th;
+        rd__stencil_cut_pass(&p, false); /* the stencil's store counted (rd_stencil_selftest.c) */
         rhi_cmd_begin_render_pass(rd__replay_cl(), &p);
         rhi_cmd_end_render_pass(rd__replay_cl());
         if (i >= RD_TARGET_COUNT) {
@@ -781,11 +951,15 @@ static void workClearEnv(void)
     s_wc.rgb = (uint32_t)v;
 }
 
-/* the targets read across frames by design, or the frame's own picture */
+/* the targets read across frames by design, or the frame's own picture;
+ * the display layer's slots (COMPOSITE, COMPOSITE_HELD, PRE_DISPLAY,
+ * PRE_HELD: rd_layer.h) are read across replays (a keep frame's hold, the
+ * motion blur's PRE_DISPLAY) */
 static bool workClearKeeps(int i)
 {
     return i == RD_TARGET_SCENE || i == RD_TARGET_DISPLAY || i == RD_TARGET_DISPLAY_HELD ||
-           i == RD_TARGET_FEED128 || i == RD_TARGET_FEED_HELD || i == RD_TARGET_WORK3_HELD;
+           i == RD_TARGET_FEED128 || i == RD_TARGET_FEED_HELD || i == RD_TARGET_WORK3_HELD ||
+           i >= RD_LAYER_SLOT_FIRST;
 }
 
 /* rd_internal.h rd__set_work_clear: every other live target's colour
@@ -840,7 +1014,8 @@ static void workClear(void)
     }
     if (s_wc.count++ == 0) {
         rd__log("work clear: every target but SCENE, DISPLAY and the feedback kept across frames "
-                "(DISPLAY_HELD, FEED128, FEED_HELD, WORK3_HELD) cleared to %06X before every frame "
+                "(DISPLAY_HELD, FEED128, FEED_HELD, WORK3_HELD, the display layer's COMPOSITE, "
+                "COMPOSITE_HELD, PRE_DISPLAY, PRE_HELD) cleared to %06X before every frame "
                 "(ICO_RD_WORK_CLEAR, a diagnostic): %d named (%s) and %d temporaries; a texel a "
                 "frame reads before drawing it shows that colour",
                 (unsigned)s_wc.rgb, named, names, temps);
