@@ -122,7 +122,7 @@ PS5_PayloadSDK, PS5_Mesa на ревизиях из `dependencies.json`) и `rel
 
 - **ProsperoStore** ([руководство](https://github.com/darkxex/ps5-homebrew-catalog/blob/main/docs/submitting.md)):
   публичный GitHub-репозиторий, опубликованный release с тегом версии
-  (`1.001.000`) и ZIP папки приложения; `.ffpfsc` не принимается. Запись
+  (`01.001.000`, как `contentVersion`) и ZIP папки приложения; `.ffpfsc` не принимается. Запись
   `apps/PPSA99031.json` с URL asset и его SHA-256, `icon_url` на
   `port/ps5/sce_sys/icon0.png` по тегу, лицензия, категория; PR от владельца
   репозитория. В каждом релизе поднимать `contentVersion` и не заменять

@@ -1,0 +1,11 @@
+Use your built-in image generation tool to create ONE new image. Do nothing else and do not modify other files.
+
+Attached: ref-icon.png (the app's icon) and ref-background.png (the app's home screen background). Match their painterly style, misty sepia palette and mood.
+
+A wide 16:9 README banner for a GitHub project, the highest resolution you can. Everything important must sit inside the middle horizontal band, between 22% and 78% of the height, because the picture will be cropped to a 2000x640 strip; above and below that band put only soft mist and sky.
+
+Composition, left to right inside that band: the attached icon as a rounded square tile with a soft shadow (keep its art recognisable: the tower on the cliff and the two small figures); then the word ICO in very large classical serif capitals (Trajan or Garamond style), warm off-white with a subtle dark outline so it reads on the misty picture; under ICO, on one line, the words "native on PS5" in a smaller elegant serif. Behind everything, the misty fortress on sea cliffs and the long stone bridge from the background reference, softened so the text stays readable.
+
+Spell exactly: ICO and native on PS5. No other text, no logos, no watermark, no border.
+
+Save the generated PNG as out/banner-b.png (create the folder if needed).
