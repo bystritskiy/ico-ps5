@@ -31,6 +31,12 @@
 > **We do not support piracy.**
 > Please do not use this project with pirated copies of the game.
 
+<p align="center">
+  <img src="port/ps5/media/yorda.jpg" alt="Ico and Yorda in a courtyard, the frame rate counter at 120 fps" width="100%">
+  <br>
+  <sub>Ico and Yorda on the PS5, rendered at 3840x2160 at 120 fps.</sub>
+</p>
+
 ## What it is
 
 A PS5 build of [ico-pc](https://github.com/nathanialf/ico-pc), which runs the game's own code as a
@@ -42,7 +48,8 @@ draws with Vulkan on its GPU. There is no emulator, BIOS or JIT.
 - **4K out of the box.** A new install starts on the Enhanced preset: 3840x2160 in the shape of
   your screen, anisotropic filtering and the full-height picture. The game draws the extra width
   itself; menus and subtitles stay in their 4:3 frame.
-- **Smooth motion.** Frames are drawn between the game's own, up to your display's refresh rate.
+- **Up to 120 fps.** Frames are drawn between the game's own, up to your display's refresh rate:
+  120 fps on a 120 Hz display, 60 elsewhere.
 - **DualSense.** Every button of the DualShock 2, vibration, and the touchpad as Select.
 - **Your disc, any region.** The European, Japanese, Korean, North American and Asian discs, the
   August 2001 preview and the June 2001 magazine demo.
@@ -50,6 +57,23 @@ draws with Vulkan on its GPU. There is no emulator, BIOS or JIT.
   by ichagas7, next to the European disc's five.
 - **Everything from ico-pc:** difficulty modes, photo mode, save states, the CRT filter, colour
   controls and many gameplay options.
+
+<table>
+  <tr>
+    <td width="50%"><img src="port/ps5/media/title.jpg" alt="The title screen with New Game, Options and Quit"><br><sub>The title screen.</sub></td>
+    <td width="50%"><img src="port/ps5/media/courtyard.jpg" alt="Ico in a stone courtyard with the coffins of the opening"><br><sub>The opening.</sub></td>
+  </tr>
+  <tr>
+    <td width="50%"><img src="port/ps5/media/photo.jpg" alt="Photo mode close to Ico with its help panel"><br><sub>Photo mode.</sub></td>
+    <td width="50%"><img src="port/ps5/media/options.jpg" alt="The Options menu"><br><sub>Options.</sub></td>
+  </tr>
+  <tr>
+    <td colspan="2" align="center"><img src="port/ps5/media/debug.jpg" alt="The game's own debug menu over the courtyard" width="50%"><br><sub>The makers' debug menu, in Developer mode.</sub></td>
+  </tr>
+</table>
+
+<sub>Screenshots: ICO on a PS5 with the Enhanced preset and the frame rate counter on, scaled to
+1920x1080; otherwise unedited. The game content in them belongs to its owners.</sub>
 
 ## Requirements
 
