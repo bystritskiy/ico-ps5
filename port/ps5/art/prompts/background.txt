@@ -1,0 +1,9 @@
+Use your built-in image generation tool to create ONE new image. Do nothing else and do not modify other files.
+
+Wide 16:9 landscape, the highest resolution you can (for a 3840x2160 PS5 home screen background).
+
+A painterly, atmospheric illustration. A vast ancient stone fortress rises from sheer sea cliffs and is joined to the land by a long, slender stone bridge, wrapped in soft golden-grey mist; a pale overcast sky with a gentle haze of sunlight; sparse windswept grass on the ledges; a few distant seabirds. On the bridge, in the right third of the picture and in the lower half, two tiny figures walk hand in hand: a boy with two small horns on his head and a slender girl in a long white dress who glows faintly. Muted, desaturated palette: warm parchment, stone grey, sage green and soft white light, like a faded fresco. Calm, melancholic and quiet.
+
+Layout rules: the top third is only soft sky and mist with no important objects (a row of icons covers it). The left half of the lower area stays calm and low in contrast (a title and a button are laid over it). No text, no letters, no logos, no border or frame, no watermark. An original composition, not a copy of any existing artwork or game cover.
+
+Save the generated PNG as out/background-b.png (create the folder if needed).

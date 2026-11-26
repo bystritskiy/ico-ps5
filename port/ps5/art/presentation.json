@@ -1,0 +1,42 @@
+{
+  "generator": "built-in image_gen (codex exec)",
+  "icon_source": {
+    "file": "icon.png",
+    "sha256": "4123d41f9096923f03d12f0720b15edc4f9994a90c78ee75cc50feec09684208"
+  },
+  "background_source": {
+    "file": "background.png",
+    "sha256": "6ff8709d847f4e6a2a39183c0b42d46530e8df023ffdc5b1617e17f4ea1f8f7a",
+    "size": [
+      1672,
+      941
+    ]
+  },
+  "background_output": {
+    "size": [
+      3840,
+      2160
+    ],
+    "format": "DX10 DDS BC7_UNORM, mode 1, opaque, one mip",
+    "decoder": "texture2ddecoder",
+    "mean_absolute_rgb_error_255": 0.6344
+  },
+  "outputs": {
+    "icon0.png": {
+      "size": 374770,
+      "sha256": "687eba7deff10a3d10c3b13ffb472c669b6874677a9c8b61e98ad5397f653614"
+    },
+    "pic0.dds": {
+      "size": 8294548,
+      "sha256": "794fcb5b2fe6d9f272285708565886cfae7f1d135892d9a511741e51b10e5537"
+    },
+    "pic1.dds": {
+      "size": 8294548,
+      "sha256": "794fcb5b2fe6d9f272285708565886cfae7f1d135892d9a511741e51b10e5537"
+    },
+    "pic1.png": {
+      "size": 2814703,
+      "sha256": "13dd08ad616c10eaf754cf27a4621afff625a7191b74fa431f5af162a32729eb"
+    }
+  }
+}

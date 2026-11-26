@@ -1,0 +1,11 @@
+Use your built-in image generation tool to create ONE new image. Do nothing else and do not modify other files.
+
+A square 1:1 app icon, the highest resolution you can (it will be shown at 512x512 and as small as 128x128).
+
+A minimal, elegant emblem on a warm parchment-beige background: a single tall ancient stone tower on a sea cliff in soft mist, and at its foot two tiny figures holding hands — a boy with two small horns on his head and a girl in a white dress who glows faintly. One large, clear silhouette that reads at small sizes; painterly but simple; muted palette of beige, stone grey, soft white and a touch of sage green. Fill the whole square edge to edge.
+
+Across the upper part, the word ICO in large, classical serif capitals (like Trajan or Garamond), dark stone-grey, perfectly spelled I-C-O and nothing else written.
+
+No border, no rounded-corner frame, no drop shadow around the square, no watermark. An original design, not a copy of any existing artwork, logo or game cover.
+
+Save the generated PNG as out/icon-text.png (create the folder if needed).
