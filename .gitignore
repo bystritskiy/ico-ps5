@@ -160,3 +160,7 @@ tools/.coverage/
 /source/
 /.upstream-clone/
 /dist/
+
+# Internal notes of the PS5 port: local only, never published
+/port/ps5/README.md
+/port/ps5/VALIDATION.md

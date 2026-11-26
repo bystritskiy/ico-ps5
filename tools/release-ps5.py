@@ -98,7 +98,7 @@ def main():
    'PS5_Mesa/        github.com/mihawk-99/PS5_Mesa: Mesa with RADV\'s PS5 winsys (MIT and\n'
    '                 others, its docs/license.rst)\n\n'
    'Each REVISION names the commit; dependencies.json pins every input. The port\'s own\n'
-   'source is the repository and commit '+identity['commit']+'; port/ps5/README.md builds it.\n')
+   'source is the repository and commit '+identity['commit']+'; its README builds it.\n')
   spath=out/(name+'.tar.xz')
   # macOS writes .DS_Store and ._ files into folders on external drives
   junk=lambda i:None if Path(i.name).name=='.DS_Store' or Path(i.name).name.startswith('._') else i

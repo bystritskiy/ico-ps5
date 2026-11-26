@@ -68,5 +68,5 @@ def main():
   run(['docker','build','-t','ico-ps5-builder:local','-f',ROOT/'port/ps5/Dockerfile.builder',ROOT/'port/ps5'])
  n=vk/'tooling/native';tool=ROOT/'build/ps5/ps5-native-tool';tool.parent.mkdir(parents=True,exist_ok=True)
  run([a.llvm_bin/'clang++','-std=c++20','-O2',n/'native_app_builder.cpp',n/'self_container.cpp',n/'elf_object.cpp',n/'sce_module_writer.cpp','-lz','-o',tool])
- print('Pinned dependencies and native tool ready. Build commands: port/ps5/README.md')
+ print('Pinned dependencies and native tool ready. Build commands: README.md, For developers')
 if __name__=='__main__':main()

@@ -150,7 +150,7 @@ app folder holds only the program, its artwork and its licences.
 ## Known issues
 
 The whole game has not been played through on a PS5 yet: stability and parity with ico-pc past the
-opening are not established. What was checked is in [port/ps5/VALIDATION.md](port/ps5/VALIDATION.md).
+opening are not established.
 ico-pc's Windows, Linux, Android and Apple instructions in [docs/](docs/) don't apply to this app.
 
 ## Reporting a bug
@@ -161,8 +161,8 @@ what you expected and what happened, and attach `ico-pc.log` and `last-run.txt` 
 
 ## For developers
 
-Build on macOS with Git, Python 3, CMake, Ninja, LLVM 18 and Docker. The steps, pinned revisions
-and checks are in [port/ps5/README.md](port/ps5/README.md):
+Build on macOS with Git, Python 3, CMake, Ninja, LLVM 18 and Docker. Every input is pinned in
+[port/ps5/dependencies.json](port/ps5/dependencies.json):
 
 ```sh
 python3 tools/setup-ps5.py --runtime-cache <PS5_Vulkan build> --compiler-rt <libclang_rt.builtins-x86_64.a> --build-images
@@ -171,7 +171,9 @@ python3 tools/package-ps5.py --pack-python <python with MkPFS 1.1.0>
 python3 tools/release-ps5.py
 ```
 
-What was checked on a console is in [port/ps5/VALIDATION.md](port/ps5/VALIDATION.md).
+`setup-ps5.py` checks the pinned PS5 runtime and fetches the sources, `build-ps5.py` compiles and
+links, `package-ps5.py` signs and stages `dist/app`, and `release-ps5.py` makes the store ZIP and
+the archive of the GPL sources.
 
 ## Credits
 
