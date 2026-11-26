@@ -524,6 +524,21 @@ static void sanitize(IcoVideoOptions *o)
     o->effectsDepth = !!o->effectsDepth;
 }
 
+/* A settings file without the preset or one of its rows: the PS2 picture,
+   except on PS5, where it is the Enhanced preset's (the console's 4K
+   output). A saved value is kept as it is. */
+#ifdef ICO_PS5
+#define DEFAULT_PRESET "enhanced"
+#define DEFAULT_ASPECT "auto"
+#define DEFAULT_FILTER "anisotropic"
+#define DEFAULT_FULL_HEIGHT 1
+#else
+#define DEFAULT_PRESET "original"
+#define DEFAULT_ASPECT "4:3"
+#define DEFAULT_FILTER "original"
+#define DEFAULT_FULL_HEIGHT 0
+#endif
+
 static void read_config(void)
 {
     IcoVideoOptions o;
@@ -541,12 +556,13 @@ static void read_config(void)
             fprintf(stderr, "video: resolution not understood; \"%s\" used\n", dres);
         }
     }
-    if (ico_video_parse_aspect(ico_config_get_string("video.aspect", "4:3"), &o.aspect) != 0) {
-        fprintf(stderr, "video: aspect not understood; \"4:3\" used\n");
+    if (ico_video_parse_aspect(ico_config_get_string("video.aspect", DEFAULT_ASPECT), &o.aspect) !=
+        0) {
+        fprintf(stderr, "video: aspect not understood; \"%s\" used\n", DEFAULT_ASPECT);
     }
-    if (ico_video_parse_filter(ico_config_get_string("video.texture_filter", "original"),
+    if (ico_video_parse_filter(ico_config_get_string("video.texture_filter", DEFAULT_FILTER),
                                &o.filter) != 0) {
-        fprintf(stderr, "video: texture_filter not understood; \"original\" used\n");
+        fprintf(stderr, "video: texture_filter not understood; \"%s\" used\n", DEFAULT_FILTER);
     }
     {
         /* window_mode when it is a mode, else the fullscreen bool (a file
@@ -562,7 +578,7 @@ static void read_config(void)
         }
     }
     o.vsync = ico_config_get_bool("video.vsync", 1) != 0;
-    o.fullHeight = ico_config_get_bool("video.full_height", 0) != 0;
+    o.fullHeight = ico_config_get_bool("video.full_height", DEFAULT_FULL_HEIGHT) != 0;
     o.fullPixel = ico_config_get_bool("video.full_pixel", 0) != 0;
     if (ico_video_parse_anti_alias(ico_config_get_string("video.anti_aliasing", "off"),
                                    &o.antiAlias) != 0) {
@@ -707,9 +723,10 @@ static void read_config(void)
         }
     }
     /* the preset is a shortcut over the four rows: only "enhanced" and
-       "custom" take them as written; "original", no key, or anything else
-       (a misspelling) is the PS2 picture whatever they say */
-    s = ico_config_get_string("video.preset", "original");
+       "custom" take them as written; "original", no key (DEFAULT_PRESET
+       aside), or anything else (a misspelling) is the PS2 picture whatever
+       they say */
+    s = ico_config_get_string("video.preset", DEFAULT_PRESET);
     if (s == NULL || !(lower_eq(s, "enhanced") || lower_eq(s, "custom"))) {
         const int fullPixel = o.fullPixel;         /* a saved Full pixel is kept */
         const int glowSmooth = o.effectGlowSmooth; /* so is a saved glow mode */

@@ -264,7 +264,12 @@ int ico_config_save(void)
         r |= ico_toml_set_string(toml, "paths.iso", "");
     }
     if (!ico_toml_has(toml, "video.preset")) {
+#ifdef ICO_PS5
+        /* video_options.c reads the missing rows as Enhanced's on PS5 */
+        r |= ico_toml_set_string(toml, "video.preset", "enhanced");
+#else
         r |= ico_toml_set_string(toml, "video.preset", "original");
+#endif
     }
     if (!ico_toml_has(toml, "video.vsync")) {
         r |= ico_toml_set_bool(toml, "video.vsync", 1);
@@ -327,7 +332,11 @@ static const char first_run_text[] =
     "[video]\n"
     "# \"original\" is the PS2 picture; \"enhanced\" takes resolution,\n"
     "# aspect, texture_filter and full_height as written.\n"
+#ifdef ICO_PS5
+    "preset = \"enhanced\"\n"
+#else
     "preset = \"original\"\n"
+#endif
     "vsync = true\n"
     "# windowed, borderless (a frameless window that fills the screen) or\n"
     "# fullscreen\n"
@@ -383,7 +392,12 @@ static const char first_run_text[] =
     "# \"original\" keeps the glow of the game's own frame; \"smooth\" makes it\n"
     "# again for every frame shown (costs more of the graphics card's time).\n"
     "# Only matters above Frame rate Original, with glow on.\n"
+#ifdef ICO_PS5
+    /* the Enhanced preset's, which the PS5 starts on (preset above) */
+    "effect_glow_mode = \"smooth\"\n"
+#else
     "effect_glow_mode = \"original\"\n"
+#endif
     "# Depth of field: the blur of far away things.\n"
     "effect_depth_of_field = true\n"
     "# Screen softening: the slight blur that smooths jagged edges.\n"
